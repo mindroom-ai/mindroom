@@ -1173,6 +1173,7 @@ async def _prepare_agent_and_prompt(
                     agent_name=agent_name,
                     shared_scope_storage=scope_context.storage if scope_context is not None else None,
                     pipeline_timing=pipeline_timing,
+                    caller_owned_agent=reusable_agent,
                 )
             finally:
                 _mark_pipeline_timing(pipeline_timing, "prompt_branches_ready")

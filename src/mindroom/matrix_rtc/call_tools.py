@@ -34,7 +34,11 @@ from agno.tools.function import Function, FunctionCall
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.agents import create_agent
 from mindroom.history.interrupted_replay import persist_interrupted_replay
-from mindroom.history.runtime import close_agent_runtime_state_dbs, open_resolved_scope_session_context
+from mindroom.history.runtime import (
+    close_agent_runtime_state_dbs,
+    create_scope_session_storage,
+    open_resolved_scope_session_context,
+)
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope
 from mindroom.hooks import EnrichmentItem
@@ -255,27 +259,49 @@ class _CallAgentCache:
             await asyncio.to_thread(close_agent_runtime_state_dbs, self.agent)
             self.agent = None
         agent = await asyncio.to_thread(
-            functools.partial(
-                create_agent,
+            self._build_agent,
+            knowledge=knowledge,
+            refresh_scheduler=refresh_scheduler,
+        )
+        self.agent = agent
+        self.knowledge_identity = knowledge_identity
+        self.refresh_scheduler = refresh_scheduler
+        return agent
+
+    def _build_agent(
+        self,
+        *,
+        knowledge: KnowledgeProtocol | None,
+        refresh_scheduler: KnowledgeRefreshScheduler | None,
+    ) -> AgnoAgent:
+        """Build one cached agent with canonical prompt-sanitizing history storage."""
+        history_storage = create_scope_session_storage(
+            agent_name=self.agent_name,
+            scope=HistoryScope(kind="agent", scope_id=self.agent_name),
+            config=self.config,
+            runtime_paths=self.runtime_paths,
+            execution_identity=self.execution_identity,
+        )
+        try:
+            return create_agent(
                 self.agent_name,
                 self.config,
                 self.runtime_paths,
-                self.execution_identity,
+                execution_identity=self.execution_identity,
                 session_id=self.session_id,
                 hook_registry=self.context.hook_registry,
                 knowledge=knowledge,
+                history_storage=history_storage,
                 active_model_name=self.active_model_name,
                 include_interactive_questions=False,
                 tool_function_filter=self.context.tool_function_filter,
                 refresh_scheduler=refresh_scheduler,
                 dynamic_tool_continuation=True,
                 eager_deferred_tools=True,
-            ),
-        )
-        self.agent = agent
-        self.knowledge_identity = knowledge_identity
-        self.refresh_scheduler = refresh_scheduler
-        return agent
+            )
+        except Exception:
+            history_storage.close()
+            raise
 
 
 async def build_call_tools(
@@ -293,6 +319,18 @@ async def build_call_tools(
 ) -> CallAgentTooling:
     """Materialize the agent for the selected voice backend."""
     session_id = session_id or create_session_id(room_id, None)
+    if enable_responder:
+        runtime_model = await asyncio.to_thread(
+            functools.partial(
+                config.resolve_runtime_model,
+                entity_name=agent_name,
+                active_model_name=active_model_name,
+                room_id=room_id,
+                thread_id=None,
+                runtime_paths=runtime_paths,
+            ),
+        )
+        active_model_name = runtime_model.model_name
     target = MessageTarget(
         room_id=room_id,
         source_thread_id=None,

@@ -71,12 +71,51 @@ async def test_prepare_mem0_prompt_branches_propagates_failure_directly(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("agent_outcome", ["pending", "finished", "fails", "cancelled"])
-async def test_prepare_mem0_prompt_branches_cancellation_cleans_agent_build(  # noqa: C901, PLR0915
+async def test_prepare_mem0_prompt_branches_preserves_caller_owned_agent_on_memory_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed memory branch must not close a reusable agent owned by its caller."""
+    built_agent = MagicMock()
+    runtime_model = ResolvedRuntimeModel(model_name="default", context_window=None)
+    close_unreturned = MagicMock()
+
+    async def memory_branch() -> MemoryPromptParts:
+        await asyncio.sleep(0)
+        msg = "memory failed"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr(pre_model_preparation_module, "close_agent_runtime_state_dbs", close_unreturned)
+
+    with pytest.raises(RuntimeError, match="memory failed"):
+        await prepare_mem0_prompt_branches(
+            prepare_memory=memory_branch,
+            build_agent=lambda: (runtime_model, built_agent),
+            agent_name="general",
+            shared_scope_storage=None,
+            pipeline_timing=None,
+            caller_owned_agent=built_agent,
+        )
+
+    close_unreturned.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("agent_outcome", "caller_owned"),
+    [
+        ("pending", False),
+        ("finished", False),
+        ("fails", False),
+        ("cancelled", False),
+        ("finished", True),
+    ],
+)
+async def test_prepare_mem0_prompt_branches_cancellation_settles_agent_build(  # noqa: C901, PLR0915
     monkeypatch: pytest.MonkeyPatch,
     agent_outcome: str,
+    caller_owned: bool,
 ) -> None:
-    """Cancellation drains construction and closes its agent without leaked tasks."""
+    """Cancellation drains construction without closing caller-owned agents or leaking tasks."""
     memory_started = asyncio.Event()
     memory_cleaned = asyncio.Event()
     agent_started = threading.Event()
@@ -121,6 +160,7 @@ async def test_prepare_mem0_prompt_branches_cancellation_cleans_agent_build(  # 
             agent_name="general",
             shared_scope_storage=None,
             pipeline_timing=None,
+            caller_owned_agent=built_agent if caller_owned else None,
         ),
     )
     try:
@@ -145,7 +185,7 @@ async def test_prepare_mem0_prompt_branches_cancellation_cleans_agent_build(  # 
         agent_release.set()
 
     assert agent_finished.is_set()
-    if agent_outcome in {"fails", "cancelled"}:
+    if agent_outcome in {"fails", "cancelled"} or caller_owned:
         close_unreturned.assert_not_called()
     else:
         close_unreturned.assert_called_once_with(built_agent, shared_scope_storage=None)
