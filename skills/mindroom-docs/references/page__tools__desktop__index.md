@@ -87,7 +87,8 @@ The Matrix homeserver can observe routing metadata, timing, and encrypted media 
 Use a dedicated Matrix account for password login whenever your homeserver permits one.
 On an SSO-only homeserver, the bridge instead adds a dedicated device to the account selected in the browser.
 The desktop account and the cloud MindRoom entity must use the same Matrix federation environment and must be able to exchange to-device events and media.
-Install the optional local desktop dependency on the computer being controlled:
+If the optional local desktop dependencies are missing, `mindroom desktop run` auto-installs the `desktop` extra at startup unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set.
+To install them in advance on the computer being controlled:
 
 ```bash
 uv tool install 'mindroom[desktop]'
