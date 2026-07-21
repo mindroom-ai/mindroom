@@ -6,6 +6,7 @@ import hashlib
 import secrets
 import sqlite3
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
@@ -19,6 +20,7 @@ from mindroom.desktop.protocol import (
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from pathlib import Path
 
     import nio
@@ -72,28 +74,33 @@ def _pairing_db_path(runtime_paths: RuntimePaths) -> Path:
     return runtime_paths.storage_root / "tracking" / _PAIRING_DB_NAME
 
 
-def _connect(runtime_paths: RuntimePaths) -> sqlite3.Connection:
+@contextmanager
+def _pairing_connection(runtime_paths: RuntimePaths) -> Iterator[sqlite3.Connection]:
     path = _pairing_db_path(runtime_paths)
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     path.parent.chmod(0o700)
     connection = sqlite3.connect(path)
-    path.chmod(0o600)
-    connection.execute(
-        """
-        CREATE TABLE IF NOT EXISTS desktop_pairings (
-            token_hash TEXT PRIMARY KEY,
-            requester_id TEXT NOT NULL,
-            agent_name TEXT NOT NULL,
-            room_id TEXT NOT NULL,
-            thread_id TEXT,
-            expires_at INTEGER NOT NULL,
-            device_user_id TEXT,
-            device_id TEXT,
-            device_ed25519 TEXT
+    try:
+        path.chmod(0o600)
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS desktop_pairings (
+                token_hash TEXT PRIMARY KEY,
+                requester_id TEXT NOT NULL,
+                agent_name TEXT NOT NULL,
+                room_id TEXT NOT NULL,
+                thread_id TEXT,
+                expires_at INTEGER NOT NULL,
+                device_user_id TEXT,
+                device_id TEXT,
+                device_ed25519 TEXT
+            )
+            """,
         )
-        """,
-    )
-    return connection
+        with connection:
+            yield connection
+    finally:
+        connection.close()
 
 
 def _purge_expired(connection: sqlite3.Connection, now: int) -> None:
@@ -113,7 +120,7 @@ def create_desktop_pairing(
     current_time = int(time.time()) if now is None else now
     token = secrets.token_urlsafe(_PAIRING_TOKEN_BYTES)
     expires_at = current_time + _PAIRING_TTL_SECONDS
-    with _connect(runtime_paths) as connection:
+    with _pairing_connection(runtime_paths) as connection:
         _purge_expired(connection, current_time)
         connection.execute(
             """
@@ -183,7 +190,7 @@ def claim_desktop_pairing(
 ) -> PendingDesktopPairing:
     """Attach one authenticated Matrix device to a pending pairing token."""
     current_time = int(time.time()) if now is None else now
-    with _connect(runtime_paths) as connection:
+    with _pairing_connection(runtime_paths) as connection:
         pending = _load_pairing(connection, token, now=current_time)
         if pending.agent_name != agent_name:
             msg = "Desktop pairing code belongs to another agent."
@@ -226,7 +233,7 @@ def confirm_desktop_pairing(
 ) -> PendingDesktopPairing:
     """Return one claimed pairing only in its original requester-agent conversation."""
     current_time = int(time.time()) if now is None else now
-    with _connect(runtime_paths) as connection:
+    with _pairing_connection(runtime_paths) as connection:
         pending = _load_pairing(connection, token, now=current_time)
     if (
         pending.requester_id != requester_id
@@ -249,7 +256,7 @@ def confirm_desktop_pairing(
 
 def complete_desktop_pairing(runtime_paths: RuntimePaths, *, token: str) -> None:
     """Consume a token after its scoped Desktop configuration was saved."""
-    with _connect(runtime_paths) as connection:
+    with _pairing_connection(runtime_paths) as connection:
         connection.execute("DELETE FROM desktop_pairings WHERE token_hash = ?", (_token_hash(token),))
 
 
