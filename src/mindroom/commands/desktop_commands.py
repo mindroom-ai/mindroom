@@ -129,6 +129,8 @@ def _confirm_response(scope: DesktopCommandScope, token: str, verification: str)
         token=token,
         requester_id=scope.requester_id,
         agent_name=scope.agent_name,
+        room_id=scope.room_id,
+        thread_id=scope.thread_id,
         verification=verification,
     )
     assert pending.device_user_id is not None

@@ -32,8 +32,8 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
-def test_pairing_binds_claim_and_confirmation_to_requester_plus_agent(tmp_path: Path) -> None:
-    """Only the initiating requester-agent pair can consume an authenticated device claim."""
+def test_pairing_binds_claim_and_confirmation_to_requester_agent_conversation(tmp_path: Path) -> None:
+    """Only the initiating requester-agent conversation can consume a device claim."""
     runtime_paths = test_runtime_paths(tmp_path)
     pairing = create_desktop_pairing(
         runtime_paths,
@@ -65,12 +65,26 @@ def test_pairing_binds_claim_and_confirmation_to_requester_plus_agent(tmp_path: 
         now=101,
     )
 
-    with pytest.raises(DesktopPairingError, match="requester and agent"):
+    with pytest.raises(DesktopPairingError, match="requester, agent, and conversation"):
         confirm_desktop_pairing(
             runtime_paths,
             token=pairing.token,
             requester_id="@bob:example.org",
             agent_name="computer",
+            room_id="!private:example.org",
+            thread_id="$thread",
+            verification="ignored",
+            now=102,
+        )
+
+    with pytest.raises(DesktopPairingError, match="conversation"):
+        confirm_desktop_pairing(
+            runtime_paths,
+            token=pairing.token,
+            requester_id="@alice:example.org",
+            agent_name="computer",
+            room_id="!private:example.org",
+            thread_id="$other-thread",
             verification="ignored",
             now=102,
         )
@@ -82,6 +96,8 @@ def test_pairing_binds_claim_and_confirmation_to_requester_plus_agent(tmp_path: 
             token=pairing.token,
             requester_id="@alice:example.org",
             agent_name="computer",
+            room_id="!private:example.org",
+            thread_id="$thread",
             verification="wrong-device",
             now=102,
         )
@@ -91,6 +107,8 @@ def test_pairing_binds_claim_and_confirmation_to_requester_plus_agent(tmp_path: 
         token=pairing.token,
         requester_id="@alice:example.org",
         agent_name="computer",
+        room_id="!private:example.org",
+        thread_id="$thread",
         verification=verification,
         now=102,
     )
@@ -105,6 +123,8 @@ def test_pairing_binds_claim_and_confirmation_to_requester_plus_agent(tmp_path: 
             token=pairing.token,
             requester_id="@alice:example.org",
             agent_name="computer",
+            room_id="!private:example.org",
+            thread_id="$thread",
             verification=verification,
             now=103,
         )
@@ -173,6 +193,8 @@ async def test_pairing_claim_uses_authenticated_device_store_identity(tmp_path: 
         token=pairing.token,
         requester_id="@alice:example.org",
         agent_name="computer",
+        room_id="!private:example.org",
+        thread_id=None,
         verification=desktop_pairing_verification(pairing.token, "signed-fingerprint"),
     )
     assert (

@@ -219,15 +219,22 @@ def confirm_desktop_pairing(
     token: str,
     requester_id: str,
     agent_name: str,
+    room_id: str,
+    thread_id: str | None,
     verification: str,
     now: int | None = None,
 ) -> PendingDesktopPairing:
-    """Return one claimed pairing only to its original requester and agent."""
+    """Return one claimed pairing only in its original requester-agent conversation."""
     current_time = int(time.time()) if now is None else now
     with _connect(runtime_paths) as connection:
         pending = _load_pairing(connection, token, now=current_time)
-    if pending.requester_id != requester_id or pending.agent_name != agent_name:
-        msg = "Desktop pairing code does not belong to this requester and agent."
+    if (
+        pending.requester_id != requester_id
+        or pending.agent_name != agent_name
+        or pending.room_id != room_id
+        or pending.thread_id != thread_id
+    ):
+        msg = "Desktop pairing code does not belong to this requester, agent, and conversation."
         raise DesktopPairingError(msg)
     if not pending.claimed:
         msg = "Desktop device has not claimed this pairing code yet."

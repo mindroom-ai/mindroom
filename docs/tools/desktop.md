@@ -137,7 +137,7 @@ It does not create or replace account-level cross-signing keys for an SSO accoun
 
 The session JSON saves only the reusable Matrix access token and device identifiers.
 The device's private Olm identity is persisted separately under `<storage>/encryption_keys/`; on Unix, MindRoom forces its per-user directory to mode `0700`.
-The printed Ed25519 value is the corresponding public fingerprint and is persisted only when you copy it into the cloud agent configuration.
+For legacy shared-agent setup, the printed Ed25519 value is the corresponding public fingerprint and is persisted only when you copy it into the cloud agent configuration.
 On Unix, the session file is forced to mode `0600`, and the bridge refuses to load it if group or other users can read it.
 The command prints values similar to these:
 
