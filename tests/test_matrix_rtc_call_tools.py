@@ -380,7 +380,7 @@ async def test_cascaded_responder_uses_normal_agent_turn_and_filters_unsafe_func
     config.tool_approval = ToolApprovalConfig(
         rules=[ApprovalRuleConfig(match="policy_approval", action="require_approval")],
     )
-    knowledge = object()
+    knowledge = SimpleNamespace(vector_db=None)
     refresh_scheduler = object()
     execution_identity = SimpleNamespace()
     calls: list[tuple[ResponseTurnContext, dict[str, object]]] = []
@@ -816,7 +816,7 @@ async def test_cascaded_responder_refreshes_knowledge_and_availability_each_turn
     second_scheduler = object()
     orchestrator = SimpleNamespace(knowledge_refresh_scheduler=first_scheduler)
     execution_identity = SimpleNamespace()
-    ready_knowledge = object()
+    ready_knowledge = SimpleNamespace(vector_db=None)
     resolver_calls: list[dict[str, object]] = []
     ai_calls: list[tuple[ResponseTurnContext, dict[str, object]]] = []
     resolutions = iter(

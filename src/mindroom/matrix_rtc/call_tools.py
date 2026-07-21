@@ -38,7 +38,7 @@ from mindroom.history.runtime import close_agent_runtime_state_dbs, open_resolve
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope
 from mindroom.hooks import EnrichmentItem
-from mindroom.knowledge.utils import resolve_agent_knowledge_access
+from mindroom.knowledge.utils import knowledge_runtime_identity, resolve_agent_knowledge_access
 from mindroom.logging_config import get_logger
 from mindroom.message_target import MessageTarget
 from mindroom.session_ids import create_session_id
@@ -49,10 +49,12 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
     from agno.agent import Agent as AgnoAgent
+    from agno.knowledge.protocol import KnowledgeProtocol
     from livekit.agents.llm import RawFunctionTool
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.runtime_context import ToolRuntimeContext, ToolRuntimeSupport
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -206,27 +208,32 @@ class _CallAgentCache:
     session_id: str
     active_model_name: str | None
     agent: AgnoAgent | None = None
-    knowledge: object | None = None
-    refresh_scheduler: object | None = None
+    knowledge_identity: tuple[int, ...] = ()
+    refresh_scheduler: KnowledgeRefreshScheduler | None = None
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     async def run(
         self,
         *,
-        knowledge: object | None,
-        refresh_scheduler: object | None,
+        knowledge: KnowledgeProtocol | None,
+        knowledge_identity: tuple[int, ...],
+        refresh_scheduler: KnowledgeRefreshScheduler | None,
         operation: Callable[[AgnoAgent], Awaitable[str]],
     ) -> str:
         """Run one turn, rebuilding only when call dependencies change identity."""
         async with self.lock:
-            agent = await self._get_agent(knowledge=knowledge, refresh_scheduler=refresh_scheduler)
+            agent = await self._get_agent(
+                knowledge=knowledge,
+                knowledge_identity=knowledge_identity,
+                refresh_scheduler=refresh_scheduler,
+            )
             return await operation(agent)
 
     async def aclose(self) -> None:
         """Close the cached agent's caller-owned runtime state."""
         async with self.lock:
             agent, self.agent = self.agent, None
-            self.knowledge = None
+            self.knowledge_identity = ()
             self.refresh_scheduler = None
             if agent is not None:
                 await asyncio.to_thread(close_agent_runtime_state_dbs, agent)
@@ -234,10 +241,15 @@ class _CallAgentCache:
     async def _get_agent(
         self,
         *,
-        knowledge: object | None,
-        refresh_scheduler: object | None,
+        knowledge: KnowledgeProtocol | None,
+        knowledge_identity: tuple[int, ...],
+        refresh_scheduler: KnowledgeRefreshScheduler | None,
     ) -> AgnoAgent:
-        if self.agent is not None and self.knowledge is knowledge and self.refresh_scheduler is refresh_scheduler:
+        if (
+            self.agent is not None
+            and self.knowledge_identity == knowledge_identity
+            and self.refresh_scheduler is refresh_scheduler
+        ):
             return self.agent
         if self.agent is not None:
             await asyncio.to_thread(close_agent_runtime_state_dbs, self.agent)
@@ -261,7 +273,7 @@ class _CallAgentCache:
             ),
         )
         self.agent = agent
-        self.knowledge = knowledge
+        self.knowledge_identity = knowledge_identity
         self.refresh_scheduler = refresh_scheduler
         return agent
 
@@ -519,6 +531,7 @@ async def _run_call_agent(
     try:
         response = await agent_cache.run(
             knowledge=knowledge_resolution.knowledge,
+            knowledge_identity=knowledge_runtime_identity(knowledge_resolution.knowledge),
             refresh_scheduler=refresh_scheduler,
             operation=_run_with_agent,
         )

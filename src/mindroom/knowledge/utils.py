@@ -717,3 +717,13 @@ def _merge_knowledge(agent_name: str, knowledges: list[Knowledge]) -> Knowledge 
         max_results=max(knowledge.max_results for knowledge in queryable_knowledges),
         source_descriptions=source_descriptions,
     )
+
+
+def knowledge_runtime_identity(knowledge: Knowledge | None) -> tuple[int, ...]:
+    """Identify the stable runtime handles behind one resolved knowledge view."""
+    if knowledge is None:
+        return ()
+    vector_db = knowledge.vector_db
+    if isinstance(knowledge, KnowledgeWithSourceDescriptions) and isinstance(vector_db, _MultiKnowledgeVectorDb):
+        return tuple(id(source) for source in vector_db.vector_dbs)
+    return (id(knowledge),)
