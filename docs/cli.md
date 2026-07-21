@@ -238,14 +238,21 @@ Create and privately save the dedicated local desktop Matrix device.
  Log in once, create an Olm device, and save its access token privately.
 
 ╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
-│ *  --user-id               TEXT  Dedicated Matrix user ID for this desktop device.     │
-│                                  [required]                                            │
-│    --homeserver            TEXT  Matrix homeserver URL; defaults to the configured     │
-│                                  MindRoom homeserver.                                  │
-│    --replace                     Replace the saved session with a fresh Matrix device. │
-│    --config        -c      PATH  MindRoom config path used for runtime env.            │
-│    --storage-path  -s      PATH  Desktop bridge state directory.                       │
-│    --help          -h            Show this message and exit.                           │
+│ *  --user-id                           TEXT  Dedicated Matrix user ID for this desktop │
+│                                              device.                                   │
+│                                              [required]                                │
+│    --homeserver                        TEXT  Matrix homeserver URL; defaults to the    │
+│                                              configured MindRoom homeserver.           │
+│    --replace                                 Replace the saved session with a fresh    │
+│                                              Matrix device.                            │
+│    --matrix-http-headers-file          PATH  Owner-only JSON file of HTTP headers      │
+│                                              added to every Matrix request.            │
+│                                              [env var:                                 │
+│                                              MINDROOM_DESKTOP_MATRIX_HTTP_HEADERS_FIL… │
+│    --config                    -c      PATH  MindRoom config path used for runtime     │
+│                                              env.                                      │
+│    --storage-path              -s      PATH  Desktop bridge state directory.           │
+│    --help                      -h            Show this message and exit.               │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 
 
@@ -327,6 +334,11 @@ Control remains disabled unless the local command grants a short lease.
 │                                                                   timeout.                   │
 │                                                                   [default: 90]              │
 │    --log-level                -l      TEXT                        [default: INFO]            │
+│    --matrix-http-headers-fi…          PATH                        Owner-only JSON file of    │
+│                                                                   HTTP headers added to      │
+│                                                                   every Matrix request.      │
+│                                                                   [env var:                  │
+│                                                                   MINDROOM_DESKTOP_MATRIX_H… │
 │    --config                   -c      PATH                        MindRoom config path used  │
 │                                                                   for runtime env.           │
 │    --storage-path             -s      PATH                        Desktop bridge state       │
