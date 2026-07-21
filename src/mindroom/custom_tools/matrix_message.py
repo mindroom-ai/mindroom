@@ -253,7 +253,7 @@ class MatrixMessageTools(Toolkit):
             thread_id (str | None): Thread; `"room"` forces room scope.
             ignore_mentions (bool): `True` except intentional dispatch.
             message_extras (list[dict[str, object]] | None): Collapsible sections.
-            limit (int | None): Read/list limit: 20-50.
+            limit (int | None): 1-50; default 20.
             page_token (str | None): Next threads page.
 
         """

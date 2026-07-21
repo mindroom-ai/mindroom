@@ -97,4 +97,5 @@ def test_matrix_message_parameter_descriptions_are_exposed() -> None:
     assert "`True`" in ignore_mentions_description
     assert "intentional dispatch" in ignore_mentions_description
 
-    assert "20-50" in limit_description
+    assert "1-50" in limit_description
+    assert "default 20" in limit_description
