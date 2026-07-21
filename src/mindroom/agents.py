@@ -1148,15 +1148,14 @@ def _prune_toolkit_functions(
     toolkit: Toolkit,
     tool_function_filter: Callable[[Function], bool] | None,
 ) -> Toolkit | None:
-    """Apply a channel-specific function policy after normal toolkit construction."""
-    if tool_function_filter is None:
-        return toolkit
-    toolkit.functions = {
-        name: function for name, function in toolkit.functions.items() if tool_function_filter(function)
-    }
-    toolkit.async_functions = {
-        name: function for name, function in toolkit.async_functions.items() if tool_function_filter(function)
-    }
+    """Apply the final function policy and discard toolkits with no callable surface."""
+    if tool_function_filter is not None:
+        toolkit.functions = {
+            name: function for name, function in toolkit.functions.items() if tool_function_filter(function)
+        }
+        toolkit.async_functions = {
+            name: function for name, function in toolkit.async_functions.items() if tool_function_filter(function)
+        }
     return toolkit if toolkit.functions or toolkit.async_functions else None
 
 

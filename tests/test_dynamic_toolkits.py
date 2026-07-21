@@ -14,6 +14,7 @@ from agno.models.openai import OpenAIChat
 from agno.run import RunContext
 from agno.session import AgentSession
 from agno.tools import Toolkit
+from agno.tools.function import Function
 
 from mindroom.agents import (
     _build_dynamic_tooling_instruction_block,
@@ -894,8 +895,29 @@ def test_native_tool_search_omits_fully_deferred_toolkit_instructions(
     assert vars(agent.model)[_DEFERRED_TOOL_NAMES_ATTR] == frozenset({"get_mindroom_update_status"})
 
 
+def test_fully_deferred_toolkit_omits_function_instructions() -> None:
+    """A deferred toolkit should not leak instructions attached to its functions."""
+
+    def deferred_tool() -> str:
+        return "deferred"
+
+    instruction_marker = "DEFERRED_FUNCTION_INSTRUCTIONS"
+    function = Function(
+        name="deferred_tool",
+        entrypoint=deferred_tool,
+        instructions=instruction_marker,
+        add_instructions=True,
+    )
+    toolkit = Toolkit(name="deferred", tools=[function])
+    suppress_fully_deferred_toolkit_instructions([toolkit], {"deferred_tool"})
+    agent = Agent(id="deferred-agent", model=OpenAIChat(id="test"), tools=[toolkit], instructions=["BASE"])
+
+    assert toolkit.functions["deferred_tool"].add_instructions is False
+    assert instruction_marker not in _render_system_prompt(agent)
+
+
 def test_partially_deferred_toolkit_keeps_instructions_inline() -> None:
-    """A toolkit with any active function should retain its shared instructions."""
+    """A toolkit with any active function should retain all of its instructions."""
 
     def active_tool() -> str:
         return "active"
@@ -903,18 +925,71 @@ def test_partially_deferred_toolkit_keeps_instructions_inline() -> None:
     def deferred_tool() -> str:
         return "deferred"
 
-    instruction_marker = "MIXED_TOOLKIT_INSTRUCTIONS"
+    toolkit_instruction_marker = "MIXED_TOOLKIT_INSTRUCTIONS"
+    function_instruction_marker = "MIXED_FUNCTION_INSTRUCTIONS"
+    deferred_function = Function(
+        name="deferred_tool",
+        entrypoint=deferred_tool,
+        instructions=function_instruction_marker,
+        add_instructions=True,
+    )
     toolkit = Toolkit(
         name="mixed",
-        tools=[active_tool, deferred_tool],
-        instructions=instruction_marker,
+        tools=[active_tool, deferred_function],
+        instructions=toolkit_instruction_marker,
         add_instructions=True,
     )
     suppress_fully_deferred_toolkit_instructions([toolkit], {"deferred_tool"})
     agent = Agent(id="mixed-agent", model=OpenAIChat(id="test"), tools=[toolkit])
 
     assert toolkit.add_instructions is True
+    assert toolkit.functions["deferred_tool"].add_instructions is True
+    system_prompt = _render_system_prompt(agent)
+    assert toolkit_instruction_marker in system_prompt
+    assert function_instruction_marker in system_prompt
+
+
+def test_native_tool_search_keeps_initial_toolkit_instructions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An initially loaded deferred toolkit should keep its instructions inline."""
+    instruction_marker = _install_update_awareness_status(monkeypatch)
+    raw = _base_config_data()
+    raw["models"]["claude"] = {"provider": "anthropic", "id": "claude-opus-4-8"}  # type: ignore[index]
+    raw["agents"]["code"]["model"] = "claude"  # type: ignore[index]
+    raw["agents"]["code"]["tools"] = [  # type: ignore[index]
+        {"update_awareness": {"defer": True, "initial": True}},
+    ]
+    config = _validated_config(tmp_path, raw)
+
+    agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None, session_id="thread-a")
+    toolkit = next(tool for tool in agent.tools if tool.name == "update_awareness")
+
+    assert toolkit.add_instructions is True
     assert instruction_marker in _render_system_prompt(agent)
+    assert _DEFERRED_TOOL_NAMES_ATTR not in vars(agent.model)
+
+
+def test_native_tool_search_drops_toolkit_emptied_by_include_filter(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Final assembly should discard a toolkit with no provider-visible functions."""
+    instruction_marker = _install_update_awareness_status(monkeypatch)
+    raw = _base_config_data()
+    raw["models"]["claude"] = {"provider": "anthropic", "id": "claude-opus-4-8"}  # type: ignore[index]
+    raw["agents"]["code"]["model"] = "claude"  # type: ignore[index]
+    raw["agents"]["code"]["tools"] = [  # type: ignore[index]
+        {"update_awareness": {"defer": True, "include_tools": []}},
+    ]
+    config = _validated_config(tmp_path, raw)
+
+    agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None, session_id="thread-a")
+
+    assert not any(tool.name == "update_awareness" for tool in agent.tools)
+    assert instruction_marker not in _render_system_prompt(agent)
+    assert _DEFERRED_TOOL_NAMES_ATTR not in vars(agent.model)
 
 
 def test_homegrown_load_tool_makes_toolkit_instructions_available(

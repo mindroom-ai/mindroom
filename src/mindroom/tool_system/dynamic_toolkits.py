@@ -157,12 +157,18 @@ def suppress_fully_deferred_toolkit_instructions(
     toolkits: Collection[Toolkit],
     deferred_function_names: Collection[str],
 ) -> None:
-    """Keep toolkit instructions inline only when at least one function is active."""
+    """Omit all instructions when every function in a toolkit is provider-deferred.
+
+    Native tool search cannot extend the already-sent system prompt when it discovers a tool.
+    """
     deferred_names = frozenset(deferred_function_names)
     for toolkit in toolkits:
-        function_names = frozenset((*toolkit.get_functions(), *toolkit.get_async_functions()))
+        functions = (*toolkit.get_functions().values(), *toolkit.get_async_functions().values())
+        function_names = frozenset(function.name for function in functions)
         if function_names and function_names <= deferred_names:
             toolkit.add_instructions = False
+            for function in functions:
+                function.add_instructions = False
 
 
 def _special_tool_names(

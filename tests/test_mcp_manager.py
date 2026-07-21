@@ -2235,7 +2235,7 @@ async def test_agent_creation_omits_tools_of_failed_optional_mcp_server(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """A timed-out optional MCP server must not break agent construction, only drop its tools."""
+    """A timed-out optional MCP server must not break agent construction, only drop its toolkit."""
     _patch_manager(monkeypatch)
     _FakeClientSession.tool_list = [_tool("echo")]
     _FakeClientSession.initialize_delay_seconds = 0.05
@@ -2289,9 +2289,7 @@ async def test_agent_creation_omits_tools_of_failed_optional_mcp_server(
         await manager.shutdown()
         bind_mcp_server_manager(None)
 
-    mcp_toolkit = next(tool for tool in agent.tools if tool.name == "mcp_demo")
-    assert mcp_toolkit.async_functions == {}
-    assert mcp_toolkit.functions == {}
+    assert not any(tool.name == "mcp_demo" for tool in agent.tools)
 
 
 @pytest.mark.asyncio
