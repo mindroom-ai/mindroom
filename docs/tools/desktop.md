@@ -127,6 +127,36 @@ Ed25519: desktop-device-fingerprint
 
 Copy these exact public identity values to the cloud MindRoom configuration.
 
+### Homeservers Behind an Identity-Aware Proxy
+
+A command-line Matrix client cannot reuse an interactive browser login cookie.
+If an identity-aware proxy requires machine credentials, put its required request headers in a separate JSON file:
+
+```json
+{
+  "X-Access-Client-Id": "client-id",
+  "X-Access-Client-Secret": "client-secret"
+}
+```
+
+Use the exact header names issued by the proxy, restrict the file to its owner, and pass it during both login and bridge startup:
+
+```bash
+chmod 600 ~/.config/mindroom/matrix-http-headers.json
+
+mindroom desktop login \
+  --user-id @my-laptop:example.org \
+  --homeserver https://matrix.example.org \
+  --matrix-http-headers-file ~/.config/mindroom/matrix-http-headers.json
+```
+
+The file must contain one JSON object whose keys and values are strings.
+MindRoom refuses group-readable or world-readable header files on Unix.
+The headers apply to every Matrix request made by the desktop client, including login, sync, encryption-key, and media requests.
+They are not copied into the saved Matrix session.
+Set `MINDROOM_DESKTOP_MATRIX_HTTP_HEADERS_FILE` to the file path instead of repeating the option on both commands.
+Configure the proxy to accept these machine credentials only for the Matrix endpoints the desktop device needs, while keeping normal Matrix authentication enabled.
+
 ## 2. Configure the Cloud Agent
 
 Start cloud MindRoom at least once so the chosen agent has a persistent Matrix device.

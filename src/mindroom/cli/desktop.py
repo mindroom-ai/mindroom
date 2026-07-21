@@ -12,6 +12,8 @@ import typer
 from rich.console import Console
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     import nio
 
     from mindroom.constants import RuntimePaths
@@ -70,6 +72,12 @@ def desktop_login(
         help="Matrix homeserver URL; defaults to the configured MindRoom homeserver.",
     ),
     replace: bool = typer.Option(False, "--replace", help="Replace the saved session with a fresh Matrix device."),
+    matrix_http_headers_file: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--matrix-http-headers-file",
+        envvar="MINDROOM_DESKTOP_MATRIX_HTTP_HEADERS_FILE",
+        help="Owner-only JSON file of HTTP headers added to every Matrix request.",
+    ),
     config_path: Path | None = typer.Option(  # noqa: B008
         None,
         "--config",
@@ -86,17 +94,22 @@ def desktop_login(
     """Log in once, create an Olm device, and save its access token privately."""
     from mindroom.cli.config import activate_cli_runtime  # noqa: PLC0415
     from mindroom.constants import runtime_matrix_homeserver  # noqa: PLC0415
-    from mindroom.desktop.session import DesktopSessionError, desktop_session_path  # noqa: PLC0415
+    from mindroom.desktop.session import (  # noqa: PLC0415
+        DesktopSessionError,
+        desktop_session_path,
+        load_desktop_http_headers,
+    )
 
     runtime_paths = activate_cli_runtime(config_path, storage_path=storage_path)
     session_path = desktop_session_path(runtime_paths)
     if session_path.exists() and not replace:
         _error_console.print(f"[red]Error:[/red] Session already exists at {session_path}. Use --replace explicitly.")
         raise typer.Exit(1)
-    password = os.environ.get("MINDROOM_DESKTOP_MATRIX_PASSWORD")
-    if password is None:
-        password = typer.prompt("Matrix password", hide_input=True, confirmation_prompt=False)
     try:
+        http_headers = load_desktop_http_headers(matrix_http_headers_file)
+        password = os.environ.get("MINDROOM_DESKTOP_MATRIX_PASSWORD")
+        if password is None:
+            password = typer.prompt("Matrix password", hide_input=True, confirmation_prompt=False)
         asyncio.run(
             _login_and_save(
                 runtime_paths=runtime_paths,
@@ -104,6 +117,7 @@ def desktop_login(
                 user_id=user_id,
                 password=password,
                 session_path=session_path,
+                http_headers=http_headers,
             ),
         )
     except DesktopSessionError as exc:
@@ -118,6 +132,7 @@ async def _login_and_save(
     user_id: str,
     password: str,
     session_path: Path,
+    http_headers: Mapping[str, str] | None = None,
 ) -> None:
     from mindroom.desktop.session import (  # noqa: PLC0415
         client_ed25519_fingerprint,
@@ -130,6 +145,7 @@ async def _login_and_save(
         user_id=user_id,
         password=password,
         runtime_paths=runtime_paths,
+        http_headers=http_headers,
     )
     try:
         save_desktop_session(session_path, session)
@@ -204,6 +220,12 @@ def desktop_run(
         help="Local Playwright MCP call timeout.",
     ),
     log_level: str = typer.Option("INFO", "--log-level", "-l"),
+    matrix_http_headers_file: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--matrix-http-headers-file",
+        envvar="MINDROOM_DESKTOP_MATRIX_HTTP_HEADERS_FILE",
+        help="Owner-only JSON file of HTTP headers added to every Matrix request.",
+    ),
     config_path: Path | None = typer.Option(  # noqa: B008
         None,
         "--config",
@@ -224,6 +246,7 @@ def desktop_run(
     from mindroom.desktop.session import (  # noqa: PLC0415
         DesktopSessionError,
         desktop_session_path,
+        load_desktop_http_headers,
         load_desktop_session,
     )
     from mindroom.logging_config import setup_logging  # noqa: PLC0415
@@ -237,6 +260,7 @@ def desktop_run(
     runtime_paths = activate_cli_runtime(config_path, storage_path=storage_path)
     setup_logging(level=log_level.upper(), runtime_paths=runtime_paths)
     try:
+        http_headers = load_desktop_http_headers(matrix_http_headers_file)
         session = load_desktop_session(desktop_session_path(runtime_paths))
         asyncio.run(
             _run_bridge(
@@ -256,6 +280,7 @@ def desktop_run(
                 browser_executable=browser_executable,
                 browser_user_data_dir=browser_user_data_dir,
                 browser_timeout_seconds=browser_timeout_seconds,
+                http_headers=http_headers,
             ),
         )
     except KeyboardInterrupt:
@@ -303,6 +328,7 @@ async def _run_bridge(
     browser_executable: Path | None = None,
     browser_user_data_dir: Path | None = None,
     browser_timeout_seconds: int = 90,
+    http_headers: Mapping[str, str] | None = None,
 ) -> None:
     from mindroom.desktop.bridge import DesktopBridge, DesktopBridgePolicy  # noqa: PLC0415
     from mindroom.desktop.playwright_mcp import PlaywrightMCPBrowserProvider  # noqa: PLC0415
@@ -330,7 +356,7 @@ async def _run_bridge(
         if browser_extension
         else None
     )
-    client = await open_desktop_client(session, runtime_paths=runtime_paths)
+    client = await open_desktop_client(session, runtime_paths=runtime_paths, http_headers=http_headers)
     tasks: set[asyncio.Task[None]] = set()
     try:
         provider = PyAutoGuiDesktopProvider(

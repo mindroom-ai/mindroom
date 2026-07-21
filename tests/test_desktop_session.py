@@ -14,6 +14,7 @@ from mindroom.desktop.session import (
     DesktopMatrixSession,
     DesktopSessionError,
     _prepare_crypto,
+    load_desktop_http_headers,
     load_desktop_session,
     login_desktop_client,
     open_desktop_client,
@@ -88,6 +89,37 @@ def test_session_preserves_unexpected_filesystem_errors(tmp_path: Path, monkeypa
         load_desktop_session(path)
 
 
+def test_http_headers_file_loads_string_mapping(tmp_path: Path) -> None:
+    """Proxy credentials remain in a separate private file instead of session state."""
+    path = tmp_path / "matrix-http-headers.json"
+    path.write_text('{"X-Access-Client": "test-secret"}', encoding="utf-8")
+    path.chmod(0o600)
+
+    assert load_desktop_http_headers(path) == {"X-Access-Client": "test-secret"}
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Unix permission bits are not authoritative on Windows")
+def test_http_headers_file_refuses_group_readable_secrets(tmp_path: Path) -> None:
+    """An exposed proxy credential file stops before any Matrix request."""
+    path = tmp_path / "matrix-http-headers.json"
+    path.write_text('{"X-Access-Client": "test-secret"}', encoding="utf-8")
+    path.chmod(0o640)
+
+    with pytest.raises(DesktopSessionError, match="must not be readable"):
+        load_desktop_http_headers(path)
+
+
+@pytest.mark.parametrize("payload", ['["not-an-object"]', '{"X-Access-Client": 1}'])
+def test_http_headers_file_requires_string_mapping(tmp_path: Path, payload: str) -> None:
+    """Malformed header configuration fails before nio receives it."""
+    path = tmp_path / "matrix-http-headers.json"
+    path.write_text(payload, encoding="utf-8")
+    path.chmod(0o600)
+
+    with pytest.raises(DesktopSessionError, match="JSON object of string values"):
+        load_desktop_http_headers(path)
+
+
 @pytest.mark.asyncio
 async def test_initial_crypto_sync_does_not_announce_bridge_online() -> None:
     """Presence stays offline until the command callback is registered and sync-forever starts."""
@@ -105,9 +137,11 @@ async def test_initial_crypto_sync_does_not_announce_bridge_online() -> None:
 @pytest.mark.asyncio
 async def test_login_translates_expected_matrix_authentication_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     """Bad desktop credentials become one actionable session-domain error."""
+    runtime_paths = SimpleNamespace()
+    matrix_login = AsyncMock(side_effect=PermanentMatrixStartupError("invalid credentials"))
     monkeypatch.setattr(
         "mindroom.desktop.session.login",
-        AsyncMock(side_effect=PermanentMatrixStartupError("invalid credentials")),
+        matrix_login,
     )
 
     with pytest.raises(DesktopSessionError, match="invalid credentials"):
@@ -115,18 +149,34 @@ async def test_login_translates_expected_matrix_authentication_failure(monkeypat
             homeserver="https://matrix.example.org",
             user_id="@desktop:example.org",
             password="wrong-password",  # noqa: S106 - Test-only invalid credential.
-            runtime_paths=SimpleNamespace(),
+            runtime_paths=runtime_paths,
+            http_headers={"X-Access-Client": "test-secret"},
         )
+
+    matrix_login.assert_awaited_once_with(
+        "https://matrix.example.org",
+        "@desktop:example.org",
+        "wrong-password",
+        runtime_paths,
+        http_headers={"X-Access-Client": "test-secret"},
+    )
 
 
 @pytest.mark.asyncio
 async def test_restore_translates_expected_revoked_session_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     """A revoked saved access token becomes one actionable session-domain error."""
     monkeypatch.setattr("mindroom.desktop.session.olm_store_exists", lambda *_args: True)
+    matrix_restore = AsyncMock(side_effect=PermanentMatrixStartupError("access token revoked"))
     monkeypatch.setattr(
         "mindroom.desktop.session.restore_login",
-        AsyncMock(side_effect=PermanentMatrixStartupError("access token revoked")),
+        matrix_restore,
     )
 
     with pytest.raises(DesktopSessionError, match="access token revoked"):
-        await open_desktop_client(_session(), runtime_paths=SimpleNamespace())
+        await open_desktop_client(
+            _session(),
+            runtime_paths=SimpleNamespace(),
+            http_headers={"X-Access-Client": "test-secret"},
+        )
+
+    assert matrix_restore.await_args.kwargs["http_headers"] == {"X-Access-Client": "test-secret"}

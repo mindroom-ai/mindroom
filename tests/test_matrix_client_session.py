@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any
 import nio
 
 from mindroom.constants import STREAM_STATUS_KEY
-from mindroom.matrix.client_session import _MindRoomAsyncClient
+from mindroom.matrix.client_session import _MindRoomAsyncClient, matrix_client_config
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -105,3 +105,13 @@ def test_explicit_zero_one_time_key_count_requests_replenishment(tmp_path: Path)
 
     assert client.olm.uploaded_key_count == 0
     assert client.should_upload_keys
+
+
+def test_matrix_client_config_copies_custom_http_headers() -> None:
+    """Caller-owned secrets cannot mutate a running client's request headers."""
+    headers = {"X-Access-Client": "test-secret"}
+
+    config = matrix_client_config(http_headers=headers)
+    headers.clear()
+
+    assert config.custom_headers == {"X-Access-Client": "test-secret"}

@@ -16,7 +16,7 @@ from mindroom.matrix.to_device import AuthenticatedToDeviceEvent
 from mindroom.startup_errors import PermanentStartupError
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator
+    from collections.abc import AsyncGenerator, Mapping
 
 logger = get_logger(__name__)
 
@@ -183,9 +183,12 @@ def olm_store_exists(user_id: str, device_id: str, runtime_paths: RuntimePaths) 
     return (olm_store_dir(user_id, runtime_paths) / f"{user_id}_{device_id}.db").is_file()
 
 
-def matrix_client_config() -> nio.AsyncClientConfig:
+def matrix_client_config(*, http_headers: Mapping[str, str] | None = None) -> nio.AsyncClientConfig:
     """Return the shared nio configuration used to read and write Olm stores."""
-    return nio.AsyncClientConfig(replace_rotated_device_keys=True)
+    return nio.AsyncClientConfig(
+        custom_headers=dict(http_headers) if http_headers is not None else None,
+        replace_rotated_device_keys=True,
+    )
 
 
 def _create_matrix_client(
@@ -194,6 +197,8 @@ def _create_matrix_client(
     user_id: str | None = None,
     access_token: str | None = None,
     store_path: str | None = None,
+    *,
+    http_headers: Mapping[str, str] | None = None,
 ) -> nio.AsyncClient:
     """Create a Matrix client with consistent configuration."""
     runtime_paths = _require_runtime_paths_arg(runtime_paths)
@@ -210,7 +215,7 @@ def _create_matrix_client(
         # Agents trust devices on first use and never verify interactively;
         # accept a peer device's re-registered olm identity (trust reset)
         # instead of keeping stale keys that silently break E2EE and calls.
-        config=matrix_client_config(),
+        config=matrix_client_config(http_headers=http_headers),
         ssl=ssl_context,  # ty: ignore[invalid-argument-type]
     )
     if user_id:
@@ -254,10 +259,12 @@ async def login(
     user_id: str,
     password: str,
     runtime_paths: RuntimePaths,
+    *,
+    http_headers: Mapping[str, str] | None = None,
 ) -> nio.AsyncClient:
     """Login to Matrix and return an authenticated client."""
     runtime_paths = _require_runtime_paths_arg(runtime_paths)
-    client = _create_matrix_client(homeserver, runtime_paths, user_id)
+    client = _create_matrix_client(homeserver, runtime_paths, user_id, http_headers=http_headers)
 
     response = await client.login(password)
     if isinstance(response, nio.LoginResponse):
@@ -277,10 +284,18 @@ async def restore_login(
     device_id: str,
     access_token: str,
     runtime_paths: RuntimePaths,
+    *,
+    http_headers: Mapping[str, str] | None = None,
 ) -> nio.AsyncClient:
     """Restore one authenticated Matrix session without creating a new device."""
     runtime_paths = _require_runtime_paths_arg(runtime_paths)
-    client = _create_matrix_client(homeserver, runtime_paths, user_id, access_token)
+    client = _create_matrix_client(
+        homeserver,
+        runtime_paths,
+        user_id,
+        access_token,
+        http_headers=http_headers,
+    )
     client.restore_login(user_id, device_id, access_token)
 
     response = await client.whoami()

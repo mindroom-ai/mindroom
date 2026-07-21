@@ -16,6 +16,7 @@ from mindroom.matrix.cross_signing import ensure_agent_cross_signing
 from mindroom.matrix.users import AgentMatrixUser
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
@@ -93,16 +94,43 @@ def load_desktop_session(path: Path) -> DesktopMatrixSession:
     return DesktopMatrixSession.from_payload(raw)
 
 
+def load_desktop_http_headers(path: Path | None) -> dict[str, str] | None:
+    """Load optional secret HTTP headers for the desktop Matrix transport."""
+    if path is None:
+        return None
+    path = path.expanduser()
+    try:
+        file_stat = path.stat()
+    except FileNotFoundError as exc:
+        msg = f"Desktop Matrix HTTP headers file not found at {path}."
+        raise DesktopSessionError(msg) from exc
+    if os.name != "nt" and stat.S_IMODE(file_stat.st_mode) & 0o077:
+        msg = f"Desktop Matrix HTTP headers file {path} must not be readable by group or other users."
+        raise DesktopSessionError(msg)
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        msg = f"Desktop Matrix HTTP headers file {path} is unreadable or malformed."
+        raise DesktopSessionError(msg) from exc
+    if not isinstance(raw, dict) or any(
+        not isinstance(name, str) or not name or not isinstance(value, str) for name, value in raw.items()
+    ):
+        msg = f"Desktop Matrix HTTP headers file {path} must contain one JSON object of string values."
+        raise DesktopSessionError(msg)
+    return cast("dict[str, str]", raw)
+
+
 async def login_desktop_client(
     *,
     homeserver: str,
     user_id: str,
     password: str,
     runtime_paths: RuntimePaths,
+    http_headers: Mapping[str, str] | None = None,
 ) -> tuple[nio.AsyncClient, DesktopMatrixSession]:
     """Create a fresh cross-signed Matrix desktop device and its restorable session."""
     try:
-        client = await login(homeserver, user_id, password, runtime_paths)
+        client = await login(homeserver, user_id, password, runtime_paths, http_headers=http_headers)
     except (PermanentMatrixStartupError, ValueError) as exc:
         msg = f"Desktop Matrix login failed: {exc}"
         raise DesktopSessionError(msg) from exc
@@ -142,9 +170,10 @@ async def restore_desktop_client(
     session: DesktopMatrixSession,
     *,
     runtime_paths: RuntimePaths,
+    http_headers: Mapping[str, str] | None = None,
 ) -> nio.AsyncClient:
     """Restore the exact desktop Matrix device and its Olm identity."""
-    client = await open_desktop_client(session, runtime_paths=runtime_paths)
+    client = await open_desktop_client(session, runtime_paths=runtime_paths, http_headers=http_headers)
     try:
         await prepare_desktop_client(client)
     except Exception:
@@ -157,6 +186,7 @@ async def open_desktop_client(
     session: DesktopMatrixSession,
     *,
     runtime_paths: RuntimePaths,
+    http_headers: Mapping[str, str] | None = None,
 ) -> nio.AsyncClient:
     """Restore a desktop Matrix client before consuming queued sync events."""
     if not olm_store_exists(session.user_id, session.device_id, runtime_paths):
@@ -169,6 +199,7 @@ async def open_desktop_client(
             session.device_id,
             session.access_token,
             runtime_paths,
+            http_headers=http_headers,
         )
     except (PermanentMatrixStartupError, ValueError) as exc:
         msg = f"Desktop Matrix session restore failed: {exc}"
@@ -213,6 +244,7 @@ __all__ = [
     "DesktopSessionError",
     "client_ed25519_fingerprint",
     "desktop_session_path",
+    "load_desktop_http_headers",
     "load_desktop_session",
     "login_desktop_client",
     "open_desktop_client",
