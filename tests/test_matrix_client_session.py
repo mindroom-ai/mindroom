@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import os
+import stat
+from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any
+from typing import Any
 from unittest.mock import AsyncMock, Mock
 
 import nio
@@ -18,9 +21,6 @@ from mindroom.matrix.client_session import (
     login_with_token,
     matrix_client_config,
 )
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 
 def test_encryption_exposes_only_mindroom_stream_status(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -123,6 +123,27 @@ def test_matrix_client_config_copies_custom_http_headers() -> None:
     headers.clear()
 
     assert config.custom_headers == {"X-Access-Client": "test-secret"}
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits are unavailable on Windows")
+def test_matrix_store_directory_is_owner_only(tmp_path: Path) -> None:
+    """Private Olm identity material is inaccessible to other local users."""
+    runtime_paths = RuntimePaths(
+        config_path=tmp_path / "config.yaml",
+        config_dir=tmp_path,
+        env_path=tmp_path / ".env",
+        storage_root=tmp_path / "data",
+    )
+
+    client = client_session._create_matrix_client(
+        "https://matrix.example.org",
+        runtime_paths,
+        "@desktop:example.org",
+        "matrix-access-token",
+    )
+
+    assert client.store_path is not None
+    assert stat.S_IMODE(Path(client.store_path).stat().st_mode) == 0o700
 
 
 @pytest.mark.asyncio

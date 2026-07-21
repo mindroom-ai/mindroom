@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import ssl as ssl_module
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -206,7 +207,10 @@ def _create_matrix_client(
 
     if store_path is None and user_id:
         store_path = str(olm_store_dir(user_id, runtime_paths=runtime_paths))
-        Path(store_path).mkdir(parents=True, exist_ok=True)
+        store_dir = Path(store_path)
+        store_dir.mkdir(parents=True, exist_ok=True)
+        if os.name != "nt":
+            store_dir.chmod(0o700)
 
     client = _MindRoomAsyncClient(
         homeserver,

@@ -134,7 +134,9 @@ The browser returns a short-lived, single-use Matrix login token to an unguessab
 MindRoom exchanges that token immediately and never writes it to disk or terminal logs.
 It does not create or replace account-level cross-signing keys for an SSO account; the bridge authenticates this transport by pinning the exact device ID and Ed25519 key shown after login.
 
-The command saves only the reusable Matrix access token and device identifiers under the selected MindRoom storage directory.
+The session JSON saves only the reusable Matrix access token and device identifiers.
+The device's private Olm identity is persisted separately under `<storage>/encryption_keys/`; on Unix, MindRoom forces its per-user directory to mode `0700`.
+The printed Ed25519 value is the corresponding public fingerprint and is persisted only when you copy it into the cloud agent configuration.
 On Unix, the session file is forced to mode `0600`, and the bridge refuses to load it if group or other users can read it.
 The command prints values similar to these:
 
