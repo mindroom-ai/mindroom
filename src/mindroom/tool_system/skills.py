@@ -242,9 +242,16 @@ class _ResolvedSkillFrontmatter:
 
 
 def set_plugin_skill_roots(roots: Sequence[Path]) -> None:
-    """Replace the plugin-provided skill roots."""
+    """Replace the plugin-provided skill roots, invalidating cached skills only on change.
+
+    Unchanged roots keep the snapshot-validated skill cache warm; per-root
+    mtime/size snapshots in ``_load_root_skills`` still catch file edits.
+    """
     global _PLUGIN_SKILL_ROOTS
-    _PLUGIN_SKILL_ROOTS = _unique_paths(roots)
+    unique_roots = _unique_paths(roots)
+    if unique_roots == _PLUGIN_SKILL_ROOTS:
+        return
+    _PLUGIN_SKILL_ROOTS = unique_roots
     clear_skill_cache()
 
 
