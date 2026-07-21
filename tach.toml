@@ -2157,6 +2157,24 @@ path = "mindroom.desktop"
 depends_on = []
 
 [[modules]]
+path = "mindroom.desktop.login_method"
+depends_on = []
+visibility = [
+    "mindroom.cli.desktop",
+    "mindroom.desktop.session",
+]
+
+[[modules]]
+path = "mindroom.desktop.cloudflare_access"
+depends_on = []
+visibility = ["mindroom.cli.desktop"]
+
+[[modules]]
+path = "mindroom.desktop.sso"
+depends_on = []
+visibility = ["mindroom.cli.desktop"]
+
+[[modules]]
 path = "mindroom.desktop.protocol"
 depends_on = []
 
@@ -2213,6 +2231,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.desktop.session"
 depends_on = [
+    "mindroom.desktop.login_method",
     "mindroom.durable_write",
     "mindroom.matrix.client_session",
     "mindroom.matrix.cross_signing",
@@ -2722,14 +2741,18 @@ depends_on = [
     "mindroom.cli.config",
     "mindroom.constants",
     "mindroom.desktop.bridge",
+    "mindroom.desktop.cloudflare_access",
     "mindroom.desktop.command_journal",
     "mindroom.desktop.identity",
+    "mindroom.desktop.login_method",
     "mindroom.desktop.playwright_mcp",
     "mindroom.desktop.provider",
     "mindroom.desktop.session",
+    "mindroom.desktop.sso",
     "mindroom.logging_config",
     "mindroom.matrix.olm_to_device",
     "mindroom.matrix.to_device",
+    "mindroom.tool_system.dependencies",
 ]
 visibility = ["mindroom.cli.main"]
 
@@ -3823,6 +3846,8 @@ expose = [
     "PermanentMatrixStartupError",
     "create_authenticated_client",
     "login",
+    "login_flows",
+    "login_with_token",
     "matrix_client",
     "matrix_client_config",
     "matrix_startup_error",

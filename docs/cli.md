@@ -238,21 +238,59 @@ Create and privately save the dedicated local desktop Matrix device.
  Log in once, create an Olm device, and save its access token privately.
 
 ╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
-│ *  --user-id                           TEXT  Dedicated Matrix user ID for this desktop │
-│                                              device.                                   │
-│                                              [required]                                │
-│    --homeserver                        TEXT  Matrix homeserver URL; defaults to the    │
-│                                              configured MindRoom homeserver.           │
-│    --replace                                 Replace the saved session with a fresh    │
-│                                              Matrix device.                            │
-│    --matrix-http-headers-file          PATH  Owner-only JSON file of HTTP headers      │
-│                                              added to every Matrix request.            │
-│                                              [env var:                                 │
-│                                              MINDROOM_DESKTOP_MATRIX_HTTP_HEADERS_FIL… │
-│    --config                    -c      PATH  MindRoom config path used for runtime     │
-│                                              env.                                      │
-│    --storage-path              -s      PATH  Desktop bridge state directory.           │
-│    --help                      -h            Show this message and exit.               │
+│ --user-id                                     TEXT                 Expected Matrix     │
+│                                                                    user ID; required   │
+│                                                                    for password login  │
+│                                                                    and optional for    │
+│                                                                    SSO.                │
+│ --homeserver                                  TEXT                 Matrix homeserver   │
+│                                                                    URL; defaults to    │
+│                                                                    the configured      │
+│                                                                    MindRoom            │
+│                                                                    homeserver.         │
+│ --login-method                                [auto|password|sso]  Matrix login        │
+│                                                                    method. Auto uses   │
+│                                                                    password when       │
+│                                                                    advertised,         │
+│                                                                    otherwise browser   │
+│                                                                    SSO.                │
+│                                                                    [default: auto]     │
+│ --sso-idp                                     TEXT                 Matrix SSO          │
+│                                                                    identity-provider   │
+│                                                                    ID. Selects SSO     │
+│                                                                    when login method   │
+│                                                                    is auto.            │
+│ --open-browser           --no-open-browser                         Open Matrix SSO in  │
+│                                                                    the default         │
+│                                                                    browser; otherwise  │
+│                                                                    print the URL.      │
+│                                                                    [default:           │
+│                                                                    open-browser]       │
+│ --cloudflare-access                                                Authenticate Matrix │
+│                                                                    requests            │
+│                                                                    interactively with  │
+│                                                                    the local           │
+│                                                                    cloudflared CLI.    │
+│                                                                    [env var:           │
+│                                                                    MINDROOM_DESKTOP_C… │
+│ --replace                                                          Replace the saved   │
+│                                                                    session with a      │
+│                                                                    fresh Matrix        │
+│                                                                    device.             │
+│ --matrix-http-head…                           PATH                 Owner-only JSON     │
+│                                                                    file of HTTP        │
+│                                                                    headers added to    │
+│                                                                    every Matrix        │
+│                                                                    request.            │
+│                                                                    [env var:           │
+│                                                                    MINDROOM_DESKTOP_M… │
+│ --config             -c                       PATH                 MindRoom config     │
+│                                                                    path used for       │
+│                                                                    runtime env.        │
+│ --storage-path       -s                       PATH                 Desktop bridge      │
+│                                                                    state directory.    │
+│ --help               -h                                            Show this message   │
+│                                                                    and exit.           │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 
 
@@ -334,6 +372,12 @@ Control remains disabled unless the local command grants a short lease.
 │                                                                   timeout.                   │
 │                                                                   [default: 90]              │
 │    --log-level                -l      TEXT                        [default: INFO]            │
+│    --cloudflare-access                                            Authenticate Matrix        │
+│                                                                   requests interactively     │
+│                                                                   with the local cloudflared │
+│                                                                   CLI.                       │
+│                                                                   [env var:                  │
+│                                                                   MINDROOM_DESKTOP_CLOUDFLA… │
 │    --matrix-http-headers-fi…          PATH                        Owner-only JSON file of    │
 │                                                                   HTTP headers added to      │
 │                                                                   every Matrix request.      │

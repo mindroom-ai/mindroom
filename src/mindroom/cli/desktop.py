@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import os
+import sys
 import time
 from pathlib import Path  # noqa: TC003 - Typer evaluates command annotations at runtime.
 from typing import TYPE_CHECKING
 
 import typer
 from rich.console import Console
+
+from mindroom.desktop.login_method import DesktopLoginMethod
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -21,12 +24,32 @@ if TYPE_CHECKING:
 
 _console = Console()
 _error_console = Console(stderr=True)
+_DESKTOP_EXTRA = "desktop"
+_DESKTOP_DEPENDENCIES = ["pyautogui"]
+_MACOS_DESKTOP_DEPENDENCIES = [
+    "pyobjc-framework-applicationservices",
+    "pyobjc-framework-cocoa",
+]
 
 desktop_app = typer.Typer(
     name="desktop",
     help="Connect allowlisted local applications to cloud MindRoom over Matrix E2EE.",
     no_args_is_help=True,
 )
+
+
+def _ensure_desktop_dependencies(runtime_paths: RuntimePaths) -> None:
+    """Install the optional desktop runtime before starting the bridge."""
+    from mindroom.desktop.provider import DesktopProviderError  # noqa: PLC0415
+    from mindroom.tool_system.dependencies import ensure_optional_deps  # noqa: PLC0415
+
+    dependencies = [*_DESKTOP_DEPENDENCIES]
+    if sys.platform == "darwin":
+        dependencies.extend(_MACOS_DESKTOP_DEPENDENCIES)
+    try:
+        ensure_optional_deps(dependencies, _DESKTOP_EXTRA, runtime_paths)
+    except ImportError as exc:
+        raise DesktopProviderError(str(exc)) from exc
 
 
 @desktop_app.command("controller")
@@ -65,11 +88,37 @@ def desktop_controller(
 
 @desktop_app.command("login")
 def desktop_login(
-    user_id: str = typer.Option(..., "--user-id", help="Dedicated Matrix user ID for this desktop device."),
+    user_id: str | None = typer.Option(
+        None,
+        "--user-id",
+        help="Expected Matrix user ID; required for password login and optional for SSO.",
+    ),
     homeserver: str | None = typer.Option(
         None,
         "--homeserver",
         help="Matrix homeserver URL; defaults to the configured MindRoom homeserver.",
+    ),
+    login_method: DesktopLoginMethod = typer.Option(  # noqa: B008
+        DesktopLoginMethod.AUTO,
+        "--login-method",
+        case_sensitive=False,
+        help="Matrix login method. Auto uses password when advertised, otherwise browser SSO.",
+    ),
+    sso_idp: str | None = typer.Option(
+        None,
+        "--sso-idp",
+        help="Matrix SSO identity-provider ID. Selects SSO when login method is auto.",
+    ),
+    open_browser: bool = typer.Option(
+        True,
+        "--open-browser/--no-open-browser",
+        help="Open Matrix SSO in the default browser; otherwise print the URL.",
+    ),
+    cloudflare_access: bool = typer.Option(
+        False,
+        "--cloudflare-access",
+        envvar="MINDROOM_DESKTOP_CLOUDFLARE_ACCESS",
+        help="Authenticate Matrix requests interactively with the local cloudflared CLI.",
     ),
     replace: bool = typer.Option(False, "--replace", help="Replace the saved session with a fresh Matrix device."),
     matrix_http_headers_file: Path | None = typer.Option(  # noqa: B008
@@ -94,11 +143,17 @@ def desktop_login(
     """Log in once, create an Olm device, and save its access token privately."""
     from mindroom.cli.config import activate_cli_runtime  # noqa: PLC0415
     from mindroom.constants import runtime_matrix_homeserver  # noqa: PLC0415
+    from mindroom.desktop.cloudflare_access import (  # noqa: PLC0415
+        CloudflareAccessError,
+        cloudflare_access_headers,
+    )
     from mindroom.desktop.session import (  # noqa: PLC0415
         DesktopSessionError,
         desktop_session_path,
         load_desktop_http_headers,
+        resolve_desktop_login_method,
     )
+    from mindroom.desktop.sso import DesktopSsoError, receive_sso_login_token  # noqa: PLC0415
 
     runtime_paths = activate_cli_runtime(config_path, storage_path=storage_path)
     session_path = desktop_session_path(runtime_paths)
@@ -106,33 +161,86 @@ def desktop_login(
         _error_console.print(f"[red]Error:[/red] Session already exists at {session_path}. Use --replace explicitly.")
         raise typer.Exit(1)
     try:
-        http_headers = load_desktop_http_headers(matrix_http_headers_file)
-        password = os.environ.get("MINDROOM_DESKTOP_MATRIX_PASSWORD")
-        if password is None:
-            password = typer.prompt("Matrix password", hide_input=True, confirmation_prompt=False)
-        asyncio.run(
-            _login_and_save(
+        resolved_homeserver = homeserver or runtime_matrix_homeserver(runtime_paths)
+        http_headers: Mapping[str, str] | None = load_desktop_http_headers(matrix_http_headers_file)
+        if cloudflare_access:
+            http_headers = cloudflare_access_headers(resolved_homeserver, http_headers)
+        requested_login_method = _login_method_for_sso_idp(login_method, sso_idp=sso_idp)
+        resolved_login_method = asyncio.run(
+            resolve_desktop_login_method(
+                requested_login_method,
+                homeserver=resolved_homeserver,
                 runtime_paths=runtime_paths,
-                homeserver=homeserver or runtime_matrix_homeserver(runtime_paths),
-                user_id=user_id,
-                password=password,
-                session_path=session_path,
                 http_headers=http_headers,
             ),
         )
-    except DesktopSessionError as exc:
+        password: str | None = None
+        login_token: str | None = None
+        if resolved_login_method is DesktopLoginMethod.PASSWORD:
+            user_id = _require_password_user_id(user_id)
+            password = os.environ.get("MINDROOM_DESKTOP_MATRIX_PASSWORD")
+            if password is None:
+                password = typer.prompt("Matrix password", hide_input=True, confirmation_prompt=False)
+        else:
+            login_token = receive_sso_login_token(
+                resolved_homeserver,
+                open_browser=open_browser,
+                announce=lambda message: _console.print(message, markup=False),
+                idp_id=sso_idp,
+            )
+        asyncio.run(
+            _login_and_save(
+                runtime_paths=runtime_paths,
+                homeserver=resolved_homeserver,
+                user_id=user_id,
+                password=password,
+                login_token=login_token,
+                session_path=session_path,
+                http_headers=http_headers,
+                cloudflare_access=cloudflare_access,
+            ),
+        )
+    except (CloudflareAccessError, DesktopSessionError, DesktopSsoError) as exc:
         _error_console.print(f"[red]Desktop login failed:[/red] {exc}")
         raise typer.Exit(1) from None
+
+
+def _require_password_user_id(user_id: str | None) -> str:
+    """Return a password-login identity or raise one friendly CLI error."""
+    from mindroom.desktop.session import DesktopSessionError  # noqa: PLC0415
+
+    if user_id is None:
+        msg = "--user-id is required for Matrix password login."
+        raise DesktopSessionError(msg)
+    return user_id
+
+
+def _login_method_for_sso_idp(
+    login_method: DesktopLoginMethod,
+    *,
+    sso_idp: str | None,
+) -> DesktopLoginMethod:
+    """Make an explicit SSO provider select SSO without hiding conflicts."""
+    if sso_idp is None:
+        return login_method
+    if login_method is DesktopLoginMethod.PASSWORD:
+        from mindroom.desktop.session import DesktopSessionError  # noqa: PLC0415
+
+        msg = "--sso-idp cannot be used with --login-method password."
+        raise DesktopSessionError(msg)
+    return DesktopLoginMethod.SSO
 
 
 async def _login_and_save(
     *,
     runtime_paths: RuntimePaths,
     homeserver: str,
-    user_id: str,
-    password: str,
+    user_id: str | None,
+    password: str | None,
+    login_token: str | None,
     session_path: Path,
     http_headers: Mapping[str, str] | None = None,
+    cloudflare_access: bool = False,
 ) -> None:
     from mindroom.desktop.session import (  # noqa: PLC0415
         client_ed25519_fingerprint,
@@ -144,8 +252,10 @@ async def _login_and_save(
         homeserver=homeserver,
         user_id=user_id,
         password=password,
+        login_token=login_token,
         runtime_paths=runtime_paths,
         http_headers=http_headers,
+        cloudflare_access=cloudflare_access,
     )
     try:
         save_desktop_session(session_path, session)
@@ -220,6 +330,12 @@ def desktop_run(
         help="Local Playwright MCP call timeout.",
     ),
     log_level: str = typer.Option("INFO", "--log-level", "-l"),
+    cloudflare_access: bool = typer.Option(
+        False,
+        "--cloudflare-access",
+        envvar="MINDROOM_DESKTOP_CLOUDFLARE_ACCESS",
+        help="Authenticate Matrix requests interactively with the local cloudflared CLI.",
+    ),
     matrix_http_headers_file: Path | None = typer.Option(  # noqa: B008
         None,
         "--matrix-http-headers-file",
@@ -241,6 +357,10 @@ def desktop_run(
 ) -> None:
     """Run the outbound-only Matrix sync loop and execute locally authorized commands."""
     from mindroom.cli.config import activate_cli_runtime  # noqa: PLC0415
+    from mindroom.desktop.cloudflare_access import (  # noqa: PLC0415
+        CloudflareAccessError,
+        cloudflare_access_headers,
+    )
     from mindroom.desktop.command_journal import DesktopCommandJournalError  # noqa: PLC0415
     from mindroom.desktop.provider import DesktopProviderError  # noqa: PLC0415
     from mindroom.desktop.session import (  # noqa: PLC0415
@@ -260,8 +380,11 @@ def desktop_run(
     runtime_paths = activate_cli_runtime(config_path, storage_path=storage_path)
     setup_logging(level=log_level.upper(), runtime_paths=runtime_paths)
     try:
-        http_headers = load_desktop_http_headers(matrix_http_headers_file)
+        http_headers: Mapping[str, str] | None = load_desktop_http_headers(matrix_http_headers_file)
         session = load_desktop_session(desktop_session_path(runtime_paths))
+        if cloudflare_access or session.cloudflare_access:
+            http_headers = cloudflare_access_headers(session.homeserver, http_headers)
+        _ensure_desktop_dependencies(runtime_paths)
         asyncio.run(
             _run_bridge(
                 runtime_paths=runtime_paths,
@@ -285,7 +408,13 @@ def desktop_run(
         )
     except KeyboardInterrupt:
         _console.print("\n[yellow]Desktop bridge stopped.[/yellow]")
-    except (DesktopCommandJournalError, DesktopProviderError, DesktopSessionError, OlmToDeviceError) as exc:
+    except (
+        CloudflareAccessError,
+        DesktopCommandJournalError,
+        DesktopProviderError,
+        DesktopSessionError,
+        OlmToDeviceError,
+    ) as exc:
         _error_console.print(f"[red]Desktop bridge failed:[/red] {exc}")
         raise typer.Exit(1) from None
 
