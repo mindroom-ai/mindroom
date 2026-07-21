@@ -8,6 +8,7 @@ import threading
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import aiohttp
 import nio
 import pytest
 
@@ -75,7 +76,6 @@ async def test_request_headers_cache_current_token_and_reauthenticate_after_expi
 
     await headers.prepare()
     assert dict(headers) == {"X-Static": "value", "cf-access-token": first_token}
-    assert dict(headers)["cf-access-token"] == first_token
     assert len(calls) == 1
 
     now[0] = 201.0
@@ -118,26 +118,34 @@ def test_nio_config_preserves_request_time_access_headers() -> None:
 
 
 @pytest.mark.asyncio
-async def test_nio_resolves_access_header_for_each_http_request(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A running sync client can replace an expired JWT without reconnecting."""
+async def test_nio_refreshes_access_header_for_each_transport_attempt(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An expired JWT is refreshed during nio's internal transport retry."""
     provider = _TestTokenProvider("first-token", "second-token")
     headers = CloudflareAccessHeaders(provider)
     client = _MindRoomAsyncClient(
         "https://matrix.example.org",
         config=matrix_client_config(http_headers=headers),
     )
-    request = AsyncMock(return_value=SimpleNamespace(status=200))
+    sent_tokens: list[str] = []
+
+    async def request(*_args: object, **kwargs: object) -> object:
+        request_headers = kwargs["headers"]
+        assert isinstance(request_headers, dict)
+        sent_tokens.append(request_headers["cf-access-token"])
+        if len(sent_tokens) == 1:
+            provider.expire()
+            message = "connection lost"
+            raise aiohttp.ClientConnectionError(message)
+        return SimpleNamespace(status=200)
+
     client.client_session = SimpleNamespace(request=request)  # type: ignore[assignment]
     monkeypatch.setattr(client, "create_matrix_response", AsyncMock(return_value=object()))
     monkeypatch.setattr(client, "receive_response", AsyncMock())
 
     event_loop_thread = threading.get_ident()
-    await client._send(nio.WhoamiResponse, "GET", "/first")
-    provider.expire()
-    await client._send(nio.WhoamiResponse, "GET", "/second")
+    await client._send(nio.WhoamiResponse, "GET", "/whoami")
 
-    assert request.await_args_list[0].kwargs["headers"]["cf-access-token"] == "first-token"
-    assert request.await_args_list[1].kwargs["headers"]["cf-access-token"] == "second-token"
+    assert sent_tokens == ["first-token", "second-token"]
     assert provider.token_threads
     assert all(thread_id != event_loop_thread for thread_id in provider.token_threads)
 

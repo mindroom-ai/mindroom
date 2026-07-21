@@ -61,12 +61,12 @@ class _AsyncRequestHeaders(Protocol):
 class _MindRoomAsyncClient(nio.AsyncClient):
     """Matrix client for MindRoom-specific encrypted event behavior."""
 
-    async def _send(self, *args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
-        """Prepare dynamic request headers before nio copies them."""
+    async def send(self, *args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
+        """Prepare dynamic request headers before every transport attempt."""
         headers = self.config.custom_headers
         if isinstance(headers, _AsyncRequestHeaders):
             await headers.prepare()
-        return await super()._send(*args, **kwargs)
+        return await super().send(*args, **kwargs)
 
     def encrypt(
         self,

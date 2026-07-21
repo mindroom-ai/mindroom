@@ -446,6 +446,7 @@ async def test_bridge_pins_controller_before_consuming_initial_sync(
     monkeypatch.setattr("mindroom.matrix.olm_to_device.resolve_pinned_device", resolve_device)
     monkeypatch.setattr("mindroom.desktop.provider.PyAutoGuiDesktopProvider", lambda **_kwargs: object())
     monkeypatch.setattr("mindroom.desktop.bridge.DesktopBridge", lambda **_kwargs: bridge)
+
     await desktop_cli._run_bridge(
         runtime_paths=SimpleNamespace(storage_root=tmp_path),
         session=DesktopMatrixSession(
