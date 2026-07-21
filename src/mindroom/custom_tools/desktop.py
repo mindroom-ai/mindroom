@@ -11,6 +11,7 @@ from agno.media import Image
 from agno.tools import Toolkit
 from agno.tools.function import ToolResult
 
+from mindroom.credentials import CredentialsManager, load_scoped_credentials
 from mindroom.custom_tools.desktop_attachment import (
     register_runtime_screenshot_attachment,
     screenshot_attachment_result_fields,
@@ -18,17 +19,22 @@ from mindroom.custom_tools.desktop_attachment import (
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.custom_tools.toolkit_functions import register_toolkit_functions
 from mindroom.desktop.client import DesktopRequestError, desktop_response_router
+from mindroom.desktop.configuration import (
+    DesktopConfigurationState,
+    DesktopConfigurationStatus,
+    desktop_configuration_state,
+)
 from mindroom.desktop.media import DesktopMediaError, download_encrypted_screenshot
 from mindroom.desktop.protocol import (
     DESKTOP_CONTROL_ACTIONS,
     DESKTOP_SAFE_KEYS,
-    MAX_COMMAND_TTL_MS,
     DesktopCommand,
     DesktopProtocolError,
     DesktopResponse,
 )
-from mindroom.matrix.olm_to_device import OlmToDeviceError, PinnedMatrixDevice
+from mindroom.matrix.olm_to_device import OlmToDeviceError
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
+from mindroom.tool_system.worker_routing import ResolvedWorkerTarget  # noqa: TC001 - runtime constructor reflection
 
 if TYPE_CHECKING:
     import nio
@@ -127,21 +133,26 @@ class DesktopTools(Toolkit):
 
     def __init__(
         self,
-        device_user_id: str,
-        device_id: str,
-        device_ed25519: str,
+        device_user_id: str | None = None,
+        device_id: str | None = None,
+        device_ed25519: str | None = None,
         timeout_seconds: float = 30.0,
+        credentials_manager: CredentialsManager | None = None,
+        worker_target: ResolvedWorkerTarget | None = None,
     ) -> None:
         super().__init__(name="desktop")
-        if isinstance(timeout_seconds, bool) or not 1 <= timeout_seconds <= MAX_COMMAND_TTL_MS / 1000:
-            msg = f"timeout_seconds must be between 1 and {MAX_COMMAND_TTL_MS // 1000}."
-            raise ValueError(msg)
-        self._target = PinnedMatrixDevice(
-            user_id=device_user_id,
-            device_id=device_id,
-            ed25519=device_ed25519,
+        self._configuration = desktop_configuration_state(
+            {
+                "device_user_id": device_user_id,
+                "device_id": device_id,
+                "device_ed25519": device_ed25519,
+                "timeout_seconds": timeout_seconds,
+            },
         )
-        self._timeout_seconds = float(timeout_seconds)
+        self._target = self._configuration.target
+        self._timeout_seconds = self._configuration.timeout_seconds
+        self._credentials_manager = credentials_manager
+        self._worker_target = worker_target
         self._command_session_id = uuid4().hex
         self._command_sequences = count()
         register_toolkit_functions(
@@ -184,6 +195,9 @@ class DesktopTools(Toolkit):
         return_attachment: bool = False,
     ) -> ToolResult:
         """Run one state-bound desktop action and return fresh state plus an app screenshot."""
+        configuration = self._current_configuration()
+        if configuration.status is not DesktopConfigurationStatus.READY or configuration.target is None:
+            return _setup_required_result(action, configuration.error)
         context = get_tool_runtime_context()
         if context is None:
             return _error_result(action, "Desktop tool requires a live Matrix runtime context.")
@@ -219,20 +233,34 @@ class DesktopTools(Toolkit):
                 parameters=parameters,
             )
             response = await desktop_response_router(context.client).request(
-                self._target,
+                configuration.target,
                 command,
-                timeout_seconds=self._timeout_seconds,
+                timeout_seconds=configuration.timeout_seconds,
             )
             return await _tool_result_from_response(
                 action,
                 client=context.client,
                 response=response,
-                timeout_seconds=self._timeout_seconds,
+                timeout_seconds=configuration.timeout_seconds,
                 context=context,
                 return_attachment=return_attachment,
             )
         except (DesktopMediaError, DesktopProtocolError, DesktopRequestError, OlmToDeviceError, ValueError) as exc:
             return _error_result(action, str(exc))
+
+    def _current_configuration(self) -> DesktopConfigurationState:
+        target = self._worker_target
+        if self._credentials_manager is None or target is None or target.worker_scope not in {"user", "user_agent"}:
+            return self._configuration
+        credentials = load_scoped_credentials(
+            "desktop",
+            credentials_manager=self._credentials_manager,
+            worker_target=target,
+            allowed_shared_services=frozenset(),
+        )
+        values = dict(credentials or {})
+        values.setdefault("timeout_seconds", self._timeout_seconds)
+        return desktop_configuration_state(values)
 
 
 async def _tool_result_from_response(
@@ -523,6 +551,20 @@ def _error_result(action: str, message: str) -> ToolResult:
         content=custom_tool_payload(
             "desktop",
             "error",
+            action=action,
+            message=message,
+        ),
+    )
+
+
+def _setup_required_result(action: str, error: str | None) -> ToolResult:
+    message = "Desktop setup is required for this requester and agent. Run `!desktop setup` in this Matrix chat."
+    if error is not None:
+        message = f"Desktop configuration is invalid: {error} Run `!desktop setup` to replace it."
+    return ToolResult(
+        content=custom_tool_payload(
+            "desktop",
+            "setup_required",
             action=action,
             message=message,
         ),

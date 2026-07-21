@@ -78,15 +78,9 @@ def desktop_configuration_state(credentials: dict[str, Any] | None) -> DesktopCo
     )
 
 
-def desktop_runtime_config_error(values: dict[str, object]) -> str | None:
-    """Return one runtime configuration error after generic required-field checks."""
-    return desktop_configuration_state(values).error
-
-
 __all__ = [
     "DESKTOP_IDENTITY_FIELDS",
     "DesktopConfigurationState",
     "DesktopConfigurationStatus",
     "desktop_configuration_state",
-    "desktop_runtime_config_error",
 ]

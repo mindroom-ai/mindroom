@@ -14,7 +14,7 @@ from mindroom.custom_tools.desktop import DesktopTools
 from mindroom.desktop.configuration import DesktopConfigurationStatus, desktop_configuration_state
 from mindroom.desktop.media import DesktopMediaError
 from mindroom.desktop.protocol import DesktopResponse, EncryptedDesktopMedia
-from mindroom.tool_system.metadata import TOOL_METADATA, ToolConfigurationNotReadyError, get_tool_by_name
+from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from tests.conftest import test_runtime_paths
 
 if TYPE_CHECKING:
@@ -37,8 +37,6 @@ def test_desktop_tool_is_registered_as_room_scoped_primary_tool() -> None:
     assert metadata.requires_room_context
     assert metadata.default_execution_target.value == "primary"
     assert metadata.function_names == ("desktop",)
-    assert metadata.runtime_config_required
-    assert metadata.runtime_config_validator is not None
     assert {field.name for field in metadata.config_fields or () if field.requester_owned} == {
         "device_user_id",
         "device_id",
@@ -46,12 +44,21 @@ def test_desktop_tool_is_registered_as_room_scoped_primary_tool() -> None:
     }
 
 
-def test_desktop_tool_reports_setup_required_before_constructor(tmp_path: Path) -> None:
-    """Missing identity becomes a skippable readiness state, not a raw constructor TypeError."""
-    with pytest.raises(ToolConfigurationNotReadyError) as exc_info:
-        get_tool_by_name("desktop", test_runtime_paths(tmp_path), worker_target=None)
+@pytest.mark.asyncio
+async def test_unconfigured_desktop_tool_constructs_and_reports_setup_required(tmp_path: Path) -> None:
+    """Missing identity stays inside Desktop instead of breaking the agent."""
+    tool = get_tool_by_name(
+        "desktop",
+        test_runtime_paths(tmp_path),
+        disable_sandbox_proxy=True,
+        worker_target=None,
+    )
 
-    assert exc_info.value.missing_fields == ("device_ed25519", "device_id", "device_user_id")
+    result = await tool.desktop("status")  # type: ignore[attr-defined]
+
+    payload = json.loads(result.content)
+    assert payload["status"] == "setup_required"
+    assert "!desktop setup" in payload["message"]
 
 
 def test_desktop_configuration_distinguishes_partial_and_invalid_state() -> None:

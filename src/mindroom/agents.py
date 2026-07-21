@@ -45,14 +45,12 @@ from mindroom.tool_system.dynamic_toolkits import (
     VisibleToolSurface,
     deferred_tool_catalog_entries,
     has_deferred_tools,
-    requester_scoped_dynamic_tool_session_id,
     resolve_dynamic_tool_selection,
     suppress_fully_deferred_toolkit_instructions,
     visible_tool_surface,
 )
 from mindroom.tool_system.output_files import ToolOutputFilePolicy, wrap_toolkit_for_output_files
 from mindroom.tool_system.plugins import load_plugins
-from mindroom.tool_system.runtime_availability import resolve_agent_runtime_tool_availability
 from mindroom.tool_system.runtime_context import ToolDispatchContext
 from mindroom.tool_system.skills import build_agent_skills
 from mindroom.tool_system.tool_hooks import build_tool_hook_bridge, prepend_tool_hook_bridge
@@ -610,7 +608,6 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
     delegation_depth: int = 0,
     refresh_scheduler: KnowledgeRefreshScheduler | None = None,
     dynamic_tool_continuation: bool = False,
-    setup_required_tool_names: frozenset[str] = frozenset(),
 ) -> Toolkit | None:
     """Build one configured toolkit for an agent.
 
@@ -700,11 +697,6 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
             tool_output_auto_save_threshold_bytes=config.defaults.tool_output_auto_save_threshold_bytes,
         )
 
-    if tool_name == "tool_setup":
-        from mindroom.custom_tools.tool_setup import ToolSetupTools  # noqa: PLC0415
-
-        return ToolSetupTools(setup_required_tool_names)
-
     if tool_name == "compact_context":
         from mindroom.custom_tools.compact_context import CompactContextTools  # noqa: PLC0415
 
@@ -769,7 +761,6 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
                 session_id=session_id,
                 stop_after_tool_call=dynamic_tool_continuation,
                 hidden_tool_names=hidden_tool_names,
-                setup_required_tool_names=setup_required_tool_names,
             ),
             agent_runtime=agent_runtime,
             runtime_paths=runtime_paths,
@@ -1312,44 +1303,36 @@ def _assemble_agent_toolkits(
         runtime_paths=runtime_paths,
     )
     # Dynamic tool state is keyed by agent and session scope, so team members
-    # sharing one Matrix thread do not leak loaded tools across agents. Private
-    # agents add their requester worker key so users sharing a room cannot leak
-    # loaded-tool state to each other either.
-    execution = agent_runtime.execution
-    dynamic_session_id = requester_scoped_dynamic_tool_session_id(
-        session_id,
-        worker_key=execution.worker_key if execution.is_private else None,
-    )
+    # sharing one Matrix thread do not leak loaded tools across agents.
     dynamic_tool_selection = _resolve_agent_dynamic_tool_selection(
         agent_name=agent_name,
         config=config,
-        session_id=dynamic_session_id,
+        session_id=session_id,
         delegation_depth=delegation_depth,
         native_deferred_tools=native_deferred_tools,
         eager_deferred_tools=eager_deferred_tools,
     )
     hidden_toolkits = _context_hidden_toolkits(execution_identity)
-    availability = resolve_agent_runtime_tool_availability(
-        agent_name,
-        config,
-        runtime_paths,
-        execution,
-        visible_tool_configs=dynamic_tool_selection.runtime_tool_configs,
-        hidden_tool_names=hidden_toolkits,
-        disabled_tool_names=disabled_tool_names,
-        disable_runtime_capabilities=disable_runtime_capabilities,
-    )
-    setup_required_tool_names = availability.setup_required_tool_names
-    resolved_tool_configs = {entry.name: entry for entry in availability.ready_tool_configs}
+    resolved_tool_configs = {entry.name: entry for entry in dynamic_tool_selection.runtime_tool_configs}
+    if disable_runtime_capabilities:
+        resolved_tool_configs = {}
+    elif disabled_tool_names:
+        resolved_tool_configs = {
+            tool_name: entry
+            for tool_name, entry in resolved_tool_configs.items()
+            if tool_name not in disabled_tool_names
+        }
+    if hidden_toolkits:
+        resolved_tool_configs = {
+            tool_name: entry for tool_name, entry in resolved_tool_configs.items() if tool_name not in hidden_toolkits
+        }
     loaded_tools = (
         ()
         if disable_runtime_capabilities
         else tuple(
             tool_name
             for tool_name in dynamic_tool_selection.loaded_tools
-            if tool_name not in disabled_tool_names
-            and tool_name not in hidden_toolkits
-            and tool_name not in setup_required_tool_names
+            if tool_name not in disabled_tool_names and tool_name not in hidden_toolkits
         )
     )
     with _agent_create_timing("resolve_worker_tools"):
@@ -1360,11 +1343,12 @@ def _assemble_agent_toolkits(
             list(resolved_tool_configs),
             tool_registry_preloaded=True,
         )
+    entity_view = config.resolve_entity(agent_name)
     tools: list[Toolkit] = []
     deferred_wire_tool_names: set[str] = set()
     for tool_name, tool_entry in resolved_tool_configs.items():
         try:
-            runtime_overrides = availability.runtime_overrides_by_tool.get(tool_name)
+            runtime_overrides = entity_view.tool_runtime_overrides(tool_name)
             with _agent_create_timing("toolkit_build.one", tool_name=tool_name):
                 toolkit = build_agent_toolkit(
                     tool_name,
@@ -1375,12 +1359,11 @@ def _assemble_agent_toolkits(
                     runtime_overrides=runtime_overrides,
                     agent_runtime=agent_runtime,
                     tool_config_overrides=tool_entry.tool_config_overrides,
-                    session_id=dynamic_session_id,
+                    session_id=session_id,
                     execution_identity=execution_identity,
                     delegation_depth=delegation_depth,
                     refresh_scheduler=refresh_scheduler,
                     dynamic_tool_continuation=dynamic_tool_continuation,
-                    setup_required_tool_names=setup_required_tool_names,
                 )
             if toolkit:
                 toolkit = _prune_openai_incompatible_tools(
@@ -1410,9 +1393,7 @@ def _assemble_agent_toolkits(
         tools=tools,
         loaded_tools=loaded_tools,
         hidden_toolkits=hidden_toolkits,
-        selected_dynamic_tools=tuple(
-            tool_name for tool_name in dynamic_tool_selection.loaded_tools if tool_name not in setup_required_tool_names
-        ),
+        selected_dynamic_tools=dynamic_tool_selection.loaded_tools,
         deferred_wire_tool_names=frozenset(deferred_wire_tool_names),
     )
 

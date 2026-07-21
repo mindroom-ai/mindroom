@@ -8,11 +8,9 @@ import sqlite3
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
-from mindroom.desktop.protocol import (
-    desktop_pairing_verification,
-)
+from mindroom.desktop.protocol import desktop_pairing_verification
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -43,8 +41,6 @@ class PendingDesktopPairing:
 
     requester_id: str
     agent_name: str
-    room_id: str
-    thread_id: str | None
     expires_at: int
     device_user_id: str | None
     device_id: str | None
@@ -78,8 +74,6 @@ def _pairing_connection(runtime_paths: RuntimePaths) -> Iterator[sqlite3.Connect
                 token_hash TEXT PRIMARY KEY,
                 requester_id TEXT NOT NULL,
                 agent_name TEXT NOT NULL,
-                room_id TEXT NOT NULL,
-                thread_id TEXT,
                 expires_at INTEGER NOT NULL,
                 device_user_id TEXT,
                 device_id TEXT,
@@ -102,8 +96,6 @@ def create_desktop_pairing(
     *,
     requester_id: str,
     agent_name: str,
-    room_id: str,
-    thread_id: str | None,
     now: int | None = None,
 ) -> DesktopPairingStart:
     """Create one single-use pairing token bound to requester plus agent."""
@@ -115,35 +107,25 @@ def create_desktop_pairing(
         connection.execute(
             """
             INSERT INTO desktop_pairings (
-                token_hash, requester_id, agent_name, room_id, thread_id, expires_at
-            ) VALUES (?, ?, ?, ?, ?, ?)
+                token_hash, requester_id, agent_name, expires_at
+            ) VALUES (?, ?, ?, ?)
             """,
-            (_token_hash(token), requester_id, agent_name, room_id, thread_id, expires_at),
+            (_token_hash(token), requester_id, agent_name, expires_at),
         )
     return DesktopPairingStart(token=token, expires_at=expires_at)
 
 
-def _pending_pairing(row: tuple[object, ...]) -> PendingDesktopPairing:
-    requester_id, agent_name, room_id, thread_id, expires_at, device_user_id, device_id, device_ed25519 = row
-    required_text = (requester_id, agent_name, room_id)
-    optional_text = (thread_id, device_user_id, device_id, device_ed25519)
-    if (
-        any(not isinstance(value, str) for value in required_text)
-        or any(value is not None and not isinstance(value, str) for value in optional_text)
-        or isinstance(expires_at, bool)
-        or not isinstance(expires_at, int)
-    ):
-        msg = "Desktop pairing database contains an invalid record."
-        raise DesktopPairingError(msg)
+def _pending_pairing(
+    row: tuple[str, str, int, str | None, str | None, str | None],
+) -> PendingDesktopPairing:
+    requester_id, agent_name, expires_at, device_user_id, device_id, device_ed25519 = row
     return PendingDesktopPairing(
-        requester_id=cast("str", requester_id),
-        agent_name=cast("str", agent_name),
-        room_id=cast("str", room_id),
-        thread_id=cast("str | None", thread_id),
+        requester_id=requester_id,
+        agent_name=agent_name,
         expires_at=expires_at,
-        device_user_id=cast("str | None", device_user_id),
-        device_id=cast("str | None", device_id),
-        device_ed25519=cast("str | None", device_ed25519),
+        device_user_id=device_user_id,
+        device_id=device_id,
+        device_ed25519=device_ed25519,
     )
 
 
@@ -156,7 +138,7 @@ def _load_pairing(
     _purge_expired(connection, now)
     row = connection.execute(
         """
-        SELECT requester_id, agent_name, room_id, thread_id, expires_at,
+        SELECT requester_id, agent_name, expires_at,
                device_user_id, device_id, device_ed25519
         FROM desktop_pairings WHERE token_hash = ?
         """,
@@ -201,8 +183,6 @@ def claim_desktop_pairing(
         return PendingDesktopPairing(
             requester_id=pending.requester_id,
             agent_name=pending.agent_name,
-            room_id=pending.room_id,
-            thread_id=pending.thread_id,
             expires_at=pending.expires_at,
             device_user_id=device_user_id,
             device_id=device_id,
@@ -216,8 +196,6 @@ def confirm_desktop_pairing(
     token: str,
     requester_id: str,
     agent_name: str,
-    room_id: str,
-    thread_id: str | None,
     verification: str,
     now: int | None = None,
 ) -> PendingDesktopPairing:
@@ -225,13 +203,8 @@ def confirm_desktop_pairing(
     current_time = int(time.time()) if now is None else now
     with _pairing_connection(runtime_paths) as connection:
         pending = _load_pairing(connection, token, now=current_time)
-    if (
-        pending.requester_id != requester_id
-        or pending.agent_name != agent_name
-        or pending.room_id != room_id
-        or pending.thread_id != thread_id
-    ):
-        msg = "Desktop pairing code does not belong to this requester, agent, and conversation."
+    if pending.requester_id != requester_id or pending.agent_name != agent_name:
+        msg = "Desktop pairing code does not belong to this requester and agent."
         raise DesktopPairingError(msg)
     if not pending.claimed:
         msg = "Desktop device has not claimed this pairing code yet."

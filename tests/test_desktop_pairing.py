@@ -33,15 +33,13 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
-def test_pairing_binds_claim_and_confirmation_to_requester_agent_conversation(tmp_path: Path) -> None:
-    """Only the initiating requester-agent conversation can consume a device claim."""
+def test_pairing_binds_claim_and_confirmation_to_requester_agent(tmp_path: Path) -> None:
+    """Only the initiating requester-agent scope can consume a device claim."""
     runtime_paths = test_runtime_paths(tmp_path)
     pairing = create_desktop_pairing(
         runtime_paths,
         requester_id="@alice:example.org",
         agent_name="computer",
-        room_id="!private:example.org",
-        thread_id="$thread",
         now=100,
     )
 
@@ -66,26 +64,12 @@ def test_pairing_binds_claim_and_confirmation_to_requester_agent_conversation(tm
         now=101,
     )
 
-    with pytest.raises(DesktopPairingError, match="requester, agent, and conversation"):
+    with pytest.raises(DesktopPairingError, match="requester and agent"):
         confirm_desktop_pairing(
             runtime_paths,
             token=pairing.token,
             requester_id="@bob:example.org",
             agent_name="computer",
-            room_id="!private:example.org",
-            thread_id="$thread",
-            verification="ignored",
-            now=102,
-        )
-
-    with pytest.raises(DesktopPairingError, match="conversation"):
-        confirm_desktop_pairing(
-            runtime_paths,
-            token=pairing.token,
-            requester_id="@alice:example.org",
-            agent_name="computer",
-            room_id="!private:example.org",
-            thread_id="$other-thread",
             verification="ignored",
             now=102,
         )
@@ -97,8 +81,6 @@ def test_pairing_binds_claim_and_confirmation_to_requester_agent_conversation(tm
             token=pairing.token,
             requester_id="@alice:example.org",
             agent_name="computer",
-            room_id="!private:example.org",
-            thread_id="$thread",
             verification="wrong-device",
             now=102,
         )
@@ -108,8 +90,6 @@ def test_pairing_binds_claim_and_confirmation_to_requester_agent_conversation(tm
         token=pairing.token,
         requester_id="@alice:example.org",
         agent_name="computer",
-        room_id="!private:example.org",
-        thread_id="$thread",
         verification=verification,
         now=102,
     )
@@ -124,8 +104,6 @@ def test_pairing_binds_claim_and_confirmation_to_requester_agent_conversation(tm
             token=pairing.token,
             requester_id="@alice:example.org",
             agent_name="computer",
-            room_id="!private:example.org",
-            thread_id="$thread",
             verification=verification,
             now=103,
         )
@@ -138,8 +116,6 @@ def test_pairing_stores_only_a_hash_and_expires(tmp_path: Path) -> None:
         runtime_paths,
         requester_id="@alice:example.org",
         agent_name="computer",
-        room_id="!private:example.org",
-        thread_id=None,
         now=100,
     )
     database_path = runtime_paths.storage_root / "tracking" / "desktop_pairing.sqlite"
@@ -168,8 +144,6 @@ async def test_pairing_claim_uses_authenticated_device_store_identity(tmp_path: 
         runtime_paths,
         requester_id="@alice:example.org",
         agent_name="computer",
-        room_id="!private:example.org",
-        thread_id=None,
     )
     device = SimpleNamespace(ed25519="signed-fingerprint", blacklisted=False)
     client = SimpleNamespace(
@@ -193,8 +167,6 @@ async def test_pairing_claim_uses_authenticated_device_store_identity(tmp_path: 
         token=pairing.token,
         requester_id="@alice:example.org",
         agent_name="computer",
-        room_id="!private:example.org",
-        thread_id=None,
         verification=desktop_pairing_verification(pairing.token, "signed-fingerprint"),
     )
     assert (
@@ -354,6 +326,22 @@ def test_chat_confirmation_saves_only_the_initiating_requester_agent_scope(
 
     assert "does not belong" in handle_desktop_command(f"confirm {token} {verification}", scope=bob_scope)
     assert "Desktop paired" in handle_desktop_command(f"confirm {token} {verification}", scope=alice_scope)
+    assert "Desktop is configured" in handle_desktop_command("", scope=alice_scope)
     assert "Desktop is configured" in handle_desktop_command("status", scope=alice_scope)
     assert "setup is required" in handle_desktop_command("status", scope=bob_scope)
     assert "setup is required" in handle_desktop_command("status", scope=alice_other_agent_scope)
+
+
+def test_desktop_command_contains_pairing_database_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A transient SQLite failure becomes a retryable chat response."""
+    monkeypatch.setattr(
+        "mindroom.commands.desktop_commands._load_desktop_credentials",
+        Mock(side_effect=sqlite3.OperationalError("database is locked")),
+    )
+    scope = SimpleNamespace(agent_name="computer")
+
+    response = handle_desktop_command("status", scope=scope)  # type: ignore[arg-type]
+
+    assert "temporarily unavailable" in response

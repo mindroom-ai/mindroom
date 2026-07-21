@@ -125,8 +125,8 @@ def _private_identity(requester_id: str) -> ToolExecutionIdentity:
     )
 
 
-def test_openai_compatible_context_hides_desktop_and_setup_surfaces() -> None:
-    """Non-Matrix callers cannot access Desktop control or pairing guidance tools."""
+def test_openai_compatible_context_hides_desktop() -> None:
+    """Non-Matrix callers cannot access the Matrix-bound Desktop tool."""
     identity = ToolExecutionIdentity(
         channel="openai_compat",
         agent_name="code",
@@ -649,8 +649,9 @@ def test_dynamic_tools_manager_loads_unloads_searches_and_respects_sticky_initia
     assert _tool_payload(manager.unload_tool("sleep"))["status"] == "not_loaded"
 
 
-def test_private_desktop_setup_is_requester_agent_scoped_without_shared_fallback(tmp_path: Path) -> None:
-    """Pairing and dynamic state for one user-agent pair must not reach another user."""
+@pytest.mark.asyncio
+async def test_private_deferred_desktop_uses_only_requester_agent_credentials(tmp_path: Path) -> None:
+    """A loaded Desktop stays usable while scoped setup changes underneath it."""
     raw = _base_config_data()
     raw["agents"]["code"]["private"] = {"per": "user_agent"}  # type: ignore[index]
     raw["agents"]["code"]["tools"] = [  # type: ignore[index]
@@ -667,7 +668,6 @@ def test_private_desktop_setup_is_requester_agent_scoped_without_shared_fallback
     config = _validated_config(tmp_path, raw)
     runtime_paths = _runtime_paths(tmp_path)
     alice_identity = _private_identity("@alice:example.org")
-    bob_identity = _private_identity("@bob:example.org")
     credentials_manager = get_runtime_credentials_manager(runtime_paths)
     shared_identity = {
         "device_user_id": "@shared-desktop:example.org",
@@ -681,18 +681,25 @@ def test_private_desktop_setup_is_requester_agent_scoped_without_shared_fallback
         config,
         runtime_paths,
         execution_identity=alice_identity,
-        session_id="same-room-session",
+        session_id="alice-session",
     )
     alice_manager = next(tool for tool in alice_unpaired.tools if tool.name == "dynamic_tools")
-    alice_catalog = _tool_payload(alice_manager.list_tools())
 
     assert any(tool.name == "calculator" for tool in alice_unpaired.tools)
-    setup_toolkit = next(tool for tool in alice_unpaired.tools if tool.name == "tool_setup")
-    assert set(setup_toolkit.get_functions()) == {"tool_setup"}
-    assert _tool_payload(setup_toolkit.tool_setup("desktop"))["status"] == "setup_required"
     assert not any(tool.name == "desktop" for tool in alice_unpaired.tools)
-    assert alice_catalog["tools"][0]["setup_required"] is True  # type: ignore[index]
-    assert _tool_payload(alice_manager.load_tool("desktop"))["status"] == "setup_required"
+    assert _tool_payload(alice_manager.load_tool("desktop"))["status"] == "loaded"
+
+    alice_loaded = create_agent(
+        "code",
+        config,
+        runtime_paths,
+        execution_identity=alice_identity,
+        session_id="alice-session",
+    )
+    alice_desktop = next(tool for tool in alice_loaded.tools if tool.name == "desktop")
+    assert alice_desktop._target is None  # type: ignore[attr-defined]
+    result = await alice_desktop.desktop("status")  # type: ignore[attr-defined]
+    assert _tool_payload(result.content)["status"] == "setup_required"
 
     alice_target = build_agent_toolkit_worker_target(
         "user_agent",
@@ -712,24 +719,9 @@ def test_private_desktop_setup_is_requester_agent_scoped_without_shared_fallback
         worker_target=alice_target,
     )
 
-    alice_paired = create_agent(
-        "code",
-        config,
-        runtime_paths,
-        execution_identity=alice_identity,
-        session_id="same-room-session",
-    )
-    alice_manager = next(tool for tool in alice_paired.tools if tool.name == "dynamic_tools")
-    assert _tool_payload(alice_manager.load_tool("desktop"))["status"] == "loaded"
-    alice_loaded = create_agent(
-        "code",
-        config,
-        runtime_paths,
-        execution_identity=alice_identity,
-        session_id="same-room-session",
-    )
-    alice_desktop = next(tool for tool in alice_loaded.tools if tool.name == "desktop")
-    assert alice_desktop._target.user_id == "@alice-desktop:example.org"  # type: ignore[attr-defined]
+    paired = alice_desktop._current_configuration()  # type: ignore[attr-defined]
+    assert paired.target is not None
+    assert paired.target.user_id == "@alice-desktop:example.org"
 
     save_scoped_credentials(
         "desktop",
@@ -741,46 +733,21 @@ def test_private_desktop_setup_is_requester_agent_scoped_without_shared_fallback
         credentials_manager=credentials_manager,
         worker_target=alice_target,
     )
-    alice_rotated = create_agent(
-        "code",
-        config,
-        runtime_paths,
-        execution_identity=alice_identity,
-        session_id="same-room-session",
-    )
-    rotated_desktop = next(tool for tool in alice_rotated.tools if tool.name == "desktop")
-    assert rotated_desktop._target.user_id == "@alice-rotated:example.org"  # type: ignore[attr-defined]
+    rotated = alice_desktop._current_configuration()  # type: ignore[attr-defined]
+    assert rotated.target is not None
+    assert rotated.target.user_id == "@alice-rotated:example.org"
 
     delete_scoped_credentials(
         "desktop",
         credentials_manager=credentials_manager,
         worker_target=alice_target,
     )
-    alice_disconnected = create_agent(
-        "code",
-        config,
-        runtime_paths,
-        execution_identity=alice_identity,
-        session_id="same-room-session",
-    )
-    assert not any(tool.name == "desktop" for tool in alice_disconnected.tools)
-
-    bob_unpaired = create_agent(
-        "code",
-        config,
-        runtime_paths,
-        execution_identity=bob_identity,
-        session_id="same-room-session",
-    )
-    bob_manager = next(tool for tool in bob_unpaired.tools if tool.name == "dynamic_tools")
-    bob_catalog = _tool_payload(bob_manager.list_tools())
-    assert bob_catalog["loaded_tools"] == []
-    assert bob_catalog["tools"][0]["setup_required"] is True  # type: ignore[index]
-    assert not any(tool.name == "desktop" for tool in bob_unpaired.tools)
+    assert alice_desktop._current_configuration().target is None  # type: ignore[attr-defined]
 
 
-def test_native_tool_search_rebuilds_private_desktop_after_pairing(tmp_path: Path) -> None:
-    """Native deferred schemas omit unconfigured Desktop and add it after scoped setup."""
+@pytest.mark.asyncio
+async def test_native_tool_search_keeps_unconfigured_desktop_safe(tmp_path: Path) -> None:
+    """Native deferred Desktop keeps one stable schema and fails closed until paired."""
     raw = _base_config_data()
     raw["models"]["claude"] = {"provider": "anthropic", "id": "claude-opus-4-8"}  # type: ignore[index]
     raw["agents"]["code"].update(  # type: ignore[union-attr,index]
@@ -801,9 +768,10 @@ def test_native_tool_search_rebuilds_private_desktop_after_pairing(tmp_path: Pat
         execution_identity=identity,
         session_id="native-session",
     )
-    assert not any(tool.name == "desktop" for tool in unpaired.tools)
-    assert any(tool.name == "tool_setup" for tool in unpaired.tools)
-    assert _DEFERRED_TOOL_NAMES_ATTR not in vars(unpaired.model)
+    unpaired_desktop = next(tool for tool in unpaired.tools if tool.name == "desktop")
+    result = await unpaired_desktop.desktop("status")  # type: ignore[attr-defined]
+    assert _tool_payload(result.content)["status"] == "setup_required"
+    assert "desktop" in vars(unpaired.model)[_DEFERRED_TOOL_NAMES_ATTR]
 
     save_scoped_credentials(
         "desktop",
@@ -828,7 +796,8 @@ def test_native_tool_search_rebuilds_private_desktop_after_pairing(tmp_path: Pat
         execution_identity=identity,
         session_id="native-session",
     )
-    assert any(tool.name == "desktop" for tool in paired.tools)
+    paired_desktop = next(tool for tool in paired.tools if tool.name == "desktop")
+    assert paired_desktop._target.user_id == "@alice-desktop:example.org"  # type: ignore[attr-defined]
     assert "desktop" in vars(paired.model)[_DEFERRED_TOOL_NAMES_ATTR]
 
 

@@ -178,12 +178,10 @@ depends_on = [
     "mindroom.agent_descriptions",
     "mindroom.agent_storage",
     "mindroom.claude_prompt_cache",
-    "mindroom.config.models",
     "mindroom.constants",
     "mindroom.credentials",
     "mindroom.custom_tools.delegate",
     "mindroom.custom_tools.memory",
-    "mindroom.custom_tools.tool_setup",
     "mindroom.entity_resolution",
     "mindroom.hooks",
     "mindroom.logging_config",
@@ -198,7 +196,6 @@ depends_on = [
     "mindroom.tool_system.output_files",
     "mindroom.tool_system.plugins",
     "mindroom.tool_system.runtime_context",
-    "mindroom.tool_system.runtime_availability",
     "mindroom.tool_system.skills",
     "mindroom.tool_system.tool_hooks",
     "mindroom.tool_system.worker_routing",
@@ -459,13 +456,16 @@ depends_on = [
 [[modules]]
 path = "mindroom.custom_tools.desktop"
 depends_on = [
+    "mindroom.credentials",
     "mindroom.custom_tools.tool_payloads",
     "mindroom.custom_tools.toolkit_functions",
     "mindroom.desktop.client",
+    "mindroom.desktop.configuration",
     "mindroom.desktop.media",
     "mindroom.desktop.protocol",
     "mindroom.matrix.olm_to_device",
     "mindroom.tool_system.runtime_context",
+    "mindroom.tool_system.worker_routing",
 ]
 
 # Keep split Matrix client consumers on explicit per-module rules so Tach can
@@ -3179,26 +3179,6 @@ depends_on = [
 ]
 
 [[modules]]
-path = "mindroom.tool_system.runtime_availability"
-depends_on = [
-    "mindroom.config.models",
-    "mindroom.credentials",
-    "mindroom.tool_system.catalog",
-    "mindroom.tool_system.dynamic_toolkits",
-    "mindroom.tool_system.worker_routing",
-]
-visibility = [
-    "mindroom.agents",
-    "mindroom.custom_tools.dynamic_tools",
-    "mindroom.custom_tools.tool_setup",
-]
-
-[[modules]]
-path = "mindroom.custom_tools.tool_setup"
-depends_on = ["mindroom.tool_system.runtime_availability"]
-visibility = ["mindroom.agents"]
-
-[[modules]]
 path = "mindroom.tool_system.plugins"
 depends_on = [
     "mindroom.constants",
@@ -4048,7 +4028,6 @@ from = ["mindroom.tool_system.registration"]
 expose = [
     "TOOL_METADATA",
     "ToolConfigOverrideError",
-    "ToolConfigurationNotReadyError",
     "ToolInitOverrideError",
     "ToolMetadataValidationError",
     "apply_authored_overrides",
@@ -4066,7 +4045,6 @@ expose = [
     "serialize_tool_validation_snapshot",
     "unresolved_plugin_tool_sources_for_runtime",
     "validate_authored_tool_entry_overrides",
-    "validate_tool_runtime_configuration",
 ]
 from = ["mindroom.tool_system.metadata"]
 visibility = ["mindroom.tool_system.catalog"]
@@ -4086,7 +4064,6 @@ expose = [
     "ToolAuthoredOverrideValidator",
     "ToolCategory",
     "ToolConfigOverrideError",
-    "ToolConfigurationNotReadyError",
     "ToolInitOverrideError",
     "ToolManagedInitArg",
     "ToolMetadata",
@@ -4109,7 +4086,6 @@ expose = [
     "serialize_tool_validation_snapshot",
     "unresolved_plugin_tool_sources_for_runtime",
     "validate_authored_tool_entry_overrides",
-    "validate_tool_runtime_configuration",
 ]
 from = ["mindroom.tool_system.catalog"]
 
@@ -4462,7 +4438,6 @@ expose = [
     "get_loaded_tools_for_session",
     "has_deferred_tools",
     "load_tool_for_session",
-    "requester_scoped_dynamic_tool_session_id",
     "resolve_dynamic_tool_selection",
     "save_loaded_tools_for_session",
     "suppress_fully_deferred_toolkit_instructions",

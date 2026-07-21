@@ -253,7 +253,6 @@ class _CallAgentCache:
             self.agent is not None
             and self.knowledge_identity == knowledge_identity
             and self.refresh_scheduler is refresh_scheduler
-            and not self._has_requester_scoped_desktop()
         ):
             return self.agent
         if self.agent is not None:
@@ -268,16 +267,6 @@ class _CallAgentCache:
         self.knowledge_identity = knowledge_identity
         self.refresh_scheduler = refresh_scheduler
         return agent
-
-    def _has_requester_scoped_desktop(self) -> bool:
-        """Return whether chat pairing may change this cached agent's tool schema."""
-        agent_config = self.config.get_agent(self.agent_name)
-        entity = self.config.resolve_entity(self.agent_name)
-        return (
-            agent_config.private is not None
-            and entity.execution_scope in {"user", "user_agent"}
-            and "desktop" in entity.available_tools
-        )
 
     def _build_agent(
         self,

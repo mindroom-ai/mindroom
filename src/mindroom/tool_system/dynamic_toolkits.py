@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 from dataclasses import dataclass
 from threading import RLock
 from typing import TYPE_CHECKING
@@ -64,24 +63,11 @@ class DeferredToolCatalogEntry:
     function_names: tuple[str, ...]
     loaded: bool
     sticky: bool
-    setup_required: bool = False
 
 
 def _dynamic_tool_scope_key(session_id: str) -> str:
     """Normalize one session id to the dynamic-tool state scope used in memory."""
     return session_id
-
-
-def requester_scoped_dynamic_tool_session_id(
-    session_id: str | None,
-    *,
-    worker_key: str | None,
-) -> str | None:
-    """Partition dynamic-tool state by requester without exposing worker keys."""
-    if session_id is None or worker_key is None:
-        return session_id
-    digest = hashlib.sha256(worker_key.encode()).hexdigest()
-    return f"{session_id}:private:{digest}"
 
 
 def _state_key(agent_name: str, session_id: str) -> tuple[str, str]:
@@ -538,7 +524,6 @@ def deferred_tool_catalog_entries(
     agent_name: str,
     config: Config,
     loaded_tools: list[str],
-    setup_required_tool_names: frozenset[str] = frozenset(),
 ) -> list[DeferredToolCatalogEntry]:
     """Return model-visible catalog metadata for one agent's authored deferred tools."""
     loaded = set(loaded_tools)
@@ -554,7 +539,6 @@ def deferred_tool_catalog_entries(
                 function_names=tuple(metadata.function_names or ()) if metadata else (),
                 loaded=entry.name in loaded,
                 sticky=entry.initial,
-                setup_required=entry.name in setup_required_tool_names,
             ),
         )
     return entries

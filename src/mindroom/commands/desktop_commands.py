@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shlex
+import sqlite3
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -92,8 +93,6 @@ def _setup_response(scope: DesktopCommandScope) -> str:
         scope.runtime_paths,
         requester_id=scope.requester_id,
         agent_name=scope.agent_name,
-        room_id=scope.room_id,
-        thread_id=scope.thread_id,
     )
     command = " ".join(
         (
@@ -129,8 +128,6 @@ def _confirm_response(scope: DesktopCommandScope, token: str, verification: str)
         token=token,
         requester_id=scope.requester_id,
         agent_name=scope.agent_name,
-        room_id=scope.room_id,
-        thread_id=scope.thread_id,
         verification=verification,
     )
     assert pending.device_user_id is not None
@@ -177,19 +174,23 @@ def handle_desktop_command(args_text: str, *, scope: DesktopCommandScope) -> str
     operation = parts[0].lower() if parts else "status"
     try:
         if operation in {"setup", "rotate"} and len(parts) == 1:
-            return _setup_response(scope)
-        if operation == "status" and len(parts) == 1:
-            return _status_response(scope)
-        if operation == "confirm" and len(parts) == 3:
-            return _confirm_response(scope, parts[1], parts[2])
-        if operation == "disconnect" and len(parts) in {1, 2}:
-            return _disconnect_response(scope, confirmed=len(parts) == 2 and parts[1].lower() == "confirm")
+            response = _setup_response(scope)
+        elif operation == "status" and len(parts) <= 1:
+            response = _status_response(scope)
+        elif operation == "confirm" and len(parts) == 3:
+            response = _confirm_response(scope, parts[1], parts[2])
+        elif operation == "disconnect" and len(parts) in {1, 2}:
+            response = _disconnect_response(scope, confirmed=len(parts) == 2 and parts[1].lower() == "confirm")
+        else:
+            response = (
+                "Usage: `!desktop setup`, `!desktop status`, `!desktop confirm <code> <verification>`, "
+                "`!desktop rotate`, or `!desktop disconnect [confirm]`."
+            )
+    except sqlite3.Error:
+        return "❌ Desktop setup is temporarily unavailable. Please try again."
     except (DesktopIdentityError, DesktopPairingError, ValueError) as exc:
         return f"❌ Desktop setup failed: {exc}"
-    return (
-        "Usage: `!desktop setup`, `!desktop status`, `!desktop confirm <code> <verification>`, "
-        "`!desktop rotate`, or `!desktop disconnect [confirm]`."
-    )
+    return response
 
 
 __all__ = ["DesktopCommandScope", "handle_desktop_command"]

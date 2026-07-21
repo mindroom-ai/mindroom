@@ -79,27 +79,6 @@ _VALIDATION_PLUGIN_MODULE_SUFFIX = "__validation__"
 _OMIT_TOOL_CONFIG_ARG = object()
 
 
-class ToolConfigurationNotReadyError(ValueError):
-    """One opt-in tool lacks complete runtime configuration."""
-
-    def __init__(
-        self,
-        tool_name: str,
-        missing_fields: tuple[str, ...] = (),
-        *,
-        error: str | None = None,
-    ) -> None:
-        self.tool_name = tool_name
-        self.missing_fields = missing_fields
-        self.error = error
-        if missing_fields:
-            fields = ", ".join(missing_fields)
-            message = f"Tool '{tool_name}' requires setup; missing fields: {fields}."
-        else:
-            message = f"Tool '{tool_name}' requires setup: {error or 'runtime configuration is invalid.'}"
-        super().__init__(message)
-
-
 class ToolInitOverrideError(ValueError):
     """Raised when a caller supplies unsupported tool init overrides."""
 
@@ -520,37 +499,6 @@ def _without_requester_owned_overrides(
     return filtered or None
 
 
-def _validate_runtime_config_readiness(
-    tool_name: str,
-    metadata: ToolMetadata,
-    init_kwargs: dict[str, object],
-) -> None:
-    """Fail before construction when an opted-in tool lacks required fields."""
-    if not metadata.runtime_config_required:
-        return
-    missing_fields = tuple(
-        sorted(
-            field.name
-            for field in metadata.config_fields or ()
-            if field.required and _runtime_config_field_missing(field.name, init_kwargs)
-        ),
-    )
-    if missing_fields:
-        raise ToolConfigurationNotReadyError(tool_name, missing_fields)
-    if metadata.runtime_config_validator is not None:
-        error = metadata.runtime_config_validator(init_kwargs)
-        if error is not None:
-            raise ToolConfigurationNotReadyError(tool_name, error=error)
-
-
-def _runtime_config_field_missing(field_name: str, init_kwargs: dict[str, object]) -> bool:
-    """Return whether one required constructor field is absent or blank."""
-    if field_name not in init_kwargs:
-        return True
-    value = init_kwargs[field_name]
-    return value is None or (isinstance(value, str) and not value.strip())
-
-
 def _pop_implicit_toolkit_filters(
     metadata: ToolMetadata,
     init_kwargs: dict[str, object],
@@ -648,106 +596,6 @@ def _resolve_tool_credentials_manager(
     return None
 
 
-@dataclass(frozen=True, slots=True)
-class _ResolvedToolConfiguration:
-    """Merged configuration inputs shared by readiness checks and construction."""
-
-    credentials_manager: CredentialsManager | None
-    tool_config_overrides: dict[str, object]
-    tool_init_overrides: dict[str, object] | None
-    init_kwargs: dict[str, object]
-
-
-def _resolve_tool_configuration(
-    tool_name: str,
-    runtime_paths: RuntimePaths,
-    *,
-    credential_overrides: dict[str, object] | None,
-    credentials_manager: CredentialsManager | None,
-    tool_config_overrides: dict[str, object] | None,
-    tool_init_overrides: dict[str, object] | None,
-    runtime_overrides: dict[str, object] | None,
-    allowed_shared_services: frozenset[str] | None,
-    worker_target: ResolvedWorkerTarget | None,
-) -> _ResolvedToolConfiguration:
-    """Resolve one tool's scoped credentials and effective constructor configuration."""
-    metadata = TOOL_METADATA[tool_name]
-    resolved_credentials_manager = _resolve_tool_credentials_manager(
-        metadata,
-        runtime_paths,
-        credentials_manager,
-    )
-    credentials = (
-        load_scoped_credentials(
-            tool_name,
-            credentials_manager=resolved_credentials_manager,
-            worker_target=worker_target,
-            allowed_shared_services=allowed_shared_services,
-        )
-        if resolved_credentials_manager is not None
-        else {}
-    ) or {}
-    if credential_overrides:
-        credentials = {**credentials, **credential_overrides}
-    validated_tool_config_overrides = validate_authored_tool_entry_overrides(tool_name, tool_config_overrides)
-    validated_tool_config_overrides = (
-        _without_requester_owned_overrides(
-            metadata,
-            worker_target,
-            validated_tool_config_overrides,
-        )
-        or {}
-    )
-    resolved_runtime_overrides = _without_requester_owned_overrides(
-        metadata,
-        worker_target,
-        runtime_overrides,
-    )
-    safe_tool_init_overrides = sanitize_tool_init_overrides(tool_name, tool_init_overrides)
-    init_kwargs = _build_tool_config_init_kwargs(
-        tool_name,
-        metadata,
-        credentials=credentials,
-        tool_config_overrides=validated_tool_config_overrides,
-        tool_init_overrides=safe_tool_init_overrides,
-        runtime_overrides=resolved_runtime_overrides,
-    )
-    return _ResolvedToolConfiguration(
-        credentials_manager=resolved_credentials_manager,
-        tool_config_overrides=validated_tool_config_overrides,
-        tool_init_overrides=safe_tool_init_overrides,
-        init_kwargs=init_kwargs,
-    )
-
-
-def validate_tool_runtime_configuration(
-    tool_name: str,
-    runtime_paths: RuntimePaths,
-    *,
-    credentials_manager: CredentialsManager | None = None,
-    tool_config_overrides: dict[str, object] | None = None,
-    runtime_overrides: dict[str, object] | None = None,
-    allowed_shared_services: frozenset[str] | None = None,
-    worker_target: ResolvedWorkerTarget | None,
-) -> None:
-    """Validate effective runtime configuration without constructing a tool."""
-    metadata = TOOL_METADATA[tool_name]
-    if not metadata.runtime_config_required:
-        return
-    resolved = _resolve_tool_configuration(
-        tool_name,
-        runtime_paths,
-        credential_overrides=None,
-        credentials_manager=credentials_manager,
-        tool_config_overrides=tool_config_overrides,
-        tool_init_overrides=None,
-        runtime_overrides=runtime_overrides,
-        allowed_shared_services=allowed_shared_services,
-        worker_target=worker_target,
-    )
-    _validate_runtime_config_readiness(tool_name, metadata, resolved.init_kwargs)
-
-
 def _build_tool_instance(
     tool_name: str,
     runtime_paths: RuntimePaths,
@@ -786,21 +634,41 @@ def _build_tool_instance(
 
     metadata = TOOL_METADATA[tool_name]
     tool_class = TOOL_REGISTRY[tool_name]()
-    resolved = _resolve_tool_configuration(
-        tool_name,
+    resolved_credentials_manager = _resolve_tool_credentials_manager(
+        metadata,
         runtime_paths,
-        credential_overrides=credential_overrides,
-        credentials_manager=credentials_manager,
-        tool_config_overrides=tool_config_overrides,
-        tool_init_overrides=tool_init_overrides,
-        runtime_overrides=runtime_overrides,
-        allowed_shared_services=allowed_shared_services,
-        worker_target=worker_target,
+        credentials_manager,
     )
-    init_kwargs = dict(resolved.init_kwargs)
-    _validate_runtime_config_readiness(tool_name, metadata, init_kwargs)
+    credentials = (
+        load_scoped_credentials(
+            tool_name,
+            credentials_manager=resolved_credentials_manager,
+            worker_target=worker_target,
+            allowed_shared_services=allowed_shared_services,
+        )
+        if resolved_credentials_manager is not None
+        else {}
+    ) or {}
+    if credential_overrides:
+        credentials = {**credentials, **credential_overrides}
+    validated_tool_config_overrides = validate_authored_tool_entry_overrides(tool_name, tool_config_overrides)
+    validated_tool_config_overrides = _without_requester_owned_overrides(
+        metadata,
+        worker_target,
+        validated_tool_config_overrides,
+    )
+    runtime_overrides = _without_requester_owned_overrides(metadata, worker_target, runtime_overrides)
+    safe_tool_init_overrides = sanitize_tool_init_overrides(tool_name, tool_init_overrides)
+    init_kwargs = _build_tool_config_init_kwargs(
+        tool_name,
+        metadata,
+        credentials=credentials,
+        tool_config_overrides=validated_tool_config_overrides,
+        tool_init_overrides=safe_tool_init_overrides,
+        runtime_overrides=runtime_overrides,
+    )
     extra_env_passthrough = init_kwargs.get("extra_env_passthrough")
-    proxy_tool_init_overrides = dict(resolved.tool_init_overrides or {})
+    proxy_tool_init_overrides = dict(safe_tool_init_overrides or {})
     shell_path_prepend = init_kwargs.get("shell_path_prepend")
     if tool_name == "shell" and isinstance(shell_path_prepend, str):
         proxy_tool_init_overrides["shell_path_prepend"] = shell_path_prepend
@@ -808,7 +676,7 @@ def _build_tool_instance(
         _build_managed_tool_init_kwargs(
             metadata,
             runtime_paths=runtime_paths,
-            credentials_manager=resolved.credentials_manager,
+            credentials_manager=resolved_credentials_manager,
             worker_target=worker_target,
             tool_output_workspace_root=tool_output_workspace_root,
             worker_tools_override=worker_tools_override,
@@ -838,9 +706,9 @@ def _build_tool_instance(
         tool_name,
         toolkit,
         runtime_paths=runtime_paths,
-        credentials_manager=resolved.credentials_manager,
+        credentials_manager=resolved_credentials_manager,
         tool_init_overrides=proxy_tool_init_overrides or None,
-        tool_config_overrides=resolved.tool_config_overrides,
+        tool_config_overrides=validated_tool_config_overrides or {},
         extra_env_passthrough=extra_env_passthrough if isinstance(extra_env_passthrough, str) else None,
         worker_tools_override=worker_tools_override,
         shared_storage_root_path=shared_storage_root_path,
@@ -1209,7 +1077,6 @@ def _tool_validation_snapshot_from_state(
             authored_override_validator=metadata.authored_override_validator,
             supports_toolkit_filters=metadata.supports_toolkit_filters,
             requires_room_context=metadata.requires_room_context,
-            runtime_config_required=metadata.runtime_config_required,
             runtime_loadable=tool_name in tool_registry,
             unavailable_due_to_plugin_load_error=tool_name in unavailable_plugin_tool_names,
         )
@@ -1354,7 +1221,6 @@ def serialize_tool_validation_snapshot(
             "authored_override_validator": info.authored_override_validator.value,
             "supports_toolkit_filters": info.supports_toolkit_filters,
             "requires_room_context": info.requires_room_context,
-            "runtime_config_required": info.runtime_config_required,
             "runtime_loadable": info.runtime_loadable,
             "unavailable_due_to_plugin_load_error": info.unavailable_due_to_plugin_load_error,
         }
@@ -1376,21 +1242,6 @@ def _deserialize_tool_validation_fields(raw_fields: object, *, field_name: str) 
             raise TypeError(msg)
         fields.append(ConfigField(**cast("dict[str, Any]", raw_field)))
     return tuple(fields)
-
-
-def _deserialize_tool_validation_bool(
-    raw_info: dict[str, object],
-    *,
-    tool_name: str,
-    field_name: str,
-    default: bool,
-) -> bool:
-    """Deserialize one strict boolean from a tool validation snapshot."""
-    value = raw_info.get(field_name, default)
-    if not isinstance(value, bool):
-        msg = f"Tool validation snapshot entry for '{tool_name}' must set {field_name} to a boolean."
-        raise TypeError(msg)
-    return value
 
 
 def deserialize_tool_validation_snapshot(payload: object) -> dict[str, ToolValidationInfo]:
@@ -1421,21 +1272,25 @@ def deserialize_tool_validation_snapshot(payload: object) -> dict[str, ToolValid
                 f"authored_override_validator '{raw_validator}'."
             )
             raise TypeError(msg) from exc
-        validation_bools = {
-            field_name: _deserialize_tool_validation_bool(
-                raw_info_mapping,
-                tool_name=tool_name,
-                field_name=field_name,
-                default=default,
+        raw_runtime_loadable = raw_info_mapping.get("runtime_loadable", True)
+        if not isinstance(raw_runtime_loadable, bool):
+            msg = f"Tool validation snapshot entry for '{tool_name}' must set runtime_loadable to a boolean."
+            raise TypeError(msg)
+        raw_unavailable_due_to_plugin_load_error = raw_info_mapping.get("unavailable_due_to_plugin_load_error", False)
+        if not isinstance(raw_unavailable_due_to_plugin_load_error, bool):
+            msg = (
+                f"Tool validation snapshot entry for '{tool_name}' must set "
+                "unavailable_due_to_plugin_load_error to a boolean."
             )
-            for field_name, default in (
-                ("runtime_loadable", True),
-                ("unavailable_due_to_plugin_load_error", False),
-                ("requires_room_context", False),
-                ("runtime_config_required", False),
-                ("supports_toolkit_filters", False),
-            )
-        }
+            raise TypeError(msg)
+        raw_requires_room_context = raw_info_mapping.get("requires_room_context", False)
+        if not isinstance(raw_requires_room_context, bool):
+            msg = f"Tool validation snapshot entry for '{tool_name}' must set requires_room_context to a boolean."
+            raise TypeError(msg)
+        raw_supports_toolkit_filters = raw_info_mapping.get("supports_toolkit_filters", False)
+        if not isinstance(raw_supports_toolkit_filters, bool):
+            msg = f"Tool validation snapshot entry for '{tool_name}' must set supports_toolkit_filters to a boolean."
+            raise TypeError(msg)
         snapshot[tool_name] = ToolValidationInfo(
             name=tool_name,
             config_fields=_deserialize_tool_validation_fields(
@@ -1447,11 +1302,10 @@ def deserialize_tool_validation_snapshot(payload: object) -> dict[str, ToolValid
                 field_name=f"{tool_name}.agent_override_fields",
             ),
             authored_override_validator=authored_override_validator,
-            supports_toolkit_filters=validation_bools["supports_toolkit_filters"],
-            requires_room_context=validation_bools["requires_room_context"],
-            runtime_config_required=validation_bools["runtime_config_required"],
-            runtime_loadable=validation_bools["runtime_loadable"],
-            unavailable_due_to_plugin_load_error=validation_bools["unavailable_due_to_plugin_load_error"],
+            supports_toolkit_filters=raw_supports_toolkit_filters,
+            requires_room_context=raw_requires_room_context,
+            runtime_loadable=raw_runtime_loadable,
+            unavailable_due_to_plugin_load_error=raw_unavailable_due_to_plugin_load_error,
         )
     return snapshot
 
@@ -1481,8 +1335,6 @@ def export_tools_metadata(tool_metadata: dict[str, ToolMetadata] | None = None) 
             for field in tool_dict.get(field_collection) or ():
                 if not field["requester_owned"]:
                     field.pop("requester_owned")
-        tool_dict.pop("runtime_config_required", None)
-        tool_dict.pop("runtime_config_validator", None)
         tool_dict.pop("authored_override_validator", None)
         tool_dict.pop("managed_init_args", None)
         tool_dict.pop("supports_toolkit_filters", None)

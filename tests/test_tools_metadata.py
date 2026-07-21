@@ -616,7 +616,6 @@ def test_requester_owned_fields_ignore_authored_and_runtime_overrides(tmp_path: 
         display_name="Requester-owned Tool",
         description="Test-only toolkit for requester-owned configuration coverage.",
         category=ToolCategory.DEVELOPMENT,
-        runtime_config_required=True,
         config_fields=[
             ConfigField(name="requester_identity", label="Requester identity", requester_owned=True),
             ConfigField(name="label", label="Label"),

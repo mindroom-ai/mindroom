@@ -7649,8 +7649,8 @@ Run that command on the computer after `mindroom desktop login`, then copy the e
 The claim travels as an authenticated Olm-encrypted to-device event, and confirmation stores the local device identity only in that requester's agent-scoped credential store.
 The verification value binds confirmation to the claimed Ed25519 key, so a different device cannot pre-claim a visible pairing code and be confirmed accidentally.
 Another requester or agent cannot confirm or use that record, and shared credentials are never used as a fallback.
-Until pairing is confirmed, the callable Desktop schema is omitted while the agent's unrelated tools continue to work.
-The model receives only a generic read-only setup guidance helper and cannot register or replace a device itself.
+Until pairing is confirmed, Desktop calls return a setup-required result while the agent's unrelated tools continue to work.
+The Desktop tool can explain the trusted chat command, but the model cannot register or replace a device itself.
 Use `!desktop rotate` to replace a device without dropping the current target before confirmation, or `!desktop disconnect confirm` to remove it.
 
 ### Shared or Operator-Managed Agents
@@ -14516,7 +14516,7 @@ Run these commands in a room with exactly one eligible private agent:
 `!desktop setup` returns a local `mindroom desktop pair` command and a short-lived pairing code.
 The local pairing command presents that code through an authenticated encrypted Matrix device event.
 It then prints an exact chat confirmation command with a verification value derived from the authenticated local device key.
-Only the same Matrix requester in the same agent scope and originating room or thread can confirm the matching claim.
+Only the same Matrix requester in the same agent scope can confirm the matching claim.
 `!desktop rotate` starts the same flow while leaving the current target active until confirmation.
 The agent can report setup status, but it cannot start, confirm, rotate, or disconnect pairing on the requester's behalf.
 See [Matrix Desktop Bridge](https://docs.mindroom.chat/tools/desktop/) for local login and allowlist instructions.

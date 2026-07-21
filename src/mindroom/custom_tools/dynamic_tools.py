@@ -17,7 +17,6 @@ from mindroom.tool_system.dynamic_toolkits import (
     load_tool_for_session,
     unload_tool_for_session,
 )
-from mindroom.tool_system.runtime_availability import tool_setup_guidance
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
@@ -42,13 +41,11 @@ class DynamicToolsToolkit(Toolkit):
         session_id: str | None,
         stop_after_tool_call: bool = False,
         hidden_tool_names: frozenset[str] = frozenset(),
-        setup_required_tool_names: frozenset[str] = frozenset(),
     ) -> None:
         self._agent_name = agent_name
         self._config = config
         self._session_id = session_id
         self._hidden_tool_names = hidden_tool_names
-        self._setup_required_tool_names = setup_required_tool_names
         super().__init__(
             name="dynamic_tools",
             instructions=config.get_prompt("DYNAMIC_TOOLS_TOOLKIT_INSTRUCTIONS"),
@@ -77,11 +74,7 @@ class DynamicToolsToolkit(Toolkit):
         )
 
     def _filter_visible_tool_names(self, tool_names: list[str] | tuple[str, ...]) -> list[str]:
-        return [
-            tool_name
-            for tool_name in tool_names
-            if tool_name not in self._hidden_tool_names and tool_name not in self._setup_required_tool_names
-        ]
+        return [tool_name for tool_name in tool_names if tool_name not in self._hidden_tool_names]
 
     def _deferred_entries(self, loaded_tools: list[str] | None = None) -> list[DeferredToolCatalogEntry]:
         return [
@@ -90,7 +83,6 @@ class DynamicToolsToolkit(Toolkit):
                 agent_name=self._agent_name,
                 config=self._config,
                 loaded_tools=loaded_tools if loaded_tools is not None else self._loaded_tools(),
-                setup_required_tool_names=self._setup_required_tool_names,
             )
             if entry.name not in self._hidden_tool_names
         ]
@@ -129,15 +121,12 @@ class DynamicToolsToolkit(Toolkit):
 
     @staticmethod
     def _tool_entry(entry: DeferredToolCatalogEntry) -> dict[str, object]:
-        payload: dict[str, object] = {
+        return {
             "name": entry.name,
             "description": entry.description,
             "loaded": entry.loaded,
             "sticky": entry.sticky,
         }
-        if entry.setup_required:
-            payload["setup_required"] = True
-        return payload
 
     def _session_error(self, *, tool_name: str | None = None, loaded_tools: list[str] | None = None) -> str:
         payload: dict[str, object] = {
@@ -238,13 +227,6 @@ class DynamicToolsToolkit(Toolkit):
                 loaded_tools=self._loaded_tools(),
                 message=f"Unknown deferred tool '{tool_name}'.",
                 available_tools=self._deferred_tool_names(),
-            )
-        if tool_name in self._setup_required_tool_names:
-            return self._payload(
-                "setup_required",
-                tool_name=tool_name,
-                loaded_tools=self._loaded_tools(),
-                message=tool_setup_guidance(tool_name),
             )
 
         result = load_tool_for_session(

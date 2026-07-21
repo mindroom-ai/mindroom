@@ -4,8 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.desktop.configuration import desktop_runtime_config_error
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolStatus
+from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolManagedInitArg, ToolStatus
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
@@ -20,8 +19,6 @@ if TYPE_CHECKING:
     status=ToolStatus.REQUIRES_CONFIG,
     setup_type=SetupType.SPECIAL,
     requires_room_context=True,
-    runtime_config_required=True,
-    runtime_config_validator=desktop_runtime_config_error,
     icon="MonitorUp",
     icon_color="text-cyan-500",
     config_fields=[
@@ -61,6 +58,7 @@ if TYPE_CHECKING:
         "Shared or operator-managed setup must be configured by the operator."
     ),
     function_names=("desktop",),
+    managed_init_args=(ToolManagedInitArg.CREDENTIALS_MANAGER, ToolManagedInitArg.WORKER_TARGET),
 )
 def desktop_tools() -> type[DesktopTools]:
     """Return the Matrix desktop toolkit."""
