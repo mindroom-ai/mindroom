@@ -8,6 +8,7 @@ import stat
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
+import aiohttp
 import nio
 
 from mindroom.desktop.login_method import DesktopLoginMethod
@@ -144,7 +145,7 @@ async def resolve_desktop_login_method(
             runtime_paths,
             http_headers=http_headers,
         )
-    except (PermanentMatrixStartupError, ValueError) as exc:
+    except (PermanentMatrixStartupError, aiohttp.ClientError, OSError, TimeoutError, ValueError) as exc:
         msg = f"Could not discover Matrix login methods: {exc}"
         raise DesktopSessionError(msg) from exc
     if "m.login.password" in flows:
@@ -185,7 +186,7 @@ async def login_desktop_client(
             assert user_id is not None
             assert password is not None
             client = await login(homeserver, user_id, password, runtime_paths, http_headers=http_headers)
-    except (PermanentMatrixStartupError, ValueError) as exc:
+    except (PermanentMatrixStartupError, aiohttp.ClientError, OSError, TimeoutError, ValueError) as exc:
         msg = f"Desktop Matrix login failed: {exc}"
         raise DesktopSessionError(msg) from exc
     try:

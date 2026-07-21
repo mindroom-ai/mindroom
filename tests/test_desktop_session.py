@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
 
+import aiohttp
 import pytest
 
 from mindroom.desktop.session import (
@@ -188,6 +189,22 @@ async def test_auto_login_method_rejects_unsupported_flows(monkeypatch: pytest.M
 
 
 @pytest.mark.asyncio
+async def test_auto_login_method_translates_network_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Login discovery reports transport failure as one actionable desktop error."""
+    monkeypatch.setattr(
+        "mindroom.desktop.session.login_flows",
+        AsyncMock(side_effect=aiohttp.ClientConnectionError("homeserver unavailable")),
+    )
+
+    with pytest.raises(DesktopSessionError, match=r"Could not discover.*homeserver unavailable"):
+        await resolve_desktop_login_method(
+            DesktopLoginMethod.AUTO,
+            homeserver="https://matrix.example.org",
+            runtime_paths=SimpleNamespace(),
+        )
+
+
+@pytest.mark.asyncio
 async def test_initial_crypto_sync_does_not_announce_bridge_online() -> None:
     """Presence stays offline until the command callback is registered and sync-forever starts."""
     client = SimpleNamespace(
@@ -227,6 +244,23 @@ async def test_login_translates_expected_matrix_authentication_failure(monkeypat
         runtime_paths,
         http_headers={"X-Access-Client": "test-secret"},
     )
+
+
+@pytest.mark.asyncio
+async def test_login_translates_network_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Desktop login reports exhausted transport retries without a traceback."""
+    monkeypatch.setattr(
+        "mindroom.desktop.session.login_with_token",
+        AsyncMock(side_effect=aiohttp.ClientConnectionError("connection refused")),
+    )
+
+    with pytest.raises(DesktopSessionError, match=r"Desktop Matrix login failed.*connection refused"):
+        await login_desktop_client(
+            homeserver="https://matrix.example.org",
+            user_id=None,
+            login_token="short-lived-token",  # noqa: S106 - Test-only login token.
+            runtime_paths=SimpleNamespace(),
+        )
 
 
 @pytest.mark.asyncio
