@@ -344,7 +344,7 @@ def desktop_pair(
     except (CloudflareAccessError, DesktopSessionError, OlmToDeviceError, ValueError) as exc:
         _error_console.print(f"[red]Desktop pairing failed:[/red] {exc}")
         raise typer.Exit(1) from None
-    _console.print("[green]Pairing claim sent.[/green] Return to the chat and run:")
+    _console.print("[green]Pairing claim accepted.[/green] Return to the chat and run:")
     _console.print(f"!desktop confirm {code} {verification}", markup=False)
 
 
@@ -358,17 +358,9 @@ async def _pair_desktop(
     controller_ed25519: str,
     http_headers: Mapping[str, str] | None = None,
 ) -> str:
-    from mindroom.desktop.protocol import (  # noqa: PLC0415
-        DESKTOP_PAIRING_CLAIM_EVENT_TYPE,
-        DesktopPairingClaim,
-        desktop_pairing_verification,
-    )
-    from mindroom.desktop.session import (  # noqa: PLC0415
-        client_ed25519_fingerprint,
-        open_desktop_client,
-        prepare_desktop_client,
-    )
-    from mindroom.matrix.olm_to_device import PinnedMatrixDevice, send_encrypted_to_device  # noqa: PLC0415
+    from mindroom.desktop.pairing_client import send_desktop_pairing_claim  # noqa: PLC0415
+    from mindroom.desktop.session import open_desktop_client  # noqa: PLC0415
+    from mindroom.matrix.olm_to_device import PinnedMatrixDevice  # noqa: PLC0415
 
     controller = PinnedMatrixDevice(
         user_id=controller_user_id,
@@ -377,14 +369,11 @@ async def _pair_desktop(
     )
     client = await open_desktop_client(session, runtime_paths=runtime_paths, http_headers=http_headers)
     try:
-        await prepare_desktop_client(client)
-        await send_encrypted_to_device(
+        return await send_desktop_pairing_claim(
             client,
             controller,
-            event_type=DESKTOP_PAIRING_CLAIM_EVENT_TYPE,
-            content=DesktopPairingClaim(code).to_content(),
+            code=code,
         )
-        return desktop_pairing_verification(code, client_ed25519_fingerprint(client))
     finally:
         await client.close()
 

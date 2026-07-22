@@ -9,12 +9,16 @@ from typing import TYPE_CHECKING
 
 from mindroom.desktop.pairing import DesktopPairingError, claim_desktop_pairing
 from mindroom.desktop.protocol import (
+    DESKTOP_PAIRING_ACCEPTED_EVENT_TYPE,
     DESKTOP_PAIRING_CLAIM_EVENT_TYPE,
+    DesktopPairingAccepted,
     DesktopPairingClaim,
     DesktopProtocolError,
+    desktop_pairing_verification,
     event_content,
 )
 from mindroom.logging_config import get_logger
+from mindroom.matrix.olm_to_device import OlmToDeviceError, PinnedMatrixDevice, send_encrypted_to_device
 from mindroom.matrix.to_device import AuthenticatedToDeviceEvent
 
 if TYPE_CHECKING:
@@ -69,7 +73,22 @@ class DesktopPairingReceiver:
         except sqlite3.Error:
             logger.exception("desktop_pairing_claim_db_error", agent=self.agent_name)
             return
-        logger.info("desktop_pairing_claimed", agent=self.agent_name)
+        verification = desktop_pairing_verification(claim.token, device.ed25519)
+        try:
+            await send_encrypted_to_device(
+                self.client,
+                PinnedMatrixDevice(
+                    user_id=event.sender,
+                    device_id=event.authenticated_device_id,
+                    ed25519=device.ed25519,
+                ),
+                event_type=DESKTOP_PAIRING_ACCEPTED_EVENT_TYPE,
+                content=DesktopPairingAccepted(verification).to_content(),
+            )
+        except OlmToDeviceError:
+            logger.exception("desktop_pairing_ack_delivery_failed", agent=self.agent_name)
+        else:
+            logger.info("desktop_pairing_claimed", agent=self.agent_name)
 
 
 def register_desktop_pairing_receiver(

@@ -10,6 +10,7 @@ from typing import Literal, cast
 DESKTOP_COMMAND_EVENT_TYPE = "io.mindroom.desktop.command.v2"
 DESKTOP_RESPONSE_EVENT_TYPE = "io.mindroom.desktop.response.v2"
 DESKTOP_PAIRING_CLAIM_EVENT_TYPE = "io.mindroom.desktop.pairing_claim.v1"
+DESKTOP_PAIRING_ACCEPTED_EVENT_TYPE = "io.mindroom.desktop.pairing_accepted.v1"
 DESKTOP_PROTOCOL_VERSION = 2
 MAX_COMMAND_TTL_MS = 120_000
 MAX_SCREENSHOT_BYTES = 10 * 1024 * 1024
@@ -94,6 +95,31 @@ class DesktopPairingClaim:
         content = _object_mapping(raw, "pairing claim")
         _require_protocol_version(content)
         return cls(token=_bounded_str(content, "token", "pairing claim", max_length=256))
+
+
+@dataclass(frozen=True, slots=True)
+class DesktopPairingAccepted:
+    """Authenticated controller acknowledgement for one claimed pairing token."""
+
+    verification: str
+
+    def to_content(self) -> dict[str, object]:
+        """Serialize one acknowledgement without returning the bearer token."""
+        return {"v": DESKTOP_PROTOCOL_VERSION, "verification": self.verification}
+
+    @classmethod
+    def from_content(cls, raw: object) -> DesktopPairingAccepted:
+        """Parse one strict pairing acknowledgement."""
+        content = _object_mapping(raw, "pairing acknowledgement")
+        _require_protocol_version(content)
+        return cls(
+            verification=_bounded_str(
+                content,
+                "verification",
+                "pairing acknowledgement",
+                max_length=64,
+            ),
+        )
 
 
 def desktop_pairing_verification(token: str, device_ed25519: str) -> str:
@@ -352,6 +378,7 @@ __all__ = [
     "DESKTOP_BROWSER_ACTIONS",
     "DESKTOP_COMMAND_EVENT_TYPE",
     "DESKTOP_CONTROL_ACTIONS",
+    "DESKTOP_PAIRING_ACCEPTED_EVENT_TYPE",
     "DESKTOP_PAIRING_CLAIM_EVENT_TYPE",
     "DESKTOP_PROTOCOL_VERSION",
     "DESKTOP_RESPONSE_EVENT_TYPE",
@@ -360,6 +387,7 @@ __all__ = [
     "MAX_SCREENSHOT_BYTES",
     "DesktopAction",
     "DesktopCommand",
+    "DesktopPairingAccepted",
     "DesktopPairingClaim",
     "DesktopProtocolError",
     "DesktopResponse",

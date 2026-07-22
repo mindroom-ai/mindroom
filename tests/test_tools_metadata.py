@@ -665,6 +665,22 @@ def test_requester_owned_fields_ignore_authored_and_runtime_overrides(tmp_path: 
         assert tool.requester_identity == "scoped"
         assert tool.label == "runtime"
 
+        user_target = build_agent_toolkit_worker_target(
+            "user",
+            "general",
+            is_private=True,
+            execution_identity=identity,
+            runtime_paths=runtime_paths,
+        )
+        user_tool = get_tool_by_name(
+            tool_name,
+            runtime_paths,
+            tool_config_overrides={"requester_identity": "authored", "label": "authored"},
+            worker_target=user_target,
+        )
+        assert isinstance(user_tool, RequesterOwnedToolkit)
+        assert user_tool.requester_identity == "authored"
+
         shared_tool = get_tool_by_name(
             tool_name,
             runtime_paths,

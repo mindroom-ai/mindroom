@@ -7,6 +7,7 @@ import pytest
 from mindroom.desktop.protocol import (
     MAX_COMMAND_TTL_MS,
     DesktopCommand,
+    DesktopPairingAccepted,
     DesktopPairingClaim,
     DesktopProtocolError,
     DesktopResponse,
@@ -25,6 +26,14 @@ def test_pairing_claim_contains_only_protocol_version_and_token() -> None:
         claim.token,
         "second-key",
     )
+
+
+def test_pairing_acknowledgement_round_trips_without_bearer_token() -> None:
+    """Controller acknowledgement correlates without echoing the code."""
+    acknowledgement = DesktopPairingAccepted("VERIFY123")
+
+    assert DesktopPairingAccepted.from_content(acknowledgement.to_content()) == acknowledgement
+    assert "token" not in acknowledgement.to_content()
 
 
 def _media() -> EncryptedDesktopMedia:

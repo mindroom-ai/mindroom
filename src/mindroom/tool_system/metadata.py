@@ -492,7 +492,7 @@ def _without_requester_owned_overrides(
     values: dict[str, object] | None,
 ) -> dict[str, object] | None:
     """Keep requester-owned fields sourced only from scoped credentials."""
-    if not values or worker_target is None or worker_target.worker_scope not in {"user", "user_agent"}:
+    if not values or worker_target is None or worker_target.worker_scope != "user_agent":
         return values
     requester_owned_fields = {field.name for field in metadata.config_fields or () if field.requester_owned}
     filtered = {name: value for name, value in values.items() if name not in requester_owned_fields}

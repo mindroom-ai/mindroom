@@ -13,6 +13,7 @@ from mindroom.commands.encryption_commands import handle_e2ee_command, handle_en
 from mindroom.commands.model_commands import handle_model_command
 from mindroom.commands.parsing import Command, CommandType, get_command_help, get_compact_command_entries
 from mindroom.commands.thread_mode_commands import handle_thread_mode_command
+from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.entity_resolution import configured_routable_entity_ids_for_room, entity_identity_registry
 from mindroom.handled_turns import TurnRecord
 from mindroom.logging_config import get_logger
@@ -202,6 +203,29 @@ def _format_plugin_reload_summary(result: PluginReloadResult) -> str:
     plugin_label = "plugin" if plugin_count == 1 else "plugins"
     active_plugins = ", ".join(result.active_plugin_names) if result.active_plugin_names else "none"
     return f"✅ Reloaded {plugin_count} {plugin_label}; cancelled {result.cancelled_task_count} {task_label}; active: {active_plugins}"
+
+
+def agent_owns_command(
+    command: Command,
+    *,
+    agent_name: str,
+    config: Config,
+    room: nio.MatrixRoom,
+    requester_user_id: str,
+) -> bool:
+    """Return whether this bot owns one command response."""
+    if agent_name == ROUTER_AGENT_NAME:
+        return True
+    if command.type is not CommandType.DESKTOP or agent_name not in config.agents:
+        return False
+    agent_config = config.get_agent(agent_name)
+    entity = config.resolve_entity(agent_name)
+    return (
+        agent_config.private is not None
+        and entity.execution_scope == "user_agent"
+        and "desktop" in entity.available_tools
+        and set(room.users) == {requester_user_id, room.own_user_id}
+    )
 
 
 async def _desktop_agent_for_room(

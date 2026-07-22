@@ -197,7 +197,11 @@ class DesktopTools(Toolkit):
         """Run one state-bound desktop action and return fresh state plus an app screenshot."""
         configuration = self._current_configuration()
         if configuration.status is not DesktopConfigurationStatus.READY or configuration.target is None:
-            return _setup_required_result(action, configuration.error)
+            return _setup_required_result(
+                action,
+                configuration.error,
+                chat_pairing=self._worker_target is not None and self._worker_target.worker_scope == "user_agent",
+            )
         context = get_tool_runtime_context()
         if context is None:
             return _error_result(action, "Desktop tool requires a live Matrix runtime context.")
@@ -250,7 +254,7 @@ class DesktopTools(Toolkit):
 
     def _current_configuration(self) -> DesktopConfigurationState:
         target = self._worker_target
-        if self._credentials_manager is None or target is None or target.worker_scope not in {"user", "user_agent"}:
+        if self._credentials_manager is None or target is None or target.worker_scope != "user_agent":
             return self._configuration
         credentials = load_scoped_credentials(
             "desktop",
@@ -557,10 +561,15 @@ def _error_result(action: str, message: str) -> ToolResult:
     )
 
 
-def _setup_required_result(action: str, error: str | None) -> ToolResult:
-    message = "Desktop setup is required for this requester and agent. Run `!desktop setup` in this Matrix chat."
-    if error is not None:
-        message = f"Desktop configuration is invalid: {error} Run `!desktop setup` to replace it."
+def _setup_required_result(action: str, error: str | None, *, chat_pairing: bool) -> ToolResult:
+    if chat_pairing:
+        message = "Desktop setup is required for this requester and agent. Run `!desktop setup` in this Matrix chat."
+        if error is not None:
+            message = f"Desktop configuration is invalid: {error} Run `!desktop setup` to replace it."
+    else:
+        message = "Desktop setup is required. Ask the deployment operator to configure this Desktop target."
+        if error is not None:
+            message = f"Desktop configuration is invalid: {error} Ask the deployment operator to replace it."
     return ToolResult(
         content=custom_tool_payload(
             "desktop",

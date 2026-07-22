@@ -34,20 +34,6 @@ class DesktopConfigurationState:
 def desktop_configuration_state(credentials: dict[str, Any] | None) -> DesktopConfigurationState:
     """Return a fail-closed readiness state for one stored Desktop document."""
     values = credentials or {}
-    missing_fields = tuple(sorted(field for field in DESKTOP_IDENTITY_FIELDS if not values.get(field)))
-    if missing_fields:
-        return DesktopConfigurationState(
-            status=DesktopConfigurationStatus.SETUP_REQUIRED,
-            missing_fields=missing_fields,
-        )
-
-    identity_values = {field: values[field] for field in DESKTOP_IDENTITY_FIELDS}
-    if any(not isinstance(value, str) for value in identity_values.values()):
-        return DesktopConfigurationState(
-            status=DesktopConfigurationStatus.INVALID,
-            error="Desktop device identity fields must be strings.",
-        )
-
     timeout_value = values.get("timeout_seconds", 30.0)
     if isinstance(timeout_value, bool) or not isinstance(timeout_value, int | float):
         return DesktopConfigurationState(
@@ -58,6 +44,23 @@ def desktop_configuration_state(credentials: dict[str, Any] | None) -> DesktopCo
         return DesktopConfigurationState(
             status=DesktopConfigurationStatus.INVALID,
             error=f"Desktop timeout_seconds must be between 1 and {MAX_COMMAND_TTL_MS // 1000}.",
+        )
+    timeout_seconds = float(timeout_value)
+
+    missing_fields = tuple(sorted(field for field in DESKTOP_IDENTITY_FIELDS if not values.get(field)))
+    if missing_fields:
+        return DesktopConfigurationState(
+            status=DesktopConfigurationStatus.SETUP_REQUIRED,
+            missing_fields=missing_fields,
+            timeout_seconds=timeout_seconds,
+        )
+
+    identity_values = {field: values[field] for field in DESKTOP_IDENTITY_FIELDS}
+    if any(not isinstance(value, str) for value in identity_values.values()):
+        return DesktopConfigurationState(
+            status=DesktopConfigurationStatus.INVALID,
+            error="Desktop device identity fields must be strings.",
+            timeout_seconds=timeout_seconds,
         )
 
     try:
@@ -74,7 +77,7 @@ def desktop_configuration_state(credentials: dict[str, Any] | None) -> DesktopCo
     return DesktopConfigurationState(
         status=DesktopConfigurationStatus.READY,
         target=target,
-        timeout_seconds=float(timeout_value),
+        timeout_seconds=timeout_seconds,
     )
 
 

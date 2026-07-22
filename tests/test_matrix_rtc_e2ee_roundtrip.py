@@ -21,7 +21,9 @@ import pytest
 from nio.crypto import Olm, OlmDevice
 from nio.crypto.olm_machine import DecryptedOlmT
 from nio.store import DefaultStore
+from structlog.testing import capture_logs
 
+from mindroom.desktop.protocol import DESKTOP_PAIRING_CLAIM_EVENT_TYPE, DesktopPairingClaim
 from mindroom.matrix.client_session import matrix_client
 from mindroom.matrix.to_device import AuthenticatedToDeviceEvent
 from mindroom.matrix_rtc.events import CALL_ENCRYPTION_KEYS_EVENT_TYPE, CallMember
@@ -173,6 +175,43 @@ async def test_frame_key_round_trips_through_real_olm(monkeypatch: pytest.Monkey
                 )
                 assert isinstance(ambiguous, nio.UnknownToDeviceEvent)
                 assert not isinstance(ambiguous, AuthenticatedToDeviceEvent)
+        finally:
+            bot_olm.store.database.close()
+            rec_olm.store.database.close()
+
+
+@pytest.mark.asyncio
+async def test_cold_pairing_claim_queues_sender_key_query_and_logs_rejection() -> None:
+    """Unknown dedicated Desktop device triggers discovery before CLI retry."""
+    with tempfile.TemporaryDirectory() as tmp:
+        bot_olm, rec_olm, rec_dev = _olm_pair(tmp)
+        try:
+            rec_olm.device_store[BOT].pop("BOTDEV")
+            session = bot_olm.session_store.get(rec_dev.curve25519)
+            assert session is not None
+            encrypted_content = bot_olm._olm_encrypt(
+                session,
+                rec_dev,
+                DESKTOP_PAIRING_CLAIM_EVENT_TYPE,
+                DesktopPairingClaim("pair-code").to_content(),
+            )
+            olm_event = nio.OlmEvent.from_dict(
+                {"type": "m.room.encrypted", "sender": BOT, "content": encrypted_content},
+            )
+            runtime_paths = test_runtime_paths(Path(tmp) / "runtime")
+            async with matrix_client("https://example.org", runtime_paths, user_id=REC) as rec_client:
+                rec_client.device_id = "RECDEV"
+                rec_client.olm = rec_olm
+                with capture_logs() as logs:
+                    decrypted = rec_client._handle_decrypt_to_device(olm_event)
+
+                assert isinstance(decrypted, nio.UnknownToDeviceEvent)
+                assert BOT in rec_olm.users_for_key_query
+                assert any(
+                    log.get("event") == "custom_olm_rejected"
+                    and log.get("event_type") == DESKTOP_PAIRING_CLAIM_EVENT_TYPE
+                    for log in logs
+                )
         finally:
             bot_olm.store.database.close()
             rec_olm.store.database.close()

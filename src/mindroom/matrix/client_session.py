@@ -31,17 +31,17 @@ _PERMANENT_MATRIX_STARTUP_ERROR_CODES = frozenset(
 )
 
 
-def _log_call_key_olm_rejection(
+def _log_custom_olm_rejection(
     event: nio.UnknownToDeviceEvent,
     reason: str,
     **details: object,
 ) -> None:
-    """Log why an otherwise decrypted call-key event failed provenance checks."""
-    if event.type != CALL_ENCRYPTION_KEYS_EVENT_TYPE:
-        return
+    """Log why a security-sensitive custom event failed provenance checks."""
+    log_event = "call_key_olm_rejected" if event.type == CALL_ENCRYPTION_KEYS_EVENT_TYPE else "custom_olm_rejected"
     logger.warning(
-        "call_key_olm_rejected",
+        log_event,
         sender=event.sender,
+        event_type=event.type,
         reason=reason,
         **details,
     )
@@ -93,7 +93,7 @@ class _MindRoomAsyncClient(nio.AsyncClient):
         if not isinstance(to_device_event, nio.OlmEvent) or not isinstance(decrypted, nio.UnknownToDeviceEvent):
             return decrypted
         if self.olm is None:
-            _log_call_key_olm_rejection(decrypted, "missing_olm_machine")
+            _log_custom_olm_rejection(decrypted, "missing_olm_machine")
             return decrypted
         matching_devices = [
             device
@@ -101,10 +101,13 @@ class _MindRoomAsyncClient(nio.AsyncClient):
             if device.curve25519 == to_device_event.sender_key
         ]
         if len(matching_devices) != 1:
-            _log_call_key_olm_rejection(
+            if not matching_devices:
+                self.olm.users_for_key_query.add(decrypted.sender)
+            _log_custom_olm_rejection(
                 decrypted,
                 "curve25519_device_match_count",
                 matching_device_count=len(matching_devices),
+                key_query_queued=not matching_devices,
             )
             return decrypted
         device = matching_devices[0]
@@ -120,7 +123,7 @@ class _MindRoomAsyncClient(nio.AsyncClient):
         sender_keys = decrypted.source.get("keys")
         sender_ed25519 = sender_keys.get("ed25519") if isinstance(sender_keys, dict) else None
         if sender_device is not None and sender_device != device.id:
-            _log_call_key_olm_rejection(
+            _log_custom_olm_rejection(
                 decrypted,
                 "signed_sender_identity_mismatch",
                 sender_device=sender_device,
@@ -128,7 +131,7 @@ class _MindRoomAsyncClient(nio.AsyncClient):
             )
             return decrypted
         if sender_keys is not None and sender_ed25519 != device.ed25519:
-            _log_call_key_olm_rejection(
+            _log_custom_olm_rejection(
                 decrypted,
                 "signed_sender_identity_mismatch",
                 sender_ed25519=sender_ed25519,

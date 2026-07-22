@@ -2146,6 +2146,7 @@ visibility = [
     "mindroom.cli.desktop",
     "mindroom.desktop.bridge",
     "mindroom.desktop.client",
+    "mindroom.desktop.pairing_client",
     "mindroom.desktop.pairing_receiver",
     "mindroom.matrix.client_session",
     "mindroom.matrix.olm_to_device",
@@ -2188,9 +2189,20 @@ depends_on = [
     "mindroom.desktop.pairing",
     "mindroom.desktop.protocol",
     "mindroom.logging_config",
+    "mindroom.matrix.olm_to_device",
     "mindroom.matrix.to_device",
 ]
 visibility = ["mindroom.bot"]
+
+[[modules]]
+path = "mindroom.desktop.pairing_client"
+depends_on = [
+    "mindroom.desktop.protocol",
+    "mindroom.desktop.session",
+    "mindroom.matrix.olm_to_device",
+    "mindroom.matrix.to_device",
+]
+visibility = ["mindroom.cli.desktop"]
 
 [[modules]]
 path = "mindroom.desktop.login_method"
@@ -2782,6 +2794,7 @@ depends_on = [
     "mindroom.desktop.command_journal",
     "mindroom.desktop.identity",
     "mindroom.desktop.login_method",
+    "mindroom.desktop.pairing_client",
     "mindroom.desktop.playwright_mcp",
     "mindroom.desktop.provider",
     "mindroom.desktop.protocol",

@@ -19,7 +19,7 @@ from mindroom.coalescing_batch import (
     build_coalesced_batch,
 )
 from mindroom.coalescing_cleanup import close_pending_event_metadata_once
-from mindroom.commands.handler import CommandHandlerContext, handle_command
+from mindroom.commands.handler import CommandHandlerContext, agent_owns_command, handle_command
 from mindroom.commands.parsing import command_parser
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
@@ -1279,6 +1279,32 @@ class TurnController:
             event=event,
             command=command,
             requester_user_id=requester_user_id,
+        )
+
+    async def _execute_command_if_owned(
+        self,
+        room: nio.MatrixRoom,
+        event: TextDispatchEvent,
+        requester_user_id: str,
+        command: Command,
+        *,
+        target: MessageTarget,
+    ) -> None:
+        """Execute one command only on the bot that owns its response."""
+        if not agent_owns_command(
+            command,
+            agent_name=self.deps.agent_name,
+            config=self.deps.runtime.config,
+            room=room,
+            requester_user_id=requester_user_id,
+        ):
+            return
+        await self._execute_command(
+            room=room,
+            event=event,
+            requester_user_id=requester_user_id,
+            command=command,
+            target=target,
         )
 
     async def handle_interactive_selection(

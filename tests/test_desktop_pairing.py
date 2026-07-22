@@ -6,7 +6,7 @@ import re
 import sqlite3
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -20,12 +20,16 @@ from mindroom.desktop.pairing import (
     confirm_desktop_pairing,
     create_desktop_pairing,
 )
+from mindroom.desktop.pairing_client import send_desktop_pairing_claim
 from mindroom.desktop.pairing_receiver import DesktopPairingReceiver, register_desktop_pairing_receiver
 from mindroom.desktop.protocol import (
+    DESKTOP_PAIRING_ACCEPTED_EVENT_TYPE,
     DESKTOP_PAIRING_CLAIM_EVENT_TYPE,
+    DesktopPairingAccepted,
     DesktopPairingClaim,
     desktop_pairing_verification,
 )
+from mindroom.matrix.device_identity import PinnedMatrixDevice
 from mindroom.matrix.to_device import AuthenticatedToDeviceEvent
 from tests.conftest import test_runtime_paths
 
@@ -137,7 +141,10 @@ def test_pairing_stores_only_a_hash_and_expires(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_pairing_claim_uses_authenticated_device_store_identity(tmp_path: Path) -> None:
+async def test_pairing_claim_uses_authenticated_device_store_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Claim content cannot choose the stored Matrix user, device, or fingerprint."""
     runtime_paths = test_runtime_paths(tmp_path)
     pairing = create_desktop_pairing(
@@ -155,6 +162,8 @@ async def test_pairing_claim_uses_authenticated_device_store_identity(tmp_path: 
         type=DESKTOP_PAIRING_CLAIM_EVENT_TYPE,
         authenticated_device_id="SIGNED",
     )
+    send_ack = AsyncMock()
+    monkeypatch.setattr("mindroom.desktop.pairing_receiver.send_encrypted_to_device", send_ack)
 
     await DesktopPairingReceiver(
         client=client,  # type: ignore[arg-type]
@@ -174,6 +183,64 @@ async def test_pairing_claim_uses_authenticated_device_store_identity(tmp_path: 
         confirmed.device_id,
         confirmed.device_ed25519,
     ) == ("@desktop:example.org", "SIGNED", "signed-fingerprint")
+    assert send_ack.await_args.kwargs["event_type"] == DESKTOP_PAIRING_ACCEPTED_EVENT_TYPE
+    assert DesktopPairingAccepted.from_content(send_ack.await_args.kwargs["content"]).verification == (
+        desktop_pairing_verification(pairing.token, "signed-fingerprint")
+    )
+
+
+@pytest.mark.asyncio
+async def test_pairing_client_retries_until_authenticated_controller_ack(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Local CLI reports success only after its pinned controller accepts the claim."""
+    controller = PinnedMatrixDevice(
+        user_id="@computer:example.org",
+        device_id="CLOUD",
+        ed25519="cloud-fingerprint",
+    )
+    verification = desktop_pairing_verification("pair-code", "desktop-fingerprint")
+    cloud_device = SimpleNamespace(ed25519="cloud-fingerprint", blacklisted=False)
+
+    class PairingClient:
+        def __init__(self) -> None:
+            self.olm = SimpleNamespace(
+                account=SimpleNamespace(identity_keys={"ed25519": "desktop-fingerprint"}),
+                device_store={controller.user_id: {controller.device_id: cloud_device}},
+            )
+            self.callback: object | None = None
+            self.sync_count = 0
+
+        def add_to_device_callback(self, callback: object, _event_type: object) -> None:
+            self.callback = callback
+
+        async def sync(self, **_kwargs: object) -> object:
+            self.sync_count += 1
+            if self.sync_count == 2:
+                event = AuthenticatedToDeviceEvent(
+                    source={"content": DesktopPairingAccepted(verification).to_content()},
+                    sender=controller.user_id,
+                    type=DESKTOP_PAIRING_ACCEPTED_EVENT_TYPE,
+                    authenticated_device_id=controller.device_id,
+                )
+                assert self.callback is not None
+                await self.callback(event)  # type: ignore[operator]
+            return object()
+
+    client = PairingClient()
+    send_claim = AsyncMock()
+    monkeypatch.setattr("mindroom.desktop.pairing_client.resolve_pinned_device", AsyncMock())
+    monkeypatch.setattr("mindroom.desktop.pairing_client.prepare_desktop_client", AsyncMock())
+    monkeypatch.setattr("mindroom.desktop.pairing_client.send_encrypted_to_device", send_claim)
+
+    result = await send_desktop_pairing_claim(
+        client,  # type: ignore[arg-type]
+        controller,
+        code="pair-code",
+    )
+
+    assert result == verification
+    assert send_claim.await_count == 2
 
 
 @pytest.mark.asyncio

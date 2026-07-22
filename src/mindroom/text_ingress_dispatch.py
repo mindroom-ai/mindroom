@@ -12,7 +12,6 @@ from mindroom.commands.parsing import command_parser
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     ORIGINAL_SENDER_KEY,
-    ROUTER_AGENT_NAME,
     SCHEDULED_HISTORY_LIMIT_KEY,
     VOICE_RAW_AUDIO_FALLBACK_KEY,
     VOICE_TRANSCRIPT_KEY,
@@ -276,14 +275,13 @@ async def _blocked_before_plan(
     requester_user_id: str,
 ) -> bool:
     if prepared.command is not None:
-        if controller.deps.agent_name == ROUTER_AGENT_NAME:
-            await controller._execute_command(
-                room=room,
-                event=prepared.event,
-                requester_user_id=requester_user_id,
-                command=prepared.command,
-                target=prepared.dispatch.target,
-            )
+        await controller._execute_command_if_owned(
+            room=room,
+            event=prepared.event,
+            requester_user_id=requester_user_id,
+            command=prepared.command,
+            target=prepared.dispatch.target,
+        )
         return True
     if controller._should_skip_deep_synthetic_full_dispatch(
         event_id=prepared.event.event_id,

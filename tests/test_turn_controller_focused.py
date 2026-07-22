@@ -27,7 +27,7 @@ from mindroom import constants, interactive
 from mindroom.attachments import register_local_attachment
 from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.coalescing import CoalescingGate
-from mindroom.config.agent import AgentConfig
+from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME
@@ -1075,6 +1075,35 @@ async def test_non_router_agent_consumes_command_without_responding(config: Conf
     # The non-router agent does not claim the command turn; the router owns its
     # terminal record, so this agent's ledger must stay untouched.
     assert harness.turn_store.is_handled(event.event_id) is False
+
+
+@pytest.mark.asyncio
+async def test_private_desktop_agent_owns_desktop_command(tmp_path: Path) -> None:
+    """A requester can pair Desktop directly in the private agent room."""
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "computer": AgentConfig(
+                    display_name="Computer",
+                    tools=["desktop"],
+                    private=AgentPrivateConfig(per="user_agent"),
+                ),
+            },
+        ),
+        test_runtime_paths(tmp_path / "runtime"),
+    )
+    harness = _build_harness(config, tmp_path, agent_name="computer")
+    room = _room_with_members(config, "computer")
+    event = _text_event("!desktop status", event_id="$desktop-command:localhost")
+
+    await harness.deliver(room, event)
+
+    assert harness.policy.plan_turn_calls == 0
+    assert harness.runner.requests == []
+    assert harness.gate_batches == []
+    assert len(harness.gateway.sent) == 1
+    assert "Desktop setup is required" in harness.gateway.sent[0].response_text
+    assert harness.turn_store.is_handled(event.event_id) is True
 
 
 @pytest.mark.asyncio

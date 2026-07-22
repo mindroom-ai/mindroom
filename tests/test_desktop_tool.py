@@ -45,8 +45,8 @@ def test_desktop_tool_is_registered_as_room_scoped_primary_tool() -> None:
 
 
 @pytest.mark.asyncio
-async def test_unconfigured_desktop_tool_constructs_and_reports_setup_required(tmp_path: Path) -> None:
-    """Missing identity stays inside Desktop instead of breaking the agent."""
+async def test_unconfigured_shared_desktop_tool_requests_operator_setup(tmp_path: Path) -> None:
+    """Shared setup does not advertise requester-only chat pairing."""
     tool = get_tool_by_name(
         "desktop",
         test_runtime_paths(tmp_path),
@@ -58,7 +58,18 @@ async def test_unconfigured_desktop_tool_constructs_and_reports_setup_required(t
 
     payload = json.loads(result.content)
     assert payload["status"] == "setup_required"
-    assert "!desktop setup" in payload["message"]
+    assert "deployment operator" in payload["message"]
+    assert "!desktop" not in payload["message"]
+
+
+@pytest.mark.asyncio
+async def test_unconfigured_private_user_agent_tool_advertises_chat_pairing() -> None:
+    """Requester-agent scoped setup points to its supported chat command."""
+    tool = DesktopTools(worker_target=SimpleNamespace(worker_scope="user_agent"))  # type: ignore[arg-type]
+
+    result = await tool.desktop("status")
+
+    assert "!desktop setup" in json.loads(result.content)["message"]
 
 
 def test_desktop_configuration_distinguishes_partial_and_invalid_state() -> None:
@@ -76,6 +87,27 @@ def test_desktop_configuration_distinguishes_partial_and_invalid_state() -> None
     assert partial.missing_fields == ("device_ed25519", "device_id")
     assert invalid.status is DesktopConfigurationStatus.INVALID
     assert "@user:server" in (invalid.error or "")
+
+
+def test_unconfigured_desktop_preserves_authored_timeout_for_scoped_reload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Requester credentials inherit authored timeout even before identity exists."""
+    monkeypatch.setattr(
+        "mindroom.custom_tools.desktop.load_scoped_credentials",
+        lambda *_args, **_kwargs: {
+            "device_user_id": "@desktop:example.org",
+            "device_id": "DEVICE",
+            "device_ed25519": "fingerprint",
+        },
+    )
+    tool = DesktopTools(
+        timeout_seconds=90,
+        credentials_manager=SimpleNamespace(),  # type: ignore[arg-type]
+        worker_target=SimpleNamespace(worker_scope="user_agent"),  # type: ignore[arg-type]
+    )
+
+    assert tool._current_configuration().timeout_seconds == 90
 
 
 @pytest.mark.asyncio
