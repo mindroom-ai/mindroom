@@ -102,8 +102,10 @@ async def test_request_timeout_is_bounded(monkeypatch: pytest.MonkeyPatch) -> No
     router = DesktopResponseRouter(client)
     monkeypatch.setattr("mindroom.desktop.client.send_encrypted_to_device", AsyncMock())
 
-    with pytest.raises(DesktopRequestError, match="did not answer"):
+    with pytest.raises(DesktopRequestError, match="did not answer") as exc_info:
         await router.request(TARGET, _command(), timeout_seconds=0.001)
+
+    assert "mindroom desktop run" in str(exc_info.value)
 
 
 @pytest.mark.asyncio
