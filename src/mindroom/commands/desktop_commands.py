@@ -7,25 +7,20 @@ import sqlite3
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from mindroom.credentials import (
-    delete_scoped_credentials,
-    get_runtime_credentials_manager,
-    load_scoped_credentials,
-    save_scoped_credentials,
-)
+from mindroom.constants import runtime_matrix_homeserver
+from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.desktop.configuration import DesktopConfigurationStatus, desktop_configuration_state
+from mindroom.desktop.credentials import (
+    delete_desktop_credentials,
+    load_desktop_credentials,
+    save_desktop_credentials,
+)
 from mindroom.desktop.identity import DesktopIdentityError, controller_identity_for_entity
 from mindroom.desktop.pairing import (
     DesktopPairingError,
     complete_desktop_pairing,
     confirm_desktop_pairing,
     create_desktop_pairing,
-)
-from mindroom.session_ids import create_session_id
-from mindroom.tool_system.worker_routing import (
-    ResolvedWorkerTarget,
-    build_agent_toolkit_worker_target,
-    build_tool_execution_identity,
 )
 
 if TYPE_CHECKING:
@@ -35,72 +30,54 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True, slots=True)
 class DesktopCommandScope:
-    """Trusted command context used to resolve one private Desktop store."""
+    """Trusted command context used to resolve one requester-agent Desktop store."""
 
     config: Config
     runtime_paths: RuntimePaths
     agent_name: str
     requester_id: str
-    room_id: str
-    thread_id: str | None
 
 
 def chat_pairing_desktop_error(config: Config, agent_name: str) -> str | None:
     """Return why an agent cannot own requester-scoped Desktop pairing."""
     if agent_name not in config.agents:
         return "Run this command while talking directly to a configured agent."
-    entity = config.resolve_entity(agent_name)
-    if "desktop" not in entity.available_tools:
+    if "desktop" not in config.resolve_entity(agent_name).available_tools:
         return f"Agent '{agent_name}' does not declare the Desktop tool."
-    agent_config = config.get_agent(agent_name)
-    if agent_config.private is None or entity.execution_scope != "user_agent":
-        return "Chat pairing requires private.per: user_agent."
     return None
 
 
-def _desktop_worker_target(scope: DesktopCommandScope) -> ResolvedWorkerTarget:
+def _validate_desktop_scope(scope: DesktopCommandScope) -> None:
     eligibility_error = chat_pairing_desktop_error(scope.config, scope.agent_name)
     if eligibility_error is not None:
         raise DesktopPairingError(eligibility_error)
-    entity = scope.config.resolve_entity(scope.agent_name)
-    execution_scope = entity.execution_scope
-    identity = build_tool_execution_identity(
-        channel="matrix",
-        agent_name=scope.agent_name,
-        runtime_paths=scope.runtime_paths,
-        requester_id=scope.requester_id,
-        room_id=scope.room_id,
-        thread_id=scope.thread_id,
-        resolved_thread_id=scope.thread_id,
-        session_id=create_session_id(scope.room_id, scope.thread_id),
-    )
-    return build_agent_toolkit_worker_target(
-        execution_scope,
-        scope.agent_name,
-        is_private=True,
-        execution_identity=identity,
-        runtime_paths=scope.runtime_paths,
-    )
 
 
 def _load_desktop_credentials(scope: DesktopCommandScope) -> dict[str, object] | None:
-    return load_scoped_credentials(
-        "desktop",
-        credentials_manager=get_runtime_credentials_manager(scope.runtime_paths),
-        worker_target=_desktop_worker_target(scope),
-        allowed_shared_services=frozenset(),
+    _validate_desktop_scope(scope)
+    return load_desktop_credentials(
+        get_runtime_credentials_manager(scope.runtime_paths),
+        requester_id=scope.requester_id,
+        agent_name=scope.agent_name,
     )
 
 
 def _setup_response(scope: DesktopCommandScope) -> str:
-    _desktop_worker_target(scope)
+    _validate_desktop_scope(scope)
     controller = controller_identity_for_entity(scope.agent_name, runtime_paths=scope.runtime_paths)
     pairing = create_desktop_pairing(
         scope.runtime_paths,
         requester_id=scope.requester_id,
         agent_name=scope.agent_name,
     )
-    command = " ".join(
+    login_command = " ".join(
+        (
+            "mindroom desktop login",
+            f"--user-id {shlex.quote(scope.requester_id)}",
+            f"--homeserver {shlex.quote(runtime_matrix_homeserver(scope.runtime_paths))}",
+        ),
+    )
+    pairing_command = " ".join(
         (
             "mindroom desktop pair",
             f"--code {shlex.quote(pairing.token)}",
@@ -111,8 +88,10 @@ def _setup_response(scope: DesktopCommandScope) -> str:
     )
     return (
         "🔐 **Desktop pairing started**\n\n"
-        "Run this on your computer after `mindroom desktop login`:\n\n"
-        f"```bash\n{command}\n```\n\n"
+        "On your computer, log in once if you have not already:\n\n"
+        f"```bash\n{login_command}\n```\n\n"
+        "Then run:\n\n"
+        f"```bash\n{pairing_command}\n```\n\n"
         "Then return here and run the exact `!desktop confirm ...` command printed by the local pairing command.\n\n"
         "Current Desktop target remains unchanged until confirmation."
     )
@@ -128,7 +107,7 @@ def _status_response(scope: DesktopCommandScope) -> str:
 
 
 def _confirm_response(scope: DesktopCommandScope, token: str, verification: str) -> str:
-    worker_target = _desktop_worker_target(scope)
+    _validate_desktop_scope(scope)
     pending = confirm_desktop_pairing(
         scope.runtime_paths,
         token=token,
@@ -147,11 +126,11 @@ def _confirm_response(scope: DesktopCommandScope, token: str, verification: str)
     state = desktop_configuration_state(credentials)
     if state.status is not DesktopConfigurationStatus.READY:
         raise DesktopPairingError(state.error or "Claimed Desktop device identity is invalid.")
-    save_scoped_credentials(
-        "desktop",
+    save_desktop_credentials(
+        get_runtime_credentials_manager(scope.runtime_paths),
         credentials,
-        credentials_manager=get_runtime_credentials_manager(scope.runtime_paths),
-        worker_target=worker_target,
+        requester_id=scope.requester_id,
+        agent_name=scope.agent_name,
     )
     complete_desktop_pairing(scope.runtime_paths, token=token)
     return (
@@ -166,10 +145,11 @@ def _disconnect_response(scope: DesktopCommandScope, *, confirmed: bool) -> str:
             f"This removes your Desktop target for agent `{scope.agent_name}`. "
             "Run `!desktop disconnect confirm` to continue."
         )
-    delete_scoped_credentials(
-        "desktop",
-        credentials_manager=get_runtime_credentials_manager(scope.runtime_paths),
-        worker_target=_desktop_worker_target(scope),
+    _validate_desktop_scope(scope)
+    delete_desktop_credentials(
+        get_runtime_credentials_manager(scope.runtime_paths),
+        requester_id=scope.requester_id,
+        agent_name=scope.agent_name,
     )
     return f"✅ Desktop disconnected for you and agent `{scope.agent_name}`."
 

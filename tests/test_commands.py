@@ -538,7 +538,7 @@ async def test_hi_command_uses_live_responder_candidates_when_available(tmp_path
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("extra_member", [None, "@bob:localhost"])
-async def test_desktop_command_resolves_exact_private_agent_from_router_candidates(
+async def test_desktop_command_resolves_exact_agent_from_router_candidates(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     extra_member: str | None,
@@ -552,7 +552,6 @@ async def test_desktop_command_resolves_exact_private_agent_from_router_candidat
                 "code": {
                     "display_name": "Code",
                     "role": "Writes code",
-                    "private": {"per": "user_agent"},
                     "tools": ["desktop"],
                 },
             },

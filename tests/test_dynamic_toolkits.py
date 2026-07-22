@@ -28,9 +28,13 @@ from mindroom.claude_prompt_cache import _DEFERRED_TOOL_NAMES_ATTR
 from mindroom.config.main import Config
 from mindroom.config.models import EffectiveToolConfig, ToolConfigEntry
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
-from mindroom.credentials import delete_scoped_credentials, get_runtime_credentials_manager, save_scoped_credentials
+from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.custom_tools import update_awareness
 from mindroom.custom_tools.dynamic_tools import DynamicToolsToolkit
+from mindroom.desktop.credentials import (
+    delete_desktop_credentials,
+    save_desktop_credentials,
+)
 from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.openai_tool_search import _DEFERRED_TOOL_NAMES_ATTR as _OPENAI_DEFERRED_TOOL_NAMES_ATTR
 from mindroom.response_runner import _agent_has_matrix_messaging_tool
@@ -41,7 +45,7 @@ from mindroom.tool_system.dynamic_toolkits import (
     suppress_fully_deferred_toolkit_instructions,
     visible_tool_surface,
 )
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity, build_agent_toolkit_worker_target
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
@@ -650,10 +654,12 @@ def test_dynamic_tools_manager_loads_unloads_searches_and_respects_sticky_initia
 
 
 @pytest.mark.asyncio
-async def test_private_deferred_desktop_uses_only_requester_agent_credentials(tmp_path: Path) -> None:
-    """A loaded Desktop stays usable while scoped setup changes underneath it."""
+@pytest.mark.parametrize("private", [False, True])
+async def test_deferred_desktop_uses_only_requester_agent_credentials(tmp_path: Path, private: bool) -> None:
+    """Normal and private agents reload only the active requester's Desktop identity."""
     raw = _base_config_data()
-    raw["agents"]["code"]["private"] = {"per": "user_agent"}  # type: ignore[index]
+    if private:
+        raw["agents"]["code"]["private"] = {"per": "user_agent"}  # type: ignore[index]
     raw["agents"]["code"]["tools"] = [  # type: ignore[index]
         "calculator",
         {"desktop": {"defer": True}},
@@ -693,46 +699,39 @@ async def test_private_deferred_desktop_uses_only_requester_agent_credentials(tm
     result = await alice_desktop.desktop("status")  # type: ignore[attr-defined]
     assert _tool_payload(result.content)["status"] == "setup_required"
 
-    alice_target = build_agent_toolkit_worker_target(
-        "user_agent",
-        "code",
-        is_private=True,
-        execution_identity=alice_identity,
-        runtime_paths=runtime_paths,
-    )
-    save_scoped_credentials(
-        "desktop",
+    save_desktop_credentials(
+        credentials_manager,
         {
             "device_user_id": "@alice-desktop:example.org",
             "device_id": "ALICE",
             "device_ed25519": "alice-fingerprint",
         },
-        credentials_manager=credentials_manager,
-        worker_target=alice_target,
+        requester_id="@alice:example.org",
+        agent_name="code",
     )
 
     paired = alice_desktop._current_configuration()  # type: ignore[attr-defined]
     assert paired.target is not None
     assert paired.target.user_id == "@alice-desktop:example.org"
 
-    save_scoped_credentials(
-        "desktop",
+    save_desktop_credentials(
+        credentials_manager,
         {
             "device_user_id": "@alice-rotated:example.org",
             "device_id": "ROTATED",
             "device_ed25519": "rotated-fingerprint",
         },
-        credentials_manager=credentials_manager,
-        worker_target=alice_target,
+        requester_id="@alice:example.org",
+        agent_name="code",
     )
     rotated = alice_desktop._current_configuration()  # type: ignore[attr-defined]
     assert rotated.target is not None
     assert rotated.target.user_id == "@alice-rotated:example.org"
 
-    delete_scoped_credentials(
-        "desktop",
-        credentials_manager=credentials_manager,
-        worker_target=alice_target,
+    delete_desktop_credentials(
+        credentials_manager,
+        requester_id="@alice:example.org",
+        agent_name="code",
     )
     assert alice_desktop._current_configuration().target is None  # type: ignore[attr-defined]
 
@@ -765,21 +764,15 @@ async def test_native_tool_search_keeps_unconfigured_desktop_safe(tmp_path: Path
     assert _tool_payload(result.content)["status"] == "setup_required"
     assert "desktop" in vars(unpaired.model)[_DEFERRED_TOOL_NAMES_ATTR]
 
-    save_scoped_credentials(
-        "desktop",
+    save_desktop_credentials(
+        get_runtime_credentials_manager(runtime_paths),
         {
             "device_user_id": "@alice-desktop:example.org",
             "device_id": "ALICE",
             "device_ed25519": "alice-fingerprint",
         },
-        credentials_manager=get_runtime_credentials_manager(runtime_paths),
-        worker_target=build_agent_toolkit_worker_target(
-            "user_agent",
-            "code",
-            is_private=True,
-            execution_identity=identity,
-            runtime_paths=runtime_paths,
-        ),
+        requester_id="@alice:example.org",
+        agent_name="code",
     )
     paired = create_agent(
         "code",

@@ -143,7 +143,8 @@ def test_http_headers_file_requires_string_mapping(tmp_path: Path, payload: str)
 @pytest.mark.parametrize(
     ("flows", "expected"),
     [
-        (("m.login.password", "m.login.sso"), DesktopLoginMethod.PASSWORD),
+        (("m.login.password", "m.login.sso"), DesktopLoginMethod.SSO),
+        (("m.login.password",), DesktopLoginMethod.PASSWORD),
         (("m.login.token", "m.login.sso"), DesktopLoginMethod.SSO),
     ],
 )
@@ -152,7 +153,7 @@ async def test_auto_login_method_uses_advertised_matrix_flows(
     flows: tuple[str, ...],
     expected: DesktopLoginMethod,
 ) -> None:
-    """Auto preserves password compatibility and falls back to SSO-only homeservers."""
+    """Auto prefers browser SSO and falls back to password-only homeservers."""
     query = AsyncMock(return_value=flows)
     monkeypatch.setattr("mindroom.desktop.session.login_flows", query)
     runtime_paths = SimpleNamespace()

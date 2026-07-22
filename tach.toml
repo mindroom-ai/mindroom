@@ -461,6 +461,7 @@ depends_on = [
     "mindroom.custom_tools.toolkit_functions",
     "mindroom.desktop.client",
     "mindroom.desktop.configuration",
+    "mindroom.desktop.credentials",
     "mindroom.desktop.media",
     "mindroom.desktop.protocol",
     "mindroom.matrix.olm_to_device",
@@ -2180,6 +2181,14 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.desktop.credentials"
+depends_on = ["mindroom.credentials"]
+visibility = [
+    "mindroom.commands.desktop_commands",
+    "mindroom.custom_tools.desktop",
+]
+
+[[modules]]
 path = "mindroom.desktop.pairing"
 depends_on = ["mindroom.desktop.protocol"]
 
@@ -2913,12 +2922,12 @@ depends_on = [
 [[modules]]
 path = "mindroom.commands.desktop_commands"
 depends_on = [
+    "mindroom.constants",
     "mindroom.credentials",
     "mindroom.desktop.configuration",
+    "mindroom.desktop.credentials",
     "mindroom.desktop.identity",
     "mindroom.desktop.pairing",
-    "mindroom.session_ids",
-    "mindroom.tool_system.worker_routing",
 ]
 visibility = [
     "mindroom.commands.handler",
@@ -4466,3 +4475,16 @@ expose = [
     "require_mcp_server_manager",
 ]
 from = ["mindroom.mcp.toolkit"]
+
+[[interfaces]]
+expose = [
+    "delete_desktop_credentials",
+    "load_desktop_credentials",
+    "save_desktop_credentials",
+]
+from = ["mindroom.desktop.credentials"]
+visibility = [
+    "mindroom.commands.desktop_commands",
+    "mindroom.custom_tools.desktop",
+]
+exclusive = true

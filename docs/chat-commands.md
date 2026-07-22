@@ -6,7 +6,7 @@ icon: lucide/terminal-square
 
 MindRoom provides chat commands that users can type in any Matrix room where MindRoom agents or teams are present.
 Commands start with `!` and are normally handled by the router agent.
-A private Desktop agent handles `!desktop` directly when its room contains only that agent and the requester.
+`!desktop` uses the direct Desktop pairing flow in a room containing only the requester and one Desktop-enabled agent, plus the router when it serves the command.
 
 ## Quick Reference
 
@@ -18,7 +18,7 @@ A private Desktop agent handles `!desktop` directly when its room contains only 
 | `!list_schedules` | List pending scheduled tasks |
 | `!cancel_schedule <id>` | Cancel a scheduled task |
 | `!edit_schedule <id> <task>` | Edit an existing scheduled task |
-| `!desktop [setup\|status\|confirm\|rotate\|disconnect]` | Manage your Desktop target for one private agent |
+| `!desktop [setup\|status\|confirm\|rotate\|disconnect]` | Manage your Desktop target for one agent |
 | `!model [name\|list\|reset]` | Show or switch the model used in the current thread |
 | `!thread_mode [room\|thread\|reset\|show]` | Show or switch the thread mode used in the current room |
 | `!encrypt [confirm]` | Enable end-to-end encryption for this room (irreversible, room admin only) |
@@ -28,8 +28,8 @@ A private Desktop agent handles `!desktop` directly when its room contains only 
 
 ## Who Handles Commands
 
-The **router** handles all commands exclusively.
-Even in single-responder rooms, commands are always processed by the router, not the responder.
+The **router** normally handles commands.
+`!desktop` uses the direct Desktop pairing flow in a room containing only the requester and one Desktop-enabled agent, plus the router when it serves the command.
 Commands work in both main room messages and within threads.
 
 Voice messages that contain commands (e.g., spoken `!schedule`) are recognized after transcription and processed the same way.
@@ -169,9 +169,9 @@ Schedule type cannot be changed (one-time to recurring or vice versa) -- cancel 
 
 ### `!desktop`
 
-Manage the current requester's Desktop target for one private Desktop-enabled agent.
+Manage the current requester's Desktop target for one Desktop-enabled agent.
 
-Run these commands in a room with exactly one eligible private agent:
+Run these commands in a private Matrix room containing only the requester and one Desktop-enabled agent, plus the router when it serves the command:
 
 ```text
 !desktop setup

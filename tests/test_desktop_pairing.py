@@ -283,7 +283,6 @@ def test_pairing_receiver_registration_owns_desktop_enablement_check(tmp_path: P
                 "computer": {
                     "display_name": "Computer",
                     "role": "Operate local apps",
-                    "private": {"per": "user_agent"},
                     "tools": ["desktop"],
                 },
                 "chat": {
@@ -323,7 +322,7 @@ def test_chat_confirmation_saves_only_the_initiating_requester_agent_scope(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A confirmed chat flow becomes ready only for its exact private user-agent pair."""
+    """A normal agent stores each requester's Desktop separately from every other scope."""
     runtime_paths = test_runtime_paths(tmp_path)
     config = Config.validate_with_runtime(
         {
@@ -332,7 +331,6 @@ def test_chat_confirmation_saves_only_the_initiating_requester_agent_scope(
                 "computer": {
                     "display_name": "Computer",
                     "role": "Operate local apps",
-                    "private": {"per": "user_agent"},
                     "tools": ["desktop"],
                 },
                 "other": {
@@ -358,27 +356,22 @@ def test_chat_confirmation_saves_only_the_initiating_requester_agent_scope(
         runtime_paths=runtime_paths,
         agent_name="computer",
         requester_id="@alice:example.org",
-        room_id="!private:example.org",
-        thread_id=None,
     )
     bob_scope = DesktopCommandScope(
         config=config,
         runtime_paths=runtime_paths,
         agent_name="computer",
         requester_id="@bob:example.org",
-        room_id="!private:example.org",
-        thread_id=None,
     )
     alice_other_agent_scope = DesktopCommandScope(
         config=config,
         runtime_paths=runtime_paths,
         agent_name="other",
         requester_id="@alice:example.org",
-        room_id="!other-private:example.org",
-        thread_id=None,
     )
 
     setup_response = handle_desktop_command("setup", scope=alice_scope)
+    assert "mindroom desktop login --user-id @alice:example.org --homeserver http://localhost:8008" in setup_response
     token_match = re.search(r"--code ([A-Za-z0-9_-]+)", setup_response)
     assert token_match is not None
     token = token_match.group(1)

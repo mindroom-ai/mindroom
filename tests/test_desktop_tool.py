@@ -17,7 +17,7 @@ from mindroom.desktop.configuration import DesktopConfigurationStatus, desktop_c
 from mindroom.desktop.media import DesktopMediaError
 from mindroom.desktop.protocol import DesktopResponse, EncryptedDesktopMedia
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
-from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
+from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, ToolExecutionIdentity, WorkerScope
 from tests.conftest import test_runtime_paths
 
 if TYPE_CHECKING:
@@ -33,11 +33,23 @@ MEDIA = EncryptedDesktopMedia(
 )
 
 
-def _user_agent_target() -> ResolvedWorkerTarget:
+def _desktop_target(
+    *,
+    worker_scope: WorkerScope | None = None,
+    requester_id: str = "@alice:example.org",
+) -> ResolvedWorkerTarget:
     return ResolvedWorkerTarget(
-        worker_scope="user_agent",
+        worker_scope=worker_scope,
         routing_agent_name="computer",
-        execution_identity=None,
+        execution_identity=ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="computer",
+            requester_id=requester_id,
+            room_id="!room:example.org",
+            thread_id=None,
+            resolved_thread_id=None,
+            session_id="session",
+        ),
         tenant_id=None,
         account_id=None,
         worker_key=None,
@@ -46,7 +58,7 @@ def _user_agent_target() -> ResolvedWorkerTarget:
 
 def _configured_tool(monkeypatch: pytest.MonkeyPatch) -> DesktopTools:
     monkeypatch.setattr(
-        "mindroom.custom_tools.desktop.load_scoped_credentials",
+        "mindroom.custom_tools.desktop.load_desktop_credentials",
         lambda *_args, **_kwargs: {
             "device_user_id": "@desktop:example.org",
             "device_id": "DESKTOP",
@@ -55,7 +67,7 @@ def _configured_tool(monkeypatch: pytest.MonkeyPatch) -> DesktopTools:
     )
     return DesktopTools(
         credentials_manager=MagicMock(spec=CredentialsManager),
-        worker_target=_user_agent_target(),
+        worker_target=_desktop_target(),
     )
 
 
@@ -69,22 +81,25 @@ def test_desktop_tool_is_registered_as_room_scoped_primary_tool() -> None:
     assert [field.name for field in metadata.config_fields or ()] == ["timeout_seconds"]
 
 
-def test_desktop_requires_private_user_agent_scope(tmp_path: Path) -> None:
-    """Shared and per-user agents cannot declare requester-agent Desktop pairing."""
-    with pytest.raises(ValueError, match=r"desktop tool requires private\.per: user_agent"):
-        Config.validate_with_runtime(
-            {
-                "defaults": {"tools": []},
-                "agents": {
-                    "computer": {
-                        "display_name": "Computer",
-                        "role": "Operate local apps",
-                        "tools": ["desktop"],
-                    },
-                },
-            },
-            test_runtime_paths(tmp_path),
-        )
+@pytest.mark.parametrize("private", [None, {"per": "user_agent"}])
+def test_desktop_supports_normal_and_private_agents(tmp_path: Path, private: dict[str, str] | None) -> None:
+    """Desktop identity isolation does not require private agent execution."""
+    agent: dict[str, object] = {
+        "display_name": "Computer",
+        "role": "Operate local apps",
+        "tools": ["desktop"],
+    }
+    if private is not None:
+        agent["private"] = private
+    config = Config.validate_with_runtime(
+        {
+            "defaults": {"tools": []},
+            "agents": {"computer": agent},
+        },
+        test_runtime_paths(tmp_path),
+    )
+
+    assert "desktop" in config.resolve_entity("computer").available_tools
 
 
 def test_desktop_rejects_authored_device_identity(tmp_path: Path) -> None:
@@ -107,31 +122,81 @@ def test_desktop_rejects_authored_device_identity(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_unconfigured_shared_desktop_tool_requires_private_agent(tmp_path: Path) -> None:
-    """A shared agent cannot use requester-only Desktop pairing."""
+async def test_unconfigured_normal_desktop_tool_advertises_chat_pairing(tmp_path: Path) -> None:
+    """A normal agent can pair a requester-owned Desktop from its direct chat."""
     tool = get_tool_by_name(
         "desktop",
         test_runtime_paths(tmp_path),
         disable_sandbox_proxy=True,
-        worker_target=None,
+        worker_target=_desktop_target(),
     )
 
     result = await tool.desktop("status")  # type: ignore[attr-defined]
 
     payload = json.loads(result.content)
     assert payload["status"] == "setup_required"
-    assert "private.per: user_agent" in payload["message"]
-    assert "!desktop" not in payload["message"]
+    assert "!desktop setup" in payload["message"]
 
 
 @pytest.mark.asyncio
 async def test_unconfigured_private_user_agent_tool_advertises_chat_pairing() -> None:
-    """Requester-agent scoped setup points to its supported chat command."""
-    tool = DesktopTools(worker_target=_user_agent_target())
+    """Private requester-agent execution uses the same chat pairing flow."""
+    tool = DesktopTools(worker_target=_desktop_target(worker_scope="user_agent"))
 
     result = await tool.desktop("status")
 
     assert "!desktop setup" in json.loads(result.content)["message"]
+
+
+@pytest.mark.asyncio
+async def test_live_requester_and_tool_owner_select_desktop_identity(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A reused or team-embedded toolkit follows the live requester and its owning agent."""
+    loaded_scopes: list[tuple[str, str]] = []
+
+    def load_credentials(
+        _manager: CredentialsManager,
+        *,
+        requester_id: str,
+        agent_name: str,
+    ) -> dict[str, str]:
+        loaded_scopes.append((requester_id, agent_name))
+        return {
+            "device_user_id": "@bob-desktop:example.org",
+            "device_id": "BOB",
+            "device_ed25519": "bob-fingerprint",
+        }
+
+    context = SimpleNamespace(
+        requester_id="@bob:example.org",
+        agent_name="configured_team",
+        client=object(),
+    )
+    request = AsyncMock(
+        return_value=DesktopResponse(
+            request_id="request-1",
+            session_id="channel",
+            ok=True,
+            result={"online": True},
+        ),
+    )
+    monkeypatch.setattr("mindroom.custom_tools.desktop.load_desktop_credentials", load_credentials)
+    monkeypatch.setattr("mindroom.custom_tools.desktop.get_tool_runtime_context", lambda: context)
+    monkeypatch.setattr(
+        "mindroom.custom_tools.desktop.desktop_response_router",
+        lambda _client: SimpleNamespace(request=request),
+    )
+    tool = DesktopTools(
+        credentials_manager=MagicMock(spec=CredentialsManager),
+        worker_target=_desktop_target(requester_id="@alice:example.org"),
+    )
+
+    await tool.desktop("status")
+
+    assert loaded_scopes == [("@bob:example.org", "computer")]
+    assert request.await_args.args[0].user_id == "@bob-desktop:example.org"
+    command = request.await_args.args[1]
+    assert command.requester_id == "@bob:example.org"
+    assert command.agent_name == "computer"
 
 
 def test_desktop_configuration_distinguishes_partial_and_invalid_state() -> None:
@@ -156,7 +221,7 @@ def test_unconfigured_desktop_preserves_authored_timeout_for_scoped_reload(
 ) -> None:
     """Requester credentials inherit authored timeout even before identity exists."""
     monkeypatch.setattr(
-        "mindroom.custom_tools.desktop.load_scoped_credentials",
+        "mindroom.custom_tools.desktop.load_desktop_credentials",
         lambda *_args, **_kwargs: {
             "device_user_id": "@desktop:example.org",
             "device_id": "DEVICE",
@@ -166,7 +231,7 @@ def test_unconfigured_desktop_preserves_authored_timeout_for_scoped_reload(
     tool = DesktopTools(
         timeout_seconds=90,
         credentials_manager=MagicMock(spec=CredentialsManager),
-        worker_target=_user_agent_target(),
+        worker_target=_desktop_target(),
     )
 
     assert tool._current_configuration().timeout_seconds == 90
@@ -177,7 +242,7 @@ def test_scoped_desktop_preserves_invalid_authored_timeout(
 ) -> None:
     """Pairing cannot silently replace an invalid operator timeout."""
     monkeypatch.setattr(
-        "mindroom.custom_tools.desktop.load_scoped_credentials",
+        "mindroom.custom_tools.desktop.load_desktop_credentials",
         lambda *_args, **_kwargs: {
             "device_user_id": "@desktop:example.org",
             "device_id": "DEVICE",
@@ -187,7 +252,7 @@ def test_scoped_desktop_preserves_invalid_authored_timeout(
     tool = DesktopTools(
         timeout_seconds=500,
         credentials_manager=MagicMock(spec=CredentialsManager),
-        worker_target=_user_agent_target(),
+        worker_target=_desktop_target(),
     )
 
     state = tool._current_configuration()

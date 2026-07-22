@@ -41,7 +41,7 @@ _COMMAND_DOCS = {
     CommandType.HELP: ("!help [topic]", "Get help"),
     CommandType.RELOAD_PLUGINS: ("!reload-plugins", "Reload configured plugins (admin only)"),
     CommandType.CONFIG: ("!config <operation>", "Manage configuration"),
-    CommandType.DESKTOP: ("!desktop [setup|status|confirm|rotate|disconnect]", "Manage your private Desktop target"),
+    CommandType.DESKTOP: ("!desktop [setup|status|confirm|rotate|disconnect]", "Manage your Desktop target"),
     CommandType.MODEL: ("!model [name|list|reset]", "Show or switch the model used in the current thread"),
     CommandType.THREAD_MODE: (
         "!thread_mode [room|thread|reset|show]",
