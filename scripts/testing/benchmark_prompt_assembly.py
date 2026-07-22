@@ -35,6 +35,7 @@ from mindroom.history.prompt_tokens import (
     agent_tool_definition_payloads_for_logging,
     estimate_agent_static_tokens,
 )
+from mindroom.model_defaults import CONFIG_INIT_MODEL_PRESETS
 from mindroom.tool_system import skills as skills_module
 from mindroom.tool_system.plugins import load_plugins
 
@@ -129,12 +130,13 @@ def _write_fixture(root: Path) -> Path:
             encoding="utf-8",
         )
 
+    default_model = CONFIG_INIT_MODEL_PRESETS["openai"]
     config_path = root / "config.yaml"
     config_path.write_text(
         "models:\n"
         "  default:\n"
-        "    provider: openai\n"
-        "    id: gpt-5.6\n"
+        f"    provider: {default_model.provider}\n"
+        f"    id: {default_model.id}\n"
         "router:\n"
         "  model: default\n"
         "plugins:\n"
