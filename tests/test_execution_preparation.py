@@ -883,11 +883,7 @@ def test_fallback_thread_history_agent_attachments_annotate_without_media(tmp_pa
     )
 
     assert messages[0].role == "assistant"
-    assert messages[0].content == render_msg_tag(
-        sender="@mindroom_team:localhost",
-        body='here is the report\n[attachments: att_report (file, "report.pdf")]',
-        event_id="$agent-file",
-    )
+    assert messages[0].content == 'here is the report\n[attachments: att_report (file, "report.pdf")]'
     assert not messages[0].files
 
 
@@ -1038,11 +1034,7 @@ def test_fallback_thread_history_strips_visible_tool_markers_from_assistant_cont
     )
 
     assert messages[0].role == "assistant"
-    assert messages[0].content == render_msg_tag(
-        sender="@mindroom_code:localhost",
-        body="Checking status.\n\n\nStill checking.\n\n\nDone.",
-        event_id="$assistant",
-    )
+    assert messages[0].content == "Checking status.\n\n\nStill checking.\n\n\nDone."
     assert "🔧" not in str(messages[0].content)
 
 
@@ -1182,11 +1174,7 @@ def test_unseen_context_keeps_unpersisted_self_sent_message() -> None:
 
     assert unseen_event_ids == ["$spawn-root"]
     assert messages[0].role == "assistant"
-    assert messages[0].content == render_msg_tag(
-        sender="@mindroom_code:localhost",
-        body="@mindroom_missing_agent Please investigate this",
-        event_id="$spawn-root",
-    )
+    assert messages[0].content == "@mindroom_missing_agent Please investigate this"
 
 
 def test_unseen_context_skips_persisted_self_sent_response_event() -> None:

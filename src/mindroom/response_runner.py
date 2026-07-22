@@ -624,7 +624,6 @@ class ResponseRunner:
                 run_id=recorder.run_id or run_id or str(uuid4()),
                 snapshot=recorder.interrupted_snapshot(),
                 is_team=is_team,
-                response_sender_id=self.deps.matrix_full_id,
             )
         finally:
             storage.close()
@@ -884,7 +883,6 @@ class ResponseRunner:
                     session_type=session_type,
                     run_id=run_id,
                     response_event_id=response_event_id,
-                    response_sender_id=self.deps.matrix_full_id,
                 )
             finally:
                 storage.close()

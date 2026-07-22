@@ -18,7 +18,7 @@ from mindroom.agent_storage import (
     get_agent_session,
     get_team_session,
 )
-from mindroom.constants import prompt_roles_for_history_storage
+from mindroom.constants import MATRIX_RESPONSE_EVENT_ID_METADATA_KEY, prompt_roles_for_history_storage
 from mindroom.history import agno_team_patch
 from mindroom.history.compaction import (
     compact_scope_history,
@@ -56,6 +56,7 @@ from mindroom.history.types import (
     ResolvedReplayPlan,
 )
 from mindroom.logging_config import get_logger
+from mindroom.prompt_message_tags import unwrap_legacy_assistant_msg_tag
 from mindroom.team_scope import ad_hoc_team_has_private_member, ad_hoc_team_scope_id
 from mindroom.timing import timed
 from mindroom.token_budget import estimate_text_tokens
@@ -67,6 +68,8 @@ if TYPE_CHECKING:
     from agno.agent import Agent
     from agno.db.base import BaseDb
     from agno.models.base import Model
+    from agno.run.agent import RunOutput
+    from agno.run.team import TeamRunOutput
     from agno.session.agent import AgentSession
     from agno.session.team import TeamSession
     from agno.team import Team
@@ -351,6 +354,9 @@ async def prepare_scope_history(
 
     execution_plan = resolved_inputs.execution_plan
     session = scope_context.session
+    visible_runs = scope_visible_runs(session, scope_context.scope)
+    if _unwrap_legacy_assistant_history(visible_runs):
+        scope_context.storage.upsert_session(session)
     if pipeline_timing is not None:
         pipeline_timing.mark("history_classify_start")
     state = _prepare_scope_state_for_run(
@@ -366,7 +372,6 @@ async def prepare_scope_history(
         scope=scope_context.scope,
         history_settings=resolved_inputs.history_settings,
     )
-    visible_runs = scope_visible_runs(session, scope_context.scope)
     compaction_decision = classify_compaction_decision(
         plan=execution_plan,
         force_compact_before_next_run=state.force_compact_before_next_run,
@@ -438,6 +443,32 @@ async def prepare_scope_history(
         compaction_decision=compaction_decision,
         compaction_reply_outcome=compaction_reply_outcome,
     )
+
+
+def _unwrap_legacy_assistant_history(runs: list[RunOutput | TeamRunOutput]) -> bool:
+    """Remove transport tags previously persisted inside assistant-role messages."""
+    changed = False
+    for run in runs:
+        metadata = run.metadata
+        if not isinstance(metadata, dict):
+            continue
+        response_event_id = metadata.get(MATRIX_RESPONSE_EVENT_ID_METADATA_KEY)
+        if not isinstance(response_event_id, str) or not response_event_id:
+            continue
+        for message in reversed(run.messages or []):
+            if message.role != "assistant":
+                continue
+            if not isinstance(message.content, str):
+                break
+            unwrapped = unwrap_legacy_assistant_msg_tag(
+                message.content,
+                response_event_id=response_event_id,
+            )
+            if unwrapped is not None:
+                message.content = unwrapped
+                changed = True
+            break
+    return changed
 
 
 async def _run_scope_compaction_with_lifecycle(

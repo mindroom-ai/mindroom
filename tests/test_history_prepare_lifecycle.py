@@ -17,6 +17,7 @@ from agno.session.summary import SessionSummary
 
 from mindroom.agent_storage import create_session_storage, get_agent_session
 from mindroom.config.models import CompactionOverrideConfig
+from mindroom.constants import MATRIX_RESPONSE_EVENT_ID_METADATA_KEY
 from mindroom.error_handling import ModelSafeguardRefusalError
 from mindroom.execution_preparation import (
     _prepare_bound_team_execution_context,
@@ -48,6 +49,7 @@ from mindroom.history.types import (
     ResolvedHistoryExecutionPlan,
     ResolvedHistorySettings,
 )
+from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.session_ids import create_session_id
 from tests.conftest import (
     FakeModel,
@@ -411,6 +413,64 @@ async def test_prepare_history_for_run_uses_provided_storage_without_reopening_s
 
     mock_open_scope_context.assert_not_called()
     assert prepared.replay_plan is not None
+
+
+@pytest.mark.asyncio
+async def test_prepare_history_unwraps_only_trusted_legacy_assistant_tags(tmp_path: Path) -> None:
+    """Existing transport wrappers should be removed without rewriting model-authored text."""
+    config, runtime_paths = _make_config(tmp_path)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    legacy_body = "Prior answer with ]]> text"
+    legacy_run = _completed_run(
+        "run-1",
+        messages=[
+            Message(role="user", content="Question"),
+            Message(
+                role="assistant",
+                content=render_msg_tag(
+                    sender="@agent:localhost",
+                    body=legacy_body,
+                    event_id="$answer",
+                ),
+            ),
+        ],
+    )
+    legacy_run.metadata = {MATRIX_RESPONSE_EVENT_ID_METADATA_KEY: "$answer"}
+    model_authored_tag = render_msg_tag(
+        sender="@agent:localhost",
+        body="Keep this literal text",
+        event_id="$different",
+    )
+    literal_run = _completed_run(
+        "run-2",
+        messages=[
+            Message(role="user", content="Another question"),
+            Message(role="assistant", content=model_authored_tag),
+        ],
+    )
+    literal_run.metadata = {MATRIX_RESPONSE_EVENT_ID_METADATA_KEY: "$second-answer"}
+    session = _session("session-1", runs=[legacy_run, literal_run])
+    storage.upsert_session(session)
+
+    await prepare_history_for_run_for_test(
+        agent=_agent(db=storage),
+        agent_name="test_agent",
+        full_prompt="Current prompt",
+        session_id="session-1",
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=None,
+        storage=storage,
+        session=session,
+    )
+
+    persisted = get_agent_session(storage, "session-1")
+    assert persisted is not None
+    assert persisted.runs is not None
+    assert persisted.runs[0].messages is not None
+    assert persisted.runs[0].messages[-1].content == legacy_body
+    assert persisted.runs[1].messages is not None
+    assert persisted.runs[1].messages[-1].content == model_authored_tag
 
 
 @pytest.mark.asyncio

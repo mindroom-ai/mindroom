@@ -1103,6 +1103,7 @@ depends_on = [
     "mindroom.history.types",
     "mindroom.logging_config",
     "mindroom.model_loading",
+    "mindroom.prompt_message_tags",
     "mindroom.team_scope",
     "mindroom.timing",
     "mindroom.token_budget",
@@ -1508,6 +1509,7 @@ visibility = [
     "mindroom.conversation_state_writer",
     "mindroom.execution_preparation",
     "mindroom.history.interrupted_replay",
+    "mindroom.history.runtime",
 ]
 
 [[modules]]
