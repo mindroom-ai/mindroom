@@ -556,19 +556,19 @@ class TestParseWorkflowSchedule:
 
     @patch("mindroom.model_loading.get_model_instance")
     @patch("mindroom.scheduling.Agent")
-    async def test_parse_conditional_schedule_rejects_non_polling_cron(
+    async def test_parse_conditional_schedule_accepts_numeric_cron(
         self,
         mock_agent_class: Mock,
         mock_get_model: Mock,  # noqa: ARG002
         mock_config: MagicMock,
     ) -> None:
-        """Conditional schedules should fail instead of accepting a non-polling cron."""
+        """Conditional schedules should accept numeric five-field crons because they recur."""
         mock_agent = AsyncMock()
         mock_response = MagicMock()
         mock_response.content = ScheduledWorkflow(
             schedule_type="cron",
             is_conditional=True,
-            cron_schedule=CronSchedule(minute="0", hour="9"),
+            cron_schedule=CronSchedule(minute="0", hour="9", day="5", month="6", weekday="1"),
             message="@general Check for messages containing urgent. If found, notify the team.",
             description="Monitor urgent mentions",
         )
@@ -582,9 +582,9 @@ class TestParseWorkflowSchedule:
             available_responders=[_mid("general")],
         )
 
-        assert isinstance(result, _WorkflowParseError)
-        assert "polling cron" in result.error
-        assert "0 9 * * *" in result.error
+        assert isinstance(result, ScheduledWorkflow)
+        assert result.cron_schedule is not None
+        assert result.cron_schedule.to_cron_string() == "0 9 5 6 1"
 
 
 @pytest.mark.asyncio
@@ -1214,20 +1214,20 @@ class TestValidateConditionalWorkflow:
             description="test",
         )
 
-    def test_conditional_with_non_polling_cron_returns_error(self) -> None:
-        """Reject conditional schedules that do not resolve to polling cron."""
-        result = _validate_conditional_workflow(self._workflow(""))
-        assert isinstance(result, _WorkflowParseError)
-        assert "polling cron" in result.error
-        assert "0 9 * * *" in result.error
-
-    def test_conditional_with_polling_cron_passes(self) -> None:
-        """Allow conditional schedules that resolve to interval polling."""
+    @pytest.mark.parametrize(
+        "cron_schedule",
+        [
+            CronSchedule(minute="*/5", hour="*", day="*", month="*", weekday="*"),  # interval
+            CronSchedule(minute="0", hour="9", day="*", month="*", weekday="*"),  # daily 9am
+            CronSchedule(minute="0", hour="9", day="*", month="*", weekday="1-5"),  # weekdays 9am
+            CronSchedule(minute="*/15", hour="9-17", day="*", month="*", weekday="*"),  # business hrs
+            CronSchedule(minute="0", hour="9", day="5", month="6", weekday="1"),  # numeric fields
+        ],
+    )
+    def test_conditional_with_recurring_cron_passes(self, cron_schedule: CronSchedule) -> None:
+        """Allow every valid five-field cron because none can encode a single year."""
         result = _validate_conditional_workflow(
-            self._workflow(
-                "@ops Check CPU usage. If above 80%, scale up.",
-                cron_schedule=CronSchedule(minute="*/5", hour="*", day="*", month="*", weekday="*"),
-            ),
+            self._workflow("@ops check something; if true, alert me", cron_schedule=cron_schedule),
         )
         assert result is None
 

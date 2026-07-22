@@ -36,13 +36,15 @@ The `schedule()` tool accepts `new_thread=True` to start a fresh thread per fire
 
 Conditional or event-like requests are converted to recurring cron-based polling schedules.
 
-The AI picks an appropriate polling frequency based on urgency, and the condition is embedded in the task message so the scheduled responder checks it on each poll cycle.
+For predictable behavior, include an explicit polling cadence.
+
+The condition is embedded in the task message so the scheduled responder checks it on each poll cycle.
 
 These are **not** real event subscriptions — they are periodic checks.
 
 ```
-!schedule If I get an email about "urgent", @phone_agent call me
-!schedule When Bitcoin drops below $40k, @crypto_agent notify me
+!schedule Every 5 minutes, check if I got an email about "urgent"; if so, @phone_agent call me
+!schedule Every 10 minutes, check whether Bitcoin dropped below $40k; if so, @crypto_agent notify me
 ```
 
 ### Edit a Schedule

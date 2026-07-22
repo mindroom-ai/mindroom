@@ -363,20 +363,6 @@ def _cancelled_task_content(
     return cancelled_content
 
 
-def _is_polling_cron_schedule(cron_schedule: CronSchedule) -> bool:
-    """Return whether a cron schedule looks like an interval-based polling cadence."""
-    if cron_schedule.day != "*" or cron_schedule.month != "*" or cron_schedule.weekday != "*":
-        return False
-
-    minute = cron_schedule.minute.strip()
-    hour = cron_schedule.hour.strip()
-
-    def is_interval(field: str) -> bool:
-        return field == "*" or field.startswith("*/")
-
-    return (is_interval(minute) and is_interval(hour)) or (minute.isdigit() and is_interval(hour))
-
-
 def _validate_parsed_workflow(workflow: ScheduledWorkflow) -> _WorkflowParseError | None:
     """Reject parses whose schedule fields do not support the declared schedule type."""
     if workflow.schedule_type == "once" and not workflow.execute_at:
@@ -402,7 +388,7 @@ def _validate_parsed_workflow(workflow: ScheduledWorkflow) -> _WorkflowParseErro
 def _validate_conditional_workflow(
     workflow: ScheduledWorkflow,
 ) -> _WorkflowParseError | None:
-    """Reject conditional parses that do not resolve to a polling-style recurring schedule."""
+    """Reject conditional parses that do not resolve to a recurring cron schedule."""
     if not workflow.is_conditional:
         return None
 
@@ -412,14 +398,7 @@ def _validate_conditional_workflow(
             suggestion="Try again, or specify the polling cadence explicitly.",
         )
 
-    cron_string = workflow.cron_schedule.to_cron_string()
-    if _is_polling_cron_schedule(workflow.cron_schedule):
-        return None
-
-    return _WorkflowParseError(
-        error=f"Conditional schedules must use a polling cron, but the parsed schedule was `{cron_string}`.",
-        suggestion="Try again, or specify the polling cadence explicitly.",
-    )
+    return None
 
 
 def _start_scheduled_task(
