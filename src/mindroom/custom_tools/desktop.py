@@ -11,7 +11,7 @@ from agno.media import Image
 from agno.tools import Toolkit
 from agno.tools.function import ToolResult
 
-from mindroom.credentials import CredentialsManager, load_scoped_credentials
+from mindroom.credentials import CredentialsManager  # noqa: TC001 - runtime constructor reflection
 from mindroom.custom_tools.desktop_attachment import (
     register_runtime_screenshot_attachment,
     screenshot_attachment_result_fields,
@@ -24,6 +24,7 @@ from mindroom.desktop.configuration import (
     DesktopConfigurationStatus,
     desktop_configuration_state,
 )
+from mindroom.desktop.credentials import load_desktop_credentials
 from mindroom.desktop.media import DesktopMediaError, download_encrypted_screenshot
 from mindroom.desktop.protocol import (
     DESKTOP_CONTROL_ACTIONS,
@@ -183,14 +184,15 @@ class DesktopTools(Toolkit):
         return_attachment: bool = False,
     ) -> ToolResult:
         """Run one state-bound desktop action and return fresh state plus an app screenshot."""
-        configuration = self._current_configuration()
+        context = get_tool_runtime_context()
+        credential_scope = self._credential_scope(context)
+        configuration = self._current_configuration(credential_scope=credential_scope)
         if configuration.status is not DesktopConfigurationStatus.READY or configuration.target is None:
             return _setup_required_result(
                 action,
                 configuration.error,
-                chat_pairing=self._worker_target is not None and self._worker_target.worker_scope == "user_agent",
+                chat_pairing=credential_scope is not None,
             )
-        context = get_tool_runtime_context()
         if context is None:
             return _error_result(action, "Desktop tool requires a live Matrix runtime context.")
         validation_error = _return_attachment_validation_error(action, return_attachment)
@@ -240,15 +242,30 @@ class DesktopTools(Toolkit):
         except (DesktopMediaError, DesktopProtocolError, DesktopRequestError, OlmToDeviceError, ValueError) as exc:
             return _error_result(action, str(exc))
 
-    def _current_configuration(self) -> DesktopConfigurationState:
+    def _credential_scope(self, context: ToolRuntimeContext | None) -> tuple[str, str] | None:
+        if context is not None:
+            target_agent_name = self._worker_target.routing_agent_name if self._worker_target is not None else None
+            return context.requester_id, target_agent_name or context.agent_name
         target = self._worker_target
-        if self._credentials_manager is None or target is None or target.worker_scope != "user_agent":
+        identity = target.execution_identity if target is not None else None
+        agent_name = target.routing_agent_name if target is not None else None
+        if identity is None or identity.requester_id is None or agent_name is None:
+            return None
+        return identity.requester_id, agent_name
+
+    def _current_configuration(
+        self,
+        *,
+        credential_scope: tuple[str, str] | None = None,
+    ) -> DesktopConfigurationState:
+        resolved_scope = credential_scope or self._credential_scope(None)
+        if self._credentials_manager is None or resolved_scope is None:
             return desktop_configuration_state({"timeout_seconds": self._authored_timeout_seconds})
-        credentials = load_scoped_credentials(
-            "desktop",
-            credentials_manager=self._credentials_manager,
-            worker_target=target,
-            allowed_shared_services=frozenset(),
+        requester_id, agent_name = resolved_scope
+        credentials = load_desktop_credentials(
+            self._credentials_manager,
+            requester_id=requester_id,
+            agent_name=agent_name,
         )
         values = dict(credentials or {})
         values.setdefault("timeout_seconds", self._authored_timeout_seconds)
@@ -555,7 +572,7 @@ def _setup_required_result(action: str, error: str | None, *, chat_pairing: bool
         if error is not None:
             message = f"Desktop configuration is invalid: {error} Run `!desktop setup` to replace it."
     else:
-        message = "Desktop requires an agent configured with `private.per: user_agent`."
+        message = "Desktop setup requires a live Matrix agent chat."
         if error is not None:
             message = f"Desktop configuration is invalid: {error}"
     return ToolResult(

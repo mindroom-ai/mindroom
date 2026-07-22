@@ -311,7 +311,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
         if desktop_agent_name is None:
             response_text = (
                 "❌ Use `!desktop` in a private room containing only you, the serving bot, "
-                "and exactly one private Desktop-enabled agent."
+                "and exactly one Desktop-enabled agent."
             )
         else:
             response_text = handle_desktop_command(
@@ -321,8 +321,6 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
                     runtime_paths=context.runtime_paths,
                     agent_name=desktop_agent_name,
                     requester_id=requester_user_id,
-                    room_id=room.room_id,
-                    thread_id=effective_thread_id,
                 ),
             )
 

@@ -156,10 +156,10 @@ async def resolve_desktop_login_method(
     except (PermanentMatrixStartupError, aiohttp.ClientError, OSError, TimeoutError, ValueError) as exc:
         msg = f"Could not discover Matrix login methods: {exc}"
         raise DesktopSessionError(msg) from exc
-    if "m.login.password" in flows:
-        return DesktopLoginMethod.PASSWORD
     if "m.login.sso" in flows:
         return DesktopLoginMethod.SSO
+    if "m.login.password" in flows:
+        return DesktopLoginMethod.PASSWORD
     advertised = ", ".join(sorted(flows)) or "none"
     msg = f"Matrix homeserver offers no supported desktop login method (advertised: {advertised})."
     raise DesktopSessionError(msg)

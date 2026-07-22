@@ -32,7 +32,7 @@ if TYPE_CHECKING:
         ),
     ],
     docs_url="https://docs.mindroom.chat/tools/desktop/",
-    helper_text="Ask the requester to send `!desktop setup` directly in this private Matrix chat.",
+    helper_text="Ask the requester to send `!desktop setup` directly in this Matrix chat.",
     function_names=("desktop",),
     managed_init_args=(ToolManagedInitArg.CREDENTIALS_MANAGER, ToolManagedInitArg.WORKER_TARGET),
 )

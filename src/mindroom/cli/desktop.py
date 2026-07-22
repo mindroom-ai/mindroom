@@ -242,7 +242,7 @@ def _print_device_identity(
     _console.print(f"  User: {session.user_id}")
     _console.print(f"  Device: {session.device_id}")
     _console.print(f"  Ed25519: {fingerprint}")
-    _console.print("\nNext, run `!desktop setup` in the private agent chat and follow its pairing command.")
+    _console.print("\nNext, run `!desktop setup` in the direct agent chat and follow its pairing command.")
 
 
 @desktop_app.command("pair")

@@ -7678,7 +7678,7 @@
       "function_names": [
         "desktop"
       ],
-      "helper_text": "Ask the requester to send `!desktop setup` directly in this private Matrix chat.",
+      "helper_text": "Ask the requester to send `!desktop setup` directly in this Matrix chat.",
       "icon": "MonitorUp",
       "icon_color": "text-cyan-500",
       "name": "desktop",

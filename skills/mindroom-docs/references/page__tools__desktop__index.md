@@ -84,8 +84,9 @@ The Matrix homeserver can observe routing metadata, timing, and encrypted media 
 
 ## Requirements
 
-Use a dedicated Matrix account for password login whenever your homeserver permits one.
-On an SSO-only homeserver, the bridge instead adds a dedicated device to the account selected in the browser.
+You can use the same Matrix account as your agent chat or a dedicated Matrix account for the local bridge.
+The chat setup command uses your chat account and adds a dedicated Matrix device to it.
+For manual password login, a dedicated account reduces the impact of exposing that password on the local computer.
 The desktop account and the cloud MindRoom entity must use the same Matrix federation environment and must be able to exchange to-device events and media.
 If the optional local desktop dependencies are missing, `mindroom desktop run` auto-installs the `desktop` extra at startup unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set.
 To install them in advance on the computer being controlled:
@@ -106,7 +107,7 @@ Chrome and Brave are supported by the local command through an explicit browser 
 
 For password login, create a dedicated Matrix user such as `@my-laptop:example.org` using your normal Matrix administration or registration flow.
 By default, the login command checks the homeserver's advertised methods.
-It uses password login when available and otherwise opens Matrix SSO in your browser.
+It opens Matrix SSO when available and otherwise uses password login.
 
 For password login, pass the dedicated user ID and enter its password at the hidden prompt:
 
@@ -144,7 +145,7 @@ Device: ABCDEFGHIJ
 Ed25519: desktop-device-fingerprint
 ```
 
-Private multi-user agents register these public identity values through the chat flow below.
+Normal and private agents register these public identity values through the requester-scoped chat flow below.
 
 ### Homeservers Behind an Identity-Aware Proxy
 
@@ -193,27 +194,27 @@ During Matrix SSO, the browser handles any interactive proxy authentication whil
 Configure the proxy to accept these machine credentials only for the Matrix endpoints the desktop device needs, while keeping normal Matrix authentication enabled.
 Do not combine `--cloudflare-access` with a static `cf-access-token` header.
 
-## 2. Configure the Private Agent
+## 2. Configure the Agent
 
-Configure the Desktop tool on a private agent without authored device identity fields:
+Configure the Desktop tool on a normal or private agent without authored device identity fields:
 
 ```yaml
 agents:
   computer:
     display_name: Computer Agent
     role: Operate my locally authorized applications one step at a time
-    private:
-      per: user_agent
     tools:
       - desktop:
           defer: true
           timeout_seconds: 30
 ```
 
-Each user then runs `!desktop setup` in a private room containing only that user, the serving bot, and that private Desktop-enabled agent.
+Add `private: {per: user_agent}` only when the agent's entire runtime and state should also be requester-private.
+Desktop device identities are requester-agent scoped either way.
+Each user then runs `!desktop setup` in a private Matrix room containing only that user and one Desktop-enabled agent, plus the router when it is serving the command.
 The short-lived pairing code is a bearer secret, so MindRoom rejects `!desktop` when any other room member is present.
-The serving bot returns a `mindroom desktop pair` command containing a short-lived code and the exact pinned cloud controller identity.
-Run that command on the computer after `mindroom desktop login`, then copy the exact `!desktop confirm <code> <verification>` command it prints back to the same Matrix chat.
+The serving bot returns the full `mindroom desktop login` command for the configured homeserver and a `mindroom desktop pair` command containing a short-lived code and the exact pinned cloud controller identity.
+Run the login command once if needed, run the pairing command, then copy the exact `!desktop confirm <code> <verification>` command it prints back to the same Matrix chat.
 The claim travels as an authenticated Olm-encrypted to-device event, and confirmation stores the local device identity only in that requester's agent-scoped credential store.
 The verification value binds confirmation to the claimed Ed25519 key, so a different device cannot pre-claim a visible pairing code and be confirmed accidentally.
 Another requester or agent cannot confirm or use that record, and shared credentials are never used as a fallback.
@@ -389,7 +390,7 @@ Approval does not override an absent or expired local control lease.
 
 ## Operations
 
-Rotate the local desktop Matrix device with `mindroom desktop login --replace`, revoke the old device in Matrix account management, then run `!desktop rotate` and follow the new pairing command in the private agent chat.
+Rotate the local desktop Matrix device with `mindroom desktop login --replace`, revoke the old device in Matrix account management, then run `!desktop rotate` and follow the new pairing command in the direct agent chat.
 The `--replace` option creates a fresh saved session but cannot revoke the old device by itself.
 If the cloud agent receives a new Matrix device, run `!desktop rotate` and follow the new pairing command so the local bridge pins the replacement controller identity.
 A device ID or Ed25519 mismatch is a hard failure and should be treated as a rotation or possible substitution, not bypassed.
