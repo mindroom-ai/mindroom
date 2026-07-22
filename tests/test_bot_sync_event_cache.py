@@ -406,6 +406,63 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         )
 
     @pytest.mark.asyncio
+    async def test_first_sync_limited_timeline_skips_gap_backfill(self, bot: AgentBot) -> None:
+        """Initial sync is limited everywhere by design and must not trigger backfill."""
+        room_id = "!test:localhost"
+        bot.client.rooms = {room_id: nio.MatrixRoom(room_id=room_id, own_user_id="@mindroom_general:localhost")}
+        bot.client.room_messages = AsyncMock()
+        sync_response = self._sync_response(
+            {room_id: MagicMock(timeline=MagicMock(events=[], limited=True, prev_batch="p1"))},
+        )
+
+        await self._run_sync_response_without_startup_side_effects(bot, sync_response)
+
+        bot.client.room_messages.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_limited_timeline_backfills_gap_through_nio_dispatch(self, bot: AgentBot) -> None:
+        """A non-first limited sync recovers gap events and fans them through nio's _on_event."""
+        room_id = "!test:localhost"
+        bot._first_sync_done = True
+        bot.client.next_batch = "s_next"
+        bot.client.rooms = {room_id: nio.MatrixRoom(room_id=room_id, own_user_id="@mindroom_general:localhost")}
+        bot.client.olm = None
+        bot.client._on_event = AsyncMock()
+
+        survivor = nio.RoomMessageText.from_dict(
+            {
+                "content": {"body": "survivor", "msgtype": "m.text"},
+                "event_id": "$survivor:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 300,
+                "room_id": room_id,
+                "type": "m.room.message",
+            },
+        )
+        gap = nio.RoomMessageText.from_dict(
+            {
+                "content": {"body": "dropped by flood", "msgtype": "m.text"},
+                "event_id": "$gap:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 200,
+                "room_id": room_id,
+                "type": "m.room.message",
+            },
+        )
+        bot.client.room_messages = AsyncMock(
+            return_value=nio.RoomMessagesResponse(room_id, [gap], start="p1", end="p2"),
+        )
+
+        sync_response = self._sync_response(
+            {room_id: MagicMock(timeline=MagicMock(events=[survivor], limited=True, prev_batch="p1"))},
+        )
+
+        await self._run_sync_response_without_startup_side_effects(bot, sync_response)
+
+        dispatched_ids = [call_args.args[0].event_id for call_args in bot.client._on_event.await_args_list]
+        assert dispatched_ids == ["$gap:localhost"]
+
+    @pytest.mark.asyncio
     async def test_limited_sync_marks_room_stale_before_admitting_partial_events(self, bot: AgentBot) -> None:
         """The durable room stale marker must land before any partial timeline event is admitted."""
         room_id = "!room:localhost"
