@@ -516,6 +516,7 @@ async def test_bridge_pins_controller_before_consuming_initial_sync(
     """Fresh stores can authenticate queued commands before the initial sync acknowledges them."""
     client = _FakeBridgeClient()
     bridge = SimpleNamespace(on_to_device_event=AsyncMock())
+    request_permissions = MagicMock(return_value=())
     lifecycle: list[str] = []
     controller_resolved = False
 
@@ -545,6 +546,7 @@ async def test_bridge_pins_controller_before_consuming_initial_sync(
     monkeypatch.setattr("mindroom.desktop.session.prepare_desktop_client", prepare_client)
     monkeypatch.setattr("mindroom.matrix.olm_to_device.resolve_pinned_device", resolve_device)
     monkeypatch.setattr("mindroom.desktop.provider.PyAutoGuiDesktopProvider", lambda **_kwargs: object())
+    monkeypatch.setattr(desktop_cli, "_request_required_desktop_permissions", request_permissions)
     monkeypatch.setattr("mindroom.desktop.bridge.DesktopBridge", lambda **_kwargs: bridge)
 
     await desktop_cli._run_bridge(
@@ -568,6 +570,7 @@ async def test_bridge_pins_controller_before_consuming_initial_sync(
     )
 
     assert lifecycle == ["open", "resolve", "prepare"]
+    request_permissions.assert_called_once_with()
     bridge.on_to_device_event.assert_awaited_once()
 
 

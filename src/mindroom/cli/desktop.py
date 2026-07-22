@@ -70,6 +70,26 @@ def _ensure_desktop_dependencies(runtime_paths: RuntimePaths) -> None:
         raise DesktopProviderError(str(exc)) from exc
 
 
+def _request_required_desktop_permissions() -> None:
+    """Request required local permissions before connecting the Desktop bridge."""
+    from mindroom.desktop.provider import (  # noqa: PLC0415
+        DesktopProviderError,
+        request_macos_desktop_permissions,
+    )
+
+    missing_permissions = request_macos_desktop_permissions()
+    if not missing_permissions:
+        return
+    permission_names = " and ".join(missing_permissions)
+    permission_label = "permission" if len(missing_permissions) == 1 else "permissions"
+    msg = (
+        f"macOS requested {permission_names} {permission_label}. Grant the requested access to the terminal app "
+        "running this command in System Settings > Privacy & Security, fully quit and reopen that app, then run "
+        "`mindroom desktop run` again."
+    )
+    raise DesktopProviderError(msg)
+
+
 @desktop_app.command("login")
 def desktop_login(
     user_id: str | None = typer.Option(
@@ -619,6 +639,7 @@ async def _run_bridge(
     from mindroom.matrix.olm_to_device import PinnedMatrixDevice, resolve_pinned_device  # noqa: PLC0415
     from mindroom.matrix.to_device import AuthenticatedToDeviceEvent  # noqa: PLC0415
 
+    _request_required_desktop_permissions()
     controller = PinnedMatrixDevice(
         user_id=controller_user_id,
         device_id=controller_device_id,

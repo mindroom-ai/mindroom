@@ -17,6 +17,7 @@ from mindroom.desktop.provider import (
     _capture_macos_primary_screen,
     _capture_macos_window,
     _type_macos_unicode,
+    request_macos_desktop_permissions,
 )
 
 if TYPE_CHECKING:
@@ -317,6 +318,28 @@ def test_macos_capture_requires_screen_recording_permission(monkeypatch: pytest.
 
     with pytest.raises(DesktopProviderError, match="Screen Recording permission"):
         _capture_macos_primary_screen()
+
+
+def test_macos_desktop_permissions_are_requested_when_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Starting the bridge asks macOS for both required privacy grants."""
+    accessibility_requests: list[dict[str, bool]] = []
+    screen_recording_requests: list[bool] = []
+    application_services = SimpleNamespace(
+        AXIsProcessTrusted=lambda: False,
+        AXIsProcessTrustedWithOptions=lambda options: accessibility_requests.append(options) or False,
+        kAXTrustedCheckOptionPrompt="prompt",
+    )
+    quartz = SimpleNamespace(
+        CGPreflightScreenCaptureAccess=lambda: False,
+        CGRequestScreenCaptureAccess=lambda: screen_recording_requests.append(True) or False,
+    )
+    monkeypatch.setattr("mindroom.desktop.provider.sys.platform", "darwin")
+    monkeypatch.setitem(sys.modules, "ApplicationServices", application_services)
+    monkeypatch.setitem(sys.modules, "Quartz", quartz)
+
+    assert request_macos_desktop_permissions() == ("Accessibility", "Screen Recording")
+    assert accessibility_requests == [{"prompt": True}]
+    assert screen_recording_requests == [True]
 
 
 def test_macos_window_capture_binds_process_and_exact_bounds(monkeypatch: pytest.MonkeyPatch) -> None:
