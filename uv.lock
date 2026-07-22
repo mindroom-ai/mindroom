@@ -4088,6 +4088,8 @@ desi-vocal = [
     { name = "requests" },
 ]
 desktop = [
+    { name = "pillow", version = "10.4.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14'" },
+    { name = "pillow", version = "11.3.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14'" },
     { name = "pyautogui" },
     { name = "pyobjc-framework-applicationservices", marker = "sys_platform == 'darwin'" },
     { name = "pyobjc-framework-cocoa", marker = "sys_platform == 'darwin'" },
@@ -4475,6 +4477,7 @@ requires-dist = [
     { name = "oxylabs", marker = "extra == 'oxylabs'" },
     { name = "packaging", specifier = ">=24" },
     { name = "pandas", marker = "extra == 'pandas'", specifier = ">=2.2" },
+    { name = "pillow", marker = "extra == 'desktop'", specifier = ">=10.2" },
     { name = "playwright", marker = "extra == 'agentql'" },
     { name = "playwright", marker = "extra == 'browser'" },
     { name = "playwright", marker = "extra == 'browserbase'" },
