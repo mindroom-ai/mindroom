@@ -171,11 +171,10 @@ See the [Matrix Desktop Bridge](tools/desktop.md) guide for the complete secure 
 │ --help  -h        Show this message and exit.                                          │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ Commands ─────────────────────────────────────────────────────────────────────────────╮
-│ controller   Print the cloud controller identity that the local bridge must pin.       │
-│ login        Log in once, create an Olm device, and save its access token privately.   │
-│ pair         Claim one requester-agent pairing through authenticated Matrix E2EE.      │
-│ run          Run the outbound-only Matrix sync loop and execute locally authorized     │
-│              commands.                                                                 │
+│ login   Log in once, create an Olm device, and save its access token privately.        │
+│ pair    Claim one requester-agent pairing through authenticated Matrix E2EE.           │
+│ run     Run the outbound-only Matrix sync loop and execute locally authorized          │
+│         commands.                                                                      │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 
 
