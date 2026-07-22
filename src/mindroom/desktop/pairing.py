@@ -211,7 +211,7 @@ def confirm_desktop_pairing(
         raise DesktopPairingError(msg)
     assert pending.device_ed25519 is not None
     expected_verification = desktop_pairing_verification(token, pending.device_ed25519)
-    if not secrets.compare_digest(verification.upper(), expected_verification):
+    if not secrets.compare_digest(verification.upper().encode(), expected_verification.encode()):
         msg = "Desktop pairing verification does not match the claimed local device."
         raise DesktopPairingError(msg)
     return pending

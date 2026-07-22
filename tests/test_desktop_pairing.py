@@ -392,6 +392,7 @@ def test_chat_confirmation_saves_only_the_initiating_requester_agent_scope(
     verification = desktop_pairing_verification(token, "alice-fingerprint")
 
     assert "does not belong" in handle_desktop_command(f"confirm {token} {verification}", scope=bob_scope)
+    assert "verification does not match" in handle_desktop_command(f"confirm {token} vérification", scope=alice_scope)
     assert "Desktop paired" in handle_desktop_command(f"confirm {token} {verification}", scope=alice_scope)
     assert "Desktop is configured" in handle_desktop_command("", scope=alice_scope)
     assert "Desktop is configured" in handle_desktop_command("status", scope=alice_scope)

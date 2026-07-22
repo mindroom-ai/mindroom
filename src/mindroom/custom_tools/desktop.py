@@ -150,7 +150,7 @@ class DesktopTools(Toolkit):
             },
         )
         self._target = self._configuration.target
-        self._timeout_seconds = self._configuration.timeout_seconds
+        self._authored_timeout_seconds = timeout_seconds
         self._credentials_manager = credentials_manager
         self._worker_target = worker_target
         self._command_session_id = uuid4().hex
@@ -263,7 +263,7 @@ class DesktopTools(Toolkit):
             allowed_shared_services=frozenset(),
         )
         values = dict(credentials or {})
-        values.setdefault("timeout_seconds", self._timeout_seconds)
+        values.setdefault("timeout_seconds", self._authored_timeout_seconds)
         return desktop_configuration_state(values)
 
 

@@ -110,6 +110,30 @@ def test_unconfigured_desktop_preserves_authored_timeout_for_scoped_reload(
     assert tool._current_configuration().timeout_seconds == 90
 
 
+def test_scoped_desktop_preserves_invalid_authored_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pairing cannot silently replace an invalid operator timeout."""
+    monkeypatch.setattr(
+        "mindroom.custom_tools.desktop.load_scoped_credentials",
+        lambda *_args, **_kwargs: {
+            "device_user_id": "@desktop:example.org",
+            "device_id": "DEVICE",
+            "device_ed25519": "fingerprint",
+        },
+    )
+    tool = DesktopTools(
+        timeout_seconds=500,
+        credentials_manager=SimpleNamespace(),  # type: ignore[arg-type]
+        worker_target=SimpleNamespace(worker_scope="user_agent"),  # type: ignore[arg-type]
+    )
+
+    state = tool._current_configuration()
+
+    assert state.status is DesktopConfigurationStatus.INVALID
+    assert "between 1 and 120" in (state.error or "")
+
+
 @pytest.mark.asyncio
 async def test_commands_use_one_process_channel_with_monotonic_sequences(monkeypatch: pytest.MonkeyPatch) -> None:
     """Wall-clock changes cannot make later commands look reordered to the local bridge."""

@@ -8,7 +8,11 @@ from typing import TYPE_CHECKING, Any, Protocol
 from mindroom.authorization import responder_candidate_entities_for_room
 from mindroom.commands import config_confirmation
 from mindroom.commands.config_commands import handle_config_command
-from mindroom.commands.desktop_commands import DesktopCommandScope, handle_desktop_command
+from mindroom.commands.desktop_commands import (
+    DesktopCommandScope,
+    chat_pairing_desktop_error,
+    handle_desktop_command,
+)
 from mindroom.commands.encryption_commands import handle_e2ee_command, handle_encrypt_command
 from mindroom.commands.model_commands import handle_model_command
 from mindroom.commands.parsing import Command, CommandType, get_command_help, get_compact_command_entries
@@ -216,16 +220,12 @@ def agent_owns_command(
     """Return whether this bot owns one command response."""
     if agent_name == ROUTER_AGENT_NAME:
         return True
-    if command.type is not CommandType.DESKTOP or agent_name not in config.agents:
+    if command.type is not CommandType.DESKTOP:
         return False
-    agent_config = config.get_agent(agent_name)
-    entity = config.resolve_entity(agent_name)
-    return (
-        agent_config.private is not None
-        and entity.execution_scope == "user_agent"
-        and "desktop" in entity.available_tools
-        and set(room.users) == {requester_user_id, room.own_user_id}
-    )
+    return chat_pairing_desktop_error(config, agent_name) is None and set(room.users) == {
+        requester_user_id,
+        room.own_user_id,
+    }
 
 
 async def _desktop_agent_for_room(
@@ -250,13 +250,7 @@ async def _desktop_agent_for_room(
         agent_name = registry.current_entity_name_for_user_id(candidate.full_id, include_router=False)
         if agent_name is None or agent_name not in context.config.agents:
             continue
-        agent_config = context.config.get_agent(agent_name)
-        entity = context.config.resolve_entity(agent_name)
-        if (
-            agent_config.private is not None
-            and entity.execution_scope == "user_agent"
-            and "desktop" in entity.available_tools
-        ):
+        if chat_pairing_desktop_error(context.config, agent_name) is None:
             eligible.append((agent_name, candidate.full_id))
     if len(eligible) != 1:
         return None

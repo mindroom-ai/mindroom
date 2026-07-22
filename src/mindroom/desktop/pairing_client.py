@@ -53,7 +53,7 @@ async def send_desktop_pairing_claim(
             acknowledgement = DesktopPairingAccepted.from_content(event_content(event.source))
         except DesktopProtocolError:
             return
-        if secrets.compare_digest(acknowledgement.verification, verification):
+        if secrets.compare_digest(acknowledgement.verification.encode(), verification.encode()):
             accepted.set()
 
     client.add_to_device_callback(

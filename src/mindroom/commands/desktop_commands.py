@@ -45,19 +45,25 @@ class DesktopCommandScope:
     thread_id: str | None
 
 
-def _desktop_worker_target(scope: DesktopCommandScope) -> ResolvedWorkerTarget:
-    if scope.agent_name not in scope.config.agents:
-        msg = "Run this command while talking directly to a configured agent."
-        raise DesktopPairingError(msg)
-    entity = scope.config.resolve_entity(scope.agent_name)
+def chat_pairing_desktop_error(config: Config, agent_name: str) -> str | None:
+    """Return why an agent cannot own requester-scoped Desktop pairing."""
+    if agent_name not in config.agents:
+        return "Run this command while talking directly to a configured agent."
+    entity = config.resolve_entity(agent_name)
     if "desktop" not in entity.available_tools:
-        msg = f"Agent '{scope.agent_name}' does not declare the Desktop tool."
-        raise DesktopPairingError(msg)
+        return f"Agent '{agent_name}' does not declare the Desktop tool."
+    agent_config = config.get_agent(agent_name)
+    if agent_config.private is None or entity.execution_scope != "user_agent":
+        return "Chat pairing requires private.per: user_agent."
+    return None
+
+
+def _desktop_worker_target(scope: DesktopCommandScope) -> ResolvedWorkerTarget:
+    eligibility_error = chat_pairing_desktop_error(scope.config, scope.agent_name)
+    if eligibility_error is not None:
+        raise DesktopPairingError(eligibility_error)
+    entity = scope.config.resolve_entity(scope.agent_name)
     execution_scope = entity.execution_scope
-    agent_config = scope.config.get_agent(scope.agent_name)
-    if agent_config.private is None or execution_scope != "user_agent":
-        msg = "Chat pairing requires private.per: user_agent."
-        raise DesktopPairingError(msg)
     identity = build_tool_execution_identity(
         channel="matrix",
         agent_name=scope.agent_name,
@@ -193,4 +199,4 @@ def handle_desktop_command(args_text: str, *, scope: DesktopCommandScope) -> str
     return response
 
 
-__all__ = ["DesktopCommandScope", "handle_desktop_command"]
+__all__ = ["DesktopCommandScope", "chat_pairing_desktop_error", "handle_desktop_command"]

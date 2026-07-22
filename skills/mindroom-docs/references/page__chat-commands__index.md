@@ -1,7 +1,8 @@
 # Chat Commands
 
 MindRoom provides chat commands that users can type in any Matrix room where MindRoom agents or teams are present.
-Commands start with `!` and are handled by the router agent.
+Commands start with `!` and are normally handled by the router agent.
+A private Desktop agent handles `!desktop` directly when its room contains only that agent and the requester.
 
 ## Quick Reference
 
