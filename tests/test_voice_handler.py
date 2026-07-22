@@ -7,6 +7,7 @@ import tempfile
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import nio
 import pytest
 from agno.media import Audio
@@ -20,6 +21,8 @@ from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_p
 from tests.identity_helpers import persist_actual_entity_accounts
 
 TEST_VOICE_ACCOUNT_PASSWORD = "pw"  # noqa: S105
+_TIMEOUT_MESSAGE = "read timed out"
+_CONNECT_ERROR_MESSAGE = "connection refused"
 
 
 def _runtime_bound_config(config: Config) -> Config:
@@ -249,6 +252,160 @@ class TestVoiceHandler:
                 "data": {"model": "whisper-1", "language": "nl", "temperature": 0},
             },
         ]
+
+    @pytest.mark.asyncio
+    async def test_transcribe_audio_retries_once_after_timeout(self) -> None:
+        """A first-attempt read timeout is retried once and the retry's transcription is returned."""
+        config = _runtime_bound_config(
+            Config(
+                voice=VoiceConfig(
+                    enabled=True,
+                    stt=VoiceSTTConfig(host="https://stt.example.test/v1", model="whisper-1"),
+                ),
+            ),
+        )
+        client_init_kwargs: list[dict[str, object]] = []
+        post_calls: list[dict[str, object]] = []
+
+        class FakeResponse:
+            status_code = 200
+
+            def json(self) -> dict[str, str]:
+                return {"text": " transcribed on retry "}
+
+        class FakeAsyncClient:
+            def __init__(self, **kwargs: object) -> None:
+                client_init_kwargs.append(kwargs)
+
+            async def __aenter__(self) -> FakeAsyncClient:
+                return self
+
+            async def __aexit__(self, *args: object) -> None:
+                return None
+
+            async def post(
+                self,
+                url: str,
+                *,
+                headers: dict[str, str],
+                files: dict[str, tuple[str, bytes, str]],
+                data: dict[str, str],
+            ) -> FakeResponse:
+                post_calls.append({"url": url, "headers": headers, "files": files, "data": data})
+                if len(post_calls) == 1:
+                    raise httpx.ReadTimeout(_TIMEOUT_MESSAGE)
+                return FakeResponse()
+
+        with (
+            patch("mindroom.voice_handler.httpx.AsyncClient", FakeAsyncClient),
+            patch("mindroom.voice_handler.get_api_key_for_service", return_value="stt-key"),
+        ):
+            transcription = await voice_handler._transcribe_audio(
+                b"audio-bytes",
+                config,
+                runtime_paths_for(config),
+                mime_type="audio/ogg",
+            )
+
+        assert transcription == "transcribed on retry"
+        assert len(post_calls) == 2
+        assert client_init_kwargs[0].get("timeout") is voice_handler._STT_HTTP_TIMEOUT
+
+    @pytest.mark.asyncio
+    async def test_transcribe_audio_returns_none_when_both_attempts_time_out(self) -> None:
+        """Timeouts on both attempts exhaust the retry budget and return None."""
+        config = _runtime_bound_config(
+            Config(
+                voice=VoiceConfig(
+                    enabled=True,
+                    stt=VoiceSTTConfig(host="https://stt.example.test/v1", model="whisper-1"),
+                ),
+            ),
+        )
+        post_calls: list[dict[str, object]] = []
+
+        class FakeAsyncClient:
+            def __init__(self, **kwargs: object) -> None:
+                pass
+
+            async def __aenter__(self) -> FakeAsyncClient:
+                return self
+
+            async def __aexit__(self, *args: object) -> None:
+                return None
+
+            async def post(
+                self,
+                url: str,
+                *,
+                headers: dict[str, str],
+                files: dict[str, tuple[str, bytes, str]],
+                data: dict[str, str],
+            ) -> object:
+                post_calls.append({"url": url, "headers": headers, "files": files, "data": data})
+                raise httpx.ReadTimeout(_TIMEOUT_MESSAGE)
+
+        with (
+            patch("mindroom.voice_handler.httpx.AsyncClient", FakeAsyncClient),
+            patch("mindroom.voice_handler.get_api_key_for_service", return_value="stt-key"),
+        ):
+            transcription = await voice_handler._transcribe_audio(
+                b"audio-bytes",
+                config,
+                runtime_paths_for(config),
+                mime_type="audio/ogg",
+            )
+
+        assert transcription is None
+        assert len(post_calls) == voice_handler._STT_MAX_ATTEMPTS
+
+    @pytest.mark.asyncio
+    async def test_transcribe_audio_does_not_retry_non_timeout_error(self) -> None:
+        """Non-timeout transport errors fail immediately without a retry."""
+        config = _runtime_bound_config(
+            Config(
+                voice=VoiceConfig(
+                    enabled=True,
+                    stt=VoiceSTTConfig(host="https://stt.example.test/v1", model="whisper-1"),
+                ),
+            ),
+        )
+        post_calls: list[dict[str, object]] = []
+
+        class FakeAsyncClient:
+            def __init__(self, **kwargs: object) -> None:
+                pass
+
+            async def __aenter__(self) -> FakeAsyncClient:
+                return self
+
+            async def __aexit__(self, *args: object) -> None:
+                return None
+
+            async def post(
+                self,
+                url: str,
+                *,
+                headers: dict[str, str],
+                files: dict[str, tuple[str, bytes, str]],
+                data: dict[str, str],
+            ) -> object:
+                post_calls.append({"url": url, "headers": headers, "files": files, "data": data})
+                raise httpx.ConnectError(_CONNECT_ERROR_MESSAGE)
+
+        with (
+            patch("mindroom.voice_handler.httpx.AsyncClient", FakeAsyncClient),
+            patch("mindroom.voice_handler.get_api_key_for_service", return_value="stt-key"),
+        ):
+            transcription = await voice_handler._transcribe_audio(
+                b"audio-bytes",
+                config,
+                runtime_paths_for(config),
+                mime_type="audio/ogg",
+            )
+
+        assert transcription is None
+        assert len(post_calls) == 1
 
     def test_sanitize_unavailable_mentions_uses_exact_aliases(self) -> None:
         """Voice mention sanitizing should match exact Matrix mention aliases."""

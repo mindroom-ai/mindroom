@@ -44,6 +44,13 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
 logger = get_logger(__name__)
+# STT latency scales with clip length, so httpx's 5s default read timeout is never enough for
+# real voice notes (a ~13s clip on a cold/busy Whisper server routinely takes >5s). Use a
+# generous read timeout and keep connect/write/pool tight to fail fast on genuine outages.
+_STT_HTTP_TIMEOUT = httpx.Timeout(60.0, connect=10.0, write=30.0, pool=10.0)
+# A single immediate retry: a timed-out request usually warms the STT server, so the retry
+# almost always succeeds in ~1s. Only timeouts are retried; other errors fail immediately.
+_STT_MAX_ATTEMPTS = 2
 _STT_AUDIO_EXTENSION_BY_MIME_TYPE = {
     "audio/aac": ".aac",
     "audio/flac": ".flac",
@@ -494,22 +501,54 @@ async def _transcribe_audio(
         form_data: dict[str, object] = {"model": config.voice.stt.model}
         form_data.update(config.voice.stt.extra_kwargs)
 
-        async with httpx.AsyncClient() as http_client:
-            response = await http_client.post(url, headers=headers, files=files, data=form_data)
-            if response.status_code != 200:
-                logger.error(
-                    "stt_api_error",
-                    status_code=response.status_code,
-                    error=response.text,
-                )
-                return None
-
-            result = response.json()
-            return result.get("text", "").strip()
+        async with httpx.AsyncClient(timeout=_STT_HTTP_TIMEOUT) as http_client:
+            return await _post_stt_transcription(
+                http_client,
+                url,
+                headers=headers,
+                files=files,
+                form_data=form_data,
+            )
 
     except Exception:
         logger.exception("Error transcribing audio")
         return None
+
+
+async def _post_stt_transcription(
+    http_client: httpx.AsyncClient,
+    url: str,
+    *,
+    headers: dict[str, str],
+    files: dict[str, tuple[str, bytes, str]],
+    form_data: dict[str, object],
+) -> str | None:
+    """POST one STT request, retrying once on timeout, and return the transcription text.
+
+    Raises the final ``httpx.TimeoutException`` if every attempt times out; the caller turns
+    that into a ``None`` result.
+    """
+    for attempt in range(1, _STT_MAX_ATTEMPTS + 1):
+        try:
+            response = await http_client.post(url, headers=headers, files=files, data=form_data)
+        except httpx.TimeoutException:
+            if attempt >= _STT_MAX_ATTEMPTS:
+                raise
+            logger.warning("stt_transcription_retry", attempt=attempt, next_attempt=attempt + 1)
+            continue
+
+        if response.status_code != 200:
+            logger.error(
+                "stt_api_error",
+                status_code=response.status_code,
+                error=response.text,
+            )
+            return None
+
+        result = response.json()
+        return result.get("text", "").strip()
+
+    return None
 
 
 async def _process_transcription(
