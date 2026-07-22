@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import base64
 import json
-import subprocess
 import threading
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -62,11 +61,9 @@ async def test_request_headers_cache_current_token_and_reauthenticate_after_expi
         ],
     )
     calls: list[list[str]] = []
-    run_options: list[dict[str, object]] = []
 
-    def run(args: list[str], **kwargs: object) -> object:
+    def run(args: list[str], **_kwargs: object) -> object:
         calls.append(args)
-        run_options.append(kwargs)
         return next(results)
 
     monkeypatch.setattr("mindroom.desktop.cloudflare_access.subprocess.run", run)
@@ -87,11 +84,9 @@ async def test_request_headers_cache_current_token_and_reauthenticate_after_expi
     assert calls == [
         ["/usr/bin/cloudflared", "access", "token", "-app=https://matrix.example.org"],
         ["/usr/bin/cloudflared", "access", "token", "-app=https://matrix.example.org"],
-        ["/usr/bin/cloudflared", "access", "login", "https://matrix.example.org"],
+        ["/usr/bin/cloudflared", "access", "login", "--quiet", "https://matrix.example.org"],
         ["/usr/bin/cloudflared", "access", "token", "-app=https://matrix.example.org"],
     ]
-    assert run_options[2]["stdout"] is subprocess.DEVNULL
-    assert "stderr" not in run_options[2]
 
 
 def test_cloudflare_access_requires_cloudflared(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -115,9 +115,8 @@ class CloudflareAccessTokenProvider:
 
     def _login(self) -> None:
         completed = subprocess.run(
-            [self.executable, "access", "login", self.app_url],
+            [self.executable, "access", "login", "--quiet", self.app_url],
             check=False,
-            stdout=subprocess.DEVNULL,
         )
         if completed.returncode != 0:
             msg = f"cloudflared access login failed with exit {completed.returncode}."

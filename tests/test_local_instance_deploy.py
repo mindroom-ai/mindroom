@@ -287,6 +287,20 @@ def test_matrix_compose_files_publish_localhost_ports() -> None:
     assert synapse_compose["services"]["synapse"]["ports"] == ["${MATRIX_PORT:-8448}:8008"]
 
 
+def test_matrix_compose_files_expose_public_url_to_desktop_pairing() -> None:
+    """Local hosted pairing commands should use the Matrix ingress URL."""
+    tuwunel_compose = yaml.safe_load(Path("local/instances/deploy/docker-compose.tuwunel.yml").read_text())
+    synapse_compose = yaml.safe_load(Path("local/instances/deploy/docker-compose.synapse.yml").read_text())
+
+    assert tuwunel_compose["services"]["mindroom"]["environment"]["MINDROOM_DESKTOP_MATRIX_HOMESERVER"] == (
+        "https://m-${INSTANCE_DOMAIN}"
+    )
+    assert (
+        "MINDROOM_DESKTOP_MATRIX_HOMESERVER=https://m-${INSTANCE_DOMAIN}"
+        in (synapse_compose["services"]["mindroom"]["environment"])
+    )
+
+
 def test_copy_config_to_instance_uses_repo_root_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Instance config seeding should read the repo-root config file."""
     instance = _instance("alpha", matrix_type=None, data_root=tmp_path)

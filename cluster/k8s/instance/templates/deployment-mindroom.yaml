@@ -143,6 +143,8 @@ spec:
           value: "shell,file,python"
         - name: MATRIX_HOMESERVER
           value: "http://synapse-{{ .Values.customer }}:8008"
+        - name: MINDROOM_DESKTOP_MATRIX_HOMESERVER
+          value: "https://{{ .Values.customer }}.matrix.{{ .Values.baseDomain }}"
         - name: MATRIX_SERVER_NAME
           value: "{{ .Values.customer }}.{{ .Values.baseDomain }}"
         - name: MATRIX_REGISTRATION_SHARED_SECRET_FILE

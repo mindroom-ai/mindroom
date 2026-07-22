@@ -88,6 +88,7 @@ services:
   mindroom:
     environment:
       - MATRIX_HOMESERVER=http://synapse:8008
+      - MINDROOM_DESKTOP_MATRIX_HOMESERVER=https://m-${INSTANCE_DOMAIN}
       - MATRIX_SERVER_NAME=m-${INSTANCE_DOMAIN}
     depends_on:
       synapse:

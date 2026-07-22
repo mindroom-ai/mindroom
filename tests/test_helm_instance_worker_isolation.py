@@ -468,6 +468,20 @@ def test_instance_chart_uses_tenant_worker_auth_secret() -> None:
     assert "data" not in worker_auth_secret
 
 
+def test_instance_chart_exposes_public_matrix_url_to_desktop_pairing() -> None:
+    """Hosted pairing commands should use the tenant's reachable Matrix ingress."""
+    docs = _render_chart(
+        Path("cluster/k8s/instance"),
+        "customer=alice",
+        "baseDomain=staging.mindroom.chat",
+    )
+    deployment = _resource(docs, "Deployment", "mindroom-alice")
+    env = _env_by_name(_container(deployment, "mindroom"))
+
+    assert env["MATRIX_HOMESERVER"]["value"] == "http://synapse-alice:8008"
+    assert env["MINDROOM_DESKTOP_MATRIX_HOMESERVER"]["value"] == "https://alice.matrix.staging.mindroom.chat"
+
+
 def test_instance_chart_static_runner_uses_shared_credentials_encryption_key_secret() -> None:
     """Static runner mode should give both runtime containers the same Secret-backed credential key."""
     credentials_encryption_key = "test-encryption-key"
