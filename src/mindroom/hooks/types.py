@@ -130,6 +130,9 @@ class HookMatrixAdmin(Protocol):
     async def invite_user(self, room_id: str, user_id: str) -> bool:
         """Invite one user into one room."""
 
+    async def kick_user(self, room_id: str, user_id: str, *, reason: str | None = None) -> bool:
+        """Kick one joined user from one room."""
+
     async def get_room_members(self, room_id: str) -> set[str] | None:
         """Return joined members for one room, or ``None`` when the fetch fails."""
 

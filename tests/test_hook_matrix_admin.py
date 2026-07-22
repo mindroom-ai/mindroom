@@ -184,6 +184,12 @@ async def test_build_hook_matrix_admin_delegates_existing_room_helpers(tmp_path:
 
         room_id = await admin.create_room(name="Personal Room", alias_localpart="personal-user", topic="Hello")
         invited = await admin.invite_user("!created:localhost", "@user:localhost")
+        client.room_kick.return_value = nio.RoomKickResponse()
+        kicked = await admin.kick_user(
+            "!created:localhost",
+            "@user:localhost",
+            reason="Reset membership",
+        )
         members = await admin.get_room_members("!created:localhost")
         added = await admin.add_room_to_space("!space:localhost", "!created:localhost")
         client.room_put_state.return_value = nio.RoomPutStateResponse.from_dict(
@@ -199,6 +205,7 @@ async def test_build_hook_matrix_admin_delegates_existing_room_helpers(tmp_path:
 
     assert room_id == "!created:localhost"
     assert invited is True
+    assert kicked is True
     assert members == {"@user:localhost", "@mindroom_router:localhost"}
     assert added is True
     assert wrote_state is True
@@ -210,6 +217,11 @@ async def test_build_hook_matrix_admin_delegates_existing_room_helpers(tmp_path:
         power_users=None,
     )
     mock_invite.assert_awaited_once_with(client, "!created:localhost", "@user:localhost")
+    client.room_kick.assert_awaited_once_with(
+        "!created:localhost",
+        "@user:localhost",
+        reason="Reset membership",
+    )
     client.room_put_state.assert_awaited_once_with(
         room_id="!created:localhost",
         event_type="com.mindroom.scheduled.task",
@@ -218,6 +230,20 @@ async def test_build_hook_matrix_admin_delegates_existing_room_helpers(tmp_path:
     )
     mock_members.assert_awaited_once_with(client, "!created:localhost")
     mock_add.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_hook_matrix_admin_kick_user_returns_false_on_error(tmp_path: Path) -> None:
+    """User kicks should fail closed on Matrix error responses."""
+    module = _matrix_admin_module()
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.homeserver = "http://localhost:8008"
+    client.room_kick.return_value = nio.RoomKickError("forbidden", status_code="M_FORBIDDEN")
+
+    admin = module.build_hook_matrix_admin(client, runtime_paths=test_runtime_paths(tmp_path))
+
+    assert await admin.kick_user("!room:localhost", "@user:localhost") is False
+    client.room_kick.assert_awaited_once_with("!room:localhost", "@user:localhost", reason=None)
 
 
 @pytest.mark.asyncio

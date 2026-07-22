@@ -63,6 +63,11 @@ class _BoundHookMatrixAdmin:
         """Invite one user into one room."""
         return await invite_to_room(self.client, room_id, user_id)
 
+    async def kick_user(self, room_id: str, user_id: str, *, reason: str | None = None) -> bool:
+        """Kick one joined user from one room."""
+        response = await self.client.room_kick(room_id, user_id, reason=reason)
+        return isinstance(response, nio.RoomKickResponse)
+
     async def get_room_members(self, room_id: str) -> set[str] | None:
         """Return the current joined members for one room, or ``None`` when the fetch fails."""
         return await get_room_members(self.client, room_id)
