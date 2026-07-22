@@ -33,6 +33,34 @@ class DesktopEmergencyStopError(DesktopProviderError):
     """The local pointer fail-safe revoked input for this bridge process."""
 
 
+def request_macos_desktop_permissions() -> tuple[str, ...]:
+    """Request the macOS permissions needed by the Desktop bridge."""
+    if sys.platform != "darwin":
+        return ()
+
+    import ApplicationServices  # noqa: PLC0415
+    import Quartz  # noqa: PLC0415
+
+    accessibility_allowed = bool(ApplicationServices.AXIsProcessTrusted())  # ty: ignore[unresolved-attribute]
+    if not accessibility_allowed:
+        accessibility_allowed = bool(
+            ApplicationServices.AXIsProcessTrustedWithOptions(  # ty: ignore[unresolved-attribute]
+                {ApplicationServices.kAXTrustedCheckOptionPrompt: True},  # ty: ignore[unresolved-attribute]
+            ),
+        )
+
+    screen_recording_allowed = bool(Quartz.CGPreflightScreenCaptureAccess())  # ty: ignore[unresolved-attribute]
+    if not screen_recording_allowed:
+        screen_recording_allowed = bool(Quartz.CGRequestScreenCaptureAccess())  # ty: ignore[unresolved-attribute]
+
+    missing: list[str] = []
+    if not accessibility_allowed:
+        missing.append("Accessibility")
+    if not screen_recording_allowed:
+        missing.append("Screen Recording")
+    return tuple(missing)
+
+
 @dataclass(frozen=True, slots=True)
 class ScreenCapture:
     """Encoded screenshot plus its logical desktop and capture geometry."""
@@ -524,4 +552,5 @@ __all__ = [
     "DesktopProviderError",
     "PyAutoGuiDesktopProvider",
     "ScreenCapture",
+    "request_macos_desktop_permissions",
 ]
