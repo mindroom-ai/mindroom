@@ -26,6 +26,7 @@ from mindroom.desktop.pairing import (
 if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.desktop.identity import DesktopControllerIdentity
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,31 +75,23 @@ def _setup_response(scope: DesktopCommandScope) -> str:
         scope.runtime_paths,
     )
     cloudflare_access = scope.runtime_paths.env_flag("MINDROOM_DESKTOP_CLOUDFLARE_ACCESS")
-    login_parts = [
-        "mindroom desktop login",
+    setup_parts = [
+        "mindroom desktop setup",
         f"--user-id {shlex.quote(scope.requester_id)}",
         f"--homeserver {shlex.quote(homeserver)}",
-    ]
-    if cloudflare_access:
-        login_parts.append("--cloudflare-access")
-    login_command = " ".join(login_parts)
-    pairing_parts = [
-        "mindroom desktop pair",
         f"--code {shlex.quote(pairing.token)}",
         f"--controller-user-id {shlex.quote(controller.user_id)}",
         f"--controller-device-id {shlex.quote(controller.device_id)}",
         f"--controller-ed25519 {shlex.quote(controller.ed25519)}",
     ]
     if cloudflare_access:
-        pairing_parts.append("--cloudflare-access")
-    pairing_command = " ".join(pairing_parts)
+        setup_parts.append("--cloudflare-access")
+    setup_command = " ".join(setup_parts)
     return (
         "🔐 **Desktop pairing started**\n\n"
-        "On your computer, log in once if you have not already:\n\n"
-        f"```bash\n{login_command}\n```\n\n"
-        "Then run:\n\n"
-        f"```bash\n{pairing_command}\n```\n\n"
-        "Then return here and run the exact `!desktop confirm ...` command printed by the local pairing command.\n\n"
+        "On your computer, run this command. It logs in if needed, then claims the pairing:\n\n"
+        f"```bash\n{setup_command}\n```\n\n"
+        "Then return here and run the exact `!desktop confirm ...` command it prints.\n\n"
         "Current Desktop target remains unchanged until confirmation."
     )
 
@@ -110,6 +103,20 @@ def _status_response(scope: DesktopCommandScope) -> str:
     if state.status is DesktopConfigurationStatus.INVALID:
         return f"⚠️ Desktop configuration is invalid: {state.error} Run `!desktop setup` to replace it."
     return f"Desktop setup is required for you and agent `{scope.agent_name}`. Run `!desktop setup`."
+
+
+def _run_command(scope: DesktopCommandScope, controller: DesktopControllerIdentity) -> str:
+    """Return the current local bridge command with only the app choice left open."""
+    parts = [
+        "mindroom desktop run",
+        f"--controller-user-id {shlex.quote(controller.user_id)}",
+        f"--controller-device-id {shlex.quote(controller.device_id)}",
+        f"--controller-ed25519 {shlex.quote(controller.ed25519)}",
+        f"--allow-requester {shlex.quote(scope.requester_id)}",
+        f"--allow-agent {shlex.quote(scope.agent_name)}",
+        "--allow-app APPLICATION_ID",
+    ]
+    return " \\\n  ".join(parts)
 
 
 def _confirm_response(scope: DesktopCommandScope, token: str, verification: str) -> str:
@@ -132,6 +139,8 @@ def _confirm_response(scope: DesktopCommandScope, token: str, verification: str)
     state = desktop_configuration_state(credentials)
     if state.status is not DesktopConfigurationStatus.READY:
         raise DesktopPairingError(state.error or "Claimed Desktop device identity is invalid.")
+    controller = controller_identity_for_entity(scope.agent_name, runtime_paths=scope.runtime_paths)
+    run_command = _run_command(scope, controller)
     save_desktop_credentials(
         get_runtime_credentials_manager(scope.runtime_paths),
         credentials,
@@ -140,8 +149,12 @@ def _confirm_response(scope: DesktopCommandScope, token: str, verification: str)
     )
     complete_desktop_pairing(scope.runtime_paths, token=token)
     return (
-        f"✅ Desktop paired for you and agent `{scope.agent_name}`. "
-        "Start the local bridge with exact requester, agent, application, and lease allowlists."
+        f"✅ Desktop paired for you and agent `{scope.agent_name}`.\n\n"
+        "Start the local bridge with:\n\n"
+        f"```bash\n{run_command}\n```\n\n"
+        "Replace `APPLICATION_ID` with one exact local application ID and repeat `--allow-app` as needed. "
+        "Add `--allow-control` for a short local control lease; otherwise the bridge is observe-only. "
+        "If setup used `--config` or `--storage-path`, add the same option to this command."
     )
 
 

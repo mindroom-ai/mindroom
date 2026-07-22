@@ -89,7 +89,7 @@ The Matrix homeserver can observe routing metadata, timing, and encrypted media 
 ## Requirements
 
 You can use the same Matrix account as your agent chat or a dedicated Matrix account for the local bridge.
-The `mindroom desktop login` command returned by `!desktop setup` uses your chat account and adds a dedicated Matrix device to it.
+The `mindroom desktop setup` command returned by `!desktop setup` uses your chat account and adds a dedicated Matrix device to it when no saved local Desktop session exists.
 For manual password login, a dedicated account reduces the impact of exposing that password on the local computer.
 The desktop account and the cloud MindRoom entity must use the same Matrix federation environment and must be able to exchange to-device events and media.
 If the optional local desktop dependencies are missing, `mindroom desktop run` auto-installs the `desktop` extra at startup unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set.
@@ -137,6 +137,8 @@ MindRoom exchanges that token immediately and never writes it to disk or termina
 It does not create or replace account-level cross-signing keys for an SSO account; the bridge authenticates this transport by pinning the exact device ID and Ed25519 key shown after login.
 
 The session JSON saves only the reusable Matrix access token and device identifiers.
+By default, all `mindroom desktop` commands use the user-level `~/.mindroom` runtime, regardless of the current working directory.
+An explicit `--config`, `--storage-path`, `MINDROOM_CONFIG_PATH`, or `MINDROOM_STORAGE_PATH` still selects another runtime and must be reused across login, pairing, and bridge startup.
 The device's private Olm identity is persisted separately under `<storage>/encryption_keys/`; on Unix, MindRoom forces its per-user directory to mode `0700`.
 The printed Ed25519 value is the device's public fingerprint.
 Self-service pairing sends that fingerprint to the exact cloud agent through an authenticated Olm-encrypted claim, so never copy user-specific Desktop identity fields into agent YAML.
@@ -221,8 +223,10 @@ Add `private: {per: user_agent}` only when the agent's entire runtime and state 
 Desktop device identities are requester-agent scoped either way.
 Each user then runs `!desktop setup` in a private Matrix room containing only that user and one Desktop-enabled agent, plus the router when it is serving the command.
 The short-lived pairing code is a bearer secret, so MindRoom rejects `!desktop` when any other room member is present.
-The serving bot returns the full `mindroom desktop login` command for the configured homeserver and a `mindroom desktop pair` command containing a short-lived code and the exact pinned cloud controller identity.
-Run the login command once if needed, run the pairing command, then copy the exact `!desktop confirm <code> <verification>` command it prints back to the same Matrix chat.
+The serving bot returns one full `mindroom desktop setup` command containing the configured homeserver, a short-lived code, and the exact pinned cloud controller identity.
+Run it once; it reuses an existing local Desktop Matrix session or completes login before claiming the pairing.
+Then copy the exact `!desktop confirm <code> <verification>` command it prints back to the same Matrix chat.
+The separate `mindroom desktop login` and `mindroom desktop pair` commands remain available for manual recovery.
 The claim travels as an authenticated Olm-encrypted to-device event, and confirmation stores the local device identity only in that requester's agent-scoped credential store.
 The verification value binds confirmation to the claimed Ed25519 key, so a different device cannot pre-claim a visible pairing code and be confirmed accidentally.
 Another requester or agent cannot confirm or use that record, and shared credentials are never used as a fallback.

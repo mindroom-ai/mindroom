@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
 
 import nio
@@ -19,11 +19,38 @@ from mindroom.desktop.provider import DesktopProviderError
 from mindroom.desktop.session import DesktopMatrixSession, DesktopSessionError
 from mindroom.matrix.to_device import AuthenticatedToDeviceEvent
 
-if TYPE_CHECKING:
-    from pathlib import Path
-
-
 runner = CliRunner()
+
+
+def test_desktop_runtime_default_is_independent_of_working_directory(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Local Desktop sessions use one user-level location across shell directories."""
+    activate = MagicMock(return_value=SimpleNamespace())
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("mindroom.constants.exported_process_env", dict)
+    monkeypatch.setattr("mindroom.cli.config.activate_cli_runtime", activate)
+
+    desktop_cli._activate_desktop_runtime(None, storage_path=None)
+
+    activate.assert_called_once_with(Path.home() / ".mindroom" / "config.yaml", storage_path=None)
+
+
+def test_desktop_runtime_storage_override_does_not_restore_working_directory_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A storage override keeps the stable user-level Desktop config selection."""
+    activate = MagicMock(return_value=SimpleNamespace())
+    monkeypatch.setattr(
+        "mindroom.constants.exported_process_env",
+        lambda: {"MINDROOM_STORAGE_PATH": "/shared/mindroom-data"},
+    )
+    monkeypatch.setattr("mindroom.cli.config.activate_cli_runtime", activate)
+
+    desktop_cli._activate_desktop_runtime(None, storage_path=None)
+
+    activate.assert_called_once_with(Path.home() / ".mindroom" / "config.yaml", storage_path=None)
 
 
 def test_login_identity_output_routes_users_to_chat_pairing(capsys: pytest.CaptureFixture[str], tmp_path: Path) -> None:
@@ -209,6 +236,49 @@ def test_desktop_pair_sends_claim_with_saved_local_session(monkeypatch: pytest.M
     assert pair.await_args.kwargs["code"] == "short-code"
     assert pair.await_args.kwargs["controller_user_id"] == "@computer:example.org"
     assert "!desktop confirm short-code VERIFY123" in result.output
+
+
+@pytest.mark.parametrize("session_exists", [False, True])
+def test_desktop_setup_logs_in_only_when_needed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    session_exists: bool,
+) -> None:
+    """One setup command creates a missing session and always claims pairing."""
+    runtime_paths = SimpleNamespace(storage_root=tmp_path)
+    session_path = tmp_path / "desktop_bridge" / "matrix_session.json"
+    if session_exists:
+        session_path.parent.mkdir(parents=True)
+        session_path.touch()
+    login = MagicMock()
+    pair = MagicMock()
+    monkeypatch.setattr("mindroom.cli.config.activate_cli_runtime", lambda *_args, **_kwargs: runtime_paths)
+    monkeypatch.setattr(desktop_cli, "desktop_login", login)
+    monkeypatch.setattr(desktop_cli, "desktop_pair", pair)
+
+    result = runner.invoke(
+        desktop_app,
+        [
+            "setup",
+            "--user-id",
+            "@alice:example.org",
+            "--homeserver",
+            "https://matrix.example.org",
+            "--code",
+            "short-code",
+            "--controller-user-id",
+            "@computer:example.org",
+            "--controller-device-id",
+            "CLOUD",
+            "--controller-ed25519",
+            "cloud-fingerprint",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert login.called is not session_exists
+    assert pair.call_args.kwargs["code"] == "short-code"
 
 
 def test_desktop_run_loads_matrix_http_headers(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
