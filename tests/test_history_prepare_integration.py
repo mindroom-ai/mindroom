@@ -10,8 +10,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from agno.agent import Agent
+from agno.db.base import SessionType
+from agno.db.sqlite import SqliteDb
 from agno.models.message import Message
 from agno.run.agent import RunOutput
+from agno.session.agent import AgentSession
 from agno.session.summary import SessionSummary
 from defusedxml.ElementTree import fromstring
 
@@ -21,6 +24,7 @@ from mindroom.ai import _prepare_agent_and_prompt
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import CompactionConfig, DefaultsConfig, ModelConfig
+from mindroom.constants import MATRIX_RESPONSE_EVENT_ID_METADATA_KEY
 from mindroom.execution_preparation import (
     _build_matrix_prompt_with_history,
     _PreparedExecutionContext,
@@ -115,6 +119,55 @@ def test_session_storage_strips_prompt_roles_before_persisting_history(tmp_path:
         ("assistant", "assistant answer"),
         ("tool", "tool result"),
     ]
+
+
+def test_session_storage_unwraps_only_trusted_legacy_assistant_tags_on_read(tmp_path: Path) -> None:
+    """Legacy transport wrappers should leave storage untouched and model-authored text intact."""
+    config, runtime_paths = _make_config(tmp_path)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    assert isinstance(storage, SqliteDb)
+    legacy_body = "Prior answer with ]]> text"
+    legacy_tag = render_msg_tag(
+        sender="@agent:localhost",
+        body=legacy_body,
+        event_id="$answer",
+    )
+    legacy_run = _completed_run(
+        "run-1",
+        messages=[
+            Message(role="user", content="Question"),
+            Message(role="assistant", content=legacy_tag),
+        ],
+    )
+    legacy_run.metadata = {MATRIX_RESPONSE_EVENT_ID_METADATA_KEY: "$answer"}
+    model_authored_tag = render_msg_tag(
+        sender="@agent:localhost",
+        body="Keep this literal text",
+        event_id="$different",
+    )
+    literal_run = _completed_run(
+        "run-2",
+        messages=[
+            Message(role="user", content="Another question"),
+            Message(role="assistant", content=model_authored_tag),
+        ],
+    )
+    literal_run.metadata = {MATRIX_RESPONSE_EVENT_ID_METADATA_KEY: "$second-answer"}
+    storage.upsert_session(_session("session-1", runs=[legacy_run, literal_run]))
+
+    loaded = get_agent_session(storage, "session-1")
+    assert loaded is not None
+    assert loaded.runs is not None
+    assert loaded.runs[0].messages is not None
+    assert loaded.runs[0].messages[-1].content == legacy_body
+    assert loaded.runs[1].messages is not None
+    assert loaded.runs[1].messages[-1].content == model_authored_tag
+
+    raw = SqliteDb.get_session(storage, "session-1", SessionType.AGENT)
+    assert isinstance(raw, AgentSession)
+    assert raw.runs is not None
+    assert raw.runs[0].messages is not None
+    assert raw.runs[0].messages[-1].content == legacy_tag
 
 
 def test_create_agent_uses_active_model_override(tmp_path: Path) -> None:

@@ -240,6 +240,7 @@ visibility = [
 path = "mindroom.agent_storage"
 depends_on = [
     "mindroom.constants",
+    "mindroom.prompt_message_tags",
     "mindroom.runtime_resolution",
 ]
 visibility = [
@@ -1103,7 +1104,6 @@ depends_on = [
     "mindroom.history.types",
     "mindroom.logging_config",
     "mindroom.model_loading",
-    "mindroom.prompt_message_tags",
     "mindroom.team_scope",
     "mindroom.timing",
     "mindroom.token_budget",
@@ -1505,11 +1505,11 @@ visibility = [
 path = "mindroom.prompt_message_tags"
 depends_on = []
 visibility = [
+    "mindroom.agent_storage",
     "mindroom.coalescing_batch",
     "mindroom.conversation_state_writer",
     "mindroom.execution_preparation",
     "mindroom.history.interrupted_replay",
-    "mindroom.history.runtime",
 ]
 
 [[modules]]
