@@ -165,6 +165,10 @@ MindRoom reads the JWT's documented `exp` claim and reuses it only while current
 After expiry, the first Matrix request obtains a current token from `cloudflared`, prompting for browser reauthentication when needed.
 For an older saved session, `mindroom desktop run --cloudflare-access` enables Access for that invocation without rewriting the session.
 
+When the MindRoom runtime reaches Matrix through an internal address, set `MINDROOM_DESKTOP_MATRIX_HOMESERVER` to the public Matrix URL that local Desktop clients can reach.
+This changes only the login command printed by `!desktop setup`; server-side Matrix traffic continues to use `MATRIX_HOMESERVER`.
+Set `MINDROOM_DESKTOP_CLOUDFLARE_ACCESS=true` when that public URL requires Cloudflare Access so the printed login and pairing commands include `--cloudflare-access`.
+
 For unattended proxies that issue machine credentials instead, put their required request headers in a separate JSON file:
 
 ```json

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import sqlite3
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, Mock
@@ -316,6 +317,71 @@ def test_pairing_receiver_registration_owns_desktop_enablement_check(tmp_path: P
     callback, event_type = client.add_to_device_callback.call_args.args
     assert callback.__self__.agent_name == "computer"
     assert event_type is AuthenticatedToDeviceEvent
+
+
+def test_setup_command_uses_public_homeserver_and_access_flag(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hosted runtimes can print a reachable Desktop login command."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = Config.validate_with_runtime(
+        {
+            "defaults": {"tools": []},
+            "agents": {
+                "computer": {
+                    "display_name": "Computer",
+                    "role": "Operate local apps",
+                    "tools": ["desktop"],
+                },
+            },
+        },
+        runtime_paths,
+    )
+    monkeypatch.setattr(
+        "mindroom.commands.desktop_commands.controller_identity_for_entity",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            user_id="@computer:example.org",
+            device_id="CLOUD",
+            ed25519="cloud-fingerprint",
+        ),
+    )
+    scope = DesktopCommandScope(
+        config=config,
+        runtime_paths=runtime_paths,
+        agent_name="computer",
+        requester_id="@alice:example.org",
+    )
+
+    setup_response = handle_desktop_command("setup", scope=scope)
+    login_command = next(line for line in setup_response.splitlines() if line.startswith("mindroom desktop login"))
+    pairing_command = next(line for line in setup_response.splitlines() if line.startswith("mindroom desktop pair"))
+    assert login_command == ("mindroom desktop login --user-id @alice:example.org --homeserver http://localhost:8008")
+    assert "--cloudflare-access" not in pairing_command
+
+    public_runtime_paths = replace(
+        runtime_paths,
+        process_env={
+            **runtime_paths.process_env,
+            "MINDROOM_DESKTOP_MATRIX_HOMESERVER": "https://matrix.example.org",
+            "MINDROOM_DESKTOP_CLOUDFLARE_ACCESS": "true",
+        },
+    )
+    public_setup_response = handle_desktop_command(
+        "setup",
+        scope=replace(scope, runtime_paths=public_runtime_paths),
+    )
+    public_login_command = next(
+        line for line in public_setup_response.splitlines() if line.startswith("mindroom desktop login")
+    )
+    public_pairing_command = next(
+        line for line in public_setup_response.splitlines() if line.startswith("mindroom desktop pair")
+    )
+    assert public_login_command == (
+        "mindroom desktop login --user-id @alice:example.org "
+        "--homeserver https://matrix.example.org --cloudflare-access"
+    )
+    assert public_pairing_command.endswith("--cloudflare-access")
 
 
 def test_chat_confirmation_saves_only_the_initiating_requester_agent_scope(

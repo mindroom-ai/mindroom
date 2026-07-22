@@ -84,7 +84,7 @@ async def test_request_headers_cache_current_token_and_reauthenticate_after_expi
     assert calls == [
         ["/usr/bin/cloudflared", "access", "token", "-app=https://matrix.example.org"],
         ["/usr/bin/cloudflared", "access", "token", "-app=https://matrix.example.org"],
-        ["/usr/bin/cloudflared", "access", "login", "https://matrix.example.org"],
+        ["/usr/bin/cloudflared", "access", "login", "--quiet", "https://matrix.example.org"],
         ["/usr/bin/cloudflared", "access", "token", "-app=https://matrix.example.org"],
     ]
 

@@ -70,22 +70,28 @@ def _setup_response(scope: DesktopCommandScope) -> str:
         requester_id=scope.requester_id,
         agent_name=scope.agent_name,
     )
-    login_command = " ".join(
-        (
-            "mindroom desktop login",
-            f"--user-id {shlex.quote(scope.requester_id)}",
-            f"--homeserver {shlex.quote(runtime_matrix_homeserver(scope.runtime_paths))}",
-        ),
+    homeserver = scope.runtime_paths.env_value("MINDROOM_DESKTOP_MATRIX_HOMESERVER") or runtime_matrix_homeserver(
+        scope.runtime_paths,
     )
-    pairing_command = " ".join(
-        (
-            "mindroom desktop pair",
-            f"--code {shlex.quote(pairing.token)}",
-            f"--controller-user-id {shlex.quote(controller.user_id)}",
-            f"--controller-device-id {shlex.quote(controller.device_id)}",
-            f"--controller-ed25519 {shlex.quote(controller.ed25519)}",
-        ),
-    )
+    cloudflare_access = scope.runtime_paths.env_flag("MINDROOM_DESKTOP_CLOUDFLARE_ACCESS")
+    login_parts = [
+        "mindroom desktop login",
+        f"--user-id {shlex.quote(scope.requester_id)}",
+        f"--homeserver {shlex.quote(homeserver)}",
+    ]
+    if cloudflare_access:
+        login_parts.append("--cloudflare-access")
+    login_command = " ".join(login_parts)
+    pairing_parts = [
+        "mindroom desktop pair",
+        f"--code {shlex.quote(pairing.token)}",
+        f"--controller-user-id {shlex.quote(controller.user_id)}",
+        f"--controller-device-id {shlex.quote(controller.device_id)}",
+        f"--controller-ed25519 {shlex.quote(controller.ed25519)}",
+    ]
+    if cloudflare_access:
+        pairing_parts.append("--cloudflare-access")
+    pairing_command = " ".join(pairing_parts)
     return (
         "🔐 **Desktop pairing started**\n\n"
         "On your computer, log in once if you have not already:\n\n"
