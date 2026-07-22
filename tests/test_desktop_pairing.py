@@ -323,7 +323,7 @@ def test_setup_command_uses_public_homeserver_and_access_flag(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Hosted runtimes can print a reachable Desktop login command."""
+    """Hosted runtimes can print one reachable Desktop setup command."""
     runtime_paths = test_runtime_paths(tmp_path)
     config = Config.validate_with_runtime(
         {
@@ -354,10 +354,12 @@ def test_setup_command_uses_public_homeserver_and_access_flag(
     )
 
     setup_response = handle_desktop_command("setup", scope=scope)
-    login_command = next(line for line in setup_response.splitlines() if line.startswith("mindroom desktop login"))
-    pairing_command = next(line for line in setup_response.splitlines() if line.startswith("mindroom desktop pair"))
-    assert login_command == ("mindroom desktop login --user-id @alice:example.org --homeserver http://localhost:8008")
-    assert "--cloudflare-access" not in pairing_command
+    setup_command = next(line for line in setup_response.splitlines() if line.startswith("mindroom desktop setup"))
+    assert setup_command.startswith(
+        "mindroom desktop setup --user-id @alice:example.org --homeserver http://localhost:8008 --code ",
+    )
+    assert "--controller-user-id @computer:example.org" in setup_command
+    assert "--cloudflare-access" not in setup_command
 
     public_runtime_paths = replace(
         runtime_paths,
@@ -371,17 +373,11 @@ def test_setup_command_uses_public_homeserver_and_access_flag(
         "setup",
         scope=replace(scope, runtime_paths=public_runtime_paths),
     )
-    public_login_command = next(
-        line for line in public_setup_response.splitlines() if line.startswith("mindroom desktop login")
+    public_setup_command = next(
+        line for line in public_setup_response.splitlines() if line.startswith("mindroom desktop setup")
     )
-    public_pairing_command = next(
-        line for line in public_setup_response.splitlines() if line.startswith("mindroom desktop pair")
-    )
-    assert public_login_command == (
-        "mindroom desktop login --user-id @alice:example.org "
-        "--homeserver https://matrix.example.org --cloudflare-access"
-    )
-    assert public_pairing_command.endswith("--cloudflare-access")
+    assert "--homeserver https://matrix.example.org" in public_setup_command
+    assert public_setup_command.endswith("--cloudflare-access")
 
 
 def test_chat_confirmation_saves_only_the_initiating_requester_agent_scope(
@@ -437,7 +433,7 @@ def test_chat_confirmation_saves_only_the_initiating_requester_agent_scope(
     )
 
     setup_response = handle_desktop_command("setup", scope=alice_scope)
-    assert "mindroom desktop login --user-id @alice:example.org --homeserver http://localhost:8008" in setup_response
+    assert "mindroom desktop setup --user-id @alice:example.org --homeserver http://localhost:8008" in setup_response
     token_match = re.search(r"--code ([A-Za-z0-9_-]+)", setup_response)
     assert token_match is not None
     token = token_match.group(1)
@@ -490,7 +486,7 @@ def test_chat_confirmation_saves_only_the_initiating_requester_agent_scope(
     pair_scope(bob_scope, device_id="BOB", fingerprint="bob-fingerprint")
     pair_scope(alice_other_agent_scope, device_id="ALICEOTHER", fingerprint="alice-other-fingerprint")
 
-    assert "mindroom desktop pair" in handle_desktop_command("rotate", scope=alice_scope)
+    assert "mindroom desktop setup" in handle_desktop_command("rotate", scope=alice_scope)
     assert "Usage:" in handle_desktop_command("unknown", scope=alice_scope)
     assert "disconnect confirm" in handle_desktop_command("disconnect", scope=alice_scope)
     assert "Desktop is configured" in handle_desktop_command("status", scope=alice_scope)

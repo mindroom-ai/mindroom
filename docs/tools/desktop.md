@@ -89,7 +89,7 @@ The Matrix homeserver can observe routing metadata, timing, and encrypted media 
 ## Requirements
 
 You can use the same Matrix account as your agent chat or a dedicated Matrix account for the local bridge.
-The `mindroom desktop login` command returned by `!desktop setup` uses your chat account and adds a dedicated Matrix device to it.
+The `mindroom desktop setup` command returned by `!desktop setup` uses your chat account and adds a dedicated Matrix device to it when no saved local Desktop session exists.
 For manual password login, a dedicated account reduces the impact of exposing that password on the local computer.
 The desktop account and the cloud MindRoom entity must use the same Matrix federation environment and must be able to exchange to-device events and media.
 If the optional local desktop dependencies are missing, `mindroom desktop run` auto-installs the `desktop` extra at startup unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set.
@@ -223,8 +223,10 @@ Add `private: {per: user_agent}` only when the agent's entire runtime and state 
 Desktop device identities are requester-agent scoped either way.
 Each user then runs `!desktop setup` in a private Matrix room containing only that user and one Desktop-enabled agent, plus the router when it is serving the command.
 The short-lived pairing code is a bearer secret, so MindRoom rejects `!desktop` when any other room member is present.
-The serving bot returns the full `mindroom desktop login` command for the configured homeserver and a `mindroom desktop pair` command containing a short-lived code and the exact pinned cloud controller identity.
-Run the login command once if needed, run the pairing command, then copy the exact `!desktop confirm <code> <verification>` command it prints back to the same Matrix chat.
+The serving bot returns one full `mindroom desktop setup` command containing the configured homeserver, a short-lived code, and the exact pinned cloud controller identity.
+Run it once; it reuses an existing local Desktop Matrix session or completes login before claiming the pairing.
+Then copy the exact `!desktop confirm <code> <verification>` command it prints back to the same Matrix chat.
+The separate `mindroom desktop login` and `mindroom desktop pair` commands remain available for manual recovery.
 The claim travels as an authenticated Olm-encrypted to-device event, and confirmation stores the local device identity only in that requester's agent-scoped credential store.
 The verification value binds confirmation to the claimed Ed25519 key, so a different device cannot pre-claim a visible pairing code and be confirmed accidentally.
 Another requester or agent cannot confirm or use that record, and shared credentials are never used as a fallback.

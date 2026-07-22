@@ -261,7 +261,7 @@ def _print_device_identity(
     _console.print(f"  User: {session.user_id}")
     _console.print(f"  Device: {session.device_id}")
     _console.print(f"  Ed25519: {fingerprint}")
-    _console.print("\nNext, run `!desktop setup` in the direct agent chat and follow its pairing command.")
+    _console.print("\nUse the pairing command returned by `!desktop setup` in the direct agent chat.")
 
 
 @desktop_app.command("pair")
@@ -330,6 +330,76 @@ def desktop_pair(
         raise typer.Exit(1) from None
     _console.print("[green]Pairing claim accepted.[/green] Return to the chat and run:")
     _console.print(f"!desktop confirm {code} {verification}", markup=False)
+
+
+@desktop_app.command("setup")
+def desktop_setup(
+    code: str = typer.Option(..., "--code", help="Short-lived code returned by !desktop setup."),
+    controller_user_id: str = typer.Option(..., "--controller-user-id", help="Pinned cloud controller Matrix user."),
+    controller_device_id: str = typer.Option(..., "--controller-device-id", help="Pinned cloud controller device."),
+    controller_ed25519: str = typer.Option(..., "--controller-ed25519", help="Pinned controller fingerprint."),
+    user_id: str | None = typer.Option(
+        None,
+        "--user-id",
+        help="Expected Matrix user ID; required for password login and optional for SSO.",
+    ),
+    homeserver: str | None = typer.Option(
+        None,
+        "--homeserver",
+        help="Matrix homeserver URL; defaults to the configured MindRoom homeserver.",
+    ),
+    cloudflare_access: bool = typer.Option(
+        False,
+        "--cloudflare-access",
+        envvar="MINDROOM_DESKTOP_CLOUDFLARE_ACCESS",
+        help="Authenticate Matrix requests interactively with the local cloudflared CLI.",
+    ),
+    matrix_http_headers_file: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--matrix-http-headers-file",
+        envvar="MINDROOM_DESKTOP_MATRIX_HTTP_HEADERS_FILE",
+        help="Owner-only JSON file of HTTP headers added to every Matrix request.",
+    ),
+    config_path: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--config",
+        "-c",
+        help="MindRoom config path used for runtime env.",
+    ),
+    storage_path: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--storage-path",
+        "-s",
+        help="Desktop bridge state directory.",
+    ),
+) -> None:
+    """Log in when needed, then claim one requester-agent pairing."""
+    from mindroom.desktop.session import desktop_session_path  # noqa: PLC0415
+
+    runtime_paths = _activate_desktop_runtime(config_path, storage_path=storage_path)
+    if not desktop_session_path(runtime_paths).exists():
+        desktop_login(
+            user_id=user_id,
+            homeserver=homeserver,
+            login_method=DesktopLoginMethod.AUTO,
+            sso_idp=None,
+            open_browser=True,
+            cloudflare_access=cloudflare_access,
+            replace=False,
+            matrix_http_headers_file=matrix_http_headers_file,
+            config_path=config_path,
+            storage_path=storage_path,
+        )
+    desktop_pair(
+        code=code,
+        controller_user_id=controller_user_id,
+        controller_device_id=controller_device_id,
+        controller_ed25519=controller_ed25519,
+        cloudflare_access=cloudflare_access,
+        matrix_http_headers_file=matrix_http_headers_file,
+        config_path=config_path,
+        storage_path=storage_path,
+    )
 
 
 async def _pair_desktop(
@@ -655,4 +725,4 @@ async def _sync_desktop_client(client: nio.AsyncClient) -> None:
         raise DesktopSessionError(msg)
 
 
-__all__ = ["desktop_app", "desktop_login", "desktop_pair", "desktop_run"]
+__all__ = ["desktop_app", "desktop_login", "desktop_pair", "desktop_run", "desktop_setup"]

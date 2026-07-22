@@ -236,6 +236,49 @@ def test_desktop_pair_sends_claim_with_saved_local_session(monkeypatch: pytest.M
     assert "!desktop confirm short-code VERIFY123" in result.output
 
 
+@pytest.mark.parametrize("session_exists", [False, True])
+def test_desktop_setup_logs_in_only_when_needed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    session_exists: bool,
+) -> None:
+    """One setup command creates a missing session and always claims pairing."""
+    runtime_paths = SimpleNamespace(storage_root=tmp_path)
+    session_path = tmp_path / "desktop_bridge" / "matrix_session.json"
+    if session_exists:
+        session_path.parent.mkdir(parents=True)
+        session_path.touch()
+    login = MagicMock()
+    pair = MagicMock()
+    monkeypatch.setattr("mindroom.cli.config.activate_cli_runtime", lambda *_args, **_kwargs: runtime_paths)
+    monkeypatch.setattr(desktop_cli, "desktop_login", login)
+    monkeypatch.setattr(desktop_cli, "desktop_pair", pair)
+
+    result = runner.invoke(
+        desktop_app,
+        [
+            "setup",
+            "--user-id",
+            "@alice:example.org",
+            "--homeserver",
+            "https://matrix.example.org",
+            "--code",
+            "short-code",
+            "--controller-user-id",
+            "@computer:example.org",
+            "--controller-device-id",
+            "CLOUD",
+            "--controller-ed25519",
+            "cloud-fingerprint",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert login.called is not session_exists
+    assert pair.call_args.kwargs["code"] == "short-code"
+
+
 def test_desktop_run_loads_matrix_http_headers(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Long-running sync receives the same proxy headers as one-time login."""
     runtime_paths = SimpleNamespace(storage_root=tmp_path)
