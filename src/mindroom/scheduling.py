@@ -364,17 +364,28 @@ def _cancelled_task_content(
 
 
 def _is_polling_cron_schedule(cron_schedule: CronSchedule) -> bool:
-    """Return whether a cron schedule looks like an interval-based polling cadence."""
-    if cron_schedule.day != "*" or cron_schedule.month != "*" or cron_schedule.weekday != "*":
-        return False
+    """Return whether a cron schedule recurs often enough to poll a condition.
 
-    minute = cron_schedule.minute.strip()
-    hour = cron_schedule.hour.strip()
+    A conditional workflow only needs a schedule that fires more than once, so any
+    valid cron qualifies except a single fixed instant (all of minute, hour, day,
+    month and weekday pinned to one concrete value). Restricting to weekdays or a
+    daily/business-hours window (e.g. ``0 9 * * 1-5`` or ``*/15 9-17 * * *``) is a
+    perfectly good polling cadence.
+    """
 
-    def is_interval(field: str) -> bool:
-        return field == "*" or field.startswith("*/")
+    def is_single_value(field: str) -> bool:
+        return field.strip().isdigit()
 
-    return (is_interval(minute) and is_interval(hour)) or (minute.isdigit() and is_interval(hour))
+    return not all(
+        is_single_value(field)
+        for field in (
+            cron_schedule.minute,
+            cron_schedule.hour,
+            cron_schedule.day,
+            cron_schedule.month,
+            cron_schedule.weekday,
+        )
+    )
 
 
 def _validate_parsed_workflow(workflow: ScheduledWorkflow) -> _WorkflowParseError | None:

@@ -562,13 +562,13 @@ class TestParseWorkflowSchedule:
         mock_get_model: Mock,  # noqa: ARG002
         mock_config: MagicMock,
     ) -> None:
-        """Conditional schedules should fail instead of accepting a non-polling cron."""
+        """Conditional schedules should fail instead of accepting a single-instant cron."""
         mock_agent = AsyncMock()
         mock_response = MagicMock()
         mock_response.content = ScheduledWorkflow(
             schedule_type="cron",
             is_conditional=True,
-            cron_schedule=CronSchedule(minute="0", hour="9"),
+            cron_schedule=CronSchedule(minute="0", hour="9", day="5", month="6", weekday="1"),
             message="@general Check for messages containing urgent. If found, notify the team.",
             description="Monitor urgent mentions",
         )
@@ -584,7 +584,7 @@ class TestParseWorkflowSchedule:
 
         assert isinstance(result, _WorkflowParseError)
         assert "polling cron" in result.error
-        assert "0 9 * * *" in result.error
+        assert "0 9 5 6 1" in result.error
 
 
 @pytest.mark.asyncio
@@ -1214,12 +1214,17 @@ class TestValidateConditionalWorkflow:
             description="test",
         )
 
-    def test_conditional_with_non_polling_cron_returns_error(self) -> None:
-        """Reject conditional schedules that do not resolve to polling cron."""
-        result = _validate_conditional_workflow(self._workflow(""))
+    def test_conditional_with_single_instant_cron_returns_error(self) -> None:
+        """Reject conditional schedules pinned to a single fixed instant."""
+        result = _validate_conditional_workflow(
+            self._workflow(
+                "",
+                cron_schedule=CronSchedule(minute="0", hour="9", day="5", month="6", weekday="1"),
+            ),
+        )
         assert isinstance(result, _WorkflowParseError)
         assert "polling cron" in result.error
-        assert "0 9 * * *" in result.error
+        assert "0 9 5 6 1" in result.error
 
     def test_conditional_with_polling_cron_passes(self) -> None:
         """Allow conditional schedules that resolve to interval polling."""
@@ -1228,6 +1233,21 @@ class TestValidateConditionalWorkflow:
                 "@ops Check CPU usage. If above 80%, scale up.",
                 cron_schedule=CronSchedule(minute="*/5", hour="*", day="*", month="*", weekday="*"),
             ),
+        )
+        assert result is None
+
+    @pytest.mark.parametrize(
+        "cron_schedule",
+        [
+            CronSchedule(minute="0", hour="9", day="*", month="*", weekday="*"),  # daily 9am
+            CronSchedule(minute="0", hour="9", day="*", month="*", weekday="1-5"),  # weekdays 9am
+            CronSchedule(minute="*/15", hour="9-17", day="*", month="*", weekday="*"),  # business hrs
+        ],
+    )
+    def test_conditional_with_recurring_cron_passes(self, cron_schedule: CronSchedule) -> None:
+        """Allow conditional schedules whose cadence restricts days/hours but still recurs."""
+        result = _validate_conditional_workflow(
+            self._workflow("@ops check something; if true, alert me", cron_schedule=cron_schedule),
         )
         assert result is None
 
