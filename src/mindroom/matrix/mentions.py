@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.entity_resolution import current_entity_id, entity_identity_registry
 from mindroom.matrix.identity import MatrixID, parse_current_matrix_user_id
-from mindroom.matrix.message_builder import build_message_content, markdown_to_html
+from mindroom.matrix.message_builder import build_message_content, markdown_fenced_code_ranges, markdown_to_html
 from mindroom.matrix_identifiers import unnamespaced_agent_name_from_username_localpart
 from mindroom.tool_system.events import build_tool_trace_content, ensure_visible_tool_marker_spacing
 
@@ -131,11 +131,16 @@ def _scan_mention_tokens(text: str) -> list[_MentionToken]:
     if "@" not in text:
         return []
 
-    tokens = _scan_explicit_matrix_id_tokens(text)
+    fenced_code_ranges = markdown_fenced_code_ranges(text)
+    tokens = [
+        token
+        for token in _scan_explicit_matrix_id_tokens(text)
+        if not _range_overlaps_existing(token.start, token.end, fenced_code_ranges)
+    ]
     tokens.extend(
         _scan_entity_alias_tokens(
             text,
-            occupied_ranges=[(token.start, token.end) for token in tokens],
+            occupied_ranges=[*fenced_code_ranges, *((token.start, token.end) for token in tokens)],
         ),
     )
     return sorted(tokens, key=lambda token: token.start)

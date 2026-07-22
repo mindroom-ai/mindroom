@@ -548,6 +548,35 @@ class TestMentionParsing:
             "@mindroom_mind_5ckzneqq:mindroom.chat</a>.</p>\n"
         )
 
+    def test_format_message_keeps_fenced_matrix_ids_literal(self) -> None:
+        """Fenced commands should not turn literal Matrix IDs into Markdown links."""
+        config = _make_config(_default_runtime_paths())
+        text = (
+            "Ask @calculator before running:\n\n"
+            "```bash\n"
+            "mindroom desktop pair --user-id @alice:example.org "
+            "--controller-user-id @actual_code:localhost\n"
+            "```\n\n"
+            "Then ask @code."
+        )
+
+        content = _format_message_with_mentions(config, text)
+
+        assert content["body"] == (
+            "Ask @actual_calculator:localhost before running:\n\n"
+            "```bash\n"
+            "mindroom desktop pair --user-id @alice:example.org "
+            "--controller-user-id @actual_code:localhost\n"
+            "```\n\n"
+            "Then ask @actual_code:localhost."
+        )
+        assert content["m.mentions"]["user_ids"] == [
+            "@actual_calculator:localhost",
+            "@actual_code:localhost",
+        ]
+        assert "https://matrix.to/#/@alice:example.org" not in content["formatted_body"]
+        assert content["formatted_body"].count("https://matrix.to/#/@actual_code:localhost") == 1
+
     def test_format_message_with_full_matrix_user_id_excludes_sentence_period(self) -> None:
         """Sentence punctuation should not become part of a full Matrix ID mention."""
         config = _make_config(_default_runtime_paths())
