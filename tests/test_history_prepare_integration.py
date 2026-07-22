@@ -153,7 +153,16 @@ def test_session_storage_unwraps_only_trusted_legacy_assistant_tags_on_read(tmp_
         ],
     )
     literal_run.metadata = {MATRIX_RESPONSE_EVENT_ID_METADATA_KEY: "$second-answer"}
-    storage.upsert_session(_session("session-1", runs=[legacy_run, literal_run]))
+    noncanonical_tag = '<msg event_id="$third-answer" from="@agent:localhost"><![CDATA[Keep raw ]]> marker]]></msg>'
+    noncanonical_run = _completed_run(
+        "run-3",
+        messages=[
+            Message(role="user", content="Third question"),
+            Message(role="assistant", content=noncanonical_tag),
+        ],
+    )
+    noncanonical_run.metadata = {MATRIX_RESPONSE_EVENT_ID_METADATA_KEY: "$third-answer"}
+    storage.upsert_session(_session("session-1", runs=[legacy_run, literal_run, noncanonical_run]))
 
     loaded = get_agent_session(storage, "session-1")
     assert loaded is not None
@@ -162,6 +171,8 @@ def test_session_storage_unwraps_only_trusted_legacy_assistant_tags_on_read(tmp_
     assert loaded.runs[0].messages[-1].content == legacy_body
     assert loaded.runs[1].messages is not None
     assert loaded.runs[1].messages[-1].content == model_authored_tag
+    assert loaded.runs[2].messages is not None
+    assert loaded.runs[2].messages[-1].content == noncanonical_tag
 
     raw = SqliteDb.get_session(storage, "session-1", SessionType.AGENT)
     assert isinstance(raw, AgentSession)

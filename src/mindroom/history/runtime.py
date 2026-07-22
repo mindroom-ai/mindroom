@@ -351,7 +351,6 @@ async def prepare_scope_history(
 
     execution_plan = resolved_inputs.execution_plan
     session = scope_context.session
-    visible_runs = scope_visible_runs(session, scope_context.scope)
     if pipeline_timing is not None:
         pipeline_timing.mark("history_classify_start")
     state = _prepare_scope_state_for_run(
@@ -367,6 +366,7 @@ async def prepare_scope_history(
         scope=scope_context.scope,
         history_settings=resolved_inputs.history_settings,
     )
+    visible_runs = scope_visible_runs(session, scope_context.scope)
     compaction_decision = classify_compaction_decision(
         plan=execution_plan,
         force_compact_before_next_run=state.force_compact_before_next_run,
