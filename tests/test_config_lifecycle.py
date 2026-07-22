@@ -191,9 +191,16 @@ async def test_stuck_drain_warns_then_forces_reload(
     monkeypatch.setattr("mindroom.orchestration.config_lifecycle.logger", logger_mock)
     lifecycle = _make_lifecycle(tmp_path)
     drain_state = _ConfigReloadDrainState()
-    drain_state.begin_wait(now=wait_started_at, requested_at=requested_at)
     loop = MagicMock(spec=asyncio.AbstractEventLoop)
-    loop.time.return_value = wait_started_at + force_after_seconds
+    loop.time.side_effect = [wait_started_at, wait_started_at + force_after_seconds]
+
+    should_defer = await lifecycle._should_defer_reload_for_active_responses(
+        drain_state=drain_state,
+        requested_at=requested_at,
+        active_response_count=1,
+        loop=loop,
+    )
+    assert should_defer is True
 
     should_defer = await lifecycle._should_defer_reload_for_active_responses(
         drain_state=drain_state,
