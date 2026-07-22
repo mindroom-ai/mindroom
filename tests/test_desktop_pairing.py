@@ -14,6 +14,7 @@ import pytest
 import mindroom.tools  # noqa: F401
 from mindroom.commands.desktop_commands import DesktopCommandScope, handle_desktop_command
 from mindroom.config.main import Config
+from mindroom.desktop.identity import DesktopIdentityError
 from mindroom.desktop.pairing import (
     DesktopPairingError,
     claim_desktop_pairing,
@@ -380,6 +381,52 @@ def test_setup_command_uses_public_homeserver_and_access_flag(
     assert public_setup_command.endswith("--cloudflare-access")
 
 
+def test_confirmation_keeps_claim_retryable_when_controller_lookup_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Startup-guidance failure must not consume a valid pairing claim."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = Config.validate_with_runtime(
+        {
+            "defaults": {"tools": []},
+            "agents": {"computer": {"display_name": "Computer", "role": "Operate apps", "tools": ["desktop"]}},
+        },
+        runtime_paths,
+    )
+    controller = SimpleNamespace(
+        user_id="@computer:example.org",
+        device_id="CLOUD",
+        ed25519="cloud-fingerprint",
+    )
+    identity_lookup = Mock(return_value=controller)
+    monkeypatch.setattr("mindroom.commands.desktop_commands.controller_identity_for_entity", identity_lookup)
+    scope = DesktopCommandScope(
+        config=config,
+        runtime_paths=runtime_paths,
+        agent_name="computer",
+        requester_id="@alice:example.org",
+    )
+    setup_response = handle_desktop_command("setup", scope=scope)
+    token_match = re.search(r"--code ([A-Za-z0-9_-]+)", setup_response)
+    assert token_match is not None
+    token = token_match.group(1)
+    claim_desktop_pairing(
+        runtime_paths,
+        token=token,
+        agent_name="computer",
+        device_user_id="@alice:example.org",
+        device_id="ALICE",
+        device_ed25519="alice-fingerprint",
+    )
+    verification = desktop_pairing_verification(token, "alice-fingerprint")
+
+    identity_lookup.side_effect = DesktopIdentityError("controller unavailable")
+    assert "controller unavailable" in handle_desktop_command(f"confirm {token} {verification}", scope=scope)
+    identity_lookup.side_effect = None
+    assert "Desktop paired" in handle_desktop_command(f"confirm {token} {verification}", scope=scope)
+
+
 def test_chat_confirmation_saves_only_the_initiating_requester_agent_scope(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -459,6 +506,7 @@ def test_chat_confirmation_saves_only_the_initiating_requester_agent_scope(
     assert "--allow-agent computer" in confirmation
     assert "--allow-app APPLICATION_ID" in confirmation
     assert "--allow-control" in confirmation
+    assert "add the same option" in confirmation
     assert "Desktop is configured" in handle_desktop_command("", scope=alice_scope)
     assert "Desktop is configured" in handle_desktop_command("status", scope=alice_scope)
     assert "setup is required" in handle_desktop_command("status", scope=bob_scope)

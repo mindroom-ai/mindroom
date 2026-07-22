@@ -37,8 +37,10 @@ def test_desktop_runtime_default_is_independent_of_working_directory(
     activate.assert_called_once_with(Path.home() / ".mindroom" / "config.yaml", storage_path=None)
 
 
-def test_desktop_runtime_preserves_explicit_environment_selection(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Existing runtime environment overrides still select Desktop state."""
+def test_desktop_runtime_storage_override_does_not_restore_working_directory_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A storage override keeps the stable user-level Desktop config selection."""
     activate = MagicMock(return_value=SimpleNamespace())
     monkeypatch.setattr(
         "mindroom.constants.exported_process_env",
@@ -48,7 +50,7 @@ def test_desktop_runtime_preserves_explicit_environment_selection(monkeypatch: p
 
     desktop_cli._activate_desktop_runtime(None, storage_path=None)
 
-    activate.assert_called_once_with(None, storage_path=None)
+    activate.assert_called_once_with(Path.home() / ".mindroom" / "config.yaml", storage_path=None)
 
 
 def test_login_identity_output_routes_users_to_chat_pairing(capsys: pytest.CaptureFixture[str], tmp_path: Path) -> None:

@@ -44,16 +44,14 @@ def _activate_desktop_runtime(config_path: Path | None, *, storage_path: Path | 
     from mindroom.cli.config import activate_cli_runtime  # noqa: PLC0415
 
     process_env = constants.exported_process_env()
-    has_explicit_runtime = any(
+    has_explicit_config = any(
         value is not None and str(value).strip()
         for value in (
             config_path,
-            storage_path,
             process_env.get("MINDROOM_CONFIG_PATH"),
-            process_env.get("MINDROOM_STORAGE_PATH"),
         )
     )
-    if not has_explicit_runtime:
+    if not has_explicit_config:
         config_path = Path.home() / ".mindroom" / "config.yaml"
     return activate_cli_runtime(config_path, storage_path=storage_path)
 

@@ -139,6 +139,8 @@ def _confirm_response(scope: DesktopCommandScope, token: str, verification: str)
     state = desktop_configuration_state(credentials)
     if state.status is not DesktopConfigurationStatus.READY:
         raise DesktopPairingError(state.error or "Claimed Desktop device identity is invalid.")
+    controller = controller_identity_for_entity(scope.agent_name, runtime_paths=scope.runtime_paths)
+    run_command = _run_command(scope, controller)
     save_desktop_credentials(
         get_runtime_credentials_manager(scope.runtime_paths),
         credentials,
@@ -146,14 +148,13 @@ def _confirm_response(scope: DesktopCommandScope, token: str, verification: str)
         agent_name=scope.agent_name,
     )
     complete_desktop_pairing(scope.runtime_paths, token=token)
-    controller = controller_identity_for_entity(scope.agent_name, runtime_paths=scope.runtime_paths)
-    run_command = _run_command(scope, controller)
     return (
         f"✅ Desktop paired for you and agent `{scope.agent_name}`.\n\n"
         "Start the local bridge with:\n\n"
         f"```bash\n{run_command}\n```\n\n"
         "Replace `APPLICATION_ID` with one exact local application ID and repeat `--allow-app` as needed. "
-        "Add `--allow-control` for a short local control lease; otherwise the bridge is observe-only."
+        "Add `--allow-control` for a short local control lease; otherwise the bridge is observe-only. "
+        "If setup used `--config` or `--storage-path`, add the same option to this command."
     )
 
 
