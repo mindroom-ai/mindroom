@@ -122,7 +122,7 @@ def _run_command(scope: DesktopCommandScope, controller: DesktopControllerIdenti
         f"--controller-ed25519 {shlex.quote(controller.ed25519)}",
         f"--allow-requester {shlex.quote(scope.requester_id)}",
         f"--allow-agent {shlex.quote(scope.agent_name)}",
-        "--allow-app <application-id>",
+        "--allow-app APPLICATION_ID",
     ]
     return " \\\n  ".join(parts)
 
@@ -160,7 +160,7 @@ def _confirm_response(scope: DesktopCommandScope, token: str, verification: str)
         f"✅ Desktop paired for you and agent `{scope.agent_name}`.\n\n"
         "Start the local bridge with:\n\n"
         f"```bash\n{run_command}\n```\n\n"
-        "Replace `<application-id>` with one exact local application ID and repeat `--allow-app` as needed. "
+        "Replace `APPLICATION_ID` with one exact local application ID and repeat `--allow-app` as needed. "
         "Add `--allow-control` for a short local control lease; otherwise the bridge is observe-only."
     )
 

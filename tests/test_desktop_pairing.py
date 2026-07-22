@@ -461,7 +461,7 @@ def test_chat_confirmation_saves_only_the_initiating_requester_agent_scope(
     assert "--controller-ed25519 cloud-fingerprint" in confirmation
     assert "--allow-requester @alice:example.org" in confirmation
     assert "--allow-agent computer" in confirmation
-    assert "--allow-app <application-id>" in confirmation
+    assert "--allow-app APPLICATION_ID" in confirmation
     assert "--allow-control" in confirmation
     assert "Desktop is configured" in handle_desktop_command("", scope=alice_scope)
     assert "Desktop is configured" in handle_desktop_command("status", scope=alice_scope)
