@@ -137,7 +137,8 @@ It does not create or replace account-level cross-signing keys for an SSO accoun
 
 The session JSON saves only the reusable Matrix access token and device identifiers.
 The device's private Olm identity is persisted separately under `<storage>/encryption_keys/`; on Unix, MindRoom forces its per-user directory to mode `0700`.
-For legacy shared-agent setup, the printed Ed25519 value is the corresponding public fingerprint and is persisted only when you copy it into the cloud agent configuration.
+The printed Ed25519 value is the device's public fingerprint.
+Self-service pairing sends that fingerprint to the exact cloud agent through an authenticated Olm-encrypted claim, so never copy user-specific Desktop identity fields into agent YAML.
 On Unix, the session file is forced to mode `0600`, and the bridge refuses to load it if group or other users can read it.
 The command prints values similar to these:
 
@@ -147,8 +148,7 @@ Device: ABCDEFGHIJ
 Ed25519: desktop-device-fingerprint
 ```
 
-Keep these public identity values available for legacy shared-agent configuration.
-Private multi-user agents register them through the chat flow below instead.
+Private multi-user agents register these public identity values through the chat flow below.
 
 ### Homeservers Behind an Identity-Aware Proxy
 
@@ -197,9 +197,7 @@ During Matrix SSO, the browser handles any interactive proxy authentication whil
 Configure the proxy to accept these machine credentials only for the Matrix endpoints the desktop device needs, while keeping normal Matrix authentication enabled.
 Do not combine `--cloudflare-access` with a static `cf-access-token` header.
 
-## 2. Configure the Cloud Agent
-
-### Private Multi-User Agents Without Dashboard Access
+## 2. Configure the Private Agent
 
 Configure the Desktop tool on a private agent without authored device identity fields:
 
@@ -227,37 +225,12 @@ Until pairing is confirmed, Desktop calls return a setup-required result while t
 The Desktop tool can explain the trusted chat command, but the model cannot register or replace a device itself.
 Use `!desktop rotate` to replace a device without dropping the current target before confirmation, or `!desktop disconnect confirm` to remove it.
 
-### Shared or Operator-Managed Agents
-
-Start cloud MindRoom at least once so the chosen agent has a persistent Matrix device.
-On the cloud server, print that controller's local device identity:
-
-```bash
-mindroom desktop controller --entity computer
-```
-
-Copy the printed controller user, device, and Ed25519 values to the local run command in the next section.
-Configure the local desktop device as an authored override on the exact cloud agent that will call the tool:
-
-```yaml
-agents:
-  computer:
-    display_name: Computer Agent
-    role: Operate my locally authorized applications one step at a time
-    tools:
-      - desktop:
-          device_user_id: "@my-laptop:example.org"
-          device_id: "ABCDEFGHIJ"
-          device_ed25519: "desktop-device-fingerprint"
-          timeout_seconds: 30
-```
-
 The `desktop` tool runs in the primary agent process because it needs that live agent's Matrix device and room requester identity.
 The `browser` tool remains worker-routable for host-browser isolation, but its Matrix desktop target requires the primary process's live Matrix context.
 Do not list `browser` in `worker_tools` for an agent that uses `target: desktop`; a worker-routed desktop call fails closed with a live-context error.
 It is hidden from OpenAI-compatible API runs when approval policy requires Matrix approval because those runs have no Matrix approval transport.
 
-To use the same device with the `browser` tool, configure its desktop target on that agent:
+The separate `browser` tool can still target its Playwright extension transport through its own configuration:
 
 ```yaml
 agents:
@@ -420,9 +393,9 @@ Approval does not override an absent or expired local control lease.
 
 ## Operations
 
-Rotate the local desktop Matrix device with `mindroom desktop login --replace`, revoke the old device in Matrix account management, and then update all three local device pin fields in the cloud tool configuration.
+Rotate the local desktop Matrix device with `mindroom desktop login --replace`, revoke the old device in Matrix account management, then run `!desktop rotate` and follow the new pairing command in the private agent chat.
 The `--replace` option creates a fresh saved session but cannot revoke the old device by itself.
-If the cloud agent receives a new Matrix device, run `mindroom desktop controller --entity <name>` again and update the three controller options used locally.
+If the cloud agent receives a new Matrix device, run `!desktop rotate` and follow the new pairing command so the local bridge pins the replacement controller identity.
 A device ID or Ed25519 mismatch is a hard failure and should be treated as a rotation or possible substitution, not bypassed.
 Use `Ctrl+C` to stop accepting new bridge commands and begin shutdown.
 Desktop input already dispatched through a native worker thread and active Playwright MCP calls are not preemptible, so an in-flight control can still finish before shutdown returns; observe local state before deciding whether to retry it.

@@ -80,7 +80,6 @@ class ConfigField:
     options: list[dict[str, str]] | None = None
     validation: dict[str, Any] | None = None
     authored_override: bool = True
-    requester_owned: bool = False
 
 
 @dataclass(frozen=True)

@@ -656,14 +656,7 @@ async def test_private_deferred_desktop_uses_only_requester_agent_credentials(tm
     raw["agents"]["code"]["private"] = {"per": "user_agent"}  # type: ignore[index]
     raw["agents"]["code"]["tools"] = [  # type: ignore[index]
         "calculator",
-        {
-            "desktop": {
-                "defer": True,
-                "device_user_id": "@authored-desktop:example.org",
-                "device_id": "AUTHORED",
-                "device_ed25519": "authored-fingerprint",
-            },
-        },
+        {"desktop": {"defer": True}},
     ]
     config = _validated_config(tmp_path, raw)
     runtime_paths = _runtime_paths(tmp_path)
@@ -697,7 +690,6 @@ async def test_private_deferred_desktop_uses_only_requester_agent_credentials(tm
         session_id="alice-session",
     )
     alice_desktop = next(tool for tool in alice_loaded.tools if tool.name == "desktop")
-    assert alice_desktop._target is None  # type: ignore[attr-defined]
     result = await alice_desktop.desktop("status")  # type: ignore[attr-defined]
     assert _tool_payload(result.content)["status"] == "setup_required"
 
@@ -797,7 +789,9 @@ async def test_native_tool_search_keeps_unconfigured_desktop_safe(tmp_path: Path
         session_id="native-session",
     )
     paired_desktop = next(tool for tool in paired.tools if tool.name == "desktop")
-    assert paired_desktop._target.user_id == "@alice-desktop:example.org"  # type: ignore[attr-defined]
+    paired_configuration = paired_desktop._current_configuration()  # type: ignore[attr-defined]
+    assert paired_configuration.target is not None
+    assert paired_configuration.target.user_id == "@alice-desktop:example.org"
     assert "desktop" in vars(paired.model)[_DEFERRED_TOOL_NAMES_ATTR]
 
 

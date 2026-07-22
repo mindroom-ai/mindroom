@@ -283,6 +283,7 @@ def test_pairing_receiver_registration_owns_desktop_enablement_check(tmp_path: P
                 "computer": {
                     "display_name": "Computer",
                     "role": "Operate local apps",
+                    "private": {"per": "user_agent"},
                     "tools": ["desktop"],
                 },
                 "chat": {

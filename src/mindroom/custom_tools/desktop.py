@@ -133,23 +133,11 @@ class DesktopTools(Toolkit):
 
     def __init__(
         self,
-        device_user_id: str | None = None,
-        device_id: str | None = None,
-        device_ed25519: str | None = None,
         timeout_seconds: float = 30.0,
         credentials_manager: CredentialsManager | None = None,
         worker_target: ResolvedWorkerTarget | None = None,
     ) -> None:
         super().__init__(name="desktop")
-        self._configuration = desktop_configuration_state(
-            {
-                "device_user_id": device_user_id,
-                "device_id": device_id,
-                "device_ed25519": device_ed25519,
-                "timeout_seconds": timeout_seconds,
-            },
-        )
-        self._target = self._configuration.target
         self._authored_timeout_seconds = timeout_seconds
         self._credentials_manager = credentials_manager
         self._worker_target = worker_target
@@ -255,7 +243,7 @@ class DesktopTools(Toolkit):
     def _current_configuration(self) -> DesktopConfigurationState:
         target = self._worker_target
         if self._credentials_manager is None or target is None or target.worker_scope != "user_agent":
-            return self._configuration
+            return desktop_configuration_state({"timeout_seconds": self._authored_timeout_seconds})
         credentials = load_scoped_credentials(
             "desktop",
             credentials_manager=self._credentials_manager,
@@ -567,9 +555,9 @@ def _setup_required_result(action: str, error: str | None, *, chat_pairing: bool
         if error is not None:
             message = f"Desktop configuration is invalid: {error} Run `!desktop setup` to replace it."
     else:
-        message = "Desktop setup is required. Ask the deployment operator to configure this Desktop target."
+        message = "Desktop requires an agent configured with `private.per: user_agent`."
         if error is not None:
-            message = f"Desktop configuration is invalid: {error} Ask the deployment operator to replace it."
+            message = f"Desktop configuration is invalid: {error}"
     return ToolResult(
         content=custom_tool_payload(
             "desktop",

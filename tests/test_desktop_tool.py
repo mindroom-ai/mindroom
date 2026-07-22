@@ -5,16 +5,19 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 import mindroom.tools  # noqa: F401
+from mindroom.config.main import Config, ConfigRuntimeValidationError
+from mindroom.credentials import CredentialsManager
 from mindroom.custom_tools.desktop import DesktopTools
 from mindroom.desktop.configuration import DesktopConfigurationStatus, desktop_configuration_state
 from mindroom.desktop.media import DesktopMediaError
 from mindroom.desktop.protocol import DesktopResponse, EncryptedDesktopMedia
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
+from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 from tests.conftest import test_runtime_paths
 
 if TYPE_CHECKING:
@@ -30,6 +33,32 @@ MEDIA = EncryptedDesktopMedia(
 )
 
 
+def _user_agent_target() -> ResolvedWorkerTarget:
+    return ResolvedWorkerTarget(
+        worker_scope="user_agent",
+        routing_agent_name="computer",
+        execution_identity=None,
+        tenant_id=None,
+        account_id=None,
+        worker_key=None,
+    )
+
+
+def _configured_tool(monkeypatch: pytest.MonkeyPatch) -> DesktopTools:
+    monkeypatch.setattr(
+        "mindroom.custom_tools.desktop.load_scoped_credentials",
+        lambda *_args, **_kwargs: {
+            "device_user_id": "@desktop:example.org",
+            "device_id": "DESKTOP",
+            "device_ed25519": "fingerprint",
+        },
+    )
+    return DesktopTools(
+        credentials_manager=MagicMock(spec=CredentialsManager),
+        worker_target=_user_agent_target(),
+    )
+
+
 def test_desktop_tool_is_registered_as_room_scoped_primary_tool() -> None:
     """Desktop commands use the live agent Matrix device, not a detached worker."""
     metadata = TOOL_METADATA["desktop"]
@@ -37,16 +66,49 @@ def test_desktop_tool_is_registered_as_room_scoped_primary_tool() -> None:
     assert metadata.requires_room_context
     assert metadata.default_execution_target.value == "primary"
     assert metadata.function_names == ("desktop",)
-    assert {field.name for field in metadata.config_fields or () if field.requester_owned} == {
-        "device_user_id",
-        "device_id",
-        "device_ed25519",
-    }
+    assert [field.name for field in metadata.config_fields or ()] == ["timeout_seconds"]
+
+
+def test_desktop_requires_private_user_agent_scope(tmp_path: Path) -> None:
+    """Shared and per-user agents cannot declare requester-agent Desktop pairing."""
+    with pytest.raises(ValueError, match=r"desktop tool requires private\.per: user_agent"):
+        Config.validate_with_runtime(
+            {
+                "defaults": {"tools": []},
+                "agents": {
+                    "computer": {
+                        "display_name": "Computer",
+                        "role": "Operate local apps",
+                        "tools": ["desktop"],
+                    },
+                },
+            },
+            test_runtime_paths(tmp_path),
+        )
+
+
+def test_desktop_rejects_authored_device_identity(tmp_path: Path) -> None:
+    """Desktop device identity comes only from requester-agent pairing."""
+    with pytest.raises(ConfigRuntimeValidationError, match=r"desktop\.device_user_id"):
+        Config.validate_with_runtime(
+            {
+                "defaults": {"tools": []},
+                "agents": {
+                    "computer": {
+                        "display_name": "Computer",
+                        "role": "Operate local apps",
+                        "private": {"per": "user_agent"},
+                        "tools": [{"desktop": {"device_user_id": "@desktop:example.org"}}],
+                    },
+                },
+            },
+            test_runtime_paths(tmp_path),
+        )
 
 
 @pytest.mark.asyncio
-async def test_unconfigured_shared_desktop_tool_requests_operator_setup(tmp_path: Path) -> None:
-    """Shared setup does not advertise requester-only chat pairing."""
+async def test_unconfigured_shared_desktop_tool_requires_private_agent(tmp_path: Path) -> None:
+    """A shared agent cannot use requester-only Desktop pairing."""
     tool = get_tool_by_name(
         "desktop",
         test_runtime_paths(tmp_path),
@@ -58,14 +120,14 @@ async def test_unconfigured_shared_desktop_tool_requests_operator_setup(tmp_path
 
     payload = json.loads(result.content)
     assert payload["status"] == "setup_required"
-    assert "deployment operator" in payload["message"]
+    assert "private.per: user_agent" in payload["message"]
     assert "!desktop" not in payload["message"]
 
 
 @pytest.mark.asyncio
 async def test_unconfigured_private_user_agent_tool_advertises_chat_pairing() -> None:
     """Requester-agent scoped setup points to its supported chat command."""
-    tool = DesktopTools(worker_target=SimpleNamespace(worker_scope="user_agent"))  # type: ignore[arg-type]
+    tool = DesktopTools(worker_target=_user_agent_target())
 
     result = await tool.desktop("status")
 
@@ -103,8 +165,8 @@ def test_unconfigured_desktop_preserves_authored_timeout_for_scoped_reload(
     )
     tool = DesktopTools(
         timeout_seconds=90,
-        credentials_manager=SimpleNamespace(),  # type: ignore[arg-type]
-        worker_target=SimpleNamespace(worker_scope="user_agent"),  # type: ignore[arg-type]
+        credentials_manager=MagicMock(spec=CredentialsManager),
+        worker_target=_user_agent_target(),
     )
 
     assert tool._current_configuration().timeout_seconds == 90
@@ -124,8 +186,8 @@ def test_scoped_desktop_preserves_invalid_authored_timeout(
     )
     tool = DesktopTools(
         timeout_seconds=500,
-        credentials_manager=SimpleNamespace(),  # type: ignore[arg-type]
-        worker_target=SimpleNamespace(worker_scope="user_agent"),  # type: ignore[arg-type]
+        credentials_manager=MagicMock(spec=CredentialsManager),
+        worker_target=_user_agent_target(),
     )
 
     state = tool._current_configuration()
@@ -156,7 +218,7 @@ async def test_commands_use_one_process_channel_with_monotonic_sequences(monkeyp
         "mindroom.custom_tools.desktop.desktop_response_router",
         lambda _client: SimpleNamespace(request=request),
     )
-    tool = DesktopTools("@desktop:example.org", "DESKTOP", "fingerprint")
+    tool = _configured_tool(monkeypatch)
 
     await tool.desktop("status")
     await tool.desktop("status")
@@ -196,7 +258,7 @@ async def test_screenshot_response_becomes_model_visible_image(monkeypatch: pyte
         "mindroom.custom_tools.desktop.download_encrypted_screenshot",
         AsyncMock(return_value=b"\xff\xd8\xffjpeg"),
     )
-    tool = DesktopTools("@desktop:example.org", "DESKTOP", "fingerprint")
+    tool = _configured_tool(monkeypatch)
 
     result = await tool.desktop("screenshot", app="com.example.Editor")
 
@@ -238,7 +300,7 @@ async def test_screenshot_can_return_turn_scoped_sendable_attachment(monkeypatch
         AsyncMock(return_value=b"\xff\xd8\xffjpeg"),
     )
 
-    result = await DesktopTools("@desktop:example.org", "DESKTOP", "fingerprint").desktop(
+    result = await _configured_tool(monkeypatch).desktop(
         "screenshot",
         app="com.example.Editor",
         return_attachment=True,
@@ -272,7 +334,7 @@ async def test_return_attachment_is_rejected_for_non_screenshot_actions(monkeypa
         lambda _client: SimpleNamespace(request=request),
     )
 
-    result = await DesktopTools("@desktop:example.org", "DESKTOP", "fingerprint").desktop(
+    result = await _configured_tool(monkeypatch).desktop(
         "get_app_state",
         app="com.example.Editor",
         return_attachment=True,
@@ -299,7 +361,7 @@ async def test_invalid_control_parameters_fail_before_matrix_delivery(monkeypatc
         "mindroom.custom_tools.desktop.desktop_response_router",
         lambda _client: SimpleNamespace(request=request),
     )
-    tool = DesktopTools("@desktop:example.org", "DESKTOP", "fingerprint")
+    tool = _configured_tool(monkeypatch)
 
     result = await tool.desktop("click", app="com.example.Editor", state_id="state-1", x=10)
 
@@ -350,7 +412,7 @@ async def test_launch_app_uses_allowlisted_app_without_a_state_id(monkeypatch: p
         "mindroom.custom_tools.desktop.desktop_response_router",
         lambda _client: SimpleNamespace(request=request),
     )
-    tool = DesktopTools("@desktop:example.org", "DESKTOP", "fingerprint")
+    tool = _configured_tool(monkeypatch)
 
     await tool.desktop("launch_app", app="com.example.Editor")
 
@@ -379,7 +441,7 @@ async def test_set_value_can_clear_semantic_field(monkeypatch: pytest.MonkeyPatc
         "mindroom.custom_tools.desktop.desktop_response_router",
         lambda _client: SimpleNamespace(request=request),
     )
-    tool = DesktopTools("@desktop:example.org", "DESKTOP", "fingerprint")
+    tool = _configured_tool(monkeypatch)
 
     await tool.desktop(
         "set_value",
@@ -419,7 +481,7 @@ async def test_completed_control_without_screenshot_is_partial(monkeypatch: pyte
         "mindroom.custom_tools.desktop.desktop_response_router",
         lambda _client: SimpleNamespace(request=request),
     )
-    tool = DesktopTools("@desktop:example.org", "DESKTOP", "fingerprint")
+    tool = _configured_tool(monkeypatch)
 
     result = await tool.desktop(
         "click",
@@ -462,7 +524,7 @@ async def test_completed_control_with_undecryptable_screenshot_is_partial(monkey
         "mindroom.custom_tools.desktop.download_encrypted_screenshot",
         AsyncMock(side_effect=DesktopMediaError("Decryption failed.")),
     )
-    tool = DesktopTools("@desktop:example.org", "DESKTOP", "fingerprint")
+    tool = _configured_tool(monkeypatch)
 
     result = await tool.desktop(
         "click",
@@ -505,7 +567,7 @@ async def test_state_with_undecryptable_screenshot_remains_partial(monkeypatch: 
         "mindroom.custom_tools.desktop.download_encrypted_screenshot",
         AsyncMock(side_effect=DesktopMediaError("Decryption failed.")),
     )
-    tool = DesktopTools("@desktop:example.org", "DESKTOP", "fingerprint")
+    tool = _configured_tool(monkeypatch)
 
     result = await tool.desktop("get_app_state", app="com.example.Editor")
 
@@ -541,7 +603,7 @@ async def test_semantic_action_carries_state_scoped_element_index(monkeypatch: p
         "mindroom.custom_tools.desktop.download_encrypted_screenshot",
         AsyncMock(return_value=b"jpeg"),
     )
-    tool = DesktopTools("@desktop:example.org", "DESKTOP", "fingerprint")
+    tool = _configured_tool(monkeypatch)
 
     result = await tool.desktop(
         "click_element",
@@ -581,7 +643,7 @@ async def test_list_apps_needs_no_screenshot(monkeypatch: pytest.MonkeyPatch) ->
         "mindroom.custom_tools.desktop.desktop_response_router",
         lambda _client: SimpleNamespace(request=request),
     )
-    tool = DesktopTools("@desktop:example.org", "DESKTOP", "fingerprint")
+    tool = _configured_tool(monkeypatch)
 
     result = await tool.desktop("list_apps")
 

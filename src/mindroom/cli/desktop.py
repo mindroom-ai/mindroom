@@ -52,40 +52,6 @@ def _ensure_desktop_dependencies(runtime_paths: RuntimePaths) -> None:
         raise DesktopProviderError(str(exc)) from exc
 
 
-@desktop_app.command("controller")
-def desktop_controller(
-    entity: str = typer.Option(..., "--entity", help="Cloud agent whose Matrix device will send commands."),
-    config_path: Path | None = typer.Option(  # noqa: B008
-        None,
-        "--config",
-        "-c",
-        help="Cloud MindRoom config path.",
-    ),
-    storage_path: Path | None = typer.Option(  # noqa: B008
-        None,
-        "--storage-path",
-        "-s",
-        help="Cloud MindRoom state directory.",
-    ),
-) -> None:
-    """Print the cloud controller identity that the local bridge must pin."""
-    from mindroom.cli.config import activate_cli_runtime  # noqa: PLC0415
-    from mindroom.desktop.identity import DesktopIdentityError, controller_identity_for_entity  # noqa: PLC0415
-
-    runtime_paths = activate_cli_runtime(config_path, storage_path=storage_path)
-    try:
-        identity = controller_identity_for_entity(entity, runtime_paths=runtime_paths)
-    except DesktopIdentityError as exc:
-        _error_console.print(f"[red]Controller identity lookup failed:[/red] {exc}")
-        raise typer.Exit(1) from None
-    _console.print("[green]Cloud Matrix controller:[/green]")
-    _console.print(f"  Entity: {identity.entity_name}")
-    _console.print(f"  User: {identity.user_id}")
-    _console.print(f"  Device: {identity.device_id}")
-    _console.print(f"  Ed25519: {identity.ed25519}")
-    _console.print("\nPass these exact values to 'mindroom desktop run' on the local computer.")
-
-
 @desktop_app.command("login")
 def desktop_login(
     user_id: str | None = typer.Option(
@@ -276,7 +242,7 @@ def _print_device_identity(
     _console.print(f"  User: {session.user_id}")
     _console.print(f"  Device: {session.device_id}")
     _console.print(f"  Ed25519: {fingerprint}")
-    _console.print("\nPin these exact values in the cloud agent's desktop tool configuration.")
+    _console.print("\nNext, run `!desktop setup` in the private agent chat and follow its pairing command.")
 
 
 @desktop_app.command("pair")
@@ -672,4 +638,4 @@ async def _sync_desktop_client(client: nio.AsyncClient) -> None:
         raise DesktopSessionError(msg)
 
 
-__all__ = ["desktop_app", "desktop_controller", "desktop_login", "desktop_pair", "desktop_run"]
+__all__ = ["desktop_app", "desktop_login", "desktop_pair", "desktop_run"]

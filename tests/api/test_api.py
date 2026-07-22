@@ -1973,10 +1973,10 @@ def test_get_tools_marks_google_oauth_tool_available_with_service_account(
     assert tool["status"] == "available"
 
 
-def test_get_tools_does_not_treat_requester_owned_scoped_credentials_as_dashboard_truth(
+def test_get_tools_does_not_treat_scoped_credentials_as_dashboard_truth(
     test_client: TestClient,
 ) -> None:
-    """Requester-owned scoped credentials must not flip isolated dashboard status to available."""
+    """Scoped credentials must not flip isolated dashboard status to available."""
     config = _config_with_worker_scope("user")
     runtime_paths = main._app_runtime_paths(main.app)
     tools = [

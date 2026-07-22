@@ -486,19 +486,6 @@ def _build_tool_config_init_kwargs(
     return init_kwargs
 
 
-def _without_requester_owned_overrides(
-    metadata: ToolMetadata,
-    worker_target: ResolvedWorkerTarget | None,
-    values: dict[str, object] | None,
-) -> dict[str, object] | None:
-    """Keep requester-owned fields sourced only from scoped credentials."""
-    if not values or worker_target is None or worker_target.worker_scope != "user_agent":
-        return values
-    requester_owned_fields = {field.name for field in metadata.config_fields or () if field.requester_owned}
-    filtered = {name: value for name, value in values.items() if name not in requester_owned_fields}
-    return filtered or None
-
-
 def _pop_implicit_toolkit_filters(
     metadata: ToolMetadata,
     init_kwargs: dict[str, object],
@@ -652,12 +639,6 @@ def _build_tool_instance(
     if credential_overrides:
         credentials = {**credentials, **credential_overrides}
     validated_tool_config_overrides = validate_authored_tool_entry_overrides(tool_name, tool_config_overrides)
-    validated_tool_config_overrides = _without_requester_owned_overrides(
-        metadata,
-        worker_target,
-        validated_tool_config_overrides,
-    )
-    runtime_overrides = _without_requester_owned_overrides(metadata, worker_target, runtime_overrides)
     safe_tool_init_overrides = sanitize_tool_init_overrides(tool_name, tool_init_overrides)
     init_kwargs = _build_tool_config_init_kwargs(
         tool_name,
@@ -708,7 +689,7 @@ def _build_tool_instance(
         runtime_paths=runtime_paths,
         credentials_manager=resolved_credentials_manager,
         tool_init_overrides=proxy_tool_init_overrides or None,
-        tool_config_overrides=validated_tool_config_overrides or {},
+        tool_config_overrides=validated_tool_config_overrides,
         extra_env_passthrough=extra_env_passthrough if isinstance(extra_env_passthrough, str) else None,
         worker_tools_override=worker_tools_override,
         shared_storage_root_path=shared_storage_root_path,
@@ -1331,10 +1312,6 @@ def export_tools_metadata(tool_metadata: dict[str, ToolMetadata] | None = None) 
         tool_dict["status"] = metadata.status.value
         tool_dict["setup_type"] = metadata.setup_type.value
         tool_dict["default_execution_target"] = metadata.default_execution_target.value
-        for field_collection in ("config_fields", "agent_override_fields"):
-            for field in tool_dict.get(field_collection) or ():
-                if not field["requester_owned"]:
-                    field.pop("requester_owned")
         tool_dict.pop("authored_override_validator", None)
         tool_dict.pop("managed_init_args", None)
         tool_dict.pop("supports_toolkit_filters", None)

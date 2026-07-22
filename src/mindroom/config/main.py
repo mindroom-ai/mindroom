@@ -751,6 +751,22 @@ class Config(BaseModel):
         return self
 
     @model_validator(mode="after")
+    def _validate_desktop_assignments(self) -> Config:
+        """Require requester-agent isolation for every Desktop-enabled agent."""
+        invalid_agents = [
+            agent_name
+            for agent_name, agent_config in self.agents.items()
+            if "desktop" in self._agent_available_tools(agent_name)
+            and (agent_config.private is None or agent_config.private.per != "user_agent")
+        ]
+        if invalid_agents:
+            msg = "The desktop tool requires private.per: user_agent. Invalid agents: " + ", ".join(
+                sorted(invalid_agents),
+            )
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
     def validate_knowledge_base_assignments(self) -> Config:
         """Ensure agents only reference configured knowledge base IDs."""
         invalid_assignments = [
