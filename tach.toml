@@ -456,13 +456,16 @@ depends_on = [
 [[modules]]
 path = "mindroom.custom_tools.desktop"
 depends_on = [
+    "mindroom.credentials",
     "mindroom.custom_tools.tool_payloads",
     "mindroom.custom_tools.toolkit_functions",
     "mindroom.desktop.client",
+    "mindroom.desktop.configuration",
     "mindroom.desktop.media",
     "mindroom.desktop.protocol",
     "mindroom.matrix.olm_to_device",
     "mindroom.tool_system.runtime_context",
+    "mindroom.tool_system.worker_routing",
 ]
 
 # Keep split Matrix client consumers on explicit per-module rules so Tach can
@@ -2143,6 +2146,8 @@ visibility = [
     "mindroom.cli.desktop",
     "mindroom.desktop.bridge",
     "mindroom.desktop.client",
+    "mindroom.desktop.pairing_client",
+    "mindroom.desktop.pairing_receiver",
     "mindroom.matrix.client_session",
     "mindroom.matrix.olm_to_device",
     "mindroom.matrix_rtc.call_manager",
@@ -2150,11 +2155,54 @@ visibility = [
 
 [[modules]]
 path = "mindroom.matrix.olm_to_device"
-depends_on = ["mindroom.matrix.to_device"]
+depends_on = [
+    "mindroom.matrix.device_identity",
+    "mindroom.matrix.to_device",
+]
+
+[[modules]]
+path = "mindroom.matrix.device_identity"
+depends_on = []
+visibility = [
+    "mindroom.desktop.configuration",
+    "mindroom.matrix.olm_to_device",
+]
 
 [[modules]]
 path = "mindroom.desktop"
 depends_on = []
+
+[[modules]]
+path = "mindroom.desktop.configuration"
+depends_on = [
+    "mindroom.desktop.protocol",
+    "mindroom.matrix.device_identity",
+]
+
+[[modules]]
+path = "mindroom.desktop.pairing"
+depends_on = ["mindroom.desktop.protocol"]
+
+[[modules]]
+path = "mindroom.desktop.pairing_receiver"
+depends_on = [
+    "mindroom.desktop.pairing",
+    "mindroom.desktop.protocol",
+    "mindroom.logging_config",
+    "mindroom.matrix.olm_to_device",
+    "mindroom.matrix.to_device",
+]
+visibility = ["mindroom.bot"]
+
+[[modules]]
+path = "mindroom.desktop.pairing_client"
+depends_on = [
+    "mindroom.desktop.protocol",
+    "mindroom.desktop.session",
+    "mindroom.matrix.olm_to_device",
+    "mindroom.matrix.to_device",
+]
+visibility = ["mindroom.cli.desktop"]
 
 [[modules]]
 path = "mindroom.desktop.login_method"
@@ -2615,6 +2663,7 @@ depends_on = [
     "mindroom.conversation_resolver",
     "mindroom.conversation_state_writer",
     "mindroom.delivery_gateway",
+    "mindroom.desktop.pairing_receiver",
     "mindroom.edit_regenerator",
     "mindroom.entity_resolution",
     "mindroom.hooks",
@@ -2745,8 +2794,10 @@ depends_on = [
     "mindroom.desktop.command_journal",
     "mindroom.desktop.identity",
     "mindroom.desktop.login_method",
+    "mindroom.desktop.pairing_client",
     "mindroom.desktop.playwright_mcp",
     "mindroom.desktop.provider",
+    "mindroom.desktop.protocol",
     "mindroom.desktop.session",
     "mindroom.desktop.sso",
     "mindroom.logging_config",
@@ -2860,6 +2911,20 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.commands.desktop_commands"
+depends_on = [
+    "mindroom.credentials",
+    "mindroom.desktop.configuration",
+    "mindroom.desktop.identity",
+    "mindroom.desktop.pairing",
+    "mindroom.session_ids",
+    "mindroom.tool_system.worker_routing",
+]
+visibility = [
+    "mindroom.commands.handler",
+]
+
+[[modules]]
 path = "mindroom.commands.config_confirmation"
 depends_on = [
     "mindroom.commands.config_commands",
@@ -2903,6 +2968,7 @@ depends_on = [
     "mindroom.authorization",
     "mindroom.commands.config_commands",
     "mindroom.commands.config_confirmation",
+    "mindroom.commands.desktop_commands",
     "mindroom.commands.encryption_commands",
     "mindroom.commands.model_commands",
     "mindroom.commands.parsing",

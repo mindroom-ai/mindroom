@@ -164,7 +164,7 @@ mindroom run
 | **Authorization** | Fine-grained user and room access control |
 | **OpenAI-Compatible API** | Use agents from LibreChat, Open WebUI, or any OpenAI client |
 | **Streaming** | Progressive message edits with presence-based gating and tool-call markers |
-| **Chat Commands** | Built-in `!schedule <task>`, `!list_schedules`, `!cancel_schedule <id>`, `!edit_schedule <id> <task>`, `!model [name\|list\|reset]`, `!thread_mode [room\|thread\|reset\|show]`, `!encrypt [confirm]`, `!e2ee`, `!help [topic]`, admin `!reload-plugins`, opt-in admin `!config <operation>`, and `!hi` commands handled by the router |
+| **Chat Commands** | Built-in `!schedule <task>`, `!list_schedules`, `!cancel_schedule <id>`, `!edit_schedule <id> <task>`, `!desktop [setup\|status\|confirm\|rotate\|disconnect]`, `!model [name\|list\|reset]`, `!thread_mode [room\|thread\|reset\|show]`, `!encrypt [confirm]`, `!e2ee`, `!help [topic]`, admin `!reload-plugins`, opt-in admin `!config <operation>`, and `!hi`; commands are normally handled by the router, while a private Desktop agent can handle `!desktop` directly |
 | **Hot Reload** | Config changes are detected and agents restart automatically |
 
 ## Architecture
@@ -206,7 +206,7 @@ mindroom run
 - [Image Messages](https://docs.mindroom.chat/images/) - Image analysis with vision models
 - [File & Video Attachments](https://docs.mindroom.chat/attachments/) - Context-scoped file and video handling
 - [Streaming Responses](https://docs.mindroom.chat/streaming/) - Progressive message edits with presence-based gating
-- [Chat Commands](https://docs.mindroom.chat/chat-commands/) - Built-in `!schedule <task>`, `!list_schedules`, `!cancel_schedule <id>`, `!edit_schedule <id> <task>`, `!model [name|list|reset]`, `!thread_mode [room|thread|reset|show]`, `!encrypt [confirm]`, `!e2ee`, `!help [topic]`, admin `!reload-plugins`, opt-in admin `!config <operation>`, and `!hi` commands
+- [Chat Commands](https://docs.mindroom.chat/chat-commands/) - Built-in `!schedule <task>`, `!list_schedules`, `!cancel_schedule <id>`, `!edit_schedule <id> <task>`, `!desktop [setup|status|confirm|rotate|disconnect]`, `!model [name|list|reset]`, `!thread_mode [room|thread|reset|show]`, `!encrypt [confirm]`, `!e2ee`, `!help [topic]`, admin `!reload-plugins`, opt-in admin `!config <operation>`, and `!hi` commands
 - [Interactive Q&A](https://docs.mindroom.chat/interactive/) - Clickable multiple-choice questions via Matrix reactions
 - [Authorization](https://docs.mindroom.chat/authorization/) - User and room access control
 - [Matrix Space](https://docs.mindroom.chat/matrix-space/) - Optional root Matrix Space for grouping managed rooms
@@ -7563,7 +7563,8 @@ It does not create or replace account-level cross-signing keys for an SSO accoun
 
 The session JSON saves only the reusable Matrix access token and device identifiers.
 The device's private Olm identity is persisted separately under `<storage>/encryption_keys/`; on Unix, MindRoom forces its per-user directory to mode `0700`.
-The printed Ed25519 value is the corresponding public fingerprint and is persisted only when you copy it into the cloud agent configuration.
+The printed Ed25519 value is the device's public fingerprint.
+Self-service pairing sends that fingerprint to the exact cloud agent through an authenticated Olm-encrypted claim, so never copy user-specific Desktop identity fields into agent YAML.
 On Unix, the session file is forced to mode `0600`, and the bridge refuses to load it if group or other users can read it.
 The command prints values similar to these:
 
@@ -7573,7 +7574,7 @@ Device: ABCDEFGHIJ
 Ed25519: desktop-device-fingerprint
 ```
 
-Copy these exact public identity values to the cloud MindRoom configuration.
+Private multi-user agents register these public identity values through the chat flow below.
 
 ### Homeservers Behind an Identity-Aware Proxy
 
@@ -7622,37 +7623,40 @@ During Matrix SSO, the browser handles any interactive proxy authentication whil
 Configure the proxy to accept these machine credentials only for the Matrix endpoints the desktop device needs, while keeping normal Matrix authentication enabled.
 Do not combine `--cloudflare-access` with a static `cf-access-token` header.
 
-## 2. Configure the Cloud Agent
+## 2. Configure the Private Agent
 
-Start cloud MindRoom at least once so the chosen agent has a persistent Matrix device.
-On the cloud server, print that controller's local device identity:
-
-```bash
-mindroom desktop controller --entity computer
-```
-
-Copy the printed controller user, device, and Ed25519 values to the local run command in the next section.
-Configure the local desktop device as an authored override on the exact cloud agent that will call the tool:
+Configure the Desktop tool on a private agent without authored device identity fields:
 
 ```yaml
 agents:
   computer:
     display_name: Computer Agent
     role: Operate my locally authorized applications one step at a time
+    private:
+      per: user_agent
     tools:
       - desktop:
-          device_user_id: "@my-laptop:example.org"
-          device_id: "ABCDEFGHIJ"
-          device_ed25519: "desktop-device-fingerprint"
+          defer: true
           timeout_seconds: 30
 ```
+
+Each user then runs `!desktop setup` in a private room containing only that user, the serving bot, and that private Desktop-enabled agent.
+The short-lived pairing code is a bearer secret, so MindRoom rejects `!desktop` when any other room member is present.
+The serving bot returns a `mindroom desktop pair` command containing a short-lived code and the exact pinned cloud controller identity.
+Run that command on the computer after `mindroom desktop login`, then copy the exact `!desktop confirm <code> <verification>` command it prints back to the same Matrix chat.
+The claim travels as an authenticated Olm-encrypted to-device event, and confirmation stores the local device identity only in that requester's agent-scoped credential store.
+The verification value binds confirmation to the claimed Ed25519 key, so a different device cannot pre-claim a visible pairing code and be confirmed accidentally.
+Another requester or agent cannot confirm or use that record, and shared credentials are never used as a fallback.
+Until pairing is confirmed, Desktop calls return a setup-required result while the agent's unrelated tools continue to work.
+The Desktop tool can explain the trusted chat command, but the model cannot register or replace a device itself.
+Use `!desktop rotate` to replace a device without dropping the current target before confirmation, or `!desktop disconnect confirm` to remove it.
 
 The `desktop` tool runs in the primary agent process because it needs that live agent's Matrix device and room requester identity.
 The `browser` tool remains worker-routable for host-browser isolation, but its Matrix desktop target requires the primary process's live Matrix context.
 Do not list `browser` in `worker_tools` for an agent that uses `target: desktop`; a worker-routed desktop call fails closed with a live-context error.
 It is hidden from OpenAI-compatible API runs when approval policy requires Matrix approval because those runs have no Matrix approval transport.
 
-To use the same device with the `browser` tool, configure its desktop target on that agent:
+The separate `browser` tool can still target its Playwright extension transport through its own configuration:
 
 ```yaml
 agents:
@@ -7815,9 +7819,9 @@ Approval does not override an absent or expired local control lease.
 
 ## Operations
 
-Rotate the local desktop Matrix device with `mindroom desktop login --replace`, revoke the old device in Matrix account management, and then update all three local device pin fields in the cloud tool configuration.
+Rotate the local desktop Matrix device with `mindroom desktop login --replace`, revoke the old device in Matrix account management, then run `!desktop rotate` and follow the new pairing command in the private agent chat.
 The `--replace` option creates a fresh saved session but cannot revoke the old device by itself.
-If the cloud agent receives a new Matrix device, run `mindroom desktop controller --entity <name>` again and update the three controller options used locally.
+If the cloud agent receives a new Matrix device, run `!desktop rotate` and follow the new pairing command so the local bridge pins the replacement controller identity.
 A device ID or Ed25519 mismatch is a hard failure and should be treated as a rotation or possible substitution, not bypassed.
 Use `Ctrl+C` to stop accepting new bridge commands and begin shutdown.
 Desktop input already dispatched through a native worker thread and active Playwright MCP calls are not preemptible, so an in-flight control can still finish before shutdown returns; observe local state before deciding whether to retry it.
@@ -14306,7 +14310,8 @@ Pruning runs opportunistically during new attachment registration.
 # Chat Commands
 
 MindRoom provides chat commands that users can type in any Matrix room where MindRoom agents or teams are present.
-Commands start with `!` and are handled by the router agent.
+Commands start with `!` and are normally handled by the router agent.
+A private Desktop agent handles `!desktop` directly when its room contains only that agent and the requester.
 
 ## Quick Reference
 
@@ -14318,6 +14323,7 @@ Commands start with `!` and are handled by the router agent.
 | `!list_schedules` | List pending scheduled tasks |
 | `!cancel_schedule <id>` | Cancel a scheduled task |
 | `!edit_schedule <id> <task>` | Edit an existing scheduled task |
+| `!desktop [setup\|status\|confirm\|rotate\|disconnect]` | Manage your Desktop target for one private agent |
 | `!model [name\|list\|reset]` | Show or switch the model used in the current thread |
 | `!thread_mode [room\|thread\|reset\|show]` | Show or switch the thread mode used in the current room |
 | `!encrypt [confirm]` | Enable end-to-end encryption for this room (irreversible, room admin only) |
@@ -14465,6 +14471,29 @@ Schedule type cannot be changed (one-time to recurring or vice versa) -- cancel 
 ```
 
 **Aliases:** `!editschedule`, `!edit-schedule`
+
+### `!desktop`
+
+Manage the current requester's Desktop target for one private Desktop-enabled agent.
+
+Run these commands in a room with exactly one eligible private agent:
+
+```text
+!desktop setup
+!desktop status
+!desktop confirm <code> <verification>
+!desktop rotate
+!desktop disconnect
+!desktop disconnect confirm
+```
+
+`!desktop setup` returns a local `mindroom desktop pair` command and a short-lived pairing code.
+The local pairing command presents that code through an authenticated encrypted Matrix device event.
+It then prints an exact chat confirmation command with a verification value derived from the authenticated local device key.
+Only the same Matrix requester in the same agent scope can confirm the matching claim.
+`!desktop rotate` starts the same flow while leaving the current target active until confirmation.
+The agent can report setup status, but it cannot start, confirm, rotate, or disconnect pairing on the requester's behalf.
+See [Matrix Desktop Bridge](https://docs.mindroom.chat/tools/desktop/) for local login and allowlist instructions.
 
 ### `!model`
 
@@ -18675,42 +18704,9 @@ See the [Matrix Desktop Bridge](https://docs.mindroom.chat/tools/desktop/) guide
 ╭─ Commands ─────────────────────────────────────────────────────────────────────────────╮
 │ controller   Print the cloud controller identity that the local bridge must pin.       │
 │ login        Log in once, create an Olm device, and save its access token privately.   │
+│ pair         Claim one requester-agent pairing through authenticated Matrix E2EE.      │
 │ run          Run the outbound-only Matrix sync loop and execute locally authorized     │
 │              commands.                                                                 │
-╰────────────────────────────────────────────────────────────────────────────────────────╯
-
-
-```
-
-<!-- OUTPUT:END -->
-
-### desktop controller
-
-Print the exact cloud agent Matrix device identity that the local bridge must pin.
-
-<!-- CODE:START -->
-<!-- from mindroom.cli.main import app -->
-<!-- from typer.testing import CliRunner -->
-<!-- runner = CliRunner() -->
-<!-- result = runner.invoke(app, ["desktop", "controller", "--help"]) -->
-<!-- print("```") -->
-<!-- print(result.output) -->
-<!-- print("```") -->
-<!-- CODE:END -->
-<!-- OUTPUT:START -->
-<!-- ⚠️ This content is auto-generated by `markdown-code-runner`. -->
-```
-
- Usage: root desktop controller [OPTIONS]
-
- Print the cloud controller identity that the local bridge must pin.
-
-╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
-│ *  --entity                TEXT  Cloud agent whose Matrix device will send commands.   │
-│                                  [required]                                            │
-│    --config        -c      PATH  Cloud MindRoom config path.                           │
-│    --storage-path  -s      PATH  Cloud MindRoom state directory.                       │
-│    --help          -h            Show this message and exit.                           │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 
 

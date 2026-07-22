@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import nio
+
+from mindroom.matrix.device_identity import PinnedMatrixDevice
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -17,27 +18,6 @@ if TYPE_CHECKING:
 
 class OlmToDeviceError(RuntimeError):
     """One pinned encrypted to-device operation failed closed."""
-
-
-@dataclass(frozen=True, slots=True)
-class PinnedMatrixDevice:
-    """Exact Matrix device identity trusted for one encrypted channel."""
-
-    user_id: str
-    device_id: str
-    ed25519: str
-
-    def __post_init__(self) -> None:
-        """Reject incomplete pins before any network or trust-store mutation."""
-        if not self.user_id.startswith("@") or ":" not in self.user_id:
-            msg = "Pinned Matrix user_id must use @user:server form."
-            raise ValueError(msg)
-        if not self.device_id.strip():
-            msg = "Pinned Matrix device_id must not be empty."
-            raise ValueError(msg)
-        if not self.ed25519.strip():
-            msg = "Pinned Matrix ed25519 fingerprint must not be empty."
-            raise ValueError(msg)
 
 
 async def resolve_pinned_device(

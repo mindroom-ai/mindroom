@@ -26,6 +26,24 @@ if TYPE_CHECKING:
 runner = CliRunner()
 
 
+def test_login_identity_output_routes_users_to_chat_pairing(capsys: pytest.CaptureFixture[str], tmp_path: Path) -> None:
+    """Login must not direct users to removed authored device fields."""
+    desktop_cli._print_device_identity(
+        DesktopMatrixSession(
+            homeserver="https://matrix.example.org",
+            user_id="@laptop:example.org",
+            device_id="LAPTOP",
+            access_token="test-token",  # noqa: S106 - Test-only token.
+        ),
+        fingerprint="fingerprint",
+        session_path=tmp_path / "matrix_session.json",
+    )
+
+    output = capsys.readouterr().out
+    assert "!desktop setup" in output
+    assert "cloud agent's desktop tool configuration" not in output
+
+
 def test_desktop_login_accepts_explicit_homeserver(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """A fresh local machine can target cloud Matrix without hidden environment setup."""
     runtime_paths = SimpleNamespace(storage_root=tmp_path)
@@ -160,6 +178,37 @@ def test_desktop_password_login_requires_user_id(monkeypatch: pytest.MonkeyPatch
 
     assert result.exit_code == 1
     assert "--user-id is required" in result.output
+
+
+def test_desktop_pair_sends_claim_with_saved_local_session(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The setup command can present its token from the already logged-in local device."""
+    runtime_paths = SimpleNamespace(storage_root=tmp_path)
+    session = SimpleNamespace(homeserver="https://matrix.example.org", cloudflare_access=False)
+    pair = AsyncMock(return_value="VERIFY123")
+    monkeypatch.setattr("mindroom.cli.config.activate_cli_runtime", lambda *_args, **_kwargs: runtime_paths)
+    monkeypatch.setattr("mindroom.desktop.session.load_desktop_session", lambda _path: session)
+    monkeypatch.setattr(desktop_cli, "_pair_desktop", pair)
+
+    result = runner.invoke(
+        desktop_app,
+        [
+            "pair",
+            "--code",
+            "short-code",
+            "--controller-user-id",
+            "@computer:example.org",
+            "--controller-device-id",
+            "CLOUD",
+            "--controller-ed25519",
+            "cloud-fingerprint",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert pair.await_args.kwargs["session"] is session
+    assert pair.await_args.kwargs["code"] == "short-code"
+    assert pair.await_args.kwargs["controller_user_id"] == "@computer:example.org"
+    assert "!desktop confirm short-code VERIFY123" in result.output
 
 
 def test_desktop_run_loads_matrix_http_headers(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -300,25 +349,6 @@ def test_browser_profile_paths_must_exist(tmp_path: Path) -> None:
         )
 
     assert exc_info.value.exit_code == 2
-
-
-def test_controller_command_preserves_unexpected_environment_errors(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Filesystem failures retain their traceback instead of becoming a generic CLI exit."""
-    runtime_paths = SimpleNamespace(storage_root=tmp_path)
-    monkeypatch.setattr("mindroom.cli.config.activate_cli_runtime", lambda *_args, **_kwargs: runtime_paths)
-
-    def denied(*_args: object, **_kwargs: object) -> None:
-        message = "test identity permission failure"
-        raise PermissionError(message)
-
-    monkeypatch.setattr("mindroom.desktop.identity.controller_identity_for_entity", denied)
-
-    result = runner.invoke(desktop_app, ["controller", "--entity", "computer"])
-
-    assert isinstance(result.exception, PermissionError)
 
 
 def test_login_command_preserves_unexpected_environment_errors(

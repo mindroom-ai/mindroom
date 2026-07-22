@@ -303,7 +303,7 @@ async def _prepare_crypto(client: nio.AsyncClient) -> None:
 
 
 def client_ed25519_fingerprint(client: nio.AsyncClient) -> str:
-    """Return the local device fingerprint users pin in cloud tool config."""
+    """Return the local device fingerprint sent through chat pairing."""
     if client.olm is None:
         msg = "Desktop Matrix client has no Olm identity."
         raise DesktopSessionError(msg)

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolStatus
+from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolManagedInitArg, ToolStatus
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
@@ -23,24 +23,6 @@ if TYPE_CHECKING:
     icon_color="text-cyan-500",
     config_fields=[
         ConfigField(
-            name="device_user_id",
-            label="Desktop Matrix User ID",
-            type="text",
-            description="Dedicated Matrix account used by the local desktop bridge.",
-        ),
-        ConfigField(
-            name="device_id",
-            label="Desktop Matrix Device ID",
-            type="text",
-            description="Exact device ID printed by 'mindroom desktop login'.",
-        ),
-        ConfigField(
-            name="device_ed25519",
-            label="Desktop Device Fingerprint",
-            type="text",
-            description="Exact Ed25519 fingerprint printed by 'mindroom desktop login'.",
-        ),
-        ConfigField(
             name="timeout_seconds",
             label="Command Timeout Seconds",
             type="number",
@@ -50,7 +32,9 @@ if TYPE_CHECKING:
         ),
     ],
     docs_url="https://docs.mindroom.chat/tools/desktop/",
+    helper_text="Ask the requester to send `!desktop setup` directly in this private Matrix chat.",
     function_names=("desktop",),
+    managed_init_args=(ToolManagedInitArg.CREDENTIALS_MANAGER, ToolManagedInitArg.WORKER_TARGET),
 )
 def desktop_tools() -> type[DesktopTools]:
     """Return the Matrix desktop toolkit."""

@@ -22,6 +22,13 @@ SENDER = "@cloud:example.org"
 RECIPIENT = "@desktop:example.org"
 
 
+@pytest.mark.parametrize("user_id", ["@:", "@:example.org", "@desktop:"])
+def test_pinned_matrix_device_rejects_empty_user_id_components(user_id: str) -> None:
+    """Pinned identities require non-empty Matrix localpart and server components."""
+    with pytest.raises(ValueError, match="@user:server"):
+        PinnedMatrixDevice(user_id, "DESKTOP", "fingerprint")
+
+
 def _olm_pair(tmp: str) -> tuple[Olm, Olm, OlmDevice]:
     sender = Olm(SENDER, "CLOUD", DefaultStore(SENDER, "CLOUD", tmp))
     recipient = Olm(RECIPIENT, "DESKTOP", DefaultStore(RECIPIENT, "DESKTOP", tmp))

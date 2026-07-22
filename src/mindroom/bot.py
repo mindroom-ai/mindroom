@@ -19,6 +19,7 @@ from mindroom.approval_inbound import (
 )
 from mindroom.bot_room_lifecycle import BotRoomLifecycle, BotRoomLifecycleDeps
 from mindroom.bot_runtime_view import BotRuntimeState
+from mindroom.desktop.pairing_receiver import register_desktop_pairing_receiver
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.hooks import (
     EVENT_AGENT_STARTED,
@@ -1428,6 +1429,17 @@ class AgentBot:
                 nio.MegolmEvent,
             )
             self._register_call_manager_callbacks(client)
+            register_desktop_pairing_receiver(
+                self.config,
+                client=client,
+                agent_name=self.agent_name,
+                runtime_paths=self.runtime_paths,
+                callback_wrapper=lambda callback: _create_task_wrapper(
+                    callback,
+                    owner=self._runtime_view,
+                    on_error=callback_failed,
+                ),
+            )
             await self._set_presence_with_model_info()
             client.add_response_callback(self._on_sync_response, nio.SyncResponse)  # ty: ignore[invalid-argument-type]  # matrix-nio callback types are too strict here
             client.add_response_callback(self._on_sync_error, nio.SyncError)  # ty: ignore[invalid-argument-type]

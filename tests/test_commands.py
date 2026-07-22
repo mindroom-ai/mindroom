@@ -536,6 +536,81 @@ async def test_hi_command_uses_live_responder_candidates_when_available(tmp_path
     assert "@research" not in response_text
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("extra_member", [None, "@bob:localhost"])
+async def test_desktop_command_resolves_exact_private_agent_from_router_candidates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    extra_member: str | None,
+) -> None:
+    """Router-owned commands require the sole eligible agent and no unrelated room member."""
+    runtime_paths = _test_runtime_paths(tmp_path)
+    config = Config.validate_with_runtime(
+        {
+            "defaults": {"tools": []},
+            "agents": {
+                "code": {
+                    "display_name": "Code",
+                    "role": "Writes code",
+                    "private": {"per": "user_agent"},
+                    "tools": ["desktop"],
+                },
+            },
+        },
+        runtime_paths,
+    )
+    persist_entity_accounts(
+        config,
+        runtime_paths,
+        usernames={"router": "mindroom_router", "code": "mindroom_code"},
+    )
+    room = nio.MatrixRoom(room_id="!room:localhost", own_user_id="@mindroom_router:localhost")
+    for user_id in ("@mindroom_router:localhost", "@mindroom_code:localhost", "@alice:localhost"):
+        room.add_member(user_id, None, None)
+    if extra_member is not None:
+        room.add_member(extra_member, None, None)
+    send_response = AsyncMock(return_value="$desktop")
+    candidate_resolver = AsyncMock(return_value=[MatrixID.parse("@mindroom_code:localhost")])
+    desktop_handler = MagicMock(return_value="desktop status")
+    monkeypatch.setattr("mindroom.commands.handler.handle_desktop_command", desktop_handler)
+    context = CommandHandlerContext(
+        client=AsyncMock(),
+        config=config,
+        runtime_paths=runtime_paths,
+        logger=MagicMock(),
+        conversation_cache=MagicMock(),
+        event_cache=make_event_cache_mock(),
+        stable_target=MessageTarget.resolve("!room:localhost", None, "$event"),
+        record_handled_turn=MagicMock(),
+        send_response=send_response,
+        responder_candidates_for_room=candidate_resolver,
+    )
+
+    await handle_command(
+        context=context,
+        room=room,
+        event=SimpleNamespace(
+            sender="@alice:localhost",
+            event_id="$event",
+            body="!desktop status",
+            source={"content": {"body": "!desktop status"}},
+        ),
+        command=Command(
+            type=CommandType.DESKTOP,
+            args={"args_text": "status"},
+            raw_text="!desktop status",
+        ),
+        requester_user_id="@alice:localhost",
+    )
+
+    if extra_member is None:
+        assert desktop_handler.call_args.kwargs["scope"].agent_name == "code"
+        assert desktop_handler.call_args.kwargs["scope"].requester_id == "@alice:localhost"
+    else:
+        desktop_handler.assert_not_called()
+        assert "private room" in send_response.await_args.args[0]
+
+
 def test_docs_index_chat_commands_summary_lists_all_supported_commands() -> None:
     """The docs index summary should stay in sync with the supported command set."""
     docs_index = Path(__file__).resolve().parents[1] / "docs" / "index.md"

@@ -7658,42 +7658,6 @@
       "config_fields": [
         {
           "authored_override": true,
-          "default": null,
-          "description": "Dedicated Matrix account used by the local desktop bridge.",
-          "label": "Desktop Matrix User ID",
-          "name": "device_user_id",
-          "options": null,
-          "placeholder": null,
-          "required": true,
-          "type": "text",
-          "validation": null
-        },
-        {
-          "authored_override": true,
-          "default": null,
-          "description": "Exact device ID printed by 'mindroom desktop login'.",
-          "label": "Desktop Matrix Device ID",
-          "name": "device_id",
-          "options": null,
-          "placeholder": null,
-          "required": true,
-          "type": "text",
-          "validation": null
-        },
-        {
-          "authored_override": true,
-          "default": null,
-          "description": "Exact Ed25519 fingerprint printed by 'mindroom desktop login'.",
-          "label": "Desktop Device Fingerprint",
-          "name": "device_ed25519",
-          "options": null,
-          "placeholder": null,
-          "required": true,
-          "type": "text",
-          "validation": null
-        },
-        {
-          "authored_override": true,
           "default": 30,
           "description": "Short-lived command and response timeout, from 1 to 120 seconds.",
           "label": "Command Timeout Seconds",
@@ -7714,7 +7678,7 @@
       "function_names": [
         "desktop"
       ],
-      "helper_text": null,
+      "helper_text": "Ask the requester to send `!desktop setup` directly in this private Matrix chat.",
       "icon": "MonitorUp",
       "icon_color": "text-cyan-500",
       "name": "desktop",

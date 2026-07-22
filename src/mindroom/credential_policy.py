@@ -38,6 +38,7 @@ _OAUTH_TOKEN_SERVICE_SUFFIX = "_oauth"  # noqa: S105
 
 _LOCAL_ONLY_SHARED_CREDENTIAL_SERVICES = frozenset(
     {
+        "desktop",
         "google_calendar",
         "google_docs",
         "google_drive",
@@ -50,6 +51,7 @@ _LOCAL_ONLY_SHARED_CREDENTIAL_SERVICES = frozenset(
 
 _UNSUPPORTED_WORKER_GRANTABLE_CREDENTIALS = frozenset(
     {
+        "desktop",
         "google_vertex_adc",
     },
 )

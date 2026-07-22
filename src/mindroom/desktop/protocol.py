@@ -2,16 +2,20 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass, field
 from typing import Literal, cast
 
 DESKTOP_COMMAND_EVENT_TYPE = "io.mindroom.desktop.command.v2"
 DESKTOP_RESPONSE_EVENT_TYPE = "io.mindroom.desktop.response.v2"
+DESKTOP_PAIRING_CLAIM_EVENT_TYPE = "io.mindroom.desktop.pairing_claim.v1"
+DESKTOP_PAIRING_ACCEPTED_EVENT_TYPE = "io.mindroom.desktop.pairing_accepted.v1"
 DESKTOP_PROTOCOL_VERSION = 2
 MAX_COMMAND_TTL_MS = 120_000
 MAX_SCREENSHOT_BYTES = 10 * 1024 * 1024
 _MAX_COMMAND_PARAMETERS_BYTES = 16 * 1024
+_PAIRING_VERIFICATION_HEX_CHARS = 16
 
 type DesktopAction = Literal[
     "status",
@@ -73,6 +77,55 @@ _DESKTOP_ACTIONS = frozenset({"status", "list_apps", *DESKTOP_APP_ACTIONS, *DESK
 
 class DesktopProtocolError(ValueError):
     """One desktop wire payload is malformed or unsupported."""
+
+
+@dataclass(frozen=True, slots=True)
+class DesktopPairingClaim:
+    """One short-lived pairing token presented by an authenticated local device."""
+
+    token: str
+
+    def to_content(self) -> dict[str, object]:
+        """Serialize one pairing claim without duplicating device identity fields."""
+        return {"v": DESKTOP_PROTOCOL_VERSION, "token": self.token}
+
+    @classmethod
+    def from_content(cls, raw: object) -> DesktopPairingClaim:
+        """Parse one strict pairing claim."""
+        content = _object_mapping(raw, "pairing claim")
+        _require_protocol_version(content)
+        return cls(token=_bounded_str(content, "token", "pairing claim", max_length=256))
+
+
+@dataclass(frozen=True, slots=True)
+class DesktopPairingAccepted:
+    """Authenticated controller acknowledgement for one claimed pairing token."""
+
+    verification: str
+
+    def to_content(self) -> dict[str, object]:
+        """Serialize one acknowledgement without returning the bearer token."""
+        return {"v": DESKTOP_PROTOCOL_VERSION, "verification": self.verification}
+
+    @classmethod
+    def from_content(cls, raw: object) -> DesktopPairingAccepted:
+        """Parse one strict pairing acknowledgement."""
+        content = _object_mapping(raw, "pairing acknowledgement")
+        _require_protocol_version(content)
+        return cls(
+            verification=_bounded_str(
+                content,
+                "verification",
+                "pairing acknowledgement",
+                max_length=64,
+            ),
+        )
+
+
+def desktop_pairing_verification(token: str, device_ed25519: str) -> str:
+    """Derive a terminal-visible confirmation bound to one claimed device key."""
+    digest = hashlib.sha256(f"{token}\0{device_ed25519}".encode()).hexdigest()
+    return digest[:_PAIRING_VERIFICATION_HEX_CHARS].upper()
 
 
 @dataclass(frozen=True, slots=True)
@@ -325,6 +378,8 @@ __all__ = [
     "DESKTOP_BROWSER_ACTIONS",
     "DESKTOP_COMMAND_EVENT_TYPE",
     "DESKTOP_CONTROL_ACTIONS",
+    "DESKTOP_PAIRING_ACCEPTED_EVENT_TYPE",
+    "DESKTOP_PAIRING_CLAIM_EVENT_TYPE",
     "DESKTOP_PROTOCOL_VERSION",
     "DESKTOP_RESPONSE_EVENT_TYPE",
     "DESKTOP_SAFE_KEYS",
@@ -332,8 +387,11 @@ __all__ = [
     "MAX_SCREENSHOT_BYTES",
     "DesktopAction",
     "DesktopCommand",
+    "DesktopPairingAccepted",
+    "DesktopPairingClaim",
     "DesktopProtocolError",
     "DesktopResponse",
     "EncryptedDesktopMedia",
+    "desktop_pairing_verification",
     "event_content",
 ]
