@@ -162,7 +162,7 @@ mindroom run
 | **Authorization** | Fine-grained user and room access control |
 | **OpenAI-Compatible API** | Use agents from LibreChat, Open WebUI, or any OpenAI client |
 | **Streaming** | Progressive message edits with presence-based gating and tool-call markers |
-| **Chat Commands** | Built-in `!schedule <task>`, `!list_schedules`, `!cancel_schedule <id>`, `!edit_schedule <id> <task>`, `!desktop [setup\|status\|confirm\|rotate\|disconnect]`, `!model [name\|list\|reset]`, `!thread_mode [room\|thread\|reset\|show]`, `!encrypt [confirm]`, `!e2ee`, `!help [topic]`, admin `!reload-plugins`, opt-in admin `!config <operation>`, and `!hi`; commands are normally handled by the router, while a Desktop-enabled agent can handle `!desktop` directly |
+| **Chat Commands** | Built-in `!schedule <task>`, `!list_schedules`, `!cancel_schedule <id>`, `!edit_schedule <id> <task>`, `!desktop [setup\|status\|confirm\|rotate\|disconnect]`, `!model [name\|list\|reset]`, `!thread_mode [room\|thread\|reset\|show]`, `!encrypt [confirm]`, `!e2ee`, `!help [topic]`, admin `!reload-plugins`, opt-in admin `!config <operation>`, and `!hi`; commands are normally handled by the router, while a Desktop-enabled agent can handle `!desktop` directly in a room containing only it and the requester |
 | **Hot Reload** | Config changes are detected and agents restart automatically |
 
 ## Architecture

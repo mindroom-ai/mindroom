@@ -89,7 +89,7 @@ The Matrix homeserver can observe routing metadata, timing, and encrypted media 
 ## Requirements
 
 You can use the same Matrix account as your agent chat or a dedicated Matrix account for the local bridge.
-The chat setup command uses your chat account and adds a dedicated Matrix device to it.
+The `mindroom desktop login` command returned by `!desktop setup` uses your chat account and adds a dedicated Matrix device to it.
 For manual password login, a dedicated account reduces the impact of exposing that password on the local computer.
 The desktop account and the cloud MindRoom entity must use the same Matrix federation environment and must be able to exchange to-device events and media.
 If the optional local desktop dependencies are missing, `mindroom desktop run` auto-installs the `desktop` extra at startup unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set.

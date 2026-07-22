@@ -195,6 +195,8 @@ class DesktopTools(Toolkit):
             )
         if context is None:
             return _error_result(action, "Desktop tool requires a live Matrix runtime context.")
+        assert credential_scope is not None
+        requester_id, agent_name = credential_scope
         validation_error = _return_attachment_validation_error(action, return_attachment)
         if validation_error is not None:
             return _error_result(action, validation_error)
@@ -222,8 +224,8 @@ class DesktopTools(Toolkit):
                 issued_at_ms=now_ms,
                 expires_at_ms=now_ms + round(configuration.timeout_seconds * 1000),
                 action=action,  # ty: ignore[invalid-argument-type] - validated by _action_parameters.
-                requester_id=context.requester_id,
-                agent_name=context.agent_name,
+                requester_id=requester_id,
+                agent_name=agent_name,
                 parameters=parameters,
             )
             response = await desktop_response_router(context.client).request(

@@ -6,7 +6,7 @@ icon: lucide/terminal-square
 
 MindRoom provides chat commands that users can type in any Matrix room where MindRoom agents or teams are present.
 Commands start with `!` and are normally handled by the router agent.
-A Desktop-enabled agent handles `!desktop` directly when its room contains only that agent and the requester.
+`!desktop` uses the direct Desktop pairing flow in a room containing only the requester and one Desktop-enabled agent, plus the router when it serves the command.
 
 ## Quick Reference
 
@@ -29,7 +29,7 @@ A Desktop-enabled agent handles `!desktop` directly when its room contains only 
 ## Who Handles Commands
 
 The **router** normally handles commands.
-A Desktop-enabled agent handles `!desktop` itself in a direct room containing only that agent and the requester.
+`!desktop` uses the direct Desktop pairing flow in a room containing only the requester and one Desktop-enabled agent, plus the router when it serves the command.
 Commands work in both main room messages and within threads.
 
 Voice messages that contain commands (e.g., spoken `!schedule`) are recognized after transcription and processed the same way.
@@ -171,7 +171,7 @@ Schedule type cannot be changed (one-time to recurring or vice versa) -- cancel 
 
 Manage the current requester's Desktop target for one Desktop-enabled agent.
 
-Run these commands in a private Matrix room with exactly one eligible agent:
+Run these commands in a private Matrix room containing only the requester and one Desktop-enabled agent, plus the router when it serves the command:
 
 ```text
 !desktop setup

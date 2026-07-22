@@ -164,7 +164,7 @@ mindroom run
 | **Authorization** | Fine-grained user and room access control |
 | **OpenAI-Compatible API** | Use agents from LibreChat, Open WebUI, or any OpenAI client |
 | **Streaming** | Progressive message edits with presence-based gating and tool-call markers |
-| **Chat Commands** | Built-in `!schedule <task>`, `!list_schedules`, `!cancel_schedule <id>`, `!edit_schedule <id> <task>`, `!desktop [setup\|status\|confirm\|rotate\|disconnect]`, `!model [name\|list\|reset]`, `!thread_mode [room\|thread\|reset\|show]`, `!encrypt [confirm]`, `!e2ee`, `!help [topic]`, admin `!reload-plugins`, opt-in admin `!config <operation>`, and `!hi`; commands are normally handled by the router, while a Desktop-enabled agent can handle `!desktop` directly |
+| **Chat Commands** | Built-in `!schedule <task>`, `!list_schedules`, `!cancel_schedule <id>`, `!edit_schedule <id> <task>`, `!desktop [setup\|status\|confirm\|rotate\|disconnect]`, `!model [name\|list\|reset]`, `!thread_mode [room\|thread\|reset\|show]`, `!encrypt [confirm]`, `!e2ee`, `!help [topic]`, admin `!reload-plugins`, opt-in admin `!config <operation>`, and `!hi`; commands are normally handled by the router, while a Desktop-enabled agent can handle `!desktop` directly in a room containing only it and the requester |
 | **Hot Reload** | Config changes are detected and agents restart automatically |
 
 ## Architecture
@@ -7515,7 +7515,7 @@ The Matrix homeserver can observe routing metadata, timing, and encrypted media 
 ## Requirements
 
 You can use the same Matrix account as your agent chat or a dedicated Matrix account for the local bridge.
-The chat setup command uses your chat account and adds a dedicated Matrix device to it.
+The `mindroom desktop login` command returned by `!desktop setup` uses your chat account and adds a dedicated Matrix device to it.
 For manual password login, a dedicated account reduces the impact of exposing that password on the local computer.
 The desktop account and the cloud MindRoom entity must use the same Matrix federation environment and must be able to exchange to-device events and media.
 If the optional local desktop dependencies are missing, `mindroom desktop run` auto-installs the `desktop` extra at startup unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set.
@@ -14312,7 +14312,7 @@ Pruning runs opportunistically during new attachment registration.
 
 MindRoom provides chat commands that users can type in any Matrix room where MindRoom agents or teams are present.
 Commands start with `!` and are normally handled by the router agent.
-A Desktop-enabled agent handles `!desktop` directly when its room contains only that agent and the requester.
+`!desktop` uses the direct Desktop pairing flow in a room containing only the requester and one Desktop-enabled agent, plus the router when it serves the command.
 
 ## Quick Reference
 
@@ -14335,7 +14335,7 @@ A Desktop-enabled agent handles `!desktop` directly when its room contains only 
 ## Who Handles Commands
 
 The **router** normally handles commands.
-A Desktop-enabled agent handles `!desktop` itself in a direct room containing only that agent and the requester.
+`!desktop` uses the direct Desktop pairing flow in a room containing only the requester and one Desktop-enabled agent, plus the router when it serves the command.
 Commands work in both main room messages and within threads.
 
 Voice messages that contain commands (e.g., spoken `!schedule`) are recognized after transcription and processed the same way.
@@ -14477,7 +14477,7 @@ Schedule type cannot be changed (one-time to recurring or vice versa) -- cancel 
 
 Manage the current requester's Desktop target for one Desktop-enabled agent.
 
-Run these commands in a private Matrix room with exactly one eligible agent:
+Run these commands in a private Matrix room containing only the requester and one Desktop-enabled agent, plus the router when it serves the command:
 
 ```text
 !desktop setup

@@ -194,6 +194,9 @@ async def test_live_requester_and_tool_owner_select_desktop_identity(monkeypatch
 
     assert loaded_scopes == [("@bob:example.org", "computer")]
     assert request.await_args.args[0].user_id == "@bob-desktop:example.org"
+    command = request.await_args.args[1]
+    assert command.requester_id == "@bob:example.org"
+    assert command.agent_name == "computer"
 
 
 def test_desktop_configuration_distinguishes_partial_and_invalid_state() -> None:
