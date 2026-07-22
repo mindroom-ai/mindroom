@@ -577,6 +577,18 @@ class TestMentionParsing:
         assert "https://matrix.to/#/@alice:example.org" not in content["formatted_body"]
         assert content["formatted_body"].count("https://matrix.to/#/@actual_code:localhost") == 1
 
+    def test_format_message_rejects_invalid_backtick_fence_opener(self) -> None:
+        """Backticks in a backtick fence info string should leave later prose outside code."""
+        config = _make_config(_default_runtime_paths())
+
+        content = _format_message_with_mentions(
+            config,
+            "```bash `invalid\nPing @alice:example.org",
+        )
+
+        assert content["m.mentions"]["user_ids"] == ["@alice:example.org"]
+        assert "https://matrix.to/#/@alice:example.org" in content["formatted_body"]
+
     def test_format_message_with_full_matrix_user_id_excludes_sentence_period(self) -> None:
         """Sentence punctuation should not become part of a full Matrix ID mention."""
         config = _make_config(_default_runtime_paths())

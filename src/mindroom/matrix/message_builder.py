@@ -174,7 +174,7 @@ def markdown_fenced_code_ranges(text: str) -> list[tuple[int, int]]:
     for line in text.splitlines(keepends=True):
         if fence_character is None:
             fence_match = _FENCE_OPEN_PATTERN.match(line)
-            if fence_match is not None:
+            if fence_match is not None and (fence_match.group(1)[0] == "~" or "`" not in line[fence_match.end() :]):
                 fence_start = offset
                 fence_character = fence_match.group(1)[0]
                 opening_length = len(fence_match.group(1))
