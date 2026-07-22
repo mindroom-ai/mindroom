@@ -275,6 +275,8 @@ def test_get_command_help() -> None:
     assert "Simple Reminders:" in schedule_help
     assert "Agent and Team Workflows:" in schedule_help
     assert "in 5 minutes" in schedule_help
+    assert "Requires an explicit recurring polling cadence" in schedule_help
+    assert "Automatically converts to smart polling" not in schedule_help
 
     list_schedules_help = get_command_help("list_schedules")
     assert "List Schedules Command" in list_schedules_help
