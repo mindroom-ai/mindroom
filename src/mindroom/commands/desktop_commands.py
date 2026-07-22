@@ -70,13 +70,17 @@ def _setup_response(scope: DesktopCommandScope) -> str:
         requester_id=scope.requester_id,
         agent_name=scope.agent_name,
     )
-    login_command = " ".join(
-        (
-            "mindroom desktop login",
-            f"--user-id {shlex.quote(scope.requester_id)}",
-            f"--homeserver {shlex.quote(runtime_matrix_homeserver(scope.runtime_paths))}",
-        ),
+    homeserver = scope.runtime_paths.env_value("MINDROOM_DESKTOP_MATRIX_HOMESERVER") or runtime_matrix_homeserver(
+        scope.runtime_paths,
     )
+    login_parts = [
+        "mindroom desktop login",
+        f"--user-id {shlex.quote(scope.requester_id)}",
+        f"--homeserver {shlex.quote(homeserver)}",
+    ]
+    if scope.runtime_paths.env_flag("MINDROOM_DESKTOP_CLOUDFLARE_ACCESS"):
+        login_parts.append("--cloudflare-access")
+    login_command = " ".join(login_parts)
     pairing_command = " ".join(
         (
             "mindroom desktop pair",

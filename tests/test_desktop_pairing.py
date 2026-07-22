@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import sqlite3
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, Mock
@@ -372,6 +373,22 @@ def test_chat_confirmation_saves_only_the_initiating_requester_agent_scope(
 
     setup_response = handle_desktop_command("setup", scope=alice_scope)
     assert "mindroom desktop login --user-id @alice:example.org --homeserver http://localhost:8008" in setup_response
+    public_runtime_paths = replace(
+        runtime_paths,
+        process_env={
+            **runtime_paths.process_env,
+            "MINDROOM_DESKTOP_MATRIX_HOMESERVER": "https://matrix.example.org",
+            "MINDROOM_DESKTOP_CLOUDFLARE_ACCESS": "true",
+        },
+    )
+    public_setup_response = handle_desktop_command(
+        "setup",
+        scope=replace(alice_scope, runtime_paths=public_runtime_paths),
+    )
+    assert (
+        "mindroom desktop login --user-id @alice:example.org "
+        "--homeserver https://matrix.example.org --cloudflare-access"
+    ) in public_setup_response
     token_match = re.search(r"--code ([A-Za-z0-9_-]+)", setup_response)
     assert token_match is not None
     token = token_match.group(1)

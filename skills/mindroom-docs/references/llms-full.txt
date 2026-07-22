@@ -1020,6 +1020,8 @@ tool_approval:
 | `MATRIX_HOMESERVER` | Matrix homeserver URL | `http://localhost:8008` |
 | `MATRIX_SERVER_NAME` | Server name for federation | _(derived from homeserver)_ |
 | `MATRIX_SSL_VERIFY` | Verify SSL certificates | `true` |
+| `MINDROOM_DESKTOP_MATRIX_HOMESERVER` | Public Matrix URL printed by `!desktop setup` when it differs from the runtime's internal homeserver URL | `MATRIX_HOMESERVER` |
+| `MINDROOM_DESKTOP_CLOUDFLARE_ACCESS` | Include `--cloudflare-access` in the Desktop login command printed by `!desktop setup` | `false` |
 
 ### API Keys
 
@@ -7594,6 +7596,10 @@ The session remembers that Cloudflare Access is enabled, so later `mindroom desk
 MindRoom reads the JWT's documented `exp` claim and reuses it only while current.
 After expiry, the first Matrix request obtains a current token from `cloudflared`, prompting for browser reauthentication when needed.
 For an older saved session, `mindroom desktop run --cloudflare-access` enables Access for that invocation without rewriting the session.
+
+When the MindRoom runtime reaches Matrix through an internal address, set `MINDROOM_DESKTOP_MATRIX_HOMESERVER` to the public Matrix URL that local Desktop clients can reach.
+This changes only the login command printed by `!desktop setup`; server-side Matrix traffic continues to use `MATRIX_HOMESERVER`.
+Set `MINDROOM_DESKTOP_CLOUDFLARE_ACCESS=true` when that public URL requires Cloudflare Access so the printed command includes `--cloudflare-access`.
 
 For unattended proxies that issue machine credentials instead, put their required request headers in a separate JSON file:
 
