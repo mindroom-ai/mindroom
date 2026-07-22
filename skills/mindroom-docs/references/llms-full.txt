@@ -7565,6 +7565,8 @@ MindRoom exchanges that token immediately and never writes it to disk or termina
 It does not create or replace account-level cross-signing keys for an SSO account; the bridge authenticates this transport by pinning the exact device ID and Ed25519 key shown after login.
 
 The session JSON saves only the reusable Matrix access token and device identifiers.
+By default, all `mindroom desktop` commands use the user-level `~/.mindroom` runtime, regardless of the current working directory.
+An explicit `--config`, `--storage-path`, `MINDROOM_CONFIG_PATH`, or `MINDROOM_STORAGE_PATH` still selects another runtime and must be reused across login, pairing, and bridge startup.
 The device's private Olm identity is persisted separately under `<storage>/encryption_keys/`; on Unix, MindRoom forces its per-user directory to mode `0700`.
 The printed Ed25519 value is the device's public fingerprint.
 Self-service pairing sends that fingerprint to the exact cloud agent through an authenticated Olm-encrypted claim, so never copy user-specific Desktop identity fields into agent YAML.

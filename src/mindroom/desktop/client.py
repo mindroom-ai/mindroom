@@ -119,7 +119,10 @@ class DesktopResponseRouter:
 
 
 def _timeout_message(command: DesktopCommand, *, timeout_seconds: float) -> str:
-    message = f"Desktop device did not answer within {timeout_seconds:g} seconds."
+    message = (
+        f"Desktop device did not answer within {timeout_seconds:g} seconds. "
+        "Ensure the local `mindroom desktop run` process is running; do not guess another command name or flags."
+    )
     if command.action not in DESKTOP_CONTROL_ACTIONS:
         return message
     recovery_action = (

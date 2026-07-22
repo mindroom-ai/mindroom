@@ -453,7 +453,16 @@ def test_chat_confirmation_saves_only_the_initiating_requester_agent_scope(
 
     assert "does not belong" in handle_desktop_command(f"confirm {token} {verification}", scope=bob_scope)
     assert "verification does not match" in handle_desktop_command(f"confirm {token} vérification", scope=alice_scope)
-    assert "Desktop paired" in handle_desktop_command(f"confirm {token} {verification}", scope=alice_scope)
+    confirmation = handle_desktop_command(f"confirm {token} {verification}", scope=alice_scope)
+    assert "Desktop paired" in confirmation
+    assert "mindroom desktop run \\" in confirmation
+    assert "--controller-user-id @computer:example.org" in confirmation
+    assert "--controller-device-id CLOUD" in confirmation
+    assert "--controller-ed25519 cloud-fingerprint" in confirmation
+    assert "--allow-requester @alice:example.org" in confirmation
+    assert "--allow-agent computer" in confirmation
+    assert "--allow-app <application-id>" in confirmation
+    assert "--allow-control" in confirmation
     assert "Desktop is configured" in handle_desktop_command("", scope=alice_scope)
     assert "Desktop is configured" in handle_desktop_command("status", scope=alice_scope)
     assert "setup is required" in handle_desktop_command("status", scope=bob_scope)

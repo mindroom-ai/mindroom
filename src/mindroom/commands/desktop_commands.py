@@ -26,6 +26,7 @@ from mindroom.desktop.pairing import (
 if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.desktop.identity import DesktopControllerIdentity
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,6 +113,20 @@ def _status_response(scope: DesktopCommandScope) -> str:
     return f"Desktop setup is required for you and agent `{scope.agent_name}`. Run `!desktop setup`."
 
 
+def _run_command(scope: DesktopCommandScope, controller: DesktopControllerIdentity) -> str:
+    """Return the current local bridge command with only the app choice left open."""
+    parts = [
+        "mindroom desktop run",
+        f"--controller-user-id {shlex.quote(controller.user_id)}",
+        f"--controller-device-id {shlex.quote(controller.device_id)}",
+        f"--controller-ed25519 {shlex.quote(controller.ed25519)}",
+        f"--allow-requester {shlex.quote(scope.requester_id)}",
+        f"--allow-agent {shlex.quote(scope.agent_name)}",
+        "--allow-app <application-id>",
+    ]
+    return " \\\n  ".join(parts)
+
+
 def _confirm_response(scope: DesktopCommandScope, token: str, verification: str) -> str:
     _validate_desktop_scope(scope)
     pending = confirm_desktop_pairing(
@@ -139,9 +154,14 @@ def _confirm_response(scope: DesktopCommandScope, token: str, verification: str)
         agent_name=scope.agent_name,
     )
     complete_desktop_pairing(scope.runtime_paths, token=token)
+    controller = controller_identity_for_entity(scope.agent_name, runtime_paths=scope.runtime_paths)
+    run_command = _run_command(scope, controller)
     return (
-        f"✅ Desktop paired for you and agent `{scope.agent_name}`. "
-        "Start the local bridge with exact requester, agent, application, and lease allowlists."
+        f"✅ Desktop paired for you and agent `{scope.agent_name}`.\n\n"
+        "Start the local bridge with:\n\n"
+        f"```bash\n{run_command}\n```\n\n"
+        "Replace `<application-id>` with one exact local application ID and repeat `--allow-app` as needed. "
+        "Add `--allow-control` for a short local control lease; otherwise the bridge is observe-only."
     )
 
 

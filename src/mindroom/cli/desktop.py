@@ -6,7 +6,7 @@ import asyncio
 import os
 import sys
 import time
-from pathlib import Path  # noqa: TC003 - Typer evaluates command annotations at runtime.
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import typer
@@ -36,6 +36,26 @@ desktop_app = typer.Typer(
     help="Connect allowlisted local applications to cloud MindRoom over Matrix E2EE.",
     no_args_is_help=True,
 )
+
+
+def _activate_desktop_runtime(config_path: Path | None, *, storage_path: Path | None) -> RuntimePaths:
+    """Resolve local Desktop state without making it depend on the working directory."""
+    from mindroom import constants  # noqa: PLC0415
+    from mindroom.cli.config import activate_cli_runtime  # noqa: PLC0415
+
+    process_env = constants.exported_process_env()
+    has_explicit_runtime = any(
+        value is not None and str(value).strip()
+        for value in (
+            config_path,
+            storage_path,
+            process_env.get("MINDROOM_CONFIG_PATH"),
+            process_env.get("MINDROOM_STORAGE_PATH"),
+        )
+    )
+    if not has_explicit_runtime:
+        config_path = Path.home() / ".mindroom" / "config.yaml"
+    return activate_cli_runtime(config_path, storage_path=storage_path)
 
 
 def _ensure_desktop_dependencies(runtime_paths: RuntimePaths) -> None:
@@ -107,7 +127,6 @@ def desktop_login(
     ),
 ) -> None:
     """Log in once, create an Olm device, and save its access token privately."""
-    from mindroom.cli.config import activate_cli_runtime  # noqa: PLC0415
     from mindroom.constants import runtime_matrix_homeserver  # noqa: PLC0415
     from mindroom.desktop.cloudflare_access import (  # noqa: PLC0415
         CloudflareAccessError,
@@ -121,7 +140,7 @@ def desktop_login(
     )
     from mindroom.desktop.sso import DesktopSsoError, receive_sso_login_token  # noqa: PLC0415
 
-    runtime_paths = activate_cli_runtime(config_path, storage_path=storage_path)
+    runtime_paths = _activate_desktop_runtime(config_path, storage_path=storage_path)
     session_path = desktop_session_path(runtime_paths)
     if session_path.exists() and not replace:
         _error_console.print(f"[red]Error:[/red] Session already exists at {session_path}. Use --replace explicitly.")
@@ -277,7 +296,6 @@ def desktop_pair(
     ),
 ) -> None:
     """Claim one requester-agent pairing through authenticated Matrix E2EE."""
-    from mindroom.cli.config import activate_cli_runtime  # noqa: PLC0415
     from mindroom.desktop.cloudflare_access import (  # noqa: PLC0415
         CloudflareAccessError,
         cloudflare_access_headers,
@@ -290,7 +308,7 @@ def desktop_pair(
     )
     from mindroom.matrix.olm_to_device import OlmToDeviceError  # noqa: PLC0415
 
-    runtime_paths = activate_cli_runtime(config_path, storage_path=storage_path)
+    runtime_paths = _activate_desktop_runtime(config_path, storage_path=storage_path)
     try:
         http_headers: Mapping[str, str] | None = load_desktop_http_headers(matrix_http_headers_file)
         session = load_desktop_session(desktop_session_path(runtime_paths))
@@ -421,7 +439,6 @@ def desktop_run(
     ),
 ) -> None:
     """Run the outbound-only Matrix sync loop and execute locally authorized commands."""
-    from mindroom.cli.config import activate_cli_runtime  # noqa: PLC0415
     from mindroom.desktop.cloudflare_access import (  # noqa: PLC0415
         CloudflareAccessError,
         cloudflare_access_headers,
@@ -442,7 +459,7 @@ def desktop_run(
         executable_path=browser_executable,
         user_data_dir=browser_user_data_dir,
     )
-    runtime_paths = activate_cli_runtime(config_path, storage_path=storage_path)
+    runtime_paths = _activate_desktop_runtime(config_path, storage_path=storage_path)
     setup_logging(level=log_level.upper(), runtime_paths=runtime_paths)
     try:
         http_headers: Mapping[str, str] | None = load_desktop_http_headers(matrix_http_headers_file)

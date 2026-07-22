@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
 
 import nio
@@ -19,11 +19,36 @@ from mindroom.desktop.provider import DesktopProviderError
 from mindroom.desktop.session import DesktopMatrixSession, DesktopSessionError
 from mindroom.matrix.to_device import AuthenticatedToDeviceEvent
 
-if TYPE_CHECKING:
-    from pathlib import Path
-
-
 runner = CliRunner()
+
+
+def test_desktop_runtime_default_is_independent_of_working_directory(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Local Desktop sessions use one user-level location across shell directories."""
+    activate = MagicMock(return_value=SimpleNamespace())
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("mindroom.constants.exported_process_env", dict)
+    monkeypatch.setattr("mindroom.cli.config.activate_cli_runtime", activate)
+
+    desktop_cli._activate_desktop_runtime(None, storage_path=None)
+
+    activate.assert_called_once_with(Path.home() / ".mindroom" / "config.yaml", storage_path=None)
+
+
+def test_desktop_runtime_preserves_explicit_environment_selection(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Existing runtime environment overrides still select Desktop state."""
+    activate = MagicMock(return_value=SimpleNamespace())
+    monkeypatch.setattr(
+        "mindroom.constants.exported_process_env",
+        lambda: {"MINDROOM_STORAGE_PATH": "/shared/mindroom-data"},
+    )
+    monkeypatch.setattr("mindroom.cli.config.activate_cli_runtime", activate)
+
+    desktop_cli._activate_desktop_runtime(None, storage_path=None)
+
+    activate.assert_called_once_with(None, storage_path=None)
 
 
 def test_login_identity_output_routes_users_to_chat_pairing(capsys: pytest.CaptureFixture[str], tmp_path: Path) -> None:
