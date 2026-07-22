@@ -363,31 +363,6 @@ def _cancelled_task_content(
     return cancelled_content
 
 
-def _is_polling_cron_schedule(cron_schedule: CronSchedule) -> bool:
-    """Return whether a cron schedule recurs often enough to poll a condition.
-
-    A conditional workflow only needs a schedule that fires more than once, so any
-    valid cron qualifies except a single fixed instant (all of minute, hour, day,
-    month and weekday pinned to one concrete value). Restricting to weekdays or a
-    daily/business-hours window (e.g. ``0 9 * * 1-5`` or ``*/15 9-17 * * *``) is a
-    perfectly good polling cadence.
-    """
-
-    def is_single_value(field: str) -> bool:
-        return field.strip().isdigit()
-
-    return not all(
-        is_single_value(field)
-        for field in (
-            cron_schedule.minute,
-            cron_schedule.hour,
-            cron_schedule.day,
-            cron_schedule.month,
-            cron_schedule.weekday,
-        )
-    )
-
-
 def _validate_parsed_workflow(workflow: ScheduledWorkflow) -> _WorkflowParseError | None:
     """Reject parses whose schedule fields do not support the declared schedule type."""
     if workflow.schedule_type == "once" and not workflow.execute_at:
@@ -413,7 +388,7 @@ def _validate_parsed_workflow(workflow: ScheduledWorkflow) -> _WorkflowParseErro
 def _validate_conditional_workflow(
     workflow: ScheduledWorkflow,
 ) -> _WorkflowParseError | None:
-    """Reject conditional parses that do not resolve to a polling-style recurring schedule."""
+    """Reject conditional parses that do not resolve to a recurring cron schedule."""
     if not workflow.is_conditional:
         return None
 
@@ -423,14 +398,7 @@ def _validate_conditional_workflow(
             suggestion="Try again, or specify the polling cadence explicitly.",
         )
 
-    cron_string = workflow.cron_schedule.to_cron_string()
-    if _is_polling_cron_schedule(workflow.cron_schedule):
-        return None
-
-    return _WorkflowParseError(
-        error=f"Conditional schedules must use a polling cron, but the parsed schedule was `{cron_string}`.",
-        suggestion="Try again, or specify the polling cadence explicitly.",
-    )
+    return None
 
 
 def _start_scheduled_task(
