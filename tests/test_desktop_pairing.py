@@ -399,6 +399,38 @@ def test_chat_confirmation_saves_only_the_initiating_requester_agent_scope(
     assert "setup is required" in handle_desktop_command("status", scope=bob_scope)
     assert "setup is required" in handle_desktop_command("status", scope=alice_other_agent_scope)
 
+    def pair_scope(scope: DesktopCommandScope, *, device_id: str, fingerprint: str) -> None:
+        setup = handle_desktop_command("setup", scope=scope)
+        scope_token_match = re.search(r"--code ([A-Za-z0-9_-]+)", setup)
+        assert scope_token_match is not None
+        scope_token = scope_token_match.group(1)
+        claim_desktop_pairing(
+            runtime_paths,
+            token=scope_token,
+            agent_name=scope.agent_name,
+            device_user_id=f"@{device_id.lower()}-desktop:example.org",
+            device_id=device_id,
+            device_ed25519=fingerprint,
+        )
+        scope_verification = desktop_pairing_verification(scope_token, fingerprint)
+        assert "Desktop paired" in handle_desktop_command(
+            f"confirm {scope_token} {scope_verification}",
+            scope=scope,
+        )
+
+    pair_scope(bob_scope, device_id="BOB", fingerprint="bob-fingerprint")
+    pair_scope(alice_other_agent_scope, device_id="ALICEOTHER", fingerprint="alice-other-fingerprint")
+
+    assert "mindroom desktop pair" in handle_desktop_command("rotate", scope=alice_scope)
+    assert "Usage:" in handle_desktop_command("unknown", scope=alice_scope)
+    assert "disconnect confirm" in handle_desktop_command("disconnect", scope=alice_scope)
+    assert "Desktop is configured" in handle_desktop_command("status", scope=alice_scope)
+
+    assert "Desktop disconnected" in handle_desktop_command("disconnect confirm", scope=alice_scope)
+    assert "setup is required" in handle_desktop_command("status", scope=alice_scope)
+    assert "Desktop is configured" in handle_desktop_command("status", scope=bob_scope)
+    assert "Desktop is configured" in handle_desktop_command("status", scope=alice_other_agent_scope)
+
 
 def test_desktop_command_contains_pairing_database_errors(
     monkeypatch: pytest.MonkeyPatch,
