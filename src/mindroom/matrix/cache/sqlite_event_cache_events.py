@@ -272,8 +272,10 @@ async def load_mxc_texts(
             """,  # noqa: S608
             parameters,
         )
-        rows = await cursor.fetchall()
-        await cursor.close()
+        try:
+            rows = await cursor.fetchall()
+        finally:
+            await cursor.close()
         resolved.update(
             {(str(event_id), str(mxc_url)): str(text_content) for event_id, mxc_url, text_content in rows},
         )
