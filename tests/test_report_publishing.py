@@ -1025,4 +1025,4 @@ def test_report_publishing_tool_denies_revoke_for_different_requester(tmp_path: 
         revoked = _tool_payload(report_tool.revoke_public_report(published["slug"]))
 
     assert revoked["status"] == "error"
-    assert "not available to the current requester" in revoked["message"]
+    assert revoked["message"] == "Report is not available to the current requester."

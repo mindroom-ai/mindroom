@@ -163,14 +163,14 @@ class ReportPublishingTools(Toolkit):
         )
 
     def revoke_public_report(self, slug: str) -> str:
-        """Revoke a previously published public report link."""
+        """Revoke a previously published report link under either access policy."""
         context = get_tool_runtime_context()
         if context is None:
             return self._context_error()
         try:
             store = ReportPublishingStore(context.runtime_paths.storage_root)
             report = store.get_report(slug, include_revoked=True)
-            _authorize_public_report_for_context(context, report)
+            _authorize_report_for_context(context, report)
             revoked = store.revoke_report(slug, revoked_by=context.requester_id)
         except ReportPublishingError as exc:
             return self._payload("error", slug=slug, message=str(exc))
@@ -194,7 +194,7 @@ class ReportPublishingTools(Toolkit):
         return self.publish_report(source_type, source, confirm_public, access_policy)
 
     async def arevoke_public_report(self, slug: str) -> str:
-        """Revoke a previously published public report link."""
+        """Revoke a previously published report link under either access policy."""
         return self.revoke_public_report(slug)
 
 
@@ -278,10 +278,10 @@ def _resolve_dynamic_workflow_run_source(
     )
 
 
-def _authorize_public_report_for_context(context: ToolRuntimeContext, report: PublishedReport) -> None:
+def _authorize_report_for_context(context: ToolRuntimeContext, report: PublishedReport) -> None:
     if context.requester_id in {report.requested_by, report.published_by}:
         return
-    msg = "Public report is not available to the current requester."
+    msg = "Report is not available to the current requester."
     raise ReportPublishingError(msg)
 
 

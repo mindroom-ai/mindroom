@@ -221,6 +221,26 @@ async def test_origin_room_authorization_treats_removed_publisher_as_identity_mi
 
 
 @pytest.mark.asyncio
+async def test_origin_room_membership_handles_client_teardown_race(tmp_path: Path) -> None:
+    """Client removal between precheck and membership lookup should stay typed."""
+    config = _config(tmp_path)
+    publisher_matrix_id = entity_identity_registry(
+        config,
+        runtime_paths_for(config),
+    ).current_id("general")
+    publisher_bot = _FakeBot(client=None, running=True, matrix_id=publisher_matrix_id)
+
+    decision = await _OriginRoomReportAuthorizer._authorize_membership(
+        publisher_bot,  # type: ignore[arg-type]
+        origin_room_id="!origin:localhost",
+        viewer_matrix_user_id="@alice:localhost",
+        publisher_matrix_user_id=publisher_matrix_id.full_id,
+    )
+
+    assert decision.reason is ReportAuthorizationReason.AUTHORIZATION_BACKEND_UNAVAILABLE
+
+
+@pytest.mark.asyncio
 async def test_origin_room_authorization_fails_closed_on_matrix_error(tmp_path: Path) -> None:
     """Matrix transport failures must never become successful authorization."""
     config = _config(tmp_path)

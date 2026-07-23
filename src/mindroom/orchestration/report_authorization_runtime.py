@@ -104,15 +104,17 @@ class _OriginRoomReportAuthorizer:
         viewer_matrix_user_id: str,
         publisher_matrix_user_id: str,
     ) -> ReportAuthorizationDecision:
-        assert publisher_bot.client is not None
+        client = publisher_bot.client
+        if client is None:
+            return ReportAuthorizationDecision(ReportAuthorizationReason.AUTHORIZATION_BACKEND_UNAVAILABLE)
         reason = ReportAuthorizationReason.AUTHORIZATION_BACKEND_UNAVAILABLE
         try:
-            joined_room_ids = await get_joined_rooms(publisher_bot.client)
+            joined_room_ids = await get_joined_rooms(client)
             if joined_room_ids is not None:
                 if origin_room_id not in joined_room_ids:
                     reason = ReportAuthorizationReason.PUBLISHER_NOT_JOINED
                 else:
-                    joined_members = await get_room_members(publisher_bot.client, origin_room_id)
+                    joined_members = await get_room_members(client, origin_room_id)
                     if joined_members is not None:
                         if publisher_matrix_user_id not in joined_members:
                             reason = ReportAuthorizationReason.PUBLISHER_NOT_JOINED

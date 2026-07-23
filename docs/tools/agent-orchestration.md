@@ -344,7 +344,7 @@ report_publishing:
 
 Set `default_access_policy: origin_room` to make omitted tool arguments protected by default.
 Set `allow_public: false` to reject new public reports, including explicit model requests for `access_policy="public"`.
-An `origin_room` default requires trusted upstream browser authentication that resolves a verified Matrix user ID.
+An `origin_room` default requires browser authentication through a trusted upstream layer that resolves a verified Matrix user ID.
 See [Trusted Upstream Browser Auth](../deployment/trusted-upstream-auth.md) for the provider-neutral authentication boundary.
 The live orchestrator binds room authorization to current Matrix clients, and protected routes return service unavailable when that runtime binding is absent.
 
