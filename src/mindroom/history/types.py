@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Literal, Protocol, TypeGuard
+from typing import Literal, Protocol, TypedDict, cast
+
+COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS = 1_000
 
 _ScopeKind = Literal["agent", "team"]
 _HistoryMode = Literal["all", "runs", "messages"]
@@ -11,8 +14,19 @@ _CompactionMode = Literal["auto", "manual"]
 _CompactionDecisionMode = Literal["none", "required"]
 CompactionReplyOutcome = Literal["none", "success", "failed", "timeout"]
 _CompactionLifecycleStatus = Literal["success", "failed", "timeout"]
-CompactionAvailabilityReason = Literal["no_context_window", "non_positive_summary_input_budget"]
+CompactionAvailabilityReason = Literal[
+    "no_context_window",
+    "non_positive_summary_input_budget",
+    "summary_input_budget_without_retry_headroom",
+]
 _ReplayPlanMode = Literal["configured", "limited", "disabled"]
+
+
+class _HistoryScopeMetadata(TypedDict):
+    """JSON-safe persisted history-scope identity."""
+
+    kind: _ScopeKind
+    scope_id: str
 
 
 @dataclass(frozen=True)
@@ -22,10 +36,38 @@ class HistoryScope:
     kind: _ScopeKind
     scope_id: str
 
+    def __post_init__(self) -> None:
+        """Validate the persisted-history scope identity."""
+        if self.kind not in {"agent", "team"}:
+            message = f"Invalid history scope kind: {self.kind!r}"
+            raise ValueError(message)
+        if not self.scope_id:
+            message = "History scope requires a non-empty scope_id"
+            raise ValueError(message)
+
     @property
     def key(self) -> str:
         """Return the stable serialized storage key for this scope."""
         return f"{self.kind}:{self.scope_id}"
+
+    def to_metadata(self) -> _HistoryScopeMetadata:
+        """Return JSON-safe history-scope metadata."""
+        return {
+            "kind": self.kind,
+            "scope_id": self.scope_id,
+        }
+
+    @classmethod
+    def from_metadata(cls, raw_metadata: object) -> HistoryScope | None:
+        """Return normalized history-scope metadata."""
+        if not isinstance(raw_metadata, Mapping):
+            return None
+        metadata = cast("Mapping[str, object]", raw_metadata)
+        kind = metadata.get("kind")
+        scope_id = metadata.get("scope_id")
+        if kind not in {"agent", "team"} or not isinstance(scope_id, str) or not scope_id:
+            return None
+        return cls(kind=cast("_ScopeKind", kind), scope_id=scope_id)
 
 
 @dataclass(frozen=True)
@@ -35,6 +77,16 @@ class HistoryPolicy:
     mode: _HistoryMode
     limit: int | None = None
 
+    @property
+    def num_history_runs(self) -> int | None:
+        """Return the Agno run-replay limit for this policy."""
+        return self.limit if self.mode == "runs" else None
+
+    @property
+    def num_history_messages(self) -> int | None:
+        """Return the Agno message-replay limit for this policy."""
+        return self.limit if self.mode == "messages" else None
+
 
 @dataclass(frozen=True)
 class ResolvedHistorySettings:
@@ -43,16 +95,21 @@ class ResolvedHistorySettings:
     policy: HistoryPolicy
     max_tool_calls_from_history: int | None
     system_message_role: str = "system"
-    skip_history_system_role: bool = True
 
 
 @dataclass(frozen=True)
 class HistoryScopeState:
-    """Persisted compaction control/audit state stored in session metadata."""
+    """Persisted compaction control/audit state stored in session metadata.
+
+    ``compacted_run_ids`` are tombstones for runs already folded into the durable
+    summary; they let the state owner prune runs that a stale session write
+    reintroduced after compaction progress was persisted.
+    """
 
     last_compacted_at: str | None = None
     last_summary_model: str | None = None
     last_compacted_run_count: int | None = None
+    compacted_run_ids: tuple[str, ...] = ()
     force_compact_before_next_run: bool = False
 
 
@@ -60,7 +117,6 @@ class HistoryScopeState:
 class ResolvedHistoryExecutionPlan:
     """Single source of truth for history-budget policy in one run scope."""
 
-    authored_compaction_config: bool
     authored_compaction_enabled: bool
     destructive_compaction_available: bool
     explicit_compaction_model: bool
@@ -74,6 +130,7 @@ class ResolvedHistoryExecutionPlan:
     summary_input_budget_tokens: int | None
     unavailable_reason: CompactionAvailabilityReason | None = None
     hard_replay_budget_tokens: int | None = None
+    compaction_fallback_model_name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -85,8 +142,6 @@ class ResolvedReplayPlan:
     add_history_to_context: bool
     num_history_runs: int | None = None
     num_history_messages: int | None = None
-    history_limit_mode: Literal["runs", "messages"] | None = None
-    history_limit: int | None = None
 
 
 @dataclass(frozen=True)
@@ -113,15 +168,6 @@ class CompactionLifecycleStart:
     history_budget_tokens: int | None
     runs_before: int
     threshold_tokens: int | None = None
-
-
-@dataclass(frozen=True)
-class CompactionLifecycleSuccess:
-    """Visible lifecycle notice payload emitted after successful foreground compaction."""
-
-    notice_event_id: str | None
-    outcome: CompactionOutcome
-    duration_ms: int
 
 
 @dataclass(frozen=True)
@@ -199,7 +245,7 @@ class CompactionLifecycle(Protocol):
     async def start(self, event: CompactionLifecycleStart) -> str | None:
         """Send the initial compaction notice and return its Matrix event id."""
 
-    async def complete_success(self, event: CompactionLifecycleSuccess) -> None:
+    async def complete_success(self, outcome: CompactionOutcome) -> None:
         """Edit the lifecycle notice after successful compaction."""
 
     async def progress(self, event: CompactionLifecycleProgress) -> None:
@@ -209,25 +255,9 @@ class CompactionLifecycle(Protocol):
         """Edit the lifecycle notice after failed compaction."""
 
 
-def _to_k(tokens: int) -> str:
-    """Abbreviate token counts: ``145826`` → ``~145K``, values <1000 as-is.
-
-    Uses floor rounding so nearby values do not jump across adjacent ``K``
-    buckets when this helper is used for compact auxiliary counts.
-    """
-    if tokens >= 1000:
-        return f"~{tokens // 1000}K"
-    return str(tokens)
-
-
 def _format_exact_tokens(tokens: int) -> str:
     """Format token counts exactly with thousands separators."""
     return f"{tokens:,}"
-
-
-def _should_render_overhead_tokens(tokens: int | None) -> TypeGuard[int]:
-    """Return whether one overhead segment should appear in the notice."""
-    return tokens is not None and tokens != 0
 
 
 @dataclass(frozen=True)
@@ -243,24 +273,19 @@ class CompactionOutcome:
     after_tokens: int
     window_tokens: int
     threshold_tokens: int
-    reserve_tokens: int
     runs_before: int
     runs_after: int
     compacted_run_count: int
     compacted_at: str
     history_budget_tokens: int | None = None
-    role_instructions_tokens: int | None = None
-    tool_definition_tokens: int | None = None
-    current_prompt_tokens: int | None = None
     lifecycle_notice_event_id: str | None = None
     duration_ms: int | None = None
     status: _CompactionLifecycleStatus = "success"
 
     def to_notice_metadata(self) -> dict[str, object]:
         """Return serialized notice metadata for Matrix compaction messages."""
-        version = 2 if self.history_budget_tokens is not None else 1
         meta: dict[str, object] = {
-            "version": version,
+            "version": 3,
             "status": self.status,
             "mode": self.mode,
             "session_id": self.session_id,
@@ -278,12 +303,6 @@ class CompactionOutcome:
             meta["history_budget_tokens"] = self.history_budget_tokens
         if self.threshold_tokens:
             meta["threshold_tokens"] = self.threshold_tokens
-        if self.role_instructions_tokens is not None:
-            meta["role_instructions_tokens"] = self.role_instructions_tokens
-        if self.tool_definition_tokens is not None:
-            meta["tool_definition_tokens"] = self.tool_definition_tokens
-        if self.current_prompt_tokens is not None:
-            meta["current_prompt_tokens"] = self.current_prompt_tokens
         if self.lifecycle_notice_event_id is not None:
             meta["lifecycle_notice_event_id"] = self.lifecycle_notice_event_id
         if self.duration_ms is not None:
@@ -298,15 +317,6 @@ class CompactionOutcome:
         )
         if self.history_budget_tokens is not None:
             line1 += f" / {_format_exact_tokens(self.history_budget_tokens)} history budget"
-        overhead_parts: list[str] = []
-        if _should_render_overhead_tokens(self.role_instructions_tokens):
-            overhead_parts.append(f"{_to_k(self.role_instructions_tokens)} instructions")
-        if _should_render_overhead_tokens(self.tool_definition_tokens):
-            overhead_parts.append(f"{_to_k(self.tool_definition_tokens)} tools")
-        if _should_render_overhead_tokens(self.current_prompt_tokens):
-            overhead_parts.append(f"{_to_k(self.current_prompt_tokens)} prompt")
-        if overhead_parts:
-            return f"{line1}\n   Overhead: {' + '.join(overhead_parts)}"
         return line1
 
 
@@ -322,4 +332,3 @@ class PreparedHistoryState:
     )
     compaction_reply_outcome: CompactionReplyOutcome = "none"
     prepared_context_tokens: int | None = None
-    estimated_context_tokens: int | None = None

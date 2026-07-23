@@ -6,15 +6,15 @@ import subprocess
 from typing import TYPE_CHECKING, Any
 
 from mindroom.logging_config import get_logger
-from mindroom.tool_system.dependencies import install_command_for_current_python
-from mindroom.tool_system.metadata import (
+from mindroom.tool_system.declarations import (
     ConfigField,
     SetupType,
     ToolCategory,
     ToolExecutionTarget,
     ToolStatus,
-    register_tool_with_metadata,
 )
+from mindroom.tool_system.dependencies import install_command_for_current_python
+from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
     import logging
@@ -67,6 +67,7 @@ def _python_tools_runtime() -> tuple[Any, Any, Any, Any]:
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,
     default_execution_target=ToolExecutionTarget.WORKER,
+    consumes_workspace_paths=True,
     icon="SiPython",
     icon_color="text-blue-500",
     config_fields=[

@@ -50,6 +50,21 @@ def resolve_live_shared_agent_names(
     }
 
 
+def resolve_team_materializable_agent_names(
+    config: Config,
+    materializable_agent_names: set[str] | None,
+    *,
+    allow_direct_private_agents: bool,
+) -> set[str] | None:
+    """Add on-demand private agents to one known live shared-agent set when allowed."""
+    if materializable_agent_names is None or not allow_direct_private_agents:
+        return materializable_agent_names
+    private_agent_names = {
+        agent_name for agent_name, agent_config in config.agents.items() if agent_config.private is not None
+    }
+    return materializable_agent_names | private_agent_names
+
+
 def materialize_exact_requested_team_members(
     requested_agent_names: list[str],
     *,

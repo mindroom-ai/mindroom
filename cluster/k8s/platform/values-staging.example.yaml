@@ -15,8 +15,18 @@ stripe:
   secretKey: # sk_test_...
   webhookSecret: # whsec_...
 
+apiKeys:
+  openrouterProvisioning: # OpenRouter management key for per-customer included AI budget keys.
+
 cleanupScheduler:
   enabled: "true"
+
+provisioner:
+  # Use the cloud volume class when staging runs on Hetzner.
+  instanceStorageClassName: hcloud-volumes
+
+autoscaling:
+  enabled: false
 
 monitoring:
   enabled: true

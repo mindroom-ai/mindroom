@@ -4,15 +4,16 @@ from __future__ import annotations
 import asyncio
 import threading
 from contextlib import asynccontextmanager, suppress
-from dataclasses import asdict
+from dataclasses import asdict, dataclass, replace
 from typing import TYPE_CHECKING, Annotated, Any, Literal
+from urllib.parse import urlsplit
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field
 
-from mindroom import constants
+from mindroom import constants, file_watcher
 from mindroom.agent_policy import build_agent_policy_seeds, resolve_agent_policy_index
 from mindroom.api import config_lifecycle
 from mindroom.api.auth import ApiAuthState, verify_user  # noqa: F401
@@ -21,6 +22,8 @@ from mindroom.api.config_lifecycle import ApiSnapshot, ApiState, ConfigLoadResul
 
 # Import routers
 from mindroom.api.credentials import router as credentials_router
+from mindroom.api.dynamic_workflows import router as dynamic_workflows_router
+from mindroom.api.external_triggers import router as external_triggers_router
 from mindroom.api.frontend import router as frontend_router
 from mindroom.api.homeassistant_integration import router as homeassistant_router
 from mindroom.api.integrations import router as integrations_router
@@ -28,14 +31,17 @@ from mindroom.api.knowledge import router as knowledge_router
 from mindroom.api.matrix_operations import router as matrix_router
 from mindroom.api.oauth import router as oauth_router
 from mindroom.api.openai_compat import router as openai_compat_router
+from mindroom.api.report_publishing import public_router as report_publishing_public_router
 from mindroom.api.schedules import router as schedules_router
 from mindroom.api.skills import router as skills_router
 from mindroom.api.tools import router as tools_router
 from mindroom.api.workers import router as workers_router
 from mindroom.credentials_sync import sync_env_to_credentials
-from mindroom.knowledge import KnowledgeRefreshScheduler
+from mindroom.embedder_health import get_embedder_failure
+from mindroom.knowledge import KnowledgeRefreshScheduler, reconcile_knowledge_mode_transition_states
 from mindroom.knowledge.watch import KnowledgeSourceWatcher
 from mindroom.logging_config import get_logger
+from mindroom.matrix.decrypt_failure import e2ee_stats
 from mindroom.matrix.health import get_matrix_sync_health_snapshot
 from mindroom.orchestration.runtime import matrix_sync_startup_timeout_seconds
 from mindroom.runtime_state import get_runtime_state
@@ -44,16 +50,82 @@ from mindroom.workers.runtime import (
     get_primary_worker_manager,
     primary_worker_backend_available,
     primary_worker_backend_name,
+    reconcile_drifted_worker_templates,
     serialized_kubernetes_worker_validation_snapshot,
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Awaitable, Callable
     from pathlib import Path
 
+    from starlette.types import ASGIApp, Receive, Scope, Send
+
     from mindroom.config.main import Config
+    from mindroom.external_triggers.store import TriggerDeliverySnapshot
+
 logger = get_logger(__name__)
 _WORKER_CLEANUP_INTERVAL_ENV = "MINDROOM_WORKER_CLEANUP_INTERVAL_SECONDS"
+_DASHBOARD_CORS_ALLOWED_ORIGINS_ENV = "MINDROOM_DASHBOARD_CORS_ALLOWED_ORIGINS"
+_DASHBOARD_CORS_ALLOW_ALL_ORIGINS_ENV = "MINDROOM_DASHBOARD_CORS_ALLOW_ALL_ORIGINS"
+_DASHBOARD_CORS_EXPOSE_HEADERS = (
+    config_lifecycle.CONFIG_GENERATION_HEADER,
+    config_lifecycle.CONFIG_USES_INCLUDES_HEADER,
+)
+_DEFAULT_DASHBOARD_CORS_ALLOWED_ORIGINS = (
+    "http://localhost:3003",
+    "http://localhost:5173",
+    "http://127.0.0.1:3003",
+    "http://127.0.0.1:5173",
+)
+
+
+@dataclass(frozen=True)
+class _DashboardCorsSettings:
+    """Dashboard CORS settings derived from the runtime environment."""
+
+    allow_origins: tuple[str, ...]
+    allow_credentials: bool
+
+
+class _RuntimeDashboardCorsMiddleware:
+    """Apply dashboard CORS settings from the app's current runtime context."""
+
+    def __init__(
+        self,
+        app: ASGIApp,
+        *,
+        api_app: FastAPI,
+        fallback_runtime_paths: constants.RuntimePaths,
+    ) -> None:
+        self.app = app
+        self.api_app = api_app
+        self.fallback_runtime_paths = fallback_runtime_paths
+        self._middleware_by_settings: dict[_DashboardCorsSettings, CORSMiddleware] = {}
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        middleware = self._middleware_for_current_runtime()
+        await middleware(scope, receive, send)
+
+    def _middleware_for_current_runtime(self) -> CORSMiddleware:
+        settings = _dashboard_cors_settings(self._current_runtime_paths())
+        middleware = self._middleware_by_settings.get(settings)
+        if middleware is None:
+            middleware = CORSMiddleware(
+                self.app,
+                allow_origins=list(settings.allow_origins),
+                allow_credentials=settings.allow_credentials,
+                allow_methods=["*"],
+                allow_headers=["*"],
+                expose_headers=list(_DASHBOARD_CORS_EXPOSE_HEADERS),
+            )
+            self._middleware_by_settings[settings] = middleware
+        return middleware
+
+    def _current_runtime_paths(self) -> constants.RuntimePaths:
+        try:
+            return _app_runtime_paths(self.api_app)
+        except TypeError:
+            return self.fallback_runtime_paths
 
 
 class DraftAgentPolicyDefaultsRequest(BaseModel):
@@ -158,6 +230,13 @@ def _cleanup_workers_once(
             count=len(cleaned_workers),
             backend=worker_manager.backend_name,
         )
+    reconciled_workers = reconcile_drifted_worker_templates(worker_manager)
+    if reconciled_workers:
+        logger.info(
+            "Reconciled drifted worker pod templates",
+            count=len(reconciled_workers),
+            backend=worker_manager.backend_name,
+        )
     return len(cleaned_workers)
 
 
@@ -222,6 +301,7 @@ def initialize_api_app(api_app: FastAPI, runtime_paths: constants.RuntimePaths) 
     app_state.api_auth_account_id = runtime_paths.env_value("ACCOUNT_ID")
     previous_state = app_state.api_state
     if previous_state is None:
+        app_state.external_trigger_runtime = None
         app_state.api_state = ApiState(
             config_lock=threading.Lock(),
             snapshot=ApiSnapshot(
@@ -244,6 +324,12 @@ def initialize_api_app(api_app: FastAPI, runtime_paths: constants.RuntimePaths) 
         config_load_result = (
             current_snapshot.config_load_result if current_snapshot.runtime_paths == runtime_paths else None
         )
+        source_fingerprint = (
+            current_snapshot.source_fingerprint if current_snapshot.runtime_paths == runtime_paths else None
+        )
+        source_files = current_snapshot.source_files if current_snapshot.runtime_paths == runtime_paths else None
+        if current_snapshot.runtime_paths != runtime_paths:
+            app_state.external_trigger_runtime = None
         previous_state.snapshot = config_lifecycle._published_snapshot(
             current_snapshot,
             runtime_paths=runtime_paths,
@@ -251,6 +337,8 @@ def initialize_api_app(api_app: FastAPI, runtime_paths: constants.RuntimePaths) 
             runtime_config=runtime_config,
             auth_state=auth_state,
             config_load_result=config_load_result,
+            source_fingerprint=source_fingerprint,
+            source_files=source_files,
         )
     config_lifecycle.register_api_app(api_app)
 
@@ -264,26 +352,76 @@ async def _sync_standalone_knowledge_watchers(api_app: FastAPI) -> None:
     await source_watcher.sync(config=snapshot.runtime_config, runtime_paths=snapshot.runtime_paths)
 
 
+def _read_request_runtime_config_or_none(request: Request) -> tuple[Config, constants.RuntimePaths] | None:
+    try:
+        return config_lifecycle.read_committed_runtime_config(request)
+    except HTTPException:
+        return None
+
+
+def _read_app_runtime_config_or_none(api_app: FastAPI) -> tuple[Config, constants.RuntimePaths] | None:
+    try:
+        return config_lifecycle.read_app_committed_runtime_config(api_app)
+    except HTTPException:
+        return None
+
+
+def _reconcile_knowledge_mode_transitions(
+    previous: tuple[Config, constants.RuntimePaths] | None,
+    api_app: FastAPI,
+) -> None:
+    if previous is None:
+        return
+    previous_config, previous_runtime_paths = previous
+    current_config, current_runtime_paths = config_lifecycle.read_app_committed_runtime_config(api_app)
+    if current_runtime_paths != previous_runtime_paths:
+        return
+    reconcile_knowledge_mode_transition_states(previous_config, current_config, current_runtime_paths)
+
+
+async def _reload_config_into_app(api_app: FastAPI, runtime_paths: constants.RuntimePaths) -> bool:
+    """Reload one API app config snapshot from disk."""
+    previous = _read_app_runtime_config_or_none(api_app)
+    # Config validation executes plugin modules and walks the filesystem;
+    # keep it off the event loop (#1260).
+    loaded = await asyncio.to_thread(config_lifecycle.load_config_into_app, runtime_paths, api_app)
+    if loaded:
+        _reconcile_knowledge_mode_transitions(previous, api_app)
+    await _sync_standalone_knowledge_watchers(api_app)
+    return loaded
+
+
+async def _reload_config_after_file_change(
+    api_app: FastAPI,
+    runtime_paths: constants.RuntimePaths,
+) -> None:
+    await _reload_config_into_app(api_app, runtime_paths)
+
+
+def _watched_config_mtimes(api_app: FastAPI) -> tuple[constants.RuntimePaths, dict[Path, int]]:
+    """Return the runtime paths and mtimes of the config file plus its !include files."""
+    snapshot = _app_context(api_app)
+    paths = snapshot.source_files or frozenset({snapshot.runtime_paths.config_path})
+    return snapshot.runtime_paths, file_watcher.paths_mtime_snapshot(paths)
+
+
 async def _watch_config(
     stop_event: asyncio.Event,
     api_app: FastAPI,
     *,
     poll_interval_seconds: float = 1.0,
 ) -> None:
-    """Watch the current config file, rebinding automatically when runtime paths change."""
-    watched_config_path: Path | None = None
-    last_mtime = 0.0
+    """Watch the config source files, rebinding automatically when runtime paths change.
+
+    A reload fires only after a quiet scan: scans that detect changes accumulate
+    them instead of reloading, so multi-file updates (git pull, rsync) land
+    completely before the reload reads the tree.
+    """
+    runtime_paths, last_mtimes = _watched_config_mtimes(api_app)
+    watched_config_path: Path = runtime_paths.config_path
+    pending_paths: set[Path] = set()
 
     while not stop_event.is_set():
-        runtime_paths = _app_runtime_paths(api_app)
-        config_path = runtime_paths.config_path
-        if config_path != watched_config_path:
-            watched_config_path = config_path
-            try:
-                last_mtime = config_path.stat().st_mtime if config_path.exists() else 0.0
-            except (OSError, PermissionError):
-                last_mtime = 0.0
-
         try:
             await asyncio.wait_for(stop_event.wait(), timeout=poll_interval_seconds)
             break
@@ -291,23 +429,25 @@ async def _watch_config(
             pass
 
         try:
-            runtime_paths = _app_runtime_paths(api_app)
-            config_path = runtime_paths.config_path
-            if config_path != watched_config_path:
-                watched_config_path = config_path
-                try:
-                    last_mtime = config_path.stat().st_mtime if config_path.exists() else 0.0
-                except (OSError, PermissionError):
-                    last_mtime = 0.0
+            runtime_paths, current_mtimes = _watched_config_mtimes(api_app)
+            if runtime_paths.config_path != watched_config_path:
+                # Runtime swap: rebaseline the new source set without reloading.
+                watched_config_path = runtime_paths.config_path
+                last_mtimes = current_mtimes
+                pending_paths.clear()
+                continue
 
-            current_mtime = config_path.stat().st_mtime if config_path.exists() else 0.0
-            if current_mtime != last_mtime:
-                last_mtime = current_mtime
-                logger.info("Config file changed", path=str(config_path))
-                config_lifecycle.load_config_into_app(runtime_paths, api_app)
-                await _sync_standalone_knowledge_watchers(api_app)
+            changed_paths = file_watcher.changed_watched_paths(last_mtimes, current_mtimes)
+            vanished = file_watcher.any_paths_newly_missing(last_mtimes, current_mtimes)
+            last_mtimes = current_mtimes
+            if changed_paths:
+                pending_paths.update(changed_paths)
+            elif pending_paths and not vanished:
+                logger.info("Config file changed", paths=sorted(str(path) for path in pending_paths))
+                pending_paths.clear()
+                await _reload_config_after_file_change(api_app, runtime_paths)
         except (OSError, PermissionError):
-            last_mtime = 0.0
+            last_mtimes = dict.fromkeys(last_mtimes, 0)
         except Exception:
             logger.exception("Exception during file watcher callback - continuing to watch")
 
@@ -316,8 +456,23 @@ async def _watch_config(
 async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
     """Manage application startup and shutdown."""
     runtime_paths = _app_runtime_paths(_app)
-    constants.ensure_writable_config_path(create_minimal=True, runtime_paths=runtime_paths)
-    config_lifecycle.load_config_into_app(runtime_paths, _app)
+    await asyncio.to_thread(constants.ensure_writable_config_path, create_minimal=True, runtime_paths=runtime_paths)
+    app_state = config_lifecycle.app_state(_app)
+    preload_snapshot = _app_context(_app)
+    loaded = await asyncio.to_thread(config_lifecycle.load_config_into_app, runtime_paths, _app)
+    preload_runtime = app_state.external_trigger_runtime
+    if (
+        preload_runtime is not None
+        and preload_snapshot.runtime_config is None
+        and preload_snapshot.config_load_result is None
+    ):
+        if loaded:
+            app_state.external_trigger_runtime = replace(
+                preload_runtime,
+                config_generation=_app_context(_app).generation,
+            )
+        else:
+            app_state.external_trigger_runtime = None
     logger.info(
         "Initialized API runtime config",
         config_path=str(runtime_paths.config_path),
@@ -328,7 +483,6 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
     logger.info("Syncing API credentials from runtime env")
     sync_env_to_credentials(runtime_paths=runtime_paths)
 
-    app_state = config_lifecycle.app_state(_app)
     api_owned_knowledge_refresh_scheduler: KnowledgeRefreshScheduler | None = None
     standalone_knowledge_source_watcher: KnowledgeSourceWatcher | None = None
     knowledge_refresh_scheduler = app_state.orchestrator_knowledge_refresh_scheduler
@@ -370,24 +524,108 @@ def bind_orchestrator_knowledge_refresh_scheduler(
     config_lifecycle.app_state(api_app).orchestrator_knowledge_refresh_scheduler = scheduler
 
 
-app = FastAPI(title="MindRoom Dashboard API", lifespan=_lifespan)
-initialize_api_app(app, constants.resolve_primary_runtime_paths())
+def bind_external_trigger_runtime(
+    api_app: FastAPI,
+    client: object,
+    conversation_cache: object,
+    *,
+    is_trigger_snapshot_ready: Callable[[TriggerDeliverySnapshot], Awaitable[bool]],
+) -> None:
+    """Attach router Matrix delivery runtime to one API app."""
+    api_state = config_lifecycle.require_api_state(api_app)
+    config_lifecycle.app_state(api_app).external_trigger_runtime = config_lifecycle.ExternalTriggerRuntime(
+        client=client,
+        conversation_cache=conversation_cache,
+        config_generation=api_state.snapshot.generation,
+        is_trigger_snapshot_ready=is_trigger_snapshot_ready,
+    )
 
-# Configure CORS for the standalone frontend dev server.
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3003",  # Frontend dev server alternative port
-        "http://localhost:5173",  # Vite dev server default
-        "http://127.0.0.1:3003",  # Alternative localhost
-        "http://127.0.0.1:5173",
-        "*",  # Allow all origins for development (remove in production)
-    ],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-    expose_headers=["*"],
+
+def unbind_external_trigger_runtime(api_app: FastAPI) -> None:
+    """Clear router Matrix delivery runtime from one API app."""
+    config_lifecycle.app_state(api_app).external_trigger_runtime = None
+
+
+def _api_docs_kwargs(runtime_paths: constants.RuntimePaths) -> dict[str, str | None]:
+    """Return generated-docs routes for this runtime."""
+    docs_enabled = runtime_paths.env_flag(
+        "MINDROOM_ENABLE_API_DOCS",
+        default=not bool(runtime_paths.env_value("MINDROOM_PLATFORM_LOGIN_URL")),
+    )
+    if not docs_enabled:
+        return {"docs_url": None, "redoc_url": None, "openapi_url": None}
+    return {"docs_url": "/docs", "redoc_url": "/redoc", "openapi_url": "/openapi.json"}
+
+
+def _origin_from_url(value: str | None) -> str | None:
+    if not value:
+        return None
+    parsed = urlsplit(value.strip())
+    if not parsed.scheme or not parsed.netloc:
+        return None
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
+def _api_cors_origins(runtime_paths: constants.RuntimePaths) -> list[str]:
+    """Return hosted browser origins allowed to make credentialed API calls."""
+    return list(
+        dict.fromkeys(
+            origin
+            for origin in (
+                _origin_from_url(runtime_paths.env_value("MINDROOM_PUBLIC_URL")),
+                _origin_from_url(runtime_paths.env_value("MINDROOM_PLATFORM_LOGIN_URL")),
+            )
+            if origin is not None
+        ),
+    )
+
+
+def _dashboard_cors_settings(runtime_paths: constants.RuntimePaths) -> _DashboardCorsSettings:
+    """Return dashboard CORS settings for one runtime context."""
+    if runtime_paths.env_flag(_DASHBOARD_CORS_ALLOW_ALL_ORIGINS_ENV):
+        return _DashboardCorsSettings(allow_origins=("*",), allow_credentials=False)
+
+    configured_origins = runtime_paths.env_value(_DASHBOARD_CORS_ALLOWED_ORIGINS_ENV)
+    if configured_origins is None:
+        hosted_origins = tuple(_api_cors_origins(runtime_paths))
+        if hosted_origins:
+            return _DashboardCorsSettings(allow_origins=hosted_origins, allow_credentials=True)
+
+    origins = _parse_dashboard_cors_allowed_origins(configured_origins)
+    return _DashboardCorsSettings(
+        allow_origins=origins,
+        allow_credentials="*" not in origins,
+    )
+
+
+def _parse_dashboard_cors_allowed_origins(configured_origins: str | None) -> tuple[str, ...]:
+    """Parse a comma-separated dashboard CORS origin list."""
+    if configured_origins is None:
+        return _DEFAULT_DASHBOARD_CORS_ALLOWED_ORIGINS
+    origins = tuple(origin for origin in (part.strip() for part in configured_origins.split(",")) if origin)
+    return origins or _DEFAULT_DASHBOARD_CORS_ALLOWED_ORIGINS
+
+
+def _add_dashboard_cors_middleware(api_app: FastAPI, runtime_paths: constants.RuntimePaths) -> None:
+    """Add dashboard CORS middleware without wildcard credential defaults."""
+    api_app.add_middleware(
+        _RuntimeDashboardCorsMiddleware,
+        api_app=api_app,
+        fallback_runtime_paths=runtime_paths,
+    )
+
+
+_runtime_paths = constants.resolve_primary_runtime_paths()
+_api_docs = _api_docs_kwargs(_runtime_paths)
+app = FastAPI(
+    title="MindRoom Dashboard API",
+    lifespan=_lifespan,
+    docs_url=_api_docs["docs_url"],
+    redoc_url=_api_docs["redoc_url"],
+    openapi_url=_api_docs["openapi_url"],
 )
+initialize_api_app(app, _runtime_paths)
+_add_dashboard_cors_middleware(app, _runtime_paths)
 
 
 def _sanitize_entity_payload(entity_data: dict[str, Any]) -> dict[str, Any]:
@@ -461,6 +699,9 @@ app.include_router(skills_router, dependencies=[Depends(verify_user)])
 app.include_router(tools_router, dependencies=[Depends(verify_user)])
 app.include_router(workers_router, dependencies=[Depends(verify_user)])
 app.include_router(openai_compat_router)  # Uses its own bearer auth, not verify_user
+app.include_router(report_publishing_public_router)
+app.include_router(external_triggers_router)
+app.include_router(dynamic_workflows_router, dependencies=[Depends(verify_user)])
 
 
 @app.get("/api/health")
@@ -475,9 +716,16 @@ async def health_check(request: Request) -> JSONResponse:
     response: dict[str, object] = {
         "status": "healthy",
         "last_sync_time": sync_health.last_sync_time.isoformat() if sync_health.last_sync_time is not None else None,
+        "e2ee": e2ee_stats().as_dict(),
     }
     if sync_health.stale_entities:
         response["stale_sync_entities"] = list(sync_health.stale_entities)
+
+    embedder_failure = get_embedder_failure()
+    if embedder_failure is not None:
+        # Additive diagnostic only: a broken embedder degrades semantic search
+        # but must not flip liveness and restart an otherwise usable runtime.
+        response["embedder"] = {"status": "failing", "detail": embedder_failure}
 
     if runtime_state.phase == "ready" and not sync_health.is_healthy:
         response["status"] = "unhealthy"
@@ -508,6 +756,11 @@ async def load_config(
     generation = config_lifecycle.committed_generation(request)
     payload = config_lifecycle.read_committed_config(request, lambda config_data: dict(config_data))
     _set_config_generation_header(response, generation)
+    # The payload is the config itself, so the includes flag rides in a header
+    # like the generation does.
+    response.headers[config_lifecycle.CONFIG_USES_INCLUDES_HEADER] = (
+        "true" if config_lifecycle.config_uses_includes(request) else "false"
+    )
     return payload
 
 
@@ -520,12 +773,15 @@ async def save_config(
     x_mindroom_config_generation: Annotated[int | None, Header()] = None,
 ) -> dict[str, bool]:
     """Save configuration to file."""
-    generation = config_lifecycle.replace_committed_config(
+    previous = _read_request_runtime_config_or_none(request)
+    generation = await asyncio.to_thread(
+        config_lifecycle.replace_committed_config,
         request,
         new_config,
         error_prefix="Failed to save configuration",
         expected_generation=x_mindroom_config_generation,
     )
+    _reconcile_knowledge_mode_transitions(previous, request.app)
     _set_config_generation_header(response, generation)
     return {"success": True}
 
@@ -535,10 +791,13 @@ async def get_raw_config_source(
     request: Request,
     response: Response,
     _user: Annotated[dict, Depends(verify_user)],
-) -> dict[str, str]:
+) -> dict[str, Any]:
     """Return the raw config source text for recovery editing."""
     generation = config_lifecycle.committed_generation(request)
-    payload = {"source": config_lifecycle.read_raw_config_source(request)}
+    payload: dict[str, Any] = {
+        "source": config_lifecycle.read_raw_config_source(request),
+        "uses_includes": config_lifecycle.config_uses_includes(request),
+    }
     _set_config_generation_header(response, generation)
     return payload
 
@@ -552,12 +811,14 @@ async def save_raw_config_source(
     x_mindroom_config_generation: Annotated[int | None, Header()] = None,
 ) -> dict[str, bool]:
     """Replace the raw config source text after validating it against the active runtime."""
+    previous = _read_request_runtime_config_or_none(request)
     generation = config_lifecycle.replace_raw_config_source(
         request,
         payload.source,
         error_prefix="Failed to save raw configuration",
         expected_generation=x_mindroom_config_generation,
     )
+    _reconcile_knowledge_mode_transitions(previous, request.app)
     _set_config_generation_header(response, generation)
     return {"success": True}
 
@@ -601,7 +862,8 @@ async def update_agent(
     def mutate(candidate_config: dict[str, Any]) -> None:
         _upsert_section_entity(candidate_config, "agents", agent_id, agent_data)
 
-    config_lifecycle.write_committed_config(
+    await asyncio.to_thread(
+        config_lifecycle.write_committed_config,
         request,
         mutate,
         error_prefix="Failed to save agent",
@@ -620,7 +882,8 @@ async def create_agent(
     def mutate(candidate_config: dict[str, Any]) -> str:
         return _create_section_entity(candidate_config, "agents", "new_agent", agent_data)
 
-    agent_id = config_lifecycle.write_committed_config(
+    agent_id = await asyncio.to_thread(
+        config_lifecycle.write_committed_config,
         request,
         mutate,
         error_prefix="Failed to create agent",
@@ -639,7 +902,8 @@ async def delete_agent(
     def mutate(candidate_config: dict[str, Any]) -> None:
         _delete_section_entity(candidate_config, "agents", agent_id, "Agent not found")
 
-    config_lifecycle.write_committed_config(
+    await asyncio.to_thread(
+        config_lifecycle.write_committed_config,
         request,
         mutate,
         error_prefix="Failed to delete agent",
@@ -665,7 +929,8 @@ async def update_team(
     def mutate(candidate_config: dict[str, Any]) -> None:
         _upsert_section_entity(candidate_config, "teams", team_id, team_data)
 
-    config_lifecycle.write_committed_config(
+    await asyncio.to_thread(
+        config_lifecycle.write_committed_config,
         request,
         mutate,
         error_prefix="Failed to save team",
@@ -684,7 +949,8 @@ async def create_team(
     def mutate(candidate_config: dict[str, Any]) -> str:
         return _create_section_entity(candidate_config, "teams", "new_team", team_data)
 
-    team_id = config_lifecycle.write_committed_config(
+    team_id = await asyncio.to_thread(
+        config_lifecycle.write_committed_config,
         request,
         mutate,
         error_prefix="Failed to create team",
@@ -703,7 +969,8 @@ async def delete_team(
     def mutate(candidate_config: dict[str, Any]) -> None:
         _delete_section_entity(candidate_config, "teams", team_id, "Team not found")
 
-    config_lifecycle.write_committed_config(
+    await asyncio.to_thread(
+        config_lifecycle.write_committed_config,
         request,
         mutate,
         error_prefix="Failed to delete team",
@@ -734,7 +1001,8 @@ async def update_model(
             candidate_config["models"] = {}
         candidate_config["models"][model_id] = model_data
 
-    config_lifecycle.write_committed_config(
+    await asyncio.to_thread(
+        config_lifecycle.write_committed_config,
         request,
         mutate,
         error_prefix="Failed to save model",
@@ -762,7 +1030,8 @@ async def update_room_models(
     def mutate(candidate_config: dict[str, Any]) -> None:
         candidate_config["room_models"] = room_models
 
-    config_lifecycle.write_committed_config(
+    await asyncio.to_thread(
+        config_lifecycle.write_committed_config,
         request,
         mutate,
         error_prefix="Failed to save room models",
@@ -776,9 +1045,13 @@ async def get_available_rooms(request: Request, _user: Annotated[dict, Depends(v
 
     def read_rooms(config_data: dict[str, Any]) -> list[str]:
         rooms: set[str] = set()
+        rooms.update(config_data.get("rooms", {}))
         for agent_data in config_data.get("agents", {}).values():
             agent_rooms = agent_data.get("rooms", [])
             rooms.update(agent_rooms)
+        for team_data in config_data.get("teams", {}).values():
+            team_rooms = team_data.get("rooms", [])
+            rooms.update(team_rooms)
         return sorted(rooms)
 
     return config_lifecycle.read_committed_config(request, read_rooms)

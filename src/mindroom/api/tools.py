@@ -11,8 +11,8 @@ from pydantic import BaseModel
 
 from mindroom.agent_policy import dashboard_credentials_supported_for_scope
 from mindroom.api import config_lifecycle
-from mindroom.api.credentials import (
-    build_dashboard_execution_identity,
+from mindroom.api.dashboard_credential_scope import (
+    require_agent_credential_management_authorized,
     resolve_dashboard_agent_execution_scope_request,
     resolve_dashboard_execution_scope_override,
 )
@@ -162,7 +162,10 @@ def _annotate_execution_scope_support(
 ) -> None:
     """Expose whether each tool is supported for the requested execution scope."""
     unsupported_tools = set(
-        unsupported_shared_only_integration_names([tool["name"] for tool in tools], execution_scope),
+        unsupported_shared_only_integration_names(
+            [tool["name"] for tool in tools],
+            execution_scope,
+        ),
     )
     for tool in tools:
         tool["execution_scope_supported"] = tool["name"] not in unsupported_tools
@@ -213,12 +216,18 @@ def _resolve_tool_availability_context(
     status_authoritative = not scope_request.draft_scope_preview and dashboard_credentials_supported_for_scope(
         execution_scope,
     )
-    execution_identity = (
-        build_dashboard_execution_identity(
+    authorized_identity = (
+        require_agent_credential_management_authorized(
             request,
-            scope_request.agent_name,
+            config=config,
             runtime_paths=runtime_paths,
+            agent_name=scope_request.agent_name,
         )
+        if scope_request.agent_name is not None
+        else None
+    )
+    execution_identity = (
+        authorized_identity
         if status_authoritative and scope_request.agent_name is not None and execution_scope is not None
         else None
     )

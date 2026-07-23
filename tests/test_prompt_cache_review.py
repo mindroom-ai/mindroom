@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import sys
 from datetime import datetime
@@ -33,8 +34,8 @@ def test_load_request_rows_handles_concatenated_json_objects(tmp_path: Path) -> 
     module = _load_prompt_cache_review_module()
     jsonl_path = tmp_path / "requests.jsonl"
     jsonl_path.write_text(
-        '{"timestamp":"2026-04-11T11:00:00-07:00","agent_name":"opus","model_id":"claude-opus-4-6","system_prompt":"S","messages":[{"role":"user","content":"a"}],"message_count":1}'
-        '{"timestamp":"2026-04-11T11:00:01-07:00","agent_name":"opus","model_id":"claude-opus-4-6","system_prompt":"S","messages":[{"role":"user","content":"b"}],"message_count":1}\n',
+        '{"timestamp":"2026-04-11T11:00:00-07:00","agent_name":"opus","model_id":"claude-opus-4-8","system_prompt":"S","messages":[{"role":"user","content":"a"}],"message_count":1}'
+        '{"timestamp":"2026-04-11T11:00:01-07:00","agent_name":"opus","model_id":"claude-opus-4-8","system_prompt":"S","messages":[{"role":"user","content":"b"}],"message_count":1}\n',
         encoding="utf-8",
     )
 
@@ -46,6 +47,47 @@ def test_load_request_rows_handles_concatenated_json_objects(tmp_path: Path) -> 
     assert stats.decode_error_count == 0
 
 
+def test_load_request_rows_skips_rows_with_corrupt_tool_call_arguments(tmp_path: Path) -> None:
+    """One logged row with invalid tool_call arguments must not kill the review."""
+    module = _load_prompt_cache_review_module()
+    jsonl_path = tmp_path / "requests.jsonl"
+    corrupt_arguments = '{"args": "curl \\\\"https://example.test?x=1%5C" | head"}'
+    corrupt_row = {
+        "timestamp": "2026-04-11T11:00:00-07:00",
+        "agent_name": "opus",
+        "model_id": "claude-opus-4-8",
+        "system_prompt": "S",
+        "messages": [
+            {
+                "role": "assistant",
+                "tool_calls": [{"id": "t1", "function": {"name": "run_shell_command", "arguments": corrupt_arguments}}],
+            },
+        ],
+        "message_count": 1,
+    }
+    healthy_row = {
+        "timestamp": "2026-04-11T11:00:01-07:00",
+        "agent_name": "opus",
+        "model_id": "claude-opus-4-8",
+        "system_prompt": "S",
+        "messages": [{"role": "user", "content": "hello"}],
+        "message_count": 1,
+    }
+    jsonl_path.write_text(
+        json.dumps(corrupt_row) + "\n" + json.dumps(healthy_row) + "\n",
+        encoding="utf-8",
+    )
+
+    rows, stats = module.load_request_rows(jsonl_path)
+
+    assert len(rows) == 1
+    assert rows[0].preview == "hello"
+    assert stats.unparseable_row_count == 1
+    assert stats.decode_error_count == 0
+    assert len(stats.unparseable_row_errors) == 1
+    assert "JSONDecodeError" in stats.unparseable_row_errors[0]
+
+
 def test_build_session_reviews_detects_prefix_extension_with_two_appended_messages() -> None:
     """Treat appended request messages as a reusable-prefix extension."""
     module = _load_prompt_cache_review_module()
@@ -55,7 +97,7 @@ def test_build_session_reviews_detects_prefix_extension_with_two_appended_messag
             session_id="room:$thread",
             room_id="room",
             agent_name="opus",
-            model_id="claude-opus-4-6",
+            model_id="claude-opus-4-8",
             system_prompt="S",
             message_count=2,
             message_blobs=("m1", "m2"),
@@ -67,7 +109,7 @@ def test_build_session_reviews_detects_prefix_extension_with_two_appended_messag
             session_id="room:$thread",
             room_id="room",
             agent_name="opus",
-            model_id="claude-opus-4-6",
+            model_id="claude-opus-4-8",
             system_prompt="S",
             message_count=4,
             message_blobs=("m1", "m2", "m3", "m4"),
@@ -96,7 +138,7 @@ def test_prefix_extension_ignores_moving_cache_control_marker() -> None:
             session_id="room:$thread",
             room_id="room",
             agent_name="opus",
-            model_id="claude-opus-4-6",
+            model_id="claude-opus-4-8",
             system_prompt="S",
             message_count=1,
             message_blobs=('{"content":[{"text":"a","cache_control":{"type":"ephemeral"}}],"role":"user"}',),
@@ -108,7 +150,7 @@ def test_prefix_extension_ignores_moving_cache_control_marker() -> None:
             session_id="room:$thread",
             room_id="room",
             agent_name="opus",
-            model_id="claude-opus-4-6",
+            model_id="claude-opus-4-8",
             system_prompt="S",
             message_count=2,
             message_blobs=(
@@ -136,7 +178,7 @@ def test_raw_prefix_extension_detects_moving_cache_control_marker() -> None:
         session_id="room:$thread",
         room_id="room",
         agent_name="opus",
-        model_id="claude-opus-4-6",
+        model_id="claude-opus-4-8",
         system_prompt="S",
         message_count=1,
         message_blobs=('{"content":[{"text":"a","cache_control":{"type":"ephemeral"}}],"role":"user"}',),
@@ -148,7 +190,7 @@ def test_raw_prefix_extension_detects_moving_cache_control_marker() -> None:
         session_id="room:$thread",
         room_id="room",
         agent_name="opus",
-        model_id="claude-opus-4-6",
+        model_id="claude-opus-4-8",
         system_prompt="S",
         message_count=2,
         message_blobs=(
@@ -166,8 +208,8 @@ def test_raw_prefix_extension_detects_moving_cache_control_marker() -> None:
     assert module.current_extends_previous_raw(previous_row, current_row) is False
 
 
-def test_build_provider_message_blobs_from_messages_can_skip_vertex_breakpoint() -> None:
-    """Allow blob building without applying the Vertex cache breakpoint hook."""
+def test_build_provider_message_blobs_from_messages_can_skip_cache_ladder() -> None:
+    """Allow blob building without applying the prompt-cache ladder."""
     module = _load_prompt_cache_review_module()
     messages = [
         Message(role="system", content="System prompt"),
@@ -178,13 +220,13 @@ def test_build_provider_message_blobs_from_messages_can_skip_vertex_breakpoint()
         messages,
         "claude-sonnet-4-6",
         {"cache_system_prompt": True, "extended_cache_time": True},
-        apply_vertex_cache_breakpoint=False,
+        apply_cache_ladder=False,
     )
     raw_blobs_hooked, normalized_blobs_hooked, preview_hooked = module.build_provider_message_blobs_from_messages(
         messages,
         "claude-sonnet-4-6",
         {"cache_system_prompt": True, "extended_cache_time": True},
-        apply_vertex_cache_breakpoint=True,
+        apply_cache_ladder=True,
     )
 
     assert raw_blobs_plain == ('{"content":[{"text":"Current turn","type":"text"}],"role":"user"}',)
@@ -193,6 +235,130 @@ def test_build_provider_message_blobs_from_messages_can_skip_vertex_breakpoint()
     )
     assert normalized_blobs_plain == normalized_blobs_hooked
     assert preview_plain == preview_hooked == "Current turn"
+
+
+def _simulation_row(
+    module: ModuleType,
+    *,
+    timestamp: str,
+    blobs: tuple[str, ...],
+    marked: frozenset[int],
+    agent_name: str = "agent",
+    model_id: str = "claude-opus-4-8",
+    system_prompt: str = "S" * 40,
+    tools_blob: str = "T" * 40,
+    cache_enabled: bool = True,
+) -> object:
+    """Build a synthetic request row with cache markers on the given message indexes."""
+    raw_blobs = tuple(
+        (
+            f'{{"content":[{{"cache_control":{{"type":"ephemeral"}},"text":"{text}","type":"text"}}],"role":"user"}}'
+            if index in marked
+            else f'{{"content":[{{"text":"{text}","type":"text"}}],"role":"user"}}'
+        )
+        for index, text in enumerate(blobs)
+    )
+    normalized_blobs = tuple(f'{{"content":[{{"text":"{text}","type":"text"}}],"role":"user"}}' for text in blobs)
+    return module.RequestRow(
+        timestamp=datetime.fromisoformat(timestamp),
+        session_id=None,
+        room_id=None,
+        agent_name=agent_name,
+        model_id=model_id,
+        system_prompt=system_prompt,
+        message_count=len(blobs),
+        message_blobs=raw_blobs,
+        normalized_message_blobs=normalized_blobs,
+        preview="preview",
+        tools_blob=tools_blob,
+        cache_enabled=cache_enabled,
+    )
+
+
+def test_simulate_prompt_cache_full_hit_on_prefix_extension() -> None:
+    """A request extending the previous rung boundary reads the full prefix."""
+    module = _load_prompt_cache_review_module()
+    rows = [
+        _simulation_row(module, timestamp="2026-04-11T11:00:00-07:00", blobs=("m1",), marked=frozenset({0})),
+        _simulation_row(module, timestamp="2026-04-11T11:05:00-07:00", blobs=("m1", "m2"), marked=frozenset({1})),
+    ]
+
+    report = module.simulate_prompt_cache(rows)
+
+    assert [outcome.outcome for outcome in report.outcomes] == ["cold", "full_hit"]
+    second = report.outcomes[1]
+    expected_read = (
+        len(second.row.tools_blob) + len(second.row.system_prompt) + len(second.row.normalized_message_blobs[0])
+    )
+    assert second.read_chars == expected_read
+    assert second.divergence is None
+
+
+def test_simulate_prompt_cache_attributes_tool_and_system_changes() -> None:
+    """Tool-array changes miss entirely; system changes still read the tools entry."""
+    module = _load_prompt_cache_review_module()
+    rows = [
+        _simulation_row(module, timestamp="2026-04-11T11:00:00-07:00", blobs=("m1",), marked=frozenset({0})),
+        _simulation_row(
+            module,
+            timestamp="2026-04-11T11:00:30-07:00",
+            blobs=("m1", "m2"),
+            marked=frozenset({1}),
+            system_prompt="different system",
+        ),
+        _simulation_row(
+            module,
+            timestamp="2026-04-11T11:05:00-07:00",
+            blobs=("m1", "m2"),
+            marked=frozenset({1}),
+            tools_blob="different tools",
+        ),
+    ]
+
+    report = module.simulate_prompt_cache(rows)
+
+    by_timestamp = {outcome.row.timestamp.isoformat(): outcome for outcome in report.outcomes}
+    system_change = by_timestamp["2026-04-11T11:00:30-07:00"]
+    tool_change = by_timestamp["2026-04-11T11:05:00-07:00"]
+    assert system_change.outcome == "tools_hit"
+    assert system_change.divergence == "system"
+    assert system_change.read_chars == len(system_change.row.tools_blob)
+    assert tool_change.outcome == "miss"
+    assert tool_change.divergence == "tools"
+
+
+def test_simulate_prompt_cache_ttl_expiry_is_cold() -> None:
+    """Entries older than the TTL cannot be read."""
+    module = _load_prompt_cache_review_module()
+    rows = [
+        _simulation_row(module, timestamp="2026-04-11T11:00:00-07:00", blobs=("m1",), marked=frozenset({0})),
+        _simulation_row(module, timestamp="2026-04-11T13:00:00-07:00", blobs=("m1", "m2"), marked=frozenset({1})),
+    ]
+
+    report = module.simulate_prompt_cache(rows, ttl_seconds=3600)
+
+    assert [outcome.outcome for outcome in report.outcomes] == ["cold", "cold"]
+
+
+def test_simulate_prompt_cache_lookback_window_downgrades_deep_boundaries() -> None:
+    """A matched boundary beyond the lookback window only reads tools+system."""
+    module = _load_prompt_cache_review_module()
+    tail = tuple(f"m{index}" for index in range(2, 27))
+    rows = [
+        _simulation_row(module, timestamp="2026-04-11T11:00:00-07:00", blobs=("m1",), marked=frozenset({0})),
+        _simulation_row(
+            module,
+            timestamp="2026-04-11T11:05:00-07:00",
+            blobs=("m1", *tail),
+            marked=frozenset({len(tail)}),
+        ),
+    ]
+
+    report = module.simulate_prompt_cache(rows, lookback_blocks=20)
+
+    second = report.outcomes[1]
+    assert second.outcome == "system_hit"
+    assert second.read_chars == len(second.row.tools_blob) + len(second.row.system_prompt)
 
 
 def test_bootstrap_probe_environment_resolves_relative_adc_path(
@@ -225,3 +391,91 @@ def test_bootstrap_probe_environment_resolves_relative_adc_path(
     assert os.environ["GOOGLE_APPLICATION_CREDENTIALS"] == str(adc_path)
     assert os.environ["ANTHROPIC_VERTEX_PROJECT_ID"] == "mindroom-test"
     assert os.environ["CLOUD_ML_REGION"] == "us-central1"
+
+
+def test_load_request_rows_joins_response_usage_records(tmp_path: Path) -> None:
+    """Response records should attach provider usage to their request rows by request_log_id."""
+    module = _load_prompt_cache_review_module()
+    jsonl_path = tmp_path / "requests.jsonl"
+    jsonl_path.write_text(
+        '{"timestamp":"2026-04-11T11:00:00-07:00","request_log_id":"req-1","agent_id":"opus",'
+        '"model_id":"claude-opus-4-8","system_prompt":"S","messages":[{"role":"user","content":"a"}]}\n'
+        '{"timestamp":"2026-04-11T11:00:02-07:00","record":"response","request_log_id":"req-1",'
+        '"agent_id":"opus","model_id":"claude-opus-4-8","usage":{"input_tokens":10,"output_tokens":4,'
+        '"cache_read_tokens":900,"cache_write_tokens":25}}\n'
+        '{"timestamp":"2026-04-11T11:00:03-07:00","request_log_id":"req-2","agent_id":"opus",'
+        '"model_id":"claude-opus-4-8","system_prompt":"S","messages":[{"role":"user","content":"b"}]}\n',
+        encoding="utf-8",
+    )
+
+    rows, stats = module.load_request_rows(jsonl_path)
+
+    assert stats.unparseable_row_count == 0
+    assert [row.request_log_id for row in rows] == ["req-1", "req-2"]
+    assert rows[0].usage == {"input_tokens": 10, "output_tokens": 4, "cache_read_tokens": 900, "cache_write_tokens": 25}
+    assert rows[1].usage is None
+
+
+def test_response_records_are_not_parsed_as_request_rows() -> None:
+    """A response record must never masquerade as a request row."""
+    module = _load_prompt_cache_review_module()
+    payload = {
+        "timestamp": "2026-04-11T11:00:02-07:00",
+        "record": "response",
+        "request_log_id": "req-1",
+        "agent_id": "opus",
+        "model_id": "claude-opus-4-8",
+        "usage": {"cache_read_tokens": 1},
+    }
+    assert module.parse_request_row(payload) is None
+
+
+def test_print_cache_actuals_reports_reuse_and_cold_requests(capsys: pytest.CaptureFixture[str]) -> None:
+    """The actuals section should aggregate provider-reported cache usage."""
+    module = _load_prompt_cache_review_module()
+    measured = module.RequestRow(
+        timestamp=datetime.fromisoformat("2026-04-11T11:00:00-07:00"),
+        session_id=None,
+        room_id=None,
+        agent_name="opus",
+        model_id="claude-opus-4-8",
+        system_prompt="S",
+        message_count=1,
+        message_blobs=("{}",),
+        normalized_message_blobs=("{}",),
+        preview="a",
+        cache_enabled=True,
+        request_log_id="req-1",
+        usage={"input_tokens": 100, "output_tokens": 5, "cache_read_tokens": 900, "cache_write_tokens": 0},
+    )
+    cold = module.RequestRow(
+        timestamp=datetime.fromisoformat("2026-04-11T11:00:05-07:00"),
+        session_id=None,
+        room_id=None,
+        agent_name="opus",
+        model_id="claude-opus-4-8",
+        system_prompt="S",
+        message_count=1,
+        message_blobs=("{}",),
+        normalized_message_blobs=("{}",),
+        preview="b",
+        cache_enabled=True,
+        request_log_id="req-2",
+        usage={"input_tokens": 1000, "output_tokens": 5, "cache_read_tokens": 0, "cache_write_tokens": 0},
+    )
+
+    module.print_cache_actuals([measured, cold])
+
+    output = capsys.readouterr().out
+    assert "ACTUAL CACHE USAGE (provider-reported, 2 of 2 requests measured)" in output
+    assert "cache_read=900" in output
+    assert "actual prefix reuse: 45.0% of prompt tokens" in output
+    assert "cache-enabled requests that read nothing: 1" in output
+    assert "agent=opus model=claude-opus-4-8 requests=2" in output
+
+
+def test_print_cache_actuals_without_usage_records(capsys: pytest.CaptureFixture[str]) -> None:
+    """Logs predating response logging should produce a clear placeholder line."""
+    module = _load_prompt_cache_review_module()
+    module.print_cache_actuals([])
+    assert "no Claude response usage records found" in capsys.readouterr().out

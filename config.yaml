@@ -138,7 +138,7 @@ agents:
     - For email drafts, maintain appropriate tone and formality based on context
     learning: true
     learning_mode: always
-    model: gpt5mini
+    model: gpt5terra
     role: Manage and respond to emails efficiently using Gmail with Claude Sonnet's
       intelligence
     rooms:
@@ -222,7 +222,7 @@ agents:
     - Highlight key developments and their significance.
     learning: true
     learning_mode: always
-    model: gpt_oss_120b
+    model: nemotron
     role: Gather and summarize news and current events.
     rooms:
     - lobby
@@ -264,8 +264,8 @@ agents:
       files and explore freely without asking.
     - >-
       Before answering questions about prior conversations, decisions, people,
-      or preferences, use search_knowledge_base to search memory files. Do not
-      guess from incomplete context; search first.
+      or preferences, use search_memories to search memory files. Do not guess
+      from incomplete context; search first.
     include_default_tools: false
     learning: false
     context_files:
@@ -276,8 +276,6 @@ agents:
     - ./openclaw_data/MEMORY.md
     - ./openclaw_data/TOOLS.md
     - ./openclaw_data/HEARTBEAT.md
-    knowledge_bases:
-    - openclaw_memory
     model: opus
     role: OpenClaw-style personal assistant with persistent file-based identity
       and memory.
@@ -288,6 +286,7 @@ agents:
     tools:
     - file
     - shell
+    - memory
     - scheduler
     - duckduckgo
     - website
@@ -305,7 +304,7 @@ agents:
     - Summarize findings in a clear, organized manner.
     learning: true
     learning_mode: always
-    model: gpt5mini
+    model: gpt5terra
     role: Conduct research using web sources, Wikipedia, and academic papers.
     rooms:
     - lobby
@@ -411,6 +410,7 @@ agents:
     tools: []
 authorization:
   default_room_access: false
+  config_command_enabled: false
   global_users:
   - '@test:m-test-4.mindroom.chat'
   room_permissions: {}
@@ -424,11 +424,6 @@ defaults:
   learning_mode: always
   markdown: true
   show_stop_button: true
-knowledge_bases:
-  openclaw_memory:
-    # Semantic search over historical OpenClaw workspace memory files.
-    path: ./openclaw_data/memory
-    watch: true
 memory:
   embedder:
     config:
@@ -441,6 +436,11 @@ memory:
       openai_base_url: http://llama.local/v1
       temperature: 0.1
     provider: openai
+  search:
+    mode: semantic
+    include:
+      - memory/**/*.md
+    include_entrypoint: false
 models:
   # --- Local (llama.local) ---
   # llama-swap + llama.cpp, see https://github.com/basnijholt/dotfiles/blob/main/configs/nixos/hosts/pc/ai.nix
@@ -469,31 +469,31 @@ models:
     id: claude-haiku-4-5
     provider: anthropic
   opus:
-    id: claude-opus-4-7
+    id: claude-opus-4-8
     provider: anthropic
   sonnet:
-    id: claude-sonnet-4-6
+    id: claude-sonnet-5
     provider: anthropic
   # --- OpenAI ---
-  gpt52:
-    id: gpt-5.2
+  gpt56:
+    id: gpt-5.6
     provider: openai
-  gpt5mini:
-    id: gpt-5-mini
+  gpt5terra:
+    id: gpt-5.6-terra
     provider: openai
   # --- Google ---
   gemini_flash:
-    id: gemini-3-flash-preview
+    id: gemini-3.5-flash
     provider: google
   # --- OpenRouter ---
   deepseek:
     id: deepseek/deepseek-v3.2
     provider: openrouter
-  gpt_oss:
-    id: openai/gpt-oss-120b
+  nemotron:
+    id: nvidia/nemotron-3-super-120b-a12b:free
     provider: openrouter
-  gpt_oss_120b:
-    id: openai/gpt-oss-120b
+  tencent_hy3:
+    id: tencent/hy3-preview
     provider: openrouter
 plugins: []
 room_models:
@@ -528,5 +528,5 @@ voice:
   intelligence:
     model: sonnet
   stt:
-    model: whisper-1
+    model: gpt-4o-transcribe
     provider: openai

@@ -6,7 +6,8 @@ FROM oven/bun:1 AS base
 FROM base AS deps
 ENV NEXT_TELEMETRY_DISABLED=1 \
     TURBO_TELEMETRY_DISABLED=1 \
-    DO_NOT_TRACK=1
+    DO_NOT_TRACK=1 \
+    PUPPETEER_SKIP_DOWNLOAD=true
 WORKDIR /app
 COPY saas-platform/platform-frontend/package.json saas-platform/platform-frontend/bun.lock ./platform-frontend/
 # Use cache mount for bun cache to speed up builds
@@ -22,7 +23,7 @@ COPY saas-platform/platform-frontend/ ./platform-frontend/
 RUN cd platform-frontend && bun run build
 
 # Production stage - optimized for Next.js standalone
-FROM public.ecr.aws/docker/library/node:20-alpine AS final
+FROM public.ecr.aws/docker/library/node:24-alpine AS final
 ENV NEXT_TELEMETRY_DISABLED=1 \
     TURBO_TELEMETRY_DISABLED=1 \
     DO_NOT_TRACK=1

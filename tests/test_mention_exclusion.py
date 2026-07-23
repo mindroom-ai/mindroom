@@ -94,10 +94,10 @@ async def test_agent_ignores_user_message_mentioning_other_agents(tmp_path) -> N
         },
     }
 
-    general_bot._send_response = AsyncMock(return_value="$placeholder")
-    general_bot._generate_response = AsyncMock()
-    install_send_response_mock(general_bot, general_bot._send_response)
-    install_generate_response_mock(general_bot, general_bot._generate_response)
+    send_response = AsyncMock(return_value="$placeholder")
+    generate_response = AsyncMock()
+    install_send_response_mock(general_bot, send_response)
+    install_generate_response_mock(general_bot, generate_response)
 
     mock_context = MessageContext(
         am_i_mentioned=False,
@@ -117,7 +117,7 @@ async def test_agent_ignores_user_message_mentioning_other_agents(tmp_path) -> N
     await general_bot._coalescing_gate.drain_all()
 
     # GeneralAgent should NOT generate a response because ResearchAgent is mentioned
-    general_bot._generate_response.assert_not_called()
+    generate_response.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -187,10 +187,10 @@ async def test_agent_responds_when_mentioned_along_with_others(tmp_path) -> None
         },
     }
 
-    general_bot._send_response = AsyncMock(return_value="$placeholder")
-    general_bot._generate_response = AsyncMock(return_value="$response")
-    install_send_response_mock(general_bot, general_bot._send_response)
-    install_generate_response_mock(general_bot, general_bot._generate_response)
+    send_response = AsyncMock(return_value="$placeholder")
+    generate_response = AsyncMock(return_value="$response")
+    install_send_response_mock(general_bot, send_response)
+    install_generate_response_mock(general_bot, generate_response)
 
     mock_context = MessageContext(
         am_i_mentioned=True,
@@ -214,4 +214,4 @@ async def test_agent_responds_when_mentioned_along_with_others(tmp_path) -> None
         await general_bot._coalescing_gate.drain_all()
 
     # GeneralAgent SHOULD generate a response because it's mentioned
-    general_bot._generate_response.assert_called_once()
+    generate_response.assert_called_once()

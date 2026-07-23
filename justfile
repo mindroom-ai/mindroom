@@ -31,7 +31,7 @@ local-matrix-reset:
     rm -f matrix_state.yaml
     docker volume prune -f
     rm -rf tmp/
-    @echo "✅ Reset complete! Run 'just create' then 'mindroom run' to start fresh."
+    @echo "✅ Reset complete! Run 'just local-matrix-up' then 'mindroom run' to start fresh."
 
 #########################################
 # Local: Instances orchestration (Compose)
@@ -97,6 +97,11 @@ local-platform-compose-logs:
 # ------------------------
 # Development / CI helpers
 # ------------------------
+
+# Export SaaS backend OpenAPI schema and regenerate frontend API types
+saas-openapi:
+    cd saas-platform/platform-backend && uv run python scripts/export_openapi.py
+    cd saas-platform/platform-frontend && bun install && bun run generate:api
 
 ################################
 # Cluster: Terraform / Helm / DB
@@ -192,6 +197,10 @@ env-saas:
 test-saas-backend *args:
     cd saas-platform/platform-backend && uv run pytest {{args}}
 
+# Run SaaS platform backend tests with a terminal coverage report
+test-saas-backend-coverage *args:
+    cd saas-platform/platform-backend && uv run pytest --cov=backend --cov-report=term-missing {{ args }}
+
 # Run SaaS platform frontend tests (Jest)
 test-saas-frontend:
     cd saas-platform/platform-frontend && bun install && bun run test
@@ -206,6 +215,15 @@ test-front:
 test-backend *args:
     uv sync --all-extras
     uv run --all-extras pytest {{args}}
+
+# Run core backend tests with a terminal coverage report
+test-backend-coverage *args:
+    uv sync --all-extras
+    uv run --all-extras pytest --cov=mindroom --cov-report=term-missing {{ args }}
+
+# Run the standard cross-platform test suites with dependency preflight and fail-fast behavior
+test-standard:
+    ./run-tests.sh
 
 # Check for public symbols that should be private
 check-module-privacy:

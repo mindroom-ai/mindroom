@@ -21,8 +21,12 @@ from .config import (
     load_config_quiet,
     print_config_search_locations,
 )
+from .desktop import desktop_app
 from .local_stack import local_stack_setup
+from .migrate import config_migrate
+from .plugins import plugins_app
 from .service import service_app
+from .trigger import trigger_app
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -31,6 +35,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.thread_export import ThreadExportStats
 
 _HELP = """\
 AI agents that live in Matrix and work everywhere via bridges.
@@ -39,6 +44,7 @@ AI agents that live in Matrix and work everywhere via bridges.
   [cyan]mindroom config init[/cyan]   Create a starter config
   [cyan]mindroom run[/cyan]           Start the system\
 """
+_CONFIG_INIT_PROVIDER_CHOICES = "{openrouter,ollama,openai,azure,bedrock_claude,codex,claude,llama.cpp,vertexai_claude}"
 
 app = typer.Typer(
     help=_HELP,
@@ -50,9 +56,15 @@ app = typer.Typer(
     pretty_exceptions_show_locals=False,
 )
 avatars_app = typer.Typer(help="Generate and sync managed avatar assets.")
+threads_app = typer.Typer(help="Export Matrix threads to local files.")
+config_app.command("migrate")(config_migrate)
 app.add_typer(config_app, name="config")
+app.add_typer(plugins_app, name="plugins")
+app.add_typer(desktop_app, name="desktop")
 app.add_typer(avatars_app, name="avatars")
+app.add_typer(threads_app, name="threads")
 app.add_typer(service_app, name="service")
+app.add_typer(trigger_app, name="trigger")
 
 
 def _httpx_post(
@@ -87,6 +99,12 @@ def run(
         case_sensitive=False,
         envvar="LOG_LEVEL",
     ),
+    config_path: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--config",
+        "-c",
+        help="Use this config file path. Defaults the storage location to the selected config directory unless --storage-path is set.",
+    ),
     storage_path: Path | None = typer.Option(  # noqa: B008
         None,
         "--storage-path",
@@ -120,6 +138,7 @@ def run(
     asyncio.run(
         _run(
             log_level=log_level.upper(),
+            config_path=config_path,
             storage_path=storage_path,
             api=api,
             api_port=api_port,
@@ -154,6 +173,7 @@ def _load_active_config_or_exit(runtime_paths: RuntimePaths) -> Config:
 
 async def _run(
     log_level: str,
+    config_path: Path | None,
     storage_path: Path | None,
     *,
     api: bool,
@@ -163,7 +183,7 @@ async def _run(
     """Run the multi-agent system with friendly error handling."""
     from mindroom.startup_errors import PermanentStartupError  # noqa: PLC0415
 
-    runtime_paths = activate_cli_runtime(storage_path=storage_path)
+    runtime_paths = activate_cli_runtime(path=config_path, storage_path=storage_path)
     config = _load_active_config_or_exit(runtime_paths)
 
     # Check for missing API keys
@@ -211,7 +231,20 @@ async def _run(
 
 
 @app.command()
-def doctor() -> None:
+def doctor(
+    config_path: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--config",
+        "-c",
+        help="Use this config file path. Defaults the storage location to the selected config directory unless --storage-path is set.",
+    ),
+    storage_path: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--storage-path",
+        "-s",
+        help="Base directory for persistent MindRoom data (state, sessions, tracking)",
+    ),
+) -> None:
     """Check your environment for common issues.
 
     Runs connectivity, configuration, and credential checks in a single pass
@@ -219,7 +252,7 @@ def doctor() -> None:
     """
     from .doctor import doctor as doctor_command  # noqa: PLC0415
 
-    doctor_command()
+    doctor_command(config_path=config_path, storage_path=storage_path)
 
 
 @avatars_app.command("generate")
@@ -274,6 +307,151 @@ def avatars_sync(
             _print_connection_error(exc, runtime_paths)
             raise typer.Exit(1) from None
         raise
+
+
+@threads_app.command("export")
+def _threads_export_command(
+    config_path: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--config",
+        "-c",
+        help="Use this config file path.",
+    ),
+    storage_path: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--storage-path",
+        "-s",
+        help="Base directory for persistent MindRoom data.",
+    ),
+    output: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--output",
+        "-o",
+        help="Output directory. Defaults to <storage>/thread_exports.",
+    ),
+    room: str | None = typer.Option(
+        None,
+        "--room",
+        "-r",
+        help="Filter exported rooms by a substring of the room key, alias, name, or Matrix room ID.",
+    ),
+    watch: bool = typer.Option(
+        False,
+        "--watch",
+        help="Repeat the export forever on a fixed interval.",
+    ),
+    interval: int = typer.Option(
+        300,
+        "--interval",
+        help="Watch interval in seconds.",
+    ),
+    max_thread_roots: int = typer.Option(
+        2000,
+        "--max-thread-roots",
+        help="Maximum thread roots to enumerate per room.",
+    ),
+    prefer_cache: bool = typer.Option(
+        False,
+        "--prefer-cache",
+        help="Serve thread bodies from the durable event cache and only fetch from the homeserver "
+        "on miss or invalidation. Use alongside a running MindRoom that keeps the cache fresh.",
+    ),
+    invited_rooms: bool = typer.Option(
+        True,
+        "--invited-rooms/--no-invited-rooms",
+        help="Include rooms joined through authorized invites (user-created rooms).",
+    ),
+) -> None:
+    """Export Matrix threads to YAML files for grep/ripgrep search."""
+    asyncio.run(
+        _threads_export(
+            config_path=config_path,
+            storage_path=storage_path,
+            output=output,
+            room=room,
+            watch=watch,
+            interval=interval,
+            max_thread_roots=max_thread_roots,
+            prefer_cache=prefer_cache,
+            include_invited_rooms=invited_rooms,
+        ),
+    )
+
+
+def _print_thread_export_stats(stats: ThreadExportStats) -> None:
+    """Print one export-pass summary."""
+    unchanged_note = f" ({stats.threads_unchanged} unchanged)" if stats.threads_unchanged else ""
+    console.print(
+        f"Exported {stats.threads_exported}/{stats.threads_seen} threads "
+        f"from {stats.rooms_exported} room(s) to {stats.output_dir}{unchanged_note}",
+    )
+    if stats.truncated_rooms:
+        console.print(f"[yellow]Warning:[/yellow] {stats.truncated_rooms} room(s) hit the thread enumeration limit")
+    for failure in stats.failed_items:
+        target = failure.thread_id or failure.room_id
+        console.print(f"[red]Failed:[/red] {failure.room_key} {target}: {failure.error}")
+
+
+def _handle_thread_export_error(exc: RuntimeError | OSError, runtime_paths: RuntimePaths, *, watch: bool) -> None:
+    """Print one top-level export error and exit unless watch mode can retry."""
+    if isinstance(exc, ConnectionError) or _is_connection_os_error(exc):
+        _print_connection_error(exc, runtime_paths)
+    else:
+        console.print(f"[red]Error:[/red] {exc}")
+    if not watch:
+        raise typer.Exit(1) from None
+
+
+def _is_connection_os_error(exc: BaseException) -> bool:
+    """Return whether an OS error looks like a Matrix connection failure."""
+    return isinstance(exc, OSError) and ("connect" in str(exc).lower() or "refused" in str(exc).lower())
+
+
+async def _threads_export(
+    *,
+    config_path: Path | None,
+    storage_path: Path | None,
+    output: Path | None,
+    room: str | None,
+    watch: bool,
+    interval: int,
+    max_thread_roots: int,
+    prefer_cache: bool,
+    include_invited_rooms: bool,
+) -> None:
+    """Run one thread export command."""
+    from mindroom.thread_export import export_threads_once  # noqa: PLC0415
+
+    runtime_paths = activate_cli_runtime(path=config_path, storage_path=storage_path)
+    config = _load_active_config_or_exit(runtime_paths)
+    if interval < 1:
+        console.print("[red]Error:[/red] --interval must be at least 1 second")
+        raise typer.Exit(1)
+    if max_thread_roots < 1:
+        console.print("[red]Error:[/red] --max-thread-roots must be at least 1")
+        raise typer.Exit(1)
+
+    while True:
+        try:
+            stats = await export_threads_once(
+                config=config,
+                runtime_paths=runtime_paths,
+                output_dir=output,
+                room_filter=room,
+                max_thread_roots=max_thread_roots,
+                prefer_cache=prefer_cache,
+                include_invited_rooms=include_invited_rooms,
+            )
+        except (OSError, RuntimeError) as exc:
+            _handle_thread_export_error(exc, runtime_paths, watch=watch)
+        else:
+            _print_thread_export_stats(stats)
+            if not watch:
+                if stats.failures:
+                    raise typer.Exit(1)
+                return
+
+        await asyncio.sleep(interval)
 
 
 @app.command()
@@ -343,7 +521,7 @@ def connect(
         )
     if credentials.namespace_invalid:
         console.print(
-            "[yellow]Warning:[/yellow] Pairing response included malformed namespace; derived a fallback namespace.",
+            "[yellow]Warning:[/yellow] Pairing response included malformed namespace; leaving MINDROOM_NAMESPACE empty.",
         )
 
     if persist_env:
@@ -419,11 +597,15 @@ def _local_client_fingerprint(*, config_path: Path) -> str:
 
 
 def _print_missing_config_error(process_env: Mapping[str, str]) -> None:
-    console.print("[red]Error:[/red] No config.yaml found.\n")
+    console.print("[red]Error:[/red] No config found.\n")
     console.print("MindRoom needs a configuration file to know which agents to run.\n")
     console.print("Quick start:")
-    console.print("  [cyan]mindroom config init[/cyan]    Create a starter config")
-    console.print("  [cyan]mindroom config edit[/cyan]    Edit your config\n")
+    console.print("  [cyan]mindroom config init[/cyan]    Create a hosted starter config")
+    console.print(
+        f"  [cyan]mindroom config init --provider {_CONFIG_INIT_PROVIDER_CHOICES}[/cyan]    Choose a model provider",
+        soft_wrap=True,
+    )
+    console.print("  [cyan]mindroom run[/cyan]            Start MindRoom after setup\n")
     print_config_search_locations(process_env, title="Config search locations (first match wins):")
     console.print("\nLearn more: https://github.com/mindroom-ai/mindroom")
 

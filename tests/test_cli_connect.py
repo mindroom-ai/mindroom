@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import stat
 from typing import TYPE_CHECKING
 
 import httpx
@@ -66,10 +67,11 @@ def test_persist_local_provisioning_env_writes_credentials_only(tmp_path: Path) 
     assert "MINDROOM_LOCAL_CLIENT_SECRET=secret-123" in content
     assert "MINDROOM_NAMESPACE=a1b2c3d4" in content
     assert "MINDROOM_OWNER_USER_ID=" not in content
+    assert stat.S_IMODE(env_path.stat().st_mode) == 0o600
 
 
 def test_persist_local_provisioning_env_writes_owner_when_available(tmp_path: Path) -> None:
-    """Persisted owner MXID lets a later config init replace authorization placeholders."""
+    """Persisted owner MXID lets a later config init replace owner access placeholders."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text("models: {}\nagents: {}\nrouter:\n  model: default\n")
 
@@ -114,6 +116,28 @@ def test_replace_owner_placeholders_in_config_accepts_server_port(tmp_path: Path
     parsed = yaml.safe_load(updated)
     assert parsed["authorization"]["global_users"] == ["@alice:mindroom.chat:8448"]
     assert parsed["authorization"]["agent_reply_permissions"]["*"] == ["@alice:mindroom.chat:8448"]
+
+
+def test_replace_owner_placeholders_reaches_included_files(tmp_path: Path) -> None:
+    """Placeholders living in !include files are replaced too."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("authorization: !include auth.yaml\n", encoding="utf-8")
+    auth_path = tmp_path / "auth.yaml"
+    auth_path.write_text(
+        f"global_users:\n  - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n",
+        encoding="utf-8",
+    )
+
+    replaced = cli_connect.replace_owner_placeholders_in_config(
+        config_path=config_path,
+        owner_user_id="@alice:mindroom.chat",
+    )
+
+    assert replaced is True
+    assert config_path.read_text(encoding="utf-8") == "authorization: !include auth.yaml\n"
+    updated = auth_path.read_text(encoding="utf-8")
+    assert OWNER_MATRIX_USER_ID_PLACEHOLDER not in updated
+    assert yaml.safe_load(updated)["global_users"] == ["@alice:mindroom.chat"]
 
 
 def test_complete_local_pairing_rejects_non_json_response() -> None:
@@ -178,8 +202,8 @@ def test_complete_local_pairing_flags_malformed_owner_user_id() -> None:
     assert result.namespace == "a1b2c3d4"
 
 
-def test_complete_local_pairing_derives_namespace_when_missing() -> None:
-    """Missing namespace should derive a stable fallback from client_id."""
+def test_complete_local_pairing_uses_empty_namespace_when_missing() -> None:
+    """Missing namespace should preserve the unnamespaced install default."""
 
     def _fake_post(_url: str, **_kwargs: object) -> httpx.Response:
         return httpx.Response(
@@ -200,5 +224,60 @@ def test_complete_local_pairing_derives_namespace_when_missing() -> None:
         post_request=_fake_post,
     )
 
-    assert result.namespace == cli_connect._derive_namespace("client-123")
+    assert result.namespace == ""
     assert result.namespace_invalid is False
+
+
+@pytest.mark.parametrize("namespace", [None, 123, ["a1b2c3d4"], {"value": "a1b2c3d4"}])
+def test_complete_local_pairing_uses_empty_namespace_when_non_string(namespace: object) -> None:
+    """Non-string namespaces should be treated like the unnamespaced install default."""
+
+    def _fake_post(_url: str, **_kwargs: object) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "client_id": "client-123",
+                "client_secret": "secret-123",
+                "namespace": namespace,
+                "owner_user_id": "@alice:mindroom.chat",
+            },
+        )
+
+    result = cli_connect.complete_local_pairing(
+        provisioning_url="https://provisioning.example",
+        pair_code="ABCD-EFGH",
+        client_name="devbox",
+        client_fingerprint="sha256:test",
+        matrix_ssl_verify=True,
+        post_request=_fake_post,
+    )
+
+    assert result.namespace == ""
+    assert result.namespace_invalid is False
+
+
+def test_complete_local_pairing_uses_empty_namespace_when_malformed() -> None:
+    """Malformed namespace should be ignored instead of inventing a new install namespace."""
+
+    def _fake_post(_url: str, **_kwargs: object) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "client_id": "client-123",
+                "client_secret": "secret-123",
+                "namespace": "bad_namespace",
+                "owner_user_id": "@alice:mindroom.chat",
+            },
+        )
+
+    result = cli_connect.complete_local_pairing(
+        provisioning_url="https://provisioning.example",
+        pair_code="ABCD-EFGH",
+        client_name="devbox",
+        client_fingerprint="sha256:test",
+        matrix_ssl_verify=True,
+        post_request=_fake_post,
+    )
+
+    assert result.namespace == ""
+    assert result.namespace_invalid is True

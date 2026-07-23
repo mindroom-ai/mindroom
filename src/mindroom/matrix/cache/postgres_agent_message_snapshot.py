@@ -3,52 +3,22 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import psycopg
 
-from mindroom.matrix.event_info import EventInfo
-from mindroom.matrix.visible_body import visible_content_from_content
-
 from . import postgres_event_cache_events, postgres_event_cache_threads
 from .agent_message_snapshot import AgentMessageSnapshot, AgentMessageSnapshotUnavailable
-from .thread_cache_helpers import thread_cache_rejection_reason
+from .agent_message_snapshot_semantics import (
+    SnapshotLookupResult,
+    event_matches_snapshot_scope,
+    snapshot_event_id,
+    snapshot_lookup_result,
+    thread_cache_has_no_snapshot,
+)
 
 if TYPE_CHECKING:
     from psycopg import AsyncConnection, AsyncCursor
-
-
-@dataclass(frozen=True, slots=True)
-class _SnapshotLookupResult:
-    """Outcome for one matching scope event during latest-message lookup."""
-
-    snapshot: AgentMessageSnapshot | None
-    stop_scanning: bool = False
-
-
-_THREAD_CACHE_REJECTION_NONE_REASONS = frozenset({"no_cache_state", "cache_never_validated"})
-
-
-def _visible_content(event: dict[str, Any]) -> dict[str, Any]:
-    content = event.get("content")
-    if not isinstance(content, dict):
-        return {}
-    return visible_content_from_content(content)
-
-
-def _event_matches_scope(
-    event: dict[str, Any],
-    *,
-    thread_id: str | None,
-    sender: str,
-) -> bool:
-    if event.get("type") != "m.room.message" or event.get("sender") != sender:
-        return False
-    relation_type = EventInfo.from_event(event).relation_type
-    if relation_type == "m.replace":
-        return False
-    return not (thread_id is None and relation_type == "m.thread")
 
 
 async def _thread_scope_has_no_snapshot(
@@ -61,7 +31,7 @@ async def _thread_scope_has_no_snapshot(
     if thread_id is None:
         return False
 
-    rejection_reason = thread_cache_rejection_reason(
+    return thread_cache_has_no_snapshot(
         await postgres_event_cache_threads.load_thread_cache_state(
             db,
             namespace=namespace,
@@ -69,12 +39,6 @@ async def _thread_scope_has_no_snapshot(
             thread_id=thread_id,
         ),
     )
-    if rejection_reason in _THREAD_CACHE_REJECTION_NONE_REASONS:
-        return True
-    if rejection_reason is not None:
-        msg = f"Thread cache snapshot is not usable: {rejection_reason}"
-        raise AgentMessageSnapshotUnavailable(msg)
-    return False
 
 
 async def _snapshot_from_event(
@@ -83,38 +47,28 @@ async def _snapshot_from_event(
     namespace: str,
     room_id: str,
     thread_id: str | None,
+    sender: str,
     event: dict[str, Any],
     cached_at: float | None,
     runtime_started_at: float | None,
-) -> _SnapshotLookupResult:
-    event_id = event.get("event_id")
-    if not isinstance(event_id, str) or not event_id:
-        return _SnapshotLookupResult(snapshot=None)
+) -> SnapshotLookupResult:
+    event_id = snapshot_event_id(event)
+    if event_id is None:
+        return SnapshotLookupResult(snapshot=None)
 
     latest_edit = await postgres_event_cache_events.load_latest_edit_row(
         db,
         namespace=namespace,
         room_id=room_id,
         original_event_id=event_id,
+        sender=sender,
     )
-    latest_event = latest_edit.event if latest_edit is not None else event
-    visible_cached_at = latest_edit.cached_at if latest_edit is not None else cached_at
-    if (
-        thread_id is None
-        and runtime_started_at is not None
-        and (visible_cached_at is None or visible_cached_at < runtime_started_at)
-    ):
-        return _SnapshotLookupResult(snapshot=None, stop_scanning=True)
-
-    timestamp = latest_event.get("origin_server_ts")
-    if not isinstance(timestamp, int) or isinstance(timestamp, bool):
-        return _SnapshotLookupResult(snapshot=None)
-
-    return _SnapshotLookupResult(
-        snapshot=AgentMessageSnapshot(
-            content=_visible_content(latest_event),
-            origin_server_ts=timestamp,
-        ),
+    return snapshot_lookup_result(
+        event,
+        latest_edit=latest_edit,
+        thread_id=thread_id,
+        cached_at=cached_at,
+        runtime_started_at=runtime_started_at,
     )
 
 
@@ -125,24 +79,30 @@ async def _iter_scope_events(
     room_id: str,
     thread_id: str | None,
 ) -> AsyncCursor[tuple[str, float | None]]:
-    if thread_id is None:
+    if thread_id is not None:
         return await db.execute(
             """
-            SELECT event_json, cached_at
-            FROM mindroom_event_cache_events
-            WHERE namespace = %s AND room_id = %s
-            ORDER BY origin_server_ts DESC, write_seq DESC
+            SELECT events.event_json, events.cached_at
+            FROM mindroom_event_cache_thread_events AS thread_events
+            JOIN mindroom_event_cache_events AS events
+                ON events.namespace = thread_events.namespace
+                AND events.event_id = thread_events.event_id
+                AND events.room_id = thread_events.room_id
+            WHERE thread_events.namespace = %s
+                AND thread_events.room_id = %s
+                AND thread_events.thread_id = %s
+            ORDER BY thread_events.origin_server_ts DESC, thread_events.write_seq DESC
             """,
-            (namespace, room_id),
+            (namespace, room_id, thread_id),
         )
     return await db.execute(
         """
-        SELECT event_json, NULL AS cached_at
-        FROM mindroom_event_cache_thread_events
-        WHERE namespace = %s AND room_id = %s AND thread_id = %s
+        SELECT event_json, cached_at
+        FROM mindroom_event_cache_events
+        WHERE namespace = %s AND room_id = %s
         ORDER BY origin_server_ts DESC, write_seq DESC
         """,
-        (namespace, room_id, thread_id),
+        (namespace, room_id),
     )
 
 
@@ -167,7 +127,7 @@ async def _load_scope_snapshot(
             if row is None:
                 return None
             event = json.loads(row[0])
-            if not _event_matches_scope(
+            if not event_matches_snapshot_scope(
                 event,
                 thread_id=thread_id,
                 sender=sender,
@@ -178,6 +138,7 @@ async def _load_scope_snapshot(
                 namespace=namespace,
                 room_id=room_id,
                 thread_id=thread_id,
+                sender=sender,
                 event=event,
                 cached_at=None if row[1] is None else float(row[1]),
                 runtime_started_at=runtime_started_at,

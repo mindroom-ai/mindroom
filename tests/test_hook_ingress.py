@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+from typing import Any, cast
+
+import pytest
+
 from mindroom.dispatch_source import is_automation_source_kind
 from mindroom.hooks.context import MessageEnvelope
-from mindroom.hooks.ingress import hook_ingress_policy, should_handle_interactive_text_response
+from mindroom.hooks.ingress import hook_ingress_policy
 from mindroom.hooks.types import format_hook_source, split_hook_source
 from mindroom.message_target import MessageTarget
+from tests.conftest import message_origin
 
 
 def _envelope(
@@ -17,17 +22,14 @@ def _envelope(
 ) -> MessageEnvelope:
     return MessageEnvelope(
         source_event_id="$event",
-        room_id="!room:localhost",
         target=MessageTarget.resolve("!room:localhost", None, "$event"),
-        requester_id="@user:localhost",
-        sender_id="@user:localhost",
         body="hello",
         attachment_ids=(),
         mentioned_agents=(),
         agent_name="code",
-        source_kind=source_kind,
         hook_source=hook_source,
         message_received_depth=message_received_depth,
+        origin=message_origin(sender_id="@user:localhost", requester_id="@user:localhost", source_kind=source_kind),
     )
 
 
@@ -49,6 +51,52 @@ def test_hook_source_formatter_matches_ingress_parser() -> None:
     assert split_hook_source(source) == ("origin-plugin", "message:received")
 
 
+def test_message_envelope_requires_origin() -> None:
+    """Every envelope should carry canonical turn-origin policy."""
+    missing_origin_kwargs: dict[str, Any] = {
+        "source_event_id": "$event",
+        "target": MessageTarget.resolve("!room:localhost", None, "$event"),
+        "body": "hello",
+        "attachment_ids": (),
+        "mentioned_agents": (),
+        "agent_name": "code",
+    }
+    with pytest.raises(TypeError, match="origin"):
+        MessageEnvelope(**missing_origin_kwargs)
+    with pytest.raises(TypeError, match="origin"):
+        MessageEnvelope(
+            source_event_id="$event",
+            target=MessageTarget.resolve("!room:localhost", None, "$event"),
+            body="hello",
+            attachment_ids=(),
+            mentioned_agents=(),
+            agent_name="code",
+            origin=cast("Any", None),
+        )
+
+
+def test_message_envelope_identity_is_derived_from_target_and_origin() -> None:
+    """Envelope identity should expose its canonical target and origin values."""
+    envelope = MessageEnvelope(
+        source_event_id="$event",
+        target=MessageTarget.resolve("!room:localhost", None, "$event"),
+        body="hello",
+        attachment_ids=(),
+        mentioned_agents=(),
+        agent_name="code",
+        origin=message_origin(
+            sender_id="@transport:localhost",
+            requester_id="@requester:localhost",
+            source_kind="hook",
+        ),
+    )
+
+    assert envelope.room_id == "!room:localhost"
+    assert envelope.sender_id == "@transport:localhost"
+    assert envelope.requester_id == "@requester:localhost"
+    assert envelope.source_kind == "hook"
+
+
 def test_hook_ingress_policy_skips_origin_plugin_on_first_message_received_hop() -> None:
     """First-hop message:received relays should rerun ingress once and skip the origin plugin."""
     policy = hook_ingress_policy(
@@ -61,7 +109,6 @@ def test_hook_ingress_policy_skips_origin_plugin_on_first_message_received_hop()
 
     assert policy.rerun_message_received is True
     assert policy.allow_full_dispatch is True
-    assert policy.bypass_unmentioned_agent_gate is True
     assert policy.skip_message_received_plugin_names == frozenset({"origin-plugin"})
 
 
@@ -77,7 +124,6 @@ def test_hook_ingress_policy_blocks_deeper_synthetic_hops() -> None:
 
     assert policy.rerun_message_received is False
     assert policy.allow_full_dispatch is False
-    assert policy.bypass_unmentioned_agent_gate is True
     assert policy.skip_message_received_plugin_names == frozenset()
 
 
@@ -88,7 +134,7 @@ def test_automation_source_kinds_do_not_answer_interactive_prompts() -> None:
     assert is_automation_source_kind("scheduled")
     assert not is_automation_source_kind("message")
 
-    assert not should_handle_interactive_text_response(_envelope(source_kind="hook"))
-    assert not should_handle_interactive_text_response(_envelope(source_kind="hook_dispatch"))
-    assert not should_handle_interactive_text_response(_envelope(source_kind="scheduled"))
-    assert should_handle_interactive_text_response(_envelope(source_kind="message"))
+    assert not _envelope(source_kind="hook").origin.may_answer_interactive_prompt
+    assert not _envelope(source_kind="hook_dispatch").origin.may_answer_interactive_prompt
+    assert not _envelope(source_kind="scheduled").origin.may_answer_interactive_prompt
+    assert _envelope(source_kind="message").origin.may_answer_interactive_prompt

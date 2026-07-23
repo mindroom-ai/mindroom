@@ -95,12 +95,16 @@ class MCPServerState:
     catalog: MCPServerCatalog | None = None
     session: ClientSession | None = None
     exit_stack: AsyncExitStack | None = None
+    session_owner_task: asyncio.Task[None] | None = None
+    session_close_event: asyncio.Event | None = None
     semaphore: asyncio.Semaphore = field(init=False)
     connected: bool = False
     stale: bool = False
     last_error: MCPError | None = None
+    consecutive_failures: int = 0
     refresh_task: asyncio.Task[None] | None = None
     refresh_revision: int = 0
+    oauth_access_token_hash: str | None = None
 
     def __post_init__(self) -> None:
         """Initialize the per-server concurrency limiter."""

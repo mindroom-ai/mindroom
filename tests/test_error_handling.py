@@ -1,10 +1,16 @@
 """Tests for error handling module."""
 
 import httpx
+from agno.exceptions import ModelProviderError
 from anthropic import AuthenticationError as AnthropicAuthError
 from openai import AuthenticationError as OpenAIAuthError
 
-from mindroom.error_handling import _extract_provider_from_error, get_user_friendly_error_message
+from mindroom.error_handling import (
+    MODEL_SAFEGUARD_REFUSAL_MESSAGE,
+    ModelSafeguardRefusalError,
+    _extract_provider_from_error,
+    get_user_friendly_error_message,
+)
 
 _MOCK_RESPONSE = httpx.Response(status_code=401, request=httpx.Request("POST", "https://api.example.com"))
 
@@ -26,6 +32,21 @@ def test_api_key_error_with_provider() -> None:
     assert "Authentication failed" in message
 
 
+def test_provider_auth_error_redacts_secret_from_user_message() -> None:
+    """Provider exception text should be redacted before Matrix-visible user output."""
+    error = OpenAIAuthError(
+        message="Incorrect API key provided: sk-test-secret",
+        response=_MOCK_RESPONSE,
+        body=None,
+    )
+
+    message = get_user_friendly_error_message(error, "assistant")
+
+    assert "Authentication failed" in message
+    assert "***redacted***" in message
+    assert "sk-test-secret" not in message
+
+
 def test_401_error() -> None:
     """Test that 401 errors are recognized as auth failures."""
     error = Exception("Error code: 401 - Unauthorized")
@@ -42,11 +63,115 @@ def test_generic_api_word_not_false_positive() -> None:
     assert "Error:" in message
 
 
+def test_model_safeguard_refusal_gives_actionable_guidance() -> None:
+    """Explicit safeguard stops should not look like empty model responses."""
+    error = ModelSafeguardRefusalError(
+        message="Vertex Claude returned stop_reason=refusal",
+        model_name="Claude",
+        model_id="claude-fable-5",
+    )
+
+    message = get_user_friendly_error_message(error, "mind")
+
+    assert message == (
+        "[mind] ⚠️ This model's safeguards blocked the request. "
+        "Choose a different model (`!model list`) or revise the prompt, then try again."
+    )
+    assert "stop_reason" not in message
+
+
+def test_stringified_model_safeguard_refusal_gives_actionable_guidance() -> None:
+    """Agno run errors preserve provider failures as text rather than exception types."""
+    message = get_user_friendly_error_message(Exception(MODEL_SAFEGUARD_REFUSAL_MESSAGE), "mind")
+
+    assert message == (
+        "[mind] ⚠️ This model's safeguards blocked the request. "
+        "Choose a different model (`!model list`) or revise the prompt, then try again."
+    )
+    assert "stop_reason" not in message
+
+
 def test_rate_limit_error() -> None:
     """Test rate limit error message."""
     error = Exception("Rate limit exceeded")
     message = get_user_friendly_error_message(error)
     assert "Rate limited" in message
+
+
+def test_typed_rate_limit_error_uses_status_code() -> None:
+    """Typed 429 errors remain rate limits even when their message is generic."""
+    error = ModelProviderError(message="upstream unavailable", status_code=429)
+
+    message = get_user_friendly_error_message(error)
+
+    assert "Rate limited" in message
+    assert "temporarily unavailable" not in message
+
+
+def test_overloaded_provider_error_is_user_friendly() -> None:
+    """An exhausted provider overload must not dump its raw payload to Matrix."""
+    error = Exception(
+        "{'type': 'error', 'error': {'type': 'overloaded_error', 'message': 'Overloaded'}, 'request_id': 'req_secret'}",
+    )
+
+    message = get_user_friendly_error_message(error, "assistant")
+
+    assert message == (
+        "[assistant] ⚠️ Model provider temporarily unavailable after automatic retries. Please try again shortly."
+    )
+    assert "req_secret" not in message
+
+
+def test_internal_provider_error_is_user_friendly() -> None:
+    """A transient provider api_error gets the same bounded-retry message."""
+    error = Exception(
+        "{'type': 'error', 'error': {'type': 'api_error', 'message': 'Internal server error'}, "
+        "'request_id': 'req_secret'}",
+    )
+
+    message = get_user_friendly_error_message(error)
+
+    assert "Model provider temporarily unavailable after automatic retries" in message
+    assert "req_secret" not in message
+
+
+def test_json_provider_error_is_case_insensitive() -> None:
+    """Structured JSON provider payloads normalize error type and message casing."""
+    error = Exception(
+        '{"type":"error","error":{"type":"API_ERROR","message":"Internal Server Error"},"request_id":"req_secret"}',
+    )
+
+    message = get_user_friendly_error_message(error)
+
+    assert "Model provider temporarily unavailable after automatic retries" in message
+    assert "req_secret" not in message
+
+
+def test_typed_model_provider_error_is_user_friendly() -> None:
+    """Typed provider errors use their status instead of message substrings."""
+    error = ModelProviderError(message="upstream unavailable", status_code=503)
+
+    message = get_user_friendly_error_message(error)
+
+    assert "Model provider temporarily unavailable after automatic retries" in message
+
+
+def test_unstructured_overloaded_text_is_not_misclassified() -> None:
+    """Arbitrary application errors containing overloaded retain useful details."""
+    error = Exception("Local model overloaded while loading workspace state")
+
+    message = get_user_friendly_error_message(error)
+
+    assert message == "⚠️ Error: Local model overloaded while loading workspace state"
+
+
+def test_unstructured_api_error_text_is_not_misclassified() -> None:
+    """Provider-like words alone do not suppress an arbitrary application error."""
+    error = Exception("api_error: Internal Server Error while reading local cache")
+
+    message = get_user_friendly_error_message(error)
+
+    assert message == "⚠️ Error: api_error: Internal Server Error while reading local cache"
 
 
 def test_timeout_error() -> None:

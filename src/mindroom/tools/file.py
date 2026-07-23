@@ -9,14 +9,14 @@ from typing import Any, cast
 from agno.tools.file import FileTools as AgnoFileTools
 from agno.tools.file import log_debug, log_error
 
-from mindroom.tool_system.metadata import (
+from mindroom.tool_system.declarations import (
     ConfigField,
     SetupType,
     ToolCategory,
     ToolExecutionTarget,
     ToolStatus,
-    register_tool_with_metadata,
 )
+from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tools.path_safety import (
     blocked_file_action_message,
     format_path_for_output,
@@ -43,6 +43,7 @@ class _MindRoomFileTools(AgnoFileTools):
         max_file_length: int = 10000000,
         max_file_lines: int = 100000,
         line_separator: str = "\n",
+        exclude_patterns: list[str] | None = None,
         all: bool = False,  # noqa: A002
         restrict_to_base_dir: bool = True,
         **kwargs: object,
@@ -61,6 +62,7 @@ class _MindRoomFileTools(AgnoFileTools):
             max_file_length=max_file_length,
             max_file_lines=max_file_lines,
             line_separator=line_separator,
+            exclude_patterns=exclude_patterns,
             all=all,
             **cast("dict[str, Any]", kwargs),
         )
@@ -232,6 +234,7 @@ class _MindRoomFileTools(AgnoFileTools):
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,
     default_execution_target=ToolExecutionTarget.WORKER,
+    consumes_workspace_paths=True,
     icon="FaFolder",
     icon_color="text-yellow-500",
     config_fields=[
@@ -327,6 +330,17 @@ class _MindRoomFileTools(AgnoFileTools):
             type="text",
             required=False,
             default="\n",
+        ),
+        ConfigField(
+            name="exclude_patterns",
+            label="Search Content Exclude Patterns",
+            type="string[]",
+            required=False,
+            default=None,
+            description=(
+                "Fnmatch-style path component patterns excluded from content search. "
+                "Leave unset to use Agno defaults; set an empty list to disable exclusions."
+            ),
         ),
         ConfigField(
             name="all",

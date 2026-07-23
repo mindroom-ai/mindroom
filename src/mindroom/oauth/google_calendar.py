@@ -11,7 +11,10 @@ if TYPE_CHECKING:
 
 _GOOGLE_CALENDAR_OAUTH_SCOPES = (
     *google_oauth.GOOGLE_IDENTITY_SCOPES,
-    "https://www.googleapis.com/auth/calendar",
+    "https://www.googleapis.com/auth/calendar.events",
+    "https://www.googleapis.com/auth/calendar.calendarlist.readonly",
+    "https://www.googleapis.com/auth/calendar.freebusy",
+    "https://www.googleapis.com/auth/calendar.settings.readonly",
 )
 
 

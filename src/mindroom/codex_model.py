@@ -1,29 +1,27 @@
-"""OpenAI Codex subscription model support via the Codex CLI OAuth state."""
+"""OpenAI Codex model support via the Codex CLI ChatGPT OAuth state."""
 
 from __future__ import annotations
 
 import base64
-import fcntl
 import hashlib
 import json
 import os
 import time
-from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import httpx
-from agno.models.openai import OpenAIResponses
 from agno.models.response import ModelResponse
 from agno.utils.http import get_default_async_client, get_default_sync_client
 from openai import AsyncOpenAI, OpenAI
 
+from mindroom.file_locks import advisory_file_lock
+from mindroom.model_defaults import CODEX_GPT, CODEX_GPT_ENDPOINT
+from mindroom.openai_models import MindRoomOpenAIResponses
 from mindroom.prompts import CODEX_DEFAULT_INSTRUCTIONS
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
-
     from agno.models.message import Message
     from agno.run.agent import RunOutput
     from pydantic import BaseModel
@@ -35,6 +33,7 @@ _CODEX_REFRESH_URL = "https://auth.openai.com/oauth/token"
 _CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 _CODEX_REFRESH_SKEW_SECONDS = 30
 _CODEX_MODEL_PREFIX = "openai-codex/"
+_CODEX_MODEL_ALIASES = {CODEX_GPT: CODEX_GPT_ENDPOINT}
 _CODEX_UNSUPPORTED_REQUEST_PARAMS = {"max_output_tokens", "temperature"}
 _CODEX_PROMPT_CACHE_KEY_PREFIX = "mindroom"
 _CODEX_INSTALLATION_ID_HEADER = "x-codex-installation-id"
@@ -49,8 +48,8 @@ def normalize_codex_model_id(model_id: str) -> str:
     """Return the Codex endpoint model slug from either bare or LLM-plugin-style IDs."""
     normalized = model_id.strip()
     if normalized.startswith(_CODEX_MODEL_PREFIX):
-        return normalized.removeprefix(_CODEX_MODEL_PREFIX)
-    return normalized
+        normalized = normalized.removeprefix(_CODEX_MODEL_PREFIX)
+    return _CODEX_MODEL_ALIASES.get(normalized, normalized)
 
 
 def _borrow_codex_key(*, codex_home: str | Path | None = None) -> tuple[str, str | None]:
@@ -66,7 +65,7 @@ def _borrow_codex_key(*, codex_home: str | Path | None = None) -> tuple[str, str
     if usable_token is not None:
         return usable_token
 
-    with _codex_auth_refresh_lock(auth_path):
+    with advisory_file_lock(auth_path.with_name(f"{auth_path.name}.lock")):
         auth = _read_codex_auth(auth_path)
         tokens = auth.get("tokens")
         if not isinstance(tokens, dict) or not tokens.get("access_token"):
@@ -105,7 +104,8 @@ def _codex_auth_path(*, codex_home: str | Path | None) -> Path:
 
 
 def _codex_home_path(*, codex_home: str | Path | None) -> Path:
-    return Path(codex_home) if codex_home is not None else Path(os.environ.get("CODEX_HOME", "~/.codex")).expanduser()
+    configured_home = codex_home if codex_home is not None else os.environ.get("CODEX_HOME", "~/.codex")
+    return Path(configured_home).expanduser()
 
 
 def _read_codex_auth(auth_path: Path) -> dict[str, Any]:
@@ -115,17 +115,6 @@ def _read_codex_auth(auth_path: Path) -> dict[str, Any]:
         msg = "Codex auth.json must use ChatGPT OAuth auth_mode. Run `codex login` first."
         raise _CodexAuthError(msg)
     return auth
-
-
-@contextmanager
-def _codex_auth_refresh_lock(auth_path: Path) -> Iterator[None]:
-    lock_path = auth_path.with_name(f"{auth_path.name}.lock")
-    with lock_path.open("a+", encoding="utf-8") as lock_file:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
 def _usable_access_token(tokens: dict[str, Any]) -> tuple[str, str | None] | None:
@@ -264,10 +253,10 @@ def _merge_codex_extra_body(request_params: dict[str, Any], codex_extra_body: di
 
 
 @dataclass
-class CodexResponses(OpenAIResponses):
+class CodexResponses(MindRoomOpenAIResponses):
     """Agno Responses model backed by the local Codex CLI ChatGPT OAuth credentials."""
 
-    id: str = "gpt-5.5"
+    id: str = CODEX_GPT
     name: str = "CodexResponses"
     provider: str = "OpenAI Codex"
     base_url: str = _CODEX_BASE_URL

@@ -11,16 +11,31 @@ import json
 import os
 import re
 import shutil
+import time
 from dataclasses import dataclass, field
+from itertools import count
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
 
+from agno.media import Image
 from agno.tools import Toolkit
+from agno.tools.function import ToolResult
 from playwright.async_api import BrowserContext, ConsoleMessage, Dialog, Page, Playwright, async_playwright
 from playwright.async_api import Error as PlaywrightError
 
+from mindroom.browser_fetch_guard import continue_or_abort_browser_fetch
+from mindroom.custom_tools.desktop_attachment import (
+    register_runtime_screenshot_attachment,
+    screenshot_attachment_result_fields,
+)
+from mindroom.desktop.client import desktop_response_router
+from mindroom.desktop.media import download_encrypted_screenshot
+from mindroom.desktop.playwright_mcp import browser_action_requires_control
+from mindroom.desktop.protocol import MAX_COMMAND_TTL_MS, DesktopCommand
 from mindroom.logging_config import get_logger
+from mindroom.matrix.olm_to_device import PinnedMatrixDevice
+from mindroom.server_fetch_url import validate_server_fetch_url
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
 if TYPE_CHECKING:
@@ -79,14 +94,26 @@ _BROWSER_ACTION_TABLE = (
     {"action": "profiles", "description": "List known browser profiles."},
     {"action": "tabs", "description": "List tabs for the selected browser profile."},
     {"action": "open", "description": "Open targetUrl in a new tab."},
-    {"action": "focus", "description": "Focus targetId."},
-    {"action": "close", "description": "Close targetId or the active tab."},
+    {"action": "focus", "description": "Host target only: focus targetId; desktop does not support focus."},
+    {
+        "action": "close",
+        "description": "Close targetId or the active host tab; desktop closes its current extension tab.",
+    },
     {"action": "snapshot", "description": "Capture a model-friendly page snapshot and element refs."},
-    {"action": "screenshot", "description": "Save a screenshot to the browser output directory."},
-    {"action": "navigate", "description": "Navigate targetId or the active tab to targetUrl."},
+    {
+        "action": "screenshot",
+        "description": "Capture a screenshot; host retains it while desktop removes its transient scratch file.",
+    },
+    {
+        "action": "navigate",
+        "description": "Navigate targetId or the active host tab, or the current desktop extension tab, to targetUrl.",
+    },
     {"action": "console", "description": "Read collected console entries."},
     {"action": "pdf", "description": "Save the current page as a PDF."},
-    {"action": "upload", "description": "Upload local paths through an input selector or ref."},
+    {
+        "action": "upload",
+        "description": "Upload paths through a host selector or ref, or through the active desktop file chooser.",
+    },
     {"action": "dialog", "description": "Arm how the next browser dialog should be handled."},
     {"action": "act", "description": "Run a browser interaction described by request.kind."},
     {"action": "help", "description": "Return this browser action and request-kind table."},
@@ -321,6 +348,104 @@ def _unknown_browser_action_message(action: str) -> str:
     )
 
 
+def _desktop_browser_parameters(  # noqa: C901, PLR0911, PLR0912, PLR0915
+    action: str,
+    *,
+    target_url: str | None,
+    target_id: str | None,
+    max_chars: int | None,
+    selector: str | None,
+    depth: int | None,
+    full_page: bool | None,
+    ref: str | None,
+    element: str | None,
+    image_type: str | None,
+    level: str | None,
+    paths: list[str] | None,
+    accept: bool | None,
+    prompt_text: str | None,
+    request: dict[str, Any] | None,
+    allow_private_networks: bool,
+) -> dict[str, object]:
+    if target_id is not None:
+        msg = (
+            "Browser target=desktop does not support targetId because Playwright MCP tab indices can change; "
+            "operate the current tab or open a new one."
+        )
+        raise ValueError(msg)
+    if action in {"status", "start", "stop", "profiles", "tabs"}:
+        return {}
+    if action in {"open", "navigate"}:
+        normalized_url = _clean_str(target_url)
+        if normalized_url is None:
+            msg = f"targetUrl required for action={action}"
+            raise ValueError(msg)
+        normalized_url = validate_server_fetch_url(normalized_url, allow_private_networks=allow_private_networks)
+        parameters: dict[str, object] = {"targetUrl": normalized_url}
+        return parameters
+    if action == "focus":
+        msg = "Browser target=desktop does not support focus because Playwright MCP exposes only mutable tab indices."
+        raise ValueError(msg)
+    if action == "close":
+        return {}
+    if action == "snapshot":
+        parameters: dict[str, object] = {}
+        normalized_selector = _clean_str(selector)
+        if normalized_selector is not None:
+            parameters["selector"] = normalized_selector
+        if isinstance(depth, int) and not isinstance(depth, bool) and depth > 0:
+            parameters["depth"] = depth
+        if isinstance(max_chars, int) and not isinstance(max_chars, bool) and max_chars > 0:
+            parameters["maxChars"] = max_chars
+        return parameters
+    if action == "screenshot":
+        parameters: dict[str, object] = {"fullPage": bool(full_page)}
+        for key, value in (
+            ("ref", _clean_str(ref)),
+            ("element", _clean_str(element)),
+            ("type", _clean_str(image_type)),
+        ):
+            if value is not None:
+                parameters[key] = value
+        return parameters
+    if action == "console":
+        parameters: dict[str, object] = {}
+        normalized_level = _clean_str(level)
+        if normalized_level is not None:
+            parameters["level"] = normalized_level
+        return parameters
+    if action == "pdf":
+        return {}
+    if action == "upload":
+        if not paths:
+            msg = "paths required for action=upload"
+            raise ValueError(msg)
+        if ref is not None or element is not None:
+            msg = "Browser target=desktop upload does not support ref or element; use the active file chooser."
+            raise ValueError(msg)
+        parameters: dict[str, object] = {"paths": paths}
+        return parameters
+    if action == "dialog":
+        parameters: dict[str, object] = {"accept": bool(accept)}
+        normalized_prompt = _clean_str(prompt_text)
+        if normalized_prompt is not None:
+            parameters["promptText"] = normalized_prompt
+        return parameters
+    if action == "act":
+        if not isinstance(request, dict):
+            msg = "request required for action=act"
+            raise ValueError(msg)
+        if request.get("targetId") is not None:
+            msg = (
+                "Browser target=desktop does not support request.targetId because Playwright MCP tab indices can "
+                "change; operate the current tab or open a new one."
+            )
+            raise ValueError(msg)
+        return {"request": request}
+    msg = f"Unsupported desktop browser action: {action}"
+    raise ValueError(msg)
+
+
 def _playwright_cache_root(expected_executable_path: Path | None) -> Path | None:
     """Return the Playwright browser cache root for an executable path."""
     if expected_executable_path is None:
@@ -394,14 +519,41 @@ class _BrowserFunctionNotRegisteredError(RuntimeError):
 class BrowserTools(Toolkit):
     """Browser control for MindRoom agents."""
 
-    def __init__(self, runtime_paths: RuntimePaths, *, output_dir: Path | str | None = None) -> None:
+    def __init__(
+        self,
+        runtime_paths: RuntimePaths,
+        *,
+        output_dir: Path | str | None = None,
+        allow_private_networks: bool = False,
+        default_target: Literal["host", "desktop"] = "host",
+        device_user_id: str | None = None,
+        device_id: str | None = None,
+        device_ed25519: str | None = None,
+        timeout_seconds: float = 90.0,
+    ) -> None:
         super().__init__(name="browser", tools=[self.browser])
         self._runtime_paths = runtime_paths
+        self._allow_private_networks = allow_private_networks
+        self._default_target = self._validated_default_target(default_target)
+        self._desktop_target = self._configured_desktop_target(
+            device_user_id=device_user_id,
+            device_id=device_id,
+            device_ed25519=device_ed25519,
+        )
+        if self._default_target == "desktop" and self._desktop_target is None:
+            msg = "Browser default_target=desktop requires device_user_id, device_id, and device_ed25519."
+            raise ValueError(msg)
+        if isinstance(timeout_seconds, bool) or not 1 <= timeout_seconds <= MAX_COMMAND_TTL_MS / 1000:
+            msg = f"timeout_seconds must be between 1 and {MAX_COMMAND_TTL_MS // 1000}."
+            raise ValueError(msg)
+        self._timeout_seconds = float(timeout_seconds)
+        self._command_session_id = uuid4().hex
+        self._command_sequences = count()
         self._profiles: dict[str, _BrowserProfileState] = {}
         self._lock = asyncio.Lock()
-        self._output_dir = Path(output_dir).expanduser().resolve() if output_dir is not None else None
-        if self._output_dir is not None:
-            self._output_dir.mkdir(parents=True, exist_ok=True)
+        self._configured_output_dir = Path(output_dir).expanduser().resolve() if output_dir is not None else None
+        if self._configured_output_dir is not None:
+            self._configured_output_dir.mkdir(parents=True, exist_ok=True)
         self._close_task: asyncio.Task[None] | None = None
         self._describe_browser_schema()
 
@@ -426,6 +578,28 @@ class BrowserTools(Toolkit):
         request_schema["description"] = _ACT_REQUEST_DESCRIPTION
         properties["request"] = request_schema
 
+        target_schema = dict(properties.get("target") or {})
+        target_schema["description"] = (
+            "Execution target. Use host for MindRoom's own browser profile or desktop for the pinned local "
+            "Playwright extension in the user's existing profile."
+        )
+        target_schema["enum"] = ["host", "desktop"]
+        properties["target"] = target_schema
+
+        target_id_schema = dict(properties.get("targetId") or {})
+        target_id_schema["description"] = (
+            "Opaque host-browser tab ID. The desktop target operates only the current tab and rejects targetId because "
+            "Playwright MCP exposes mutable numeric indices."
+        )
+        properties["targetId"] = target_id_schema
+
+        attachment_schema = dict(properties.get("returnAttachment") or {})
+        attachment_schema["description"] = (
+            "For action=screenshot with target=desktop, return a turn-scoped att_* handle so matrix_message can "
+            "send the captured image without saving plaintext to disk."
+        )
+        properties["returnAttachment"] = attachment_schema
+
         parameters["properties"] = properties
         function.parameters = parameters
 
@@ -443,7 +617,7 @@ class BrowserTools(Toolkit):
             return
         self._close_task = loop.create_task(self._close_profiles())
 
-    async def browser(  # noqa: C901, PLR0911, PLR0912
+    async def browser(  # noqa: C901, PLR0911, PLR0912, PLR0915
         self,
         action: str,
         target: str | None = None,
@@ -466,6 +640,7 @@ class BrowserTools(Toolkit):
         ref: str | None = None,
         element: str | None = None,
         type: str | None = None,
+        returnAttachment: bool = False,
         level: str | None = None,
         paths: list[str] | None = None,
         inputRef: str | None = None,
@@ -473,35 +648,36 @@ class BrowserTools(Toolkit):
         accept: bool | None = None,
         promptText: str | None = None,
         request: dict[str, Any] | None = None,
-    ) -> str:
+    ) -> str | ToolResult:
         """Control browser state and actions.
 
         Args:
             action: Browser action (status/start/stop/profiles/tabs/open/focus/close/snapshot/screenshot/navigate/console/pdf/upload/dialog/act/help/actions)
-            target: Browser target location. Only ``host`` is currently supported.
+            target: Browser target location: ``host`` or the configured ``desktop`` Matrix device.
             node: Node id compatibility field; unsupported in MindRoom runtime.
-            profile: Browser profile name (defaults to ``mindroom``).
+            profile: Host-target browser profile name (defaults to ``mindroom``).
             targetUrl: URL for ``open`` and ``navigate`` actions.
-            targetId: Tab target id for actions that address a specific tab.
-            limit: Snapshot item limit.
+            targetId: Opaque host-browser tab id. Unsupported for the desktop target, which operates the current tab.
+            limit: Host-target snapshot item limit.
             maxChars: Snapshot text limit.
-            mode: Snapshot mode (supports ``efficient``).
-            snapshotFormat: ``ai`` or ``aria``.
-            refs: Snapshot refs mode (accepted for compatibility).
-            interactive: Snapshot interactive filtering.
-            compact: Snapshot compact mode hint.
+            mode: Host-target snapshot mode (supports ``efficient``).
+            snapshotFormat: Host-target snapshot format (``ai`` or ``aria``).
+            refs: Host-target snapshot refs mode (accepted for compatibility).
+            interactive: Host-target snapshot interactive filtering.
+            compact: Host-target snapshot compact mode hint.
             depth: Snapshot traversal depth.
             selector: Root selector for snapshot.
-            frame: Frame selector (accepted for compatibility; ignored for now).
-            labels: Snapshot label hint (accepted for compatibility; ignored for now).
+            frame: Host-target frame selector (accepted for compatibility; ignored for now).
+            labels: Host-target snapshot label hint (accepted for compatibility; ignored for now).
             fullPage: Full-page capture for screenshots.
             ref: Snapshot ref id or CSS selector.
             element: CSS selector for element-specific actions.
             type: Screenshot type (``png`` or ``jpeg``).
+            returnAttachment: For desktop screenshots, expose an ephemeral handle that matrix_message can send.
             level: Console log level filter.
             paths: Upload file paths.
-            inputRef: Upload input selector or ref.
-            timeoutMs: Timeout for wait/upload/dialog actions.
+            inputRef: Host-target upload input selector or ref.
+            timeoutMs: Host-target timeout for upload/dialog actions.
             accept: Whether to accept dialog.
             promptText: Prompt text for dialog accept.
             request: Act request object.
@@ -516,8 +692,55 @@ class BrowserTools(Toolkit):
             raise ValueError(msg)
         if normalized_action in {"actions", "help"}:
             return json.dumps(_browser_help_payload(normalized_action), sort_keys=True)
+        if not isinstance(returnAttachment, bool):
+            msg = "returnAttachment must be a boolean."
+            raise TypeError(msg)
+        if returnAttachment and normalized_action != "screenshot":
+            msg = "returnAttachment is only supported for action=screenshot."
+            raise ValueError(msg)
 
-        self._validate_target(target=target, node=node)
+        resolved_target = self._resolve_target(target=target, node=node)
+        if returnAttachment and resolved_target != "desktop":
+            msg = "returnAttachment requires target=desktop."
+            raise ValueError(msg)
+        if resolved_target == "desktop":
+            unsupported = {
+                "compact": compact,
+                "frame": frame,
+                "inputRef": inputRef,
+                "interactive": interactive,
+                "labels": labels,
+                "limit": limit,
+                "mode": mode,
+                "profile": profile,
+                "refs": refs,
+                "snapshotFormat": snapshotFormat,
+                "timeoutMs": timeoutMs,
+            }
+            provided_unsupported = sorted(
+                name for name, value in unsupported.items() if value is not None and value is not False
+            )
+            if provided_unsupported:
+                msg = f"Browser target=desktop does not support: {', '.join(provided_unsupported)}."
+                raise ValueError(msg)
+            return await self._desktop_browser(
+                action=normalized_action,
+                target_url=targetUrl,
+                target_id=targetId,
+                max_chars=maxChars,
+                selector=selector,
+                depth=depth,
+                full_page=fullPage,
+                ref=ref,
+                element=element,
+                image_type=type,
+                return_attachment=returnAttachment,
+                level=level,
+                paths=paths,
+                accept=accept,
+                prompt_text=promptText,
+                request=request,
+            )
         profile_name = _clean_str(profile) or _DEFAULT_PROFILE
 
         if normalized_action == "status":
@@ -540,6 +763,7 @@ class BrowserTools(Toolkit):
             if target_url is None:
                 msg = "targetUrl required for action=open"
                 raise ValueError(msg)
+            target_url = validate_server_fetch_url(target_url, allow_private_networks=self._allow_private_networks)
             return json.dumps(await self._open_tab(profile_name, target_url), sort_keys=True)
         if normalized_action == "focus":
             target_id = _clean_str(targetId)
@@ -585,6 +809,7 @@ class BrowserTools(Toolkit):
             if target_url is None:
                 msg = "targetUrl required for action=navigate"
                 raise ValueError(msg)
+            target_url = validate_server_fetch_url(target_url, allow_private_networks=self._allow_private_networks)
             return json.dumps(
                 await self._navigate(profile_name, target_url, _clean_str(targetId)),
                 sort_keys=True,
@@ -650,11 +875,126 @@ class BrowserTools(Toolkit):
             msg = "node parameter is not supported in MindRoom."
             raise ValueError(msg)
         if normalized_target in {"sandbox", "node"} or node is not None:
-            msg = "MindRoom browser tool currently supports host target only."
+            msg = "MindRoom browser tool does not support sandbox or node targets."
             raise ValueError(msg)
-        if normalized_target not in {None, "host"}:
+        if normalized_target not in {None, "host", "desktop"}:
             msg = f"Unsupported target: {target}"
             raise ValueError(msg)
+
+    def _resolve_target(self, *, target: str | None, node: str | None) -> str:
+        self._validate_target(target=target, node=node)
+        return _clean_str(target) or self._default_target
+
+    @staticmethod
+    def _validated_default_target(default_target: str) -> str:
+        normalized = default_target.strip().lower()
+        if normalized not in {"host", "desktop"}:
+            msg = "Browser default_target must be host or desktop."
+            raise ValueError(msg)
+        return normalized
+
+    @staticmethod
+    def _configured_desktop_target(
+        *,
+        device_user_id: str | None,
+        device_id: str | None,
+        device_ed25519: str | None,
+    ) -> PinnedMatrixDevice | None:
+        values = (device_user_id, device_id, device_ed25519)
+        if all(value is None for value in values):
+            return None
+        if any(value is None or not value.strip() for value in values):
+            msg = "Browser desktop target requires device_user_id, device_id, and device_ed25519 together."
+            raise ValueError(msg)
+        assert device_user_id is not None
+        assert device_id is not None
+        assert device_ed25519 is not None
+        return PinnedMatrixDevice(user_id=device_user_id, device_id=device_id, ed25519=device_ed25519)
+
+    async def _desktop_browser(
+        self,
+        *,
+        action: str,
+        target_url: str | None,
+        target_id: str | None,
+        max_chars: int | None,
+        selector: str | None,
+        depth: int | None,
+        full_page: bool | None,
+        ref: str | None,
+        element: str | None,
+        image_type: str | None,
+        return_attachment: bool,
+        level: str | None,
+        paths: list[str] | None,
+        accept: bool | None,
+        prompt_text: str | None,
+        request: dict[str, Any] | None,
+    ) -> str | ToolResult:
+        target = self._desktop_target
+        if target is None:
+            msg = "Browser target=desktop requires configured Matrix desktop device identity."
+            raise ValueError(msg)
+        context = get_tool_runtime_context()
+        if context is None:
+            msg = "Browser target=desktop requires a live Matrix runtime context."
+            raise ValueError(msg)
+        parameters = _desktop_browser_parameters(
+            action,
+            target_url=target_url,
+            target_id=target_id,
+            max_chars=max_chars,
+            selector=selector,
+            depth=depth,
+            full_page=full_page,
+            ref=ref,
+            element=element,
+            image_type=image_type,
+            level=level,
+            paths=paths,
+            accept=accept,
+            prompt_text=prompt_text,
+            request=request,
+            allow_private_networks=self._allow_private_networks,
+        )
+        now_ms = round(time.time() * 1000)
+        command = DesktopCommand(
+            request_id=uuid4().hex,
+            session_id=self._command_session_id,
+            sequence=next(self._command_sequences),
+            issued_at_ms=now_ms,
+            expires_at_ms=now_ms + round(self._timeout_seconds * 1000),
+            action="browser_control" if browser_action_requires_control(action) else "browser_observe",
+            requester_id=context.requester_id,
+            agent_name=context.agent_name,
+            parameters={"browser_action": action, "browser_parameters": parameters},
+        )
+        response = await desktop_response_router(context.client).request(
+            target,
+            command,
+            timeout_seconds=self._timeout_seconds,
+        )
+        if not response.ok:
+            raise ValueError(response.error or "Desktop Playwright browser request failed.")
+        result_payload = dict(response.result)
+        if response.screenshot is None:
+            return json.dumps(result_payload, sort_keys=True, ensure_ascii=False)
+        image_bytes = await download_encrypted_screenshot(
+            context.client,
+            response.screenshot,
+            timeout_seconds=self._timeout_seconds,
+        )
+        if return_attachment:
+            attachment = register_runtime_screenshot_attachment(
+                context,
+                response.screenshot,
+                filename_prefix="browser-screenshot",
+            )
+            result_payload.update(screenshot_attachment_result_fields(attachment))
+        return ToolResult(
+            content=json.dumps(result_payload, sort_keys=True, ensure_ascii=False),
+            images=[Image(content=image_bytes, mime_type=response.screenshot.mime_type)],
+        )
 
     async def _status_payload(self, profile_name: str) -> dict[str, Any]:
         async with self._lock:
@@ -822,7 +1162,7 @@ class BrowserTools(Toolkit):
         if selector is None:
             msg = "upload requires inputRef, ref, or element"
             raise ValueError(msg)
-        normalized_paths = [str(Path(path).expanduser()) for path in paths]
+        normalized_paths = [str(self._resolve_upload_path(path)) for path in paths]
         locator = tab.page.locator(selector).first
         await locator.set_input_files(normalized_paths, timeout=timeout_ms or _DEFAULT_TIMEOUT_MS)
         return {
@@ -1181,6 +1521,13 @@ class BrowserTools(Toolkit):
             except Exception:
                 await playwright.stop()
                 raise
+            await context.route(
+                "**/*",
+                lambda route: continue_or_abort_browser_fetch(
+                    route,
+                    allow_private_networks=self._allow_private_networks,
+                ),
+            )
             state = _BrowserProfileState(playwright=playwright, context=context)
             self._profiles[profile_name] = state
 
@@ -1264,16 +1611,44 @@ class BrowserTools(Toolkit):
 
     def _resolve_output_dir(self) -> Path:
         """Return the directory used for browser artifacts."""
-        if self._output_dir is not None:
-            return self._output_dir
+        if self._configured_output_dir is not None:
+            return self._configured_output_dir
 
         context = get_tool_runtime_context()
-        storage_root = context.storage_path if context is not None and context.storage_path is not None else None
-        if storage_root is None:
-            storage_root = self._runtime_paths.storage_root
-        self._output_dir = (storage_root / "browser").resolve()
-        self._output_dir.mkdir(parents=True, exist_ok=True)
-        return self._output_dir
+        storage_root = (
+            context.storage_path
+            if context is not None and context.storage_path is not None
+            else self._runtime_paths.storage_root
+        )
+        output_dir = (storage_root / "browser").resolve()
+        output_dir.mkdir(parents=True, exist_ok=True)
+        return output_dir
+
+    def _browser_upload_roots(self) -> tuple[Path, ...]:
+        """Return roots whose files can be read by browser upload."""
+        context = get_tool_runtime_context()
+        if self._configured_output_dir is not None:
+            roots = [self._configured_output_dir.resolve()]
+        elif context is not None and context.storage_path is not None:
+            roots = [(context.storage_path / "browser").resolve()]
+        else:
+            roots = [(self._runtime_paths.storage_root / "browser").resolve()]
+        if context is not None and context.storage_path is not None:
+            roots.append(context.storage_path.resolve())
+        return tuple(roots)
+
+    def _resolve_upload_path(self, path: str) -> Path:
+        """Resolve and confine one browser upload path."""
+        resolved = Path(path).expanduser().resolve()
+        if not resolved.is_file():
+            msg = f"upload path must be an existing file: {path}"
+            raise ValueError(msg)
+        roots = self._browser_upload_roots()
+        if any(resolved.is_relative_to(root) for root in roots):
+            return resolved
+        root_list = ", ".join(str(root) for root in roots)
+        msg = f"upload path '{path}' resolves to '{resolved}', outside browser upload root(s): {root_list}"
+        raise ValueError(msg)
 
     @staticmethod
     def _remove_tab(state: _BrowserProfileState, target_id: str) -> None:

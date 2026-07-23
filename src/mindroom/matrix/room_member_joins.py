@@ -16,7 +16,7 @@ from mindroom.entity_resolution import entity_identity_registry, mindroom_user_i
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Iterator, Mapping
     from pathlib import Path
 
     from mindroom.config.main import Config
@@ -120,6 +120,42 @@ def _mark_room_member_join_seen(storage_root: Path, *, room_id: str, user_id: st
         return _save_room_member_joins(path, seen)
 
 
+def _human_join_user_id(
+    event: nio.RoomMemberEvent,
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> str | None:
+    """Return the joined human user ID for one membership event, or None."""
+    if event.membership != "join":
+        return None
+
+    user_id = event.state_key
+    if (
+        entity_identity_registry(config, runtime_paths).is_managed_user_id(user_id)
+        or user_id in config.bot_accounts
+        or user_id == mindroom_user_id(config, runtime_paths)
+    ):
+        return None
+    return user_id
+
+
+def _record_room_member_join_seen_from_event(
+    room: nio.MatrixRoom,
+    event: nio.RoomMemberEvent,
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    storage_root: Path,
+) -> bool:
+    """Record one human room-member join event without emitting hook payload data."""
+    user_id = _human_join_user_id(event, config=config, runtime_paths=runtime_paths)
+    if user_id is None:
+        return False
+
+    return _mark_room_member_join_seen(storage_root, room_id=room.room_id, user_id=user_id)
+
+
 def room_member_join_from_event(
     room: nio.MatrixRoom,
     event: nio.RoomMemberEvent,
@@ -135,12 +171,8 @@ def room_member_join_from_event(
     if require_previous_membership and event.prev_membership is None:
         return None
 
-    user_id = event.state_key
-    if (
-        entity_identity_registry(config, runtime_paths).is_managed_user_id(user_id)
-        or user_id in config.bot_accounts
-        or user_id == mindroom_user_id(config, runtime_paths)
-    ):
+    user_id = _human_join_user_id(event, config=config, runtime_paths=runtime_paths)
+    if user_id is None:
         return None
 
     if not _mark_room_member_join_seen(storage_root, room_id=room.room_id, user_id=user_id):
@@ -158,6 +190,21 @@ def room_member_join_from_event(
     )
 
 
+def _room_member_events_from_sync_state(
+    response: nio.SyncResponse,
+    *,
+    rooms: Mapping[str, nio.MatrixRoom],
+) -> Iterator[tuple[nio.MatrixRoom, nio.RoomMemberEvent]]:
+    """Yield room-member events from sync state with their resolved room."""
+    for room_id, join_info in response.rooms.join.items():
+        room = rooms.get(room_id)
+        if room is None:
+            continue
+        for event in join_info.state:
+            if isinstance(event, nio.RoomMemberEvent):
+                yield room, event
+
+
 def room_member_joins_from_sync_state(
     response: nio.SyncResponse,
     *,
@@ -165,26 +212,39 @@ def room_member_joins_from_sync_state(
     config: Config,
     runtime_paths: RuntimePaths,
     storage_root: Path,
+    record_only: bool = False,
 ) -> tuple[RoomMemberJoin, ...]:
     """Return hook payloads for human joins delivered through sync room state."""
     joins: list[RoomMemberJoin] = []
-    for room_id, join_info in response.rooms.join.items():
-        room = rooms.get(room_id)
-        if room is None:
-            continue
-        for event in join_info.state:
-            if not isinstance(event, nio.RoomMemberEvent):
-                continue
-            join = room_member_join_from_event(
+    for room, event in _room_member_events_from_sync_state(response, rooms=rooms):
+        if record_only:
+            _record_room_member_join_seen_from_event(
                 room,
                 event,
                 config=config,
                 runtime_paths=runtime_paths,
                 storage_root=storage_root,
-                require_previous_membership=True,
             )
-            if join is not None:
-                joins.append(join)
+            continue
+
+        join = room_member_join_from_event(
+            room,
+            event,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_root=storage_root,
+            require_previous_membership=True,
+        )
+        if join is not None:
+            joins.append(join)
+        elif event.prev_membership in {None, "join"}:
+            _record_room_member_join_seen_from_event(
+                room,
+                event,
+                config=config,
+                runtime_paths=runtime_paths,
+                storage_root=storage_root,
+            )
     return tuple(joins)
 
 
@@ -211,6 +271,8 @@ def room_member_joins_from_sync_timeline(
                 config=config,
                 runtime_paths=runtime_paths,
                 storage_root=storage_root,
+                # Timeline events are a live event stream, not a full-state snapshot.
+                require_previous_membership=False,
             )
             if join is not None:
                 joins.append(join)

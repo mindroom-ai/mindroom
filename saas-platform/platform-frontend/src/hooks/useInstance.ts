@@ -3,25 +3,11 @@
 import { useEffect, useState } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import { useAuth } from './useAuth'
-import { listInstances, restartInstance as apiRestartInstance } from '@/lib/api'
+import { listInstances, restartInstance as apiRestartInstance, type Instance } from '@/lib/api'
 import { instanceCache } from '@/lib/cache'
 import { logger } from '@/lib/logger'
 
-export interface Instance {
-  id: string // UUID
-  instance_id: number | string
-  subscription_id: string
-  subdomain: string
-  status: 'provisioning' | 'running' | 'failed' | 'stopped' | 'error' | 'deprovisioned' | 'restarting'
-  frontend_url: string | null
-  backend_url: string | null
-  created_at: string
-  updated_at: string
-  tier?: string
-  matrix_server_url?: string | null
-  kubernetes_synced_at?: string | null
-  status_hint?: string | null
-}
+export type { Instance }
 
 // Development-only mock instance
 const DEV_INSTANCE: Instance | null =
@@ -36,7 +22,7 @@ const DEV_INSTANCE: Instance | null =
         frontend_url: 'https://dev.mindroom.local',
         backend_url: 'https://api.dev.mindroom.local',
         matrix_server_url: 'https://matrix.dev.mindroom.local',
-        tier: 'starter',
+        tier: 'byok',
         created_at: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString(), // 7 days ago
         updated_at: new Date(Date.now() - 60 * 60 * 1000).toISOString(), // 1 hour ago
       }

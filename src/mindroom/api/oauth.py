@@ -13,21 +13,20 @@ from pydantic import BaseModel, Field
 
 from mindroom.api import config_lifecycle
 from mindroom.api.auth import login_redirect_for_request, verify_user
-from mindroom.api.credentials import (
-    build_dashboard_execution_identity,
-    consume_pending_oauth_request,
-    issue_pending_oauth_state,
-    resolve_request_credentials_target,
-    worker_target_for_credentials_target,
-)
+from mindroom.api.credentials_oauth_flows import consume_pending_oauth_request, issue_pending_oauth_state
+from mindroom.api.credentials_target import resolve_request_credentials_target, worker_target_for_credentials_target
+from mindroom.api.dashboard_credential_scope import build_dashboard_execution_identity
 from mindroom.credentials import delete_scoped_credentials, load_scoped_credentials, save_scoped_credentials
 from mindroom.logging_config import get_logger
+from mindroom.mcp.oauth import disconnect_mcp_oauth_request_session
 from mindroom.oauth import (
     OAuthClaimValidationError,
+    OAuthClientConfigResolution,
     OAuthProvider,
     OAuthProviderError,
-    load_oauth_providers_for_snapshot,
+    is_oauth_loopback_hostname,
 )
+from mindroom.oauth.registry import load_oauth_providers_for_snapshot
 from mindroom.oauth.service import (
     OAuthConnectTarget,
     consume_oauth_connect_token,
@@ -36,11 +35,12 @@ from mindroom.oauth.service import (
     oauth_credentials_usable,
     oauth_provider_service_account_configured,
     oauth_success_redirect_url,
+    refresh_scoped_oauth_credentials,
     sanitized_oauth_token_result,
 )
 
 if TYPE_CHECKING:
-    from mindroom.api.credentials import RequestCredentialsTarget
+    from mindroom.api.credentials_target import RequestCredentialsTarget
     from mindroom.constants import RuntimePaths
 
 router = APIRouter(prefix="/api/oauth", tags=["oauth"])
@@ -69,6 +69,7 @@ class OAuthStatusResponse(BaseModel):
     client_config_redirect_uri_supported: bool = False
     connected: bool
     has_client_config: bool
+    has_custom_client_config: bool = False
     has_service_account_config: bool = False
     email: str | None = None
     hosted_domain: str | None = None
@@ -100,7 +101,30 @@ async def _require_oauth_browser_user(request: Request) -> RedirectResponse | No
     return None
 
 
-def _issue_authorization_url(
+async def _client_config_resolution_for_request(
+    request: Request,
+    provider: OAuthProvider,
+    runtime_paths: RuntimePaths,
+    *,
+    reject_remote_provisioned: bool,
+) -> OAuthClientConfigResolution | None:
+    """Resolve an OAuth client that can return to the requesting browser host."""
+    try:
+        resolution = await provider.client_config_resolution_async(runtime_paths)
+    except OAuthProviderError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    if resolution is None or resolution.custom or is_oauth_loopback_hostname(request.url.hostname):
+        return resolution
+    if reject_remote_provisioned:
+        detail = (
+            "The provisioned OAuth client is available only when MindRoom is opened on localhost. "
+            "Set MINDROOM_PUBLIC_URL (or MINDROOM_BASE_URL) and configure a custom OAuth client for remote access."
+        )
+        raise HTTPException(status_code=503, detail=detail)
+    return None
+
+
+async def _issue_authorization_url(
     request: Request,
     provider: OAuthProvider,
     runtime_paths: RuntimePaths,
@@ -108,6 +132,12 @@ def _issue_authorization_url(
     agent_name: str | None,
     connect_token: str | None = None,
 ) -> OAuthConnectResponse:
+    await _client_config_resolution_for_request(
+        request,
+        provider,
+        runtime_paths,
+        reject_remote_provisioned=True,
+    )
     if connect_token:
         try:
             connect_target = lookup_oauth_connect_token(provider, runtime_paths, connect_token)
@@ -131,7 +161,7 @@ def _issue_authorization_url(
             code_verifier=code_verifier,
         )
         try:
-            auth_url = provider.authorization_uri(
+            auth_url = await provider.authorization_uri_async(
                 target.runtime_paths,
                 state=state,
                 code_verifier=code_verifier,
@@ -163,7 +193,7 @@ def _issue_authorization_url(
             payload=_target_binding_payload(provider, target),
             code_verifier=code_verifier,
         )
-        auth_url = provider.authorization_uri(
+        auth_url = await provider.authorization_uri_async(
             target.runtime_paths,
             state=state,
             code_verifier=code_verifier,
@@ -289,7 +319,7 @@ async def connect(provider_id: str, request: Request, agent_name: str | None = N
     """Start a provider OAuth flow and return the external authorization URL."""
     await _require_oauth_api_user(request)
     provider, runtime_paths = _load_provider(request, provider_id)
-    return _issue_authorization_url(request, provider, runtime_paths, agent_name=agent_name)
+    return await _issue_authorization_url(request, provider, runtime_paths, agent_name=agent_name)
 
 
 @router.get("/{provider_id}/authorize")
@@ -304,7 +334,7 @@ async def authorize(
     if login_redirect is not None:
         return login_redirect
     provider, runtime_paths = _load_provider(request, provider_id)
-    response = _issue_authorization_url(
+    response = await _issue_authorization_url(
         request,
         provider,
         runtime_paths,
@@ -432,10 +462,38 @@ async def status(provider_id: str, request: Request, agent_name: str | None = No
         )
         or {}
     )
-    client_config_resolution = provider.client_config_resolution(runtime_paths)
-    has_client_config = client_config_resolution is not None
     has_service_account_config = oauth_provider_service_account_configured(provider, runtime_paths)
-    connected = has_service_account_config or oauth_credentials_usable(provider, runtime_paths, credentials)
+    client_config_resolution = (
+        provider.client_config_resolution(runtime_paths)
+        if has_service_account_config
+        else await _client_config_resolution_for_request(
+            request,
+            provider,
+            runtime_paths,
+            reject_remote_provisioned=False,
+        )
+    )
+    has_client_config = client_config_resolution is not None
+    credentials_usable = oauth_credentials_usable(provider, runtime_paths, credentials)
+    if credentials_usable and has_client_config and not has_service_account_config:
+        try:
+            refreshed_credentials = await refresh_scoped_oauth_credentials(
+                provider,
+                runtime_paths,
+                credentials_manager=target.base_manager,
+                worker_target=worker_target,
+                allowed_shared_services=target.allowed_shared_services,
+            )
+        except OAuthProviderError as exc:
+            logger.warning(
+                "oauth_token_refresh_failed",
+                provider_id=provider.id,
+                error_type=type(exc).__name__,
+            )
+        else:
+            credentials = refreshed_credentials or {}
+            credentials_usable = oauth_credentials_usable(provider, runtime_paths, credentials)
+    connected = has_service_account_config or credentials_usable
     if client_config_resolution is not None:
         client_config_service = client_config_resolution.service
     elif provider.all_client_config_services:
@@ -454,6 +512,7 @@ async def status(provider_id: str, request: Request, agent_name: str | None = No
         client_config_redirect_uri_supported=client_config_redirect_uri_supported,
         connected=connected,
         has_client_config=has_client_config,
+        has_custom_client_config=(client_config_resolution is not None and client_config_resolution.custom),
         has_service_account_config=has_service_account_config,
         email=_claim_str(credentials, "email"),
         hosted_domain=_claim_str(credentials, "hd"),
@@ -478,4 +537,12 @@ async def disconnect(provider_id: str, request: Request, agent_name: str | None 
         credentials_manager=target.base_manager,
         worker_target=worker_target,
     )
+    snapshot = config_lifecycle.bind_current_request_snapshot(request)
+    config = snapshot.runtime_config
+    if config is not None:
+        await disconnect_mcp_oauth_request_session(
+            config.mcp_servers,
+            provider.id,
+            worker_target=worker_target,
+        )
     return {"status": "disconnected", "provider": provider.id}

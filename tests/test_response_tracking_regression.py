@@ -18,8 +18,9 @@ from mindroom.commands.parsing import Command, CommandType
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
-from mindroom.handled_turns import HandledTurnState
+from mindroom.handled_turns import TurnRecord
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.message_target import MessageTarget
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -123,6 +124,7 @@ class TestResponseTrackingRegression:
             command_event,
             "@user:localhost",
             command,
+            target=MessageTarget.resolve(test_room_id, None, "$command_123", thread_start_root_event_id="$command_123"),
         )
 
         # Verify response was sent
@@ -143,6 +145,7 @@ class TestResponseTrackingRegression:
             command_event,
             "@user:localhost",
             command,
+            target=MessageTarget.resolve(test_room_id, None, "$command_123", thread_start_root_event_id="$command_123"),
         )
 
         # Should NOT send another response if properly tracked
@@ -212,8 +215,8 @@ class TestResponseTrackingRegression:
             return_value=dispatch_context_result(mock_context),
         )
 
-        bot._send_response = AsyncMock(return_value="$response_456")
-        install_send_response_mock(bot, bot._send_response)
+        send_response = AsyncMock(return_value="$response_456")
+        install_send_response_mock(bot, send_response)
 
         # Mock constants to make router handle commands
         with patch("mindroom.constants.ROUTER_AGENT_NAME", "router"):
@@ -221,8 +224,8 @@ class TestResponseTrackingRegression:
             await bot._on_message(mock_room, unknown_command_event)
             await drain_coalescing(bot)
 
-        bot._send_response.assert_awaited_once()
-        assert "❌ Unknown command" in bot._send_response.await_args.args[2]
+        send_response.assert_awaited_once()
+        assert "❌ Unknown command" in send_response.await_args.kwargs["response_text"]
 
         # IMPORTANT: Check if event was marked as responded
         # This should be True after the fix in bot.py at line 371
@@ -300,7 +303,7 @@ class TestResponseTrackingRegression:
             message_event,
             [],
             requester_user_id="@user:localhost",
-            handled_turn=HandledTurnState.create(
+            handled_turn=TurnRecord.create(
                 source_event_ids,
                 source_event_prompts=source_event_prompts,
             ),
@@ -330,7 +333,7 @@ class TestResponseTrackingRegression:
             message_event,
             [],
             requester_user_id="@user:localhost",
-            handled_turn=HandledTurnState.create(
+            handled_turn=TurnRecord.create(
                 source_event_ids,
                 source_event_prompts=source_event_prompts,
             ),

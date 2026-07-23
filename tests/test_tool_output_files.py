@@ -31,9 +31,10 @@ from mindroom.tool_system.output_files import (
     DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES,
     OUTPUT_PATH_ARGUMENT,
     ToolOutputFilePolicy,
-    _wrap_function_for_output_files,
     ensure_output_path_schema_optional,
     saved_tool_output_receipt,
+    validate_output_path_syntax,
+    wrap_function_for_output_files,
     wrap_toolkit_for_output_files,
 )
 from mindroom.tool_system.tool_hooks import build_tool_hook_bridge, prepend_tool_hook_bridge
@@ -237,7 +238,7 @@ def test_schema_handles_strict_or_additional_properties_false_function(tmp_path:
         },
         skip_entrypoint_processing=True,
     )
-    _wrap_function_for_output_files(function, _policy(tmp_path))
+    wrap_function_for_output_files(function, _policy(tmp_path))
 
     assert function.parameters["additionalProperties"] is False
     _assert_output_path_schema_is_optional(function)
@@ -257,7 +258,7 @@ def test_schema_handles_skip_entrypoint_processing_function(tmp_path: Path) -> N
         },
         skip_entrypoint_processing=True,
     )
-    _wrap_function_for_output_files(function, _policy(tmp_path))
+    wrap_function_for_output_files(function, _policy(tmp_path))
 
     result = FunctionCall(
         function=function,
@@ -284,7 +285,7 @@ def test_schema_handles_skip_entrypoint_processing_function_in_strict_mode(tmp_p
         },
         skip_entrypoint_processing=True,
     )
-    _wrap_function_for_output_files(function, _policy(tmp_path))
+    wrap_function_for_output_files(function, _policy(tmp_path))
 
     function = _processed_strict(function)
 
@@ -353,7 +354,7 @@ def test_function_with_existing_mindroom_output_path_is_skipped_with_warning(tmp
 
     function = Function(name="existing", entrypoint=existing)
     with patch("mindroom.tool_system.output_files.logger.warning") as warning:
-        _wrap_function_for_output_files(function, _policy(tmp_path))
+        wrap_function_for_output_files(function, _policy(tmp_path))
 
     warning.assert_called_once()
     result = FunctionCall(
@@ -542,6 +543,27 @@ def test_invalid_output_paths_rejected_without_calling_tool(tmp_path: Path, bad_
 
     assert seen == []
     assert _receipt(result.result)["status"] == "error"
+
+
+@pytest.mark.parametrize(
+    "rejected_path",
+    [
+        "~/ride-trace.json",
+        "$HOME/ride-trace.json",
+        "%USERPROFILE%\\out.json",
+        "reports/100%/out.json",
+        "price$5/output.json",
+        "~literal/output.json",
+    ],
+)
+def test_expansion_characters_rejected_with_actionable_workspace_relative_message(rejected_path: str) -> None:
+    error = validate_output_path_syntax(rejected_path)
+
+    assert error is not None
+    assert repr(rejected_path) in error
+    assert "relative to the agent workspace" in error
+    assert "must not start with `~` or contain `$` or `%`" in error
+    assert "workspace-relative path" in error
 
 
 def test_existing_directory_rejected_without_calling_tool(tmp_path: Path) -> None:

@@ -3,13 +3,13 @@ import { createServerClientSupabase } from '@/lib/supabase/server'
 import { logger } from '@/lib/logger'
 import { NextResponse } from 'next/server'
 import { NextRequest } from 'next/server'
+import { sanitizePostAuthRedirect } from '@/lib/auth/redirect'
 
 export async function GET(request: NextRequest) {
   const requestUrl = new URL(request.url)
   const code = requestUrl.searchParams.get('code')
-  const next = requestUrl.searchParams.get('next') || '/dashboard'
-
   const { apiUrl, platformDomain } = getServerRuntimeConfig()
+  const next = sanitizePostAuthRedirect(requestUrl.searchParams.get('next'), platformDomain)
 
   if (code) {
     const supabase = await createServerClientSupabase()

@@ -39,10 +39,15 @@ The tool always uses the current agent's configured MindRoom memory backend, so 
 Agents with `memory_backend: none` do not receive this tool.
 Search and list results include memory IDs, and those IDs are then used with `get_memory()`, `update_memory()`, and `delete_memory()`.
 The tool is bound to the current agent's MindRoom scope and can reach any agent or team memories that MindRoom makes visible to that agent.
+For file-backed memory, `search_memories()` follows `memory.search.mode`.
+Keyword mode scans markdown files directly.
+Semantic mode searches the agent's file-memory scope through a lazy embedding index and falls back to keyword search when embeddings are unavailable.
+Result metadata includes `search_mode` so callers can tell which path produced the result.
 
 ### Configuration
 
 This tool has no tool-specific inline configuration fields.
+Use `memory.search` or `agents.<name>.memory_search` to configure file-backed search behavior.
 
 ### Example
 

@@ -2,18 +2,25 @@
 
 from __future__ import annotations
 
-import fcntl
+import asyncio
 import json
 import threading
 import time
+from contextlib import contextmanager
+from dataclasses import replace
 from typing import TYPE_CHECKING
+from unittest.mock import MagicMock, patch
 
 import pytest
 
+import mindroom.handled_turns as handled_turns_module
+from mindroom.file_locks import advisory_file_lock
 from mindroom.handled_turns import (
     HandledTurnLedger,
-    HandledTurnRecord,
-    HandledTurnState,
+    SourceEventMetadata,
+    TurnRecord,
+    TurnRecordCodec,
+    _reset_handled_turn_ledger_runtime,
 )
 from mindroom.history.types import HistoryScope
 from mindroom.message_target import MessageTarget
@@ -28,12 +35,63 @@ def temp_dir(tmp_path: Path) -> Path:
     return tmp_path
 
 
+def _reload_ledger(agent_name: str, base_path: Path) -> HandledTurnLedger:
+    """Simulate a process restart: flush persists, drop shared state, reload from disk."""
+    _reset_handled_turn_ledger_runtime()
+    return HandledTurnLedger(agent_name, base_path=base_path)
+
+
 def _write_responses_file(
     tracker: HandledTurnLedger,
     responses: dict[str, dict[str, object]],
 ) -> None:
-    """Seed the persisted ledger file for tests that exercise reload semantics."""
-    tracker._responses_file.write_text(json.dumps(responses), encoding="utf-8")
+    """Seed current-schema ledger records for reload and cleanup tests."""
+    serialized_records: dict[str, dict[str, object]] = {}
+    for event_id, raw_record in responses.items():
+        raw_source_event_ids = raw_record.get("source_event_ids")
+        source_event_ids = raw_source_event_ids if isinstance(raw_source_event_ids, list) else [event_id]
+        raw_discovery_event_ids = raw_record.get("discovery_event_ids")
+        discovery_event_ids = raw_discovery_event_ids if isinstance(raw_discovery_event_ids, list) else []
+        record = TurnRecord.create(
+            source_event_ids,
+            discovery_event_ids=discovery_event_ids,
+            anchor_event_id=raw_record.get("anchor_event_id")
+            if isinstance(raw_record.get("anchor_event_id"), str)
+            else None,
+            response_event_id=raw_record.get("response_event_id")
+            if isinstance(raw_record.get("response_event_id"), str)
+            else None,
+            completed=raw_record.get("completed") if isinstance(raw_record.get("completed"), bool) else True,
+            visible_echo_event_id=raw_record.get("visible_echo_event_id")
+            if isinstance(raw_record.get("visible_echo_event_id"), str)
+            else None,
+            source_event_prompts=raw_record.get("source_event_prompts")
+            if isinstance(raw_record.get("source_event_prompts"), dict)
+            else None,
+            source_event_metadata=raw_record.get("source_event_metadata")
+            if isinstance(raw_record.get("source_event_metadata"), dict)
+            else None,
+            response_owner=raw_record.get("response_owner")
+            if isinstance(raw_record.get("response_owner"), str)
+            else None,
+            requester_id=raw_record.get("requester_id") if isinstance(raw_record.get("requester_id"), str) else None,
+            correlation_id=raw_record.get("correlation_id")
+            if isinstance(raw_record.get("correlation_id"), str)
+            else None,
+            history_scope=HistoryScope.from_metadata(raw_record.get("history_scope")),
+            conversation_target=MessageTarget.from_metadata(raw_record.get("conversation_target")),
+            timestamp=float(raw_record.get("timestamp", 0.0)),
+        )
+        serialized_records[event_id] = TurnRecordCodec.to_ledger_record(record)
+    tracker._responses_file.write_text(
+        json.dumps(
+            {
+                "schema_version": TurnRecordCodec.schema_version(),
+                "records": serialized_records,
+            },
+        ),
+        encoding="utf-8",
+    )
 
 
 def _record_handled_turn(
@@ -50,7 +108,7 @@ def _record_handled_turn(
 ) -> None:
     """Record one normalized handled turn through the typed carrier."""
     tracker.record_handled_turn(
-        HandledTurnState.create(
+        TurnRecord.create(
             source_event_ids,
             response_event_id=response_event_id,
             source_event_prompts=source_event_prompts,
@@ -66,6 +124,14 @@ def _record_handled_turn(
 def _get_response_event_id(tracker: HandledTurnLedger, source_event_id: str) -> str | None:
     turn_record = tracker.get_turn_record(source_event_id)
     return turn_record.response_event_id if turn_record is not None else None
+
+
+def _read_persisted_records(tracker: HandledTurnLedger) -> dict[str, object]:
+    payload = json.loads(tracker._responses_file.read_text(encoding="utf-8"))
+    assert payload["schema_version"] == TurnRecordCodec.schema_version()
+    records = payload["records"]
+    assert isinstance(records, dict)
+    return records
 
 
 def test_handled_turn_ledger_init(temp_dir: Path) -> None:
@@ -85,9 +151,9 @@ def test_has_responded_empty(temp_dir: Path) -> None:
     assert tracker.get_turn_record("event123") is None
 
 
-def test_handled_turn_state_normalizes_ids_and_prompt_map() -> None:
+def test_turn_record_normalizes_ids_and_prompt_map() -> None:
     """The handled-turn carrier should normalize IDs, prompts, and empty event IDs."""
-    handled_turn = HandledTurnState.create(
+    handled_turn = TurnRecord.create(
         ["$a", "", "$a", "$b"],
         response_event_id="",
         visible_echo_event_id="",
@@ -102,7 +168,7 @@ def test_handled_turn_state_normalizes_ids_and_prompt_map() -> None:
     assert handled_turn.is_coalesced
 
 
-def test_handled_turn_state_preserves_response_context() -> None:
+def test_turn_record_preserves_response_context() -> None:
     """The handled-turn carrier should keep response owner, history scope, and target intact."""
     conversation_target = MessageTarget.resolve(
         room_id="!room:example.com",
@@ -111,7 +177,7 @@ def test_handled_turn_state_preserves_response_context() -> None:
     )
     history_scope = HistoryScope(kind="team", scope_id="team_scope")
 
-    handled_turn = HandledTurnState.create(
+    handled_turn = TurnRecord.create(
         ["$event:example.com"],
         response_owner="test_agent",
         history_scope=history_scope,
@@ -123,19 +189,15 @@ def test_handled_turn_state_preserves_response_context() -> None:
     assert handled_turn.conversation_target == conversation_target
 
 
-def test_handled_turn_state_preserves_requester_and_correlation() -> None:
+def test_turn_record_preserves_requester_and_correlation() -> None:
     """The handled-turn carrier should keep requester and correlation ids intact."""
-    handled_turn = HandledTurnState.create(
+    handled_turn = TurnRecord.create(
         ["$event:example.com"],
         requester_id="@user:example.com",
         correlation_id="corr-123",
     )
 
-    updated = handled_turn.with_response_context(
-        response_owner="agent",
-        history_scope=None,
-        conversation_target=None,
-    )
+    updated = replace(handled_turn, response_owner="agent")
 
     assert updated.requester_id == "@user:example.com"
     assert updated.correlation_id == "corr-123"
@@ -152,7 +214,7 @@ def test_record_outcome_marks_single_source_event(temp_dir: Path) -> None:
     assert tracker.has_responded("event123")
     assert _get_response_event_id(tracker, "event123") is None
     record = tracker.get_turn_record("event123")
-    assert record == HandledTurnRecord(
+    assert record == TurnRecord(
         anchor_event_id="event123",
         source_event_ids=("event123",),
         timestamp=record.timestamp if record is not None else 0.0,
@@ -173,7 +235,7 @@ def test_record_handled_turn_tracks_typed_carrier(temp_dir: Path) -> None:
     )
 
     tracker.record_handled_turn(
-        HandledTurnState.create(
+        TurnRecord.create(
             ["$first", "$second"],
             response_event_id="$response",
             source_event_prompts={"$first": "first prompt", "$second": "second prompt"},
@@ -204,7 +266,7 @@ def test_record_outcome_tracks_response_event_id(temp_dir: Path) -> None:
 
     assert tracker.has_responded("event123")
     assert _get_response_event_id(tracker, "event123") == "$response"
-    assert tracker.get_turn_record("event123") == HandledTurnRecord(
+    assert tracker.get_turn_record("event123") == TurnRecord(
         anchor_event_id="event123",
         source_event_ids=("event123",),
         response_event_id="$response",
@@ -280,47 +342,13 @@ def test_record_outcome_filters_prompt_map_to_source_ids(temp_dir: Path) -> None
     assert turn_record.source_event_prompts == {"$a": "prompt a"}
 
 
-def test_record_outcome_preserves_existing_prompt_map_when_omitted(temp_dir: Path) -> None:
-    """A later outcome write without prompts should keep the existing prompt map."""
-    tracker = HandledTurnLedger("test_prompt_preserve", base_path=temp_dir)
-
-    _record_handled_turn(
-        tracker,
-        ["$a", "$b"],
-        response_event_id="$response-1",
-        source_event_prompts={"$a": "prompt a", "$b": "prompt b"},
-    )
-    _record_handled_turn(tracker, ["$a", "$b"], response_event_id="$response-2")
-
-    turn_record = tracker.get_turn_record("$b")
-    assert turn_record is not None
-    assert turn_record.response_event_id == "$response-2"
-    assert turn_record.source_event_prompts == {"$a": "prompt a", "$b": "prompt b"}
-
-
-def test_record_outcome_preserves_existing_prompt_map_when_empty_dict(temp_dir: Path) -> None:
-    """An empty prompt map should behave like omission rather than clearing stored prompts."""
-    tracker = HandledTurnLedger("test_prompt_empty_dict", base_path=temp_dir)
-
-    _record_handled_turn(
-        tracker,
-        ["$a", "$b"],
-        response_event_id="$response-1",
-        source_event_prompts={"$a": "prompt a", "$b": "prompt b"},
-    )
-    _record_handled_turn(tracker, ["$a", "$b"], response_event_id="$response-2", source_event_prompts={})
-
-    turn_record = tracker.get_turn_record("$a")
-    assert turn_record is not None
-    assert turn_record.response_event_id == "$response-2"
-    assert turn_record.source_event_prompts == {"$a": "prompt a", "$b": "prompt b"}
-
-
 def test_visible_echo_tracking_stays_partial_until_completed(temp_dir: Path) -> None:
-    """Visible echoes should dedupe retries without completing the turn."""
+    """The ledger should persist an exact partial record without completing it."""
     tracker = HandledTurnLedger("test_visible_echo", base_path=temp_dir)
 
-    tracker.record_visible_echo("event123", "$echo")
+    tracker.record_handled_turn(
+        TurnRecord.create(["event123"], completed=False, visible_echo_event_id="$echo"),
+    )
 
     assert not tracker.has_responded("event123")
     assert _get_response_event_id(tracker, "event123") is None
@@ -331,37 +359,15 @@ def test_visible_echo_tracking_stays_partial_until_completed(temp_dir: Path) -> 
     assert turn_record.visible_echo_event_id == "$echo"
 
 
-def test_record_outcome_preserves_existing_visible_echo(temp_dir: Path) -> None:
-    """Completing a partially echoed turn should keep the visible echo ID."""
-    tracker = HandledTurnLedger("test_visible_echo_completion", base_path=temp_dir)
-
-    tracker.record_visible_echo("event123", "$echo")
-    _record_handled_turn(tracker, ["event123"])
-
-    assert tracker.has_responded("event123")
-    assert tracker.get_visible_echo_event_id("event123") == "$echo"
-
-
-def test_record_outcome_propagates_visible_echo_to_coalesced_sources(temp_dir: Path) -> None:
-    """When one source already has a visible echo, terminal completion should copy it to the batch."""
-    tracker = HandledTurnLedger("test_visible_echo_batch", base_path=temp_dir)
-
-    tracker.record_visible_echo("$voice", "$echo")
-    _record_handled_turn(tracker, ["$voice", "$text"], response_event_id="$echo")
-
-    assert tracker.has_responded("$voice")
-    assert tracker.has_responded("$text")
-    assert tracker.get_visible_echo_event_id("$voice") == "$echo"
-    assert tracker.get_visible_echo_event_id("$text") == "$echo"
-
-
 def test_visible_echo_persists_across_reload(temp_dir: Path) -> None:
     """Visible echoes should survive a new ledger instance on the same storage path."""
     tracker1 = HandledTurnLedger("test_visible_echo_reload", base_path=temp_dir)
 
-    tracker1.record_visible_echo("event123", "$echo")
+    tracker1.record_handled_turn(
+        TurnRecord.create(["event123"], completed=False, visible_echo_event_id="$echo"),
+    )
 
-    tracker2 = HandledTurnLedger("test_visible_echo_reload", base_path=temp_dir)
+    tracker2 = _reload_ledger("test_visible_echo_reload", temp_dir)
 
     assert not tracker2.has_responded("event123")
     assert tracker2.get_visible_echo_event_id("event123") == "$echo"
@@ -369,6 +375,46 @@ def test_visible_echo_persists_across_reload(temp_dir: Path) -> None:
     assert turn_record is not None
     assert not turn_record.completed
     assert turn_record.visible_echo_event_id == "$echo"
+
+
+def test_source_event_metadata_persists_across_reload(temp_dir: Path) -> None:
+    """Coalesced source-event metadata should survive a ledger reload from disk as floats."""
+    tracker1 = HandledTurnLedger("test_source_metadata_reload", base_path=temp_dir)
+    tracker1.record_handled_turn(
+        TurnRecord.create(
+            ["$first", "$second"],
+            response_event_id="$response",
+            source_event_prompts={"$first": "first", "$second": "second"},
+            source_event_metadata={
+                "$first": SourceEventMetadata(sender="@alice:localhost", timestamp_ms=1_774_019_700_000),
+                "$second": SourceEventMetadata(sender="@bob:localhost", timestamp_ms=None),
+            },
+        ),
+    )
+
+    turn_record = _reload_ledger("test_source_metadata_reload", temp_dir).get_turn_record("$second")
+
+    assert turn_record is not None
+    assert turn_record.source_event_metadata == {
+        "$first": SourceEventMetadata(sender="@alice:localhost", timestamp_ms=1_774_019_700_000.0),
+        "$second": SourceEventMetadata(sender="@bob:localhost", timestamp_ms=None),
+    }
+
+
+def test_missing_source_event_metadata_loads_as_none(temp_dir: Path) -> None:
+    """Records persisted before source_event_metadata existed should load cleanly as None."""
+    tracker1 = HandledTurnLedger("test_source_metadata_absent", base_path=temp_dir)
+    _record_handled_turn(
+        tracker1,
+        ["$first", "$second"],
+        response_event_id="$response",
+        source_event_prompts={"$first": "first", "$second": "second"},
+    )
+
+    turn_record = _reload_ledger("test_source_metadata_absent", temp_dir).get_turn_record("$second")
+
+    assert turn_record is not None
+    assert turn_record.source_event_metadata is None
 
 
 def test_record_outcome_with_empty_source_list_is_noop(temp_dir: Path) -> None:
@@ -390,7 +436,7 @@ def test_persistence_round_trip(temp_dir: Path) -> None:
         source_event_prompts={"$first": "first", "$second": "second"},
     )
 
-    tracker2 = HandledTurnLedger("test_persist", base_path=temp_dir)
+    tracker2 = _reload_ledger("test_persist", temp_dir)
 
     assert tracker2.has_responded("$first")
     assert tracker2.has_responded("$second")
@@ -399,6 +445,104 @@ def test_persistence_round_trip(temp_dir: Path) -> None:
         "$first": "first",
         "$second": "second",
     }
+
+
+def test_discovery_alias_persists_without_becoming_a_coalesced_source(temp_dir: Path) -> None:
+    """Discovery aliases should rehydrate to the canonical record without changing source semantics."""
+    tracker1 = HandledTurnLedger("test_discovery_alias", base_path=temp_dir)
+    tracker1.record_handled_turn(
+        TurnRecord.create(
+            ["$question"],
+            discovery_event_ids=["$selection"],
+            response_event_id="$response",
+        ),
+    )
+
+    tracker2 = _reload_ledger("test_discovery_alias", temp_dir)
+
+    question_record = tracker2.get_turn_record("$question")
+    selection_record = tracker2.get_turn_record("$selection")
+    assert question_record is not None
+    assert selection_record == question_record
+    assert question_record.source_event_ids == ("$question",)
+    assert question_record.discovery_event_ids == ("$selection",)
+    assert not question_record.is_coalesced
+
+
+def test_discovery_alias_redaction_and_cleanup_intent_persist(temp_dir: Path) -> None:
+    """Selection aliases must retain both their tombstone and owed cleanup across restart."""
+    tracker = HandledTurnLedger("test_discovery_redaction", base_path=temp_dir)
+    tracker.record_handled_turn(
+        TurnRecord.create(
+            ["$question"],
+            discovery_event_ids=["$selection"],
+            redacted_source_event_ids=["$selection"],
+            pending_redaction_cleanup_event_ids=["$selection"],
+            completed=False,
+        ),
+    )
+
+    reloaded = _reload_ledger("test_discovery_redaction", temp_dir)
+    record = reloaded.get_turn_record("$selection")
+
+    assert record is not None
+    assert record.redacted_source_event_ids == ("$selection",)
+    assert record.pending_redaction_cleanup_event_ids == ("$selection",)
+    assert reloaded.pending_redaction_cleanup_event_ids() == ("$selection",)
+    assert reloaded.has_responded("$selection") is True
+    assert reloaded.has_responded("$question") is False
+
+
+def test_flush_propagates_persistence_failure(temp_dir: Path) -> None:
+    """Durability barriers must fail before callers mutate source cache state."""
+    tracker = HandledTurnLedger("test_persist_failure", base_path=temp_dir)
+
+    with patch.object(tracker, "_write_responses_file_locked", side_effect=OSError("disk full")):
+        tracker.record_handled_turn(TurnRecord.create(["$source"], completed=False))
+        with pytest.raises(OSError, match="disk full"):
+            tracker.flush()
+
+
+def test_flush_waits_for_every_captured_persist_before_raising(temp_dir: Path) -> None:
+    """One failed persist must not drop later captured work from the barrier."""
+    tracker = HandledTurnLedger("test_flush_drains", base_path=temp_dir)
+    first_future = MagicMock()
+    first_future.result.side_effect = OSError("first persist failed")
+    second_future = MagicMock()
+    tracker._state.pending_persists = [first_future, second_future]
+
+    with pytest.raises(OSError, match="first persist failed"):
+        tracker.flush()
+
+    first_future.result.assert_called_once_with()
+    second_future.result.assert_called_once_with()
+
+
+def test_later_record_does_not_prune_unobserved_persistence_failure(temp_dir: Path) -> None:
+    """A later write must not hide an earlier completed persistence failure."""
+    tracker = HandledTurnLedger("test_interleaved_persist_failure", base_path=temp_dir)
+    tracker.warm()
+    real_persist = tracker._persist_record
+    first_failed = threading.Event()
+    second_completed = threading.Event()
+
+    def persist_with_first_failure(turn_record: TurnRecord) -> None:
+        if "$redacted" in turn_record.indexed_event_ids:
+            first_failed.set()
+            message = "redaction persist failed"
+            raise OSError(message)
+        real_persist(turn_record)
+        second_completed.set()
+
+    with patch.object(tracker, "_persist_record", side_effect=persist_with_first_failure):
+        tracker.record_handled_turn(TurnRecord.create(["$redacted"], completed=False))
+        assert first_failed.wait(timeout=5)
+        failure = tracker._state.pending_persists[0].exception(timeout=5)
+        assert isinstance(failure, OSError)
+        tracker.record_handled_turn(TurnRecord.create(["$later"], completed=False))
+        assert second_completed.wait(timeout=5)
+        with pytest.raises(OSError, match="redaction persist failed"):
+            tracker.flush()
 
 
 def test_persistence_round_trip_preserves_response_context(temp_dir: Path) -> None:
@@ -420,7 +564,7 @@ def test_persistence_round_trip_preserves_response_context(temp_dir: Path) -> No
         conversation_target=conversation_target,
     )
 
-    tracker2 = HandledTurnLedger("test_persist_context", base_path=temp_dir)
+    tracker2 = _reload_ledger("test_persist_context", temp_dir)
 
     turn_record = tracker2.get_turn_record("$reply")
     assert turn_record is not None
@@ -446,7 +590,7 @@ def test_persistence_round_trip_preserves_requester_and_correlation(temp_dir: Pa
         correlation_id="corr-123",
     )
 
-    tracker2 = HandledTurnLedger("test_persist_request_context", base_path=temp_dir)
+    tracker2 = _reload_ledger("test_persist_request_context", temp_dir)
 
     turn_record = tracker2.get_turn_record("$reply")
     assert turn_record is not None
@@ -454,80 +598,32 @@ def test_persistence_round_trip_preserves_requester_and_correlation(temp_dir: Pa
     assert turn_record.correlation_id == "corr-123"
 
 
-def test_updates_preserve_requester_and_correlation_when_not_reprovided(temp_dir: Path) -> None:
-    """Later updates should keep stored requester and correlation values."""
-    tracker = HandledTurnLedger("test_request_context_updates", base_path=temp_dir)
-    _record_handled_turn(
-        tracker,
-        ["$event"],
-        response_event_id="$response-1",
-        requester_id="@user:example.com",
-        correlation_id="corr-123",
-    )
-    _record_handled_turn(tracker, ["$event"], response_event_id="$response-2")
-
-    turn_record = tracker.get_turn_record("$event")
-    assert turn_record is not None
-    assert turn_record.response_event_id == "$response-2"
-    assert turn_record.requester_id == "@user:example.com"
-    assert turn_record.correlation_id == "corr-123"
-
-
-def test_loads_legacy_response_tracker_shape(temp_dir: Path) -> None:
-    """Legacy response tracker JSON should load into the new ledger."""
-    legacy_file = temp_dir / "legacy_responded.json"
-    legacy_file.write_text(
+def test_unversioned_ledger_is_quarantined_instead_of_migrated(temp_dir: Path) -> None:
+    """Pre-schema ledgers should be discarded rather than adding migration scaffolding."""
+    tracker_file = temp_dir / "unversioned_responded.json"
+    tracker_file.write_text(
         json.dumps(
             {
                 "$event": {
                     "timestamp": time.time(),
-                    "response_id": "$response",
+                    "response_event_id": "$response",
                     "completed": True,
-                    "visible_echo_response_id": "$echo",
                 },
             },
         ),
         encoding="utf-8",
     )
 
-    tracker = HandledTurnLedger("legacy", base_path=temp_dir)
+    tracker = HandledTurnLedger("unversioned", base_path=temp_dir)
 
-    assert tracker.has_responded("$event")
-    assert _get_response_event_id(tracker, "$event") == "$response"
-    assert tracker.get_visible_echo_event_id("$event") == "$echo"
-    turn_record = tracker.get_turn_record("$event")
-    assert turn_record is not None
-    assert turn_record.anchor_event_id == "$event"
-    assert turn_record.source_event_ids == ("$event",)
+    assert not tracker.has_responded("$event")
+    assert tracker.get_turn_record("$event") is None
+    assert len(list(temp_dir.glob("unversioned_responded.json.corrupt-*"))) == 1
 
 
-def test_loads_legacy_record_without_completed_flag_as_terminal(temp_dir: Path) -> None:
-    """Legacy records without `completed` should remain terminally handled."""
-    legacy_file = temp_dir / "legacy_default_responded.json"
-    legacy_file.write_text(
-        json.dumps(
-            {
-                "$event": {
-                    "timestamp": time.time(),
-                    "response_id": None,
-                },
-            },
-        ),
-        encoding="utf-8",
-    )
-
-    tracker = HandledTurnLedger("legacy_default", base_path=temp_dir)
-
-    assert tracker.has_responded("$event")
-    assert _get_response_event_id(tracker, "$event") is None
-    turn_record = tracker.get_turn_record("$event")
-    assert turn_record is not None
-    assert turn_record.completed
-
-
-def test_loads_legacy_record_without_requester_or_correlation(temp_dir: Path) -> None:
-    """Legacy records without the new request fields should still load cleanly."""
-    tracker = HandledTurnLedger("legacy_missing_request_context", base_path=temp_dir)
+def test_record_without_requester_or_correlation_loads_cleanly(temp_dir: Path) -> None:
+    """Requester and correlation IDs remain optional record context."""
+    tracker = HandledTurnLedger("missing_request_context", base_path=temp_dir)
     _write_responses_file(
         tracker,
         {
@@ -539,7 +635,7 @@ def test_loads_legacy_record_without_requester_or_correlation(temp_dir: Path) ->
         },
     )
 
-    reloaded = HandledTurnLedger("legacy_missing_request_context", base_path=temp_dir)
+    reloaded = _reload_ledger("missing_request_context", temp_dir)
     turn_record = reloaded.get_turn_record("$event")
     assert turn_record is not None
     assert turn_record.response_event_id == "$response"
@@ -547,88 +643,23 @@ def test_loads_legacy_record_without_requester_or_correlation(temp_dir: Path) ->
     assert turn_record.correlation_id is None
 
 
-def test_loads_legacy_coalesced_record_shape(temp_dir: Path) -> None:
-    """Legacy response field names should still load coalesced turn metadata."""
-    legacy_file = temp_dir / "legacy_coalesced_responded.json"
-    legacy_file.write_text(
-        json.dumps(
+def test_current_codec_rejects_incomplete_ledger_records() -> None:
+    """Current-version ledger rows require the full canonical identity and outcome fields."""
+    assert TurnRecordCodec.from_ledger_record("$event", {}) is None
+    assert (
+        TurnRecordCodec.from_ledger_record(
+            "$event",
             {
-                "$first": {
-                    "timestamp": time.time(),
-                    "response_id": "$response",
-                    "visible_echo_response_id": "$echo",
-                    "source_event_ids": ["$first", "$primary"],
-                    "source_event_prompts": {
-                        "$first": "first",
-                        "$primary": "primary",
-                    },
-                },
-                "$primary": {
-                    "timestamp": time.time(),
-                    "response_id": "$response",
-                    "visible_echo_response_id": "$echo",
-                    "source_event_ids": ["$first", "$primary"],
-                    "source_event_prompts": {
-                        "$first": "first",
-                        "$primary": "primary",
-                    },
-                },
-            },
-        ),
-        encoding="utf-8",
-    )
-
-    tracker = HandledTurnLedger("legacy_coalesced", base_path=temp_dir)
-
-    turn_record = tracker.get_turn_record("$first")
-    assert turn_record is not None
-    assert turn_record.source_event_ids == ("$first", "$primary")
-    assert turn_record.response_event_id == "$response"
-    assert turn_record.visible_echo_event_id == "$echo"
-    assert turn_record.source_event_prompts == {
-        "$first": "first",
-        "$primary": "primary",
-    }
-
-
-def test_normalizes_empty_record_dict_to_terminal_self_anchored_turn(temp_dir: Path) -> None:
-    """Semantically partial on-disk records should normalize to one terminal self-anchored turn."""
-    tracker = HandledTurnLedger("test_empty_record", base_path=temp_dir)
-    _write_responses_file(tracker, {"$event": {}})
-
-    turn_record = tracker.get_turn_record("$event")
-    assert turn_record is not None
-    assert turn_record.source_event_ids == ("$event",)
-    assert turn_record.anchor_event_id == "$event"
-    assert turn_record.response_event_id is None
-    assert turn_record.source_event_prompts is None
-    assert turn_record.completed
-    assert turn_record.timestamp == 0.0
-
-
-def test_normalizes_empty_source_ids_and_filters_partial_prompt_map(temp_dir: Path) -> None:
-    """Invalid source lists should fall back to the event ID and keep only matching prompt entries."""
-    tracker = HandledTurnLedger("test_partial_record", base_path=temp_dir)
-    _write_responses_file(
-        tracker,
-        {
-            "$event": {
-                "timestamp": 123.0,
+                "anchor_event_id": "$event",
+                "source_event_ids": ["", None],
+                "discovery_event_ids": ["$event"],
                 "response_event_id": "$response",
-                "source_event_ids": [],
-                "source_event_prompts": {
-                    "$event": "prompt",
-                    "$extra": "ignored",
-                },
+                "completed": True,
+                "timestamp": time.time(),
             },
-        },
+        )
+        is None
     )
-
-    turn_record = tracker.get_turn_record("$event")
-    assert turn_record is not None
-    assert turn_record.source_event_ids == ("$event",)
-    assert turn_record.response_event_id == "$response"
-    assert turn_record.source_event_prompts == {"$event": "prompt"}
 
 
 def test_large_coalesced_turn_round_trips(temp_dir: Path) -> None:
@@ -644,7 +675,7 @@ def test_large_coalesced_turn_round_trips(temp_dir: Path) -> None:
         source_event_prompts=prompt_map,
     )
 
-    reloaded = HandledTurnLedger("test_large_coalesced", base_path=temp_dir)
+    reloaded = _reload_ledger("test_large_coalesced", temp_dir)
 
     turn_record = reloaded.get_turn_record(source_event_ids[-1])
     assert turn_record is not None
@@ -739,6 +770,49 @@ def test_cleanup_by_age_removes_old_records(temp_dir: Path) -> None:
         assert not tracker.has_responded(f"old_event{index}")
 
 
+def test_cleanup_by_age_retains_pending_redaction_intent(temp_dir: Path) -> None:
+    """Age retention must not discard cleanup work before the next response."""
+    tracker = HandledTurnLedger("test_pending_age_cleanup", base_path=temp_dir)
+    old_timestamp = time.time() - (40 * 24 * 60 * 60)
+    tracker.record_handled_turn(
+        TurnRecord.create(
+            ["$pending"],
+            redacted_source_event_ids=["$pending"],
+            pending_redaction_cleanup_event_ids=["$pending"],
+            timestamp=old_timestamp,
+        ),
+    )
+    tracker.record_handled_turn(TurnRecord.create(["$ordinary"], timestamp=old_timestamp))
+    tracker.flush()
+
+    tracker._cleanup_old_events(max_events=100, max_age_days=30)
+
+    assert tracker.get_turn_record("$pending") is not None
+    assert tracker.pending_redaction_cleanup_event_ids() == ("$pending",)
+    assert tracker.get_turn_record("$ordinary") is None
+
+
+def test_cleanup_by_count_retains_pending_redaction_intent(temp_dir: Path) -> None:
+    """Count retention may exceed its limit rather than lose owed cleanup work."""
+    tracker = HandledTurnLedger("test_pending_count_cleanup", base_path=temp_dir)
+    tracker.record_handled_turn(
+        TurnRecord.create(
+            ["$pending"],
+            redacted_source_event_ids=["$pending"],
+            pending_redaction_cleanup_event_ids=["$pending"],
+            timestamp=time.time() - 2,
+        ),
+    )
+    tracker.record_handled_turn(TurnRecord.create(["$newest"], timestamp=time.time()))
+    tracker.flush()
+
+    tracker._cleanup_old_events(max_events=1, max_age_days=30)
+
+    assert tracker.get_turn_record("$pending") is not None
+    assert tracker.pending_redaction_cleanup_event_ids() == ("$pending",)
+    assert tracker.get_turn_record("$newest") is not None
+
+
 def test_concurrent_access_keeps_json_valid(temp_dir: Path) -> None:
     """Concurrent writes should keep the persisted file readable."""
     tracker = HandledTurnLedger("test_concurrent", base_path=temp_dir)
@@ -754,56 +828,46 @@ def test_concurrent_access_keeps_json_valid(temp_dir: Path) -> None:
         thread.join()
 
     assert len(tracker._responses) == 100
-    with tracker._responses_file.open() as file:
-        assert len(json.load(file)) == 100
+    tracker.flush()
+    assert len(_read_persisted_records(tracker)) == 100
 
 
-def test_concurrent_cross_instance_writes_wait_for_lock_and_merge(temp_dir: Path) -> None:
-    """A second ledger instance should wait on the lock file and preserve both writes."""
+def test_file_lock_defers_persist_without_blocking_writers(temp_dir: Path) -> None:
+    """A held file lock should stall only disk persistence, never the recording caller."""
     tracker_a = HandledTurnLedger("test_cross_instance_lock", base_path=temp_dir)
     tracker_b = HandledTurnLedger("test_cross_instance_lock", base_path=temp_dir)
     _record_handled_turn(tracker_a, ["$first"], response_event_id="$response-a")
+    tracker_a.flush()
 
-    writer_started = threading.Event()
-    writer_finished = threading.Event()
-
-    def write_second_turn() -> None:
-        writer_started.set()
+    with advisory_file_lock(tracker_a._responses_lock_file):
+        # Recording returns immediately and is visible in shared memory even
+        # while the ledger file lock is held.
         _record_handled_turn(tracker_b, ["$second"], response_event_id="$response-b")
-        writer_finished.set()
+        assert _get_response_event_id(tracker_b, "$second") == "$response-b"
+        # The queued disk merge cannot complete while the lock is held.
+        assert "$second" not in _read_persisted_records(tracker_a)
 
-    with tracker_a._responses_lock_file.open("a+") as lock_file:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-        writer_thread = threading.Thread(target=write_second_turn)
-        writer_thread.start()
-        assert writer_started.wait(timeout=5.0)
-        time.sleep(0.05)
-        assert not writer_finished.is_set()
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
-        assert writer_finished.wait(timeout=5.0)
-        writer_thread.join(timeout=1.0)
-        assert not writer_thread.is_alive()
-
-    tracker_c = HandledTurnLedger("test_cross_instance_lock", base_path=temp_dir)
+    tracker_b.flush()
+    tracker_c = _reload_ledger("test_cross_instance_lock", temp_dir)
     assert _get_response_event_id(tracker_c, "$first") == "$response-a"
     assert _get_response_event_id(tracker_c, "$second") == "$response-b"
 
 
-def test_multiple_instances_merge_updates(temp_dir: Path) -> None:
-    """Stale instances should merge with disk state instead of clobbering prior writes."""
+def test_sibling_ledgers_merge_updates(temp_dir: Path) -> None:
+    """Sibling ledgers should share and persist updates."""
     tracker_a = HandledTurnLedger("test_multi_instance", base_path=temp_dir)
     tracker_b = HandledTurnLedger("test_multi_instance", base_path=temp_dir)
 
     _record_handled_turn(tracker_a, ["$first"], response_event_id="$response-a")
     _record_handled_turn(tracker_b, ["$second"], response_event_id="$response-b")
 
-    tracker_c = HandledTurnLedger("test_multi_instance", base_path=temp_dir)
+    tracker_c = _reload_ledger("test_multi_instance", temp_dir)
     assert _get_response_event_id(tracker_c, "$first") == "$response-a"
     assert _get_response_event_id(tracker_c, "$second") == "$response-b"
 
 
-def test_multiple_instances_refresh_reads_from_disk(temp_dir: Path) -> None:
-    """Long-lived instances should observe sibling writes during read-side queries."""
+def test_sibling_ledgers_share_live_state(temp_dir: Path) -> None:
+    """Sibling ledgers should observe process-shared state."""
     tracker_a = HandledTurnLedger("test_multi_instance_reads", base_path=temp_dir)
     tracker_b = HandledTurnLedger("test_multi_instance_reads", base_path=temp_dir)
 
@@ -828,9 +892,10 @@ def test_quarantines_malformed_ledger_file(temp_dir: Path) -> None:
     responses_file.write_text("{not valid json", encoding="utf-8")
 
     tracker = HandledTurnLedger("bad_json", base_path=temp_dir)
+    tracker.warm()
 
     assert tracker._responses == {}
-    assert json.loads(responses_file.read_text(encoding="utf-8")) == {}
+    assert _read_persisted_records(tracker) == {}
     quarantined_files = list(temp_dir.glob("bad_json_responded.json.corrupt-*"))
     assert len(quarantined_files) == 1
 
@@ -841,9 +906,10 @@ def test_quarantines_non_utf8_ledger_file(temp_dir: Path) -> None:
     responses_file.write_bytes(b"\xff\xfe\x00")
 
     tracker = HandledTurnLedger("bad_utf8", base_path=temp_dir)
+    tracker.warm()
 
     assert tracker._responses == {}
-    assert json.loads(responses_file.read_text(encoding="utf-8")) == {}
+    assert _read_persisted_records(tracker) == {}
     quarantined_files = list(temp_dir.glob("bad_utf8_responded.json.corrupt-*"))
     assert len(quarantined_files) == 1
 
@@ -854,9 +920,10 @@ def test_quarantines_structurally_invalid_ledger_file(temp_dir: Path) -> None:
     responses_file.write_text(json.dumps(["oops"]), encoding="utf-8")
 
     tracker = HandledTurnLedger("bad_shape", base_path=temp_dir)
+    tracker.warm()
 
     assert tracker._responses == {}
-    assert json.loads(responses_file.read_text(encoding="utf-8")) == {}
+    assert _read_persisted_records(tracker) == {}
     quarantined_files = list(temp_dir.glob("bad_shape_responded.json.corrupt-*"))
     assert len(quarantined_files) == 1
     assert json.loads(quarantined_files[0].read_text(encoding="utf-8")) == ["oops"]
@@ -865,19 +932,62 @@ def test_quarantines_structurally_invalid_ledger_file(temp_dir: Path) -> None:
 def test_quarantines_ledger_file_with_invalid_event_entry(temp_dir: Path) -> None:
     """Per-event entries with invalid shapes should be quarantined before rewrite."""
     responses_file = temp_dir / "bad_entry_responded.json"
-    responses_file.write_text(json.dumps({"$event": []}), encoding="utf-8")
+    invalid_payload = {
+        "schema_version": TurnRecordCodec.schema_version(),
+        "records": {"$event": []},
+    }
+    responses_file.write_text(json.dumps(invalid_payload), encoding="utf-8")
 
     tracker = HandledTurnLedger("bad_entry", base_path=temp_dir)
+    tracker.warm()
 
     assert tracker._responses == {}
-    assert json.loads(responses_file.read_text(encoding="utf-8")) == {}
+    assert _read_persisted_records(tracker) == {}
     quarantined_files = list(temp_dir.glob("bad_entry_responded.json.corrupt-*"))
     assert len(quarantined_files) == 1
-    assert json.loads(quarantined_files[0].read_text(encoding="utf-8")) == {"$event": []}
+    assert json.loads(quarantined_files[0].read_text(encoding="utf-8")) == invalid_payload
 
 
-def test_shared_reads_fail_soft_on_corrupt_file_without_quarantining(temp_dir: Path) -> None:
-    """Shared-lock reads should return empty state instead of trying to repair the ledger."""
+def test_partial_invalid_coalesced_ledger_rehydrates_and_persists_valid_group(temp_dir: Path) -> None:
+    """A surviving coalesced row should restore its invalid sibling before the next write."""
+    responses_file = temp_dir / "partial_bad_entry_responded.json"
+    valid_record = TurnRecord.create(
+        ["$valid", "$invalid"],
+        response_event_id="$valid-response",
+        timestamp=time.time(),
+    )
+    responses_file.write_text(
+        json.dumps(
+            {
+                "schema_version": TurnRecordCodec.schema_version(),
+                "records": {
+                    "$valid": TurnRecordCodec.to_ledger_record(valid_record),
+                    "$invalid": [],
+                },
+            },
+        ),
+        encoding="utf-8",
+    )
+    tracker = HandledTurnLedger("partial_bad_entry", base_path=temp_dir)
+
+    assert tracker.has_responded("$valid")
+    assert tracker.has_responded("$invalid")
+    _record_handled_turn(tracker, ["$new"], response_event_id="$new-response")
+    tracker.flush()
+
+    reloaded = _reload_ledger("partial_bad_entry", temp_dir)
+    reloaded.warm()
+    assert reloaded.has_responded("$valid")
+    assert reloaded.has_responded("$invalid")
+    assert reloaded.has_responded("$new")
+    assert _get_response_event_id(reloaded, "$valid") == "$valid-response"
+    assert _get_response_event_id(reloaded, "$invalid") == "$valid-response"
+    assert _get_response_event_id(reloaded, "$new") == "$new-response"
+    assert not list(temp_dir.glob("partial_bad_entry_responded.json.corrupt-*"))
+
+
+def test_concurrent_reads_fail_soft_on_corrupt_file(temp_dir: Path) -> None:
+    """Concurrent reads over a corrupt file should fail soft from shared memory state."""
     tracker_a = HandledTurnLedger("bad_race", base_path=temp_dir)
     tracker_b = HandledTurnLedger("bad_race", base_path=temp_dir)
     tracker_a._responses_file.write_text("{not valid json", encoding="utf-8")
@@ -910,7 +1020,7 @@ def test_invalid_agent_name_rejected(temp_dir: Path) -> None:
         HandledTurnLedger("../escape", base_path=temp_dir)
 
 
-def test_record_outcome_overwrites_previous_response_id(temp_dir: Path) -> None:
+def test_record_outcome_overwrites_previous_response_event_id(temp_dir: Path) -> None:
     """A later outcome write should replace the stored response event ID."""
     tracker = HandledTurnLedger("test_replace_response", base_path=temp_dir)
 
@@ -925,3 +1035,72 @@ def test_get_turn_record_returns_none_for_unknown_source(temp_dir: Path) -> None
     tracker = HandledTurnLedger("test_missing", base_path=temp_dir)
 
     assert tracker.get_turn_record("$missing") is None
+
+
+def test_construction_touches_no_filesystem(temp_dir: Path) -> None:
+    """Binding a ledger must stay free of filesystem access so bot init never stalls the loop."""
+    missing_parent = temp_dir / "does-not-exist" / "tracking"
+
+    tracker = HandledTurnLedger("test_lazy_init", base_path=missing_parent)
+
+    assert not missing_parent.exists()
+    assert tracker._responses == {}
+
+
+@pytest.mark.asyncio
+async def test_warm_on_slow_filesystem_does_not_block_event_loop(
+    temp_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """warm() must run its advisory-lock load off the loop so heartbeats keep ticking."""
+    gate = threading.Event()
+    real_lock = handled_turns_module.advisory_file_lock
+
+    @contextmanager
+    def gated_lock(lock_path: Path, *, exclusive: bool = True) -> object:
+        gate.wait()
+        with real_lock(lock_path, exclusive=exclusive):
+            yield
+
+    monkeypatch.setattr(handled_turns_module, "advisory_file_lock", gated_lock)
+    tracker = HandledTurnLedger("test_slow_warm", base_path=temp_dir)
+    warm_task = asyncio.create_task(asyncio.to_thread(tracker.warm))
+
+    # The warm thread is parked on the gated lock; the loop must stay live.
+    heartbeats = 0
+    while heartbeats < 50:
+        await asyncio.sleep(0)
+        heartbeats += 1
+    assert not warm_task.done()
+
+    gate.set()
+    await warm_task
+    assert tracker._responses == {}
+
+
+def test_record_returns_before_disk_persist_completes(temp_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Recording must apply in memory and return while the disk merge is still blocked."""
+    tracker = HandledTurnLedger("test_async_persist", base_path=temp_dir)
+    tracker.warm()
+
+    gate = threading.Event()
+    real_lock = handled_turns_module.advisory_file_lock
+
+    @contextmanager
+    def gated_lock(lock_path: Path, *, exclusive: bool = True) -> object:
+        gate.wait()
+        with real_lock(lock_path, exclusive=exclusive):
+            yield
+
+    monkeypatch.setattr(handled_turns_module, "advisory_file_lock", gated_lock)
+
+    # If recording touched the (gated) file lock on the calling thread this
+    # would deadlock; returning at all proves the disk merge is write-behind.
+    _record_handled_turn(tracker, ["$event"], response_event_id="$response")
+    assert tracker.has_responded("$event")
+    assert "$event" not in _read_persisted_records(tracker)
+
+    gate.set()
+    tracker.flush()
+    persisted = _read_persisted_records(tracker)
+    assert persisted["$event"]["response_event_id"] == "$response"

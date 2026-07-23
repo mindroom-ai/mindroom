@@ -36,6 +36,14 @@ function extractService(url: string): string {
   return queryIndex === -1 ? service : service.slice(0, queryIndex);
 }
 
+function selectOpenAIOption() {
+  const option = screen
+    .getAllByRole("option")
+    .find((element) => element.textContent?.includes("OpenAI"));
+  if (!option) throw new Error("OpenAI provider option not found");
+  fireEvent.click(option);
+}
+
 describe("ModelConfig", () => {
   const mockStore = {
     config: {
@@ -425,7 +433,7 @@ describe("ModelConfig", () => {
     if (!addRow) throw new Error("add row not found");
 
     fireEvent.click(within(addRow).getAllByRole("combobox")[0]);
-    fireEvent.click(screen.getByRole("option", { name: /OpenAI OpenAI/i }));
+    selectOpenAIOption();
 
     fireEvent.change(within(addRow).getByPlaceholderText("model name"), {
       target: { value: "openai_default" },
@@ -457,7 +465,7 @@ describe("ModelConfig", () => {
     if (!addRow) throw new Error("add row not found");
 
     fireEvent.click(within(addRow).getAllByRole("combobox")[0]);
-    fireEvent.click(screen.getByRole("option", { name: /OpenAI OpenAI/i }));
+    selectOpenAIOption();
 
     fireEvent.change(within(addRow).getByPlaceholderText("model name"), {
       target: { value: "openai_compat" },
@@ -493,7 +501,7 @@ describe("ModelConfig", () => {
     if (!addRow) throw new Error("add row not found");
 
     fireEvent.click(within(addRow).getAllByRole("combobox")[0]);
-    fireEvent.click(screen.getByRole("option", { name: /OpenAI OpenAI/i }));
+    selectOpenAIOption();
 
     fireEvent.change(within(addRow).getByPlaceholderText("model name"), {
       target: { value: "openai_compat" },

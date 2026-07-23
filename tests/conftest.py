@@ -1,5 +1,6 @@
 """Test configuration and fixtures for MindRoom tests."""
 
+import asyncio
 import os
 import re
 import shutil
@@ -7,29 +8,65 @@ import subprocess
 import sys
 import time
 import uuid
-from collections.abc import AsyncGenerator, Awaitable, Callable, Generator, Iterator, Mapping, MutableMapping
+import warnings
+from collections.abc import (
+    AsyncGenerator,
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Generator,
+    Iterable,
+    Iterator,
+    Mapping,
+    MutableMapping,
+    Sequence,
+)
 from contextlib import ExitStack, contextmanager
 from dataclasses import replace
 from itertools import count
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
 import pytest_asyncio
+import structlog
 import yaml
+from agno.models.base import Model
+from agno.models.response import ModelResponse
 from aioresponses import aioresponses
+from structlog.testing import ReturnLoggerFactory
+from structlog.typing import BindableLogger, Context, Processor, WrappedLogger
 
 import mindroom.bot  # noqa: F401
+from mindroom.agent_storage import get_agent_session, get_team_session
+from mindroom.ai import ResponseTurnContext
 from mindroom.bot import AgentBot, TeamBot
 from mindroom.config.main import Config, load_config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths, safe_replace
 from mindroom.conversation_resolver import DispatchContextResult, MessageContext
 from mindroom.delivery_gateway import DeliveryGateway, EditTextRequest, FinalDeliveryRequest, SendTextRequest
+from mindroom.dispatch_source import ScheduledHistoryBudget
 from mindroom.edit_regenerator import EditRegenerator
 from mindroom.final_delivery import FinalDeliveryOutcome
-from mindroom.history import prepare_history_for_run as prepare_history_for_run_for_test
+from mindroom.history.runtime import (
+    ScopeSessionContext,
+    _resolve_history_scope,
+    finalize_history_preparation,
+    open_scope_session_context,
+    prepare_scope_history,
+    resolve_agent_preparation_inputs,
+)
+from mindroom.history.types import (
+    CompactionLifecycle,
+    HistoryScope,
+    PreparedHistoryState,
+    ResolvedHistoryExecutionPlan,
+    ResolvedHistorySettings,
+)
+from mindroom.hooks import EnrichmentItem, MessageEnvelope
+from mindroom.ingress_validation import IngressValidator
 from mindroom.interactive import InteractiveMetadata
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from mindroom.matrix.cache.thread_history_result import thread_history_result
@@ -37,21 +74,82 @@ from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
 from mindroom.matrix.client import DeliveredMatrixEvent, ResolvedVisibleMessage
 from mindroom.matrix.client_delivery import build_edit_event_content
 from mindroom.matrix.conversation_cache import ConversationCacheProtocol
+from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
+from mindroom.media_fallback import reset_model_media_capability_cache
+from mindroom.message_target import MessageTarget
+from mindroom.response_payload_preparation import (
+    DispatchPayloadInputs,
+    ResponsePayloadPreparation,
+    ResponsePayloadPreparer,
+)
 from mindroom.response_runner import PostLockRequestPreparationError, ResponseRequest, ResponseRunner
 from mindroom.runtime_support import StartupThreadPrewarmRegistry
+from mindroom.thread_utils import decide_agent_response
 from mindroom.turn_controller import TurnController, _DispatchPreparation, _ReplayGuardContext
+from mindroom.turn_origin import TurnOrigin, classify_turn_origin
 from mindroom.turn_policy import PreparedDispatch, TurnPolicy
 from mindroom.turn_store import TurnStore
 from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
+    from agno.agent import Agent
+    from agno.db.base import BaseDb
+    from agno.session.agent import AgentSession
+    from agno.session.team import TeamSession
+    from xdist.workermanage import WorkerController
+
+    from mindroom.config.models import CompactionConfig
+    from mindroom.dispatch_handoff import DispatchEvent
     from mindroom.matrix.cache import ConversationEventCache
+    from mindroom.matrix_rtc.call_manager import CallManager
+    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+
+
+_STRUCTLOG_CONFIGURE = structlog.configure
+_POSTGRES_CONTAINER_NAME_STASH_KEY = pytest.StashKey[str]()
+_POSTGRES_CONTAINER_PREFIX = "mindroom-postgres-cache-test-"
+_POSTGRES_STARTUP_TIMEOUT_SECONDS = 30
+
+
+def _configure_quiet_structlog() -> None:
+    """Keep incidental test logging cheap and silent."""
+    _STRUCTLOG_CONFIGURE(
+        processors=[],
+        context_class=dict,
+        logger_factory=ReturnLoggerFactory(),
+        wrapper_class=structlog.stdlib.BoundLogger,
+        cache_logger_on_first_use=False,
+    )
+
+
+def _configure_uncached_structlog(
+    processors: Iterable[Processor] | None = None,
+    wrapper_class: type[BindableLogger] | None = None,
+    context_class: type[Context] | None = None,
+    logger_factory: Callable[..., WrappedLogger] | None = None,
+    cache_logger_on_first_use: bool | None = None,
+) -> None:
+    """Prevent logging tests from leaving cached production renderers behind."""
+    # Cached proxies outlive one test, so the suite intentionally overrides this request.
+    _ = cache_logger_on_first_use
+    _STRUCTLOG_CONFIGURE(
+        processors=processors,
+        wrapper_class=wrapper_class,
+        context_class=context_class,
+        logger_factory=logger_factory,
+        cache_logger_on_first_use=False,
+    )
+
+
+_configure_quiet_structlog()
+
 
 __all__ = [
     "TEST_ACCESS_TOKEN",
     "TEST_PASSWORD",
     "FakeCredentialsManager",
+    "agent_response_should_respond",
     "aioresponse",
     "bind_mock_config_cache",
     "bind_runtime_paths",
@@ -64,6 +162,7 @@ __all__ = [
     "drain_coalescing",
     "event_cache",
     "event_cache_factory",
+    "install_call_manager_mock",
     "install_edit_message_mock",
     "install_generate_response_mock",
     "install_runtime_cache_support",
@@ -74,11 +173,13 @@ __all__ = [
     "make_event_cache_write_coordinator_mock",
     "make_matrix_client_mock",
     "make_visible_message",
+    "message_origin",
     "normalize_console_output",
     "orchestrator_runtime_paths",
     "patch_response_runner_module",
     "postgres_event_cache_url",
     "prepare_history_for_run_for_test",
+    "prepare_payload_via_seam",
     "prepared_dispatch_result",
     "replace_delivery_gateway_deps",
     "replace_edit_regenerator_deps",
@@ -86,8 +187,8 @@ __all__ = [
     "replace_turn_controller_deps",
     "replace_turn_policy_deps",
     "replace_turn_store_deps",
+    "request_envelope",
     "requires_linux",
-    "resolve_response_thread_root_for_test",
     "runtime_paths_for",
     "sync_bot_runtime_state",
     "test_runtime_paths",
@@ -104,6 +205,97 @@ RuntimeBot = AgentBot | TeamBot
 TestFunction = Callable[..., object]
 
 
+async def prepare_history_for_run_for_test(
+    *,
+    agent: "Agent",
+    agent_name: str,
+    full_prompt: str,
+    session_id: str | None,
+    runtime_paths: RuntimePaths,
+    config: Config,
+    execution_identity: "ToolExecutionIdentity | None",
+    storage: "BaseDb | None" = None,
+    session: "AgentSession | TeamSession | None" = None,
+    history_settings: ResolvedHistorySettings | None = None,
+    compaction_config: "CompactionConfig | None" = None,
+    has_authored_compaction_config: bool | None = None,
+    active_model_name: str | None = None,
+    active_context_window: int | None = None,
+    static_prompt_tokens: int | None = None,
+    available_history_budget: int | None = None,
+    scope: HistoryScope | None = None,
+    execution_plan: ResolvedHistoryExecutionPlan | None = None,
+    compaction_lifecycle: CompactionLifecycle | None = None,
+) -> PreparedHistoryState:
+    """Compose the production history-preparation seams for one test run."""
+    resolved_scope = scope or _resolve_history_scope(agent)
+    resolved_inputs = resolve_agent_preparation_inputs(
+        agent=agent,
+        agent_name=agent_name,
+        full_prompt=full_prompt,
+        config=config,
+        history_settings=history_settings,
+        compaction_config=compaction_config,
+        has_authored_compaction_config=has_authored_compaction_config,
+        active_model_name=active_model_name,
+        active_context_window=active_context_window,
+        static_prompt_tokens=static_prompt_tokens,
+        execution_plan=execution_plan,
+    )
+    if available_history_budget is not None:
+        # prepare_scope_history reads its trigger/hard budgets from the execution
+        # plan, so express the test budget override through the plan itself.
+        resolved_inputs = replace(
+            resolved_inputs,
+            execution_plan=replace(
+                resolved_inputs.execution_plan,
+                replay_budget_tokens=available_history_budget,
+                hard_replay_budget_tokens=available_history_budget,
+            ),
+        )
+    scope_history_kwargs = {
+        "agent": agent,
+        "agent_name": agent_name,
+        "resolved_inputs": resolved_inputs,
+        "runtime_paths": runtime_paths,
+        "config": config,
+        "scope": resolved_scope,
+        "compaction_lifecycle": compaction_lifecycle,
+    }
+    if storage is not None and resolved_scope is not None and session_id is not None:
+        persisted_session = session
+        if persisted_session is None:
+            persisted_session = (
+                get_team_session(storage, session_id)
+                if resolved_scope.kind == "team"
+                else get_agent_session(storage, session_id)
+            )
+        scope_context = ScopeSessionContext(
+            scope=resolved_scope,
+            storage=storage,
+            session=persisted_session,
+            session_id=session_id,
+        )
+        prepared_scope_history = await prepare_scope_history(scope_context=scope_context, **scope_history_kwargs)
+    else:
+        with open_scope_session_context(
+            agent=agent,
+            agent_name=agent_name,
+            session_id=session_id,
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=execution_identity,
+            scope=resolved_scope,
+        ) as scope_context:
+            prepared_scope_history = await prepare_scope_history(scope_context=scope_context, **scope_history_kwargs)
+    return finalize_history_preparation(
+        prepared_scope_history=prepared_scope_history,
+        config=config,
+        static_prompt_tokens=static_prompt_tokens,
+        available_history_budget=available_history_budget,
+    )
+
+
 def dispatch_context_result(context: MessageContext) -> DispatchContextResult:
     """Wrap a stable message context in the dispatch extraction result shape."""
     return DispatchContextResult(context=context, thread_context=None)
@@ -118,6 +310,86 @@ def prepared_dispatch_result(dispatch: PreparedDispatch) -> _DispatchPreparation
             degraded=is_thread_history_degraded(dispatch.context.replay_guard_history),
             thread_id=dispatch.target.resolved_thread_id,
         ),
+    )
+
+
+def agent_response_should_respond(
+    agent_name: str,
+    am_i_mentioned: bool,
+    is_thread: bool,
+    room: nio.MatrixRoom,
+    thread_history: Sequence[ResolvedVisibleMessage],
+    config: Config,
+    runtime_paths: RuntimePaths,
+    mentioned_agents: list[MatrixID] | None = None,
+    has_non_agent_mentions: bool = False,
+    *,
+    sender_id: str,
+    available_responders_in_room: list[MatrixID] | None = None,
+    agents_in_thread: Sequence[MatrixID] | None = None,
+) -> bool:
+    """Return the boolean projection of the agent response decision for tests."""
+    return decide_agent_response(
+        agent_name,
+        am_i_mentioned,
+        is_thread,
+        room,
+        thread_history,
+        config,
+        runtime_paths,
+        mentioned_agents,
+        has_non_agent_mentions,
+        sender_id=sender_id,
+        available_responders_in_room=available_responders_in_room,
+        agents_in_thread=agents_in_thread,
+    ).should_respond
+
+
+def message_origin(
+    *,
+    sender_id: str = "@user:localhost",
+    requester_id: str | None = None,
+    sender_entity_name: str | None = None,
+    requester_entity_name: str | None = None,
+    source_kind: str = "message",
+    original_sender: str | None = None,
+    trusted_user_relay: bool = False,
+) -> TurnOrigin:
+    """Build canonical origin metadata for manually constructed test envelopes."""
+    return classify_turn_origin(
+        transport_sender_id=sender_id,
+        requester_id=requester_id or sender_id,
+        sender_entity_name=sender_entity_name,
+        requester_entity_name=requester_entity_name,
+        source_kind=source_kind,
+        original_sender=original_sender,
+        trusted_user_relay=trusted_user_relay,
+    )
+
+
+def request_envelope(
+    *,
+    room_id: str = "!test:localhost",
+    reply_to_event_id: str = "$event",
+    thread_id: str | None = None,
+    prompt: str = "Hello",
+    user_id: str | None = "@user:localhost",
+    target: MessageTarget | None = None,
+    agent_name: str = "test_agent",
+    source_kind: str = "message",
+    attachment_ids: tuple[str, ...] = (),
+) -> MessageEnvelope:
+    """Build a canonical response envelope for direct ResponseRequest tests."""
+    resolved_user_id = user_id or "@user:localhost"
+    resolved_target = target or MessageTarget.resolve(room_id, thread_id, reply_to_event_id)
+    return MessageEnvelope(
+        source_event_id=reply_to_event_id,
+        target=resolved_target,
+        body=prompt,
+        attachment_ids=attachment_ids,
+        mentioned_agents=(),
+        agent_name=agent_name,
+        origin=message_origin(sender_id=resolved_user_id, requester_id=resolved_user_id, source_kind=source_kind),
     )
 
 
@@ -138,15 +410,30 @@ def requires_linux(
 
 
 async def drain_coalescing(*bots: RuntimeBot) -> None:
-    """Run queued coalescing dispatch before asserting post-dispatch effects."""
+    """Drain gate batches and detached responses until both are quiescent.
+
+    A detached response settling during the runner drain can release its
+    lifecycle lock and flush a busy-conversation backlog into the gate, so a
+    single gate-then-runner pass is not a reliable barrier.
+    """
     for bot in bots:
-        await bot._coalescing_gate.drain_all()
+        runner = unwrap_extracted_collaborator(bot._response_runner)
+        while True:
+            # Concurrently: the gate drain may hold a busy conversation's
+            # backlog until its detached response goes idle, which only the
+            # runner drain settles.
+            await asyncio.gather(
+                bot._coalescing_gate.drain_all(),
+                runner.drain_inbox_responses(),
+            )
+            if not runner._inbox_response_tasks and not bot._coalescing_gate._gates:
+                break
 
 
 def _wait_for_postgres_container(database_url: str) -> None:
     import psycopg  # noqa: PLC0415
 
-    deadline = time.monotonic() + 30
+    deadline = time.monotonic() + _POSTGRES_STARTUP_TIMEOUT_SECONDS
     last_error: Exception | None = None
     while time.monotonic() < deadline:
         try:
@@ -159,21 +446,84 @@ def _wait_for_postgres_container(database_url: str) -> None:
     raise RuntimeError(msg) from last_error
 
 
-def _postgres_url_from_container_port(docker: str, container_name: str) -> str:
+def _create_postgres_worker_database(database_url: str, worker_id: str) -> str:
+    """Create an isolated database for one worker on the shared Postgres server."""
+    import psycopg  # noqa: PLC0415
+    from psycopg import sql  # noqa: PLC0415
+
+    database_name = f"mindroom_{worker_id}"
+    with psycopg.connect(database_url, autocommit=True) as db:
+        db.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(database_name)))
+    return f"{database_url.rsplit('/', 1)[0]}/{database_name}"
+
+
+def _wait_for_postgres_container_port(docker: str, container_name: str) -> str:
+    """Wait for Docker to publish a shared container's random host port."""
+    deadline = time.monotonic() + _POSTGRES_STARTUP_TIMEOUT_SECONDS
+    last_error = ""
+    while time.monotonic() < deadline:
+        result = subprocess.run(
+            [docker, "port", container_name, "5432/tcp"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            mapped_port = result.stdout.strip().splitlines()[-1]
+            _, port = mapped_port.rsplit(":", 1)
+            return f"postgresql://cache:test@127.0.0.1:{port}/mindroom"
+        last_error = result.stderr.strip()
+        time.sleep(0.05)
+    msg = f"Postgres test container did not publish a port: {last_error}"
+    raise RuntimeError(msg)
+
+
+def _postgres_container_name(run_id: str) -> str:
+    """Return the deterministic disposable Postgres container name for one test run."""
+    return f"{_POSTGRES_CONTAINER_PREFIX}{run_id}"
+
+
+def _remove_postgres_container(docker: str, container_name: str) -> None:
+    """Remove one disposable Postgres container if it exists."""
     result = subprocess.run(
-        [docker, "port", container_name, "5432/tcp"],
-        check=True,
+        [docker, "rm", "-f", container_name],
+        check=False,
         capture_output=True,
         text=True,
     )
-    mapped_port = result.stdout.strip().splitlines()[-1]
-    host, port = mapped_port.rsplit(":", 1)
-    return f"postgresql://cache:test@{host.removeprefix('[').removesuffix(']')}:{port}/mindroom"
+    if result.returncode == 0 or "No such container" in result.stderr:
+        return
+    msg = f"Could not remove Postgres test container {container_name}: {result.stderr.strip()}"
+    raise RuntimeError(msg)
+
+
+def pytest_configure_node(node: "WorkerController") -> None:
+    """Remember the shared Postgres container name in the xdist controller."""
+    node.config.stash[_POSTGRES_CONTAINER_NAME_STASH_KEY] = _postgres_container_name(
+        node.workerinput["testrunuid"],
+    )
+
+
+def pytest_sessionfinish(session: pytest.Session) -> None:
+    """Remove the shared Postgres container after every xdist worker has finished."""
+    if hasattr(session.config, "workerinput"):
+        return
+    container_name = session.config.stash.get(_POSTGRES_CONTAINER_NAME_STASH_KEY, None)
+    docker = shutil.which("docker")
+    if container_name is not None and docker is not None:
+        try:
+            _remove_postgres_container(docker, container_name)
+        except RuntimeError as exc:
+            warnings.warn(pytest.PytestWarning(str(exc)), stacklevel=1)
+            session.exitstatus = pytest.ExitCode.TESTS_FAILED
 
 
 @pytest.fixture(scope="session")
-def postgres_event_cache_url() -> Iterator[str]:
-    """Start a disposable Postgres server when Docker is available."""
+def postgres_event_cache_url(
+    worker_id: str,
+    testrun_uid: str,
+) -> Iterator[str]:
+    """Start or reuse one disposable Postgres server for the current test run."""
     docker = shutil.which("docker")
     if docker is None:
         pytest.skip("Docker is required for Postgres event-cache integration tests")
@@ -187,7 +537,9 @@ def postgres_event_cache_url() -> Iterator[str]:
     if info_result.returncode != 0:
         pytest.skip("Docker daemon is unavailable for Postgres event-cache integration tests")
 
-    container_name = f"mindroom-postgres-cache-test-{uuid.uuid4().hex}"
+    shared_across_workers = worker_id != "master"
+    run_id = testrun_uid if shared_across_workers else uuid.uuid4().hex
+    container_name = _postgres_container_name(run_id)
     run_result = subprocess.run(
         [
             docker,
@@ -196,6 +548,8 @@ def postgres_event_cache_url() -> Iterator[str]:
             "-d",
             "--name",
             container_name,
+            "--label",
+            f"mindroom.pytest.run={run_id}",
             "-e",
             "POSTGRES_USER=cache",
             "-e",
@@ -211,19 +565,27 @@ def postgres_event_cache_url() -> Iterator[str]:
         text=True,
     )
     if run_result.returncode != 0:
-        pytest.skip(f"Could not start Postgres test container: {run_result.stderr.strip()}")
-
-    try:
-        database_url = _postgres_url_from_container_port(docker, container_name)
-        _wait_for_postgres_container(database_url)
-        yield database_url
-    finally:
-        subprocess.run(
-            [docker, "rm", "-f", container_name],
+        inspect_result = subprocess.run(
+            [docker, "inspect", "--format", "{{.State.Status}}", container_name],
             check=False,
             capture_output=True,
             text=True,
         )
+        if not shared_across_workers or inspect_result.returncode != 0:
+            pytest.skip(f"Could not start Postgres test container: {run_result.stderr.strip()}")
+        if inspect_result.stdout.strip() in {"dead", "exited"}:
+            msg = f"Shared Postgres test container is {inspect_result.stdout.strip()}"
+            raise RuntimeError(msg)
+
+    try:
+        database_url = _wait_for_postgres_container_port(docker, container_name)
+        _wait_for_postgres_container(database_url)
+        if shared_across_workers:
+            database_url = _create_postgres_worker_database(database_url, worker_id)
+        yield database_url
+    finally:
+        if not shared_across_workers:
+            _remove_postgres_container(docker, container_name)
 
 
 @pytest.fixture(params=("sqlite", "postgres"), ids=("sqlite", "postgres"))
@@ -416,6 +778,8 @@ def delivered_matrix_side_effect(event_id: str) -> Callable[..., Awaitable[Deliv
 def make_event_cache_mock() -> AsyncMock:
     """Return an async mock shaped like the event cache protocol."""
     event_cache = AsyncMock(spec=SqliteEventCache)
+    event_cache.principal_id = "@mindroom_test:localhost"
+    event_cache.cache_generation = "test-cache-generation"
     event_cache.durable_writes_available = True
     event_cache.get_event.return_value = None
     event_cache.get_latest_edit.return_value = None
@@ -428,9 +792,20 @@ def make_event_cache_mock() -> AsyncMock:
     event_cache.get_latest_agent_message_snapshot.return_value = None
     event_cache.pending_durable_write_room_ids.return_value = ()
     event_cache.runtime_diagnostics.return_value = {"cache_backend": "mock"}
+    departure_epochs: dict[str, int] = {}
+
+    def mark_room_departed(room_id: str) -> int:
+        epoch = departure_epochs.get(room_id, 0) + 1
+        departure_epochs[room_id] = epoch
+        return epoch
+
+    event_cache.mark_room_departed.side_effect = mark_room_departed
+    event_cache.room_departure_epoch.side_effect = lambda room_id: departure_epochs.get(room_id, 0)
+    event_cache.room_membership_epoch.return_value = 0
     event_cache.flush_pending_durable_writes.return_value = None
     event_cache.append_event.return_value = True
     event_cache.redact_event.return_value = False
+    event_cache.store_mxc_text.return_value = True
     return event_cache
 
 
@@ -482,6 +857,11 @@ def install_runtime_cache_support(bot: RuntimeBot) -> RuntimeBot:
     return bot
 
 
+def install_call_manager_mock(bot: RuntimeBot, call_manager: object | None) -> None:
+    """Install a call-manager fake through the shared test seam."""
+    bot._call_manager = cast("CallManager | None", call_manager)
+
+
 def normalize_console_output(text: str) -> str:
     """Collapse wrapped console output for stable substring assertions."""
     return " ".join(_SOFT_WRAP_RE.sub("", _ANSI_RE.sub("", text)).split())
@@ -509,6 +889,37 @@ class _ExtractedCollaboratorProxy[CollaboratorT]:
             return
         msg = f"{type(self).__name__!s} has no attribute {name!r}"
         raise AttributeError(msg)
+
+
+class FakeModel(Model):
+    """Minimal model returning one canned response, for deterministic agent tests."""
+
+    def invoke(self, *_args: object, **_kwargs: object) -> ModelResponse:
+        """Return one successful fake response."""
+        return ModelResponse(content="ok")
+
+    async def ainvoke(self, *_args: object, **_kwargs: object) -> ModelResponse:
+        """Return one successful fake async response."""
+        return ModelResponse(content="ok")
+
+    def invoke_stream(self, *_args: object, **_kwargs: object) -> Iterator[ModelResponse]:
+        """Yield one successful fake streaming response."""
+        yield ModelResponse(content="ok")
+
+    async def ainvoke_stream(self, *_args: object, **_kwargs: object) -> AsyncIterator[ModelResponse]:
+        """Yield one successful fake async streaming response."""
+        yield ModelResponse(content="ok")
+
+    def _parse_provider_response(self, response: ModelResponse, *_args: object, **_kwargs: object) -> ModelResponse:
+        return response
+
+    def _parse_provider_response_delta(
+        self,
+        response: ModelResponse,
+        *_args: object,
+        **_kwargs: object,
+    ) -> ModelResponse:
+        return response
 
 
 class FakeCredentialsManager:
@@ -641,8 +1052,6 @@ def bind_runtime_paths(
     authored_coalescing = config.defaults.coalescing
     if "debounce_ms" not in authored_coalescing.model_fields_set:
         bound.defaults.coalescing.debounce_ms = 0
-    if "upload_grace_ms" not in authored_coalescing.model_fields_set:
-        bound.defaults.coalescing.upload_grace_ms = 0
     _TEST_RUNTIME_PATHS_BY_CONFIG_ID[id(bound)] = runtime_paths
     return bound
 
@@ -685,6 +1094,40 @@ def create_mock_room(
     return room
 
 
+def make_turn_context(
+    entity_label: str = "test_agent",
+    *,
+    session_id: str | None = "test_session",
+    run_id: str | None = None,
+    correlation_id: str = "corr-test",
+    reply_to_event_id: str | None = None,
+    room_id: str | None = None,
+    thread_id: str | None = None,
+    requester_id: str | None = None,
+    matrix_run_metadata: dict[str, Any] | None = None,
+    active_event_ids: frozenset[str] = frozenset(),
+    transient_enrichment_items: tuple[EnrichmentItem, ...] = (),
+    system_enrichment_items: tuple[EnrichmentItem, ...] = (),
+    scheduled_history_budget: ScheduledHistoryBudget | None = None,
+) -> ResponseTurnContext:
+    """Build one response-turn context with test defaults."""
+    return ResponseTurnContext(
+        entity_label=entity_label,
+        session_id=session_id,
+        run_id=run_id,
+        correlation_id=correlation_id,
+        reply_to_event_id=reply_to_event_id,
+        room_id=room_id,
+        thread_id=thread_id,
+        requester_id=requester_id,
+        matrix_run_metadata=matrix_run_metadata,
+        active_event_ids=active_event_ids,
+        transient_enrichment_items=transient_enrichment_items,
+        system_enrichment_items=system_enrichment_items,
+        scheduled_history_budget=scheduled_history_budget,
+    )
+
+
 def make_visible_message(
     *,
     sender: str = "@user:localhost",
@@ -706,20 +1149,6 @@ def make_visible_message(
         content=resolved_content or None,
         thread_id=thread_id,
     )
-
-
-def resolve_response_thread_root_for_test(
-    thread_id: str | None,
-    _reply_to_event_id: str | None,
-    *,
-    room_id: str,
-    response_envelope: object | None = None,
-) -> str | None:
-    """Resolve thread roots like the bot seam helpers used by response tests."""
-    del room_id
-    if response_envelope is not None:
-        return response_envelope.target.resolved_thread_id
-    return thread_id
 
 
 def unwrap_extracted_collaborator[T](collaborator: T) -> T:
@@ -752,7 +1181,48 @@ def wrap_extracted_collaborators(bot: RuntimeBot, *names: str) -> RuntimeBot:
         if isinstance(collaborator, MagicMock | _ExtractedCollaboratorProxy):
             continue
         setattr(bot, name, _ExtractedCollaboratorProxy(collaborator))
+    _sync_request_payload_preparer(bot)
     return bot
+
+
+def _sync_request_payload_preparer(bot: RuntimeBot) -> None:
+    """Repoint the response runner's payload preparer at the current collaborators.
+
+    The preparer captures the normalizer and ingress hook runner; tests swap
+    those for proxies after construction, so rebuild the preparer to track them.
+    """
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    preparer = ResponsePayloadPreparer(
+        normalizer=bot._inbound_turn_normalizer,
+        ingress_hook_runner=bot._ingress_hook_runner,
+        agent_name=runner.deps.agent_name,
+        logger=runner.deps.logger,
+    )
+    bot._request_payload_preparer = preparer
+    runner.deps = replace(runner.deps, request_preparer=preparer)
+
+
+async def prepare_payload_via_seam(bot: RuntimeBot, execute_args: tuple[object, ...]) -> None:
+    """Drive the execution-side payload preparation from captured dispatch args."""
+    event = cast("DispatchEvent", execute_args[1])
+    dispatch = cast("PreparedDispatch", execute_args[2])
+    payload_inputs = cast("DispatchPayloadInputs", execute_args[4])
+    await bot._request_payload_preparer.prepare(
+        ResponseRequest(
+            thread_history=dispatch.context.thread_history,
+            prompt=event.body,
+            response_envelope=dispatch.envelope,
+            payload_preparation=ResponsePayloadPreparation(
+                dispatch=dispatch,
+                prompt=event.body,
+                action_kind="individual",
+                payload_inputs=payload_inputs,
+                target_member_names=None,
+                dispatch_started_at=0.0,
+                context_ready_monotonic=0.0,
+            ),
+        ),
+    )
 
 
 def sync_bot_runtime_state(bot: RuntimeBot) -> None:
@@ -877,6 +1347,15 @@ def replace_turn_controller_deps(bot: RuntimeBot, **changes: object) -> TurnCont
         rebuilt_changes["turn_store"] = bot._turn_store
     if "edit_regenerator" not in rebuilt_changes:
         rebuilt_changes["edit_regenerator"] = bot._edit_regenerator
+    if "ingress" not in rebuilt_changes:
+        rebuilt_changes["ingress"] = IngressValidator(
+            replace(
+                bot._ingress_validator.deps,
+                turn_store=rebuilt_changes["turn_store"],
+                turn_policy=rebuilt_changes["turn_policy"],
+            ),
+        )
+    bot._ingress_validator = rebuilt_changes["ingress"]
     rebuilt = TurnController(replace(controller.deps, **rebuilt_changes))
     bot._turn_controller = rebuilt
     edit_changes = {
@@ -902,37 +1381,27 @@ def patch_response_runner_module(**changes: object) -> Generator[None, None, Non
 
 
 def install_send_response_mock(bot: RuntimeBot, send_response: AsyncMock) -> None:
-    """Route visible delivery through one legacy-style send-response mock."""
+    """Route visible delivery through one target-explicit send-response mock."""
     wrap_extracted_collaborators(bot, "_delivery_gateway")
 
     async def _send_text(request: SendTextRequest) -> str | None:
         return await send_response(
-            request.target.room_id,
-            request.target.reply_to_event_id,
-            request.response_text,
-            request.target.resolved_thread_id,
-            reply_to_event=None,
+            target=request.target,
+            response_text=request.response_text,
             skip_mentions=request.skip_mentions,
             tool_trace=request.tool_trace,
             extra_content=request.extra_content,
-            thread_mode_override=None,
-            target=request.target,
         )
 
     bot._delivery_gateway.send_text = AsyncMock(side_effect=_send_text)
 
     async def _deliver_final(request: FinalDeliveryRequest) -> FinalDeliveryOutcome:
         event_id = await send_response(
-            request.target.room_id,
-            request.target.reply_to_event_id,
-            request.response_text,
-            request.target.resolved_thread_id,
-            reply_to_event=None,
+            target=request.target,
+            response_text=request.response_text,
             skip_mentions=request.skip_mentions,
             tool_trace=request.tool_trace,
             extra_content=request.extra_content,
-            thread_mode_override=None,
-            target=request.target,
         )
         delivery_kind = "edited" if request.existing_event_id is not None else "sent"
         if event_id is None:
@@ -964,7 +1433,7 @@ def install_send_response_mock(bot: RuntimeBot, send_response: AsyncMock) -> Non
 
 
 def install_generate_response_mock(bot: RuntimeBot, generate_response: AsyncMock) -> None:
-    """Route response execution through one legacy-style generate-response mock."""
+    """Route response execution through one envelope-explicit generate-response mock."""
     wrap_extracted_collaborators(bot, "_response_runner")
 
     def _resolved_event_id_from_test_result(
@@ -975,17 +1444,14 @@ def install_generate_response_mock(bot: RuntimeBot, generate_response: AsyncMock
         return result
 
     async def _generate(request: ResponseRequest) -> str | None:
-        if request.prepare_after_lock is not None:
+        if request.payload_preparation is not None:
             try:
-                request = await request.prepare_after_lock(request)
+                request = await bot._request_payload_preparer.prepare(request)
             except Exception as exc:
                 raise PostLockRequestPreparationError from exc
         attachment_ids = list(request.attachment_ids) if request.attachment_ids is not None else None
         result = await generate_response(
-            room_id=request.room_id,
             prompt=request.prompt,
-            reply_to_event_id=request.reply_to_event_id,
-            thread_id=request.thread_id,
             thread_history=request.thread_history,
             existing_event_id=request.existing_event_id,
             existing_event_is_placeholder=request.existing_event_is_placeholder,
@@ -993,10 +1459,10 @@ def install_generate_response_mock(bot: RuntimeBot, generate_response: AsyncMock
             media=request.media,
             attachment_ids=attachment_ids,
             model_prompt=request.model_prompt,
+            transient_enrichment_items=request.transient_enrichment_items,
             system_enrichment_items=request.system_enrichment_items,
             response_envelope=request.response_envelope,
             correlation_id=request.correlation_id,
-            target=request.target,
             matrix_run_metadata=request.matrix_run_metadata,
         )
         return _resolved_event_id_from_test_result(result)
@@ -1006,7 +1472,7 @@ def install_generate_response_mock(bot: RuntimeBot, generate_response: AsyncMock
 
 
 def install_edit_message_mock(bot: RuntimeBot, edit_message: AsyncMock) -> None:
-    """Route Matrix edits through one legacy-style edit-message mock."""
+    """Route Matrix edits through one argument-expanded edit-message mock."""
     wrap_extracted_collaborators(bot, "_delivery_gateway")
 
     async def _edit_text(request: EditTextRequest) -> bool:
@@ -1059,6 +1525,19 @@ async def aioresponse() -> AsyncGenerator[aioresponses, None]:
 
 
 @pytest.fixture(autouse=True)
+def _isolate_structlog_configuration(
+    monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
+) -> Generator[None, None, None]:
+    """Silence incidental logs and prevent global logging configuration leaks."""
+    _configure_quiet_structlog()
+    if request.node.path.name != "test_logging_config.py":
+        monkeypatch.setattr(structlog, "configure", _configure_uncached_structlog)
+    yield
+    _configure_quiet_structlog()
+
+
+@pytest.fixture(autouse=True)
 def _pin_matrix_homeserver(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep test runtime defaults isolated from shell-level runtime overrides.
 
@@ -1085,6 +1564,14 @@ def _reset_runtime_paths() -> Generator[None, None, None]:
 
 
 @pytest.fixture(autouse=True)
+def _reset_model_media_capabilities() -> Generator[None, None, None]:
+    """Keep process-local learned media support isolated per test."""
+    reset_model_media_capability_cache()
+    yield
+    reset_model_media_capability_cache()
+
+
+@pytest.fixture(autouse=True)
 def bypass_authorization(request: pytest.FixtureRequest) -> Generator[None, None, None]:
     """Bypass authorization checks in tests by default.
 
@@ -1099,6 +1586,6 @@ def bypass_authorization(request: pytest.FixtureRequest) -> Generator[None, None
     else:
         with (
             patch("mindroom.bot.is_authorized_sender", return_value=True),
-            patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
+            patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
         ):
             yield

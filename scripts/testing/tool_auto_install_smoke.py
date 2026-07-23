@@ -21,14 +21,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from mindroom.tool_system.catalog import TOOL_METADATA, ToolStatus, ensure_tool_registry_loaded, get_tool_by_name
 from mindroom.tool_system.dependencies import _pip_name_to_import, check_deps_installed
-from mindroom.tool_system.metadata import (
-    TOOL_METADATA,
-    TOOL_REGISTRY,
-    ToolStatus,
-    ensure_tool_registry_loaded,
-    get_tool_by_name,
-)
+from mindroom.tool_system.registry_state import TOOL_REGISTRY
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT_PATH = Path(__file__).resolve()

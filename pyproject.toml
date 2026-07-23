@@ -16,10 +16,10 @@ classifiers = [
 ]
 dynamic = [ "version" ]
 dependencies = [
-  "agno[anthropic,google,ollama,openai]==2.5.13",
+  "agno[anthropic,google,ollama,openai]==2.6.12",
   "aiohttp>=3.13.3",
   "aiosqlite>=0.20",
-  "anthropic>=0.70",
+  "anthropic>=0.77",
   "anyio>=4.10",
   "authlib>=1.6",
   "cerebras-cloud-sdk>=1.46",
@@ -30,17 +30,22 @@ dependencies = [
   "fastapi[standard]>=0.116.1",
   "filetype>=1.2",
   "google-auth>=2.40.3",
-  "google-genai",
+  # agno 2.6.12 imports the pre-2.9 google-genai streaming delta layout (google.genai.interactions.step_delta);
+  # google-genai >=2.9 removed it. Drop the cap when bumping agno to >=2.6.21 (which has a version compat shim).
+  "google-genai>=2,<2.9",
   "groq>=0.31",
   "httpx>=0.27",
   "humanize>=4.12.3",
+  "jinja2>=3.1",
   "json5>=0.13",
   "markdown-it-py>=4",
   "mcp[cli]>=1.12.4",
   "mdit-py-plugins>=0.5",
   "mem0ai>=0.1.115",
-  "mindroom-nio[e2e]>=0.25.2",
+  # Arbitrary Olm to-device encryption uses the fork's tested internal API; update only with its round-trip tests.
+  "mindroom-nio[e2e]==0.27.3",
   "openai",
+  "packaging>=24",
   "pydantic>=2",
   "pydantic-settings>=2.10.1",
   "pygments>=2.20",
@@ -50,6 +55,7 @@ dependencies = [
   "rich",
   "structlog>=24.1",
   "tenacity>=9.1.2",
+  "tiktoken>=0.12",
   "typer>=0.24",
   "uvicorn>=0.35",
   "watchfiles>=1",
@@ -57,6 +63,9 @@ dependencies = [
 [[project.authors]]
 name = "mindroom team"
 [project.optional-dependencies]
+agent_vault_access = [
+  "httpx>=0.27",
+]
 agentql = [
   "agentql",
   "playwright",
@@ -65,6 +74,7 @@ airflow = []
 apify = [
   "apify-client>=1.12.2; platform_machine!='aarch64'",
 ]
+approved_egress = []
 arxiv = [
   "arxiv",
   "pypdf",
@@ -79,6 +89,9 @@ aws_ses = [
 baidusearch = [
   "baidusearch",
   "pycountry",
+]
+aws_bedrock = [
+  "boto3>=1.40.8",
 ]
 bitbucket = [
   "requests",
@@ -101,6 +114,7 @@ cal_com = [
   "requests",
 ]
 calculator = []
+callback_manager = []
 cartesia = [
   "cartesia",
 ]
@@ -154,6 +168,8 @@ duckduckgo = [
   "ddgs",
 ]
 dynamic_tools = []
+dynamic_workflow = []
+report_publishing = []
 e2b = [
   "e2b-code-interpreter",
 ]
@@ -164,11 +180,13 @@ email = []
 exa = [
   "exa-py",
 ]
+external_trigger_manager = []
 fal = [
   "fal-client",
 ]
 file = []
 file_generation = [
+  "python-docx>=1.2",
   "reportlab",
 ]
 financial_datasets_api = [
@@ -207,9 +225,18 @@ google_drive = [
   "google-auth-httplib2>=0.2",
   "google-auth-oauthlib>=1.2.2",
 ]
+google_docs = [
+  "google-api-python-client>=2.178",
+  "google-auth>=2.40.3",
+  "google-auth-httplib2>=0.2",
+  "google-auth-oauthlib>=1.2.2",
+]
 google_maps = [
   "google-maps-places",
   "googlemaps",
+]
+google_scholar = [
+  "scholarly",
 ]
 google_sheets = [
   "google-api-python-client>=2.178",
@@ -245,9 +272,13 @@ lumalabs = [
   "lumaai",
 ]
 matrix_api = []
+matrix_calls = [
+  "livekit-agents[openai]>=1.6.4",
+]
 matrix-e2ee = []
 matrix_message = []
 matrix_room = []
+matrix_voice_message = []
 mem0 = [
   "mem0ai>=0.1.115",
 ]
@@ -306,7 +337,7 @@ resend = [
 ]
 scheduler = []
 scrapegraph = [
-  "scrapegraph-py<2",
+  "scrapegraph-py>=2.1",
 ]
 searxng = []
 self_config = [
@@ -350,8 +381,11 @@ tavily = [
 telegram = [
   "httpx>=0.27",
 ]
+thread_model = []
+thread_resolution = []
 thread_summary = []
 thread_tags = []
+todo = []
 todoist = [
   "todoist-api-python",
 ]
@@ -365,6 +399,7 @@ twilio = [
   "twilio",
 ]
 unsplash = []
+update_awareness = []
 visualization = [
   "matplotlib",
 ]
@@ -400,6 +435,12 @@ zep = [
 zoom = [
   "requests",
 ]
+desktop = [
+  "pillow>=10.2",
+  "pyautogui>=0.9.54",
+  "pyobjc-framework-applicationservices>=12.2.1; sys_platform=='darwin'",
+  "pyobjc-framework-cocoa>=12.2.1; sys_platform=='darwin'",
+]
 [project.scripts]
 mindroom = "mindroom.cli.main:main"
 [project.urls]
@@ -410,6 +451,7 @@ repository = "https://github.com/mindroom-ai/mindroom"
 [dependency-groups]
 dev = [
   "aioresponses>=0.7.8",
+  "markdown>=3.10.2",
   "markdown-code-runner>=2.4",
   "markdown-gfm-admonition",
   "pre-commit>=4.2",
@@ -419,7 +461,6 @@ dev = [
   "pytest-asyncio>=1.1",
   "pytest-cov>=6.2.1",
   "pytest-mock>=3.14.1",
-  "pytest-sugar>=1",
   "pytest-timeout>=2.4",
   "pytest-xdist>=3.8",
   "requests>=2.32.4",
@@ -533,12 +574,9 @@ python_files = "test_*.py"
 asyncio_mode = "auto"
 pythonpath = [ "src" ]
 addopts = """
-    -vvv
+    -p no:tach
+    -q
     -n auto
-    --cov=mindroom
-    --cov-report term
-    --cov-report html
-    --cov-report xml
     --asyncio-mode=strict
     --timeout 60
     --durations 20

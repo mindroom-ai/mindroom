@@ -28,6 +28,9 @@ authorization:
   # Default for rooms not in room_permissions
   default_room_access: false
 
+  # Optional: enable !config for global admin users
+  config_command_enabled: false
+
   # Optional: per-agent/team/router reply allowlists
   # Keys must match an agent name, team name, "router", or "*"
   # Values are canonical Matrix user IDs or glob patterns (aliases are resolved)
@@ -54,6 +57,7 @@ matrix_room_access:
   publish_to_room_directory: false # publish managed rooms to public directory
   invite_only_rooms: []            # room keys/aliases/IDs that stay restricted
   reconcile_existing_rooms: false  # migrate existing managed rooms when true
+  room_admins: []                  # Matrix user IDs granted admin power (100) in every managed room
 ```
 
 **Defaults** (when `authorization` block is omitted):
@@ -61,9 +65,14 @@ matrix_room_access:
 - `global_users: []`
 - `room_permissions: {}`
 - `default_room_access: false`
+- `config_command_enabled: false`
 - `agent_reply_permissions: {}`
 
 This means only MindRoom system users (agents, teams, router, and the configured internal user if present) can interact with agents by default.
+
+`!config` is disabled by default.
+Set `authorization.config_command_enabled: true` only for trusted single-user or admin-managed environments.
+Even when enabled, callers must be in `authorization.global_users`.
 
 `mindroom_user.username` is a one-time account-creation request used to create the internal Matrix account.
 After the account exists, keep the same configured username and only change `mindroom_user.display_name` for visible name changes.
@@ -84,6 +93,16 @@ When users authenticate through Synapse OIDC, they are regular Matrix users. To 
 3. Set `publish_to_room_directory: true` if rooms should appear in Explore/public room directory.
 
 If you keep `mode: single_user_private` (default), managed rooms remain invite-only and private in the directory.
+
+## Managed Room Admins
+
+`matrix_room_access.room_admins` lists Matrix user IDs that automatically receive room admin power (power level 100) in every managed room.
+Admin power is seeded when a managed room is created and reconciled for existing managed rooms on startup and config reload, regardless of `mode` or `reconcile_existing_rooms`.
+Existing power levels are never lowered: users already at admin level or above keep their level.
+Removing a user from `room_admins` stops future grants but does not lower admin power they already have, because the managing account cannot demote an equal-power admin in Matrix.
+Membership is not changed by this setting, so listed users become admins once they are in the room (for invites, use `authorization.global_users` or `room_permissions`).
+Admin power on the root Matrix Space is granted separately to `authorization.global_users`, so list a user in both places when they should administer both the Space and the managed rooms.
+Entries must be concrete Matrix user IDs; wildcard or placeholder entries are skipped with a warning.
 
 ### Required Service Account Permissions
 
@@ -164,6 +183,10 @@ Use `authorization.agent_reply_permissions` to restrict which users each respond
 - A `*` user entry means "allow any sender" for that specific entity.
 - If an entity is not present in the map, it has no extra reply restriction.
 - Alias mapping from `authorization.aliases` is applied before matching, so bridged IDs inherit canonical user permissions.
+- The same allowlist gates dashboard credential and OAuth management when a request targets an agent with `agent_name`.
+- Unauthorized agent-scoped credential requests return HTTP 403 before credentials are read, written, connected, or disconnected.
+- Under trusted upstream auth, MindRoom checks the resolved Matrix requester from the configured Matrix user ID header or email-to-Matrix template.
+- Under standalone API-key auth, set `MINDROOM_OWNER_USER_ID` so agent-scoped credential management resolves to the owner Matrix user instead of the generic standalone principal.
 - Internal MindRoom identities (agents, teams, router, and the internal `mindroom_user`) always bypass reply permissions — they are system participants, not end users.
 - `bot_accounts` are **not** exempt. Bridge bots listed in `bot_accounts` are still subject to reply permission checks.
 - Keys that do not match any configured agent, team, `router`, or `*` are rejected at config load time.

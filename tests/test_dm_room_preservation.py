@@ -16,7 +16,13 @@ from mindroom.matrix.room_cleanup import _cleanup_orphaned_bots_in_room, cleanup
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.tool_system.worker_routing import agent_state_root_path
-from tests.conftest import TEST_PASSWORD, bind_runtime_paths, orchestrator_runtime_paths, runtime_paths_for
+from tests.conftest import (
+    TEST_PASSWORD,
+    bind_runtime_paths,
+    install_runtime_cache_support,
+    orchestrator_runtime_paths,
+    runtime_paths_for,
+)
 
 
 def _config_with_runtime_paths(tmp_path: Path, **config_data: object) -> Config:
@@ -62,6 +68,7 @@ class TestDMPreservationDuringCleanup:
             runtime_paths=runtime_paths_for(config),
             rooms=["!regular:server", "!another:server"],
         )
+        install_runtime_cache_support(bot)
         bot.client = AsyncMock()
         bot.logger = MagicMock()
 
@@ -116,6 +123,7 @@ class TestDMPreservationDuringCleanup:
             runtime_paths=runtime_paths_for(config),
             rooms=["!configured:server"],  # Only one configured room
         )
+        install_runtime_cache_support(bot)
         bot.client = AsyncMock()
         bot.logger = MagicMock()
 
@@ -215,6 +223,102 @@ class TestDMPreservationDuringCleanup:
                 "@mindroom_orphaned:server",
                 reason="Bot no longer configured for this room",
             )
+
+    async def test_orphaned_bot_cleanup_leaves_when_orphan_is_own_account(self, tmp_path: Path) -> None:
+        """The sweeping client's own account must leave instead of kick (Matrix forbids self-kick)."""
+        client = AsyncMock()
+        client.user_id = "@mindroom_orphaned:server"
+        config = _config_with_runtime_paths(
+            tmp_path,
+            agents={
+                "configured_agent": AgentConfig(
+                    display_name="Configured Agent",
+                    role="Agent that should be in rooms",
+                ),
+            },
+        )
+        current_domain = config.get_domain(runtime_paths_for(config))
+        members = ["@user:server", "@mindroom_orphaned:server", f"@mindroom_configured_agent:{current_domain}"]
+
+        with (
+            patch(
+                "mindroom.matrix.room_cleanup.get_room_members",
+                return_value=members,
+            ),
+            patch(
+                "mindroom.matrix.room_cleanup._get_all_known_bot_user_ids",
+                return_value={"@mindroom_orphaned:server", f"@mindroom_configured_agent:{current_domain}"},
+            ),
+            patch(
+                "mindroom.matrix.room_cleanup.configured_bot_user_ids_for_room",
+                return_value={f"@mindroom_configured_agent:{current_domain}"},
+            ),
+        ):
+            client.room_leave = AsyncMock(return_value=nio.RoomLeaveResponse())
+
+            removed_bots = await _cleanup_orphaned_bots_in_room(
+                client,
+                "!regular:server",
+                config,
+                runtime_paths_for(config),
+            )
+
+            # Should leave the room itself instead of kicking its own account
+            assert removed_bots == ["@mindroom_orphaned:server"]
+            client.room_leave.assert_called_once_with("!regular:server")
+            client.room_kick.assert_not_called()
+
+    async def test_orphaned_bot_cleanup_kicks_other_orphans_before_self_leave(self, tmp_path: Path) -> None:
+        """Other orphans must be kicked before the client leaves, even when it is listed first."""
+        client = AsyncMock()
+        client.user_id = "@mindroom_self:server"
+        config = _config_with_runtime_paths(
+            tmp_path,
+            agents={
+                "configured_agent": AgentConfig(
+                    display_name="Configured Agent",
+                    role="Agent that should be in rooms",
+                ),
+            },
+        )
+        current_domain = config.get_domain(runtime_paths_for(config))
+        # The client's own account comes first so a naive sweep would leave before kicking
+        members = ["@mindroom_self:server", "@mindroom_orphaned:server"]
+
+        with (
+            patch(
+                "mindroom.matrix.room_cleanup.get_room_members",
+                return_value=members,
+            ),
+            patch(
+                "mindroom.matrix.room_cleanup._get_all_known_bot_user_ids",
+                return_value={"@mindroom_self:server", "@mindroom_orphaned:server"},
+            ),
+            patch(
+                "mindroom.matrix.room_cleanup.configured_bot_user_ids_for_room",
+                return_value={f"@mindroom_configured_agent:{current_domain}"},
+            ),
+        ):
+            client.room_kick = AsyncMock(return_value=nio.RoomKickResponse())
+            client.room_leave = AsyncMock(return_value=nio.RoomLeaveResponse())
+
+            removed_bots = await _cleanup_orphaned_bots_in_room(
+                client,
+                "!regular:server",
+                config,
+                runtime_paths_for(config),
+            )
+
+            assert removed_bots == ["@mindroom_orphaned:server", "@mindroom_self:server"]
+            client.room_kick.assert_called_once_with(
+                "!regular:server",
+                "@mindroom_orphaned:server",
+                reason="Bot no longer configured for this room",
+            )
+            client.room_leave.assert_called_once_with("!regular:server")
+            # The kick must happen while the client is still in the room
+            removal_order = [name for name, _, _ in client.mock_calls if name in ("room_kick", "room_leave")]
+            assert removal_order == ["room_kick", "room_leave"]
 
     async def test_orphaned_bot_cleanup_preserves_drifted_current_bot_username(self, tmp_path: Path) -> None:
         """Current managed bots with persisted username drift must not be treated as orphaned."""
@@ -437,11 +541,9 @@ class TestDMPreservationDuringCleanup:
         # The router bot is a member of the root space
         members = ["@mindroom_router:server"]
 
-        with (
-            patch(
-                "mindroom.matrix.room_cleanup.get_room_members",
-                return_value=members,
-            ),
+        with patch(
+            "mindroom.matrix.room_cleanup.get_room_members",
+            return_value=members,
         ):
             kicked_bots = await _cleanup_orphaned_bots_in_room(
                 client,

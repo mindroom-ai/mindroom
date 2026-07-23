@@ -8,9 +8,18 @@ from typing import TYPE_CHECKING, Any, Protocol
 from mindroom.authorization import responder_candidate_entities_for_room
 from mindroom.commands import config_confirmation
 from mindroom.commands.config_commands import handle_config_command
+from mindroom.commands.desktop_commands import (
+    DesktopCommandScope,
+    chat_pairing_desktop_error,
+    handle_desktop_command,
+)
+from mindroom.commands.encryption_commands import handle_e2ee_command, handle_encrypt_command
+from mindroom.commands.model_commands import handle_model_command
 from mindroom.commands.parsing import Command, CommandType, get_command_help, get_compact_command_entries
+from mindroom.commands.thread_mode_commands import handle_thread_mode_command
+from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.entity_resolution import configured_routable_entity_ids_for_room, entity_identity_registry
-from mindroom.handled_turns import HandledTurnState
+from mindroom.handled_turns import TurnRecord
 from mindroom.logging_config import get_logger
 from mindroom.scheduling import (
     SchedulingRuntime,
@@ -84,7 +93,7 @@ class CommandHandlerContext:
     conversation_cache: ConversationCacheProtocol
     event_cache: ConversationEventCache
     stable_target: MessageTarget
-    record_handled_turn: Callable[[HandledTurnState], None]
+    record_handled_turn: Callable[[TurnRecord], None]
     send_response: _CommandResponseSender
     reload_plugins: Callable[[], Awaitable[PluginReloadResult]] | None = None
     matrix_admin: HookMatrixAdmin | None = None
@@ -95,7 +104,7 @@ def _format_agent_description(agent_name: str, config: Config) -> str:
     """Format a concise agent description for the welcome message."""
     if agent_name in config.agents:
         agent_config = config.agents[agent_name]
-        tool_names = config.get_agent_tools(agent_name)
+        tool_names = config.resolve_entity(agent_name).available_tools
         desc_parts = []
 
         # Add role first
@@ -200,6 +209,58 @@ def _format_plugin_reload_summary(result: PluginReloadResult) -> str:
     return f"✅ Reloaded {plugin_count} {plugin_label}; cancelled {result.cancelled_task_count} {task_label}; active: {active_plugins}"
 
 
+def agent_owns_command(
+    command: Command,
+    *,
+    agent_name: str,
+    config: Config,
+    room: nio.MatrixRoom,
+    requester_user_id: str,
+) -> bool:
+    """Return whether this bot owns one command response."""
+    if agent_name == ROUTER_AGENT_NAME:
+        return True
+    if command.type is not CommandType.DESKTOP:
+        return False
+    return chat_pairing_desktop_error(config, agent_name) is None and set(room.users) == {
+        requester_user_id,
+        room.own_user_id,
+    }
+
+
+async def _desktop_agent_for_room(
+    context: CommandHandlerContext,
+    room: nio.MatrixRoom,
+    requester_user_id: str,
+) -> str | None:
+    """Resolve one eligible agent from a room containing only the requester and serving bots."""
+    if context.responder_candidates_for_room is None:
+        candidates = await responder_candidate_entities_for_room(
+            context.client,
+            room,
+            requester_user_id,
+            context.config,
+            context.runtime_paths,
+        )
+    else:
+        candidates = await context.responder_candidates_for_room(room, requester_user_id)
+    registry = entity_identity_registry(context.config, context.runtime_paths)
+    eligible: list[tuple[str, str]] = []
+    for candidate in candidates:
+        agent_name = registry.current_entity_name_for_user_id(candidate.full_id, include_router=False)
+        if agent_name is None or agent_name not in context.config.agents:
+            continue
+        if chat_pairing_desktop_error(context.config, agent_name) is None:
+            eligible.append((agent_name, candidate.full_id))
+    if len(eligible) != 1:
+        return None
+    agent_name, agent_user_id = eligible[0]
+    expected_members = {requester_user_id, room.own_user_id, agent_user_id}
+    if set(room.users) != expected_members:
+        return None
+    return agent_name
+
+
 async def handle_command(  # noqa: C901, PLR0912, PLR0915
     *,
     context: CommandHandlerContext,
@@ -245,6 +306,24 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
             candidate_entities = await context.responder_candidates_for_room(room, requester_user_id)
             response_text = _format_welcome_message(candidate_entities, context.config, context.runtime_paths)
 
+    elif command.type == CommandType.DESKTOP:
+        desktop_agent_name = await _desktop_agent_for_room(context, room, requester_user_id)
+        if desktop_agent_name is None:
+            response_text = (
+                "❌ Use `!desktop` in a private room containing only you, the serving bot, "
+                "and exactly one Desktop-enabled agent."
+            )
+        else:
+            response_text = handle_desktop_command(
+                command.args.get("args_text", ""),
+                scope=DesktopCommandScope(
+                    config=context.config,
+                    runtime_paths=context.runtime_paths,
+                    agent_name=desktop_agent_name,
+                    requester_id=requester_user_id,
+                ),
+            )
+
     elif command.type == CommandType.SCHEDULE:
         full_text = command.args["full_text"]
 
@@ -275,6 +354,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
             response_text = await cancel_all_scheduled_tasks(
                 client=context.client,
                 room_id=room.room_id,
+                matrix_admin=context.matrix_admin,
             )
         else:
             # Cancel specific task
@@ -283,6 +363,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
                 client=context.client,
                 room_id=room.room_id,
                 task_id=task_id,
+                matrix_admin=context.matrix_admin,
             )
 
     elif command.type == CommandType.EDIT_SCHEDULE:
@@ -298,61 +379,102 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
         )
 
     elif command.type == CommandType.CONFIG:
-        # Handle config command
-        args_text = command.args.get("args_text", "")
-        response_text, change_info = await handle_config_command(
-            args_text,
-            runtime_paths=context.runtime_paths,
-        )
-
-        # If we have change_info, this is a config set that needs confirmation
-        if change_info:
-            # Send the preview message
-            raw_response_event_id = await context.send_response(
-                response_text,
-                skip_mentions=True,
-            )
-            response_event_id = _normalized_response_event_id(raw_response_event_id)
-            handled_turn = HandledTurnState.from_source_event_id(
-                event.event_id,
-                response_event_id=response_event_id,
+        authorization = context.config.authorization
+        resolved_requester_user_id = authorization.resolve_alias(requester_user_id)
+        if not authorization.config_command_enabled:
+            response_text = "❌ Config command disabled."
+        elif resolved_requester_user_id not in authorization.global_users:
+            response_text = "❌ Admin only."
+        else:
+            # Handle config command
+            args_text = command.args.get("args_text", "")
+            response_text, change_info = await handle_config_command(
+                args_text,
+                runtime_paths=context.runtime_paths,
             )
 
-            if response_event_id:
-                context.record_handled_turn(handled_turn)
-                # Register the pending change
-                config_confirmation.register_pending_change(
-                    event_id=response_event_id,
-                    room_id=room.room_id,
-                    thread_id=effective_thread_id,
-                    config_path=change_info["config_path"],
-                    old_value=change_info["old_value"],
-                    new_value=change_info["new_value"],
-                    requester=requester_user_id,
+            # If we have change_info, this is a config set that needs confirmation
+            if change_info:
+                # Send the preview message
+                raw_response_event_id = await context.send_response(
+                    response_text,
+                    skip_mentions=True,
+                )
+                response_event_id = _normalized_response_event_id(raw_response_event_id)
+                handled_turn = TurnRecord.create(
+                    [event.event_id],
+                    response_event_id=response_event_id,
                 )
 
-                # Get the pending change we just registered
-                pending_change = config_confirmation.get_pending_change(response_event_id)
-
-                # Store in Matrix state for persistence
-                if pending_change:
-                    await config_confirmation.store_pending_change_in_matrix(
-                        context.client,
-                        response_event_id,
-                        pending_change,
+                if response_event_id:
+                    context.record_handled_turn(handled_turn)
+                    # Register the pending change
+                    config_confirmation.register_pending_change(
+                        event_id=response_event_id,
+                        room_id=room.room_id,
+                        thread_id=effective_thread_id,
+                        config_path=change_info["config_path"],
+                        old_value=change_info["old_value"],
+                        new_value=change_info["new_value"],
+                        requester=resolved_requester_user_id,
                     )
 
-                # Add reaction buttons
-                await config_confirmation.add_confirmation_reactions(
-                    context.client,
-                    room.room_id,
-                    response_event_id,
-                    config=context.config,
-                )
+                    # Get the pending change we just registered
+                    pending_change = config_confirmation.get_pending_change(response_event_id)
 
-            if response_event_id is None:
-                context.record_handled_turn(handled_turn)
-            return  # Exit early since we've handled the response
+                    # Store in Matrix state for persistence
+                    if pending_change:
+                        await config_confirmation.store_pending_change_in_matrix(
+                            context.client,
+                            response_event_id,
+                            pending_change,
+                        )
+
+                    # Add reaction buttons
+                    await config_confirmation.add_confirmation_reactions(
+                        context.client,
+                        room.room_id,
+                        response_event_id,
+                    )
+
+                if response_event_id is None:
+                    context.record_handled_turn(handled_turn)
+                return  # Exit early since we've handled the response
+
+    elif command.type == CommandType.MODEL:
+        response_text = handle_model_command(
+            command.args.get("args_text", ""),
+            config=context.config,
+            runtime_paths=context.runtime_paths,
+            room_id=room.room_id,
+            thread_id=effective_thread_id,
+            requester_user_id=requester_user_id,
+        )
+
+    elif command.type == CommandType.THREAD_MODE:
+        response_text = await handle_thread_mode_command(
+            command.args.get("args_text", ""),
+            client=context.client,
+            runtime_paths=context.runtime_paths,
+            room_id=room.room_id,
+            requester_user_id=requester_user_id,
+            sender_user_id=event.sender,
+        )
+
+    elif command.type == CommandType.ENCRYPT:
+        response_text = await handle_encrypt_command(
+            command.args.get("args_text", ""),
+            client=context.client,
+            room_id=room.room_id,
+            requester_user_id=requester_user_id,
+            sender_user_id=event.sender,
+        )
+
+    elif command.type == CommandType.E2EE:
+        response_text = await handle_e2ee_command(
+            client=context.client,
+            room_id=room.room_id,
+        )
 
     elif command.type == CommandType.UNKNOWN:
         # Handle unknown commands
@@ -364,8 +486,8 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
             skip_mentions=True,
         )
         context.record_handled_turn(
-            HandledTurnState.from_source_event_id(
-                event.event_id,
+            TurnRecord.create(
+                [event.event_id],
                 response_event_id=_normalized_response_event_id(raw_response_event_id),
             ),
         )

@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 import hashlib
-import json
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from mindroom.constants import runtime_env_values
 from mindroom.runtime_env_policy import (
@@ -15,6 +14,19 @@ from mindroom.runtime_env_policy import (
     is_worker_backend_config_env_name,
 )
 from mindroom.workers.backend import WorkerBackendError
+from mindroom.workers.backends._config_helpers import (
+    read_bool_env,
+    read_env,
+    read_float_env,
+    read_int_env,
+    read_json_mapping_env,
+    read_json_object_list_env,
+)
+from mindroom.workers.backends._dedicated_worker_common import stable_signature_json
+from mindroom.workers.backends.kubernetes_pod_names import (
+    RESERVED_EXTRA_CONTAINER_NAMES,
+    RESERVED_EXTRA_VOLUME_NAMES,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -37,6 +49,11 @@ _DEFAULT_MEMORY_LIMIT = "1Gi"
 _DEFAULT_CPU_REQUEST = "100m"
 _DEFAULT_CPU_LIMIT = "500m"
 
+_DEFAULT_AGENT_VAULT_VAULT_NAME_PREFIX = "agent-vault"
+_DEFAULT_AGENT_VAULT_API_URL = "http://agent-vault:14321"
+_DEFAULT_AGENT_VAULT_PROXY_URL = "http://agent-vault:14322"
+_DEFAULT_AGENT_VAULT_BOOTSTRAP_SECRET_NAME = "agent-vault-bootstrap"  # noqa: S105
+
 _WORKER_BACKEND_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["worker_backend"]
 _NAMESPACE_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["namespace"]
 _IMAGE_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["image"]
@@ -54,9 +71,12 @@ _READY_TIMEOUT_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["ready_timeout"
 _NAME_PREFIX_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["name_prefix"]
 _NODE_NAME_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["node_name"]
 _COLOCATE_WITH_CONTROL_PLANE_NODE_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["colocate_with_control_plane_node"]
+_RECONCILE_POD_TEMPLATES_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["reconcile_pod_templates"]
 _EXTRA_ENV_JSON_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["extra_env_json"]
 _EXTRA_LABELS_JSON_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["extra_labels_json"]
 _EXTRA_ANNOTATIONS_JSON_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["extra_annotations_json"]
+_EXTRA_CONTAINERS_JSON_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["extra_containers_json"]
+_EXTRA_VOLUMES_JSON_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["extra_volumes_json"]
 _OWNER_DEPLOYMENT_NAME_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["owner_deployment_name"]
 _MEMORY_REQUEST_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["memory_request"]
 _MEMORY_LIMIT_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["memory_limit"]
@@ -64,7 +84,35 @@ _CPU_REQUEST_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["cpu_request"]
 _CPU_LIMIT_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["cpu_limit"]
 _ENABLE_SERVICE_LINKS_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["enable_service_links"]
 _AUTH_SECRET_NAME_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["auth_secret_name"]
+_AGENT_VAULT_ENABLED_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["agent_vault_enabled"]
+_AGENT_VAULT_VAULT_NAME_PREFIX_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["agent_vault_vault_name_prefix"]
+_AGENT_VAULT_CLI_IMAGE_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["agent_vault_cli_image"]
+_AGENT_VAULT_API_URL_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["agent_vault_api_url"]
+_AGENT_VAULT_PROXY_URL_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["agent_vault_proxy_url"]
+_AGENT_VAULT_OWNER_EMAIL_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["agent_vault_owner_email"]
+_AGENT_VAULT_BOOTSTRAP_SECRET_NAME_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY[
+    "agent_vault_bootstrap_secret_name"
+]
+_AGENT_VAULT_WORKER_CA_CONFIGMAP_NAME_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY[
+    "agent_vault_worker_ca_configmap_name"
+]
 _POD_NAMESPACE_ENV = "POD_NAMESPACE"
+_EXTRA_CONTAINER_ALLOWED_KEYS = frozenset(
+    {
+        "name",
+        "image",
+        "imagePullPolicy",
+        "command",
+        "args",
+        "env",
+        "envFrom",
+        "volumeMounts",
+        "resources",
+        "securityContext",
+    },
+)
+_EXTRA_VOLUME_SOURCE_KEYS = frozenset({"secret", "configMap", "emptyDir", "projected"})
+_EXTRA_VOLUME_ALLOWED_KEYS = frozenset({"name", *_EXTRA_VOLUME_SOURCE_KEYS})
 
 
 def is_kubernetes_worker_backend_config_env_name(name: str) -> bool:
@@ -72,54 +120,125 @@ def is_kubernetes_worker_backend_config_env_name(name: str) -> bool:
     return is_worker_backend_config_env_name(name) and name != _WORKER_BACKEND_ENV
 
 
-def _read_env(env: Mapping[str, str], name: str, default: str = "") -> str:
-    return env.get(name, default).strip()
+def _validate_required_string(item: dict[str, object], env_name: str, index: int, field_name: str) -> None:
+    value = item.get(field_name)
+    if not isinstance(value, str) or not value.strip():
+        msg = f"{env_name}[{index}].{field_name} must be a non-empty string."
+        raise WorkerBackendError(msg)
 
 
-def _read_float_env(env: Mapping[str, str], name: str, default: float) -> float:
-    raw = _read_env(env, name, str(default))
-    try:
-        value = float(raw)
-    except ValueError:
-        value = default
-    return max(1.0, value)
+def _validate_unique_names(
+    items: tuple[dict[str, object], ...],
+    env_name: str,
+    reserved_names: frozenset[str],
+) -> None:
+    seen_names: set[str] = set()
+    for index, item in enumerate(items):
+        name = cast("str", item["name"]).strip()
+        if name in reserved_names:
+            msg = f"{env_name}[{index}].name must not use reserved name: {name}."
+            raise WorkerBackendError(msg)
+        if name in seen_names:
+            msg = f"{env_name}[{index}].name duplicates an earlier item: {name}."
+            raise WorkerBackendError(msg)
+        seen_names.add(name)
 
 
-def _read_int_env(env: Mapping[str, str], name: str, default: int) -> int:
-    raw = _read_env(env, name, str(default))
-    try:
-        value = int(raw)
-    except ValueError:
-        value = default
-    return max(1, value)
+def _read_extra_containers_env(env: Mapping[str, str]) -> tuple[dict[str, object], ...]:
+    containers = read_json_object_list_env(env, _EXTRA_CONTAINERS_JSON_ENV)
+    for index, container in enumerate(containers):
+        unknown_keys = sorted(set(container) - _EXTRA_CONTAINER_ALLOWED_KEYS)
+        if unknown_keys:
+            unknown_keys_text = ", ".join(unknown_keys)
+            msg = f"{_EXTRA_CONTAINERS_JSON_ENV}[{index}] has unsupported keys: {unknown_keys_text}."
+            raise WorkerBackendError(msg)
+        _validate_required_string(container, _EXTRA_CONTAINERS_JSON_ENV, index, "name")
+        _validate_required_string(container, _EXTRA_CONTAINERS_JSON_ENV, index, "image")
+    _validate_unique_names(containers, _EXTRA_CONTAINERS_JSON_ENV, RESERVED_EXTRA_CONTAINER_NAMES)
+    return containers
 
 
-def _read_bool_env(env: Mapping[str, str], name: str, default: bool = False) -> bool:
-    raw = env.get(name)
-    if raw is None:
-        return default
-    return raw.strip().lower() in {"1", "true", "yes", "on"}
+def _read_extra_volumes_env(env: Mapping[str, str]) -> tuple[dict[str, object], ...]:
+    volumes = read_json_object_list_env(env, _EXTRA_VOLUMES_JSON_ENV)
+    for index, volume in enumerate(volumes):
+        unknown_keys = sorted(set(volume) - _EXTRA_VOLUME_ALLOWED_KEYS)
+        if unknown_keys:
+            unknown_keys_text = ", ".join(unknown_keys)
+            msg = f"{_EXTRA_VOLUMES_JSON_ENV}[{index}] has unsupported keys: {unknown_keys_text}."
+            raise WorkerBackendError(msg)
+        _validate_required_string(volume, _EXTRA_VOLUMES_JSON_ENV, index, "name")
+        source_keys = [key for key in _EXTRA_VOLUME_SOURCE_KEYS if key in volume]
+        if len(source_keys) != 1:
+            msg = f"{_EXTRA_VOLUMES_JSON_ENV}[{index}] must set exactly one of secret, configMap, emptyDir, projected."
+            raise WorkerBackendError(msg)
+    _validate_unique_names(volumes, _EXTRA_VOLUMES_JSON_ENV, RESERVED_EXTRA_VOLUME_NAMES)
+    return volumes
 
 
-def _read_json_mapping_env(env: Mapping[str, str], name: str) -> dict[str, str]:
-    raw = _read_env(env, name)
-    if not raw:
-        return {}
-    try:
-        parsed = json.loads(raw)
-    except json.JSONDecodeError:
-        return {}
-    if not isinstance(parsed, dict):
-        return {}
-    cleaned: dict[str, str] = {}
-    for key, value in parsed.items():
-        if not isinstance(key, str):
-            continue
-        if isinstance(value, str):
-            cleaned[key] = value
-        elif value is not None:
-            cleaned[key] = str(value)
-    return cleaned
+@dataclass(frozen=True, slots=True)
+class KubernetesAgentVaultConfig:
+    """Per-worker Agent Vault egress settings (no separate bridge pod).
+
+    When present, each dedicated worker pod gets an init container that mints
+    (or rotates) a proxy-role Agent Vault agent token for that worker's vault
+    and writes it to a shared in-pod volume. The sandbox runner composes
+    ``http://<token>:<vault>@<proxy host>`` for python/shell egress so Agent
+    Vault injects credentials in transit. The owner password is mounted only on the
+    init container, never on the agent-executing container.
+    """
+
+    vault_name_prefix: str
+    cli_image: str
+    api_url: str
+    proxy_url: str
+    owner_email: str
+    bootstrap_secret_name: str
+    worker_ca_configmap_name: str | None = None
+
+    @classmethod
+    def from_env(cls, env: Mapping[str, str]) -> KubernetesAgentVaultConfig | None:
+        """Parse Agent Vault egress settings, returning ``None`` when disabled."""
+        if not read_bool_env(env, _AGENT_VAULT_ENABLED_ENV, default=False):
+            return None
+        cli_image = read_env(env, _AGENT_VAULT_CLI_IMAGE_ENV)
+        if not cli_image:
+            msg = f"{_AGENT_VAULT_CLI_IMAGE_ENV} must be set when {_AGENT_VAULT_ENABLED_ENV} is enabled."
+            raise WorkerBackendError(msg)
+        owner_email = read_env(env, _AGENT_VAULT_OWNER_EMAIL_ENV)
+        if not owner_email:
+            msg = f"{_AGENT_VAULT_OWNER_EMAIL_ENV} must be set when {_AGENT_VAULT_ENABLED_ENV} is enabled."
+            raise WorkerBackendError(msg)
+        return cls(
+            vault_name_prefix=read_env(env, _AGENT_VAULT_VAULT_NAME_PREFIX_ENV, _DEFAULT_AGENT_VAULT_VAULT_NAME_PREFIX)
+            or _DEFAULT_AGENT_VAULT_VAULT_NAME_PREFIX,
+            cli_image=cli_image,
+            api_url=read_env(env, _AGENT_VAULT_API_URL_ENV, _DEFAULT_AGENT_VAULT_API_URL)
+            or _DEFAULT_AGENT_VAULT_API_URL,
+            proxy_url=read_env(env, _AGENT_VAULT_PROXY_URL_ENV, _DEFAULT_AGENT_VAULT_PROXY_URL)
+            or _DEFAULT_AGENT_VAULT_PROXY_URL,
+            owner_email=owner_email,
+            bootstrap_secret_name=read_env(
+                env,
+                _AGENT_VAULT_BOOTSTRAP_SECRET_NAME_ENV,
+                _DEFAULT_AGENT_VAULT_BOOTSTRAP_SECRET_NAME,
+            )
+            or _DEFAULT_AGENT_VAULT_BOOTSTRAP_SECRET_NAME,
+            worker_ca_configmap_name=read_env(env, _AGENT_VAULT_WORKER_CA_CONFIGMAP_NAME_ENV) or None,
+        )
+
+    def signature(self) -> str:
+        """Return a stable signature fragment for backend cache keys."""
+        return stable_signature_json(
+            {
+                "vault_name_prefix": self.vault_name_prefix,
+                "cli_image": self.cli_image,
+                "api_url": self.api_url,
+                "proxy_url": self.proxy_url,
+                "owner_email": self.owner_email,
+                "bootstrap_secret_name": self.bootstrap_secret_name,
+                "worker_ca_configmap_name": self.worker_ca_configmap_name,
+            },
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -150,60 +269,68 @@ class KubernetesWorkerBackendConfig:
     resource_limits: dict[str, str]
     enable_service_links: bool
     auth_secret_name: str | None
+    reconcile_pod_templates: bool = True
+    agent_vault: KubernetesAgentVaultConfig | None = None
+    extra_containers: tuple[dict[str, object], ...] = ()
+    extra_volumes: tuple[dict[str, object], ...] = ()
 
     @classmethod
     def from_runtime(cls, runtime_paths: RuntimePaths) -> KubernetesWorkerBackendConfig:
         """Build Kubernetes worker configuration from one explicit runtime context."""
         env = runtime_env_values(runtime_paths)
-        namespace = _read_env(env, _NAMESPACE_ENV) or _read_env(env, _POD_NAMESPACE_ENV) or "default"
-        image = _read_env(env, _IMAGE_ENV)
+        namespace = read_env(env, _NAMESPACE_ENV) or read_env(env, _POD_NAMESPACE_ENV) or "default"
+        image = read_env(env, _IMAGE_ENV)
         if not image:
             msg = f"{_IMAGE_ENV} must be set when {_WORKER_BACKEND_ENV}=kubernetes."
             raise WorkerBackendError(msg)
 
-        storage_pvc_name = _read_env(env, _STORAGE_PVC_ENV)
+        storage_pvc_name = read_env(env, _STORAGE_PVC_ENV)
         if not storage_pvc_name:
             msg = f"{_STORAGE_PVC_ENV} must be set when {_WORKER_BACKEND_ENV}=kubernetes."
             raise WorkerBackendError(msg)
 
-        config_map_name = _read_env(env, _CONFIG_MAP_NAME_ENV) or None
+        config_map_name = read_env(env, _CONFIG_MAP_NAME_ENV) or None
         resource_requests = {
-            "memory": _read_env(env, _MEMORY_REQUEST_ENV, _DEFAULT_MEMORY_REQUEST) or _DEFAULT_MEMORY_REQUEST,
-            "cpu": _read_env(env, _CPU_REQUEST_ENV, _DEFAULT_CPU_REQUEST) or _DEFAULT_CPU_REQUEST,
+            "memory": read_env(env, _MEMORY_REQUEST_ENV, _DEFAULT_MEMORY_REQUEST) or _DEFAULT_MEMORY_REQUEST,
+            "cpu": read_env(env, _CPU_REQUEST_ENV, _DEFAULT_CPU_REQUEST) or _DEFAULT_CPU_REQUEST,
         }
         resource_limits = {
-            "memory": _read_env(env, _MEMORY_LIMIT_ENV, _DEFAULT_MEMORY_LIMIT) or _DEFAULT_MEMORY_LIMIT,
-            "cpu": _read_env(env, _CPU_LIMIT_ENV, _DEFAULT_CPU_LIMIT) or _DEFAULT_CPU_LIMIT,
+            "memory": read_env(env, _MEMORY_LIMIT_ENV, _DEFAULT_MEMORY_LIMIT) or _DEFAULT_MEMORY_LIMIT,
+            "cpu": read_env(env, _CPU_LIMIT_ENV, _DEFAULT_CPU_LIMIT) or _DEFAULT_CPU_LIMIT,
         }
         return cls(
             namespace=namespace,
             image=image,
-            image_pull_policy=_read_env(env, _IMAGE_PULL_POLICY_ENV, _DEFAULT_IMAGE_PULL_POLICY)
+            image_pull_policy=read_env(env, _IMAGE_PULL_POLICY_ENV, _DEFAULT_IMAGE_PULL_POLICY)
             or _DEFAULT_IMAGE_PULL_POLICY,
-            worker_port=_read_int_env(env, _PORT_ENV, _DEFAULT_WORKER_PORT),
-            service_account_name=_read_env(env, _SERVICE_ACCOUNT_ENV, _DEFAULT_SERVICE_ACCOUNT_NAME)
+            worker_port=read_int_env(env, _PORT_ENV, _DEFAULT_WORKER_PORT),
+            service_account_name=read_env(env, _SERVICE_ACCOUNT_ENV, _DEFAULT_SERVICE_ACCOUNT_NAME)
             or _DEFAULT_SERVICE_ACCOUNT_NAME,
             storage_pvc_name=storage_pvc_name,
-            storage_mount_path=_read_env(env, _STORAGE_MOUNT_PATH_ENV, _DEFAULT_STORAGE_MOUNT_PATH)
+            storage_mount_path=read_env(env, _STORAGE_MOUNT_PATH_ENV, _DEFAULT_STORAGE_MOUNT_PATH)
             or _DEFAULT_STORAGE_MOUNT_PATH,
-            storage_subpath_prefix=_read_env(env, _STORAGE_SUBPATH_PREFIX_ENV, _DEFAULT_STORAGE_SUBPATH_PREFIX)
+            storage_subpath_prefix=read_env(env, _STORAGE_SUBPATH_PREFIX_ENV, _DEFAULT_STORAGE_SUBPATH_PREFIX)
             or _DEFAULT_STORAGE_SUBPATH_PREFIX,
             config_map_name=config_map_name,
-            config_key=_read_env(env, _CONFIG_KEY_ENV, _DEFAULT_CONFIG_KEY) or _DEFAULT_CONFIG_KEY,
-            config_path=_read_env(env, _CONFIG_PATH_ENV, _DEFAULT_CONFIG_PATH) or _DEFAULT_CONFIG_PATH,
-            idle_timeout_seconds=_read_float_env(env, _IDLE_TIMEOUT_ENV, _DEFAULT_IDLE_TIMEOUT_SECONDS),
-            ready_timeout_seconds=_read_float_env(env, _READY_TIMEOUT_ENV, _DEFAULT_READY_TIMEOUT_SECONDS),
-            name_prefix=_read_env(env, _NAME_PREFIX_ENV, _DEFAULT_NAME_PREFIX) or _DEFAULT_NAME_PREFIX,
-            node_name=_read_env(env, _NODE_NAME_ENV) or None,
-            colocate_with_control_plane_node=_read_bool_env(env, _COLOCATE_WITH_CONTROL_PLANE_NODE_ENV, default=False),
-            extra_env=_read_json_mapping_env(env, _EXTRA_ENV_JSON_ENV),
-            extra_labels=_read_json_mapping_env(env, _EXTRA_LABELS_JSON_ENV),
-            extra_annotations=_read_json_mapping_env(env, _EXTRA_ANNOTATIONS_JSON_ENV),
-            owner_deployment_name=_read_env(env, _OWNER_DEPLOYMENT_NAME_ENV) or None,
+            config_key=read_env(env, _CONFIG_KEY_ENV, _DEFAULT_CONFIG_KEY) or _DEFAULT_CONFIG_KEY,
+            config_path=read_env(env, _CONFIG_PATH_ENV, _DEFAULT_CONFIG_PATH) or _DEFAULT_CONFIG_PATH,
+            idle_timeout_seconds=read_float_env(env, _IDLE_TIMEOUT_ENV, _DEFAULT_IDLE_TIMEOUT_SECONDS),
+            ready_timeout_seconds=read_float_env(env, _READY_TIMEOUT_ENV, _DEFAULT_READY_TIMEOUT_SECONDS),
+            name_prefix=read_env(env, _NAME_PREFIX_ENV, _DEFAULT_NAME_PREFIX) or _DEFAULT_NAME_PREFIX,
+            node_name=read_env(env, _NODE_NAME_ENV) or None,
+            colocate_with_control_plane_node=read_bool_env(env, _COLOCATE_WITH_CONTROL_PLANE_NODE_ENV, default=False),
+            extra_env=read_json_mapping_env(env, _EXTRA_ENV_JSON_ENV),
+            extra_labels=read_json_mapping_env(env, _EXTRA_LABELS_JSON_ENV),
+            extra_annotations=read_json_mapping_env(env, _EXTRA_ANNOTATIONS_JSON_ENV),
+            extra_containers=_read_extra_containers_env(env),
+            extra_volumes=_read_extra_volumes_env(env),
+            owner_deployment_name=read_env(env, _OWNER_DEPLOYMENT_NAME_ENV) or None,
             resource_requests=resource_requests,
             resource_limits=resource_limits,
-            enable_service_links=_read_bool_env(env, _ENABLE_SERVICE_LINKS_ENV, default=False),
-            auth_secret_name=_read_env(env, _AUTH_SECRET_NAME_ENV) or None,
+            enable_service_links=read_bool_env(env, _ENABLE_SERVICE_LINKS_ENV, default=False),
+            auth_secret_name=read_env(env, _AUTH_SECRET_NAME_ENV) or None,
+            reconcile_pod_templates=read_bool_env(env, _RECONCILE_POD_TEMPLATES_ENV, default=True),
+            agent_vault=KubernetesAgentVaultConfig.from_env(env),
         )
 
 
@@ -217,11 +344,13 @@ def kubernetes_backend_config_signature(
     config = KubernetesWorkerBackendConfig.from_runtime(runtime_paths)
     credentials_encryption_key = runtime_paths.env_value(CREDENTIALS_ENCRYPTION_KEY_ENV)
     credentials_encryption_key_marker = credentials_encryption_key_hash(credentials_encryption_key) or ""
-    extra_env_json = json.dumps(config.extra_env, sort_keys=True, separators=(",", ":"))
-    extra_labels_json = json.dumps(config.extra_labels, sort_keys=True, separators=(",", ":"))
-    extra_annotations_json = json.dumps(config.extra_annotations, sort_keys=True, separators=(",", ":"))
-    resource_requests_json = json.dumps(config.resource_requests, sort_keys=True, separators=(",", ":"))
-    resource_limits_json = json.dumps(config.resource_limits, sort_keys=True, separators=(",", ":"))
+    extra_env_json = stable_signature_json(config.extra_env)
+    extra_labels_json = stable_signature_json(config.extra_labels)
+    extra_annotations_json = stable_signature_json(config.extra_annotations)
+    extra_containers_json = stable_signature_json(config.extra_containers)
+    extra_volumes_json = stable_signature_json(config.extra_volumes)
+    resource_requests_json = stable_signature_json(config.resource_requests)
+    resource_limits_json = stable_signature_json(config.resource_limits)
     return (
         "kubernetes",
         config.namespace,
@@ -243,11 +372,15 @@ def kubernetes_backend_config_signature(
         extra_env_json,
         extra_labels_json,
         extra_annotations_json,
+        extra_containers_json,
+        extra_volumes_json,
         config.owner_deployment_name or "",
         resource_requests_json,
         resource_limits_json,
         str(config.enable_service_links),
         config.auth_secret_name or "",
+        str(config.reconcile_pod_templates),
+        config.agent_vault.signature() if config.agent_vault is not None else "",
         credentials_encryption_key_marker,
         auth_token or "",
         str(storage_root.expanduser().resolve()) if storage_root is not None else "",

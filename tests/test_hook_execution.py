@@ -35,15 +35,13 @@ from mindroom.hooks import (
 from mindroom.hooks.execution import emit, emit_collect, emit_final_response_transform, emit_transform
 from mindroom.logging_config import get_logger
 from mindroom.message_target import MessageTarget
-from mindroom.tool_system.runtime_context import (
-    ToolRuntimeContext,
-    emit_custom_event,
-    tool_runtime_context,
-)
+from mindroom.session_ids import create_session_id
+from mindroom.tool_system.runtime_context import ToolRuntimeContext, emit_custom_event, tool_runtime_context
 from tests.conftest import (
     bind_runtime_paths,
     make_conversation_cache_mock,
     make_event_cache_mock,
+    message_origin,
     runtime_paths_for,
     test_runtime_paths,
 )
@@ -86,16 +84,13 @@ def _envelope(
 ) -> MessageEnvelope:
     return MessageEnvelope(
         source_event_id="$event",
-        room_id=room_id,
         target=MessageTarget.resolve(room_id, None, "$event"),
-        requester_id="@user:localhost",
-        sender_id="@user:localhost",
         body=body,
         attachment_ids=(),
         mentioned_agents=(),
         agent_name=agent_name,
-        source_kind="message",
         message_received_depth=message_received_depth,
+        origin=message_origin(sender_id="@user:localhost", requester_id="@user:localhost", source_kind="message"),
     )
 
 
@@ -239,6 +234,49 @@ async def test_emit_observer_continues_after_failure_and_propagates_suppression(
 
     assert seen == ["failing", "suppressing"]
     assert context.suppress is True
+
+
+@pytest.mark.asyncio
+async def test_emit_observer_isolates_system_exit_from_plugin_hook(tmp_path: Path) -> None:
+    """Plugin hooks should not be able to terminate the host process."""
+    seen: list[str] = []
+
+    @hook(EVENT_MESSAGE_RECEIVED, priority=10)
+    async def exiting_hook(ctx: MessageReceivedContext) -> None:
+        del ctx
+        seen.append("exiting")
+        message = "plugin exit"
+        raise SystemExit(message)
+
+    @hook(EVENT_MESSAGE_RECEIVED, priority=20)
+    async def suppressing_hook(ctx: MessageReceivedContext) -> None:
+        seen.append("suppressing")
+        ctx.suppress = True
+
+    registry = HookRegistry.from_plugins([_plugin("observer-plugin", [exiting_hook, suppressing_hook])])
+    context = _message_received_context(tmp_path)
+
+    await emit(registry, EVENT_MESSAGE_RECEIVED, context)
+
+    assert seen == ["exiting", "suppressing"]
+    assert context.suppress is True
+
+
+@pytest.mark.asyncio
+async def test_emit_observer_propagates_keyboard_interrupt_from_plugin_hook(tmp_path: Path) -> None:
+    """Operator interrupts from hooks should still terminate execution."""
+
+    @hook(EVENT_MESSAGE_RECEIVED, priority=10)
+    async def interrupting_hook(ctx: MessageReceivedContext) -> None:
+        del ctx
+        message = "stop"
+        raise KeyboardInterrupt(message)
+
+    registry = HookRegistry.from_plugins([_plugin("observer-plugin", [interrupting_hook])])
+    context = _message_received_context(tmp_path)
+
+    with pytest.raises(KeyboardInterrupt):
+        await emit(registry, EVENT_MESSAGE_RECEIVED, context)
 
 
 @pytest.mark.asyncio
@@ -514,9 +552,13 @@ async def test_emit_custom_event_uses_runtime_context_and_plugin_state_root(tmp_
     )
     tool_context = ToolRuntimeContext(
         agent_name="code",
-        room_id="!room:localhost",
-        thread_id=None,
-        resolved_thread_id="$event",
+        target=MessageTarget(
+            room_id="!room:localhost",
+            source_thread_id=None,
+            resolved_thread_id="$event",
+            reply_to_event_id=None,
+            session_id=create_session_id("!room:localhost", "$event"),
+        ),
         requester_id="@user:localhost",
         client=client,
         config=config,

@@ -2,6 +2,7 @@ import type { PROVIDERS } from "@/lib/providers";
 
 export type ProviderType = keyof typeof PROVIDERS;
 export type MemoryBackend = "mem0" | "file" | "none";
+export type MemorySearchMode = "keyword" | "semantic";
 export type WorkerScope = "shared" | "user" | "user_agent";
 export type PrivateWorkerScope = Exclude<WorkerScope, "shared">;
 export type AgentPolicySource =
@@ -28,6 +29,7 @@ export interface MemoryConfig {
     provider: string;
     config: {
       model: string;
+      credentials_service?: string;
       host?: string;
       dimensions?: number;
     };
@@ -35,6 +37,11 @@ export interface MemoryConfig {
   file?: {
     path?: string | null;
     max_entrypoint_lines?: number;
+  };
+  search?: {
+    mode?: MemorySearchMode;
+    include?: string[];
+    include_entrypoint?: boolean;
   };
   auto_flush?: {
     enabled?: boolean;
@@ -75,6 +82,7 @@ export interface KnowledgeGitConfig {
 }
 
 export interface KnowledgeBaseConfig {
+  mode?: "semantic" | "files";
   description?: string;
   path: string;
   watch: boolean;
@@ -110,18 +118,23 @@ export interface CompactionConfig {
   enabled?: boolean;
   threshold_tokens?: number | null;
   threshold_percent?: number | null;
+  replay_window_tokens?: number | null;
   reserve_tokens?: number;
   model?: string | null;
+  fallback_model?: string | null;
 }
 
 const DEFAULT_INHERITED_TOOLS = ["scheduler"] as const;
 
 function isPureCompactionModelClear(compaction: CompactionConfig): boolean {
+  const modelFields = [compaction.model, compaction.fallback_model];
   return (
-    compaction.model === null &&
+    modelFields.some((value) => value === null) &&
+    modelFields.every((value) => value === null || value === undefined) &&
     compaction.enabled === undefined &&
     compaction.threshold_tokens === undefined &&
     compaction.threshold_percent === undefined &&
+    compaction.replay_window_tokens === undefined &&
     compaction.reserve_tokens === undefined
   );
 }
@@ -130,8 +143,10 @@ function isEmptyCompactionOverride(compaction: CompactionConfig): boolean {
   return (
     compaction.enabled === undefined &&
     compaction.model === undefined &&
+    compaction.fallback_model === undefined &&
     compaction.threshold_tokens === undefined &&
     compaction.threshold_percent === undefined &&
+    compaction.replay_window_tokens === undefined &&
     compaction.reserve_tokens === undefined
   );
 }
@@ -226,6 +241,10 @@ export interface Team {
   max_tool_calls_from_history?: number | null; // Max tool call messages replayed from team history
 }
 
+export type TeamConfig = Omit<Team, "id" | "rooms"> & {
+  rooms?: string[];
+};
+
 export interface Culture {
   id: string; // The key in the cultures object
   description: string;
@@ -241,11 +260,17 @@ export interface Room {
   model?: string; // Room-specific model override
 }
 
+export interface RoomConfig {
+  display_name?: string;
+  description?: string;
+}
+
 export interface VoiceSTTConfig {
-  provider: string;
+  provider: "openai" | "openai_compatible";
   model: string;
   api_key?: string;
   host?: string;
+  extra_kwargs?: Record<string, unknown>;
 }
 
 export interface VoiceLLMConfig {
@@ -257,6 +282,16 @@ export interface VoiceConfig {
   visible_router_echo: boolean;
   stt: VoiceSTTConfig;
   intelligence: VoiceLLMConfig;
+}
+
+export interface MatrixRoomAccessConfig {
+  mode?: "single_user_private" | "multi_user";
+  multi_user_join_rule?: "public" | "knock";
+  publish_to_room_directory?: boolean;
+  invite_only_rooms?: string[];
+  reconcile_existing_rooms?: boolean;
+  encrypt_managed_rooms?: boolean;
+  room_admins?: string[]; // Matrix user IDs granted admin power (100) in every managed room
 }
 
 export interface Config {
@@ -285,10 +320,12 @@ export interface Config {
   router: {
     model: string;
   };
+  rooms?: Record<string, RoomConfig>; // Managed Matrix room metadata
   room_models?: Record<string, string>; // Room-specific model overrides for teams
-  teams?: Record<string, Omit<Team, "id">>; // Teams configuration
+  teams?: Record<string, TeamConfig>; // Teams configuration
   tools?: Record<string, unknown>; // Tool configurations
   voice?: VoiceConfig; // Voice configuration
+  matrix_room_access?: MatrixRoomAccessConfig; // Managed room access policy
 }
 
 export interface AgentPolicy {
@@ -349,18 +386,21 @@ function normalizeCompactionConfig(
     return compaction;
   }
 
-  const normalizedModel =
-    compaction.model === null
+  const normalizeModelName = (
+    modelName: string | null | undefined,
+  ): string | null | undefined =>
+    modelName === null
       ? null
-      : compaction.model?.trim()
-        ? compaction.model.trim()
+      : modelName?.trim()
+        ? modelName.trim()
         : undefined;
   const hasExplicitNullClear = Object.values(compaction).some(
     (value) => value === null,
   );
   const normalizedCompaction: CompactionConfig = {
     ...compaction,
-    model: normalizedModel,
+    model: normalizeModelName(compaction.model),
+    fallback_model: normalizeModelName(compaction.fallback_model),
   };
 
   if (

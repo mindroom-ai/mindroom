@@ -3,12 +3,14 @@
 import { Suspense, useEffect } from 'react'
 import { useSearchParams } from 'next/navigation'
 import { setSsoCookie } from '@/lib/api'
+import { sanitizePostAuthRedirect } from '@/lib/auth/redirect'
+import { getRuntimeConfig } from '@/lib/runtime-config'
 
 export const dynamic = 'force-dynamic'
 
 function CompleteInner() {
   const search = useSearchParams()
-  const next = search.get('next') || '/dashboard'
+  const next = sanitizePostAuthRedirect(search.get('next'), getRuntimeConfig().platformDomain)
 
   useEffect(() => {
     let canceled = false

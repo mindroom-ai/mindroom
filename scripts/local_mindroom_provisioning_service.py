@@ -13,6 +13,25 @@ This service is designed for hosted Matrix + chat deployments where users run
 MindRoom locally. Browser users authenticate with their Matrix access token.
 Paired local MindRoom installs receive client credentials that can request
 registration tokens for agent account creation.
+
+Namespace exemption: pairing always assigns each new connection a random
+namespace, and register-agent only accepts usernames shaped like
+``mindroom_<entity>_<namespace>``. The operator's own installs are the
+deliberate exception: they keep the plain ``mindroom_<entity>`` names. To mark
+such a trusted connection namespace-exempt, the operator stops the service,
+sets ``"namespace": ""`` on that connection in the persisted state file
+(``MINDROOM_PROVISIONING_STATE_PATH``, default
+``/var/lib/mindroom-local-provisioning/state.json``), and starts the service
+again. The paired install must also unset ``MINDROOM_NAMESPACE`` in its local
+``.env`` (``mindroom connect`` writes one during pairing) so the client builds
+plain usernames, and the exemption is per-connection, so re-pairing requires
+editing the state file again. The value must be exactly ``""``: ``null``, a removed key, or a
+whitespace-only string fails closed to a derived namespace that will not match
+the connection's original pairing namespace. An exempt connection skips only
+the namespace suffix check — usernames must still be valid Matrix localparts
+starting with ``mindroom_``. Exemption trusts that connection with the entire
+``mindroom_*`` username space, including usernames shaped like other
+connections' namespaced agents, so exempt only installs you fully control.
 """
 
 from __future__ import annotations
@@ -22,6 +41,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import secrets
 import time
 from contextlib import asynccontextmanager
@@ -33,7 +53,7 @@ from urllib.parse import quote
 
 import httpx
 import uvicorn
-from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request
+from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -52,6 +72,13 @@ RATE_LIMIT_CLEANUP_INTERVAL_SECONDS = 300
 RATE_LIMIT_STALE_SECONDS = 3600
 NAMESPACE_ALPHABET = "abcdefghjkmnpqrstuvwxyz23456789"
 NAMESPACE_LENGTH = 8
+MANAGED_AGENT_USERNAME_PREFIX = "mindroom_"
+MATRIX_LOCALPART_RE = re.compile(r"\A[-a-z0-9._=/+]+\Z")
+# The local MindRoom client (src/mindroom/matrix/provisioning.py) classifies
+# errors by these exact strings; a contract test keeps the two sides in sync.
+CONNECTION_REVOKED_DETAIL = "Connection revoked"
+NAMESPACE_MISMATCH_DETAIL = "Requested username is outside this local connection namespace"
+PAIR_STATUS_SESSION_HEADER = "X-Local-MindRoom-Pair-Session-Id"
 
 
 @dataclass(slots=True)
@@ -68,6 +95,8 @@ class ServiceConfig:
     cors_origins: list[str]
     listen_host: str
     listen_port: int
+    google_oauth_client_id: str | None = None
+    google_oauth_client_secret: str | None = None
 
 
 @dataclass(slots=True)
@@ -115,6 +144,7 @@ class PairStartResponse(BaseModel):
     """Response for starting pairing."""
 
     pair_code: str
+    pair_session_id: str
     expires_at: datetime
     poll_interval_seconds: int
 
@@ -184,6 +214,13 @@ class RegisterAgentResponse(BaseModel):
 
     status: Literal["created", "user_in_use"]
     user_id: str
+
+
+class GoogleOAuthClientResponse(BaseModel):
+    """Installed-app OAuth client returned only to an authenticated local install."""
+
+    client_id: str
+    client_secret: str
 
 
 def _new_runtime_state() -> ProvisioningState:
@@ -303,6 +340,15 @@ def _load_service_config_from_env() -> ServiceConfig:
     if not cors_origins:
         cors_origins = [DEFAULT_CORS_ORIGINS]
 
+    google_oauth_client_id = os.getenv("MINDROOM_GOOGLE_OAUTH_CLIENT_ID", "").strip() or None
+    google_oauth_client_secret = _read_secret(
+        env_name="MINDROOM_GOOGLE_OAUTH_CLIENT_SECRET",
+        file_env_name="MINDROOM_GOOGLE_OAUTH_CLIENT_SECRET_FILE",
+    )
+    if (google_oauth_client_id is None) != (google_oauth_client_secret is None):
+        msg = "MINDROOM_GOOGLE_OAUTH_CLIENT_ID and its client secret must be configured together."
+        raise ValueError(msg)
+
     return ServiceConfig(
         matrix_homeserver=matrix_homeserver,
         matrix_server_name=matrix_server_name,
@@ -314,6 +360,8 @@ def _load_service_config_from_env() -> ServiceConfig:
         cors_origins=cors_origins,
         listen_host=os.getenv("MINDROOM_PROVISIONING_HOST", DEFAULT_LISTEN_HOST).strip(),
         listen_port=_env_int("MINDROOM_PROVISIONING_PORT", default=DEFAULT_LISTEN_PORT, minimum=1),
+        google_oauth_client_id=google_oauth_client_id,
+        google_oauth_client_secret=google_oauth_client_secret,
     )
 
 
@@ -403,10 +451,16 @@ def _load_state_from_disk_unlocked(state: ProvisioningState, state_path: Path) -
 
     for item in payload.get("connections", []):
         connection_id = item["id"]
-        namespace = item.get("namespace")
-        if isinstance(namespace, str):
-            namespace = namespace.strip().lower()
-        if not isinstance(namespace, str) or not namespace:
+        raw_namespace = item.get("namespace")
+        # Only a literal "" (the operator-set exemption sentinel, see module
+        # docstring) may stay empty. Whitespace-only, null, and missing values
+        # fail closed to a derived namespace so a connection can never become
+        # namespace-exempt by accident.
+        if raw_namespace == "":
+            namespace = ""
+        elif isinstance(raw_namespace, str) and raw_namespace.strip():
+            namespace = raw_namespace.strip().lower()
+        else:
             namespace = _derive_namespace(connection_id)
         connection = LocalConnection(
             id=connection_id,
@@ -446,6 +500,31 @@ def _find_pair_session_unlocked(state: ProvisioningState, pair_code: str) -> Pai
     if not session_id:
         return None
     return state.pair_sessions.get(session_id)
+
+
+def _is_managed_agent_username_for_namespace(username: str, namespace: str) -> bool:
+    """Return whether username matches mindroom_<entity>_<namespace>."""
+    suffix = f"_{namespace}"
+    return (
+        username.startswith(MANAGED_AGENT_USERNAME_PREFIX)
+        and username.endswith(suffix)
+        and len(username) > len(MANAGED_AGENT_USERNAME_PREFIX) + len(suffix)
+    )
+
+
+def _is_username_permitted_for_connection(username: str, namespace: str) -> bool:
+    """Return whether a connection may register the requested agent username.
+
+    An empty namespace marks a namespace-exempt connection (operator-set, see
+    module docstring): the namespace suffix check is skipped, but the managed
+    agent prefix is still required. Localpart syntax is validated separately
+    in register_agent so it surfaces as 400, not 403.
+    """
+    if not namespace:
+        return username.startswith(MANAGED_AGENT_USERNAME_PREFIX) and len(username) > len(
+            MANAGED_AGENT_USERNAME_PREFIX,
+        )
+    return _is_managed_agent_username_for_namespace(username, namespace)
 
 
 def _expire_if_needed(session: PairSession, now: datetime) -> None:
@@ -500,7 +579,7 @@ def _require_local_client(
     if not hmac.compare_digest(expected_hash, provided_hash):
         raise HTTPException(status_code=401, detail="Invalid local client credentials")
     if connection.revoked_at:
-        raise HTTPException(status_code=403, detail="Connection revoked")
+        raise HTTPException(status_code=403, detail=CONNECTION_REVOKED_DETAIL)
     return connection
 
 
@@ -662,6 +741,7 @@ async def start_pair(
 
     return PairStartResponse(
         pair_code=pair_code,
+        pair_session_id=session_id,
         expires_at=expires_at,
         poll_interval_seconds=config.pair_poll_interval_seconds,
     )
@@ -669,17 +749,23 @@ async def start_pair(
 
 @router.get("/v1/local-mindroom/pair/status", response_model=PairStatusResponse)
 async def pair_status(
-    pair_code: str,
     user_id: Annotated[str, Depends(_verify_browser_user)],
     state: Annotated[ProvisioningState, Depends(_runtime_state_from_request)],
+    x_local_mindroom_pair_session_id: Annotated[
+        str | None,
+        Header(alias=PAIR_STATUS_SESSION_HEADER),
+    ] = None,
 ) -> PairStatusResponse:
-    """Poll the status of a previously issued pair code."""
+    """Poll a pairing session by opaque session ID header."""
     now = _now_utc()
     async with state.lock:
         _enforce_rate_limit_unlocked(state, key=f"pair:status:{user_id}", limit=60, window_seconds=60)
-        session = _find_pair_session_unlocked(state, pair_code)
+        session_id = x_local_mindroom_pair_session_id.strip() if x_local_mindroom_pair_session_id else ""
+        if not session_id:
+            raise HTTPException(status_code=400, detail="Missing pair session id")
+        session = state.pair_sessions.get(session_id)
         if not session or session.user_id != user_id:
-            raise HTTPException(status_code=404, detail="Pair code not found")
+            raise HTTPException(status_code=404, detail="Pair session not found")
 
         _expire_if_needed(session, now)
         if session.status == "connected" and session.connection_id:
@@ -794,13 +880,51 @@ async def register_agent(
         )
         raise HTTPException(status_code=400, detail=msg)
 
+    # 400, not 403: clients treat 403 as an authorization problem, but a
+    # malformed localpart can only be fixed by changing the agent name.
+    if MATRIX_LOCALPART_RE.match(payload.username) is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Requested username is not a valid Matrix localpart (allowed: a-z 0-9 . _ = / + -)",
+        )
+
     async with state.lock:
         connection = _require_local_client(state, x_local_mindroom_client_id, x_local_mindroom_client_secret)
         _enforce_rate_limit_unlocked(state, key=f"register:agent:{connection.id}", limit=60, window_seconds=60)
+        if not _is_username_permitted_for_connection(payload.username, connection.namespace):
+            raise HTTPException(
+                status_code=403,
+                detail=NAMESPACE_MISMATCH_DETAIL,
+            )
         connection.last_seen_at = now
         _persist_state_unlocked(state, config.state_path)
 
     return await _register_agent_with_matrix(config, payload)
+
+
+@router.get("/v1/local-mindroom/oauth/google-client", response_model=GoogleOAuthClientResponse)
+async def google_oauth_client(
+    response: Response,
+    config: Annotated[ServiceConfig, Depends(_service_config_from_request)],
+    state: Annotated[ProvisioningState, Depends(_runtime_state_from_request)],
+    x_local_mindroom_client_id: Annotated[str | None, Header(alias="X-Local-MindRoom-Client-Id")] = None,
+    x_local_mindroom_client_secret: Annotated[str | None, Header(alias="X-Local-MindRoom-Client-Secret")] = None,
+) -> GoogleOAuthClientResponse:
+    """Return the Google installed-app client to one paired local runtime."""
+    now = _now_utc()
+    async with state.lock:
+        connection = _require_local_client(state, x_local_mindroom_client_id, x_local_mindroom_client_secret)
+        _enforce_rate_limit_unlocked(state, key=f"oauth:google-client:{connection.id}", limit=60, window_seconds=60)
+        connection.last_seen_at = now
+        _persist_state_unlocked(state, config.state_path)
+
+    if not config.google_oauth_client_id or not config.google_oauth_client_secret:
+        raise HTTPException(status_code=503, detail="Google OAuth client is not configured")
+    response.headers["Cache-Control"] = "no-store"
+    return GoogleOAuthClientResponse(
+        client_id=config.google_oauth_client_id,
+        client_secret=config.google_oauth_client_secret,
+    )
 
 
 def create_app(config: ServiceConfig | None = None) -> FastAPI:
@@ -822,7 +946,7 @@ def create_app(config: ServiceConfig | None = None) -> FastAPI:
         allow_origins=service_config.cors_origins,
         allow_credentials=False,
         allow_methods=["GET", "POST", "DELETE"],
-        allow_headers=["Authorization", "Content-Type", "X-Matrix-Access-Token"],
+        allow_headers=["Authorization", "Content-Type", "X-Matrix-Access-Token", PAIR_STATUS_SESSION_HEADER],
     )
     app.include_router(router)
     return app

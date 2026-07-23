@@ -4,14 +4,14 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.tool_system.metadata import (
+from mindroom.tool_system.declarations import (
     ConfigField,
     SetupType,
     ToolCategory,
     ToolManagedInitArg,
     ToolStatus,
-    register_tool_with_metadata,
 )
+from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
     from mindroom.custom_tools.google_drive import GoogleDriveTools
@@ -20,10 +20,11 @@ if TYPE_CHECKING:
 @register_tool_with_metadata(
     name="google_drive",
     display_name="Google Drive",
-    description="Search and read files from the connected user's Google Drive",
+    description="Search, read, upload, and organize files in the connected user's Google Drive",
     category=ToolCategory.PRODUCTIVITY,
     status=ToolStatus.REQUIRES_CONFIG,
     setup_type=SetupType.OAUTH,
+    consumes_workspace_paths=True,
     auth_provider="google_drive",
     icon="SiGoogledrive",
     icon_color="text-green-600",
@@ -53,6 +54,22 @@ if TYPE_CHECKING:
             description="Allow reading Google Drive file contents.",
         ),
         ConfigField(
+            name="download_file",
+            label="Download Files",
+            type="boolean",
+            required=False,
+            default=False,
+            description="Allow downloading or exporting Google Drive files.",
+        ),
+        ConfigField(
+            name="write",
+            label="Allow Write Operations",
+            type="boolean",
+            required=False,
+            default=True,
+            description="Allow uploading, creating folders, moving or renaming files, and trashing files.",
+        ),
+        ConfigField(
             name="max_read_size",
             label="Max Read Size",
             type="number",
@@ -65,6 +82,7 @@ if TYPE_CHECKING:
         ToolManagedInitArg.RUNTIME_PATHS,
         ToolManagedInitArg.CREDENTIALS_MANAGER,
         ToolManagedInitArg.WORKER_TARGET,
+        ToolManagedInitArg.TOOL_OUTPUT_WORKSPACE_ROOT,
     ),
     dependencies=[
         "google-api-python-client",
@@ -77,10 +95,15 @@ if TYPE_CHECKING:
         "google_drive_list_files",
         "google_drive_search_files",
         "google_drive_read_file",
+        "google_drive_download_file",
+        "google_drive_upload_file",
+        "google_drive_create_folder",
+        "google_drive_move_file",
+        "google_drive_trash_file",
     ),
 )
 def google_drive_tools() -> type[GoogleDriveTools]:
-    """Return Google Drive tools for file search and read access."""
+    """Return Google Drive tools for file reading and management."""
     from mindroom.custom_tools.google_drive import GoogleDriveTools
 
     return GoogleDriveTools

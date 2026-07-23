@@ -22,7 +22,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import STREAM_STATUS_ERROR, STREAM_STATUS_KEY
 from mindroom.final_delivery import StreamTransportOutcome
-from mindroom.history import HistoryScope, PreparedHistoryState
+from mindroom.history.types import HistoryScope, PreparedHistoryState
 from mindroom.hooks import HookRegistry
 from mindroom.knowledge.utils import _KnowledgeResolution
 from mindroom.matrix.client import DeliveredMatrixEvent
@@ -36,7 +36,7 @@ from tests.conftest import (
     install_runtime_cache_support,
     replace_delivery_gateway_deps,
     replace_response_runner_deps,
-    resolve_response_thread_root_for_test,
+    request_envelope,
     runtime_paths_for,
     test_runtime_paths,
 )
@@ -80,9 +80,6 @@ def _mock_bot(tmp_path: Path) -> AgentBot:
     install_runtime_cache_support(bot)
     bot._conversation_resolver.build_message_target = MagicMock(
         return_value=MessageTarget.resolve("!room:localhost", None, None, room_mode=True),
-    )
-    bot._conversation_resolver.resolve_response_thread_root = MagicMock(
-        side_effect=resolve_response_thread_root_for_test,
     )
     bot._conversation_state_writer = MagicMock()
     bot._conversation_state_writer.create_storage = MagicMock(return_value=MagicMock())
@@ -131,11 +128,14 @@ def _response_request(
 ) -> ResponseRequest:
     """Build one response request for direct bot seam tests."""
     return ResponseRequest(
-        room_id=room_id,
-        reply_to_event_id=reply_to_event_id,
-        thread_id=thread_id,
         thread_history=(),
         prompt=prompt,
+        response_envelope=request_envelope(
+            room_id=room_id,
+            reply_to_event_id=reply_to_event_id,
+            thread_id=thread_id,
+            prompt=prompt,
+        ),
         existing_event_id=existing_event_id,
     )
 
@@ -147,6 +147,7 @@ def _prepared_run(agent: object, *, prompt: str = "Help me with something") -> S
         run_input=[Message(role="user", content=prompt)],
         unseen_event_ids=[],
         prepared_history=PreparedHistoryState(),
+        runtime_model_name="default",
     )
 
 
@@ -210,7 +211,6 @@ class TestAIErrorDisplay:
             edited_messages.append((event_id, text))
 
         bot._edit_message = mock_edit_message
-        bot._handle_interactive_question = AsyncMock()
 
         # Mock stream_agent_response to yield an error message
         with patch("mindroom.response_runner.stream_agent_response") as mock_stream:
@@ -315,13 +315,14 @@ class TestAIErrorDisplay:
         event_id, text = edited_messages[0]
         assert event_id == "$thinking_msg"
         assert text == _CANCELLED_RESPONSE_NOTE
-        assert outcome.terminal_status == "cancelled"
-        assert outcome.failure_reason == "cancelled_by_user"
+        assert outcome.delivery.terminal_status == "cancelled"
+        assert outcome.delivery.failure_reason == "cancelled_by_user"
 
     @pytest.mark.asyncio
     async def test_cancelled_run_status_preserves_user_stop_note(self, tmp_path: Path) -> None:
-        """RunStatus.cancelled should keep a user-stop label when the task is already cancelling."""
+        """Legacy non-streaming RunStatus.cancelled should keep a user-stop label."""
         bot = _mock_bot(tmp_path)
+        bot.config.agents["test_agent"].show_tool_calls = False
 
         edited_messages: list[tuple[str, str]] = []
 
@@ -344,7 +345,7 @@ class TestAIErrorDisplay:
         async def fake_cached_run(*_args: object, **_kwargs: object) -> RunOutput:
             current_task = asyncio.current_task()
             assert current_task is not None
-            request_task_cancel(current_task, cancel_msg=USER_STOP_CANCEL_MSG)
+            request_task_cancel(current_task, cancel_source="user_stop")
             return RunOutput(
                 run_id="run-1",
                 agent_id="test_agent",
@@ -378,14 +379,76 @@ class TestAIErrorDisplay:
         event_id, text = edited_messages[0]
         assert event_id == "$thinking_msg"
         assert text == _CANCELLED_RESPONSE_NOTE
-        assert outcome.terminal_status == "cancelled"
-        assert outcome.failure_reason == "cancelled_by_user"
+        assert outcome.delivery.terminal_status == "cancelled"
+        assert outcome.delivery.failure_reason == "cancelled_by_user"
+
+    @pytest.mark.asyncio
+    async def test_collected_stream_cancelled_event_preserves_user_stop_note(self, tmp_path: Path) -> None:
+        """Collected non-streaming RunCancelledEvent should keep a user-stop label."""
+        bot = _mock_bot(tmp_path)
+        bot.config.agents["test_agent"].show_tool_calls = True
+
+        edited_messages: list[tuple[str, str]] = []
+
+        async def mock_gateway_edit_message(
+            client: object,  # noqa: ARG001
+            room_id: str,  # noqa: ARG001
+            event_id: str,
+            content: dict[str, object],
+            text: str,
+            **_kwargs: object,
+        ) -> DeliveredMatrixEvent:
+            edited_messages.append((event_id, text))
+            return DeliveredMatrixEvent(event_id="$edit", content_sent=content)
+
+        mock_agent = MagicMock()
+        mock_agent.model = MagicMock()
+        mock_agent.model.id = "test-model"
+        mock_agent.name = "Test Agent"
+        mock_agent.add_history_to_context = False
+
+        async def fake_arun_stream(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
+            yield RunContentEvent(content="Partial answer")
+            current_task = asyncio.current_task()
+            assert current_task is not None
+            request_task_cancel(current_task, cancel_source="user_stop")
+            yield RunCancelledEvent(
+                run_id="run-2",
+                session_id="session-1",
+                reason="Run run-2 was cancelled",
+            )
+
+        with (
+            patch(
+                "mindroom.ai.open_resolved_scope_session_context",
+                new=lambda **_kwargs: nullcontext(
+                    SimpleNamespace(storage=MagicMock(), session=None),
+                ),
+            ),
+            patch("mindroom.ai._prepare_agent_and_prompt", new=AsyncMock(return_value=_prepared_run(mock_agent))),
+            patch(
+                "mindroom.delivery_gateway.edit_message_result",
+                new=AsyncMock(side_effect=mock_gateway_edit_message),
+            ),
+        ):
+            _build_response_runner(bot)
+            mock_agent.arun = MagicMock(return_value=fake_arun_stream())
+
+            outcome = await bot._response_runner.process_and_respond(
+                _response_request(existing_event_id="$thinking_msg"),
+            )
+
+        assert len(edited_messages) == 1
+        event_id, text = edited_messages[0]
+        assert event_id == "$thinking_msg"
+        assert text == _CANCELLED_RESPONSE_NOTE
+        assert outcome.delivery.terminal_status == "cancelled"
+        assert outcome.delivery.failure_reason == "cancelled_by_user"
 
     @pytest.mark.asyncio
     async def test_run_cancelled_event_preserves_user_stop_note_in_streaming(self, tmp_path: Path) -> None:
         """RunCancelledEvent should keep a user-stop label in the final streamed edit."""
         bot = _mock_bot(tmp_path)
-        bot._handle_interactive_question = AsyncMock()
 
         edited_messages: list[tuple[str, str]] = []
 
@@ -410,7 +473,7 @@ class TestAIErrorDisplay:
             yield RunContentEvent(content="Partial answer")
             current_task = asyncio.current_task()
             assert current_task is not None
-            request_task_cancel(current_task, cancel_msg=USER_STOP_CANCEL_MSG)
+            request_task_cancel(current_task, cancel_source="user_stop")
             yield RunCancelledEvent(
                 run_id="run-2",
                 session_id="session-1",
@@ -438,8 +501,8 @@ class TestAIErrorDisplay:
         event_id, text = edited_messages[-1]
         assert event_id == "$thinking_msg"
         assert text == f"Partial answer\n\n{_CANCELLED_RESPONSE_NOTE}"
-        assert outcome.terminal_status == "cancelled"
-        assert outcome.failure_reason == "cancelled_by_user"
+        assert outcome.delivery.terminal_status == "cancelled"
+        assert outcome.delivery.failure_reason == "cancelled_by_user"
 
     @pytest.mark.asyncio
     async def test_various_error_messages_are_user_friendly(self, tmp_path: Path) -> None:
@@ -563,10 +626,10 @@ class TestAIErrorDisplay:
             _build_response_runner(bot)
             mock_ai.return_value = "Response without knowledge"
 
-            delivery = await bot._response_runner.process_and_respond(
+            generation = await bot._response_runner.process_and_respond(
                 _response_request(),
             )
 
-        assert delivery.event_id == "$response_id"
+        assert generation.delivery.event_id == "$response_id"
         assert mock_ai.call_args.kwargs["knowledge"] is None
         bot.logger.exception.assert_not_called()

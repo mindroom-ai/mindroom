@@ -11,9 +11,7 @@ if TYPE_CHECKING:
 
 _GOOGLE_GMAIL_OAUTH_SCOPES = (
     *google_oauth.GOOGLE_IDENTITY_SCOPES,
-    "https://www.googleapis.com/auth/gmail.readonly",
     "https://www.googleapis.com/auth/gmail.modify",
-    "https://www.googleapis.com/auth/gmail.compose",
 )
 
 
@@ -26,5 +24,5 @@ def google_gmail_oauth_provider() -> OAuthProvider:
         credential_service="google_gmail_oauth",
         tool_config_service="gmail",
         client_config_services=("google_gmail_oauth_client",),
-        status_capabilities=("Gmail read/modify/compose",),
+        status_capabilities=("Gmail read, send, draft, and mailbox management",),
     )

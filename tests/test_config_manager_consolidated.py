@@ -5,11 +5,14 @@ from __future__ import annotations
 import json
 import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock
+from typing import Any, Literal
+from unittest.mock import MagicMock, patch
+from urllib.parse import parse_qs, urlparse
 
 import nio
 import pytest
 import yaml
+from agno.tools.function import Function
 from pydantic import ValidationError
 
 from mindroom.config.agent import AgentConfig, TeamConfig
@@ -21,8 +24,13 @@ from mindroom.constants import DEFAULT_WORKER_GRANTABLE_CREDENTIALS, RuntimePath
 from mindroom.credential_policy import _UNSUPPORTED_WORKER_GRANTABLE_CREDENTIALS
 from mindroom.custom_tools.config_manager import ConfigManagerTools, _InfoType
 from mindroom.matrix.state import MatrixState
+from mindroom.mcp.config import MCPServerConfig
+from mindroom.message_target import MessageTarget
+from mindroom.oauth.google_drive import google_drive_oauth_provider
+from mindroom.oauth.service import lookup_oauth_connect_token
 from mindroom.tool_system.metadata import _AUTHORED_OVERRIDE_INHERIT
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerScope, resolve_worker_key
 from tests.conftest import load_config_yaml, make_conversation_cache_mock, make_event_cache_mock, write_config_yaml
 from tests.identity_helpers import persist_entity_accounts
 
@@ -41,6 +49,37 @@ def _runtime_paths() -> RuntimePaths:
 def _config_manager(config_path: Path) -> ConfigManagerTools:
     """Construct ConfigManagerTools with explicit RuntimePaths."""
     return ConfigManagerTools(resolve_runtime_paths(config_path=config_path, process_env={}))
+
+
+def _caller_context(
+    config_manager: ConfigManagerTools,
+    config: Config,
+    *,
+    agent_name: str = "admin",
+    requester_id: str = "@alice:example.org",
+) -> ToolRuntimeContext:
+    """Build a live config-manager caller context with a stable human requester."""
+    return ToolRuntimeContext(
+        agent_name=agent_name,
+        target=MessageTarget.resolve(
+            room_id="!room:example.org",
+            thread_id="$thread",
+            reply_to_event_id="$request",
+        ),
+        requester_id=requester_id,
+        client=MagicMock(),
+        config=config,
+        runtime_paths=config_manager.runtime_paths,
+        event_cache=make_event_cache_mock(),
+        conversation_cache=make_conversation_cache_mock(),
+    )
+
+
+def _connect_url_from_result(result: str) -> str:
+    """Extract the first direct OAuth link from a config-manager result."""
+    marker = "`connect_url`: "
+    assert marker in result
+    return result.split(marker, maxsplit=1)[1].split(";", maxsplit=1)[0]
 
 
 def _invalid_plugin_config_path(tmp_path: Path, *, with_agent: bool = True) -> Path:
@@ -73,7 +112,7 @@ def _plugin_tool_config_path(tmp_path: Path, *, tool_name: str = "config_manager
     )
     (plugin_root / "tools.py").write_text(
         "from agno.tools import Toolkit\n"
-        "from mindroom.tool_system.metadata import ToolCategory, register_tool_with_metadata\n"
+        "from mindroom.tool_system.declarations import ToolCategory\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
         "\n"
         "class DemoTool(Toolkit):\n"
         "    def __init__(self) -> None:\n"
@@ -102,18 +141,297 @@ def _plugin_tool_config_path(tmp_path: Path, *, tool_name: str = "config_manager
 
 
 class TestConsolidatedConfigManager:
-    """Test the consolidated ConfigManager with only 3 tools."""
+    """Test the consolidated ConfigManager with four tools."""
 
     def test_init(self, tmp_path: Path) -> None:
         """Test ConfigManagerTools initialization."""
         cm = _config_manager(_minimal_config_path(tmp_path))
         assert cm.config_path is not None
         assert cm.name == "config_manager"
-        # Should only have 3 tools now
-        assert len(cm.tools) == 3
+        assert len(cm.tools) == 4
         assert any(tool.__name__ == "get_info" for tool in cm.tools)
+        assert any(tool.__name__ == "manage_config" for tool in cm.tools)
         assert any(tool.__name__ == "manage_agent" for tool in cm.tools)
         assert any(tool.__name__ == "manage_team" for tool in cm.tools)
+
+    def test_manage_config_inspects_authored_subtree_with_redaction(self, tmp_path: Path) -> None:
+        """Inspection should be path-scoped, authored-only, and centrally redacted."""
+        config_path = tmp_path / "config.yaml"
+        write_config_yaml(
+            Config(
+                models={
+                    "default": {
+                        "provider": "openai",
+                        "id": "gpt-4o",
+                        "api_key": "sk-test-secret",
+                    },
+                },
+            ),
+            config_path,
+        )
+
+        result = _config_manager(config_path).manage_config(operation="inspect", path="/models/default")
+
+        assert "Authored MindRoom configuration" in result
+        assert "authored values only" in result
+        assert "api_key: '***redacted***'" in result
+        assert "id: gpt-4o" in result
+        assert "sk-test-secret" not in result
+        assert str(config_path.resolve()) in result
+
+    def test_manage_config_inspect_redacts_secret_leaf_pointers(self, tmp_path: Path) -> None:
+        """A pointer directly at a secret leaf must stay redacted at any depth."""
+        config_path = tmp_path / "config.yaml"
+        write_config_yaml(
+            Config(
+                models={
+                    "default": {
+                        "provider": "openai",
+                        "id": "gpt-4o",
+                        # A secret that no token-shape regex matches, so only
+                        # key-context redaction can catch it.
+                        "api_key": "plain-local-secret",
+                    },
+                },
+            ),
+            config_path,
+        )
+
+        result = _config_manager(config_path).manage_config(
+            operation="inspect",
+            path="/models/default/api_key",
+        )
+
+        assert "plain-local-secret" not in result
+        assert "```yaml\n'***redacted***'\n```" in result
+
+    def test_manage_config_schema_accepts_arbitrary_json_values(self, tmp_path: Path) -> None:
+        """The model-facing patch schema must allow scalars, lists, objects, and null."""
+        function = Function.from_callable(_config_manager(_minimal_config_path(tmp_path)).manage_config)
+        changes_schema = function.parameters["properties"]["changes"]["anyOf"][0]
+        entry_schema = changes_schema["items"]
+
+        assert entry_schema["properties"]["op"]["enum"] == ["add", "replace", "remove"]
+        assert entry_schema["additionalProperties"] is False
+        assert entry_schema["properties"]["value"] == {}
+
+    def test_manage_config_patches_full_schema_atomically(self, tmp_path: Path) -> None:
+        """One patch should update unrelated Config sections through shared validation."""
+        config_path = _minimal_config_path(tmp_path)
+        cm = _config_manager(config_path)
+
+        result = cm.manage_config(
+            operation="patch",
+            changes=[
+                {"op": "add", "path": "/authorization", "value": {"room_permissions": {}}},
+                {
+                    "op": "add",
+                    "path": "/authorization/room_permissions/room~1a~0b",
+                    "value": ["@user:example.org"],
+                },
+                {"op": "replace", "path": "/models/default/id", "value": "gpt-5"},
+                {"op": "add", "path": "/tool_approval", "value": {"default": "require_approval"}},
+            ],
+        )
+
+        assert "patch updated" in result
+        assert "Persisted: yes" in result
+        assert "/tool_approval" in result
+        saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert saved["models"]["default"]["id"] == "gpt-5"
+        assert saved["authorization"]["room_permissions"]["room/a~b"] == ["@user:example.org"]
+        assert saved["tool_approval"]["default"] == "require_approval"
+
+    def test_manage_config_appends_and_preserves_explicit_null(self, tmp_path: Path) -> None:
+        """Array append and explicit null should remain distinct from removal."""
+        config_path = tmp_path / "config.yaml"
+        write_config_yaml(
+            Config(
+                models={"default": {"provider": "openai", "id": "gpt-4o"}},
+                agents={"writer": AgentConfig(display_name="Writer", role="Writes", instructions=["first"])},
+            ),
+            config_path,
+        )
+
+        result = _config_manager(config_path).manage_config(
+            operation="patch",
+            changes=[
+                {"op": "add", "path": "/agents/writer/instructions/-", "value": "second"},
+                {"op": "add", "path": "/agents/writer/compaction", "value": {"model": None}},
+            ],
+        )
+
+        assert "patch updated" in result
+        saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert saved["agents"]["writer"]["instructions"] == ["first", "second"]
+        assert saved["agents"]["writer"]["compaction"]["model"] is None
+
+    def test_manage_config_dry_run_validates_without_writing(self, tmp_path: Path) -> None:
+        """Dry runs should return a receipt while preserving the original bytes."""
+        config_path = _minimal_config_path(tmp_path)
+        original = config_path.read_bytes()
+
+        result = _config_manager(config_path).manage_config(
+            operation="patch",
+            changes=[{"op": "replace", "path": "/models/default/id", "value": "gpt-5"}],
+            dry_run=True,
+        )
+
+        assert "patch validated" in result
+        assert "Persisted: no (dry run)" in result
+        assert config_path.read_bytes() == original
+
+    def test_manage_config_rejects_invalid_batch_without_writing(self, tmp_path: Path) -> None:
+        """A later bad pointer should roll back the whole in-memory patch."""
+        config_path = _minimal_config_path(tmp_path)
+        original = config_path.read_bytes()
+
+        result = _config_manager(config_path).manage_config(
+            operation="patch",
+            changes=[
+                {"op": "replace", "path": "/models/default/id", "value": "gpt-5"},
+                {"op": "remove", "path": "/models/missing"},
+            ],
+        )
+
+        assert "Remove target does not exist" in result
+        assert "Changes were NOT applied" in result
+        assert config_path.read_bytes() == original
+
+    @pytest.mark.parametrize(
+        ("change", "expected"),
+        [
+            ({"op": "move", "path": "/models/default"}, "Input should be 'add', 'replace' or 'remove'"),
+            ({"op": "add", "path": "models/default", "value": {}}, "must be empty for the root or start"),
+            ({"op": "add", "path": "/models/~2bad", "value": {}}, "Invalid JSON Pointer escape"),
+            ({"op": "add", "path": "/models/new"}, "requires a value"),
+            ({"op": "remove", "path": "/models/default", "value": {}}, "does not take a value"),
+        ],
+    )
+    def test_manage_config_rejects_malformed_patch_entries(
+        self,
+        tmp_path: Path,
+        change: dict[str, Any],
+        expected: str,
+    ) -> None:
+        """Malformed operations and pointers should fail without touching disk."""
+        config_path = _minimal_config_path(tmp_path)
+        original = config_path.read_bytes()
+
+        result = _config_manager(config_path).manage_config(operation="patch", changes=[change])
+
+        assert expected in result
+        assert "Changes were NOT applied" in result
+        assert config_path.read_bytes() == original
+
+    def test_manage_config_labels_patch_schema_errors_as_patch_errors(self, tmp_path: Path) -> None:
+        """A malformed request should not imply that the authored config is broken."""
+        config_path = _minimal_config_path(tmp_path)
+
+        result = _config_manager(config_path).manage_config(
+            operation="patch",
+            changes=[{"op": "move", "path": "/models/default"}],
+        )
+
+        assert "Invalid patch request" in result
+        assert "Invalid configuration" not in result
+        assert "Changes were NOT applied" in result
+
+    def test_manage_config_rejects_root_null_that_schema_normalizes_away(self, tmp_path: Path) -> None:
+        """A root null must fail rather than persist with removal semantics."""
+        config_path = _minimal_config_path(tmp_path)
+        original = config_path.read_bytes()
+
+        result = _config_manager(config_path).manage_config(
+            operation="patch",
+            changes=[{"op": "add", "path": "/tool_approval", "value": None}],
+        )
+
+        assert "cannot be set to null" in result
+        assert "schema normalizes null to unset/default" in result
+        assert "Changes were NOT applied" in result
+        assert config_path.read_bytes() == original
+
+    def test_manage_config_replace_missing_suggests_add(self, tmp_path: Path) -> None:
+        """Unset authored fields should explain the replace-versus-add distinction."""
+        config_path = _minimal_config_path(tmp_path)
+
+        result = _config_manager(config_path).manage_config(
+            operation="patch",
+            changes=[{"op": "replace", "path": "/defaults", "value": {"markdown": False}}],
+        )
+
+        assert "use add instead" in result
+        assert "Changes were NOT applied" in result
+
+    def test_manage_config_rejects_schema_invalid_patch_without_writing(self, tmp_path: Path) -> None:
+        """Runtime-aware Config validation should reject unknown fields atomically."""
+        config_path = tmp_path / "config.yaml"
+        write_config_yaml(
+            Config(
+                models={"default": {"provider": "openai", "id": "gpt-4o"}},
+                agents={"writer": AgentConfig(display_name="Writer", role="Writes")},
+            ),
+            config_path,
+        )
+        original = config_path.read_bytes()
+
+        result = _config_manager(config_path).manage_config(
+            operation="patch",
+            changes=[{"op": "add", "path": "/agents/writer/not_a_field", "value": True}],
+        )
+
+        assert "Invalid configuration" in result
+        assert "not_a_field" in result
+        assert config_path.read_bytes() == original
+
+    def test_manage_config_preserves_tool_overrides_and_runtime_overlay(self, tmp_path: Path) -> None:
+        """Unrelated patches must preserve authored overrides without persisting runtime overlays."""
+        config_path = tmp_path / "config.yaml"
+        write_config_yaml(
+            Config(
+                models={"default": {"provider": "openai", "id": "gpt-4o"}},
+                defaults=DefaultsConfig(
+                    tools=[{"shell": {"enable_run_shell_command": True}}],
+                ),
+            ),
+            config_path,
+        )
+        runtime_paths = resolve_runtime_paths(
+            config_path=config_path,
+            process_env={"MINDROOM_APPROVED_EGRESS_ENABLED": "true"},
+        )
+
+        result = ConfigManagerTools(runtime_paths).manage_config(
+            operation="patch",
+            changes=[{"op": "add", "path": "/timezone", "value": "Europe/Amsterdam"}],
+        )
+
+        assert "patch updated" in result
+        saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert saved["defaults"]["tools"] == [{"shell": {"enable_run_shell_command": True}}]
+        assert "approved_egress" not in str(saved)
+        assert "tool_approval" not in saved
+
+    def test_manage_config_surfaces_include_boundary_on_inspect_and_patch(self, tmp_path: Path) -> None:
+        """Composed configs should remain inspectable but reject structured writes."""
+        config_path = tmp_path / "config.yaml"
+        models_path = tmp_path / "models.yaml"
+        config_path.write_text("models: !include models.yaml\n", encoding="utf-8")
+        models_path.write_text("default:\n  provider: openai\n  id: gpt-4o\n", encoding="utf-8")
+        cm = _config_manager(config_path)
+
+        inspected = cm.manage_config(operation="inspect", path="/models/default")
+        rejected = cm.manage_config(
+            operation="patch",
+            changes=[{"op": "replace", "path": "/models/default/id", "value": "gpt-5"}],
+        )
+
+        assert "composed from multiple files" in inspected
+        assert "structured patching is unavailable" in inspected
+        assert "composed from multiple files" in rejected
+        assert "Changes were NOT applied" in rejected
+        assert "gpt-4o" in models_path.read_text(encoding="utf-8")
 
     def test_init_uses_explicit_config_path(self) -> None:
         """Initialization should preserve the explicitly provided config path."""
@@ -203,9 +521,11 @@ class TestConsolidatedConfigManager:
         room.members_synced = True
         runtime_context = ToolRuntimeContext(
             agent_name="present",
-            room_id=room.room_id,
-            thread_id=None,
-            resolved_thread_id=None,
+            target=MessageTarget.resolve(
+                room_id=room.room_id,
+                thread_id=None,
+                reply_to_event_id=None,
+            ),
             requester_id="@user:localhost",
             client=MagicMock(),
             config=config,
@@ -354,6 +674,304 @@ class TestConsolidatedConfigManager:
         finally:
             config_path.unlink(missing_ok=True)
 
+    @pytest.mark.parametrize("worker_scope", [None, "shared", "user", "user_agent"])
+    def test_manage_agent_create_returns_updated_agent_oauth_target(
+        self,
+        tmp_path: Path,
+        worker_scope: WorkerScope | None,
+    ) -> None:
+        """Create links should use the new agent and requester's effective execution scope."""
+        config = Config(
+            agents={"admin": AgentConfig(display_name="Admin", role="Configure agents")},
+            defaults=DefaultsConfig(tools=[], worker_scope=worker_scope),
+            models={"default": {"provider": "openai", "id": "gpt-4o"}},
+        )
+        config_path = tmp_path / "config.yaml"
+        write_config_yaml(config, config_path)
+        cm = _config_manager(config_path)
+
+        with tool_runtime_context(_caller_context(cm, config)):
+            result = cm.manage_agent(
+                operation="create",
+                agent_name="research",
+                display_name="Research",
+                role="Read Drive files",
+                tools=["google_drive"],
+            )
+
+        connect_url = _connect_url_from_result(result)
+        query = parse_qs(urlparse(connect_url).query)
+        assert query["agent_name"] == ["research"]
+        assert query.get("execution_scope") == ([worker_scope] if worker_scope is not None else None)
+        assert "admin" not in connect_url
+        assert "`requires_host_browser`: true" in result
+        assert "Localhost links must be opened in a browser on the computer where MindRoom is running" in result
+        assert "direct links instead of sending them to the dashboard" in result
+        assert "After connection, have agent `research` retry" in result
+        assert "not guaranteed to be available to the current agent or in the current run" in result
+        assert "Before replying" not in result
+
+        connect_tokens = query.get("connect_token")
+        if worker_scope is None:
+            assert connect_tokens is None
+            return
+
+        connect_target = lookup_oauth_connect_token(
+            google_drive_oauth_provider(),
+            cm.runtime_paths,
+            connect_tokens[0],
+        )
+        expected_identity = ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="research",
+            requester_id="@alice:example.org",
+            room_id="!room:example.org",
+            thread_id="$thread",
+            resolved_thread_id="$thread",
+            session_id="!room:example.org:$thread",
+        )
+        assert connect_target.agent_name == "research"
+        assert connect_target.requester_id == "@alice:example.org"
+        assert connect_target.worker_scope == worker_scope
+        assert connect_target.worker_key == resolve_worker_key(
+            worker_scope,
+            expected_identity,
+            agent_name="research",
+        )
+
+    @pytest.mark.parametrize("private_scope", ["user", "user_agent"])
+    def test_manage_agent_update_returns_private_target_oauth_link(
+        self,
+        tmp_path: Path,
+        private_scope: Literal["user", "user_agent"],
+    ) -> None:
+        """Updating another private agent should mint only that agent's requester-bound link."""
+        config = Config(
+            agents={
+                "admin": AgentConfig(display_name="Admin", role="Configure agents"),
+                "research": AgentConfig(
+                    display_name="Research",
+                    role="Research",
+                    tools=["calculator"],
+                    private={"per": private_scope},
+                ),
+            },
+            defaults=DefaultsConfig(tools=[]),
+            models={"default": {"provider": "openai", "id": "gpt-4o"}},
+        )
+        config_path = tmp_path / "config.yaml"
+        write_config_yaml(config, config_path)
+        cm = _config_manager(config_path)
+
+        with tool_runtime_context(_caller_context(cm, config)):
+            result = cm.manage_agent(
+                operation="update",
+                agent_name="research",
+                tools=["calculator", "google_drive"],
+            )
+
+        connect_url = _connect_url_from_result(result)
+        query = parse_qs(urlparse(connect_url).query)
+        assert query["agent_name"] == ["research"]
+        assert query["execution_scope"] == [private_scope]
+        connect_target = lookup_oauth_connect_token(
+            google_drive_oauth_provider(),
+            cm.runtime_paths,
+            query["connect_token"][0],
+        )
+        assert connect_target.agent_name == "research"
+        assert connect_target.requester_id == "@alice:example.org"
+        assert connect_target.worker_scope == private_scope
+
+    def test_manage_agent_update_does_not_mint_caller_link_when_requester_cannot_manage_target(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Target authorization failure should not fall back to the config-manager caller."""
+        config = Config(
+            agents={
+                "admin": AgentConfig(display_name="Admin", role="Configure agents"),
+                "research": AgentConfig(display_name="Research", role="Research"),
+            },
+            defaults=DefaultsConfig(tools=[]),
+            models={"default": {"provider": "openai", "id": "gpt-4o"}},
+            authorization={"agent_reply_permissions": {"research": ["@bob:example.org"]}},
+        )
+        config_path = tmp_path / "config.yaml"
+        write_config_yaml(config, config_path)
+        cm = _config_manager(config_path)
+
+        with (
+            tool_runtime_context(_caller_context(cm, config)),
+            patch("mindroom.custom_tools.config_manager.oauth_connect_url") as connect_url,
+        ):
+            result = cm.manage_agent(
+                operation="update",
+                agent_name="research",
+                tools=["google_drive"],
+            )
+
+        connect_url.assert_not_called()
+        assert "not authorized to manage credentials for agent `research`" in result
+        assert "connect_url" not in result
+        assert "admin" not in result
+
+    def test_manage_agent_self_update_does_not_promise_same_run_tool_use(self, tmp_path: Path) -> None:
+        """Self-update should return the scoped link without claiming the new schema is callable now."""
+        config = Config(
+            agents={"research": AgentConfig(display_name="Research", role="Research", worker_scope="user_agent")},
+            defaults=DefaultsConfig(tools=[]),
+            models={"default": {"provider": "openai", "id": "gpt-4o"}},
+        )
+        config_path = tmp_path / "config.yaml"
+        write_config_yaml(config, config_path)
+        cm = _config_manager(config_path)
+
+        with tool_runtime_context(_caller_context(cm, config, agent_name="research")):
+            result = cm.manage_agent(
+                operation="update",
+                agent_name="research",
+                tools=["google_drive"],
+            )
+
+        assert "`connect_url`:" in result
+        assert "not guaranteed to be available to the current agent or in the current run" in result
+        assert "call a harmless" not in result
+
+    def test_manage_agent_oauth_guidance_respects_inherited_default_tools(self, tmp_path: Path) -> None:
+        """Effective default-tool changes should produce links only for agents that inherit them."""
+        config = Config(
+            agents={
+                "admin": AgentConfig(display_name="Admin", role="Configure agents"),
+                "research": AgentConfig(
+                    display_name="Research",
+                    role="Research",
+                    include_default_tools=False,
+                ),
+            },
+            defaults=DefaultsConfig(tools=["google_drive"], worker_scope="user_agent"),
+            models={"default": {"provider": "openai", "id": "gpt-4o"}},
+        )
+        config_path = tmp_path / "config.yaml"
+        write_config_yaml(config, config_path)
+        cm = _config_manager(config_path)
+
+        with tool_runtime_context(_caller_context(cm, config)):
+            inherited_create = cm.manage_agent(
+                operation="create",
+                agent_name="inherited",
+                display_name="Inherited",
+                role="Use defaults",
+                tools=[],
+            )
+            excluded_create = cm.manage_agent(
+                operation="create",
+                agent_name="excluded",
+                display_name="Excluded",
+                role="Skip defaults",
+                tools=[],
+                include_default_tools=False,
+            )
+            inherited_update = cm.manage_agent(
+                operation="update",
+                agent_name="research",
+                include_default_tools=True,
+            )
+
+        assert "`connect_url`:" in inherited_create
+        assert "agent `inherited`" in inherited_create
+        assert "connect_url" not in excluded_create
+        assert "`connect_url`:" in inherited_update
+        assert "agent `research`" in inherited_update
+
+    def test_manage_agent_excludes_setup_type_oauth_without_auth_provider(self, tmp_path: Path) -> None:
+        """SetupType.OAUTH alone should not claim the structured generic-provider contract."""
+        config = Config(
+            agents={"admin": AgentConfig(display_name="Admin", role="Configure agents")},
+            defaults=DefaultsConfig(tools=[]),
+            models={"default": {"provider": "openai", "id": "gpt-4o"}},
+        )
+        config_path = tmp_path / "config.yaml"
+        write_config_yaml(config, config_path)
+        cm = _config_manager(config_path)
+
+        with tool_runtime_context(_caller_context(cm, config)):
+            result = cm.manage_agent(
+                operation="create",
+                agent_name="meetings",
+                display_name="Meetings",
+                role="Manage Zoom meetings",
+                tools=["zoom"],
+            )
+
+        assert "Successfully created" in result
+        assert "connect_url" not in result
+        assert "MindRoom-managed OAuth" not in result
+
+    def test_manage_agent_returns_target_link_for_oauth_mcp_tool(self, tmp_path: Path) -> None:
+        """Generic OAuth MCP metadata should use the same updated-agent target flow."""
+        mcp_server = MCPServerConfig(
+            transport="streamable-http",
+            url="https://mcp.example.test/mcp",
+            auth={
+                "type": "oauth",
+                "display_name": "Demo MCP",
+                "discovery": "manual",
+                "authorization_url": "https://auth.example.test/authorize",
+                "token_url": "https://auth.example.test/token",
+            },
+        )
+        config = Config(
+            agents={"admin": AgentConfig(display_name="Admin", role="Configure agents")},
+            defaults=DefaultsConfig(tools=[], worker_scope="user_agent"),
+            models={"default": {"provider": "openai", "id": "gpt-4o"}},
+            mcp_servers={"demo": mcp_server},
+        )
+        config_path = tmp_path / "config.yaml"
+        write_config_yaml(config, config_path)
+        cm = _config_manager(config_path)
+
+        with tool_runtime_context(_caller_context(cm, config)):
+            result = cm.manage_agent(
+                operation="create",
+                agent_name="research",
+                display_name="Research",
+                role="Use Demo MCP",
+                tools=["mcp_demo"],
+            )
+
+        query = parse_qs(urlparse(_connect_url_from_result(result)).query)
+        assert query["agent_name"] == ["research"]
+        assert query["execution_scope"] == ["user_agent"]
+        assert "/api/oauth/mcp_demo/authorize" in result
+
+    def test_manage_agent_oauth_link_failure_does_not_mask_saved_update(self, tmp_path: Path) -> None:
+        """Optional link generation must not report a persisted config change as failed."""
+        config = Config(
+            agents={
+                "admin": AgentConfig(display_name="Admin", role="Configure agents"),
+                "research": AgentConfig(display_name="Research", role="Research"),
+            },
+            defaults=DefaultsConfig(tools=[]),
+            models={"default": {"provider": "openai", "id": "gpt-4o"}},
+        )
+        config_path = tmp_path / "config.yaml"
+        write_config_yaml(config, config_path)
+        cm = _config_manager(config_path)
+
+        with (
+            tool_runtime_context(_caller_context(cm, config)),
+            patch("mindroom.custom_tools.config_manager.oauth_connect_url", side_effect=RuntimeError("disk failed")),
+        ):
+            result = cm.manage_agent(
+                operation="update",
+                agent_name="research",
+                tools=["google_drive"],
+            )
+
+        assert "Successfully updated" in result
+        assert load_config_yaml(config_path).agents["research"].tool_names == ["google_drive"]
+
     def test_manage_agent_create_returns_invalid_plugin_manifest_error(self, tmp_path: Path) -> None:
         """Write config-manager flows should keep runtime plugin validation in the invalid-config channel."""
         cm = _config_manager(_invalid_plugin_config_path(tmp_path, with_agent=False))
@@ -428,7 +1046,7 @@ class TestConsolidatedConfigManager:
 
             config = load_config_yaml(config_path)
             assert config.agents["test_agent"].tool_names == ["openclaw_compat"]
-            effective = config.get_agent_tools("test_agent")
+            effective = config.resolve_entity("test_agent").available_tools
             assert effective[0] == "openclaw_compat"
             assert "shell" in effective
             assert "matrix_message" in effective
@@ -603,7 +1221,7 @@ class TestConsolidatedConfigManager:
         assert config.defaults.tool_names == ["scheduler", "shell"]
         assert config.agents["code"].tool_names == ["file", "shell"]
 
-        resolved = config.get_agent_tool_configs("code")
+        resolved = config.resolve_entity("code").tool_configs
         assert [entry.name for entry in resolved[:3]] == ["file", "shell", "scheduler"]
         resolved_shell = next(entry for entry in resolved if entry.name == "shell")
         assert resolved_shell.tool_config_overrides == {
@@ -632,7 +1250,7 @@ class TestConsolidatedConfigManager:
             _runtime_paths(),
         )
 
-        resolved = next(entry for entry in config.get_agent_tool_configs("code") if entry.name == "clickup")
+        resolved = next(entry for entry in config.resolve_entity("code").tool_configs if entry.name == "clickup")
         assert resolved.tool_config_overrides == {}
 
     def test_tool_approval_null_section_uses_default_config(self) -> None:
@@ -642,6 +1260,78 @@ class TestConsolidatedConfigManager:
         assert config.tool_approval.default == "auto_approve"
         assert config.tool_approval.timeout_days == 7.0
         assert config.tool_approval.rules == []
+
+    def test_runtime_approved_egress_flag_adds_tool_and_approval_rule(self) -> None:
+        """Runtime-managed approved egress should not require editing authored config."""
+        runtime_paths = resolve_runtime_paths(
+            config_path=Path("config.yaml"),
+            process_env={"MINDROOM_APPROVED_EGRESS_ENABLED": "true"},
+        )
+
+        config = Config.validate_with_runtime(
+            {
+                "defaults": {"tools": ["scheduler"]},
+                "tool_approval": {
+                    "rules": [
+                        {"match": "run_shell_command", "action": "require_approval"},
+                    ],
+                },
+            },
+            runtime_paths,
+        )
+
+        assert config.defaults.tool_names == ["scheduler", "approved_egress"]
+        assert [rule.model_dump(exclude_none=True) for rule in config.tool_approval.rules] == [
+            {"match": "request_network_access", "action": "require_approval"},
+            {"match": "run_shell_command", "action": "require_approval"},
+        ]
+
+    def test_runtime_approved_egress_flag_keeps_authored_dump_unmodified(self) -> None:
+        """Runtime-managed approved egress should not become persisted authored config."""
+        runtime_paths = resolve_runtime_paths(
+            config_path=Path("config.yaml"),
+            process_env={"MINDROOM_APPROVED_EGRESS_ENABLED": "true"},
+        )
+
+        config = Config.validate_with_runtime(
+            {
+                "defaults": {"tools": ["scheduler"]},
+            },
+            runtime_paths,
+        )
+        empty_config = Config.validate_with_runtime({}, runtime_paths)
+
+        assert config.defaults.tool_names == ["scheduler", "approved_egress"]
+        assert config.authored_model_dump()["defaults"]["tools"] == ["scheduler"]
+        assert "tool_approval" not in config.authored_model_dump()
+        assert empty_config.defaults.tool_names == ["approved_egress"]
+        assert empty_config.authored_model_dump() == {}
+
+    def test_runtime_approved_egress_flag_forces_approval_ahead_of_script_rules(self) -> None:
+        """Runtime-managed approved egress must require Matrix approval even with authored scripts."""
+        runtime_paths = resolve_runtime_paths(
+            config_path=Path("config.yaml"),
+            process_env={"MINDROOM_APPROVED_EGRESS_ENABLED": "true"},
+        )
+
+        config = Config.validate_with_runtime(
+            {
+                "tool_approval": {
+                    "rules": [
+                        {"match": "*", "script": "approval.py"},
+                    ],
+                },
+            },
+            runtime_paths,
+        )
+
+        assert [rule.model_dump(exclude_none=True) for rule in config.tool_approval.rules] == [
+            {"match": "request_network_access", "action": "require_approval"},
+            {"match": "*", "script": "approval.py"},
+        ]
+        assert config.authored_model_dump()["tool_approval"]["rules"] == [
+            {"match": "*", "script": "approval.py"},
+        ]
 
     def test_tool_output_auto_save_threshold_is_configurable_in_defaults(self) -> None:
         """The automatic tool-output save threshold should be a validated config setting."""
@@ -728,7 +1418,7 @@ class TestConsolidatedConfigManager:
             _runtime_paths(),
         )
 
-        resolved = {entry.name: entry.tool_config_overrides for entry in config.get_agent_tool_configs("code")}
+        resolved = {entry.name: entry.tool_config_overrides for entry in config.resolve_entity("code").tool_configs}
         assert resolved["openclaw_compat"] == {}
         assert resolved["shell"] == {"enable_run_shell_command": False}
         assert resolved["coding"] == {}
@@ -1030,15 +1720,15 @@ class TestConsolidatedConfigManager:
                 assert "Error: Unknown info_type" not in result
 
     def test_reduced_tool_count(self, tmp_path: Path) -> None:
-        """Verify we reduced from 15 tools to just 3."""
+        """Verify the toolkit remains consolidated into four functions."""
         cm = _config_manager(_minimal_config_path(tmp_path))
 
-        # Should only have 3 tools registered
-        assert len(cm.tools) == 3
+        assert len(cm.tools) == 4
 
         # Check the specific tools
         tool_names = [tool.__name__ for tool in cm.tools]
         assert "get_info" in tool_names
+        assert "manage_config" in tool_names
         assert "manage_agent" in tool_names
         assert "manage_team" in tool_names
 
@@ -1116,7 +1806,7 @@ class TestConsolidatedConfigManager:
 
 
 class TestAgentWorkerScope:
-    """Tests for Config.get_agent_execution_scope."""
+    """Tests for the resolved per-agent execution scope."""
 
     def test_worker_scope_prefers_agent_override(self) -> None:
         """Agent-level worker_scope should override defaults."""
@@ -1126,7 +1816,7 @@ class TestAgentWorkerScope:
                 "code": AgentConfig(display_name="Code", worker_scope="user_agent"),
             },
         )
-        assert config.get_agent_execution_scope("code") == "user_agent"
+        assert config.resolve_entity("code").execution_scope == "user_agent"
 
     def test_worker_scope_falls_back_to_defaults(self) -> None:
         """Worker scope should inherit from defaults when agent config omits it."""
@@ -1136,7 +1826,7 @@ class TestAgentWorkerScope:
                 "code": AgentConfig(display_name="Code"),
             },
         )
-        assert config.get_agent_execution_scope("code") == "user"
+        assert config.resolve_entity("code").execution_scope == "user"
 
 
 class TestWorkerGrantableCredentials:

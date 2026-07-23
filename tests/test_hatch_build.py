@@ -34,25 +34,92 @@ def test_get_output_dir_for_standard_build_stays_out_of_dist(
     tmp_path: Path,
 ) -> None:
     """Wheel builds should not leave non-package artifacts in the publish directory."""
-    frontend_dir = tmp_path / "frontend"
     build_dir = tmp_path / "dist"
 
-    output_dir = hatch_build_module._get_output_dir(frontend_dir, str(build_dir), "standard")
+    output_dir = hatch_build_module._get_output_dir(tmp_path / "frontend", str(build_dir), "standard")
 
     assert output_dir == tmp_path / ".frontend-build" / "frontend-dist"
     assert output_dir.parent != build_dir
 
 
-def test_get_output_dir_for_editable_build_uses_repo_frontend_dist(
+def test_editable_build_skips_frontend_build_even_when_bun_is_available(
     hatch_build_module: types.ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Editable installs should still write to the repo frontend dist directory."""
+    """Editable installs should not build bundled dashboard assets."""
     frontend_dir = tmp_path / "frontend"
+    frontend_dir.mkdir()
+    hook = hatch_build_module.FrontendBuildHook()
+    hook.target_name = "wheel"
+    hook.root = str(tmp_path)
+    hook.directory = str(tmp_path / "dist")
+    build_calls: list[tuple[Path, Path, str]] = []
 
-    output_dir = hatch_build_module._get_output_dir(frontend_dir, str(tmp_path / "dist"), "editable")
+    def fake_build_frontend(frontend: Path, output: Path, bun: str) -> None:
+        build_calls.append((frontend, output, bun))
 
-    assert output_dir == frontend_dir / "dist"
+    monkeypatch.setattr(
+        hatch_build_module.shutil,
+        "which",
+        lambda name: "/usr/local/bin/bun" if name == "bun" else None,
+    )
+    monkeypatch.setattr(hatch_build_module, "_build_frontend", fake_build_frontend)
+
+    hook.initialize("editable", {})
+
+    assert build_calls == []
+
+
+def test_editable_build_env_opt_in_builds_repo_frontend_dist(
+    hatch_build_module: types.ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Editable installs should build frontend/dist when explicitly requested."""
+    frontend_dir = tmp_path / "frontend"
+    frontend_dir.mkdir()
+    hook = hatch_build_module.FrontendBuildHook()
+    hook.target_name = "wheel"
+    hook.root = str(tmp_path)
+    hook.directory = str(tmp_path / "dist")
+    build_calls: list[tuple[Path, Path, str]] = []
+    build_data: dict[str, object] = {}
+
+    def fake_build_frontend(frontend: Path, output: Path, bun: str) -> None:
+        build_calls.append((frontend, output, bun))
+
+    monkeypatch.setenv(hatch_build_module._BUILD_FRONTEND_ENV, "1")
+    monkeypatch.setattr(
+        hatch_build_module.shutil,
+        "which",
+        lambda name: "/usr/local/bin/bun" if name == "bun" else None,
+    )
+    monkeypatch.setattr(hatch_build_module, "_build_frontend", fake_build_frontend)
+
+    hook.initialize("editable", build_data)
+
+    assert build_calls == [(frontend_dir, frontend_dir / "dist", "/usr/local/bin/bun")]
+    assert build_data == {}
+
+
+def test_editable_build_env_opt_in_requires_bun(
+    hatch_build_module: types.ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An explicit editable frontend build should fail rather than skip missing Bun."""
+    (tmp_path / "frontend").mkdir()
+    hook = hatch_build_module.FrontendBuildHook()
+    hook.target_name = "wheel"
+    hook.root = str(tmp_path)
+    hook.directory = str(tmp_path / "dist")
+
+    monkeypatch.setenv(hatch_build_module._BUILD_FRONTEND_ENV, "1")
+    monkeypatch.setattr(hatch_build_module.shutil, "which", lambda _name: None)
+
+    with pytest.raises(RuntimeError, match="MINDROOM_BUILD_FRONTEND=1"):
+        hook.initialize("editable", {})
 
 
 def test_run_command_retries_once_before_succeeding(
@@ -125,6 +192,42 @@ def test_build_frontend_retries_bun_install_only(
             0.0,
         ),
     ]
+
+
+def test_build_frontend_rejects_git_lfs_pointer_assets(
+    hatch_build_module: types.ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Wheel builds must fail instead of bundling unresolved Git LFS pointers."""
+    frontend_dir = tmp_path / "frontend"
+    output_dir = tmp_path / "frontend-dist"
+    frontend_dir.mkdir()
+
+    def fake_run_command(
+        cmd: list[str],
+        **_run_kwargs: object,
+    ) -> None:
+        if cmd[-2:] == ["--outDir", str(output_dir)]:
+            output_dir.mkdir(exist_ok=True)
+            (output_dir / "logo.png").write_text(
+                "version https://git-lfs.github.com/spec/v1\n"
+                "oid sha256:4aab59a2761edf3b65c4f82cd0a0f13cb0ab782a4c1ef345034d1f9724cec4f1\n"
+                "size 685151\n",
+            )
+
+    monkeypatch.setattr(hatch_build_module, "_run_command", fake_run_command)
+
+    with pytest.raises(RuntimeError, match="Run git lfs pull before building"):
+        hatch_build_module._build_frontend(frontend_dir, output_dir, "/usr/local/bin/bun")
+
+
+def test_dashboard_shell_uses_canonical_png_logo() -> None:
+    """The installed dashboard should use the canonical PNG logo assets."""
+    repo_root = Path(__file__).resolve().parents[1]
+
+    assert 'href="/favicon.png"' in (repo_root / "frontend/index.html").read_text()
+    assert 'src="/logo.png"' in (repo_root / "frontend/src/App.tsx").read_text()
 
 
 def test_wheel_force_include_does_not_bundle_avatar_assets() -> None:

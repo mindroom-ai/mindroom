@@ -1,6 +1,9 @@
 """Tests for the custom Home Assistant tools."""
 
 import json
+import socket
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
@@ -10,6 +13,8 @@ from httpx import Response
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.credentials import CredentialsManager
 from mindroom.custom_tools.homeassistant import HomeAssistantTools
+from mindroom.homeassistant_url_validation import homeassistant_url_error_detail
+from mindroom.server_fetch_url import ServerFetchUrlError
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.worker_routing import resolve_worker_target
 from tests.conftest import TEST_PASSWORD
@@ -22,8 +27,9 @@ def mock_credentials_manager(tmp_path: Path) -> CredentialsManager:
 
     # Save test Home Assistant credentials
     test_creds = {
-        "instance_url": "http://homeassistant.local:8123",
+        "instance_url": "http://127.0.0.1:8123",
         "access_token": TEST_PASSWORD,
+        "allow_private_url": True,
     }
     manager.save_credentials("homeassistant", test_creds)
     return manager
@@ -102,8 +108,9 @@ class TestHomeAssistantTools:
         credentials_manager.save_credentials(
             "homeassistant",
             {
-                "instance_url": "http://homeassistant.local:8123",
+                "instance_url": "http://127.0.0.1:8123",
                 "access_token": TEST_PASSWORD,
+                "allow_private_url": True,
                 "_source": "ui",
             },
         )
@@ -123,8 +130,9 @@ class TestHomeAssistantTools:
 
         assert isinstance(tool, HomeAssistantTools)
         assert tool._load_config() == {
-            "instance_url": "http://homeassistant.local:8123",
+            "instance_url": "http://127.0.0.1:8123",
             "access_token": TEST_PASSWORD,
+            "allow_private_url": True,
             "_source": "ui",
         }
 
@@ -156,8 +164,9 @@ class TestHomeAssistantTools:
         config = ha_tools_with_mocked_creds._load_config()
 
         assert config is not None
-        assert config["instance_url"] == "http://homeassistant.local:8123"
+        assert config["instance_url"] == "http://127.0.0.1:8123"
         assert config["access_token"] == TEST_PASSWORD
+        assert config["allow_private_url"] is True
 
         # A second lookup should return the same values.
         config2 = ha_tools_with_mocked_creds._load_config()
@@ -199,6 +208,157 @@ class TestHomeAssistantTools:
         assert result == {"error": "Missing Home Assistant credentials"}
 
     @pytest.mark.asyncio
+    async def test_api_request_rejects_private_url_without_explicit_opt_in(self, tmp_path: Path) -> None:
+        """Stored Home Assistant URLs should not fetch internal targets unless explicitly allowed."""
+        manager = CredentialsManager(base_path=tmp_path / "credentials")
+        manager.save_credentials(
+            "homeassistant",
+            {
+                "instance_url": "http://127.0.0.1:8123",
+                "access_token": TEST_PASSWORD,
+            },
+        )
+        ha_tools = HomeAssistantTools(credentials_manager=manager)
+
+        with patch("httpx.AsyncClient") as mock_client_class:
+            mock_client_class.side_effect = AssertionError("private URL should be rejected before request")
+
+            result = await ha_tools._api_request("GET", "/api/states")
+
+        assert result == {
+            "error": homeassistant_url_error_detail(
+                ServerFetchUrlError(reason="private_address"),
+                allow_private_url=False,
+            ),
+        }
+
+    @pytest.mark.asyncio
+    async def test_api_request_allows_private_url_with_explicit_opt_in(self, tmp_path: Path) -> None:
+        """Self-hosted Home Assistant instances can opt into private URL access deliberately."""
+        manager = CredentialsManager(base_path=tmp_path / "credentials")
+        manager.save_credentials(
+            "homeassistant",
+            {
+                "instance_url": "http://127.0.0.1:8123",
+                "access_token": TEST_PASSWORD,
+                "allow_private_url": True,
+            },
+        )
+        ha_tools = HomeAssistantTools(credentials_manager=manager)
+
+        with patch("httpx.AsyncClient") as mock_client_class:
+            mock_client = AsyncMock()
+            mock_response = Mock(spec=Response)
+            mock_response.status_code = 200
+            mock_response.text = '{"success": true}'
+            mock_response.json.return_value = {"success": True}
+            mock_client.request.return_value = mock_response
+            mock_client_class.return_value.__aenter__.return_value = mock_client
+
+            result = await ha_tools._api_request("GET", "/api/states")
+
+        assert result == {"success": True}
+        mock_client.request.assert_called_once_with(
+            method="GET",
+            url="http://127.0.0.1:8123/api/states",
+            headers={"Authorization": f"Bearer {TEST_PASSWORD}"},
+            json=None,
+            timeout=10.0,
+        )
+
+    @pytest.mark.asyncio
+    async def test_api_request_rejects_dns_rebind_at_connect_time(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The async Home Assistant client should validate the address it actually connects to."""
+
+        class RebindHandler(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:
+                body = b'{"success": true}'
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, format: str, *_args: object) -> None:  # noqa: A002, ARG002
+                return
+
+        server = HTTPServer(("127.0.0.1", 0), RebindHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        manager = CredentialsManager(base_path=tmp_path / "credentials")
+        manager.save_credentials(
+            "homeassistant",
+            {
+                "instance_url": f"http://rebind.test:{server.server_port}",
+                "access_token": TEST_PASSWORD,
+            },
+        )
+        ha_tools = HomeAssistantTools(credentials_manager=manager)
+        dns_calls = 0
+
+        def fake_getaddrinfo(host: str | bytes, port: int, *_args: object, **_kwargs: object) -> list[object]:
+            nonlocal dns_calls
+            if host in ("rebind.test", b"rebind.test"):
+                dns_calls += 1
+                ip_address = "93.184.216.34" if dns_calls == 1 else "127.0.0.1"
+                return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", (ip_address, port))]
+            return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("93.184.216.34", port))]
+
+        monkeypatch.setattr("socket.getaddrinfo", fake_getaddrinfo)
+
+        try:
+            result = await ha_tools._api_request("GET", "/api/states")
+        finally:
+            server.shutdown()
+            server.server_close()
+
+        assert result == {
+            "error": homeassistant_url_error_detail(
+                ServerFetchUrlError(reason="private_address"),
+                allow_private_url=False,
+            ),
+        }
+        assert dns_calls >= 2
+
+    @pytest.mark.asyncio
+    async def test_api_request_uses_validated_instance_url(self, tmp_path: Path) -> None:
+        """The tool should request the normalized URL returned by server-side fetch validation."""
+        manager = CredentialsManager(base_path=tmp_path / "credentials")
+        manager.save_credentials(
+            "homeassistant",
+            {
+                "instance_url": " http://127.0.0.1:8123 ",
+                "access_token": TEST_PASSWORD,
+                "allow_private_url": True,
+            },
+        )
+        ha_tools = HomeAssistantTools(credentials_manager=manager)
+
+        with patch("httpx.AsyncClient") as mock_client_class:
+            mock_client = AsyncMock()
+            mock_response = Mock(spec=Response)
+            mock_response.status_code = 200
+            mock_response.text = '{"success": true}'
+            mock_response.json.return_value = {"success": True}
+            mock_client.request.return_value = mock_response
+            mock_client_class.return_value.__aenter__.return_value = mock_client
+
+            result = await ha_tools._api_request("GET", "/api/states")
+
+        assert result == {"success": True}
+        mock_client.request.assert_called_once_with(
+            method="GET",
+            url="http://127.0.0.1:8123/api/states",
+            headers={"Authorization": f"Bearer {TEST_PASSWORD}"},
+            json=None,
+            timeout=10.0,
+        )
+
+    @pytest.mark.asyncio
     async def test_api_request_success(self, ha_tools_with_mocked_creds: HomeAssistantTools) -> None:
         """Test successful API request."""
         with patch("httpx.AsyncClient") as mock_client_class:
@@ -214,7 +374,7 @@ class TestHomeAssistantTools:
             assert result == {"success": True}
             mock_client.request.assert_called_once_with(
                 method="GET",
-                url="http://homeassistant.local:8123/api/states",
+                url="http://127.0.0.1:8123/api/states",
                 headers={"Authorization": f"Bearer {TEST_PASSWORD}"},
                 json=None,
                 timeout=10.0,
@@ -244,7 +404,7 @@ class TestHomeAssistantTools:
             assert result == {"success": True}
             mock_client.request.assert_called_once_with(
                 method="POST",
-                url="http://homeassistant.local:8123/api/services/light/turn_on",
+                url="http://127.0.0.1:8123/api/services/light/turn_on",
                 headers={"Authorization": f"Bearer {TEST_PASSWORD}"},
                 json=json_data,
                 timeout=10.0,
@@ -266,7 +426,7 @@ class TestHomeAssistantTools:
 
             result = await ha_tools_with_mocked_creds._api_request("GET", "/api/invalid")
 
-            assert result == {"error": "API error: Not found"}
+            assert result == {"error": "Home Assistant API returned status 404"}
 
     @pytest.mark.asyncio
     async def test_api_request_network_error(

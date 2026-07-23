@@ -18,6 +18,16 @@ STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY")
 HAS_STRIPE_CREDENTIALS = bool(STRIPE_SECRET_KEY and STRIPE_SECRET_KEY.startswith("sk_test_"))
 
 
+def _metadata_dict(value):
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, stripe.StripeObject):
+        return value.to_dict()
+    return dict(value)
+
+
 # Tests will use mocked or real Stripe depending on credentials
 class TestStripeDebugUtils:
     """Utility tests for debugging Stripe integration."""
@@ -37,7 +47,7 @@ class TestStripeDebugUtils:
         products = stripe.Product.list(limit=100)
 
         # Find MindRoom products
-        mindroom_products = [p for p in products.data if p.metadata.get("platform") == "mindroom"]
+        mindroom_products = [p for p in products.data if _metadata_dict(p.metadata).get("platform") == "mindroom"]
 
         # Should have at least one MindRoom product
         assert len(mindroom_products) > 0, "No MindRoom products found in Stripe"
@@ -46,7 +56,7 @@ class TestStripeDebugUtils:
         product = mindroom_products[0]
         assert product.name == "MindRoom Subscription", f"Product name mismatch: {product.name}"
         assert product.active, "MindRoom product is not active"
-        assert product.metadata.get("platform") == "mindroom", "Missing platform metadata"
+        assert _metadata_dict(product.metadata).get("platform") == "mindroom", "Missing platform metadata"
 
     def _check_price(self, plan_name: str, price_id: str | None, yaml_price: int, billing_cycle: str) -> str | None:
         """Check a single price against Stripe. Returns error message if mismatch."""
@@ -73,7 +83,7 @@ class TestStripeDebugUtils:
         errors = []
 
         for plan_key, plan in yaml_config["plans"].items():
-            if plan_key not in ["starter", "professional"]:
+            if plan_key not in ["byok", "hobby", "pro"]:
                 continue  # Only check paid plans with Stripe IDs
 
             # Check monthly price

@@ -9,6 +9,7 @@ import nio
 import pytest
 
 from mindroom import topic_generator
+from mindroom.config.agent import RoomConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.matrix import client as matrix_client
@@ -16,6 +17,7 @@ from mindroom.matrix import client_room_admin as matrix_room_admin
 from mindroom.matrix import rooms as matrix_rooms
 from mindroom.matrix import state as matrix_state
 from mindroom.matrix.presence import is_user_online
+from mindroom.scheduling import _SCHEDULED_TASK_EVENT_TYPE
 from mindroom.thread_tags import THREAD_TAGS_EVENT_TYPE
 from tests.conftest import TEST_ACCESS_TOKEN, bind_runtime_paths, load_config_yaml, runtime_paths_for
 
@@ -55,6 +57,15 @@ def test_matrix_room_access_defaults() -> None:
     assert config.matrix_room_access.publish_to_room_directory is False
     assert config.matrix_room_access.invite_only_rooms == []
     assert config.matrix_room_access.reconcile_existing_rooms is False
+    assert config.matrix_room_access.room_admins == []
+
+
+def test_matrix_room_access_rejects_duplicate_room_admins() -> None:
+    """Duplicate room admin user IDs should be rejected."""
+    with pytest.raises(ValueError, match="Duplicate room_admins"):
+        Config.model_validate(
+            {"matrix_room_access": {"room_admins": ["@admin:example.com", "@admin:example.com"]}},
+        )
 
 
 def test_matrix_room_access_yaml_null_uses_defaults(tmp_path: Path) -> None:
@@ -64,6 +75,16 @@ def test_matrix_room_access_yaml_null_uses_defaults(tmp_path: Path) -> None:
 
     config = load_config_yaml(config_path)
     assert config.matrix_room_access.mode == "single_user_private"
+
+
+def test_room_config_normalizes_blank_display_name() -> None:
+    """Room display names should be absent or trimmed non-empty strings."""
+    assert RoomConfig(display_name="   ").display_name is None
+    assert RoomConfig(display_name="  Project Lobby  ").display_name == "Project Lobby"
+    assert Config(rooms={"lobby": {"display_name": "   "}}).authored_model_dump()["rooms"] == {"lobby": {}}
+    assert Config(rooms={"lobby": {"display_name": "  Project Lobby  "}}).authored_model_dump()["rooms"] == {
+        "lobby": {"display_name": "Project Lobby"},
+    }
 
 
 def test_matrix_room_access_invite_only_matching() -> None:
@@ -175,12 +196,14 @@ async def test_existing_room_reconciliation_respects_flag(
     monkeypatch.setattr(matrix_state, "load_rooms", dict)
     monkeypatch.setattr(matrix_rooms, "_add_room", MagicMock())
     monkeypatch.setattr(matrix_rooms, "get_joined_rooms", AsyncMock(return_value=["!lobby:example.com"]))
+    ensure_room_name = AsyncMock(return_value=True)
+    monkeypatch.setattr(matrix_rooms, "ensure_room_name", ensure_room_name)
     monkeypatch.setattr(matrix_rooms, "ensure_room_has_topic", AsyncMock())
-    ensure_thread_tags_power_level = AsyncMock(return_value=True)
+    ensure_managed_room_power_levels = AsyncMock(return_value=True)
     monkeypatch.setattr(
         matrix_rooms,
-        "ensure_thread_tags_power_level",
-        ensure_thread_tags_power_level,
+        "ensure_managed_room_power_levels",
+        ensure_managed_room_power_levels,
     )
     configure_access = AsyncMock(return_value=True)
     monkeypatch.setattr(matrix_rooms, "_configure_managed_room_access", configure_access)
@@ -195,11 +218,63 @@ async def test_existing_room_reconciliation_respects_flag(
     )
 
     assert room_id == "!lobby:example.com"
-    ensure_thread_tags_power_level.assert_awaited_once_with(
+    ensure_room_name.assert_awaited_once_with(
         mock_client,
         "!lobby:example.com",
+        "Lobby",
+    )
+    ensure_managed_room_power_levels.assert_awaited_once_with(
+        mock_client,
+        "!lobby:example.com",
+        (),
     )
     assert configure_access.await_count == expected_calls
+
+
+@pytest.mark.asyncio
+async def test_existing_room_without_explicit_display_name_does_not_rename(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Agent/team-derived rooms should not overwrite manually renamed Matrix rooms."""
+    config = _config_with_runtime_paths(tmp_path)
+    mock_client = AsyncMock()
+    mock_client.homeserver = "https://example.com"
+    mock_client.rooms = {}
+    mock_client.room_resolve_alias.return_value = nio.RoomResolveAliasResponse(
+        room_alias="#lobby:example.com",
+        room_id="!lobby:example.com",
+        servers=["example.com"],
+    )
+
+    monkeypatch.setattr(matrix_state, "load_rooms", dict)
+    monkeypatch.setattr(matrix_rooms, "_add_room", MagicMock())
+    monkeypatch.setattr(matrix_rooms, "get_joined_rooms", AsyncMock(return_value=["!lobby:example.com"]))
+    ensure_room_name = AsyncMock(return_value=True)
+    monkeypatch.setattr(matrix_rooms, "ensure_room_name", ensure_room_name)
+    ensure_topic = AsyncMock()
+    monkeypatch.setattr(matrix_rooms, "ensure_room_has_topic", ensure_topic)
+    monkeypatch.setattr(matrix_rooms, "ensure_managed_room_power_levels", AsyncMock(return_value=True))
+
+    room_id = await matrix_rooms._ensure_room_exists(
+        client=mock_client,
+        room_key="lobby",
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        room_name=None,
+        power_users=[],
+    )
+
+    assert room_id == "!lobby:example.com"
+    ensure_room_name.assert_not_awaited()
+    ensure_topic.assert_awaited_once_with(
+        mock_client,
+        "!lobby:example.com",
+        "lobby",
+        "Lobby",
+        config,
+        runtime_paths_for(config),
+    )
 
 
 @pytest.mark.asyncio
@@ -252,7 +327,7 @@ async def test_new_room_creation_applies_access_policy_in_multi_user_mode(
 async def test_create_room_seeds_thread_tags_power_level(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Managed room creation should seed the custom state-event override."""
+    """Managed room creation should seed only regular-user-safe state-event overrides."""
     mock_client = AsyncMock()
     mock_client.user_id = "@router:example.com"
     mock_client.room_create.return_value = nio.RoomCreateResponse(room_id="!lobby:example.com")
@@ -273,15 +348,177 @@ async def test_create_room_seeds_thread_tags_power_level(
     assert len(initial_state) == 1
     assert initial_state[0]["type"] == "m.room.power_levels"
     power_levels = initial_state[0]["content"]
+    assert power_levels["users_default"] == 0
     assert power_levels["state_default"] == 50
     assert power_levels["events"][THREAD_TAGS_EVENT_TYPE] == 0
+    # Element Call membership must be publishable by regular members (PL0).
+    assert power_levels["events"]["org.matrix.msc3401.call.member"] == 0
+    assert _SCHEDULED_TASK_EVENT_TYPE not in power_levels["events"]
     assert power_levels["users"]["@agent:example.com"] == 50
     assert power_levels["users"]["@router:example.com"] == 100
     invite_to_room.assert_awaited_once_with(mock_client, "!lobby:example.com", "@agent:example.com")
 
 
 @pytest.mark.asyncio
-async def test_ensure_thread_tags_power_level_preserves_existing_content() -> None:
+async def test_create_room_seeds_room_admin_power_levels(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Managed room creation should grant configured room admins power level 100 without inviting them."""
+    mock_client = AsyncMock()
+    mock_client.user_id = "@router:example.com"
+    mock_client.room_create.return_value = nio.RoomCreateResponse(room_id="!lobby:example.com")
+    invite_to_room = AsyncMock(return_value=True)
+    monkeypatch.setattr(matrix_room_admin, "invite_to_room", invite_to_room)
+
+    room_id = await matrix_client.create_room(
+        client=mock_client,
+        name="Lobby",
+        alias="lobby",
+        topic="topic",
+        power_users=["@agent:example.com"],
+        admin_users=["@admin:example.com", "@agent:example.com"],
+    )
+
+    assert room_id == "!lobby:example.com"
+    _, kwargs = mock_client.room_create.await_args
+    power_levels = kwargs["initial_state"][0]["content"]
+    assert power_levels["users"]["@admin:example.com"] == 100
+    assert power_levels["users"]["@agent:example.com"] == 100  # admin grant wins over power-user grant
+    assert power_levels["users"]["@router:example.com"] == 100
+    invite_to_room.assert_awaited_once_with(mock_client, "!lobby:example.com", "@agent:example.com")
+
+
+def test_room_admin_user_ids_filters_non_concrete_entries(tmp_path: Path) -> None:
+    """Configured room admins should keep concrete IDs and skip wildcard, placeholder, or malformed entries."""
+    config = _config_with_runtime_paths(
+        tmp_path,
+        matrix_room_access={
+            "room_admins": [
+                "@admin:example.com",
+                "@admin:example.com:8448",
+                "@*:example.com",
+                "__MINDROOM_OWNER_USER_ID_FROM_PAIRING__",
+                "@:example.com",
+                "@nodomain:",
+                "@tabbed\t:example.com",
+            ],
+        },
+    )
+
+    assert matrix_rooms._room_admin_user_ids(config) == ["@admin:example.com", "@admin:example.com:8448"]
+
+
+@pytest.mark.asyncio
+async def test_new_room_creation_passes_room_admins(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """New managed rooms should seed the supplied room admins at creation."""
+    config = _config_with_runtime_paths(tmp_path)
+    mock_client = AsyncMock()
+    mock_client.homeserver = "https://example.com"
+    mock_client.room_resolve_alias.return_value = nio.RoomResolveAliasError("not found", status_code="M_NOT_FOUND")
+
+    monkeypatch.setattr(matrix_state, "load_rooms", dict)
+    monkeypatch.setattr(matrix_rooms, "generate_room_topic_ai", AsyncMock(return_value="topic"))
+    create_room = AsyncMock(return_value="!lobby:example.com")
+    monkeypatch.setattr(matrix_rooms, "create_room", create_room)
+    monkeypatch.setattr(matrix_rooms, "_add_room", MagicMock())
+
+    room_id = await matrix_rooms._ensure_room_exists(
+        client=mock_client,
+        room_key="lobby",
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        room_name="Lobby",
+        power_users=[],
+        admin_user_ids=["@admin:example.com"],
+    )
+
+    assert room_id == "!lobby:example.com"
+    _, kwargs = create_room.await_args
+    assert kwargs["admin_users"] == ["@admin:example.com"]
+
+
+@pytest.mark.asyncio
+async def test_existing_room_reconciliation_grants_room_admin_power(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Existing managed rooms should grant supplied room admins power in any access mode."""
+    config = _config_with_runtime_paths(tmp_path)
+    mock_client = AsyncMock()
+    mock_client.homeserver = "https://example.com"
+    mock_client.rooms = {}
+    mock_client.room_resolve_alias.return_value = nio.RoomResolveAliasResponse(
+        room_alias="#lobby:example.com",
+        room_id="!lobby:example.com",
+        servers=["example.com"],
+    )
+
+    monkeypatch.setattr(matrix_state, "load_rooms", dict)
+    monkeypatch.setattr(matrix_rooms, "_add_room", MagicMock())
+    monkeypatch.setattr(matrix_rooms, "get_joined_rooms", AsyncMock(return_value=["!lobby:example.com"]))
+    monkeypatch.setattr(matrix_rooms, "ensure_room_name", AsyncMock(return_value=True))
+    monkeypatch.setattr(matrix_rooms, "ensure_room_has_topic", AsyncMock())
+    ensure_managed_room_power_levels = AsyncMock(return_value=True)
+    monkeypatch.setattr(matrix_rooms, "ensure_managed_room_power_levels", ensure_managed_room_power_levels)
+
+    room_id = await matrix_rooms._ensure_room_exists(
+        client=mock_client,
+        room_key="lobby",
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        room_name="Lobby",
+        power_users=[],
+        admin_user_ids=["@admin:example.com"],
+    )
+
+    assert room_id == "!lobby:example.com"
+    ensure_managed_room_power_levels.assert_awaited_once_with(
+        mock_client,
+        "!lobby:example.com",
+        ["@admin:example.com"],
+    )
+
+
+@pytest.mark.asyncio
+async def test_ensure_managed_room_power_levels_applies_client_events_and_admins_in_one_put() -> None:
+    """The merged reconciliation should apply both overrides with a single read and write."""
+    mock_client = AsyncMock()
+    mock_client.room_get_state_event.return_value = nio.RoomGetStateEventResponse(
+        content={
+            "events": {},
+            "state_default": 50,
+            "users": {"@router:example.com": 100},
+        },
+        event_type="m.room.power_levels",
+        state_key="",
+        room_id="!room:example.com",
+    )
+    mock_client.room_put_state.return_value = nio.RoomPutStateResponse.from_dict(
+        {"event_id": "$state"},
+        room_id="!room:example.com",
+    )
+
+    result = await matrix_client.ensure_managed_room_power_levels(
+        mock_client,
+        "!room:example.com",
+        ["@admin:example.com"],
+    )
+
+    assert result is True
+    mock_client.room_get_state_event.assert_awaited_once_with("!room:example.com", "m.room.power_levels")
+    mock_client.room_put_state.assert_awaited_once()
+    _, kwargs = mock_client.room_put_state.await_args
+    assert kwargs["content"]["events"][THREAD_TAGS_EVENT_TYPE] == 0
+    assert kwargs["content"]["events"]["org.matrix.msc3401.call.member"] == 0
+    assert kwargs["content"]["users"]["@admin:example.com"] == 100
+    assert kwargs["content"]["users"]["@router:example.com"] == 100
+
+
+@pytest.mark.asyncio
+async def test_ensure_managed_room_power_levels_preserves_existing_content() -> None:
     """Reconciliation should preserve existing power-level content while adding the override."""
     mock_client = AsyncMock()
     mock_client.room_get_state_event.return_value = nio.RoomGetStateEventResponse(
@@ -299,7 +536,7 @@ async def test_ensure_thread_tags_power_level_preserves_existing_content() -> No
         room_id="!room:example.com",
     )
 
-    result = await matrix_client.ensure_thread_tags_power_level(mock_client, "!room:example.com")
+    result = await matrix_client.ensure_managed_room_power_levels(mock_client, "!room:example.com")
 
     assert result is True
     mock_client.room_put_state.assert_awaited_once()
@@ -310,10 +547,12 @@ async def test_ensure_thread_tags_power_level_preserves_existing_content() -> No
     assert kwargs["content"]["state_default"] == 50
     assert kwargs["content"]["events"]["m.room.name"] == 50
     assert kwargs["content"]["events"][THREAD_TAGS_EVENT_TYPE] == 0
+    assert kwargs["content"]["events"]["org.matrix.msc3401.call.member"] == 0
+    assert _SCHEDULED_TASK_EVENT_TYPE not in kwargs["content"]["events"]
 
 
 @pytest.mark.asyncio
-async def test_ensure_thread_tags_power_level_always_fetches_fresh_power_levels() -> None:
+async def test_ensure_managed_room_power_levels_always_fetches_fresh_power_levels() -> None:
     """Write-back reconciliation must fetch fresh power levels, not use cached ones."""
     mock_client = AsyncMock()
     room = nio.MatrixRoom("!room:example.com", "@router:example.com")
@@ -336,7 +575,7 @@ async def test_ensure_thread_tags_power_level_always_fetches_fresh_power_levels(
         room_id="!room:example.com",
     )
 
-    result = await matrix_client.ensure_thread_tags_power_level(mock_client, "!room:example.com")
+    result = await matrix_client.ensure_managed_room_power_levels(mock_client, "!room:example.com")
 
     assert result is True
     mock_client.room_get_state_event.assert_awaited_once_with("!room:example.com", "m.room.power_levels")
@@ -344,7 +583,7 @@ async def test_ensure_thread_tags_power_level_always_fetches_fresh_power_levels(
 
 
 @pytest.mark.asyncio
-async def test_ensure_thread_tags_power_level_does_not_restore_removed_overrides() -> None:
+async def test_ensure_managed_room_power_levels_does_not_restore_removed_overrides() -> None:
     """Stale cached overrides must not be written back when adding thread-tags PL."""
     mock_client = AsyncMock()
     room = nio.MatrixRoom("!room:example.com", "@router:example.com")
@@ -366,7 +605,7 @@ async def test_ensure_thread_tags_power_level_does_not_restore_removed_overrides
         room_id="!room:example.com",
     )
 
-    result = await matrix_client.ensure_thread_tags_power_level(mock_client, "!room:example.com")
+    result = await matrix_client.ensure_managed_room_power_levels(mock_client, "!room:example.com")
 
     assert result is True
     _, kwargs = mock_client.room_put_state.await_args
@@ -374,12 +613,15 @@ async def test_ensure_thread_tags_power_level_does_not_restore_removed_overrides
 
 
 @pytest.mark.asyncio
-async def test_ensure_thread_tags_power_level_idempotent() -> None:
+async def test_ensure_managed_room_power_levels_idempotent() -> None:
     """Reconciliation should skip writes when the override already exists."""
     mock_client = AsyncMock()
     mock_client.room_get_state_event.return_value = nio.RoomGetStateEventResponse(
         content={
-            "events": {THREAD_TAGS_EVENT_TYPE: 0},
+            "events": {
+                THREAD_TAGS_EVENT_TYPE: 0,
+                "org.matrix.msc3401.call.member": 0,
+            },
             "state_default": 50,
             "users": {"@router:example.com": 100},
         },
@@ -388,7 +630,7 @@ async def test_ensure_thread_tags_power_level_idempotent() -> None:
         room_id="!room:example.com",
     )
 
-    result = await matrix_client.ensure_thread_tags_power_level(mock_client, "!room:example.com")
+    result = await matrix_client.ensure_managed_room_power_levels(mock_client, "!room:example.com")
 
     assert result is True
     mock_client.room_put_state.assert_not_awaited()
@@ -740,11 +982,11 @@ async def test_existing_room_reconciliation_skipped_when_not_joined(
     monkeypatch.setattr(matrix_rooms, "_add_room", MagicMock())
     monkeypatch.setattr(matrix_rooms, "get_joined_rooms", AsyncMock(return_value=[]))
     monkeypatch.setattr(matrix_rooms, "ensure_room_has_topic", AsyncMock())
-    ensure_thread_tags_power_level = AsyncMock(return_value=True)
+    ensure_managed_room_power_levels = AsyncMock(return_value=True)
     monkeypatch.setattr(
         matrix_rooms,
-        "ensure_thread_tags_power_level",
-        ensure_thread_tags_power_level,
+        "ensure_managed_room_power_levels",
+        ensure_managed_room_power_levels,
     )
     configure_access = AsyncMock(return_value=True)
     monkeypatch.setattr(matrix_rooms, "_configure_managed_room_access", configure_access)
@@ -759,7 +1001,7 @@ async def test_existing_room_reconciliation_skipped_when_not_joined(
     )
 
     assert room_id == "!lobby:example.com"
-    ensure_thread_tags_power_level.assert_not_awaited()
+    ensure_managed_room_power_levels.assert_not_awaited()
     configure_access.assert_not_awaited()
 
 
@@ -845,11 +1087,11 @@ async def test_existing_room_reconciliation_runs_after_later_join(
     monkeypatch.setattr(matrix_rooms, "get_joined_rooms", AsyncMock(side_effect=[[], ["!lobby:example.com"]]))
     ensure_room_has_topic = AsyncMock()
     monkeypatch.setattr(matrix_rooms, "ensure_room_has_topic", ensure_room_has_topic)
-    ensure_thread_tags_power_level = AsyncMock(return_value=True)
+    ensure_managed_room_power_levels = AsyncMock(return_value=True)
     monkeypatch.setattr(
         matrix_rooms,
-        "ensure_thread_tags_power_level",
-        ensure_thread_tags_power_level,
+        "ensure_managed_room_power_levels",
+        ensure_managed_room_power_levels,
     )
     configure_access = AsyncMock(return_value=True)
     monkeypatch.setattr(matrix_rooms, "_configure_managed_room_access", configure_access)
@@ -865,7 +1107,7 @@ async def test_existing_room_reconciliation_runs_after_later_join(
 
     assert first_room_id == "!lobby:example.com"
     ensure_room_has_topic.assert_not_awaited()
-    ensure_thread_tags_power_level.assert_not_awaited()
+    ensure_managed_room_power_levels.assert_not_awaited()
     configure_access.assert_not_awaited()
 
     mock_client.rooms = {"!lobby:example.com": object()}
@@ -888,9 +1130,10 @@ async def test_existing_room_reconciliation_runs_after_later_join(
         config,
         runtime_paths_for(config),
     )
-    ensure_thread_tags_power_level.assert_awaited_once_with(
+    ensure_managed_room_power_levels.assert_awaited_once_with(
         mock_client,
         "!lobby:example.com",
+        (),
     )
     configure_access.assert_awaited_once_with(
         client=mock_client,
@@ -963,6 +1206,55 @@ async def test_ensure_all_rooms_exist_continues_after_room_failure(monkeypatch: 
     assert room_ids == {"ops": "!ops:example.com"}
     assert ensure_room_exists_mock.await_count == 2
     logger_exception.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_ensure_all_rooms_exist_resets_authored_room_to_default_name(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Authored room entries without display_name should manage the default Matrix name."""
+    config = _config_with_runtime_paths(tmp_path, rooms={"project_room": {}})
+    mock_client = AsyncMock()
+
+    monkeypatch.setattr(
+        "mindroom.matrix.rooms.managed_entity_power_user_ids_for_room",
+        lambda _room_key, _config, _runtime_paths: [],
+    )
+    ensure_room_exists_mock = AsyncMock(return_value="!project:example.com")
+    monkeypatch.setattr(matrix_rooms, "_ensure_room_exists", ensure_room_exists_mock)
+
+    room_ids = await matrix_rooms.ensure_all_rooms_exist(mock_client, config, runtime_paths_for(config))
+
+    assert room_ids == {"project_room": "!project:example.com"}
+    ensure_room_exists_mock.assert_awaited_once()
+    assert ensure_room_exists_mock.await_args.kwargs["room_name"] == "Project Room"
+
+
+@pytest.mark.asyncio
+async def test_ensure_all_rooms_exist_leaves_membership_only_room_name_unmanaged(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Agent/team-derived rooms should not imply Matrix room rename intent."""
+    config = _config_with_runtime_paths(
+        tmp_path,
+        agents={"assistant": {"display_name": "Assistant", "rooms": ["project_room"]}},
+    )
+    mock_client = AsyncMock()
+
+    monkeypatch.setattr(
+        "mindroom.matrix.rooms.managed_entity_power_user_ids_for_room",
+        lambda _room_key, _config, _runtime_paths: [],
+    )
+    ensure_room_exists_mock = AsyncMock(return_value="!project:example.com")
+    monkeypatch.setattr(matrix_rooms, "_ensure_room_exists", ensure_room_exists_mock)
+
+    room_ids = await matrix_rooms.ensure_all_rooms_exist(mock_client, config, runtime_paths_for(config))
+
+    assert room_ids == {"project_room": "!project:example.com"}
+    ensure_room_exists_mock.assert_awaited_once()
+    assert ensure_room_exists_mock.await_args.kwargs["room_name"] is None
 
 
 @pytest.mark.asyncio

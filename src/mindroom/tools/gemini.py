@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.tool_system.metadata import ConfigField, SetupType, ToolCategory, ToolStatus, register_tool_with_metadata
+from mindroom.model_defaults import GOOGLE_IMAGEN, GOOGLE_VEO
+from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolStatus
+from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
     from agno.tools.models.gemini import GeminiTools
@@ -53,14 +55,14 @@ if TYPE_CHECKING:
             label="Image Generation Model",
             type="text",
             required=False,
-            default="imagen-3.0-generate-002",
+            default=GOOGLE_IMAGEN,
         ),
         ConfigField(
             name="video_generation_model",
             label="Video Generation Model",
             type="text",
             required=False,
-            default="veo-2.0-generate-001",
+            default=GOOGLE_VEO,
         ),
         ConfigField(
             name="enable_generate_image",

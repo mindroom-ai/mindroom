@@ -36,21 +36,36 @@ See [Per-Agent Tool Configuration](https://docs.mindroom.chat/configuration/agen
 Configured MCP servers also appear here as dynamic tools named `mcp_<server_id>`.
 See [MCP](https://docs.mindroom.chat/mcp/) for the `mcp_servers` config and naming rules.
 
+## MindRoom-Managed OAuth Onboarding In Conversation
+
+This flow applies to tools whose MindRoom catalog metadata names an `auth_provider`, including the Google provider tools and OAuth MCP servers.
+It does not apply to every tool labeled `SetupType.OAUTH`; tools without `auth_provider` metadata use their own setup contract.
+When `config_manager` creates or updates an agent with one of these tools, it returns a connect URL scoped to the updated agent and current authorized requester when that binding is available.
+Present that URL directly instead of asking the configuring agent to call the new tool, because newly configured tools are not guaranteed to enter the current run's tool schema.
+When the current agent already has a MindRoom-managed provider tool, call an appropriate safe status, read, or list operation to check its connection.
+For an OAuth MCP server, use its generated `*_connection_status` or `*_list_tools` operation.
+If the operation is disconnected, its structured `OAuthConnectionRequired` result includes `oauth_connection_required: true`, a scoped `connect_url` when available, and `requires_host_browser: true` when the URL uses a supported loopback host.
+When `connect_url` is provided, present it directly instead of sending the user to the dashboard.
+When `requires_host_browser` is true, explain that the loopback URL (`localhost`, `127.0.0.1`, or `::1`) must be opened in a browser on the computer where MindRoom is running, not on a phone or another computer.
+After the user connects, have the target agent retry the safe operation or original request.
+The dashboard remains a manual alternative only when no `connect_url` is available.
+
 ## Browse By Topic
 
 - [Execution & Coding](https://docs.mindroom.chat/tools/execution-and-coding/) - Local files, shell, Python, coding helpers, and worker-routed execution tools.
-- [Data & Databases](https://docs.mindroom.chat/tools/data-and-databases/) - SQL, databases, Google Drive files, spreadsheets, tabular analysis, and financial/business datasets.
+- [Data & Databases](https://docs.mindroom.chat/tools/data-and-databases/) - SQL, databases, Google Docs and Drive files, spreadsheets, tabular analysis, and financial/business datasets.
 - [Web Search](https://docs.mindroom.chat/tools/web-search/) - Search engines and search APIs.
 - [Web Scraping & Browser](https://docs.mindroom.chat/tools/web-scraping-and-browser/) - Crawlers, extractors, browser automation, and page-reading tools.
 - [Research Sources](https://docs.mindroom.chat/tools/research-sources/) - ArXiv, Wikipedia, PubMed, and Hacker News.
 - [AI & Generation](https://docs.mindroom.chat/tools/ai-and-generation/) - Image, video, speech, and transcription APIs.
 - [Media & Content](https://docs.mindroom.chat/tools/media-and-content/) - Media processing, brand/media retrieval, and Spotify.
-- [Matrix & Attachments](https://docs.mindroom.chat/tools/matrix-and-attachments/) - Matrix-native messaging, thread tags and summaries, low-level Matrix API access, and attachment-aware workflows.
+- [Matrix & Attachments](https://docs.mindroom.chat/tools/matrix-and-attachments/) - Matrix-native messaging and voice messages, thread tags, resolution, summaries, and model overrides, low-level Matrix API access, and attachment-aware workflows.
 - [Messaging & Social](https://docs.mindroom.chat/tools/messaging-and-social/) - Email, chat, and social/community integrations.
-- [Project Management](https://docs.mindroom.chat/tools/project-management/) - Git hosting, issue trackers, docs platforms, and task managers.
+- [Project Management](https://docs.mindroom.chat/tools/project-management/) - Git hosting, issue trackers, docs platforms, per-thread work plans, and task managers.
 - [Calendar & Scheduling](https://docs.mindroom.chat/tools/calendar-and-scheduling/) - Calendar APIs and MindRoom scheduling tools.
 - [Memory & Storage](https://docs.mindroom.chat/tools/memory-and-storage/) - Explicit memory tools and external memory providers.
-- [Agent Orchestration](https://docs.mindroom.chat/tools/agent-orchestration/) - Subagents, delegation, config tools, OpenClaw compatibility, and Claude Agent sessions.
+- [Agent Orchestration](https://docs.mindroom.chat/tools/agent-orchestration/) - Subagents, delegation, Dynamic Workflows, config tools, OpenClaw compatibility, and Claude Agent sessions.
+- [Dynamic Tools](https://docs.mindroom.chat/tools/dynamic-tools/) - Per-tool lazy loading for optional agent capabilities.
 - [Automation & Platforms](https://docs.mindroom.chat/tools/automation-and-platforms/) - Infrastructure automation, generic APIs, and platform aggregators.
 - [Location, Commerce, & Home](https://docs.mindroom.chat/tools/location-commerce-and-home/) - Maps, weather, commerce, and Home Assistant.
 
@@ -66,15 +81,36 @@ Today `matrix_message` implies `attachments`, so the effective tool set includes
 When a tool runs inside a Matrix-connected agent, it receives a `ToolRuntimeContext` via a context variable.
 This context carries the current `room_id`, source `thread_id`, canonical `resolved_thread_id`, `requester_id`, `agent_name`, the Matrix client, the active config, and runtime paths.
 `thread_id` preserves the raw inbound thread provenance, while `resolved_thread_id` is the canonical thread scope after compatible plain replies and other transitive resolution are applied.
-Tools like `matrix_message`, `matrix_room`, `thread_tags`, and `matrix_api` use this context to act on the correct room and canonical thread without the caller passing explicit IDs.
+Tools like `matrix_message`, `matrix_room`, `thread_tags`, `thread_resolution`, and `matrix_api` use this context to act on the correct room and canonical thread without the caller passing explicit IDs.
 `thread_tags` can also target another authorized room, but it still checks the target room's canonical thread root and requester membership before writing the shared tag state.
 `thread_tags.tag_thread()` and `thread_tags.untag_thread()` still use the active thread when the caller explicitly repeats the current `room_id`.
 `thread_tags.list_thread_tags()` uses the active thread by default, but passing `room_id` without `thread_id` forces room-wide listing even from inside an active thread.
 `thread_tags.list_thread_tags(tag=...)` narrows both thread-specific and room-wide responses to the requested tag only.
-`thread_tags.list_thread_tags(include_tag=..., exclude_tag=...)` filters which threads are returned: `include_tag` keeps only threads with that tag, `exclude_tag` removes threads with that tag. Both can be combined. Unlike `tag` (which narrows the output payload), these filter which threads appear at all.
+`thread_tags.list_thread_tags(include_tag=..., exclude_tag=...)` filters which threads are returned: `include_tag` keeps only threads with that tag, `exclude_tag` removes threads with that tag.
+Both can be combined.
+Unlike `tag` (which narrows the output payload), these filter which threads appear at all.
+`thread_tags.list_thread_tags(exclude_tag="resolved", include_untagged=True)` lists unresolved room threads, including threads that have no tag state yet.
+`include_untagged=True` forces a room-wide query and cannot be combined with `thread_id`.
+It enumerates Matrix `/threads` and may stop at the 2000-root safety cap.
+The response includes `include_untagged: bool` and `truncated: bool`.
+Callers must check `truncated` before claiming the unresolved list is complete.
 `thread_tags` also validates and normalizes predefined payload schemas for `blocked.data.blocked_by`, `waiting.data.waiting_on`, `priority.data.level`, and `due.data.deadline`.
-`thread_tags` intentionally replaces the removed experimental `thread_resolution` tool and does not auto-read old `com.mindroom.thread.resolution` markers.
+`thread_resolution` is an explicit opt-in capability backed by the `resolved` thread tag and does not read the removed experimental `com.mindroom.thread.resolution` event type.
+It is absent from starter configs and default tool sets, while `thread_tags` can list but cannot mutate `resolved` state.
 `matrix_api` defaults `room_id` to the active room, supports authorized cross-room targeting, never infers event IDs or state keys from thread context, and now also supports room-scoped full-text search through `action="search"`.
+
+## MindRoom Update Awareness
+
+Enable the `update_awareness` tool to add the installed MindRoom version and the latest published PyPI release to the agent's system prompt.
+The tool checks PyPI at most once every 24 hours and stores the result under `mindroom_data/cache/update_awareness.json`.
+Every prompt assembled during that cache window receives identical version text, so ordinary turns do not invalidate the prompt cache.
+When a newer release is available, the agent is instructed to notify the user briefly at a natural opportunity without repeating the notice in the same conversation.
+
+```yaml
+defaults:
+  tools:
+    - update_awareness
+```
 
 ## Worker-Routed Execution
 
@@ -85,7 +121,8 @@ Use [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-prox
 ## Shared-Only Integrations
 
 Some dashboard integrations are restricted to shared or unscoped execution and cannot be used by agents with isolating worker scopes.
-The current shared-only integrations are `spotify`, `homeassistant`, and all configured `mcp_<server_id>` tools.
+The current shared-only integrations are `spotify` and `homeassistant`.
+MCP `mcp_<server_id>` tools work on isolating worker scopes: OAuth-backed servers are requester-scoped, while non-OAuth servers always call through the shared server session without requester credentials.
 
 ## Automatic Dependency Installation
 

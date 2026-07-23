@@ -225,12 +225,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.tool_system.metadata import (
+from mindroom.tool_system.declarations import (
     SetupType,
     ToolCategory,
     ToolStatus,
-    register_tool_with_metadata,
 )
+from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
     from agno.tools import Toolkit
@@ -339,13 +339,13 @@ Each `ConfigField` describes one constructor parameter that can be configured th
 Example — a tool that requires an API key:
 
 ```python
-from mindroom.tool_system.metadata import (
+from mindroom.tool_system.declarations import (
     ConfigField,
     SetupType,
     ToolCategory,
     ToolStatus,
-    register_tool_with_metadata,
 )
+from mindroom.tool_system.registration import register_tool_with_metadata
 
 @register_tool_with_metadata(
     name="weather",
@@ -388,7 +388,8 @@ Example:
 
 ```python
 from agno.tools import Toolkit
-from mindroom.tool_system.metadata import ToolCategory, ToolManagedInitArg, register_tool_with_metadata
+from mindroom.tool_system.declarations import ToolCategory, ToolManagedInitArg
+from mindroom.tool_system.registration import register_tool_with_metadata
 
 
 @register_tool_with_metadata(
@@ -407,6 +408,21 @@ def needs_runtime_tools() -> type[Toolkit]:
     return NeedsRuntimeTools
 ```
 
+### Dispatch-time worker targets
+
+`WORKER_TARGET` covers toolkits that receive their worker target at construction.
+Tools that compose other registered tools while handling a call (for example building a sub-toolkit with `get_tool_by_name`) resolve the same target from the live runtime context instead:
+
+```python
+from mindroom.tool_system.runtime_context import get_tool_runtime_context
+
+context = get_tool_runtime_context()
+worker_target = context.resolve_worker_target()
+```
+
+This returns the exact worker target that agent toolkit construction uses, so requester-scoped state such as OAuth MCP sessions and scoped credentials resolves identically.
+`resolve_worker_target()` raises `ValueError` for team and router dispatches, because those contexts have no single agent execution scope to mirror; catch it if your tool can run inside a team.
+
 ## MCP via plugins (advanced)
 
 MindRoom supports native MCP servers in `config.yaml` — see [MCP](https://docs.mindroom.chat/mcp/) for the normal setup path.
@@ -414,12 +430,12 @@ This plugin pattern is still useful when you want a custom wrapper around Agno `
 
 ```python
 from agno.tools.mcp import MCPTools
-from mindroom.tool_system.metadata import (
+from mindroom.tool_system.declarations import (
     SetupType,
     ToolCategory,
     ToolStatus,
-    register_tool_with_metadata,
 )
+from mindroom.tool_system.registration import register_tool_with_metadata
 
 
 class FilesystemMCPTools(MCPTools):
@@ -475,6 +491,51 @@ See the [Hooks](https://docs.mindroom.chat/hooks/) page for full documentation i
 - Error handling without cooldowns or circuit breakers
 - Testing patterns
 
+## Installing plugins
+
+Vendor a plugin directly from GitHub into your local plugins directory:
+
+```bash
+mindroom plugins install ping-hook-plugin
+mindroom plugins install mindroom-ai/ping-hook-plugin@v1.2.0
+```
+
+Bare names install from the `mindroom-ai` organization, and `@ref` pins a branch, tag, or exact commit (the default follows the repository default branch).
+The command resolves the reference to an exact commit, downloads that commit's archive, validates it with the strict compatibility check, and only then moves it into `<config dir>/plugins/<name>`.
+Each vendored plugin carries a `.mindroom-plugin.lock.json` file recording the repository, the requested reference, and the exact installed commit.
+Plugin Python dependencies are not installed automatically; installs report a note when the plugin declares a `pyproject.toml`.
+
+After installing, reference the plugin from `config.yaml`:
+
+```yaml
+plugins:
+  - path: plugins/ping-hook-plugin
+```
+
+Update vendored plugins with:
+
+```bash
+mindroom plugins update ping-hook-plugin
+mindroom plugins update --all
+mindroom plugins update ping-hook-plugin --ref v1.3.0
+```
+
+Updates re-resolve the pinned reference, skip plugins already at the resolved commit, and atomically replace the plugin directory only after the new revision passes the strict check.
+A failed update leaves the installed version untouched.
+Both commands accept `--path` to target a specific config file's directory and `--plugins-dir` to override the vendor directory.
+Set `GITHUB_TOKEN` to authenticate GitHub requests, which raises API rate limits and allows private repositories.
+
+## Compatibility checks
+
+Validate a plugin against the installed MindRoom version before deployment:
+
+```bash
+mindroom plugins check ./my-plugin
+```
+
+The command strictly loads and validates the manifest, tools, hooks, OAuth providers, and skills using isolated temporary runtime paths.
+It reports discovered tools, hooks, and skills, then exits nonzero without leaving plugin registrations active when validation fails.
+
 ## Live development (hot reload)
 
 Plugins hot-reload automatically.
@@ -503,6 +564,8 @@ journalctl -u mindroom.service -f | grep -E 'Reloading plugins|Plugin reload com
 ```
 
 You can break and fix a plugin freely.
+A normal `mindroom run` startup skips broken plugins and disables tools known to belong to them rather than crash-looping.
+If a broken tools module prevents MindRoom from resolving its complete tool namespace, otherwise-unknown authored tool names are also disabled with a warning; `mindroom config validate` remains strict.
 A broken save that prevents reload, such as an import error or plugin validation error, can deactivate the affected plugin set, and the next valid save reloads it successfully.
 A hook that only raises at runtime is different: that failure is logged for that event, and the hook is tried again on the next matching event.
 There is no quarantine, failure threshold, or cooldown.
@@ -565,5 +628,5 @@ plugins:
 | --- | --- |
 | [thread-snooze-plugin](https://github.com/mindroom-ai/thread-snooze-plugin) | Snooze and unsnooze threads — temporarily resolves a thread and wakes it at a specified time. |
 | [thread-goal-plugin](https://github.com/mindroom-ai/thread-goal-plugin) | Persistent per-thread goals stored in Matrix room state that survive context compaction and restarts. |
-| [workloop-plugin](https://github.com/mindroom-ai/workloop-plugin) | Autonomous work plans with dependencies, priorities, auto-poke, and template-driven task creation. |
+| [workloop-plugin](https://github.com/mindroom-ai/workloop-plugin) | Legacy external workloop implementation; native per-thread todo plans and auto-poke behavior are now built into MindRoom, so this plugin is not needed for that workflow. |
 | [openviking-plugin](https://github.com/mindroom-ai/openviking-plugin) | Long-term memory via [OpenViking](https://github.com/volcengine/OpenViking) — automatic memory extraction, recall, and compaction archiving. |

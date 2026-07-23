@@ -59,21 +59,29 @@ console.error = (...args) => {
   originalConsoleError.call(console, ...args)
 }
 
-// JSDOM location is read-only, so we delete and replace it
-delete window.location
-window.location = {
-  origin: 'http://localhost:3000',
-  href: 'http://localhost:3000',
-  pathname: '/',
-  search: '',
-  hash: '',
-  protocol: 'http:',
-  hostname: 'localhost',
-  host: 'localhost:3000',
-  port: '3000',
-  reload: jest.fn(),
-  replace: jest.fn(),
-  assign: jest.fn(),
+// JSDOM location is non-configurable in newer versions.
+// The configured test URL already provides the expected localhost origin.
+try {
+  delete window.location
+  window.location = {
+    origin: 'http://localhost:3000',
+    href: 'http://localhost:3000',
+    pathname: '/',
+    search: '',
+    hash: '',
+    protocol: 'http:',
+    hostname: 'localhost',
+    host: 'localhost:3000',
+    port: '3000',
+    reload: jest.fn(),
+    replace: jest.fn(),
+    assign: jest.fn(),
+  }
+} catch (error) {
+  const message = error instanceof Error ? error.message : String(error)
+  if (!/location|non-configurable|read only|Cannot delete|Cannot assign/i.test(message)) {
+    throw error
+  }
 }
 
 // Inject runtime config expected by browser helpers

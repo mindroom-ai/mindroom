@@ -6,6 +6,7 @@ import { createElement } from "react";
 import {
   SiGmail,
   SiGooglecalendar,
+  SiGoogledocs,
   SiGoogledrive,
   SiGooglesheets,
 } from "react-icons/si";
@@ -25,6 +26,7 @@ const OAUTH_COMPLETE_MESSAGE_TYPE = "mindroom:oauth-complete";
 type OAuthStatus = {
   connected: boolean;
   hasClientConfig: boolean;
+  hasCustomClientConfig: boolean;
   hasServiceAccountConfig: boolean;
   clientConfigService?: string;
   clientConfigRedirectUriSupported: boolean;
@@ -93,6 +95,7 @@ export class GenericOAuthIntegrationProvider implements IntegrationProvider {
           : "not_connected",
       connected: status.connected,
       oauth_client_configured: status.hasClientConfig,
+      oauth_custom_client_configured: status.hasCustomClientConfig,
       oauth_client_config_service: status.clientConfigService,
       oauth_client_redirect_uri_supported:
         status.clientConfigRedirectUriSupported,
@@ -179,6 +182,7 @@ export class GenericOAuthIntegrationProvider implements IntegrationProvider {
         return {
           connected: false,
           hasClientConfig: false,
+          hasCustomClientConfig: false,
           hasServiceAccountConfig: false,
           clientConfigRedirectUriSupported: false,
           statusError: detail,
@@ -188,6 +192,7 @@ export class GenericOAuthIntegrationProvider implements IntegrationProvider {
       return {
         connected: data.connected === true,
         hasClientConfig: data.has_client_config === true,
+        hasCustomClientConfig: data.has_custom_client_config === true,
         hasServiceAccountConfig: data.has_service_account_config === true,
         clientConfigRedirectUriSupported:
           data.client_config_redirect_uri_supported === true,
@@ -205,6 +210,7 @@ export class GenericOAuthIntegrationProvider implements IntegrationProvider {
       return {
         connected: false,
         hasClientConfig: false,
+        hasCustomClientConfig: false,
         hasServiceAccountConfig: false,
         clientConfigRedirectUriSupported: false,
         statusError: `Failed to load ${this.integration.name} OAuth status.`,
@@ -274,7 +280,8 @@ const googleDriveIntegration = new GenericOAuthIntegrationProvider(
   {
     id: "google_drive",
     name: "Google Drive",
-    description: "Search and read files from your connected Google Drive",
+    description:
+      "Search, read, upload, and organize files in your connected Google Drive",
     category: "productivity",
     icon: createElement(SiGoogledrive, {
       className: "h-5 w-5 text-green-600",
@@ -284,6 +291,22 @@ const googleDriveIntegration = new GenericOAuthIntegrationProvider(
     connected: false,
   },
   "google_drive",
+);
+
+const googleDocsIntegration = new GenericOAuthIntegrationProvider(
+  {
+    id: "google_docs",
+    name: "Google Docs",
+    description: "Create, read, and edit documents with Google Docs",
+    category: "productivity",
+    icon: createElement(SiGoogledocs, {
+      className: "h-5 w-5 text-blue-600",
+    }),
+    status: "available",
+    setup_type: "oauth",
+    connected: false,
+  },
+  "google_docs",
 );
 
 const googleCalendarIntegration = new GenericOAuthIntegrationProvider(
@@ -338,6 +361,7 @@ const googleGmailIntegration = new GenericOAuthIntegrationProvider(
 // Export all integration providers
 export const integrationProviders: Record<string, IntegrationProvider> = {
   google_calendar: googleCalendarIntegration,
+  google_docs: googleDocsIntegration,
   google_drive: googleDriveIntegration,
   google_gmail: googleGmailIntegration,
   google_sheets: googleSheetsIntegration,

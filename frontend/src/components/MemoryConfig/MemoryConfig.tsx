@@ -60,6 +60,11 @@ const DEFAULT_MEMORY_SETTINGS: MemorySettings = {
     path: "",
     max_entrypoint_lines: 200,
   },
+  search: {
+    mode: "keyword",
+    include: ["memory/**/*.md"],
+    include_entrypoint: false,
+  },
   auto_flush: {
     enabled: false,
     flush_interval_seconds: 1800,
@@ -104,6 +109,10 @@ function normalizeMemorySettings(
       ...DEFAULT_MEMORY_SETTINGS.file,
       ...(memory?.file || {}),
     },
+    search: {
+      ...DEFAULT_MEMORY_SETTINGS.search,
+      ...(memory?.search || {}),
+    },
     auto_flush: {
       ...DEFAULT_MEMORY_SETTINGS.auto_flush,
       ...(memory?.auto_flush || {}),
@@ -136,6 +145,13 @@ function parseInteger(value: string, fallback: number): number {
 
 function parseBoolean(value: string): boolean {
   return value === "true";
+}
+
+function parseIncludePatterns(value: string): string[] {
+  return value
+    .split(",")
+    .map((pattern) => pattern.trim())
+    .filter((pattern) => pattern.length > 0);
 }
 
 function providerHelperText(provider: string): string {
@@ -221,12 +237,59 @@ export function MemoryConfig() {
     });
   };
 
+  const handleCredentialsServiceChange = (credentialsService: string) => {
+    const config = { ...localConfig.embedder.config };
+    const normalizedService = credentialsService.trim();
+    if (normalizedService) {
+      config.credentials_service = normalizedService;
+    } else {
+      delete config.credentials_service;
+    }
+    applyMemoryConfig({
+      ...localConfig,
+      embedder: {
+        ...localConfig.embedder,
+        config,
+      },
+    });
+  };
+
   const handleFilePathChange = (path: string) => {
     applyMemoryConfig({
       ...localConfig,
       file: {
         ...localConfig.file,
         path,
+      },
+    });
+  };
+
+  const handleSearchModeChange = (mode: "keyword" | "semantic") => {
+    applyMemoryConfig({
+      ...localConfig,
+      search: {
+        ...localConfig.search,
+        mode,
+      },
+    });
+  };
+
+  const handleSearchIncludeChange = (value: string) => {
+    applyMemoryConfig({
+      ...localConfig,
+      search: {
+        ...localConfig.search,
+        include: parseIncludePatterns(value),
+      },
+    });
+  };
+
+  const handleIncludeEntrypointChange = (include_entrypoint: boolean) => {
+    applyMemoryConfig({
+      ...localConfig,
+      search: {
+        ...localConfig.search,
+        include_entrypoint,
       },
     });
   };
@@ -421,6 +484,23 @@ export function MemoryConfig() {
             />
           </FieldGroup>
 
+          {localConfig.embedder.provider === "openai" && (
+            <FieldGroup
+              label="Credential Service"
+              helperText="Bind this embedder to a credential service. Leave empty for the legacy embedder-to-openai fallback."
+              htmlFor="credentials-service"
+            >
+              <Input
+                id="credentials-service"
+                type="text"
+                value={localConfig.embedder.config.credentials_service || ""}
+                onChange={(e) => handleCredentialsServiceChange(e.target.value)}
+                placeholder="embedder"
+                className="transition-colors hover:border-ring focus:border-ring"
+              />
+            </FieldGroup>
+          )}
+
           {shouldShowHostField(localConfig.embedder.provider) && (
             <FieldGroup
               label={
@@ -489,6 +569,71 @@ export function MemoryConfig() {
                   }
                   className="transition-colors hover:border-ring focus:border-ring"
                 />
+              </FieldGroup>
+
+              <FieldGroup
+                label="Search Mode"
+                helperText="Keyword search is exact text matching; semantic search uses the memory embedder."
+                htmlFor="memory-search-mode"
+              >
+                <Select
+                  value={localConfig.search?.mode ?? "keyword"}
+                  onValueChange={(value) =>
+                    handleSearchModeChange(value as "keyword" | "semantic")
+                  }
+                >
+                  <SelectTrigger
+                    id="memory-search-mode"
+                    className="transition-colors hover:border-ring"
+                  >
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="keyword">Keyword</SelectItem>
+                    <SelectItem value="semantic">Semantic</SelectItem>
+                  </SelectContent>
+                </Select>
+              </FieldGroup>
+
+              <FieldGroup
+                label="Search Include"
+                helperText="Comma-separated root-relative globs for file-memory search."
+                htmlFor="memory-search-include"
+              >
+                <Input
+                  id="memory-search-include"
+                  type="text"
+                  value={(localConfig.search?.include || []).join(", ")}
+                  onChange={(e) => handleSearchIncludeChange(e.target.value)}
+                  placeholder="memory/**/*.md"
+                  className="transition-colors hover:border-ring focus:border-ring"
+                />
+              </FieldGroup>
+
+              <FieldGroup
+                label="Include Entrypoint"
+                helperText="Include MEMORY.md in search results in addition to preloaded context."
+                htmlFor="memory-search-entrypoint"
+              >
+                <Select
+                  value={String(
+                    localConfig.search?.include_entrypoint ?? false,
+                  )}
+                  onValueChange={(value) =>
+                    handleIncludeEntrypointChange(parseBoolean(value))
+                  }
+                >
+                  <SelectTrigger
+                    id="memory-search-entrypoint"
+                    className="transition-colors hover:border-ring"
+                  >
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="true">Enabled</SelectItem>
+                    <SelectItem value="false">Disabled</SelectItem>
+                  </SelectContent>
+                </Select>
               </FieldGroup>
 
               <FieldGroup
@@ -841,17 +986,6 @@ export function MemoryConfig() {
           )}
         </div>
 
-        {localConfig.backend !== "file" &&
-          localConfig.embedder.provider === "openai" &&
-          !localConfig.embedder.config.host && (
-            <div className="p-4 bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800/30 rounded-lg shadow-sm">
-              <p className="text-sm text-yellow-800 dark:text-yellow-300">
-                <strong>Note:</strong> You&apos;ll need to set the
-                OPENAI_API_KEY environment variable for this provider to work.
-              </p>
-            </div>
-          )}
-
         <div className="p-4 bg-muted/50 rounded-lg shadow-sm border border-border">
           <h3 className="text-sm font-medium mb-3">Current Configuration</h3>
           <div className="space-y-2 text-sm">
@@ -861,6 +995,16 @@ export function MemoryConfig() {
                 {localConfig.backend || "mem0"}
               </span>
             </div>
+            {localConfig.embedder.config.credentials_service && (
+              <div className="flex justify-between">
+                <span className="text-muted-foreground">
+                  Credential Service:
+                </span>
+                <span className="font-mono text-foreground">
+                  {localConfig.embedder.config.credentials_service}
+                </span>
+              </div>
+            )}
             <div className="flex justify-between">
               <span className="text-muted-foreground">Provider:</span>
               <span className="font-mono text-foreground">

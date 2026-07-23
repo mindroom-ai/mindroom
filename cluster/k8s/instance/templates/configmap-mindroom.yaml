@@ -2,6 +2,16 @@
 {{- $authorization := get $config "authorization" | default (dict) -}}
 {{- $_ := set $authorization "global_users" (.Values.authorizationGlobalUsers | default (list)) -}}
 {{- $_ := set $config "authorization" $authorization -}}
+{{- $matrixRoomAccessValues := .Values.matrixRoomAccess | default (dict) -}}
+{{- if $matrixRoomAccessValues -}}
+{{- $matrixRoomAccess := dict -}}
+{{- $_ := set $matrixRoomAccess "mode" ($matrixRoomAccessValues.mode | default "single_user_private") -}}
+{{- $_ := set $matrixRoomAccess "multi_user_join_rule" ($matrixRoomAccessValues.multiUserJoinRule | default "public") -}}
+{{- $_ := set $matrixRoomAccess "publish_to_room_directory" ($matrixRoomAccessValues.publishToRoomDirectory | default false) -}}
+{{- $_ := set $matrixRoomAccess "invite_only_rooms" ($matrixRoomAccessValues.inviteOnlyRooms | default (list)) -}}
+{{- $_ := set $matrixRoomAccess "reconcile_existing_rooms" ($matrixRoomAccessValues.reconcileExistingRooms | default false) -}}
+{{- $_ := set $config "matrix_room_access" $matrixRoomAccess -}}
+{{- end -}}
 apiVersion: v1
 kind: ConfigMap
 metadata:

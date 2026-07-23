@@ -17,9 +17,13 @@ from google.auth.exceptions import DefaultCredentialsError, RefreshError
 
 from mindroom import constants
 from mindroom.constants import RuntimePaths, env_key_for_provider, runtime_env_path
+from mindroom.credentials_sync import sync_env_to_credentials
+from mindroom.embedder_health import probe_embedder, semantic_embedder_configured
+from mindroom.embedding_errors import EMBEDDER_UNREACHABLE_DETAIL
 from mindroom.embeddings import create_sentence_transformers_embedder
 from mindroom.google_adc import load_google_application_credentials
 from mindroom.matrix.health import matrix_versions_url, response_has_matrix_versions
+from mindroom.model_defaults import OLLAMA_HOST_DEFAULT
 from mindroom.runtime_env_policy import VERTEXAI_CLAUDE_ENV_BY_KEY
 from mindroom.startup_errors import PermanentStartupError
 
@@ -33,7 +37,7 @@ if TYPE_CHECKING:
 from mindroom.config.main import CONFIG_LOAD_USER_ERROR_TYPES, Config, iter_config_validation_messages
 
 
-def doctor() -> None:
+def doctor(config_path: Path | None = None, storage_path: Path | None = None) -> None:
     """Check your environment for common issues.
 
     Runs connectivity, configuration, and credential checks in a single pass
@@ -45,8 +49,20 @@ def doctor() -> None:
     failed = 0
     warnings = 0
 
-    runtime_paths = activate_cli_runtime()
+    runtime_paths = activate_cli_runtime(path=config_path, storage_path=storage_path)
     config_path = runtime_paths.config_path
+    console.print(f"[dim]Config directory: {runtime_paths.config_dir}[/dim]")
+
+    # Resolve credentials the way `mindroom run` will: seed/update env-backed
+    # services (EMBEDDER_API_KEY, provider keys, ...) into the shared store so
+    # preflight probes validate the keys the runtime will actually use.
+    # Credential-store failures must not abort the remaining diagnostics, but
+    # they are counted because the general storage check may target another path.
+    try:
+        sync_env_to_credentials(runtime_paths=runtime_paths)
+    except (OSError, ValueError) as exc:
+        console.print(f"[yellow]![/yellow] Could not sync env credentials into the store ({exc})")
+        warnings += 1
 
     # 1. Config file exists
     p, f, w = _run_doctor_step("Checking config file...", lambda: _check_config_exists(config_path))
@@ -55,7 +71,7 @@ def doctor() -> None:
     warnings += w
 
     # 2+. Config validity + provider API key validation (skip if file missing)
-    if config_path.exists():
+    if config_path.is_file():
         config, p, f, w = _run_doctor_step(
             "Validating configuration...",
             lambda: _check_config_valid(runtime_paths),
@@ -96,11 +112,49 @@ def doctor() -> None:
     failed += f
     warnings += w
 
+    # 7. Matrix encryption stores match persisted device identities
+    p, f, w = _run_doctor_step("Checking encryption stores...", lambda: _check_e2ee_stores(runtime_paths))
+    passed += p
+    failed += f
+    warnings += w
+
     # Summary
     console.print(f"\n{passed} passed, {failed} failed, {warnings} warning{'s' if warnings != 1 else ''}")
 
     if failed > 0:
         raise typer.Exit(1)
+
+
+def _check_e2ee_stores(runtime_paths: RuntimePaths) -> tuple[int, int, int]:
+    """Check persisted Matrix devices have their encryption stores on disk."""
+    from mindroom.matrix.client_session import olm_store_exists  # noqa: PLC0415
+    from mindroom.matrix.state import MatrixState  # noqa: PLC0415
+
+    state = MatrixState.load(runtime_paths=runtime_paths)
+    accounts_with_devices = [
+        (key, account) for key, account in state.accounts.items() if account.device_id and account.domain
+    ]
+    if not accounts_with_devices:
+        console.print("[green]✓[/green] Encryption stores: no persisted Matrix devices yet")
+        return 1, 0, 0
+
+    missing = [
+        (key, account)
+        for key, account in accounts_with_devices
+        if not olm_store_exists(f"@{account.username}:{account.domain}", account.device_id or "", runtime_paths)
+    ]
+    if not missing:
+        count = len(accounts_with_devices)
+        console.print(f"[green]✓[/green] Encryption stores: {count} device store{'s' if count != 1 else ''} present")
+        return 1, 0, 0
+
+    for key, account in missing:
+        console.print(
+            f"[yellow]⚠[/yellow] Encryption store missing for {key} "
+            f"(@{account.username}:{account.domain}, device {account.device_id}); "
+            "MindRoom will log in as a fresh device on next start and old encrypted messages stay unreadable",
+        )
+    return 0, 0, len(missing)
 
 
 def _run_doctor_step[T](message: str, check: Callable[[], T]) -> T:
@@ -111,9 +165,12 @@ def _run_doctor_step[T](message: str, check: Callable[[], T]) -> T:
 
 def _check_config_exists(config_path: Path) -> tuple[int, int, int]:
     """Check config file exists. Returns (passed, failed, warnings)."""
-    if config_path.exists():
+    if config_path.is_file():
         console.print(f"[green]✓[/green] Config file: {config_path}")
         return 1, 0, 0
+    if config_path.exists():
+        console.print(f"[red]✗[/red] Config path is not a file: {config_path}")
+        return 0, 1, 0
     console.print(f"[red]✗[/red] Config file not found: {config_path}")
     return 0, 1, 0
 
@@ -148,6 +205,8 @@ _PROVIDER_VALIDATE_URLS: dict[str, str] = {
     "deepseek": "https://api.deepseek.com/v1/models",
     "cerebras": "https://api.cerebras.ai/v1/models",
     "groq": "https://api.groq.com/openai/v1/models",
+    # No "zai" entry: Z.ai's paas/v4 OpenAPI spec exposes no GET /models
+    # listing endpoint, so a URL probe would misreport valid keys as broken.
 }
 
 
@@ -205,6 +264,7 @@ def _with_local_network_hint(detail: str, base_url: str | None) -> str:
         "connection refused",
         "name or service not known",
         "nodename nor servname provided",
+        EMBEDDER_UNREACHABLE_DETAIL,
     )
     if not any(signal in lowered for signal in route_signals):
         return detail
@@ -213,48 +273,6 @@ def _with_local_network_hint(detail: str, base_url: str | None) -> str:
         f"{detail}; local host '{host}' may be unreachable from this Python runtime"
         " (try a reachable LAN IP instead of .local)"
     )
-
-
-def _validate_openai_embeddings_endpoint(
-    api_key: str,
-    base_url: str,
-    model: str,
-) -> tuple[bool | None, str]:
-    """Validate a custom OpenAI-compatible embeddings endpoint with a tiny request."""
-    url = f"{base_url.rstrip('/')}/embeddings"
-    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
-    payload = {"model": model, "input": "mindroom doctor embedder check"}
-
-    try:
-        resp = httpx.post(url, headers=headers, json=payload, timeout=10)
-    except httpx.HTTPError as exc:
-        return None, str(exc)
-
-    if not resp.is_success:
-        return False, f"HTTP {resp.status_code}"
-
-    error_detail: str | None = None
-    try:
-        body = resp.json()
-    except ValueError:
-        error_detail = "invalid JSON response"
-    else:
-        data = body.get("data") if isinstance(body, dict) else None
-        if not isinstance(data, list) or not data:
-            error_detail = "missing embeddings data"
-        else:
-            first_item = data[0]
-            if not isinstance(first_item, dict):
-                error_detail = "invalid embeddings payload"
-            else:
-                embedding = first_item.get("embedding")
-                if not isinstance(embedding, list) or not embedding:
-                    error_detail = "empty embedding vector"
-
-    if error_detail is not None:
-        return False, error_detail
-
-    return True, ""
 
 
 def _validate_provider_key(
@@ -299,12 +317,34 @@ def _classify_vertexai_claude_error(
 ) -> tuple[bool | None, str]:
     """Classify one Vertex AI Claude validation failure for doctor output."""
     if isinstance(exc, APIStatusError):
-        return False, f"HTTP {exc.status_code}"
+        return False, _vertexai_claude_api_error_detail(exc)
     if isinstance(exc, DefaultCredentialsError):
         return None, str(exc)
     if isinstance(exc, RefreshError):
         return False, str(exc)
     return None, str(exc)
+
+
+def _vertexai_claude_api_error_detail(exc: APIStatusError) -> str:
+    """Turn a Vertex Claude API error into an actionable doctor message.
+
+    Model availability on Vertex is per project and region: a project can have
+    the Vertex AI API enabled yet still 404 on a Claude model when Anthropic
+    models are not enabled in its Model Garden or when the model id form is
+    wrong for Vertex (current-generation ids are bare, e.g. the anthropic
+    default; older ones are dated snapshots with an @ separator).
+    """
+    if exc.status_code == httpx.codes.NOT_FOUND:
+        return (
+            "HTTP 404: model not available in this project/region — verify the Vertex model id form "
+            "(bare current-generation id or dated @ snapshot) and that Anthropic models are enabled "
+            f"in the project's Model Garden ({exc.message})"
+        )
+    if exc.status_code == httpx.codes.FORBIDDEN:
+        if "SERVICE_DISABLED" in exc.message:
+            return "HTTP 403: the Vertex AI API (aiplatform.googleapis.com) is not enabled in this project"
+        return "HTTP 403: permission denied — check the credentials' IAM access to Vertex AI in this project"
+    return f"HTTP {exc.status_code}"
 
 
 def _validate_vertexai_claude_connection(
@@ -369,7 +409,7 @@ def _get_ollama_host(config: Config, runtime_paths: RuntimePaths) -> str:
     for model in config.models.values():
         if model.provider == "ollama" and model.host:
             return model.host
-    return runtime_paths.env_value("OLLAMA_HOST", default="http://localhost:11434") or "http://localhost:11434"
+    return runtime_paths.env_value("OLLAMA_HOST", default=OLLAMA_HOST_DEFAULT) or OLLAMA_HOST_DEFAULT
 
 
 def _check_providers(config: Config, runtime_paths: RuntimePaths) -> tuple[int, int, int]:
@@ -489,7 +529,7 @@ def _check_memory_config(config: Config, runtime_paths: RuntimePaths) -> tuple[i
     backends = (
         {config.memory.backend}
         if not config.agents
-        else {config.get_agent_memory_backend(agent_name) for agent_name in config.agents}
+        else {config.resolve_entity(agent_name).memory_backend for agent_name in config.agents}
     )
     if "mem0" not in backends:
         if backends == {"none"}:
@@ -499,6 +539,11 @@ def _check_memory_config(config: Config, runtime_paths: RuntimePaths) -> tuple[i
         else:
             labels = "/".join("disabled" if backend == "none" else backend for backend in sorted(backends))
             console.print(f"[green]✓[/green] Memory backend: mixed (per-agent {labels})")
+        # Semantic knowledge bases and file-backend semantic memory search
+        # need the shared embedder even without mem0.
+        if semantic_embedder_configured(config):
+            p, f, w = _check_memory_embedder(config, runtime_paths=runtime_paths)
+            return 1 + p, f, w
         return 1, 0, 0
 
     if len(backends) > 1:
@@ -588,6 +633,24 @@ def _check_memory_embedder(config: Config, runtime_paths: RuntimePaths) -> tuple
             f"Memory embedder: sentence_transformers/{emb.config.model} could not validate",
         )
 
+    if emb.provider == "openai":
+        # One real embedding round-trip through the shared probe, which builds
+        # the configured embedder and resolves the key via get_embedder_api_key
+        # (explicit config key > 'embedder' credential > openai fallback).
+        error = probe_embedder(config, runtime_paths)
+        host_suffix = f" ({emb.config.host})" if emb.config.host else ""
+        valid: bool | None = True if error is None else None if error == EMBEDDER_UNREACHABLE_DETAIL else False
+        detail = error or ""
+        if error is not None and emb.config.host:
+            detail = _with_local_network_hint(detail, emb.config.host)
+        return _print_validation(
+            valid,
+            detail,
+            f"Memory embedder: openai/{emb.config.model} embedding round-trip succeeded{host_suffix}",
+            f"Memory embedder: openai/{emb.config.model} embedding request failed{host_suffix}",
+            f"Memory embedder: openai/{emb.config.model} could not reach embeddings endpoint{host_suffix}",
+        )
+
     env_key = env_key_for_provider(emb.provider)
     api_key = runtime_paths.env_value(env_key) if env_key else None
     if env_key and not api_key:
@@ -595,16 +658,6 @@ def _check_memory_embedder(config: Config, runtime_paths: RuntimePaths) -> tuple
             f"[yellow]![/yellow] Memory embedder ({emb.provider}): {env_key} not set",
         )
         return 0, 0, 1
-
-    if emb.provider == "openai" and emb.config.host:
-        valid, detail = _validate_openai_embeddings_endpoint(api_key or "", emb.config.host, emb.config.model)
-        return _print_validation(
-            valid,
-            _with_local_network_hint(detail, emb.config.host),
-            f"Memory embedder: openai/{emb.config.model} embeddings endpoint reachable ({emb.config.host})",
-            f"Memory embedder: openai/{emb.config.model} embeddings endpoint failed ({emb.config.host})",
-            f"Memory embedder: openai/{emb.config.model} could not reach embeddings endpoint ({emb.config.host})",
-        )
 
     base_url = emb.config.host
     valid, detail = _validate_provider_key(emb.provider, api_key or "", base_url)

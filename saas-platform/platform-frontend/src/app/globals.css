@@ -292,3 +292,43 @@ body {
     -webkit-overflow-scrolling: touch;
   }
 }
+
+.auth-glass-page .supabase-auth-ui_ui-button {
+  border-color: rgba(255, 255, 255, 0.18) !important;
+  background: rgba(255, 255, 255, 0.08) !important;
+  color: rgba(248, 245, 255, 0.9) !important;
+  box-shadow: none !important;
+}
+
+.auth-glass-page .supabase-auth-ui_ui-button:hover {
+  background: rgba(255, 255, 255, 0.14) !important;
+  color: #ffffff !important;
+}
+
+.auth-glass-page .supabase-auth-ui_ui-button[type='submit'] {
+  border-color: rgba(244, 180, 126, 0.45) !important;
+  background: rgba(244, 180, 126, 0.92) !important;
+  color: #12102a !important;
+}
+
+.auth-glass-page .supabase-auth-ui_ui-button[type='submit']:hover {
+  background: rgba(255, 214, 176, 0.96) !important;
+}
+
+.auth-glass-page .supabase-auth-ui_ui-input {
+  border-color: rgba(255, 255, 255, 0.18) !important;
+  background: rgba(8, 10, 22, 0.46) !important;
+  color: #f8f5ff !important;
+}
+
+.auth-glass-page .supabase-auth-ui_ui-label {
+  color: rgba(248, 245, 255, 0.72) !important;
+}
+
+.auth-glass-page .supabase-auth-ui_ui-divider {
+  background-color: rgba(255, 255, 255, 0.16) !important;
+}
+
+.auth-glass-page .supabase-auth-ui_ui-anchor[href$='#auth-sign-up'] {
+  display: none !important;
+}

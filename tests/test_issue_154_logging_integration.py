@@ -6,6 +6,7 @@ import json
 import logging
 import re
 import time
+import uuid
 from dataclasses import dataclass
 from json import JSONDecodeError
 from types import SimpleNamespace
@@ -15,6 +16,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 import structlog
 from agno.models.message import Message
+from agno.models.response import ModelResponse
 from agno.run.agent import ModelRequestCompletedEvent, RunCompletedEvent, RunContentEvent
 from agno.run.base import RunStatus
 
@@ -24,18 +26,26 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DebugConfig, ModelConfig
 from mindroom.constants import AI_RUN_METADATA_KEY, tracking_dir
-from mindroom.handled_turns import HandledTurnState
-from mindroom.history import PreparedHistoryState
+from mindroom.handled_turns import TurnRecord
+from mindroom.history.types import PreparedHistoryState
 from mindroom.hooks import HookRegistry
 from mindroom.llm_request_logging import install_llm_request_logging
 from mindroom.logging_config import get_logger, setup_logging
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
+from mindroom.response_payload_preparation import DispatchPayloadInputs
 from mindroom.tool_system.runtime_context import ToolDispatchContext
 from mindroom.tool_system.tool_hooks import build_tool_hook_bridge
 from mindroom.tool_system.worker_routing import build_tool_execution_identity
 from mindroom.turn_policy import PreparedDispatch, ResponseAction
-from tests.conftest import bind_runtime_paths, replace_turn_controller_deps, runtime_paths_for, test_runtime_paths
+from tests.conftest import (
+    bind_runtime_paths,
+    make_turn_context,
+    replace_turn_controller_deps,
+    request_envelope,
+    runtime_paths_for,
+    test_runtime_paths,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator
@@ -56,20 +66,21 @@ def _reset_logging_after_test() -> Iterator[None]:
 @dataclass
 class _LoggingModel:
     id: str = "test-model"
+    provider: str | None = "OpenAI"
     system_prompt: str | None = None
     temperature: float | None = 0.7
     client: object | None = None
     async_client: object | None = None
 
-    async def ainvoke(self, *_args: object, **_kwargs: object) -> dict[str, str]:
-        return {"status": "ok"}
+    async def ainvoke(self, *_args: object, **_kwargs: object) -> ModelResponse:
+        return ModelResponse(content="ok")
 
     async def ainvoke_stream(
         self,
         *_args: object,
         **_kwargs: object,
-    ) -> AsyncIterator[dict[str, str]]:
-        yield {"status": "ok"}
+    ) -> AsyncIterator[ModelResponse]:
+        yield ModelResponse(content="ok")
 
 
 class _InvokeAgent:
@@ -111,6 +122,7 @@ class _InvokeAgent:
             status=RunStatus.completed,
             model=self.model.id,
             model_provider="openai",
+            metrics=None,
         )
 
 
@@ -211,6 +223,7 @@ def _prepared_prompt_result(agent: object, *, prompt: str = "expanded prompt") -
         messages=(Message(role="user", content=prompt),),
         unseen_event_ids=[],
         prepared_history=PreparedHistoryState(),
+        runtime_model_name="default",
     )
 
 
@@ -290,18 +303,21 @@ async def test_cross_sink_correlation_invariant_for_matrix_turn_processing_log( 
             ),
         ):
             response = await ai_response(
-                agent_name="general",
+                make_turn_context(
+                    "general",
+                    session_id=target.session_id or "session-1",
+                    correlation_id=request.reply_to_event_id or "corr-test",
+                    reply_to_event_id=request.reply_to_event_id,
+                    room_id=request.room_id,
+                    thread_id=request.thread_id,
+                    requester_id=request.user_id,
+                    matrix_run_metadata=request.matrix_run_metadata,
+                ),
                 prompt=request.prompt,
                 model_prompt="model prompt",
-                session_id=target.session_id or "session-1",
                 runtime_paths=runtime_paths,
                 config=config,
-                room_id=request.room_id,
-                thread_id=request.thread_id,
-                reply_to_event_id=request.reply_to_event_id,
-                user_id=request.user_id,
                 execution_identity=dispatch_context.execution_identity,
-                matrix_run_metadata=request.matrix_run_metadata,
             )
         assert response == "Done"
         return "$response:localhost"
@@ -321,6 +337,7 @@ async def test_cross_sink_correlation_invariant_for_matrix_turn_processing_log( 
     event = SimpleNamespace(
         event_id="$event:localhost",
         body="hello",
+        server_timestamp=1234567890,
         source={},
     )
     dispatch = PreparedDispatch(
@@ -334,7 +351,14 @@ async def test_cross_sink_correlation_invariant_for_matrix_turn_processing_log( 
         ),
         target=target,
         correlation_id="$event:localhost",
-        envelope=MagicMock(),
+        envelope=request_envelope(
+            room_id=target.room_id,
+            reply_to_event_id=target.reply_to_event_id or "$event:localhost",
+            target=target,
+            prompt=event.body,
+            user_id="@user:localhost",
+            agent_name="general",
+        ),
     )
 
     await controller._execute_response_action(
@@ -342,11 +366,11 @@ async def test_cross_sink_correlation_invariant_for_matrix_turn_processing_log( 
         event,
         dispatch,
         ResponseAction(kind="individual"),
-        AsyncMock(),
+        DispatchPayloadInputs((), (), ()),
         processing_log="Processing",
         dispatch_started_at=time.monotonic(),
-        handled_turn=HandledTurnState.from_source_event_id(
-            event.event_id,
+        handled_turn=TurnRecord.create(
+            [event.event_id],
             requester_id="@user:localhost",
             correlation_id="$event:localhost",
         ),
@@ -452,16 +476,19 @@ async def test_streaming_tool_call_shares_correlation_id_across_streaming_sinks(
         chunks = [
             chunk
             async for chunk in stream_agent_response(
-                agent_name="general",
+                make_turn_context(
+                    "general",
+                    session_id="!room:localhost:$thread:localhost",
+                    correlation_id="$event:localhost",
+                    reply_to_event_id="$event:localhost",
+                    room_id="!room:localhost",
+                    thread_id="$thread:localhost",
+                    requester_id="@user:localhost",
+                ),
                 prompt="hello",
                 model_prompt="model prompt",
-                session_id="!room:localhost:$thread:localhost",
                 runtime_paths=runtime_paths,
                 config=config,
-                room_id="!room:localhost",
-                thread_id="$thread:localhost",
-                reply_to_event_id="$event:localhost",
-                user_id="@user:localhost",
                 execution_identity=execution_identity,
             )
         ]
@@ -525,14 +552,18 @@ async def test_non_matrix_request_mints_uuid_correlation_id_across_sinks(tmp_pat
             return_value=[{"name": "demo_tool", "description": "Echo"}],
         ),
     ):
+        expected_correlation_id = uuid.uuid4().hex
         response = await ai_response(
-            agent_name="general",
+            make_turn_context(
+                "general",
+                session_id="openai-session",
+                correlation_id=expected_correlation_id,
+                requester_id="@api-user:localhost",
+            ),
             prompt="hello",
             model_prompt="model prompt",
-            session_id="openai-session",
             runtime_paths=runtime_paths,
             config=config,
-            user_id="@api-user:localhost",
             execution_identity=execution_identity,
         )
 
@@ -544,6 +575,7 @@ async def test_non_matrix_request_mints_uuid_correlation_id_across_sinks(tmp_pat
 
     assert isinstance(correlation_id, str)
     assert re.fullmatch(r"[0-9a-f]{32}", correlation_id)
+    assert correlation_id == expected_correlation_id
     assert tool_entry["correlation_id"] == correlation_id
     assert metadata["correlation_id"] == correlation_id
     assert "reply_to_event_id" not in metadata

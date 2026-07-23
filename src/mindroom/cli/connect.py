@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from hashlib import sha256
 from typing import TYPE_CHECKING
 
+import yaml
+
 from mindroom.cli.owner import parse_owner_matrix_user_id, replace_owner_placeholders_in_text
+from mindroom.config.yaml_includes import load_yaml_config_source
 from mindroom.constants import OWNER_MATRIX_USER_ID_ENV
+from mindroom.http_error_detail import error_detail_from_response
 
 from .env_file import env_path_for_config, upsert_env_values
 
@@ -66,7 +69,7 @@ def complete_local_pairing(
         raise ValueError(msg) from exc
 
     if not response.is_success:
-        detail = _extract_error_detail(response)
+        detail = error_detail_from_response(response)
         msg = f"Pairing failed ({response.status_code}): {detail}"
         raise ValueError(msg)
 
@@ -89,7 +92,7 @@ def complete_local_pairing(
     parsed_namespace = _parse_namespace(raw_namespace)
     namespace_invalid = isinstance(raw_namespace, str) and bool(raw_namespace.strip()) and parsed_namespace is None
     if parsed_namespace is None:
-        parsed_namespace = _derive_namespace(client_id)
+        parsed_namespace = ""
 
     return _PairCompleteResult(
         client_id=client_id,
@@ -123,20 +126,31 @@ def persist_local_provisioning_env(
     return upsert_env_values(env_path_for_config(config_path), updates)
 
 
+def _owner_placeholder_config_files(config_path: Path) -> tuple[Path, ...]:
+    """Return every config source file: the top-level file plus each !include target."""
+    try:
+        _, source_files = load_yaml_config_source(config_path)
+    except (OSError, yaml.YAMLError, UnicodeError):
+        # A config that fails to parse still gets top-level replacement.
+        return (config_path,)
+    return tuple(sorted(source_files))
+
+
 def replace_owner_placeholders_in_config(*, config_path: Path, owner_user_id: str) -> bool:
-    """Replace owner placeholder tokens in config.yaml if they are still present."""
+    """Replace owner placeholder tokens in the config and its !include files."""
     if parse_owner_matrix_user_id(owner_user_id) is None:
         return False
     if not config_path.exists():
         return False
 
-    content = config_path.read_text(encoding="utf-8")
-    replaced = replace_owner_placeholders_in_text(content, owner_user_id)
-    if replaced == content:
-        return False
-
-    config_path.write_text(replaced, encoding="utf-8")
-    return True
+    replaced_any = False
+    for source_file in _owner_placeholder_config_files(config_path):
+        content = source_file.read_text(encoding="utf-8")
+        replaced = replace_owner_placeholders_in_text(content, owner_user_id)
+        if replaced != content:
+            source_file.write_text(replaced, encoding="utf-8")
+            replaced_any = True
+    return replaced_any
 
 
 def _required_non_empty_string(data: dict[str, object], key: str) -> str:
@@ -160,25 +174,3 @@ def _parse_namespace(raw_value: object) -> str | None:
     if _NAMESPACE_RE.fullmatch(namespace):
         return namespace
     return None
-
-
-def _derive_namespace(seed: str) -> str:
-    """Derive a deterministic namespace from an identifier."""
-    return sha256(seed.encode("utf-8")).hexdigest()[:8]
-
-
-def _extract_error_detail(response: httpx.Response) -> str:
-    """Extract a compact error detail from JSON or plaintext responses."""
-    try:
-        body = response.json()
-    except ValueError:
-        text = response.text.strip()
-        return text or "unknown error"
-
-    if isinstance(body, dict):
-        detail = body.get("detail")
-        if isinstance(detail, str):
-            return detail
-        if detail is not None:
-            return str(detail)
-    return "unknown error"

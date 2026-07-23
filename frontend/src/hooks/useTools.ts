@@ -30,6 +30,7 @@ export interface ToolInfo {
   category: string;
   status: string;
   setup_type: string;
+  default_execution_target?: string | null;
   icon: string | null;
   icon_color: string | null;
   config_fields: ToolFieldSchema[] | null;
@@ -38,6 +39,7 @@ export interface ToolInfo {
   auth_provider?: string | null;
   docs_url?: string | null;
   helper_text?: string | null;
+  function_names?: string[] | null;
   dashboard_configuration_supported?: boolean;
   execution_scope_supported?: boolean;
 }

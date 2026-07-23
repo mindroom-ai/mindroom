@@ -8,7 +8,9 @@ from pathlib import Path
 
 from mindroom.services.config import (
     SERVICE_NAME,
+    SERVICE_NOT_INSTALLED_MESSAGE,
     InstallResult,
+    ServiceActionResult,
     ServiceManager,
     ServiceStatus,
     UninstallResult,
@@ -34,6 +36,11 @@ def _get_unit_path() -> Path:
 def _get_log_command() -> str:
     """Return the command for following service logs."""
     return f"journalctl --user -u {SERVICE_NAME} -f"
+
+
+def _get_log_args() -> list[str]:
+    """Return the argv for following service logs."""
+    return ["journalctl", "--user", "-u", SERVICE_NAME, "-f"]
 
 
 def _get_recent_logs(num_lines: int = 10) -> list[str]:
@@ -167,6 +174,43 @@ def _install_service() -> InstallResult:
     return InstallResult(success=True, message="Installed and started")
 
 
+def _run_systemctl_action(action: str, success_message: str) -> ServiceActionResult:
+    """Run one systemd user-service lifecycle action."""
+    unit_path = _get_unit_path()
+    if not unit_path.exists():
+        return ServiceActionResult(success=False, message=SERVICE_NOT_INSTALLED_MESSAGE)
+
+    result = subprocess.run(
+        ["systemctl", "--user", action, _get_unit_name()],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        detail = result.stderr.strip()
+        message = f"Failed to {action} service"
+        if detail:
+            message = f"{message}: {detail}"
+        return ServiceActionResult(success=False, message=message)
+
+    return ServiceActionResult(success=True, message=success_message)
+
+
+def _start_service() -> ServiceActionResult:
+    """Start the installed systemd user service."""
+    return _run_systemctl_action("start", "Service started")
+
+
+def _stop_service() -> ServiceActionResult:
+    """Stop the installed systemd user service without removing it."""
+    return _run_systemctl_action("stop", "Service stopped")
+
+
+def _restart_service() -> ServiceActionResult:
+    """Restart the installed systemd user service."""
+    return _run_systemctl_action("restart", "Service restarted")
+
+
 def _uninstall_service() -> UninstallResult:
     """Stop and remove the systemd user service."""
     unit_path = _get_unit_path()
@@ -197,7 +241,11 @@ manager = ServiceManager(
     install_uv=install_uv,
     install_service=_install_service,
     uninstall_service=_uninstall_service,
+    start_service=_start_service,
+    stop_service=_stop_service,
+    restart_service=_restart_service,
     get_service_status=_get_service_status,
     get_log_command=_get_log_command,
+    get_log_args=_get_log_args,
     get_recent_logs=_get_recent_logs,
 )

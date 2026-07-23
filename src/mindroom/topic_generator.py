@@ -178,5 +178,5 @@ async def ensure_room_has_topic(
         logger.info("room_topic_set", room_id=room_id, room_key=room_key, topic=topic)
         return True
 
-    logger.warning("set_room_topic_failed", room_id=room_id, room_key=room_key, error=response)
+    logger.warning("set_room_topic_failed", room_id=room_id, room_key=room_key, error=str(response))
     return False

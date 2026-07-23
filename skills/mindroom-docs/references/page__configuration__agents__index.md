@@ -1,6 +1,7 @@
 # Agent Configuration
 
-Agents are the core building blocks of MindRoom. Each agent is a specialized AI actor with specific capabilities.
+Agents are the core building blocks of MindRoom.
+Each agent is a specialized AI actor with specific capabilities.
 
 ## Basic Agent
 
@@ -142,8 +143,9 @@ agents:
 | `learning` | bool | `null` | Enable [Agno Learning](https://docs.agno.com/agents/learning) — the agent builds a persistent profile of user preferences and adapts over time. Inherits from `defaults.learning` (default: `true`) |
 | `learning_mode` | string | `null` | `always`: agent automatically learns from every interaction. `agentic`: agent decides when to learn via a tool call. Inherits from `defaults.learning_mode` (default: `"always"`) |
 | `memory_backend` | string | `null` | Memory backend override for this agent (`"mem0"`, `"file"`, or `"none"`). Inherits from global `memory.backend` when omitted |
-| `private` | object | `null` | Optional requester-private state for one shared agent definition. `private.per` defines which requester boundary gets a separate private instance of the agent's state. Private agents must not set `worker_scope`. Internally, MindRoom reuses that same requester boundary for worker execution, but `private.per` is still a different public config concept from `worker_scope`. `private.root` defaults to `<agent_name>_data`, `private.template_dir` copies a local template into each requester root without overwriting existing files, `private.context_files` loads private-root-relative files into role context, and `private.knowledge` adds PrivateAgentKnowledge indexed from that private root. `private` does not implicitly enable file memory, context files, or private knowledge, and private agents cannot participate in teams yet |
-| `knowledge_bases` | list | `[]` | Knowledge base IDs from top-level `knowledge_bases` — gives the agent RAG access to the indexed documents |
+| `memory_search` | object | `null` | File-memory search override for this agent. Supports `mode`, `include`, and `include_entrypoint`; omitted fields inherit from global `memory.search` |
+| `private` | object | `null` | Optional requester-private state for one shared agent definition |
+| `knowledge_bases` | list | `[]` | Knowledge base IDs from top-level `knowledge_bases`; semantic bases add indexed RAG search while file-mode bases expose workspace file paths for agents with file-aware tools |
 | `context_files` | list | `[]` | File paths (relative to the agent's workspace) loaded into each agent instance and prepended to role context (under `Personality Context`) |
 | `thread_mode` | string | `"thread"` | `thread`: responses are sent in Matrix threads (default). `room`: responses are sent as plain room messages with a single persistent session per room — ideal for bridges (Telegram, Signal, WhatsApp) and mobile |
 | `room_thread_modes` | map | `{}` | Per-room thread mode overrides keyed by room alias/name or Matrix room ID. Values are `thread` or `room`. Overrides apply before `thread_mode` fallback |
@@ -160,11 +162,14 @@ agents:
 | `delegate_to` | list | `[]` | Agent names this agent can delegate tasks to via tool calls (see [Agent Delegation](#agent-delegation)) |
 
 Each entry in `knowledge_bases` must match a key under `knowledge_bases` in `config.yaml`.
+See [Knowledge Bases](https://docs.mindroom.chat/knowledge/) for `mode: semantic` and `mode: files`.
 
 Per-agent fields with a `null` default inherit from the `defaults` section at runtime.
 Per-agent values override them.
 `memory.backend` is the global memory default, and `agents.<name>.memory_backend` overrides it per agent.
 Use `memory_backend: none` for stateless agents that should skip prompt memory lookup, automatic memory persistence, and the explicit `memory` tool.
+`agents.<name>.memory_search` can override `mode`, `include`, and `include_entrypoint` when the effective memory backend is `file`.
+Unset `memory_search` fields inherit from top-level `memory.search`.
 `show_stop_button` and `enable_streaming` are global-only settings in `defaults` and cannot be overridden per-agent.
 The dashboard Agents tab exposes this as the **Memory Backend** selector for each agent.
 
@@ -176,17 +181,30 @@ Approval-gated tools are stricter than plain ad-hoc chat access.
 Approval-gated tools only work there while the router is already joined.
 
 MindRoom compacts in one visible lifecycle.
-Per-agent compaction supports `enabled`, `threshold_tokens`, `threshold_percent`, `reserve_tokens`, and `model`.
+Per-agent compaction supports `enabled`, `threshold_tokens`, `threshold_percent`, `replay_window_tokens`, `reserve_tokens`, `model`, and `fallback_model`.
 When the active runtime model has a known `context_window`, MindRoom always computes a per-run replay plan that reduces or disables persisted replay before the model call if needed.
 Automatic destructive compaction is enabled by default through `defaults.compaction`, but it runs only when raw history exceeds the hard replay budget for the next reply.
 `threshold_tokens` and `threshold_percent` set a soft trigger budget for planning metadata and compaction notices.
 Crossing that soft trigger while still within the hard budget leaves the stored session unchanged and relies on replay fitting.
-Use `reserve_tokens` to leave hard-budget headroom, use `model` to choose the summary model, or set `enabled: false` to disable automatic pre-reply compaction for this agent.
-Replay safety always uses the active runtime model window.
+
+You can tune compaction behavior with these settings:
+
+- Use `replay_window_tokens` to cap persisted replay, required-compaction planning, and summary input chunks below the model's real context window without lowering the provider request limit.
+- Use `reserve_tokens` to leave hard-budget headroom.
+- Use `model` to choose the summary model.
+- Use `fallback_model` to name a different model config that resends the unchanged summary prompt and input once (only the target model differs) when the summary model refuses for safeguards; after a successful fallback, that model serves the remaining compaction chunks and is reported as the summary model.
+- Set `enabled: false` to disable automatic pre-reply compaction for this agent.
+
+When the active runtime model window is known, replay safety uses the smaller of it and `replay_window_tokens`.
+When that model window is unknown, an explicit `replay_window_tokens` still supplies the replay-planning window.
+The effective replay window also caps each compaction summary input chunk.
+Destructive compaction requires the resolved summary input budget to exceed 2,000 tokens.
+With the default `reserve_tokens`, this makes destructive compaction unavailable when the compaction model's context window is roughly 10,000 tokens or smaller; lowering `reserve_tokens` restores availability for such small windows.
 If you set `compaction.model`, that summary model must also define its own `context_window`, but only for the durable summary-generation pass.
+`compaction.fallback_model` must also name a configured model with its own `context_window`; a fallback naming the summary model's alias, or another alias resolving to the same provider and model ID, is ignored because it would resend the refused request to the same model.
 If the current reply needs required compaction to preserve usable history, MindRoom sends `Compacting history...`, compacts before the model call, and edits that same notice with the result.
 Manual `compact_context` records a durable request that runs before the next reply in the same conversation scope.
-Manual `compact_context` remains available when a compaction model and context window are configured.
+Manual `compact_context` remains available when a compaction model and context window are configured and the resolved summary input budget exceeds 2,000 tokens.
 MindRoom does not run a separate background post-response compaction path.
 It always plans the replay that is safe for the current model call when the active runtime model has a known `context_window`.
 That replay planner can keep configured replay, reduce raw replay, fall back to summary-only replay, or disable persisted replay for the run.
@@ -246,6 +264,24 @@ defaults:
     - scheduler
     - shell:
         enable_run_shell_command: true     # global default for all agents
+```
+
+### Filtering Toolkit Functions
+
+Registered Agno Toolkit integrations accept `include_tools` and `exclude_tools` inline overrides even when those fields are not declared by the concrete toolkit constructor.
+`include_tools` is an allowlist, while `exclude_tools` is a denylist applied after the toolkit registers its functions.
+Use the function names exposed by the tool catalog.
+Unsupported non-Toolkit integrations reject these fields during config validation.
+
+```yaml
+agents:
+  research:
+    tools:
+      - searxng:
+          include_tools:
+            - search_web
+            - news_search
+            - image_search
 ```
 
 ### Clearing An Inherited Override
@@ -321,12 +357,22 @@ Adding or removing tools via chat does not discard existing per-agent overrides 
 ## Worker Routing
 
 `worker_tools` decides which tools run in the sandbox proxy instead of the main MindRoom process.
-When omitted, MindRoom routes `coding`, `file`, `python`, and `shell` through the proxy by default.
+When omitted, MindRoom routes `coding`, `docker`, `file`, `python`, and `shell` through the proxy by default.
+Registry-backed tools can be listed in `worker_tools`, and MindRoom will attempt to route them through the worker runtime.
+Some local-only tools stay in the primary runtime even when listed: `attachments`, `desktop`, `gmail`, `google_calendar`, `google_docs`, `google_drive`, `google_sheets`, and `homeassistant`.
+Dedicated Docker workers also receive a projected read-only config snapshot so config-relative plugins, knowledge bases, and other worker-safe assets remain available without exposing unrelated primary-runtime state.
+Agent-scoped workers snapshot only that agent's projected context files and assigned knowledge bases, while scopes that intentionally share one worker across multiple agents keep the broader shared projection for that worker.
+Writable file-memory paths are rewritten into worker-owned state instead of being mounted from the host config tree.
+Config-adjacent `.env` files are intentionally masked as files inside those Docker workers.
+A filtered public startup-runtime env payload can still propagate from exported env vars and allowed `.env` values.
 `worker_scope` controls how those sandbox runtimes are reused between calls.
-The shared-only integrations require `worker_scope` unset or `shared`.
-That list includes `spotify`, `homeassistant`, and all configured `mcp_<server_id>` tools.
-Separately, `gmail`, `google_calendar`, `google_drive`, `google_sheets`, and `homeassistant` always stay local regardless of `worker_tools` (they are never proxied to the sandbox).
+Some integrations require `worker_scope` unset or `shared` because their credentials or sessions are shared at runtime.
+That list includes `spotify`, `homeassistant`, and non-OAuth configured `mcp_<server_id>` tools.
+OAuth-backed remote MCP tools use requester-scoped OAuth credentials and can be used with `worker_scope: user` or `worker_scope: user_agent`.
+Among those shared-scope integrations, `homeassistant` always stays local regardless of `worker_tools` and is never proxied to the sandbox.
+`gmail`, `google_calendar`, `google_docs`, `google_drive`, and `google_sheets` also always stay local.
 `spotify` can still be proxied through the sandbox.
+The built-in `memory`, `delegate`, and `self_config` tools are also created directly in the primary runtime today and are not routed through `worker_tools`.
 
 The supported `worker_scope` values are:
 
@@ -372,7 +418,7 @@ Workers mount those canonical private-instance roots.
 They do not own them.
 
 The dashboard's generic credential forms only work for unscoped agents and agents with `worker_scope=shared`.
-OAuth providers that support scoped dashboard flows, such as the Google Drive, Gmail, Calendar, and Sheets providers, are the exception.
+OAuth providers that support scoped dashboard flows, such as the Google Drive, Docs, Gmail, Calendar, and Sheets providers, are the exception.
 For those providers, the dashboard can connect scoped `user` and `user_agent` credentials, but the Google tools still execute in the primary MindRoom runtime.
 Tools without a scoped OAuth provider still manage `user` and `user_agent` credentials through their worker runtime instead.
 
@@ -383,8 +429,9 @@ For more details on storage layout and isolation, see [Sandbox Proxy Isolation](
 Use `private` when one shared agent definition should behave like a template that materializes a separate requester-local instance at runtime.
 The YAML definition stays shared.
 The private root, copied files, file-memory workspace, and private knowledge path do not.
-Private agents cannot participate in teams yet.
-That restriction also applies transitively: a shared team member that reaches a private agent through `delegate_to` is rejected.
+Private agents cannot be configured as team members.
+Explicit Matrix messages that tag a private agent with other agents can form an ad hoc team for that requester.
+That exception is direct only: a shared team member that reaches a private agent through `delegate_to` is still rejected.
 
 `private.per` is not a second spelling of `worker_scope`.
 `private.per` chooses who gets a separate private instance of the agent's state.
@@ -404,6 +451,11 @@ agents:
     tools: [file, shell]
     worker_tools: [file, shell]
     memory_backend: file
+    memory_search:
+      mode: semantic
+      include:
+        - memory/**/*.md
+      include_entrypoint: false
     private:
       per: user
       root: mind_data
@@ -474,8 +526,9 @@ For a `mind` agent with `private.per: user`, different users get different priva
 - `private` does not automatically enable file memory.
 - `private` does not automatically load any context files.
 - `private` does not automatically create a private knowledge base.
-- Private agents cannot participate in teams yet.
-- Shared team members that reach a private agent through `delegate_to` are rejected for the same reason.
+- Private agents cannot be configured as team members.
+- Explicit Matrix ad hoc teams can include directly tagged private agents for requester-scoped execution.
+- Shared team members that reach a private agent through `delegate_to` are rejected.
 - If `private.template_dir` is omitted, MindRoom still creates the private root.
 - Private agents require an active requester-scoped runtime context.
 - MindRoom raises an error instead of silently falling back to a shared config-relative path when that requester scope is missing.
@@ -524,9 +577,11 @@ The normal Matrix and OpenAI-compatible reply paths build fresh agent instances 
 
 ## Agent Delegation
 
-Agents can delegate tasks to other agents using the `delegate_to` field. When configured, a delegation tool is automatically added to the agent — no need to include `"delegate"` in the `tools` list.
+Agents can delegate tasks to other agents using the `delegate_to` field.
+When configured, a delegation tool is automatically added to the agent, so you do not need to include `"delegate"` in the `tools` list.
 
-The delegated agent runs as a fresh, one-shot instance with no shared session or history. It executes the task and returns its response as the tool result.
+The delegated agent runs as a fresh, one-shot instance with no shared session or history.
+It executes the task and returns its response as the tool result.
 
 ```yaml
 agents:
@@ -566,7 +621,8 @@ Agent and team names must be distinct — the same key cannot appear in both `ag
 
 ## Defaults
 
-The `defaults` section sets fallback values for all agents. Any agent that omits a setting inherits the value from here.
+The `defaults` section sets fallback values for all agents.
+Any agent that omits a setting inherits the value from here.
 
 ```yaml
 defaults:

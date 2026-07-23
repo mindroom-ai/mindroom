@@ -1,4 +1,21 @@
-"""Shared pure helpers for Matrix thread cache policies."""
+"""Shared pure helpers for Matrix thread cache policies.
+
+``thread_cache_rejection_reason`` is the single trust gate for durable thread snapshots:
+
+1. Trust is durable-state-only: a snapshot is trusted when its state row exists, ``validated_at`` is
+   set, and neither ``invalidated_at`` nor ``room_invalidated_at`` is at or after ``validated_at``.
+   Timestamp ties reject: an invalidation written at the same instant as a validation wins.
+
+2. There is deliberately no age rule: a trusted snapshot stays trusted regardless of how long ago it was
+   validated (PR #731 removed ``cache_too_old``).
+
+3. There is deliberately no restart rule: trust survives process restarts without comparing against a
+   runtime start time (PR #734 removed ``validated_before_runtime_start``).
+   Cross-restart safety is owned by sync-token certification instead: a sync token is persisted only
+   after its sync response's timeline writes are durably complete, so a restored token proves the
+   durable cache kept up, and any uncertain outcome clears the token to force a cold sync (PR #714,
+   see ``mindroom.matrix.sync_certification``).
+"""
 
 from __future__ import annotations
 

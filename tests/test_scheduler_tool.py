@@ -12,6 +12,7 @@ import mindroom.tools  # noqa: F401
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.custom_tools.scheduler import SchedulerTools
+from mindroom.message_target import MessageTarget
 from mindroom.scheduling import SchedulingRuntime, _extract_mentioned_agents_from_text
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.conftest import bind_runtime_paths, make_event_cache_mock, runtime_paths_for, test_runtime_paths
@@ -28,9 +29,11 @@ def _bind_runtime_paths(config: Config) -> Config:
 def _make_context(config: Config, *, matrix_admin: object | None = None) -> ToolRuntimeContext:
     return ToolRuntimeContext(
         agent_name="general",
-        room_id="!room:localhost",
-        thread_id="$thread",
-        resolved_thread_id="$thread",
+        target=MessageTarget.resolve(
+            room_id="!room:localhost",
+            thread_id="$thread",
+            reply_to_event_id=None,
+        ),
         requester_id="@user:localhost",
         client=AsyncMock(),
         config=config,
@@ -38,7 +41,6 @@ def _make_context(config: Config, *, matrix_admin: object | None = None) -> Tool
         conversation_cache=MagicMock(),
         event_cache=make_event_cache_mock(),
         room=MagicMock(),
-        reply_to_event_id=None,
         storage_path=None,
         matrix_admin=matrix_admin,
     )
@@ -61,9 +63,17 @@ async def test_scheduler_tool_requires_context() -> None:
     """Tool should fail clearly when called outside Matrix response context."""
     tools = SchedulerTools()
 
-    result = await tools.schedule("in 10 minutes remind me to check logs")
+    result = await tools.schedule("in 10 minutes remind me to check logs", new_thread=False)
 
     assert "unavailable" in result
+
+
+def test_scheduler_tool_requires_explicit_delivery_mode() -> None:
+    """The model-facing schema must not silently choose a delivery scope."""
+    function = SchedulerTools().async_functions["schedule"].model_copy(deep=True)
+    function.process_entrypoint()
+
+    assert set(function.parameters["required"]) == {"request", "new_thread"}
 
 
 @pytest.mark.asyncio
@@ -81,14 +91,17 @@ async def test_scheduler_tool_uses_shared_backend() -> None:
         ) as mock_schedule,
         tool_runtime_context(context),
     ):
-        result = await tools.schedule("tomorrow at 3pm check deployment")
+        result = await tools.schedule("tomorrow at 3pm check deployment", new_thread=False)
         new_thread_result = await tools.schedule("tomorrow at 4pm check deployment", new_thread=True)
+        limited_result = await tools.schedule("every 25 minutes poll the queue", new_thread=False, history_limit=0)
 
     assert result == "✅ Scheduled"
     assert new_thread_result == "✅ Scheduled"
-    assert mock_schedule.await_count == 2
+    assert limited_result == "✅ Scheduled"
+    assert mock_schedule.await_count == 3
     first_call = mock_schedule.await_args_list[0].kwargs
     second_call = mock_schedule.await_args_list[1].kwargs
+    third_call = mock_schedule.await_args_list[2].kwargs
     expected_runtime = SchedulingRuntime(
         client=context.client,
         config=context.config,
@@ -105,6 +118,7 @@ async def test_scheduler_tool_uses_shared_backend() -> None:
         "scheduled_by": context.requester_id,
         "full_text": "tomorrow at 3pm check deployment",
         "new_thread": False,
+        "history_limit": None,
     }
     assert second_call == {
         "runtime": expected_runtime,
@@ -113,6 +127,16 @@ async def test_scheduler_tool_uses_shared_backend() -> None:
         "scheduled_by": context.requester_id,
         "full_text": "tomorrow at 4pm check deployment",
         "new_thread": True,
+        "history_limit": None,
+    }
+    assert third_call == {
+        "runtime": expected_runtime,
+        "room_id": context.room_id,
+        "thread_id": context.resolved_thread_id,
+        "scheduled_by": context.requester_id,
+        "full_text": "every 25 minutes poll the queue",
+        "new_thread": False,
+        "history_limit": 0,
     }
 
 
@@ -131,7 +155,7 @@ async def test_scheduler_tool_raises_when_backend_rejects_request() -> None:
         tool_runtime_context(context),
         pytest.raises(RuntimeError, match="schedule is not valid"),
     ):
-        await tools.schedule("next message")
+        await tools.schedule("next message", new_thread=False)
 
 
 @pytest.mark.asyncio
@@ -157,23 +181,37 @@ async def test_edit_schedule_tool_calls_backend() -> None:
         tool_runtime_context(context),
     ):
         result = await tools.edit_schedule("task123", "tomorrow at 9am check deployment")
+        limited_result = await tools.edit_schedule("task123", "keep the same schedule", history_limit=5)
 
     assert "Updated" in result
-    mock_edit.assert_awaited_once_with(
-        runtime=SchedulingRuntime(
-            client=context.client,
-            config=context.config,
-            runtime_paths=context.runtime_paths,
-            room=context.room,
-            conversation_cache=context.conversation_cache,
-            event_cache=context.event_cache,
-        ),
-        room_id=context.room_id,
-        task_id="task123",
-        full_text="tomorrow at 9am check deployment",
-        scheduled_by=context.requester_id,
-        thread_id=context.resolved_thread_id,
+    assert "Updated" in limited_result
+    expected_runtime = SchedulingRuntime(
+        client=context.client,
+        config=context.config,
+        runtime_paths=context.runtime_paths,
+        room=context.room,
+        conversation_cache=context.conversation_cache,
+        event_cache=context.event_cache,
     )
+    assert mock_edit.await_count == 2
+    assert mock_edit.await_args_list[0].kwargs == {
+        "runtime": expected_runtime,
+        "room_id": context.room_id,
+        "task_id": "task123",
+        "full_text": "tomorrow at 9am check deployment",
+        "scheduled_by": context.requester_id,
+        "thread_id": context.resolved_thread_id,
+        "history_limit": None,
+    }
+    assert mock_edit.await_args_list[1].kwargs == {
+        "runtime": expected_runtime,
+        "room_id": context.room_id,
+        "task_id": "task123",
+        "full_text": "keep the same schedule",
+        "scheduled_by": context.requester_id,
+        "thread_id": context.resolved_thread_id,
+        "history_limit": 5,
+    }
 
 
 @pytest.mark.asyncio
@@ -258,7 +296,8 @@ async def test_cancel_schedule_tool_calls_backend() -> None:
     """Cancel tool should call cancel_scheduled_task with correct arguments."""
     tools = SchedulerTools()
     config = _bind_runtime_paths(Config(agents={"general": AgentConfig(display_name="General Agent")}))
-    context = _make_context(config)
+    matrix_admin = object()
+    context = _make_context(config, matrix_admin=matrix_admin)
 
     with (
         patch(
@@ -274,6 +313,7 @@ async def test_cancel_schedule_tool_calls_backend() -> None:
         client=context.client,
         room_id=context.room_id,
         task_id="task123",
+        matrix_admin=matrix_admin,
     )
 
 

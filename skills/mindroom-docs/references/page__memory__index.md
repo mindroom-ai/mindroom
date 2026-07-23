@@ -45,8 +45,14 @@ memory:
     provider: openai
     config:
       model: text-embedding-3-small
+      credentials_service: embedder # Optional strict credential binding
       dimensions: null             # Optional: embedding dimension override (e.g., 256)
 ```
+
+The `openai` embedder resolves its API key in this order: explicit `memory.embedder.config.api_key`; then the service named by `memory.embedder.config.credentials_service`; or, when no service is named, the legacy dedicated `embedder` credential (seeded from `EMBEDDER_API_KEY` or `EMBEDDER_API_KEY_FILE`) followed by the shared `openai` provider key.
+An explicit `credentials_service` is a strict binding: if that service has no key, MindRoom does not silently borrow another OpenAI key. Use it when your embedding endpoint needs a different key than chat, voice, or another OpenAI-compatible model.
+When none of these are set, MindRoom sends a non-secret placeholder key so keyless local OpenAI-compatible endpoints keep working, while a keyed endpoint rejects the placeholder with a loud classified auth failure.
+When the embedder rejects its credential, semantic search degrades loudly instead of returning fake-empty results: memory tool output and the per-turn prompt carry the classified cause, and `/api/health` reports an `embedder` block until a request succeeds again.
 
 Fully local embedder example:
 
@@ -133,11 +139,25 @@ memory:
   backend: file
   file:
     max_entrypoint_lines: 200
+  search:
+    mode: keyword
+    include:
+      - memory/**/*.md
+    include_entrypoint: false
 ```
 
 `memory.file.path` is an optional fallback root for file-memory paths.
 It does not relocate canonical agent file memory (which always lives under the agent's workspace root).
 It can affect team file memory when the resolution determines the configured path should be used.
+`memory.search` controls how `search_memories` reads file-backed agent memory.
+`mode: keyword` scans markdown files directly.
+`mode: semantic` builds a lazy per-agent or per-requester vector index under `mindroom_data/memory_search_db/` and uses `memory.embedder`.
+`include` contains root-relative glob patterns below the effective file-memory root.
+The default `memory/**/*.md` searches dated memory files and excludes `MEMORY.md`.
+Set `include_entrypoint: true` only if you also want `MEMORY.md` returned by search.
+MindRoom already preloads `MEMORY.md` into the prompt, so the default avoids duplicate retrieval.
+Semantic mode applies to the agent's own file-memory scope.
+Team-visible file memory is still keyword searched.
 
 Per-agent override example:
 
@@ -150,7 +170,14 @@ agents:
     display_name: Coder
     role: Write and review code
     memory_backend: file
+    memory_search:
+      mode: semantic
+      include:
+        - memory/**/*.md
+      include_entrypoint: false
 ```
+
+Omitted `memory_search` fields inherit from `memory.search`.
 
 For shared agents, file memory now lives directly under `agents/<name>/workspace/`.
 For requester-private agents, file memory lives directly under the effective private root.
@@ -235,6 +262,7 @@ The Dashboard **Memory** page supports:
 - team/member read toggle (`team_reads_member_memory`)
 - embedder provider/model/host
 - file backend settings (`path`, `max_entrypoint_lines`)
+- search settings (`mode`, `include`, `include_entrypoint`)
 - auto-flush settings (intervals, idle/age thresholds, retries)
 - batch sizing
 - extractor settings (`no_reply_token`, message/char/time limits, `include_memory_context` dedupe bounds)

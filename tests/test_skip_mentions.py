@@ -14,15 +14,18 @@ import pytest
 from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
+from mindroom.constants import SKIP_MENTIONS_KEY
 from mindroom.conversation_resolver import _should_skip_mentions
 from mindroom.delivery_gateway import (
     DeliveryGateway,
     DeliveryGatewayDeps,
     EditTextRequest,
     FinalDeliveryRequest,
+    ResponseIdentity,
     SendTextRequest,
     StreamingDeliveryRequest,
 )
+from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
 from mindroom.hooks import MessageEnvelope, ResponseDraft
 from mindroom.logging_config import get_logger, setup_logging
 from mindroom.matrix.users import AgentMatrixUser
@@ -32,6 +35,7 @@ from tests.conftest import (
     bind_runtime_paths,
     delivered_matrix_side_effect,
     make_event_cache_mock,
+    message_origin,
     runtime_paths_for,
     sync_bot_runtime_state,
     test_runtime_paths,
@@ -49,7 +53,7 @@ def test_should_skip_mentions_with_metadata() -> None:
     event_source = {
         "content": {
             "body": "✅ Scheduled task. @email_agent will be mentioned",
-            "com.mindroom.skip_mentions": True,
+            SKIP_MENTIONS_KEY: True,
         },
     }
     assert _should_skip_mentions(event_source) is True
@@ -71,7 +75,7 @@ def test_should_skip_mentions_explicit_false() -> None:
     event_source = {
         "content": {
             "body": "Message with explicit false @email_agent",
-            "com.mindroom.skip_mentions": False,
+            SKIP_MENTIONS_KEY: False,
         },
     }
     assert _should_skip_mentions(event_source) is False
@@ -106,7 +110,7 @@ def _context_bot(tmp_path: Path, config: Config | None = None) -> AgentBot:
 
 @pytest.mark.asyncio
 async def test_send_response_with_skip_mentions(tmp_path: Path) -> None:
-    """Test that _send_response adds metadata when skip_mentions is True."""
+    """Test that the delivery gateway's send_text adds metadata when skip_mentions is True."""
     config = bind_runtime_paths(
         Config(agents={"email_agent": AgentConfig(display_name="Email Agent")}),
         test_runtime_paths(tmp_path),
@@ -140,21 +144,25 @@ async def test_send_response_with_skip_mentions(tmp_path: Path) -> None:
             "mindroom.delivery_gateway.send_message_result",
             new=AsyncMock(side_effect=delivered_matrix_side_effect("$response123")),
         ) as mock_send:
-            # Call the actual _send_response method with skip_mentions=True
-            await AgentBot._send_response(
-                bot,
+            # Call the actual delivery gateway send_text with skip_mentions=True
+            target = bot._conversation_resolver.build_message_target(
                 room_id=room.room_id,
-                reply_to_event_id=event.event_id,
-                response_text="✅ Scheduled. Will notify @email_agent",
                 thread_id=None,
-                reply_to_event=event,
-                skip_mentions=True,
+                reply_to_event_id=event.event_id,
+                event_source=event.source,
+            )
+            await bot._delivery_gateway.send_text(
+                SendTextRequest(
+                    target=target,
+                    response_text="✅ Scheduled. Will notify @email_agent",
+                    skip_mentions=True,
+                ),
             )
 
             # Check that send_message was called with content that has skip_mentions
             mock_send.assert_called_once()
             sent_content = mock_send.call_args[0][2]  # Third argument is content
-            assert sent_content.get("com.mindroom.skip_mentions") is True
+            assert sent_content.get(SKIP_MENTIONS_KEY) is True
 
 
 @pytest.mark.asyncio
@@ -171,7 +179,7 @@ async def test_extract_context_with_skip_mentions(tmp_path: Path) -> None:
             "content": {
                 "body": "✅ Scheduled task. @email_agent will handle it",
                 "msgtype": "m.text",
-                "com.mindroom.skip_mentions": True,
+                SKIP_MENTIONS_KEY: True,
                 "m.mentions": {
                     "user_ids": ["@mindroom_email_agent:localhost"],
                 },
@@ -310,15 +318,12 @@ def _delivery_envelope() -> MessageEnvelope:
     """Build a minimal response envelope for delivery gateway tests."""
     return MessageEnvelope(
         source_event_id="$event123",
-        room_id="!test:server",
         target=MessageTarget.resolve("!test:server", "$thread", "$event123"),
-        requester_id="@user:server",
-        sender_id="@user:server",
         body="hello",
         attachment_ids=(),
         mentioned_agents=(),
         agent_name="email_agent",
-        source_kind="message",
+        origin=message_origin(sender_id="@user:server", requester_id="@user:server", source_kind=MESSAGE_SOURCE_KIND),
     )
 
 
@@ -530,9 +535,11 @@ async def test_delivery_gateway_deliver_final_uses_send_text_for_new_messages(tm
                 target=_delivery_envelope().target,
                 existing_event_id=None,
                 response_text="raw response",
-                response_kind="ai",
-                response_envelope=_delivery_envelope(),
-                correlation_id="corr-1",
+                identity=ResponseIdentity(
+                    response_kind="ai",
+                    response_envelope=_delivery_envelope(),
+                    correlation_id="corr-1",
+                ),
                 tool_trace=None,
                 extra_content=None,
             ),
@@ -570,9 +577,11 @@ async def test_delivery_gateway_deliver_final_uses_edit_text_for_existing_messag
                 target=_delivery_envelope().target,
                 existing_event_id="$existing",
                 response_text="raw response",
-                response_kind="ai",
-                response_envelope=_delivery_envelope(),
-                correlation_id="corr-2",
+                identity=ResponseIdentity(
+                    response_kind="ai",
+                    response_envelope=_delivery_envelope(),
+                    correlation_id="corr-2",
+                ),
                 tool_trace=None,
                 extra_content=None,
             ),

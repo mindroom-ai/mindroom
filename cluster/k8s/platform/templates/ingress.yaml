@@ -6,9 +6,10 @@ metadata:
   name: platform-ingress
   namespace: mindroom-{{ .Values.environment }}
   annotations:
-    nginx.ingress.kubernetes.io/rewrite-target: /
     nginx.ingress.kubernetes.io/proxy-buffer-size: "16k"
     nginx.ingress.kubernetes.io/proxy-buffers-number: "8"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: {{ .Values.ingress.proxyReadTimeout | quote }}
+    nginx.ingress.kubernetes.io/proxy-send-timeout: {{ .Values.ingress.proxySendTimeout | quote }}
     nginx.ingress.kubernetes.io/client-header-buffer-size: "16k"
     nginx.ingress.kubernetes.io/large-client-header-buffers: "4 32k"
     cert-manager.io/cluster-issuer: letsencrypt-prod
@@ -50,7 +51,7 @@ spec:
   - host: webhooks.{{ .Values.domain }}
     http:
       paths:
-      - path: /stripe
+      - path: /webhooks/stripe
         pathType: Prefix
         backend:
           service:

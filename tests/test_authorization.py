@@ -14,7 +14,8 @@ import mindroom.authorization
 from mindroom import constants
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
-from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME, resolve_runtime_paths
+from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME, SOURCE_KIND_KEY, resolve_runtime_paths
+from mindroom.dispatch_source import EXTERNAL_TRIGGER_SOURCE_KIND
 from mindroom.entity_resolution import mindroom_user_id
 from mindroom.matrix.identity import managed_account_key
 from mindroom.matrix.state import MatrixRoom, MatrixState
@@ -70,8 +71,6 @@ def is_authorized_sender(
     sender_id: str,
     config: Config,
     room_id: str,
-    *,
-    room_alias: str | None = None,
 ) -> bool:
     """Run sender authorization with the test config's bound runtime context."""
     return mindroom.authorization.is_authorized_sender(
@@ -79,7 +78,6 @@ def is_authorized_sender(
         config,
         room_id,
         _runtime_paths_for(config),
-        room_alias=room_alias,
     )
 
 
@@ -90,6 +88,15 @@ def is_sender_allowed_for_agent_reply(sender_id: str, agent_name: str, config: C
         agent_name,
         config,
         _runtime_paths_for(config),
+    )
+
+
+def is_sender_allowed_for_agent_credential_management(sender_id: str, agent_name: str, config: Config) -> bool:
+    """Run credential-management permission checks with the test config's bound runtime context."""
+    return mindroom.authorization.is_sender_allowed_for_agent_credential_management(
+        sender_id,
+        agent_name,
+        config,
     )
 
 
@@ -712,7 +719,7 @@ def test_room_specific_permissions(mock_config_with_room_permissions: Config) ->
     assert not is_authorized_sender("@dave:example.com", mock_config_with_room_permissions, "!room3:example.com")
 
 
-def test_room_specific_permissions_support_full_alias() -> None:
+def test_room_specific_permissions_support_full_alias(monkeypatch: pytest.MonkeyPatch) -> None:
     """Room permissions should allow using a full Matrix room alias key."""
     config = _config(
         agents={
@@ -729,19 +736,90 @@ def test_room_specific_permissions_support_full_alias() -> None:
             "default_room_access": False,
         },
     )
+    state = MatrixState(
+        rooms={
+            "lobby": MatrixRoom(
+                room_id="!lobby:example.com",
+                alias="#lobby:example.com",
+                name="Lobby",
+            ),
+        },
+    )
+    monkeypatch.setattr("mindroom.authorization.matrix_state_for_runtime", lambda *_args, **_kwargs: state)
 
     assert is_authorized_sender(
         "@bob:example.com",
         config,
         "!lobby:example.com",
-        room_alias="#lobby:example.com",
     )
     assert not is_authorized_sender(
         "@eve:example.com",
         config,
         "!lobby:example.com",
-        room_alias="#lobby:example.com",
     )
+
+
+def test_room_specific_permissions_ignore_unmanaged_alias_permissions(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Unmanaged room IDs must not resolve alias or room-key permission entries."""
+    config = _config(
+        agents={
+            "assistant": {
+                "display_name": "Assistant",
+                "role": "Test assistant",
+                "rooms": ["lobby"],
+            },
+        },
+        authorization={
+            "room_permissions": {
+                "#lobby:example.com": ["@bob:example.com"],
+                "lobby": ["@charlie:example.com"],
+            },
+            "default_room_access": False,
+        },
+    )
+    state = MatrixState(
+        rooms={
+            "lobby": MatrixRoom(
+                room_id="!lobby:example.com",
+                alias="#lobby:example.com",
+                name="Lobby",
+            ),
+        },
+    )
+    monkeypatch.setattr("mindroom.authorization.matrix_state_for_runtime", lambda *_args, **_kwargs: state)
+
+    assert not is_authorized_sender(
+        "@bob:example.com",
+        config,
+        "!attacker:example.com",
+    )
+    assert not is_authorized_sender(
+        "@charlie:example.com",
+        config,
+        "!attacker:example.com",
+    )
+
+
+def test_room_specific_permissions_support_explicit_alias_target() -> None:
+    """Direct alias targets should remain usable as operator-authored permission keys."""
+    config = _config(
+        agents={
+            "assistant": {
+                "display_name": "Assistant",
+                "role": "Test assistant",
+                "rooms": ["lobby"],
+            },
+        },
+        authorization={
+            "room_permissions": {
+                "#lobby:example.com": ["@bob:example.com"],
+            },
+            "default_room_access": False,
+        },
+    )
+
+    assert is_authorized_sender("@bob:example.com", config, "#lobby:example.com")
+    assert not is_authorized_sender("@eve:example.com", config, "#lobby:example.com")
 
 
 def test_room_specific_permissions_support_managed_room_key(
@@ -1118,6 +1196,7 @@ def test_effective_sender_uses_voice_original_sender_for_router_messages() -> No
         "content": {
             "body": "🎤 help me",
             ORIGINAL_SENDER_KEY: "@alice:example.com",
+            SOURCE_KIND_KEY: "voice",
         },
     }
 
@@ -1173,6 +1252,7 @@ def test_effective_sender_uses_original_sender_for_internal_agent_messages() -> 
         "content": {
             "body": "automated task",
             ORIGINAL_SENDER_KEY: "@alice:example.com",
+            SOURCE_KIND_KEY: "trusted_internal_relay",
         },
     }
 
@@ -1181,6 +1261,54 @@ def test_effective_sender_uses_original_sender_for_internal_agent_messages() -> 
         event_source,
         config,
     ) == ("@alice:example.com")
+
+
+def test_effective_sender_ignores_original_sender_without_trusted_source_kind() -> None:
+    """Internal senders need trusted source-kind metadata before requester promotion."""
+    config = _config(
+        agents={
+            "assistant": {
+                "display_name": "Assistant",
+                "role": "Test assistant",
+                "rooms": ["test_room"],
+            },
+        },
+        authorization={"default_room_access": True},
+    )
+
+    sender = entity_ids(config, _runtime_paths_for(config))["assistant"].full_id
+    event_source = {
+        "content": {
+            "body": "plain message",
+            ORIGINAL_SENDER_KEY: "@alice:example.com",
+        },
+    }
+
+    assert get_effective_sender_id_for_reply_permissions(sender, event_source, config) == sender
+
+
+def test_effective_sender_ignores_external_trigger_metadata_from_human_sender() -> None:
+    """Human-authored Matrix content cannot spoof trusted trigger owner metadata."""
+    config = _config(
+        agents={
+            "assistant": {
+                "display_name": "Assistant",
+                "role": "Test assistant",
+                "rooms": ["test_room"],
+            },
+        },
+        authorization={"default_room_access": True},
+    )
+    sender = "@mallory:example.com"
+    event_source = {
+        "content": {
+            "body": "spoof attempt",
+            ORIGINAL_SENDER_KEY: "@alice:example.com",
+            SOURCE_KIND_KEY: EXTERNAL_TRIGGER_SOURCE_KIND,
+        },
+    }
+
+    assert get_effective_sender_id_for_reply_permissions(sender, event_source, config) == sender
 
 
 def test_effective_sender_does_not_trust_cross_domain_router_like_ids() -> None:
@@ -1264,6 +1392,7 @@ def test_effective_sender_trusts_persisted_current_internal_accounts(tmp_path: P
         "content": {
             "body": "current relay",
             ORIGINAL_SENDER_KEY: "@alice:example.com",
+            SOURCE_KIND_KEY: "trusted_internal_relay",
         },
     }
 
@@ -1299,6 +1428,39 @@ def test_reply_permissions_bypass_trusts_persisted_current_internal_accounts(tmp
     state.save(runtime_paths=runtime_paths)
 
     assert is_sender_allowed_for_agent_reply("@mindroom_assistant_oldns:example.com", "assistant", config) is True
+
+
+def test_credential_management_does_not_bypass_agent_allowlist_for_internal_accounts(tmp_path: Path) -> None:
+    """Dashboard credential management is user-initiated and should not inherit reply-time internal trust."""
+    config = _isolated_config(
+        tmp_path,
+        agents={
+            "assistant": {
+                "display_name": "Assistant",
+                "role": "Test assistant",
+                "rooms": ["test_room"],
+            },
+        },
+        authorization={
+            "default_room_access": False,
+            "agent_reply_permissions": {"assistant": ["@alice:example.com"]},
+        },
+    )
+    runtime_paths = _runtime_paths_for(config)
+    state = MatrixState.load(runtime_paths=runtime_paths)
+    state.add_account("agent_assistant", "mindroom_assistant_oldns", "pw", domain="example.com")
+    state.save(runtime_paths=runtime_paths)
+
+    assert is_sender_allowed_for_agent_reply("@mindroom_assistant_oldns:example.com", "assistant", config) is True
+    assert (
+        is_sender_allowed_for_agent_credential_management(
+            "@mindroom_assistant_oldns:example.com",
+            "assistant",
+            config,
+        )
+        is False
+    )
+    assert is_sender_allowed_for_agent_credential_management("@alice:example.com", "assistant", config) is True
 
 
 def test_sender_authorization_trusts_persisted_current_internal_accounts(tmp_path: Path) -> None:
@@ -1411,6 +1573,7 @@ def test_effective_sender_trusts_persisted_current_internal_accounts_with_nondef
         "content": {
             "body": "current relay",
             ORIGINAL_SENDER_KEY: "@alice:example.com",
+            SOURCE_KIND_KEY: "trusted_internal_relay",
         },
     }
 

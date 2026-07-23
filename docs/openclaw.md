@@ -71,7 +71,7 @@ agents:
       - Important long-term context is persisted by the configured MindRoom memory backend. If something must be preserved exactly, write/update the relevant file directly.
       - MEMORY.md is curated long-term memory; daily files are short-lived notes and logs.
       - Ask before external/public actions and destructive operations.
-      - Before answering prior-history questions, search memory files first with `search_knowledge_base` when configured.
+      - Before answering prior-history questions, search memory files first with `search_memories`.
 
     context_files:
       - SOUL.md
@@ -81,23 +81,22 @@ agents:
       - TOOLS.md
       - HEARTBEAT.md
 
-    knowledge_bases: [openclaw_memory]
-
     tools:
       - openclaw_compat
+      - memory
       - python
 
     skills:
       - transcribe
 
-knowledge_bases:
-  openclaw_memory:
-    path: ${MINDROOM_STORAGE_PATH}/agents/openclaw/workspace/memory
-    watch: false
-
 memory:
   file:
     max_entrypoint_lines: 200
+  search:
+    mode: semantic
+    include:
+      - memory/**/*.md
+    include_entrypoint: false
   auto_flush:
     enabled: true
 ```
@@ -105,10 +104,9 @@ memory:
 When using `memory_backend: file`, the file backend automatically loads `MEMORY.md` from the canonical workspace root, so there is no need to add it to `context_files`.
 If you switch to `mem0`, add `MEMORY.md` back to `context_files` if you still want it preloaded.
 The `openclaw_compat` preset already expands to native shell, coding, duckduckgo, website, browser, scheduler, sub-agent orchestration, and `matrix_message` tools (`attachments` is auto-implied by `matrix_message`), so listing those tools individually is not necessary.
-Copy or sync your OpenClaw files into `agents/openclaw/workspace/` before using this config so `context_files`, file memory, and `openclaw_memory` read the same canonical workspace.
-This example sets `watch: false`, so direct external file edits require explicit reindex, while dashboard/API mutations still schedule refresh after a successful mutation.
-For shared local non-Git knowledge bases, `watch: true` still starts a live filesystem watcher.
-If `openclaw_memory` is Git-backed, update the repository and reindex instead of using dashboard upload or delete actions.
+Copy or sync your OpenClaw files into `agents/openclaw/workspace/` before using this config so `context_files`, file memory, and `search_memories` read the same canonical workspace.
+Direct external edits to daily memory files are picked up lazily on the next semantic memory search.
+Use `knowledge_bases` only for non-memory project documents that should be searchable as external knowledge.
 
 ## Recommended workspace layout
 
@@ -139,8 +137,8 @@ OpenClaw-compatible agents use the same memory system as every other MindRoom ag
 - `memory_backend: file` on an individual agent to override the global default
 - `memory_backend: none` on an individual agent to keep that agent stateless
 - agents that use file memory store it under `agents/<name>/workspace/`, not under the shared global `memory.file.path` tree
-- `context_files` and OpenClaw-style knowledge paths should point into that same canonical workspace if you want one consistent file-first workflow
-- optional `knowledge_bases` for semantic recall over arbitrary workspace folders
+- `context_files` should point into that same canonical workspace if you want one consistent file-first workflow
+- optional `knowledge_bases` for semantic recall over arbitrary non-memory workspace folders
 
 Recommended for OpenClaw-style setups: `memory_backend: file` with the canonical workspace layout and `memory.auto_flush.enabled: true`.
 

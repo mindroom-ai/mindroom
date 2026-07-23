@@ -5,13 +5,47 @@ domain: mindroom.chat  # Base domain - override with --set domain based on envir
 # Image settings
 registry: ghcr.io/mindroom-ai
 imageTag: latest
+frontendImageTag: ""
+backendImageTag: ""
 imagePullPolicy: Always
+imagePullSecrets: []
 
 # Replicas
 replicas: 1
 
+resources:
+  frontend:
+    requests:
+      cpu: "100m"
+      memory: "256Mi"
+    limits:
+      cpu: "500m"
+      memory: "512Mi"
+  backend:
+    requests:
+      cpu: "250m"
+      memory: "512Mi"
+    limits:
+      cpu: "1000m"
+      memory: "1Gi"
+
+autoscaling:
+  enabled: false
+  frontend:
+    minReplicas: 1
+    maxReplicas: 3
+    targetCPUUtilizationPercentage: 70
+  backend:
+    minReplicas: 1
+    maxReplicas: 4
+    targetCPUUtilizationPercentage: 65
+
 cleanupScheduler:
-  enabled: "false"
+  enabled: "true"
+
+platformSecrets:
+  create: true
+  name: platform-secrets
 
 # These should be overridden in values-staging.yaml and values-prod.yaml
 supabase:
@@ -32,6 +66,7 @@ provisioner:
   instanceStorageClassName: ""
   instanceMindroomImage: ""
   instanceMindroomImagePullPolicy: ""
+  instanceImagePullSecretNames: []
   instanceSynapseImage: ""
   instanceSynapseImagePullPolicy: ""
   trustedUpstreamAuth:
@@ -49,17 +84,34 @@ provisioner:
     jwtUserIdClaim: ""
     jwtMatrixUserIdClaim: ""
 
+matrixOidc:
+  enabled: "false"
+  issuer: ""
+  clientId: "mindroom-synapse"
+  clientSecret: ""
+  privateKey: ""
+  keyId: "mindroom-platform"
+
 # Optional AI API keys
 apiKeys:
   openai: ""
   anthropic: ""
   openrouter: ""
+  openrouterProvisioning: ""
+  google: ""
+  deepseek: ""
 
 # Ingress options
 ingress:
   # NGINX blocks configuration-snippet by default in many setups (incl. kind example)
   # Keep disabled for local kind; enable in hardened clusters if allowed.
   enableConfigurationSnippet: false
+  proxyReadTimeout: "300"
+  proxySendTimeout: "300"
+
+# The apex mindroom.chat is the Matrix server name and must stay on hetzner-matrix.
+apexRedirect:
+  enabled: false
 
 monitoring:
   enabled: true

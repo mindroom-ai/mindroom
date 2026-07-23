@@ -6,6 +6,7 @@ This directory contains utility scripts for MindRoom self-hosting.
 
 ### 🧪 Testing
 - **`testing/benchmark_matrix_throughput.py`** - Benchmark Matrix message throughput performance
+- **`testing/benchmark_tool_call_overhead.py`** - Benchmark synthetic tool-call bridge overhead
 
 ### 🔧 Utilities
 - **`utilities/cleanup_agent_edits.sh`** - Clean up agent-edited files in Matrix database
@@ -34,6 +35,11 @@ If you're looking for platform deployment scripts (infrastructure, database migr
 ### Benchmark Matrix performance
 ```bash
 ./scripts/testing/benchmark_matrix_throughput.py
+```
+
+### Benchmark tool-call overhead
+```bash
+uv run python scripts/testing/benchmark_tool_call_overhead.py --iterations 1000 --warmup 100
 ```
 
 ### Generate and sync managed avatars

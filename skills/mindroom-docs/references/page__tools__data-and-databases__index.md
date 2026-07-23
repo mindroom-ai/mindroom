@@ -1,11 +1,11 @@
 # Data & Databases
 
-Use these tools to query SQL and graph databases, analyze tabular files, work with Google datasets, Drive files, and spreadsheets, and fetch financial or business data.
+Use these tools to query SQL and graph databases, analyze tabular files, work with Google datasets, Docs, Drive files, and spreadsheets, and fetch financial or business data.
 
 ## What This Page Covers
 
 This page documents the built-in tools in the `data-and-databases` group.
-Use these tools when you need database access, dataframe-style analysis, Google Drive file lookup, spreadsheet automation, or market and company data.
+Use these tools when you need database access, dataframe-style analysis, Google document editing, Drive file lookup, spreadsheet automation, or market and company data.
 
 ## Tools On This Page
 
@@ -17,21 +17,22 @@ Use these tools when you need database access, dataframe-style analysis, Google 
 - [`csv`] - Pre-registered CSV reading and DuckDB-backed SQL queries over CSV files.
 - [`pandas`] - In-memory dataframe creation and dataframe method execution.
 - [`google_bigquery`] - BigQuery dataset inspection and SQL queries.
-- [`google_drive`] - Google Drive file listing, metadata search, and file reading through the per-service Google Drive OAuth provider.
-- [`google_sheets`] - Google Sheets access through the per-service Google Sheets OAuth provider, with read support verified by default and create/update support when enabled.
+- [`google_drive`] - Google Drive file listing, metadata search, file reading, workspace downloads, uploads, folder creation, moves, renames, and trashing through the per-service Google Drive OAuth provider.
+- [`google_docs`] - Google Docs creation, tab-aware structure reads, text insertion, and text replacement through the per-service Google Docs OAuth provider.
+- [`google_sheets`] - Google Sheets read, create, and update access through the per-service Google Sheets OAuth provider.
 - [`openbb`] - Stock prices, company search, news, profiles, and price targets through OpenBB.
 - [`yfinance`] - Yahoo Finance market data, fundamentals, news, and history.
 - [`financial_datasets_api`] - Structured financial statements, filings, ownership, and crypto data from Financial Datasets.
 
 ## Common Setup Notes
 
-`sql`, `postgres`, `redshift`, `neo4j`, `google_bigquery`, `google_drive`, `google_sheets`, and `financial_datasets_api` are registered as `requires_config`, so they stay unavailable in the dashboard until their required config or auth is present.
+`sql`, `postgres`, `redshift`, `neo4j`, `google_bigquery`, `google_drive`, `google_docs`, `google_sheets`, and `financial_datasets_api` are registered as `requires_config`, so they stay unavailable in the dashboard until their required config or auth is present.
 `duckdb`, `csv`, `pandas`, `openbb`, and `yfinance` are `setup_type: none`, so they can be enabled immediately once their optional Python dependencies are installed.
 MindRoom validates inline tool overrides against the declared `config_fields`, and `type="password"` fields such as `password`, `secret_access_key`, and `api_key` must go through the dashboard or credential store instead of inline YAML.
 Several fields on this page are advanced constructor inputs rather than normal `config.yaml` values, including `db_engine`, `connection`, `credentials`, `duckdb_connection`, `duckdb_kwargs`, `obb`, and `session`.
 Token-like fields such as `openbb_pat` are better kept in stored credentials even when the current metadata does not mark them as password fields.
-`src/mindroom/api/integrations.py` currently contains Spotify-specific OAuth endpoints only, while Google Drive and Google Sheets use the generic `/api/oauth/google_drive/*` and `/api/oauth/google_sheets/*` flows.
-`google_drive` and `google_sheets` declare per-service `auth_provider` values and store OAuth tokens separately from editable tool settings.
+`src/mindroom/api/integrations.py` currently contains Spotify-specific OAuth endpoints only, while Google Drive, Docs, and Sheets use the generic `/api/oauth/google_drive/*`, `/api/oauth/google_docs/*`, and `/api/oauth/google_sheets/*` flows.
+`google_drive`, `google_docs`, and `google_sheets` declare per-service `auth_provider` values and store OAuth tokens separately from editable tool settings.
 `csv` queries use DuckDB under the hood, and `duckdb` is the better fit when you need to create tables from files, export results, or load local and S3 data repeatedly.
 Missing optional dependencies can auto-install at first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set.
 
@@ -437,14 +438,20 @@ run_sql_query("SELECT event_name, COUNT(*) AS total FROM events GROUP BY 1 ORDER
 
 ## [`google_drive`]
 
-`google_drive` is the Google Drive toolkit for listing, searching, and reading files from the connected user's Drive account.
+`google_drive` is the Google Drive toolkit for listing, searching, reading, downloading, uploading, and organizing files in the connected user's Drive account.
 
 ### What It Does
 
-MindRoom exposes `google_drive_list_files()`, `google_drive_search_files()`, and `google_drive_read_file()` through the Google Drive OAuth provider.
+MindRoom exposes `google_drive_list_files()`, `google_drive_search_files()`, `google_drive_read_file()`, `google_drive_download_file()`, `google_drive_upload_file()`, `google_drive_create_folder()`, `google_drive_move_file()`, and `google_drive_trash_file()` through the Google Drive OAuth provider.
 `google_drive_list_files()` returns recent Drive files visible to the connected account.
 `google_drive_search_files()` searches Drive metadata.
 `google_drive_read_file()` reads Google Workspace files and non-Google files up to the configured `max_read_size`.
+`google_drive_download_file()` downloads a Drive file, exporting Google Workspace files to their best native format, for example a complete Google Sheets workbook as `.xlsx`.
+`google_drive_upload_file()` uploads a local file and resolves relative paths from the agent workspace.
+`google_drive_create_folder()` creates a folder under the Drive root or an optional parent.
+`google_drive_move_file()` moves a file to a new parent and can rename it in the same request.
+`google_drive_trash_file()` moves a file to trash and never permanently deletes it.
+Downloads always land in the `google-drive-downloads/` directory inside the agent workspace, so the destination cannot be redirected elsewhere.
 When no usable MindRoom OAuth credentials exist, the wrapper raises `OAuthConnectionRequired` instead of falling back to a local token flow.
 
 ### Configuration
@@ -454,6 +461,8 @@ When no usable MindRoom OAuth credentials exist, the wrapper raises `OAuthConnec
 | `list_files` | `boolean` | `no` | `true` | Enable recent file listing. |
 | `search_files` | `boolean` | `no` | `true` | Enable Drive metadata search. |
 | `read_file` | `boolean` | `no` | `true` | Enable file content reads. |
+| `download_file` | `boolean` | `no` | `false` | Enable file downloads and Workspace exports into the agent workspace. |
+| `write` | `boolean` | `no` | `true` | Enable uploads, folder creation, file moves or renames, and trashing. |
 | `max_read_size` | `number` | `no` | `10485760` | Maximum non-Google-Workspace file size to read in bytes. |
 
 ### Example
@@ -463,6 +472,8 @@ agents:
   assistant:
     tools:
       - google_drive:
+          download_file: true
+          write: true
           max_read_size: 10485760
 ```
 
@@ -470,13 +481,85 @@ agents:
 google_drive_list_files()
 google_drive_search_files("name contains 'budget'")
 google_drive_read_file("1AbCdEfGhIjKlMnOpQrStUvWxYz")
+google_drive_download_file("1AbCdEfGhIjKlMnOpQrStUvWxYz")
+google_drive_upload_file("reports/launch-plan.pdf", folder_id="1FolderId")
+google_drive_create_folder("Launch", parent_id="1FolderId")
+google_drive_move_file("1FileId", "1NewFolderId", name="Final plan.pdf")
+google_drive_trash_file("1OldFileId")
 ```
 
 ### Notes
 
 - `google_drive` uses the per-service `google_drive` OAuth provider and always runs in the primary MindRoom runtime.
-- The provider requests Drive read-only access plus OpenID email/profile scopes.
+- Downloads require an agent workspace; when the agent has none (for example the default `mem0` memory backend without a `private` workspace), `download_file` is ignored and a warning is logged.
+- The provider requests full Drive access plus OpenID email/profile scopes.
+- Existing connections that granted `drive.readonly` keep working for read operations, while write operations return a structured reconnect-required result until the connection grants full Drive access.
+- Full Drive scope authorizes permanent deletion at the Google API layer, but this toolkit exposes only `google_drive_trash_file()` and no permanent-delete function.
+- Set `write: false` to remove all Drive mutation functions from the agent's tool surface.
+- MindRoom's `tool_approval` rules can gate each write call behind a Matrix approval card.
 - Configure Google OAuth through [Google Services OAuth (Admin Setup)](https://docs.mindroom.chat/deployment/google-services-oauth/) or [Google Services OAuth (Individual Setup)](https://docs.mindroom.chat/deployment/google-services-user-oauth/).
+
+```yaml
+tool_approval:
+  rules:
+    - match: google_drive_upload_file
+      action: require_approval
+    - match: google_drive_create_folder
+      action: require_approval
+    - match: google_drive_move_file
+      action: require_approval
+    - match: google_drive_trash_file
+      action: require_approval
+```
+
+## [`google_docs`]
+
+`google_docs` is the native Google Docs API toolkit for creating documents, reading their tab-aware structure and content, and editing text.
+
+### What It Does
+
+`google_docs_create_document()` creates a blank document and can insert optional initial text in the same tool call.
+`google_docs_get_document()` returns the complete Google Docs API document resource with `includeTabsContent` enabled, including tabs, structural elements, paragraphs, text runs, styles, tables, lists, and other returned structure.
+`google_docs_insert_text()` inserts at a Docs API body index or appends at the end of the selected tab.
+`google_docs_replace_text()` replaces every matching occurrence across all tabs or an explicit list of tab IDs and reports Google's replacement counts.
+Every successful operation returns the document edit URL.
+When no usable scoped OAuth credentials exist, the tool returns a structured `OAuthConnectionRequired` result with the provider-specific connection link.
+
+### Configuration
+
+| Option | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `create_document` | `boolean` | `no` | `true` | Enable document creation and optional initial-text insertion. |
+| `read_document` | `boolean` | `no` | `true` | Enable complete tab-aware structure and content reads. |
+| `edit_document` | `boolean` | `no` | `true` | Enable text insertion and replacement. |
+
+### Example
+
+```yaml
+agents:
+  writer:
+    worker_scope: user_agent
+    tools:
+      - google_docs:
+          create_document: true
+          read_document: true
+          edit_document: true
+```
+
+```python
+google_docs_create_document("Launch plan", "DRAFT\n")
+google_docs_get_document("1AbCdEfGhIjKlMnOpQrStUvWxYz")
+google_docs_insert_text("1AbCdEfGhIjKlMnOpQrStUvWxYz", "Next step\n")
+google_docs_replace_text("1AbCdEfGhIjKlMnOpQrStUvWxYz", "DRAFT", "FINAL", match_case=True)
+```
+
+### Notes
+
+- `google_docs` uses its own `google_docs` OAuth provider and `google_docs_oauth` token service, separate from Google Drive.
+- The provider requests `documents` plus OpenID email/profile scopes and does not request any Drive scope.
+- `google_drive` has its own full Drive grant and does not reuse the separate Docs grant when `google_docs` is enabled.
+- Google classifies the `documents` scope as sensitive, so public production clients need the verification follow-up described in [Google Services OAuth](https://docs.mindroom.chat/deployment/google-services-oauth/#production-verification-follow-up).
+- `google_docs` always runs in the primary MindRoom runtime so Google OAuth tokens are never mirrored into worker containers.
 
 ## [`google_sheets`]
 
@@ -498,8 +581,8 @@ When no usable MindRoom OAuth credentials exist, the wrapper raises `OAuthConnec
 | `spreadsheet_id` | `text` | `no` | `null` | Default spreadsheet ID. Leave unset to work with multiple spreadsheets by passing IDs per call. |
 | `spreadsheet_range` | `text` | `no` | `null` | Default range such as `Sheet1!A1:Z100`. |
 | `read` | `boolean` | `no` | `true` | Enable read operations. |
-| `create` | `boolean` | `no` | `false` | Enable spreadsheet creation. |
-| `update` | `boolean` | `no` | `false` | Enable sheet updates. |
+| `create` | `boolean` | `no` | `true` | Enable spreadsheet creation. |
+| `update` | `boolean` | `no` | `true` | Enable sheet updates. |
 
 ### Example
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from importlib import import_module
 from typing import TYPE_CHECKING, cast
@@ -15,34 +16,45 @@ from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
 from mindroom.tool_system.dependencies import ensure_optional_deps
 
+_STARTUP_PREWARM_ROOM_CONCURRENCY = 1
+
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
     from pathlib import Path
 
     import structlog
 
-    from mindroom.matrix.cache import ConversationEventCache
+    from mindroom.matrix.cache import SharedConversationEventCache
     from mindroom.matrix.cache.postgres_event_cache import PostgresEventCache
 
 
 class StartupThreadPrewarmRegistry:
     """Track one startup-wave claim set for room-level thread prewarm."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, room_concurrency: int = _STARTUP_PREWARM_ROOM_CONCURRENCY) -> None:
         self._lock = asyncio.Lock()
-        self._claimed_room_ids: set[str] = set()
+        self._claimed_rooms: set[tuple[str, str]] = set()
+        self._room_slots = asyncio.Semaphore(max(1, room_concurrency))
 
-    async def try_claim(self, room_id: str) -> bool:
-        """Claim one room for this startup wave unless another bot already did."""
+    async def try_claim(self, principal_id: str, room_id: str) -> bool:
+        """Claim one principal-owned room for this startup wave."""
+        key = (principal_id, room_id)
         async with self._lock:
-            if room_id in self._claimed_room_ids:
+            if key in self._claimed_rooms:
                 return False
-            self._claimed_room_ids.add(room_id)
+            self._claimed_rooms.add(key)
             return True
 
-    async def release(self, room_id: str) -> None:
-        """Release one room claim so another bot may retry during the same startup wave."""
+    async def release(self, principal_id: str, room_id: str) -> None:
+        """Release one principal-owned room claim for a retry."""
         async with self._lock:
-            self._claimed_room_ids.discard(room_id)
+            self._claimed_rooms.discard((principal_id, room_id))
+
+    @asynccontextmanager
+    async def room_slot(self) -> AsyncIterator[None]:
+        """Limit concurrent room-level startup prewarm work across all bots."""
+        async with self._room_slots:
+            yield
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,7 +77,7 @@ class _EventCacheRuntimeIdentity:
 class OwnedRuntimeSupport:
     """Concrete event-cache services owned by one runtime lifecycle."""
 
-    event_cache: ConversationEventCache
+    event_cache: SharedConversationEventCache
     event_cache_write_coordinator: EventCacheWriteCoordinator
     startup_thread_prewarm_registry: StartupThreadPrewarmRegistry
     event_cache_identity: _EventCacheRuntimeIdentity
@@ -98,7 +110,7 @@ def _load_postgres_event_cache_class(runtime_paths: RuntimePaths) -> type[Postgr
 def _build_event_cache(
     cache_config: CacheConfig,
     runtime_paths: RuntimePaths,
-) -> ConversationEventCache:
+) -> SharedConversationEventCache:
     """Build the configured event-cache backend without initializing it."""
     if cache_config.backend != "postgres":
         return SqliteEventCache(cache_config.resolve_db_path(runtime_paths))

@@ -12,7 +12,8 @@ Generated from `docs/` via `.github/scripts/generate_skill_references.py`.
 | Title | Source page | Built markdown | Reference file |
 | --- | --- | --- | --- |
 | Home | `index.md` | `index.md` | `page__index.md` |
-| Getting Started | `getting-started.md` | `getting-started/index.md` | `page__getting-started__index.md` |
+| Overview | `getting-started.md` | `getting-started/index.md` | `page__getting-started__index.md` |
+| iOS Beta | `ios-beta.md` | `ios-beta/index.md` | `page__ios-beta__index.md` |
 | Dashboard | `dashboard.md` | `dashboard/index.md` | `page__dashboard__index.md` |
 | Overview | `configuration/index.md` | `configuration/index.md` | `page__configuration__index.md` |
 | Agents | `configuration/agents.md` | `configuration/agents/index.md` | `page__configuration__agents__index.md` |
@@ -20,9 +21,8 @@ Generated from `docs/` via `.github/scripts/generate_skill_references.py`.
 | Teams | `configuration/teams.md` | `configuration/teams/index.md` | `page__configuration__teams__index.md` |
 | Cultures | `configuration/cultures.md` | `configuration/cultures/index.md` | `page__configuration__cultures__index.md` |
 | Router | `configuration/router.md` | `configuration/router/index.md` | `page__configuration__router__index.md` |
-| Toolkits | `configuration/toolkits.md` | `configuration/toolkits/index.md` | `page__configuration__toolkits__index.md` |
 | Overview | `tools/index.md` | `tools/index.md` | `page__tools__index.md` |
-| Dynamic Toolkits | `tools/dynamic-toolkits.md` | `tools/dynamic-toolkits/index.md` | `page__tools__dynamic-toolkits__index.md` |
+| Dynamic Tools | `tools/dynamic-tools.md` | `tools/dynamic-tools/index.md` | `page__tools__dynamic-tools__index.md` |
 | Execution & Coding | `tools/execution-and-coding.md` | `tools/execution-and-coding/index.md` | `page__tools__execution-and-coding__index.md` |
 | Data & Databases | `tools/data-and-databases.md` | `tools/data-and-databases/index.md` | `page__tools__data-and-databases__index.md` |
 | Web Search | `tools/web-search.md` | `tools/web-search/index.md` | `page__tools__web-search__index.md` |
@@ -31,6 +31,8 @@ Generated from `docs/` via `.github/scripts/generate_skill_references.py`.
 | AI & Generation | `tools/ai-and-generation.md` | `tools/ai-and-generation/index.md` | `page__tools__ai-and-generation__index.md` |
 | Media & Content | `tools/media-and-content.md` | `tools/media-and-content/index.md` | `page__tools__media-and-content__index.md` |
 | Matrix & Attachments | `tools/matrix-and-attachments.md` | `tools/matrix-and-attachments/index.md` | `page__tools__matrix-and-attachments__index.md` |
+| Matrix Message Full Semantics | `tools/matrix-message.md` | `tools/matrix-message/index.md` | `page__tools__matrix-message__index.md` |
+| Matrix Desktop Bridge | `tools/desktop.md` | `tools/desktop/index.md` | `page__tools__desktop__index.md` |
 | Messaging & Social | `tools/messaging-and-social.md` | `tools/messaging-and-social/index.md` | `page__tools__messaging-and-social__index.md` |
 | Project Management | `tools/project-management.md` | `tools/project-management/index.md` | `page__tools__project-management__index.md` |
 | Calendar & Scheduling | `tools/calendar-and-scheduling.md` | `tools/calendar-and-scheduling/index.md` | `page__tools__calendar-and-scheduling__index.md` |
@@ -48,12 +50,15 @@ Generated from `docs/` via `.github/scripts/generate_skill_references.py`.
 | Knowledge Bases | `knowledge.md` | `knowledge/index.md` | `page__knowledge__index.md` |
 | Memory System | `memory.md` | `memory/index.md` | `page__memory__index.md` |
 | Voice Messages | `voice.md` | `voice/index.md` | `page__voice__index.md` |
+| Voice Calls | `voice-calls.md` | `voice-calls/index.md` | `page__voice-calls__index.md` |
 | Image Messages | `images.md` | `images/index.md` | `page__images__index.md` |
 | File & Video Attachments | `attachments.md` | `attachments/index.md` | `page__attachments__index.md` |
 | Chat Commands | `chat-commands.md` | `chat-commands/index.md` | `page__chat-commands__index.md` |
 | Interactive Q&A | `interactive.md` | `interactive/index.md` | `page__interactive__index.md` |
 | Streaming | `streaming.md` | `streaming/index.md` | `page__streaming__index.md` |
 | Scheduling | `scheduling.md` | `scheduling/index.md` | `page__scheduling__index.md` |
+| External Triggers | `external-triggers.md` | `external-triggers/index.md` | `page__external-triggers__index.md` |
+| Agent Callbacks | `agent-callbacks.md` | `agent-callbacks/index.md` | `page__agent-callbacks__index.md` |
 | Authorization | `authorization.md` | `authorization/index.md` | `page__authorization__index.md` |
 | Matrix Space | `matrix-space.md` | `matrix-space/index.md` | `page__matrix-space__index.md` |
 | OpenAI-Compatible API | `openai-api.md` | `openai-api/index.md` | `page__openai-api__index.md` |
@@ -69,5 +74,6 @@ Generated from `docs/` via `.github/scripts/generate_skill_references.py`.
 | Trusted Upstream Browser Auth | `deployment/trusted-upstream-auth.md` | `deployment/trusted-upstream-auth/index.md` | `page__deployment__trusted-upstream-auth__index.md` |
 | Docker | `deployment/docker.md` | `deployment/docker/index.md` | `page__deployment__docker__index.md` |
 | Sandbox Proxy | `deployment/sandbox-proxy.md` | `deployment/sandbox-proxy/index.md` | `page__deployment__sandbox-proxy__index.md` |
+| Approved Egress | `deployment/approved-egress.md` | `deployment/approved-egress/index.md` | `page__deployment__approved-egress__index.md` |
 | Kubernetes | `deployment/kubernetes.md` | `deployment/kubernetes/index.md` | `page__deployment__kubernetes__index.md` |
 | CLI Reference | `cli.md` | `cli/index.md` | `page__cli__index.md` |

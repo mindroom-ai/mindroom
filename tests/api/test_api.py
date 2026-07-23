@@ -6,12 +6,14 @@ import os
 import threading
 import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace, TracebackType
 from typing import Annotated, Any, NoReturn, cast
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 from urllib.parse import parse_qs, urlparse
+from uuid import uuid4
 
 import jwt
 import pytest
@@ -22,18 +24,21 @@ from fastapi.testclient import TestClient
 from jwt.algorithms import RSAAlgorithm
 
 from mindroom import constants, frontend_assets
-from mindroom.api import auth, config_lifecycle, frontend, main
+from mindroom.api import auth, config_lifecycle, frontend, homeassistant_integration, main
 from mindroom.api import sandbox_runner as sandbox_runner_api
 from mindroom.api import tools as tools_api
 from mindroom.api import workers as workers_api
 from mindroom.commands.config_commands import apply_config_change
 from mindroom.config.main import Config
 from mindroom.credentials import get_runtime_credentials_manager, save_scoped_credentials
+from mindroom.embedder_health import capture_embedder_health_recorder
+from mindroom.matrix.decrypt_failure import e2ee_stats
 from mindroom.matrix.health import mark_matrix_sync_loop_started, mark_matrix_sync_success, reset_matrix_sync_health
 from mindroom.matrix.state import MatrixState
 from mindroom.runtime_state import reset_runtime_state, set_runtime_ready, set_runtime_starting
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key
 from mindroom.workers.models import WorkerHandle
+from tests.api.conftest import trusted_upstream_headers, use_trusted_upstream_runtime
 
 TEST_WORKER_AUTH = "token"
 
@@ -81,26 +86,28 @@ def _runtime_paths(tmp_path: Path, *, process_env: dict[str, str] | None = None)
 def _config_with_worker_scope(
     worker_scope: str | None,
     *,
+    authorization: dict[str, Any] | None = None,
     worker_grantable_credentials: list[str] | None = None,
 ) -> Config:
-    config = Config.model_validate(
-        {
-            "models": {"default": {"provider": "openai", "id": "gpt-4o-mini"}},
-            "agents": {
-                "general": {
-                    "display_name": "General",
-                    "role": "test",
-                    "tools": ["homeassistant"],
-                    "instructions": ["hi"],
-                    "rooms": ["lobby"],
-                },
-            },
-            "defaults": {
-                "markdown": True,
-                "worker_grantable_credentials": worker_grantable_credentials,
+    payload: dict[str, Any] = {
+        "models": {"default": {"provider": "openai", "id": "gpt-4o-mini"}},
+        "agents": {
+            "general": {
+                "display_name": "General",
+                "role": "test",
+                "tools": ["homeassistant"],
+                "instructions": ["hi"],
+                "rooms": ["lobby"],
             },
         },
-    )
+        "defaults": {
+            "markdown": True,
+            "worker_grantable_credentials": worker_grantable_credentials,
+        },
+    }
+    if authorization is not None:
+        payload["authorization"] = authorization
+    config = Config.model_validate(payload)
     config.agents["general"].worker_scope = worker_scope
     return config
 
@@ -177,6 +184,7 @@ def test_config_lifecycle_published_snapshot_owns_optional_runtime_fields(tmp_pa
         config_data={"agents": {"old": {"display_name": "Old"}}},
         runtime_config=runtime_config,
         config_load_result=load_result,
+        source_fingerprint="old-source",
         auth_state=auth_state,
     )
 
@@ -187,6 +195,7 @@ def test_config_lifecycle_published_snapshot_owns_optional_runtime_fields(tmp_pa
     assert preserved.config_data is snapshot.config_data
     assert preserved.runtime_config is runtime_config
     assert preserved.config_load_result is load_result
+    assert preserved.source_fingerprint == "old-source"
     assert preserved.auth_state is auth_state
 
     cleared = config_lifecycle._published_snapshot(
@@ -195,6 +204,7 @@ def test_config_lifecycle_published_snapshot_owns_optional_runtime_fields(tmp_pa
         config_data={},
         runtime_config=None,
         config_load_result=None,
+        source_fingerprint=None,
         auth_state=None,
     )
 
@@ -203,6 +213,7 @@ def test_config_lifecycle_published_snapshot_owns_optional_runtime_fields(tmp_pa
     assert cleared.config_data == {}
     assert cleared.runtime_config is None
     assert cleared.config_load_result is None
+    assert cleared.source_fingerprint is None
     assert cleared.auth_state is None
 
 
@@ -567,10 +578,12 @@ def test_initialize_api_app_clears_config_cache_when_config_path_changes(tmp_pat
     main.initialize_api_app(fresh_app, first_runtime)
     config_lifecycle.load_config_into_app(first_runtime, fresh_app)
     assert set(main._app_context(fresh_app).config_data["agents"]) == {"first"}
+    assert main._app_context(fresh_app).source_fingerprint is not None
 
     main.initialize_api_app(fresh_app, second_runtime)
 
     assert main._app_context(fresh_app).config_data == {}
+    assert main._app_context(fresh_app).source_fingerprint is None
 
 
 def test_initialize_api_app_clears_config_cache_when_runtime_changes(tmp_path: Path) -> None:
@@ -592,10 +605,12 @@ def test_initialize_api_app_clears_config_cache_when_runtime_changes(tmp_path: P
     main.initialize_api_app(fresh_app, runtime_one)
     config_lifecycle.load_config_into_app(runtime_one, fresh_app)
     assert set(main._app_context(fresh_app).config_data["agents"]) == {"first"}
+    assert main._app_context(fresh_app).source_fingerprint is not None
 
     main.initialize_api_app(fresh_app, runtime_two)
 
     assert main._app_context(fresh_app).config_data == {}
+    assert main._app_context(fresh_app).source_fingerprint is None
 
 
 def test_load_config_into_app_discards_stale_results_after_runtime_swap(tmp_path: Path) -> None:
@@ -609,54 +624,62 @@ def test_load_config_into_app_discards_stale_results_after_runtime_swap(tmp_path
         config_path=tmp_path / "second.yaml",
         process_env={},
     )
+    first_runtime.config_path.write_text("agents: {}\n", encoding="utf-8")
+    second_runtime.config_path.write_text(
+        yaml.safe_dump(
+            {
+                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+                "router": {"model": "default"},
+                "agents": {"second": {"display_name": "Second", "role": "valid", "rooms": []}},
+            },
+        ),
+        encoding="utf-8",
+    )
     started = threading.Event()
     allow_finish = threading.Event()
-    original_loader = config_lifecycle.load_runtime_config_model
+    original_load_result = config_lifecycle._load_config_result
 
-    def _fake_loader(
+    def _fake_load_result(
         runtime_paths: constants.RuntimePaths,
-        *,
-        tolerate_plugin_load_errors: bool = False,
-    ) -> Config:
+    ) -> tuple[
+        config_lifecycle.ConfigLoadResult,
+        dict[str, Any] | None,
+        Config | None,
+        str | None,
+        frozenset[Path] | None,
+    ]:
         if runtime_paths == first_runtime:
             started.set()
-            allow_finish.wait(timeout=1)
-            message = "invalid old config"
-            raise yaml.YAMLError(message)
-        if runtime_paths == second_runtime:
-            return Config.validate_with_runtime(
-                {
-                    "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
-                    "router": {"model": "default"},
-                    "agents": {
-                        "second": {
-                            "display_name": "Second",
-                            "role": "valid",
-                            "rooms": [],
-                        },
-                    },
-                },
-                second_runtime,
+            allow_finish.wait()
+            return (
+                config_lifecycle.ConfigLoadResult(
+                    success=False,
+                    error_status_code=422,
+                    error_detail="invalid old config",
+                ),
+                None,
+                None,
+                "stale-old-source",
+                frozenset({first_runtime.config_path}),
             )
-        return original_loader(
-            runtime_paths,
-            tolerate_plugin_load_errors=tolerate_plugin_load_errors,
-        )
+        return original_load_result(runtime_paths)
 
-    with patch.object(config_lifecycle, "load_runtime_config_model", side_effect=_fake_loader):
-        main.initialize_api_app(fresh_app, first_runtime)
+    main.initialize_api_app(fresh_app, first_runtime)
 
-        stale_thread = threading.Thread(
-            target=config_lifecycle.load_config_into_app,
-            args=(first_runtime, fresh_app),
-        )
-        stale_thread.start()
-        assert started.wait(timeout=1)
+    with (
+        patch.object(config_lifecycle, "_load_config_result", side_effect=_fake_load_result),
+        ThreadPoolExecutor(max_workers=1) as executor,
+    ):
+        stale_result = executor.submit(config_lifecycle.load_config_into_app, first_runtime, fresh_app)
+        try:
+            assert started.wait(timeout=1)
 
-        main.initialize_api_app(fresh_app, second_runtime)
-        assert config_lifecycle.load_config_into_app(second_runtime, fresh_app) is True
-        allow_finish.set()
-        stale_thread.join(timeout=1)
+            main.initialize_api_app(fresh_app, second_runtime)
+            assert config_lifecycle.load_config_into_app(second_runtime, fresh_app) is True
+        finally:
+            allow_finish.set()
+
+        assert stale_result.result(timeout=1) is False
 
     context = main._app_context(fresh_app)
     assert context.runtime_paths == second_runtime
@@ -867,6 +890,35 @@ def test_health_check(test_client: TestClient) -> None:
     assert data["last_sync_time"] is None
 
 
+def test_health_check_reports_recorded_embedder_failure(test_client: TestClient) -> None:
+    """A recorded embedder failure appears as an additive block without flipping status."""
+    reset_matrix_sync_health()
+    capture_embedder_health_recorder().record("embedder authentication failed (HTTP 401)")
+    try:
+        response = test_client.get("/api/health")
+    finally:
+        capture_embedder_health_recorder().record(None)
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "healthy"
+    assert data["embedder"] == {
+        "status": "failing",
+        "detail": "embedder authentication failed (HTTP 401)",
+    }
+
+
+def test_health_check_omits_embedder_block_when_healthy(test_client: TestClient) -> None:
+    """No embedder block appears while the embedder is healthy."""
+    reset_matrix_sync_health()
+    capture_embedder_health_recorder().record(None)
+
+    response = test_client.get("/api/health")
+
+    assert response.status_code == 200
+    assert "embedder" not in response.json()
+
+
 def test_health_check_reports_stale_matrix_sync(test_client: TestClient) -> None:
     """Ready runtimes should fail health checks when Matrix sync responses go stale."""
     reset_matrix_sync_health()
@@ -881,8 +933,24 @@ def test_health_check_reports_stale_matrix_sync(test_client: TestClient) -> None
     assert response.json() == {
         "status": "unhealthy",
         "last_sync_time": stale_sync_time.isoformat(),
+        "e2ee": e2ee_stats().as_dict(),
         "stale_sync_entities": ["router"],
     }
+    reset_matrix_sync_health()
+    reset_runtime_state()
+
+
+def test_health_reports_live_e2ee_counter_values(test_client: TestClient) -> None:
+    """The e2ee health field must serialize the real counters, not a stale copy."""
+    reset_matrix_sync_health()
+    set_runtime_ready()
+    before = test_client.get("/api/health").json()["e2ee"]
+
+    e2ee_stats().record_failure("!e2ee-health:localhost", f"$health{uuid4().hex}:localhost")
+
+    after = test_client.get("/api/health").json()["e2ee"]
+    assert after["decrypt_failures"] == before["decrypt_failures"] + 1
+    assert after.keys() == {"decrypt_failures", "key_requests_sent", "notices_sent"}
     reset_matrix_sync_health()
     reset_runtime_state()
 
@@ -926,6 +994,7 @@ def test_health_after_watchdog_restart_stays_unhealthy_until_sync(test_client: T
     assert response.json() == {
         "status": "unhealthy",
         "last_sync_time": stale_time.isoformat(),
+        "e2ee": e2ee_stats().as_dict(),
         "stale_sync_entities": ["router"],
     }
 
@@ -1114,6 +1183,41 @@ def test_worker_cleanup_once_cleans_workers(monkeypatch: pytest.MonkeyPatch) -> 
     assert captured_kwargs["worker_grantable_credentials"] == runtime_config.get_worker_grantable_credentials()
 
 
+def test_worker_cleanup_once_reconciles_drifted_worker_templates(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each background cleanup pass should also reconcile drifted worker pod templates."""
+
+    class _FakeWorkerManager:
+        backend_name = "kubernetes"
+
+        def cleanup_idle_workers(self) -> list[WorkerHandle]:
+            return []
+
+    worker_manager = _FakeWorkerManager()
+    monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "kubernetes")
+    monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_IMAGE", "ghcr.io/mindroom-ai/mindroom:latest")
+    monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME", "mindroom-storage")
+    monkeypatch.setattr(main, "primary_worker_backend_available", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(main, "primary_worker_backend_name", lambda *_args, **_kwargs: "kubernetes")
+    monkeypatch.setattr(main, "get_primary_worker_manager", lambda *_args, **_kwargs: worker_manager)
+    reconciled_managers: list[object] = []
+
+    def _fake_reconcile(manager: object) -> list[WorkerHandle]:
+        reconciled_managers.append(manager)
+        return []
+
+    monkeypatch.setattr(main, "reconcile_drifted_worker_templates", _fake_reconcile)
+
+    runtime_paths = main._app_runtime_paths(main.app)
+    runtime_config = Config.validate_with_runtime({}, runtime_paths)
+    main._cleanup_workers_once(
+        runtime_paths,
+        runtime_config=runtime_config,
+        worker_grantable_credentials=runtime_config.get_worker_grantable_credentials(),
+    )
+
+    assert reconciled_managers == [worker_manager]
+
+
 def test_list_workers_endpoint(test_client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     """The dashboard should expose backend-neutral worker metadata."""
 
@@ -1180,12 +1284,12 @@ def test_cleanup_workers_endpoint(test_client: TestClient, monkeypatch: pytest.M
                 ),
             ]
 
+    monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "kubernetes")
+    monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_IMAGE", "ghcr.io/mindroom-ai/mindroom:latest")
+    monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME", "mindroom-storage")
     monkeypatch.setattr(workers_api, "primary_worker_backend_available", lambda *_args, **_kwargs: True)
-    monkeypatch.setattr(
-        workers_api,
-        "get_primary_worker_manager",
-        lambda *_args, **_kwargs: _FakeWorkerManager(),
-    )
+    monkeypatch.setattr(workers_api, "primary_worker_backend_name", lambda *_args, **_kwargs: "kubernetes")
+    monkeypatch.setattr(workers_api, "get_primary_worker_manager", lambda *_args, **_kwargs: _FakeWorkerManager())
 
     response = test_client.post("/api/workers/cleanup")
 
@@ -1433,9 +1537,12 @@ def test_non_oauth_auth_provider_uses_required_credential_fields(tmp_path: Path)
     [
         ("google_drive", "shared", frozenset({"google_drive"})),
         ("google_calendar", "shared", frozenset({"google_calendar"})),
+        ("google_docs", "shared", frozenset({"google_docs"})),
         ("google_sheets", "shared", frozenset({"google_sheets"})),
         ("gmail", "shared", frozenset({"gmail"})),
-        ("google_drive_oauth", "shared", frozenset({"google_drive_oauth"})),
+        # Agent-scoped OAuth token services no longer inject themselves into the
+        # shared allowlist; they fall through to the context allowlist unchanged.
+        ("google_drive_oauth", "shared", frozenset({"weather"})),
         ("weather", "shared", frozenset({"weather"})),
         ("google_drive", "user", frozenset({"weather"})),
         ("google_drive", "user_agent", frozenset({"weather"})),
@@ -1479,6 +1586,7 @@ def test_get_tools_marks_shared_only_integrations_unsupported_for_isolating_work
     assert tools_by_name["spotify"]["execution_scope_supported"] is False
     assert tools_by_name["gmail"]["execution_scope_supported"] is True
     assert tools_by_name["google_calendar"]["execution_scope_supported"] is True
+    assert tools_by_name["google_docs"]["execution_scope_supported"] is True
     assert tools_by_name["google_sheets"]["execution_scope_supported"] is True
     assert "calculator" in tools_by_name
     assert tools_by_name["calculator"]["execution_scope_supported"] is True
@@ -1567,16 +1675,57 @@ def test_get_tools_explicit_unscoped_override_does_not_fall_back_to_saved_scope(
     assert tools_by_name["homeassistant"]["dashboard_configuration_supported"] is False
 
 
-def test_get_tools_unknown_agent_rejected(test_client: TestClient) -> None:
-    """Tool preview should reject unknown agents instead of falling back to shared state."""
+def test_get_tools_unknown_agent_previews_draft_scope(test_client: TestClient) -> None:
+    """Tool preview should serve unsaved draft agents as a non-authoritative scope preview."""
     config = _config_with_worker_scope("shared")
     runtime_paths = main._app_runtime_paths(main.app)
 
     with patch("mindroom.api.tools._read_tools_runtime_config", return_value=(config, runtime_paths)):
-        response = test_client.get("/api/tools/?agent_name=missing")
+        response = test_client.get("/api/tools/?agent_name=draft_agent&execution_scope=user")
 
-    assert response.status_code == 404
-    assert response.json()["detail"] == "Unknown agent: missing"
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status_authoritative"] is False
+    tools_by_name = {tool["name"]: tool for tool in payload["tools"]}
+    assert "calculator" in tools_by_name
+    assert tools_by_name["homeassistant"]["execution_scope_supported"] is False
+    assert tools_by_name["calculator"]["execution_scope_supported"] is True
+
+
+def test_get_tools_requires_agent_reply_permission_for_agent_scoped_status(test_client: TestClient) -> None:
+    """Agent-scoped tool availability should not expose credential-backed state to unauthorized users."""
+    runtime_paths = use_trusted_upstream_runtime(main.app)
+    config = _config_with_worker_scope(
+        "shared",
+        authorization={"agent_reply_permissions": {"general": ["@alice:example.org"]}},
+    )
+    tools = [
+        {
+            "name": "homeassistant",
+            "display_name": "Home Assistant",
+            "description": "Home automation",
+            "category": "home",
+            "status": "requires_config",
+            "setup_type": "special",
+            "auth_provider": None,
+            "config_fields": [],
+        },
+    ]
+    bob_headers = trusted_upstream_headers(
+        user_id="bob",
+        email="bob@example.org",
+        matrix_user_id="@bob:example.org",
+    )
+
+    with (
+        patch("mindroom.api.tools._read_tools_runtime_config", return_value=(config, runtime_paths)),
+        patch("mindroom.api.tools.export_tools_metadata", return_value=tools),
+        patch("mindroom.api.tools.load_scoped_credentials") as mock_load_scoped_credentials,
+    ):
+        response = test_client.get("/api/tools/?agent_name=general", headers=bob_headers)
+
+    assert response.status_code == 403
+    mock_load_scoped_credentials.assert_not_called()
 
 
 def test_get_tools_marks_allowlisted_shared_ui_scoped_tools_available(test_client: TestClient) -> None:
@@ -1661,8 +1810,9 @@ def test_get_tools_shared_scope_homeassistant_ignores_worker_allowlist(test_clie
     manager.save_credentials(
         "homeassistant",
         {
-            "instance_url": "http://homeassistant.local:8123",
+            "instance_url": "http://127.0.0.1:8123",
             "access_token": "ha-token",
+            "allow_private_url": True,
             "_source": "ui",
         },
     )
@@ -1758,7 +1908,7 @@ def test_get_tools_requires_oauth_token_for_generic_auth_provider(test_client: T
     assert tool["name"] == "google_drive"
     assert tool["status"] == "requires_config"
 
-    manager.save_credentials(
+    manager.for_primary_runtime_agent_scope("general").save_credentials(
         "google_drive_oauth",
         {
             "token": "drive-token",
@@ -1768,7 +1918,7 @@ def test_get_tools_requires_oauth_token_for_generic_auth_provider(test_client: T
                 "openid",
                 "https://www.googleapis.com/auth/userinfo.email",
                 "https://www.googleapis.com/auth/userinfo.profile",
-                "https://www.googleapis.com/auth/drive.readonly",
+                "https://www.googleapis.com/auth/drive",
             ],
             "_source": "oauth",
         },
@@ -1823,10 +1973,10 @@ def test_get_tools_marks_google_oauth_tool_available_with_service_account(
     assert tool["status"] == "available"
 
 
-def test_get_tools_does_not_treat_requester_owned_scoped_credentials_as_dashboard_truth(
+def test_get_tools_does_not_treat_scoped_credentials_as_dashboard_truth(
     test_client: TestClient,
 ) -> None:
-    """Requester-owned scoped credentials must not flip isolated dashboard status to available."""
+    """Scoped credentials must not flip isolated dashboard status to available."""
     config = _config_with_worker_scope("user")
     runtime_paths = main._app_runtime_paths(main.app)
     tools = [
@@ -1951,8 +2101,9 @@ def test_homeassistant_connect_oauth_uses_pending_oauth_state(api_key_client: Te
     response = api_key_client.post(
         "/api/homeassistant/connect/oauth?agent_name=general",
         json={
-            "instance_url": "homeassistant.local:8123",
+            "instance_url": "127.0.0.1:8123",
             "client_id": "client-id",
+            "allow_private_url": True,
         },
     )
 
@@ -1960,7 +2111,7 @@ def test_homeassistant_connect_oauth_uses_pending_oauth_state(api_key_client: Te
     auth_url = response.json()["auth_url"]
     parsed = urlparse(auth_url)
     params = parse_qs(parsed.query)
-    assert f"{parsed.scheme}://{parsed.netloc}{parsed.path}" == "http://homeassistant.local:8123/auth/authorize"
+    assert f"{parsed.scheme}://{parsed.netloc}{parsed.path}" == "http://127.0.0.1:8123/auth/authorize"
     assert params["state"][0]
     assert params["state"][0] != "general"
     assert "agent_name=general" not in params["redirect_uri"][0]
@@ -1998,8 +2149,9 @@ def test_homeassistant_oauth_callback_uses_pending_payload_not_live_credentials(
         connect_response = api_key_client.post(
             "/api/homeassistant/connect/oauth?agent_name=general",
             json={
-                "instance_url": "homeassistant.local:8123",
+                "instance_url": "127.0.0.1:8123",
                 "client_id": "client-id",
+                "allow_private_url": True,
             },
         )
         assert connect_response.status_code == 200
@@ -2012,7 +2164,7 @@ def test_homeassistant_oauth_callback_uses_pending_payload_not_live_credentials(
 
     assert callback_response.status_code in {302, 307}
     async_client.__aenter__.return_value.post.assert_called_once_with(
-        "http://homeassistant.local:8123/auth/token",
+        "http://127.0.0.1:8123/auth/token",
         data={
             "grant_type": "authorization_code",
             "code": "test-code",
@@ -2023,14 +2175,104 @@ def test_homeassistant_oauth_callback_uses_pending_payload_not_live_credentials(
     target.target_manager.save_credentials.assert_called_once_with(
         "homeassistant",
         {
-            "instance_url": "http://homeassistant.local:8123",
+            "instance_url": "http://127.0.0.1:8123",
             "client_id": "client-id",
             "access_token": "ha-access",
             "refresh_token": "ha-refresh",
             "expires_in": 3600,
+            "allow_private_url": True,
             "_source": "ui",
         },
     )
+
+
+def test_homeassistant_token_connect_rejects_private_url_without_opt_in(api_key_client: TestClient) -> None:
+    """Home Assistant token setup should not probe private URLs unless the user opts in."""
+    config = _config_with_worker_scope("shared")
+    login_response = api_key_client.post("/api/auth/session", json={"api_key": "test-key"})
+    assert login_response.status_code == 200
+    _publish_committed_runtime_config(
+        api_key_client.app,
+        main._app_runtime_paths(api_key_client.app),
+        config.model_dump(),
+    )
+
+    with patch(
+        "mindroom.api.homeassistant_integration._test_connection",
+        new_callable=AsyncMock,
+    ) as test_connection:
+        response = api_key_client.post(
+            "/api/homeassistant/connect/token?agent_name=general",
+            json={
+                "instance_url": "http://127.0.0.1:8123",
+                "long_lived_token": "ha-token",
+            },
+        )
+
+    assert response.status_code == 400
+    assert "Private Home Assistant URLs require explicit opt-in" in response.json()["detail"]
+    test_connection.assert_not_awaited()
+
+
+def test_homeassistant_url_validation_maps_malformed_hosts_to_http_error() -> None:
+    """Malformed bracketed Home Assistant hosts should return a controlled 400."""
+    with pytest.raises(HTTPException) as exc_info:
+        homeassistant_integration._validate_homeassistant_instance_url(
+            "http://[not-ip]/",
+            allow_private_url=False,
+        )
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "Home Assistant instance URL is not allowed for server-side fetching."
+
+
+def test_homeassistant_token_connect_allows_private_url_with_opt_in(api_key_client: TestClient) -> None:
+    """Home Assistant token setup can deliberately allow a self-hosted private URL."""
+    config = _config_with_worker_scope("shared")
+    login_response = api_key_client.post("/api/auth/session", json={"api_key": "test-key"})
+    assert login_response.status_code == 200
+    _publish_committed_runtime_config(
+        api_key_client.app,
+        main._app_runtime_paths(api_key_client.app),
+        config.model_dump(),
+    )
+
+    with patch(
+        "mindroom.api.homeassistant_integration._test_connection",
+        new_callable=AsyncMock,
+        return_value={"message": "API running"},
+    ) as test_connection:
+        response = api_key_client.post(
+            "/api/homeassistant/connect/token?agent_name=general",
+            json={
+                "instance_url": "http://127.0.0.1:8123",
+                "long_lived_token": "ha-token",
+                "allow_private_url": True,
+            },
+        )
+
+    assert response.status_code == 200
+    test_connection.assert_awaited_once_with("http://127.0.0.1:8123", "ha-token", allow_private_url=True)
+
+
+@pytest.mark.asyncio
+async def test_homeassistant_connection_failure_does_not_return_response_body() -> None:
+    """Failed Home Assistant probes should not expose response bodies in API errors."""
+    provider_body = "provider response body contents"
+    async_client = MagicMock()
+    api_response = MagicMock()
+    api_response.status_code = 500
+    api_response.text = provider_body
+    async_client.__aenter__.return_value.get.return_value = api_response
+
+    with (
+        patch("mindroom.api.homeassistant_integration.httpx.AsyncClient", return_value=async_client),
+        pytest.raises(HTTPException) as exc_info,
+    ):
+        await homeassistant_integration._test_connection("http://93.184.216.34:8123", "ha-token")
+
+    assert exc_info.value.status_code == 500
+    assert provider_body not in str(exc_info.value.detail)
 
 
 def test_homeassistant_connect_rejects_draft_execution_scope_override(
@@ -2047,7 +2289,7 @@ def test_homeassistant_connect_rejects_draft_execution_scope_override(
         connect_response = api_key_client.post(
             "/api/homeassistant/connect/oauth?agent_name=general&execution_scope=shared",
             json={
-                "instance_url": "homeassistant.local:8123",
+                "instance_url": "http://93.184.216.34:8123",
                 "client_id": "client-id",
             },
         )
@@ -2311,6 +2553,46 @@ def test_save_config(test_client: TestClient, temp_config_file: Path) -> None:
     assert saved_config["defaults"] == {}
 
 
+def test_save_config_persists_unassigned_configured_rooms(
+    test_client: TestClient,
+    temp_config_file: Path,
+) -> None:
+    """Dashboard-created rooms should survive save even before responders are assigned."""
+    new_config = {
+        "models": {"default": {"provider": "test", "id": "test-model"}},
+        "agents": {
+            "assistant": {
+                "display_name": "Assistant",
+                "role": "Helpful assistant",
+                "rooms": [],
+            },
+        },
+        "rooms": {
+            "project_room": {
+                "display_name": "Project Room",
+                "description": "Planning space",
+            },
+        },
+        "defaults": {},
+        "router": {"model": "default"},
+    }
+
+    response = test_client.put("/api/config/save", json=new_config)
+    assert response.status_code == 200
+
+    saved_config = yaml.safe_load(temp_config_file.read_text(encoding="utf-8"))
+    assert saved_config["rooms"] == {
+        "project_room": {
+            "display_name": "Project Room",
+            "description": "Planning space",
+        },
+    }
+
+    response = test_client.get("/api/rooms")
+    assert response.status_code == 200
+    assert "project_room" in response.json()
+
+
 def test_save_config_preserves_explicit_compaction_model_null_clear(
     test_client: TestClient,
     temp_config_file: Path,
@@ -2493,7 +2775,7 @@ def test_get_raw_config_source_returns_current_invalid_file(
     response = test_client.get("/api/config/raw")
 
     assert response.status_code == 200
-    assert response.json() == {"source": invalid_source}
+    assert response.json() == {"source": invalid_source, "uses_includes": False}
 
 
 def test_get_raw_config_source_returns_replacement_text_for_non_utf8_invalid_file(
@@ -2509,7 +2791,7 @@ def test_get_raw_config_source_returns_replacement_text_for_non_utf8_invalid_fil
     response = test_client.get("/api/config/raw")
 
     assert response.status_code == 200
-    assert response.json() == {"source": "agents:\n  broken: \ufffd\n"}
+    assert response.json() == {"source": "agents:\n  broken: \ufffd\n", "uses_includes": False}
 
 
 def test_save_raw_config_source_can_recover_from_invalid_reload(
@@ -2598,6 +2880,111 @@ def test_config_generation_headers_protect_full_and_raw_save_endpoints(
     assert stale_raw_save_response.status_code == 409
 
 
+def test_config_reload_after_api_save_keeps_returned_generation(test_client: TestClient) -> None:
+    """The file watcher should not make an API save response immediately stale."""
+    initial_load = test_client.post("/api/config/load")
+    assert initial_load.status_code == 200
+    initial_generation = int(initial_load.headers[config_lifecycle.CONFIG_GENERATION_HEADER])
+
+    first_save_response = test_client.put(
+        "/api/config/save",
+        headers={config_lifecycle.CONFIG_GENERATION_HEADER: str(initial_generation)},
+        json=_authored_config_payload("first"),
+    )
+    assert first_save_response.status_code == 200
+    first_save_generation = int(first_save_response.headers[config_lifecycle.CONFIG_GENERATION_HEADER])
+
+    assert config_lifecycle.load_config_into_app(main._app_runtime_paths(test_client.app), main.app) is True
+
+    reloaded_config_response = test_client.post("/api/config/load")
+    assert reloaded_config_response.status_code == 200
+    assert int(reloaded_config_response.headers[config_lifecycle.CONFIG_GENERATION_HEADER]) == first_save_generation
+
+    second_save_response = test_client.put(
+        "/api/config/save",
+        headers={config_lifecycle.CONFIG_GENERATION_HEADER: str(first_save_generation)},
+        json=_authored_config_payload("second"),
+    )
+    assert second_save_response.status_code == 200
+    assert int(second_save_response.headers[config_lifecycle.CONFIG_GENERATION_HEADER]) > first_save_generation
+
+
+def test_external_raw_config_reload_advances_generation_for_same_authored_config(
+    test_client: TestClient,
+    temp_config_file: Path,
+) -> None:
+    """External raw-only edits should still make older raw editor drafts stale."""
+    initial_raw_response = test_client.get("/api/config/raw")
+    assert initial_raw_response.status_code == 200
+    initial_generation = int(initial_raw_response.headers[config_lifecycle.CONFIG_GENERATION_HEADER])
+    initial_source = initial_raw_response.json()["source"]
+
+    externally_edited_source = f"# external operator note\n{initial_source}"
+    temp_config_file.write_text(externally_edited_source, encoding="utf-8")
+
+    assert config_lifecycle.load_config_into_app(main._app_runtime_paths(test_client.app), main.app) is True
+
+    reloaded_raw_response = test_client.get("/api/config/raw")
+    assert reloaded_raw_response.status_code == 200
+    assert int(reloaded_raw_response.headers[config_lifecycle.CONFIG_GENERATION_HEADER]) > initial_generation
+    assert reloaded_raw_response.json() == {"source": externally_edited_source, "uses_includes": False}
+
+    stale_save_response = test_client.put(
+        "/api/config/raw",
+        headers={config_lifecycle.CONFIG_GENERATION_HEADER: str(initial_generation)},
+        json={"source": initial_source},
+    )
+    assert stale_save_response.status_code == 409
+    assert temp_config_file.read_text(encoding="utf-8") == externally_edited_source
+
+
+def test_config_reload_uses_source_fingerprint_from_validated_source(
+    test_client: TestClient,
+    temp_config_file: Path,
+) -> None:
+    """A file edit during reload should not publish new config under the old source identity."""
+    initial_response = test_client.post("/api/config/load")
+    assert initial_response.status_code == 200
+    initial_generation = int(initial_response.headers[config_lifecycle.CONFIG_GENERATION_HEADER])
+    initial_agents = initial_response.json()["agents"]
+
+    interleaved_source = yaml.safe_dump(_authored_config_payload("interleaved"), sort_keys=True)
+    original_read_bytes = Path.read_bytes
+    mutated = False
+
+    def _read_then_mutate(path: Path) -> bytes:
+        nonlocal mutated
+        source = original_read_bytes(path)
+        if path == temp_config_file and not mutated:
+            mutated = True
+            temp_config_file.write_text(interleaved_source, encoding="utf-8")
+        return source
+
+    with patch.object(Path, "read_bytes", autospec=True, side_effect=_read_then_mutate):
+        assert config_lifecycle.load_config_into_app(main._app_runtime_paths(test_client.app), main.app) is True
+
+    reloaded_response = test_client.post("/api/config/load")
+    assert reloaded_response.status_code == 200
+    assert reloaded_response.json()["agents"] == initial_agents
+    assert int(reloaded_response.headers[config_lifecycle.CONFIG_GENERATION_HEADER]) == initial_generation
+
+    assert config_lifecycle.load_config_into_app(main._app_runtime_paths(test_client.app), main.app) is True
+    interleaved_response = test_client.post("/api/config/load")
+    assert interleaved_response.status_code == 200
+    assert list(interleaved_response.json()["agents"]) == ["interleaved"]
+    assert int(interleaved_response.headers[config_lifecycle.CONFIG_GENERATION_HEADER]) > initial_generation
+
+    stale_save_response = test_client.put(
+        "/api/config/save",
+        headers={config_lifecycle.CONFIG_GENERATION_HEADER: str(initial_generation)},
+        json=_authored_config_payload("stale"),
+    )
+    assert stale_save_response.status_code == 409
+    assert yaml.safe_load(temp_config_file.read_text(encoding="utf-8"))["agents"] == {
+        "interleaved": {"display_name": "Interleaved", "role": "valid", "rooms": []},
+    }
+
+
 def test_first_party_config_writers_advance_generation_before_watcher_reload(
     test_client: TestClient,
 ) -> None:
@@ -2623,71 +3010,6 @@ def test_first_party_config_writers_advance_generation_before_watcher_reload(
     )
 
     assert stale_save_response.status_code == 409
-
-
-def test_validate_raw_config_source_uses_unique_validation_files(tmp_path: Path) -> None:
-    """Concurrent raw validation should not let one request read another request's temp file."""
-    runtime_paths = _runtime_paths(tmp_path)
-    first_source = yaml.safe_dump(
-        {
-            "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
-            "router": {"model": "default"},
-            "agents": {"agent_a": {"display_name": "Agent A", "role": "role a", "rooms": []}},
-        },
-        sort_keys=True,
-    )
-    second_source = yaml.safe_dump(
-        {
-            "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
-            "router": {"model": "default"},
-            "agents": {"agent_b": {"display_name": "Agent B", "role": "role b", "rooms": []}},
-        },
-        sort_keys=True,
-    )
-    first_entered = threading.Event()
-    second_entered = threading.Event()
-    call_lock = threading.Lock()
-    call_count = 0
-    original_loader = config_lifecycle.load_runtime_config_model
-    results: list[tuple[Config, dict[str, Any]] | None] = [None, None]
-
-    def _interleaving_loader(
-        validation_runtime_paths: constants.RuntimePaths,
-        *,
-        tolerate_plugin_load_errors: bool = False,
-    ) -> Config:
-        nonlocal call_count
-        with call_lock:
-            call_count += 1
-            call_number = call_count
-        if call_number == 1:
-            first_entered.set()
-            assert second_entered.wait(timeout=5)
-        else:
-            assert first_entered.wait(timeout=5)
-            second_entered.set()
-        return original_loader(
-            validation_runtime_paths,
-            tolerate_plugin_load_errors=tolerate_plugin_load_errors,
-        )
-
-    def _run_validation(index: int, source: str) -> None:
-        results[index] = config_lifecycle._validate_raw_config_source(source, runtime_paths)
-
-    with patch("mindroom.api.config_lifecycle.load_runtime_config_model", side_effect=_interleaving_loader):
-        first_thread = threading.Thread(target=_run_validation, args=(0, first_source))
-        second_thread = threading.Thread(target=_run_validation, args=(1, second_source))
-        first_thread.start()
-        second_thread.start()
-        first_thread.join(timeout=5)
-        second_thread.join(timeout=5)
-
-    assert not first_thread.is_alive()
-    assert not second_thread.is_alive()
-    assert results[0] is not None
-    assert results[1] is not None
-    assert results[0][1]["agents"] == {"agent_a": {"display_name": "Agent A", "role": "role a", "rooms": []}}
-    assert results[1][1]["agents"] == {"agent_b": {"display_name": "Agent B", "role": "role b", "rooms": []}}
 
 
 def test_api_config_load_accepts_missing_plugin_path_in_degraded_mode(temp_config_file: Path) -> None:
@@ -2817,7 +3139,7 @@ def test_api_key_raw_endpoints_recover_from_invalid_reload(
         headers={"Authorization": "Bearer test-key"},
     )
     assert raw_response.status_code == 200
-    assert raw_response.json() == {"source": invalid_source}
+    assert raw_response.json() == {"source": invalid_source, "uses_includes": False}
 
     valid_source = yaml.safe_dump(_authored_config_payload("recovered"), sort_keys=True)
     save_response = api_key_client.put(
@@ -2904,6 +3226,172 @@ def test_cors_headers(test_client: TestClient) -> None:
     # TestClient doesn't simulate CORS middleware properly
     # In a real browser environment, these headers would be present
     assert response.status_code == 200
+
+
+def _dashboard_cors_test_client(runtime_paths: constants.RuntimePaths) -> TestClient:
+    api_app = FastAPI()
+
+    @api_app.get("/api/health")
+    async def _health_check() -> dict[str, str]:
+        return {"status": "healthy"}
+
+    main._add_dashboard_cors_middleware(api_app, runtime_paths)
+    return TestClient(api_app)
+
+
+def test_cors_rejects_unknown_origin_by_default(tmp_path: Path) -> None:
+    """Default dashboard CORS should not allow arbitrary browser origins."""
+    test_client = _dashboard_cors_test_client(_runtime_paths(tmp_path, process_env={}))
+
+    response = test_client.options(
+        "/api/health",
+        headers={
+            "Origin": "https://dashboard.example.test",
+            "Access-Control-Request-Method": "GET",
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.headers.get("access-control-allow-origin") is None
+
+
+def test_cors_allows_local_frontend_origin_by_default(tmp_path: Path) -> None:
+    """Default dashboard CORS should keep the local frontend dev server working."""
+    test_client = _dashboard_cors_test_client(_runtime_paths(tmp_path, process_env={}))
+
+    response = test_client.options(
+        "/api/health",
+        headers={
+            "Origin": "http://localhost:5173",
+            "Access-Control-Request-Method": "GET",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == "http://localhost:5173"
+    assert response.headers["access-control-allow-credentials"] == "true"
+
+
+def test_cors_exposes_config_generation_header_for_credentialed_origins(tmp_path: Path) -> None:
+    """Credentialed dashboard CORS should expose headers the frontend reads."""
+    test_client = _dashboard_cors_test_client(_runtime_paths(tmp_path, process_env={}))
+
+    response = test_client.get("/api/health", headers={"Origin": "http://localhost:5173"})
+
+    assert response.status_code == 200
+    exposed = {header.strip() for header in response.headers["access-control-expose-headers"].split(",")}
+    assert exposed == {
+        config_lifecycle.CONFIG_GENERATION_HEADER,
+        config_lifecycle.CONFIG_USES_INCLUDES_HEADER,
+    }
+
+
+def test_cors_wildcard_opt_in_disables_credentials(tmp_path: Path) -> None:
+    """Explicit wildcard CORS must not be combined with credentialed requests."""
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        process_env={"MINDROOM_DASHBOARD_CORS_ALLOW_ALL_ORIGINS": "true"},
+    )
+
+    settings = main._dashboard_cors_settings(runtime_paths)
+    test_client = _dashboard_cors_test_client(runtime_paths)
+    response = test_client.options(
+        "/api/health",
+        headers={
+            "Origin": "https://dashboard.example.test",
+            "Access-Control-Request-Method": "GET",
+        },
+    )
+
+    assert settings.allow_origins == ("*",)
+    assert settings.allow_credentials is False
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == "*"
+    assert response.headers.get("access-control-allow-credentials") is None
+
+
+def test_cors_empty_allowed_origins_env_uses_default_origins(tmp_path: Path) -> None:
+    """Blank configured CORS origins should keep safe local development defaults."""
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        process_env={"MINDROOM_DASHBOARD_CORS_ALLOWED_ORIGINS": ""},
+    )
+    settings = main._dashboard_cors_settings(runtime_paths)
+    test_client = _dashboard_cors_test_client(runtime_paths)
+
+    response = test_client.options(
+        "/api/health",
+        headers={
+            "Origin": "http://localhost:5173",
+            "Access-Control-Request-Method": "GET",
+        },
+    )
+
+    assert "http://localhost:5173" in settings.allow_origins
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == "http://localhost:5173"
+
+
+def test_cors_allowed_origins_env_replaces_default_origins(tmp_path: Path) -> None:
+    """Configured CORS origins should be explicit and credential-capable."""
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        process_env={
+            "MINDROOM_DASHBOARD_CORS_ALLOWED_ORIGINS": ("https://dashboard.example.test, http://localhost:3003"),
+        },
+    )
+    test_client = _dashboard_cors_test_client(runtime_paths)
+
+    allowed_response = test_client.options(
+        "/api/health",
+        headers={
+            "Origin": "https://dashboard.example.test",
+            "Access-Control-Request-Method": "GET",
+        },
+    )
+    default_origin_response = test_client.options(
+        "/api/health",
+        headers={
+            "Origin": "http://localhost:5173",
+            "Access-Control-Request-Method": "GET",
+        },
+    )
+
+    assert allowed_response.status_code == 200
+    assert allowed_response.headers["access-control-allow-origin"] == "https://dashboard.example.test"
+    assert allowed_response.headers["access-control-allow-credentials"] == "true"
+    assert default_origin_response.status_code == 400
+    assert default_origin_response.headers.get("access-control-allow-origin") is None
+
+
+def test_exported_app_cors_uses_reinitialized_runtime(tmp_path: Path) -> None:
+    """The exported API app should derive CORS from its current runtime paths."""
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        process_env={"MINDROOM_DASHBOARD_CORS_ALLOWED_ORIGINS": "https://dashboard.example.test"},
+    )
+    main.initialize_api_app(main.app, runtime_paths)
+
+    with TestClient(main.app) as test_client:
+        allowed_response = test_client.options(
+            "/api/health",
+            headers={
+                "Origin": "https://dashboard.example.test",
+                "Access-Control-Request-Method": "GET",
+            },
+        )
+        default_origin_response = test_client.options(
+            "/api/health",
+            headers={
+                "Origin": "http://localhost:5173",
+                "Access-Control-Request-Method": "GET",
+            },
+        )
+
+    assert allowed_response.status_code == 200
+    assert allowed_response.headers["access-control-allow-origin"] == "https://dashboard.example.test"
+    assert default_origin_response.status_code == 400
+    assert default_origin_response.headers.get("access-control-allow-origin") is None
 
 
 def test_frontend_root_serves_index(
@@ -3019,6 +3507,36 @@ def test_frontend_login_page_serializes_oauth_next_path_without_html_entities(
     next_path_literal = next_path_line.split("=", 1)[1].strip().removesuffix(";")
     assert json.loads(next_path_literal) == next_path
     assert "&amp;execution_scope" not in response.text
+
+
+@pytest.mark.parametrize(
+    ("next_path", "expected"),
+    [
+        (None, "/"),
+        ("", "/"),
+        ("agents", "/"),
+        ("/", "/"),
+        ("/agents", "/agents"),
+        (
+            "/api/oauth/test_drive/authorize?agent_name=general&execution_scope=user",
+            "/api/oauth/test_drive/authorize?agent_name=general&execution_scope=user",
+        ),
+        ("//example.com", "/"),
+        ("/\\example.com", "/"),
+        ("/%2Fexample.com", "/"),
+        ("/%5Cexample.com", "/"),
+        ("/%5c/example.com", "/"),
+        ("/%255Cexample.com", "/"),
+        ("/%252Fexample.com", "/"),
+        ("/agents/%5Cprofile", "/agents/%5Cprofile"),
+    ],
+)
+def test_sanitize_next_path_blocks_protocol_relative_variants(
+    next_path: str | None,
+    expected: str,
+) -> None:
+    """Standalone login redirects must stay on same-origin dashboard paths."""
+    assert auth.sanitize_next_path(next_path) == expected
 
 
 def test_frontend_login_propagates_trusted_upstream_auth_misconfiguration(
@@ -3141,7 +3659,7 @@ def test_agent_policies_endpoint_uses_backend_policy(test_client: TestClient) ->
                 "scope_label": "unscoped",
                 "scope_source": "unscoped",
                 "dashboard_credentials_supported": True,
-                "team_eligibility_reason": "Delegates to private agent 'mind', so it cannot participate in teams yet.",
+                "team_eligibility_reason": "Delegates to private agent 'mind', so it cannot participate in teams.",
                 "private_knowledge_base_id": None,
                 "private_workspace_enabled": False,
                 "private_agent_knowledge_enabled": False,
@@ -3153,7 +3671,7 @@ def test_agent_policies_endpoint_uses_backend_policy(test_client: TestClient) ->
                 "scope_label": "private.per=user",
                 "scope_source": "private.per",
                 "dashboard_credentials_supported": False,
-                "team_eligibility_reason": "Private agents cannot participate in teams yet.",
+                "team_eligibility_reason": "Private agents cannot be configured as team members.",
                 "private_knowledge_base_id": None,
                 "private_workspace_enabled": True,
                 "private_agent_knowledge_enabled": False,
@@ -3560,7 +4078,7 @@ def test_protected_raw_read_keeps_auth_time_snapshot_after_runtime_swap(tmp_path
         )
 
     assert response.status_code == 200
-    assert response.json() == {"source": source_a}
+    assert response.json() == {"source": source_a, "uses_includes": False}
 
 
 def test_protected_raw_write_rejects_runtime_swap_after_auth(tmp_path: Path) -> None:
@@ -4450,6 +4968,7 @@ def _set_platform_auth(
     *,
     valid_tokens: set[str],
     platform_login_url: str = "https://platform.example.com/login",
+    public_url: str | None = None,
     account_id: str | None = None,
     user_id: str = "user-123",
 ) -> None:
@@ -4480,6 +4999,7 @@ def _set_platform_auth(
             supabase_anon_key="anon-key",
             account_id=account_id,
             mindroom_api_key=None,
+            public_url=public_url,
         ),
         supabase_auth=_FakeClient(),
     )
@@ -4518,6 +5038,64 @@ def test_platform_frontend_redirects_to_login_when_cookie_missing(
     response = test_client.get("/agents", follow_redirects=False)
     assert response.status_code == 307
     assert response.headers["location"].startswith("https://app.example.com/auth/login?redirect_to=")
+
+
+def test_platform_frontend_redirect_uses_public_url_for_redirect_to(
+    test_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Hosted redirects must use the public dashboard URL, not ingress-internal HTTP."""
+    frontend_dir = tmp_path / "frontend-dist"
+    frontend_dir.mkdir()
+    (frontend_dir / "index.html").write_text("<html><body>MindRoom Dashboard</body></html>")
+
+    monkeypatch.setattr(frontend, "ensure_frontend_dist_dir", lambda _runtime_paths: frontend_dir)
+    _set_platform_auth(
+        valid_tokens=set(),
+        platform_login_url="https://app.example.com/auth/login",
+        public_url="https://tenant42.example.test",
+    )
+
+    response = test_client.get("/agents", follow_redirects=False)
+    assert response.status_code == 307
+
+    location = response.headers["location"]
+    parsed = urlparse(location)
+    redirect_to = parse_qs(parsed.query)["redirect_to"][0]
+    assert redirect_to == "https://tenant42.example.test/agents"
+
+
+def test_platform_runtime_disables_generated_api_docs(tmp_path: Path) -> None:
+    """Hosted instances should not expose generated FastAPI docs on public hosts."""
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        process_env={
+            "MINDROOM_PLATFORM_LOGIN_URL": "https://app.example.com/auth/login",
+        },
+    )
+
+    assert main._api_docs_kwargs(runtime_paths) == {
+        "docs_url": None,
+        "redoc_url": None,
+        "openapi_url": None,
+    }
+
+
+def test_platform_runtime_restricts_cors_origins(tmp_path: Path) -> None:
+    """Hosted instances should not allow credentialed CORS from every origin."""
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        process_env={
+            "MINDROOM_PUBLIC_URL": "https://tenant42.example.test",
+            "MINDROOM_PLATFORM_LOGIN_URL": "https://app.example.test/auth/login",
+        },
+    )
+
+    assert main._api_cors_origins(runtime_paths) == [
+        "https://tenant42.example.test",
+        "https://app.example.test",
+    ]
 
 
 def test_platform_frontend_redirects_to_login_when_cookie_invalid(
@@ -4649,6 +5227,7 @@ def test_health_repeated_restarts_do_not_extend_first_sync_grace(test_client: Te
     assert response.json() == {
         "status": "unhealthy",
         "last_sync_time": None,
+        "e2ee": e2ee_stats().as_dict(),
         "stale_sync_entities": ["router"],
     }
     assert _matrix_sync_state["router"].loop_started_time == first_start_time

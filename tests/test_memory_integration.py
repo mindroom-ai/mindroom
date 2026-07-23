@@ -14,7 +14,9 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
+from mindroom.hooks import render_transient_context
 from mindroom.memory import MemoryPromptParts
+from tests.conftest import make_turn_context
 from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
@@ -48,7 +50,7 @@ class TestMemoryIntegration:
                 *_args: object,
                 **_kwargs: dict[str, object],
             ) -> MemoryPromptParts:
-                return MemoryPromptParts(turn_context=f"[Enhanced memory] {prompt}")
+                return MemoryPromptParts(transient_turn_context=f"[Enhanced memory] {prompt}")
 
             mock_build.side_effect = build_side_effect
             yield mock_build
@@ -81,12 +83,10 @@ class TestMemoryIntegration:
             patch("mindroom.ai.create_agent", return_value=MagicMock()),
         ):
             response = await ai_response(
-                agent_name="general",
+                make_turn_context("general", session_id="test_session", room_id="!test:room"),
                 prompt="What is 2+2?",
-                session_id="test_session",
                 runtime_paths=runtime_paths,
                 config=config,
-                room_id="!test:room",
             )
 
             # Verify response
@@ -100,15 +100,18 @@ class TestMemoryIntegration:
                 config,
                 runtime_paths,
                 execution_identity=None,
-                timing_scope="test_session",
             )
 
             # Verify enhanced prompt was used
             mock_agent_run.assert_called_once()
             call_args = mock_agent_run.call_args[0]
-            assert len(call_args[1]) == 1
+            assert len(call_args[1]) == 2
             assert call_args[1][0].role == "user"
-            assert call_args[1][0].content == "What is 2+2?\n\n[Enhanced memory] What is 2+2?"
+            assert call_args[1][0].content == render_transient_context(("[Enhanced memory] What is 2+2?",))
+            assert call_args[1][0].add_to_agent_memory is False
+            assert call_args[1][1].role == "user"
+            assert call_args[1][1].content == "What is 2+2?"
+            assert call_args[1][1].add_to_agent_memory is True
 
             # Note: Memory storage now happens at the bot level, not in ai_response
 
@@ -130,12 +133,10 @@ class TestMemoryIntegration:
             patch("mindroom.ai.create_agent", return_value=MagicMock()),
         ):
             await ai_response(
-                agent_name="general",
+                make_turn_context("general", session_id="test_session", room_id=None),
                 prompt="Hello",
-                session_id="test_session",
                 runtime_paths=runtime_paths,
                 config=config,
-                room_id=None,
             )
 
             # Verify memory enhancement remains agent-scoped
@@ -146,7 +147,6 @@ class TestMemoryIntegration:
                 config,
                 runtime_paths,
                 execution_identity=None,
-                timing_scope="test_session",
             )
 
             # Note: Memory storage now happens at the bot level, not in ai_response
@@ -160,12 +160,11 @@ class TestMemoryIntegration:
 
         with (
             patch("mindroom.ai.create_agent", side_effect=Exception("Model error")),
-            patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory),
+            patch("mindroom.memory._backend.create_memory_instance", return_value=mock_memory),
         ):
             response = await ai_response(
-                agent_name="general",
+                make_turn_context("general", session_id="session"),
                 prompt="Test",
-                session_id="session",
                 runtime_paths=self._runtime_paths(tmp_path),
                 config=config,
             )
@@ -183,16 +182,15 @@ class TestMemoryIntegration:
         mock_memory.search.return_value = {"results": []}
 
         with (
-            patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory),
+            patch("mindroom.memory._backend.create_memory_instance", return_value=mock_memory),
             patch("mindroom.ai_runtime.cached_agent_run", AsyncMock(return_value=MagicMock(content="First response"))),
             patch("mindroom.model_loading.get_model_instance", return_value=Ollama(id="test-model")),
             patch("mindroom.ai.create_agent", return_value=MagicMock()),
         ):
             # First interaction
             await ai_response(
-                agent_name="general",
+                make_turn_context("general", session_id="session1"),
                 prompt="Remember this: A=1",
-                session_id="session1",
                 runtime_paths=self._runtime_paths(tmp_path),
                 config=config,
             )
@@ -207,9 +205,8 @@ class TestMemoryIntegration:
             mock_memory.search.return_value = {"results": [{"memory": "Remember this: A=1", "id": "1"}]}
 
             await ai_response(
-                agent_name="general",
+                make_turn_context("general", session_id="session2"),
                 prompt="What is A?",
-                session_id="session2",
                 runtime_paths=self._runtime_paths(tmp_path),
                 config=config,
             )

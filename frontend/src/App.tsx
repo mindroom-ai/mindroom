@@ -29,6 +29,7 @@ import { CultureList } from "@/components/CultureList/CultureList";
 import { CultureEditor } from "@/components/CultureEditor/CultureEditor";
 import { RoomList } from "@/components/RoomList/RoomList";
 import { RoomEditor } from "@/components/RoomEditor/RoomEditor";
+import { RoomAdmins } from "@/components/RoomAdmins/RoomAdmins";
 import { ModelConfig } from "@/components/ModelConfig/ModelConfig";
 import { MemoryConfig } from "@/components/MemoryConfig/MemoryConfig";
 import { Knowledge } from "@/components/Knowledge/Knowledge";
@@ -165,6 +166,7 @@ function AppContent() {
     saveRecoveryConfigSource,
     syncStatus,
     diagnostics,
+    configUsesIncludes,
     isLoading,
     selectedAgentId,
     selectedTeamId,
@@ -510,6 +512,15 @@ function AppContent() {
           </div>
         </header>
 
+        {configUsesIncludes && (
+          <div className="border-b border-amber-500/20 bg-amber-500/10 px-3 py-2 text-sm text-amber-900 dark:text-amber-100 sm:px-6">
+            This configuration is composed from multiple files via{" "}
+            <code>!include</code>. The backend rejects structured saves from the
+            dashboard editors — make changes by editing the include source files
+            directly.
+          </div>
+        )}
+
         {visibleGlobalDiagnostics.map((diagnostic, index) => (
           <div
             key={`${diagnostic.kind}-${diagnostic.message}-${index}`}
@@ -708,20 +719,23 @@ function AppContent() {
               value="rooms"
               className="flex-1 p-2 sm:p-4 overflow-hidden min-h-0"
             >
-              <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 sm:gap-4 h-full">
-                <div
-                  className={`col-span-1 lg:col-span-4 h-full overflow-hidden ${
-                    selectedRoomId ? "hidden lg:block" : "block"
-                  }`}
-                >
-                  <RoomList />
-                </div>
-                <div
-                  className={`col-span-1 lg:col-span-8 h-full overflow-hidden ${
-                    selectedRoomId ? "block" : "hidden lg:block"
-                  }`}
-                >
-                  <RoomEditor />
+              <div className="flex h-full flex-col gap-3 sm:gap-4">
+                <RoomAdmins />
+                <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 sm:gap-4 flex-1 min-h-0">
+                  <div
+                    className={`col-span-1 lg:col-span-4 h-full overflow-hidden ${
+                      selectedRoomId ? "hidden lg:block" : "block"
+                    }`}
+                  >
+                    <RoomList />
+                  </div>
+                  <div
+                    className={`col-span-1 lg:col-span-8 h-full overflow-hidden ${
+                      selectedRoomId ? "block" : "hidden lg:block"
+                    }`}
+                  >
+                    <RoomEditor />
+                  </div>
                 </div>
               </div>
             </TabsContent>

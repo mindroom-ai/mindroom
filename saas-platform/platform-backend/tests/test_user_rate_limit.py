@@ -46,7 +46,6 @@ class _DummyTable:
             "status": data.get("status", "active"),
             "max_agents": data.get("max_agents", 1),
             "max_messages_per_day": data.get("max_messages_per_day", 100),
-            "max_storage_gb": data.get("max_storage_gb", 1),
             "created_at": data.get("created_at"),
         }
         self._insert_data = [inserted_data]

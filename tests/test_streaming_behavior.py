@@ -32,10 +32,15 @@ from mindroom.constants import (
     STREAM_STATUS_STREAMING,
     STREAM_VISIBLE_BODY_KEY,
 )
-from mindroom.delivery_gateway import DeliveryGateway, DeliveryGatewayDeps, FinalizeStreamedResponseRequest
+from mindroom.delivery_gateway import (
+    DeliveryGateway,
+    DeliveryGatewayDeps,
+    FinalizeStreamedResponseRequest,
+    ResponseIdentity,
+)
+from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.history.interrupted_replay import (
-    _INTERRUPTED_RESPONSE_MARKER,
     InterruptedReplaySnapshot,
     _render_interrupted_replay_content,
 )
@@ -56,19 +61,17 @@ from mindroom.streaming import (
     ReplacementStreamingResponse,
     StreamingDeliveryError,
     StreamingResponse,
+    _DeliveryRequest,
+    _drive_stream_delivery,
+    _flush_phase_boundary_if_needed,
+    _shutdown_stream_delivery,
+    _StreamDeliveryShutdownTimeoutError,
     build_restart_interrupted_body,
     clean_partial_reply_text,
     is_interrupted_partial_reply,
     send_streaming_response,
 )
-from mindroom.streaming_delivery import (
-    DeliveryRequest,
-    StreamDeliveryShutdownTimeoutError,
-    _flush_phase_boundary_if_needed,
-    drive_stream_delivery,
-    shutdown_stream_delivery,
-)
-from mindroom.streaming_delivery import _consume_streaming_chunks as _consume_streaming_chunks_impl
+from mindroom.streaming import _consume_streaming_chunks as _consume_streaming_chunks_impl
 from mindroom.timing import DispatchPipelineTiming
 from mindroom.tool_system.runtime_context import WorkerProgressEvent, get_worker_progress_pump
 from mindroom.workers.models import WorkerReadyProgress
@@ -78,8 +81,10 @@ from tests.conftest import (
     drain_coalescing,
     install_runtime_cache_support,
     make_matrix_client_mock,
+    message_origin,
     patch_response_runner_module,
     replace_response_runner_deps,
+    request_envelope,
     runtime_paths_for,
     test_runtime_paths,
 )
@@ -89,6 +94,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator
 
 IN_PROGRESS_MARKER = " ⋯"
+_INTERRUPTION_SUMMARY = "(turn stopped before completion)"
 
 
 async def _aiter(*events: object) -> AsyncIterator[object]:
@@ -103,11 +109,7 @@ def _render_cleaned_interrupted_replay(body: str) -> str:
             partial_text=clean_partial_reply_text(body),
             completed_tools=(),
             interrupted_tools=(),
-            seen_event_ids=(),
-            source_event_id=None,
-            source_event_ids=(),
-            source_event_prompts=(),
-            response_event_id=None,
+            run_metadata={},
         ),
     )
 
@@ -166,17 +168,17 @@ async def _consume_streaming_chunks_for_test(
     response_stream: AsyncIterator[object],
     streaming: StreamingResponse,
 ) -> None:
-    delivery_queue: asyncio.Queue[DeliveryRequest | None] = asyncio.Queue()
-    delivery_task = asyncio.create_task(drive_stream_delivery(client, streaming, delivery_queue))
+    delivery_queue: asyncio.Queue[_DeliveryRequest | None] = asyncio.Queue()
+    delivery_task = asyncio.create_task(_drive_stream_delivery(client, streaming, delivery_queue))
     try:
         await _consume_streaming_chunks_impl(response_stream, streaming, delivery_queue)
-        shutdown_error = await shutdown_stream_delivery(delivery_queue, delivery_task)
+        shutdown_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
         delivery_task = None
         if shutdown_error is not None:
             raise shutdown_error
     finally:
         if delivery_task is not None:
-            cleanup_error = await shutdown_stream_delivery(delivery_queue, delivery_task)
+            cleanup_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
             if cleanup_error is not None:
                 raise cleanup_error
 
@@ -492,9 +494,7 @@ class TestStreamingBehavior:
         # Create streaming response
         config = self.config
         streaming = StreamingResponse(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=config,
             runtime_paths=runtime_paths_for(config),
         )
@@ -545,9 +545,7 @@ class TestStreamingBehavior:
         """Oversized in-progress edits should not burst sidecar uploads while final still sends."""
         mock_client = _make_matrix_client_mock()
         streaming = StreamingResponse(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id="$thread_123",
+            target=MessageTarget.resolve("!test:localhost", "$thread_123", "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
         )
@@ -562,10 +560,7 @@ class TestStreamingBehavior:
             _event_id: str,
             new_content: dict[str, object],
             _new_text: str,
-            *,
-            config: Config,
         ) -> DeliveredMatrixEvent:
-            assert isinstance(config, Config)
             return DeliveredMatrixEvent(event_id="$edit", content_sent=dict(new_content))
 
         with (
@@ -604,9 +599,7 @@ class TestStreamingBehavior:
         """Skipping an oversized in-progress edit should still unblock capture waiters."""
         mock_client = _make_matrix_client_mock()
         streaming = StreamingResponse(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id="$thread_123",
+            target=MessageTarget.resolve("!test:localhost", "$thread_123", "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
         )
@@ -631,9 +624,7 @@ class TestStreamingBehavior:
     def test_streaming_update_interval_starts_fast_then_slows(self) -> None:
         """Test progressive throttling: frequent edits first, slower later."""
         streaming = StreamingResponse(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
             update_interval=5.0,
@@ -655,9 +646,7 @@ class TestStreamingBehavior:
     def test_streaming_char_threshold_starts_small_then_grows(self) -> None:
         """Character trigger should ramp from a low threshold to steady-state."""
         streaming = StreamingResponse(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
             update_char_threshold=180,
@@ -679,9 +668,7 @@ class TestStreamingBehavior:
     def test_replacement_streaming_tracks_chars_since_last_update(self) -> None:
         """Replacement streams should still advance char-trigger counters."""
         streaming = ReplacementStreamingResponse(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
         )
@@ -695,9 +682,7 @@ class TestStreamingBehavior:
     def test_stream_started_at_not_set_before_first_send(self) -> None:
         """Test that stream_started_at is None until first _throttled_send."""
         streaming = StreamingResponse(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
         )
@@ -730,19 +715,19 @@ class TestStreamingBehavior:
     def test_clean_partial_reply_text_normalises_user_stop_label_to_interrupted_marker(self) -> None:
         """User-stop labels should collapse to the canonical interrupted replay marker."""
         assert _render_cleaned_interrupted_replay(f"Draft answer\n\n{_CANCELLED_RESPONSE_NOTE}") == (
-            f"Draft answer\n\n{_INTERRUPTED_RESPONSE_MARKER}"
+            f"Draft answer\n\n{_INTERRUPTION_SUMMARY}"
         )
 
     def test_clean_partial_reply_text_normalises_restart_label_to_interrupted_marker(self) -> None:
         """Restart labels should collapse to the canonical interrupted replay marker."""
         assert _render_cleaned_interrupted_replay(build_restart_interrupted_body("Draft answer")) == (
-            f"Draft answer\n\n{_INTERRUPTED_RESPONSE_MARKER}"
+            f"Draft answer\n\n{_INTERRUPTION_SUMMARY}"
         )
 
     def test_clean_partial_reply_text_normalises_new_interrupted_label_to_interrupted_marker(self) -> None:
         """Generic interruption labels should collapse to the canonical interrupted replay marker."""
         assert _render_cleaned_interrupted_replay(f"Draft answer\n\n{_INTERRUPTED_RESPONSE_NOTE}") == (
-            f"Draft answer\n\n{_INTERRUPTED_RESPONSE_MARKER}"
+            f"Draft answer\n\n{_INTERRUPTION_SUMMARY}"
         )
 
     @pytest.mark.asyncio
@@ -755,9 +740,7 @@ class TestStreamingBehavior:
         mock_client.room_send.return_value = mock_response
 
         streaming = StreamingResponse(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
             update_interval=5.0,
@@ -781,9 +764,7 @@ class TestStreamingBehavior:
         mock_client.room_send.return_value = mock_response
 
         streaming = StreamingResponse(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
             update_interval=10.0,
@@ -810,9 +791,7 @@ class TestStreamingBehavior:
             mock_client.room_send.return_value = mock_response
 
             streaming = StreamingResponse(
-                room_id="!test:localhost",
-                reply_to_event_id="$original_123",
-                thread_id=None,
+                target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
                 config=self.config,
                 runtime_paths=runtime_paths_for(self.config),
                 update_interval=10.0,
@@ -858,9 +837,7 @@ class TestStreamingBehavior:
         mock_client.room_send.return_value = mock_response
 
         streaming = StreamingResponse(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
             update_interval=10.0,
@@ -912,9 +889,7 @@ class TestStreamingBehavior:
         mock_client.room_send.side_effect = slow_room_send
 
         streaming = StreamingResponse(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
             update_interval=10.0,
@@ -931,8 +906,8 @@ class TestStreamingBehavior:
             second_yield_started.set()
             yield ToolCallStartedEvent(tool=ToolExecution(tool_name="save_file", tool_args={"file": "a.py"}))
 
-        delivery_queue: asyncio.Queue[DeliveryRequest | None] = asyncio.Queue()
-        delivery_task = asyncio.create_task(drive_stream_delivery(mock_client, streaming, delivery_queue))
+        delivery_queue: asyncio.Queue[_DeliveryRequest | None] = asyncio.Queue()
+        delivery_task = asyncio.create_task(_drive_stream_delivery(mock_client, streaming, delivery_queue))
         consume_task = asyncio.create_task(_consume_streaming_chunks_impl(response_stream(), streaming, delivery_queue))
 
         await first_send_started.wait()
@@ -942,7 +917,7 @@ class TestStreamingBehavior:
 
         allow_send_to_finish.set()
         await consume_task
-        shutdown_error = await shutdown_stream_delivery(delivery_queue, delivery_task)
+        shutdown_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
         assert shutdown_error is None
 
     @pytest.mark.asyncio
@@ -964,9 +939,7 @@ class TestStreamingBehavior:
         mock_client.room_send.side_effect = slow_room_send
 
         streaming = StreamingResponse(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
             update_interval=10.0,
@@ -983,8 +956,8 @@ class TestStreamingBehavior:
             yield ToolCallStartedEvent(tool=ToolExecution(tool_name="search_web", tool_args={"q": "mindroom"}))
             yield ToolCallStartedEvent(tool=ToolExecution(tool_name="save_file", tool_args={"file": "a.py"}))
 
-        delivery_queue: asyncio.Queue[DeliveryRequest | None] = asyncio.Queue()
-        delivery_task = asyncio.create_task(drive_stream_delivery(mock_client, streaming, delivery_queue))
+        delivery_queue: asyncio.Queue[_DeliveryRequest | None] = asyncio.Queue()
+        delivery_task = asyncio.create_task(_drive_stream_delivery(mock_client, streaming, delivery_queue))
         consume_task = asyncio.create_task(_consume_streaming_chunks_impl(response_stream(), streaming, delivery_queue))
 
         await first_send_started.wait()
@@ -992,7 +965,7 @@ class TestStreamingBehavior:
         await asyncio.sleep(0)
         allow_send_to_finish.set()
         await consume_task
-        shutdown_error = await shutdown_stream_delivery(delivery_queue, delivery_task)
+        shutdown_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
         assert shutdown_error is None
 
         assert mock_client.room_send.call_count == 1
@@ -1022,9 +995,7 @@ class TestStreamingBehavior:
         mock_client.room_send.side_effect = slow_room_send
 
         streaming = StreamingResponse(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
             update_interval=10.0,
@@ -1045,15 +1016,15 @@ class TestStreamingBehavior:
             await first_send_started.wait()
             yield ToolCallStartedEvent(tool=ToolExecution(tool_name="save_file", tool_args={"file": "a.py"}))
 
-        delivery_queue: asyncio.Queue[DeliveryRequest | None] = asyncio.Queue()
-        delivery_task = asyncio.create_task(drive_stream_delivery(mock_client, streaming, delivery_queue))
+        delivery_queue: asyncio.Queue[_DeliveryRequest | None] = asyncio.Queue()
+        delivery_task = asyncio.create_task(_drive_stream_delivery(mock_client, streaming, delivery_queue))
         consume_task = asyncio.create_task(_consume_streaming_chunks_impl(response_stream(), streaming, delivery_queue))
 
         await first_send_started.wait()
         await asyncio.sleep(0)
         allow_first_send_to_finish.set()
         await consume_task
-        shutdown_error = await shutdown_stream_delivery(delivery_queue, delivery_task)
+        shutdown_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
         assert shutdown_error is None
 
         assert mock_client.room_send.call_count == 2
@@ -1082,9 +1053,7 @@ class TestStreamingBehavior:
         mock_client.room_send.side_effect = room_send
 
         streaming = StreamingResponse(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
             update_interval=10.0,
@@ -1103,19 +1072,13 @@ class TestStreamingBehavior:
         async def first_response_stream() -> AsyncIterator[object]:
             yield ToolCallStartedEvent(tool=ToolExecution(tool_name="search_web", tool_args={"q": "mindroom"}))
 
-        with (
-            patch("mindroom.streaming.time.time", side_effect=[100.0, 100.0]),
-            patch("mindroom.streaming_delivery.time.time", return_value=100.0),
-        ):
+        with patch("mindroom.streaming.time.time", return_value=100.0):
             await _consume_streaming_chunks_for_test(mock_client, first_response_stream(), streaming)
 
         async def second_response_stream() -> AsyncIterator[object]:
             yield ToolCallStartedEvent(tool=ToolExecution(tool_name="save_file", tool_args={"file": "a.py"}))
 
-        with (
-            patch("mindroom.streaming.time.time", side_effect=[100.1, 100.1]),
-            patch("mindroom.streaming_delivery.time.time", return_value=100.1),
-        ):
+        with patch("mindroom.streaming.time.time", return_value=100.1):
             await _consume_streaming_chunks_for_test(mock_client, second_response_stream(), streaming)
 
         assert mock_client.room_send.call_count == 2
@@ -1136,9 +1099,7 @@ class TestStreamingBehavior:
         mock_client.room_send.return_value = mock_response
 
         streaming = StreamingResponse(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
             update_interval=10.0,
@@ -1205,9 +1166,7 @@ class TestStreamingBehavior:
         mock_client.room_send.side_effect = slow_room_send
 
         streaming = streaming_cls(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
             update_interval=10.0,
@@ -1228,8 +1187,8 @@ class TestStreamingBehavior:
             second_yield_started.set()
             yield "after"
 
-        delivery_queue: asyncio.Queue[DeliveryRequest | None] = asyncio.Queue()
-        delivery_task = asyncio.create_task(drive_stream_delivery(mock_client, streaming, delivery_queue))
+        delivery_queue: asyncio.Queue[_DeliveryRequest | None] = asyncio.Queue()
+        delivery_task = asyncio.create_task(_drive_stream_delivery(mock_client, streaming, delivery_queue))
         consume_task = asyncio.create_task(_consume_streaming_chunks_impl(response_stream(), streaming, delivery_queue))
 
         await first_send_started.wait()
@@ -1239,7 +1198,7 @@ class TestStreamingBehavior:
 
         allow_send_to_finish.set()
         await consume_task
-        shutdown_error = await shutdown_stream_delivery(delivery_queue, delivery_task)
+        shutdown_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
         assert shutdown_error is None
 
     @pytest.mark.asyncio
@@ -1252,9 +1211,7 @@ class TestStreamingBehavior:
         mock_client.room_send.return_value = mock_response
 
         streaming = StreamingResponse(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
             update_interval=10.0,
@@ -1274,21 +1231,18 @@ class TestStreamingBehavior:
         streaming.accumulated_text = "\n\n🔧 `search_web` [1] ⏳\nx\n\n🔧 `save_file` [2] ⏳\n"
         streaming.chars_since_last_update = len(streaming.accumulated_text)
 
-        delivery_queue: asyncio.Queue[DeliveryRequest | None] = asyncio.Queue()
-        delivery_task = asyncio.create_task(drive_stream_delivery(mock_client, streaming, delivery_queue))
+        delivery_queue: asyncio.Queue[_DeliveryRequest | None] = asyncio.Queue()
+        delivery_task = asyncio.create_task(_drive_stream_delivery(mock_client, streaming, delivery_queue))
         delivery_queue.put_nowait(
-            DeliveryRequest(
+            _DeliveryRequest(
                 boundary_refresh=True,
                 prior_delta_at=100.0,
                 boundary_refresh_prior_delta_at=100.0,
             ),
         )
 
-        with (
-            patch("mindroom.streaming.time.time", return_value=100.0),
-            patch("mindroom.streaming_delivery.time.time", return_value=100.0),
-        ):
-            shutdown_error = await shutdown_stream_delivery(delivery_queue, delivery_task)
+        with patch("mindroom.streaming.time.time", return_value=100.0):
+            shutdown_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
 
         assert shutdown_error is None
         assert mock_client.room_send.call_count == 1
@@ -1316,9 +1270,7 @@ class TestStreamingBehavior:
         mock_client.room_send.side_effect = room_send
 
         streaming = StreamingResponse(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
             update_interval=10.0,
@@ -1356,9 +1308,7 @@ class TestStreamingBehavior:
         """A long gap before the next text chunk should trigger an idle flush on that text event."""
         mock_client = _make_matrix_client_mock()
         streaming = StreamingResponse(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
             update_interval=10.0,
@@ -1396,9 +1346,7 @@ class TestStreamingBehavior:
         mock_client.room_send.return_value = mock_response
 
         streaming = StreamingResponse(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
             update_interval=10.0,
@@ -1414,15 +1362,12 @@ class TestStreamingBehavior:
         with patch("mindroom.streaming.time.time", return_value=100.0):
             streaming._update("\n")
 
-        delivery_queue: asyncio.Queue[DeliveryRequest | None] = asyncio.Queue()
-        delivery_task = asyncio.create_task(drive_stream_delivery(mock_client, streaming, delivery_queue))
+        delivery_queue: asyncio.Queue[_DeliveryRequest | None] = asyncio.Queue()
+        delivery_task = asyncio.create_task(_drive_stream_delivery(mock_client, streaming, delivery_queue))
         await _flush_phase_boundary_if_needed(streaming, delivery_queue)
 
-        with (
-            patch("mindroom.streaming.time.time", return_value=101.0),
-            patch("mindroom.streaming_delivery.time.time", return_value=101.0),
-        ):
-            shutdown_error = await shutdown_stream_delivery(delivery_queue, delivery_task)
+        with patch("mindroom.streaming.time.time", return_value=101.0):
+            shutdown_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
 
         assert shutdown_error is None
         assert mock_client.room_send.call_count == 0
@@ -1458,9 +1403,7 @@ class TestStreamingBehavior:
         mock_client.room_send.side_effect = room_send
 
         streaming = StreamingResponse(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
             update_char_threshold=1,
@@ -1475,8 +1418,8 @@ class TestStreamingBehavior:
             second_yield_started.set()
             yield "B"
 
-        delivery_queue: asyncio.Queue[DeliveryRequest | None] = asyncio.Queue()
-        delivery_task = asyncio.create_task(drive_stream_delivery(mock_client, streaming, delivery_queue))
+        delivery_queue: asyncio.Queue[_DeliveryRequest | None] = asyncio.Queue()
+        delivery_task = asyncio.create_task(_drive_stream_delivery(mock_client, streaming, delivery_queue))
         streaming_times = iter([100.0, 100.0, 100.1, 100.2, 100.2, 100.2])
 
         with patch("mindroom.streaming.time.time", side_effect=lambda: next(streaming_times, 100.2)):
@@ -1489,7 +1432,7 @@ class TestStreamingBehavior:
             assert second_yield_started.is_set()
             allow_first_send_to_finish.set()
             await consume_task
-            shutdown_error = await shutdown_stream_delivery(delivery_queue, delivery_task)
+            shutdown_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
 
         assert shutdown_error is None
         assert mock_client.room_send.call_count == 2
@@ -1509,27 +1452,19 @@ class TestStreamingBehavior:
         mock_response.event_id = "$boundary_refresh_start"
         mock_client.room_send.return_value = mock_response
         streaming = StreamingResponse(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
         )
         streaming.accumulated_text = "hello"
         streaming.chars_since_last_update = len(streaming.accumulated_text)
 
-        delivery_queue: asyncio.Queue[DeliveryRequest | None] = asyncio.Queue()
-        delivery_task = asyncio.create_task(drive_stream_delivery(mock_client, streaming, delivery_queue))
-        delivery_queue.put_nowait(DeliveryRequest(boundary_refresh=True))
+        delivery_queue: asyncio.Queue[_DeliveryRequest | None] = asyncio.Queue()
+        delivery_task = asyncio.create_task(_drive_stream_delivery(mock_client, streaming, delivery_queue))
+        delivery_queue.put_nowait(_DeliveryRequest(boundary_refresh=True))
 
-        with (
-            patch("mindroom.streaming.time.time", return_value=101.0),
-            patch(
-                "mindroom.streaming_delivery.time.time",
-                return_value=101.0,
-            ),
-        ):
-            shutdown_error = await shutdown_stream_delivery(delivery_queue, delivery_task)
+        with patch("mindroom.streaming.time.time", return_value=101.0):
+            shutdown_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
 
         assert shutdown_error is None
         assert streaming.stream_started_at == 101.0
@@ -1539,9 +1474,7 @@ class TestStreamingBehavior:
         """An idle flush should reset the idle baseline before the next small chunk arrives."""
         mock_client = _make_matrix_client_mock()
         streaming = StreamingResponse(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
             update_interval=10.0,
@@ -1575,9 +1508,7 @@ class TestStreamingBehavior:
         """Small inter-delta gaps should not inflate edit cadence via the idle trigger."""
         mock_client = _make_matrix_client_mock()
         streaming = StreamingResponse(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
             update_interval=0.5,
@@ -1605,9 +1536,7 @@ class TestStreamingBehavior:
         """A single buffered chunk should flush once the idle gap exceeds max_idle."""
         mock_client = _make_matrix_client_mock()
         streaming = StreamingResponse(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
             update_interval=10.0,
@@ -1643,9 +1572,7 @@ class TestStreamingBehavior:
         send_results = iter((False, True))
 
         streaming = StreamingResponse(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
             update_interval=10.0,
@@ -1686,9 +1613,7 @@ class TestStreamingBehavior:
         """Idle-triggered edits should still respect the anti-spam minimum interval floor."""
         mock_client = _make_matrix_client_mock()
         streaming = StreamingResponse(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
             update_interval=10.0,
@@ -1722,9 +1647,7 @@ class TestStreamingBehavior:
         mock_client.room_send.return_value = mock_response
 
         streaming = StreamingResponse(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
             update_interval=5.0,
@@ -1749,9 +1672,7 @@ class TestStreamingBehavior:
         mock_client = _make_matrix_client_mock()
 
         streaming = StreamingResponse(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
             update_interval=5.0,
@@ -1790,9 +1711,7 @@ class TestStreamingBehavior:
         mock_client.room_send.return_value = mock_response
 
         streaming = StreamingResponse(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
             update_interval=5.0,
@@ -1821,9 +1740,7 @@ class TestStreamingBehavior:
         mock_client.room_send.return_value = mock_response
 
         streaming = StreamingResponse(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
             update_interval=5.0,
@@ -1851,9 +1768,7 @@ class TestStreamingBehavior:
         mock_client.room_send.return_value = mock_response
 
         streaming = StreamingResponse(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
             update_interval=5.0,
@@ -1896,9 +1811,7 @@ class TestStreamingBehavior:
         mock_client = _make_matrix_client_mock()
 
         streaming = StreamingResponse(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
         )
@@ -1930,10 +1843,7 @@ class TestStreamingBehavior:
             _event_id: str,
             new_content: dict[str, object],
             new_text: str,
-            *,
-            config: Config,
         ) -> DeliveredMatrixEvent:
-            assert isinstance(config, Config)
             edited_contents.append((new_content, new_text))
             return DeliveredMatrixEvent(event_id="$edit", content_sent=dict(new_content))
 
@@ -1945,15 +1855,12 @@ class TestStreamingBehavior:
         with patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=record_edit)):
             outcome = await send_streaming_response(
                 client=mock_client,
-                room_id="!test:localhost",
-                reply_to_event_id="$original_123",
-                thread_id=None,
+                target=MessageTarget.resolve("!test:localhost", None, "$original_123", room_mode=True),
                 config=self.config,
                 runtime_paths=runtime_paths_for(self.config),
                 response_stream=empty_stream(),
                 existing_event_id="$thinking_123",
                 adopt_existing_placeholder=True,
-                room_mode=True,
             )
 
         event_id = outcome.last_physical_stream_event_id
@@ -1981,10 +1888,7 @@ class TestStreamingBehavior:
             _client: object,
             _room_id: str,
             content: dict[str, object],
-            *,
-            config: Config,
         ) -> DeliveredMatrixEvent:
-            assert isinstance(config, Config)
             return DeliveredMatrixEvent(event_id="$stream-send", content_sent=dict(content))
 
         async def record_edit(
@@ -1993,10 +1897,7 @@ class TestStreamingBehavior:
             event_id: str,
             new_content: dict[str, object],
             new_text: str,
-            *,
-            config: Config,
         ) -> DeliveredMatrixEvent:
-            assert isinstance(config, Config)
             return DeliveredMatrixEvent(
                 event_id="$stream-edit",
                 content_sent=build_edit_event_content(
@@ -2012,9 +1913,7 @@ class TestStreamingBehavior:
         ):
             outcome = await send_streaming_response(
                 client=mock_client,
-                room_id="!test:localhost",
-                reply_to_event_id="$original_123",
-                thread_id="$thread_root",
+                target=MessageTarget.resolve("!test:localhost", "$thread_root", "$original_123"),
                 config=self.config,
                 runtime_paths=runtime_paths_for(self.config),
                 response_stream=one_chunk_stream(),
@@ -2080,30 +1979,28 @@ class TestStreamingBehavior:
         )
         envelope = MessageEnvelope(
             source_event_id="$reply_plain:localhost",
-            room_id="!test:localhost",
             target=MessageTarget.resolve(
                 room_id="!test:localhost",
                 thread_id=None,
                 reply_to_event_id="$reply_plain:localhost",
                 thread_start_root_event_id="$thread_root:localhost",
             ),
-            requester_id="@user:localhost",
-            sender_id="@user:localhost",
             body="Continue",
             attachment_ids=(),
             mentioned_agents=(),
             agent_name="helper",
-            source_kind="message",
+            origin=message_origin(
+                sender_id="@user:localhost",
+                requester_id="@user:localhost",
+                source_kind=MESSAGE_SOURCE_KIND,
+            ),
         )
 
         async def record_send(
             _client: object,
             _room_id: str,
             content: dict[str, object],
-            *,
-            config: Config,
         ) -> DeliveredMatrixEvent:
-            assert isinstance(config, Config)
             sent_contents.append(content)
             return DeliveredMatrixEvent(event_id="$stream_1", content_sent=dict(content))
 
@@ -2113,10 +2010,7 @@ class TestStreamingBehavior:
             _event_id: str,
             _new_content: dict[str, object],
             _new_text: str,
-            *,
-            config: Config,
         ) -> DeliveredMatrixEvent:
-            assert isinstance(config, Config)
             return DeliveredMatrixEvent(event_id="$stream_1", content_sent={})
 
         with (
@@ -2127,11 +2021,8 @@ class TestStreamingBehavior:
                 typing_indicator=noop_typing,
             ),
         ):
-            delivery = await bot._response_runner.process_and_respond_streaming(
+            generation = await bot._response_runner.process_and_respond_streaming(
                 ResponseRequest(
-                    room_id="!test:localhost",
-                    reply_to_event_id="$reply_plain:localhost",
-                    thread_id=None,
                     thread_history=[],
                     prompt="Continue",
                     user_id="@user:localhost",
@@ -2140,7 +2031,7 @@ class TestStreamingBehavior:
                 ),
             )
 
-        assert delivery.event_id == "$stream_1"
+        assert generation.delivery.event_id == "$stream_1"
         assert sent_contents
         first_content = sent_contents[0]
         assert first_content["m.relates_to"]["rel_type"] == "m.thread"
@@ -2161,21 +2052,15 @@ class TestStreamingBehavior:
             _client: object,
             room_id: str,
             content: dict[str, object],
-            *,
-            config: Config,
         ) -> DeliveredMatrixEvent:
-            assert isinstance(config, Config)
             sent_messages.append((room_id, content))
             return DeliveredMatrixEvent(event_id="$stream_1", content_sent=dict(content))
 
         with patch("mindroom.streaming.send_message_result", new=record_send):
             streaming = StreamingResponse(
-                room_id="!stale:localhost",
-                reply_to_event_id="$stale_reply:localhost",
-                thread_id="$stale_thread:localhost",
+                target=target,
                 config=self.config,
                 runtime_paths=runtime_paths_for(self.config),
-                target=target,
             )
 
             assert streaming.room_id == "!canonical:localhost"
@@ -2210,17 +2095,17 @@ class TestStreamingBehavior:
         bot.client.room_send.return_value = mock_send_response
         pipeline_timing = DispatchPipelineTiming(source_event_id="$request", room_id="!test:localhost")
 
-        async def fake_stream_agent_response(*_args: object, **kwargs: object) -> AsyncIterator[str]:
-            system_enrichment_items = kwargs["system_enrichment_items"]
-            assert len(system_enrichment_items) == 1
+        async def fake_stream_agent_response(*args: object, **_kwargs: object) -> AsyncIterator[str]:
+            transient_enrichment_items = args[0].transient_enrichment_items
+            assert len(transient_enrichment_items) == 1
             assert (
                 f"Knowledge base `{base_id}` is initializing and unavailable for semantic search this turn."
-                in system_enrichment_items[0].text
+                in transient_enrichment_items[0].text
             )
             yield "stream chunk"
 
         async def fake_send_streaming_response(*args: object, **_kwargs: object) -> StreamTransportOutcome:
-            response_stream = args[6]
+            response_stream = args[4]
             chunks = [str(chunk) async for chunk in response_stream]
             body = "".join(chunks)
             return StreamTransportOutcome(
@@ -2244,12 +2129,15 @@ class TestStreamingBehavior:
             event_id = await asyncio.wait_for(
                 bot._response_runner.generate_response(
                     ResponseRequest(
-                        room_id="!test:localhost",
-                        reply_to_event_id="$event",
-                        thread_id=None,
                         thread_history=[],
                         prompt="Please check the docs",
                         user_id="@user:localhost",
+                        response_envelope=request_envelope(
+                            room_id="!test:localhost",
+                            reply_to_event_id="$event",
+                            prompt="Please check the docs",
+                            user_id="@user:localhost",
+                        ),
                         pipeline_timing=pipeline_timing,
                     ),
                 ),
@@ -2274,10 +2162,10 @@ class TestStreamingBehavior:
             base_id="fresh_turn_docs",
         )
 
-        async def fake_ai_response(*_args: object, **kwargs: object) -> str:
-            system_enrichment_items = kwargs["system_enrichment_items"]
-            assert len(system_enrichment_items) == 1
-            assert "Knowledge base `fresh_turn_docs` is initializing" in system_enrichment_items[0].text
+        async def fake_ai_response(*args: object, **_kwargs: object) -> str:
+            transient_enrichment_items = args[0].transient_enrichment_items
+            assert len(transient_enrichment_items) == 1
+            assert "Knowledge base `fresh_turn_docs` is initializing" in transient_enrichment_items[0].text
             return "handled"
 
         with (
@@ -2306,18 +2194,21 @@ class TestStreamingBehavior:
                 typing_indicator=_noop_typing_indicator,
             ),
         ):
-            delivery = await bot._response_runner.process_and_respond(
+            generation = await bot._response_runner.process_and_respond(
                 ResponseRequest(
-                    room_id="!test:localhost",
-                    reply_to_event_id="$event",
-                    thread_id=None,
                     thread_history=[],
                     prompt="Please check the docs",
                     user_id="@user:localhost",
+                    response_envelope=request_envelope(
+                        room_id="!test:localhost",
+                        reply_to_event_id="$event",
+                        prompt="Please check the docs",
+                        user_id="@user:localhost",
+                    ),
                 ),
             )
 
-        assert delivery.event_id == "$response"
+        assert generation.delivery.event_id == "$response"
         assert sync_git_source.await_count == 0
         assert reindex_all.await_count == 0
 
@@ -2338,9 +2229,7 @@ class TestStreamingBehavior:
         # Create streaming response
         config = self.config
         streaming = StreamingResponse(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=config,
             runtime_paths=runtime_paths_for(config),
         )
@@ -2376,10 +2265,7 @@ class TestStreamingBehavior:
             _event_id: str,
             _new_content: dict[str, object],
             new_text: str,
-            *,
-            config: Config,
         ) -> DeliveredMatrixEvent:
-            assert isinstance(config, Config)
             edited_texts.append(new_text)
             return DeliveredMatrixEvent(event_id="$edit", content_sent={})
 
@@ -2393,14 +2279,11 @@ class TestStreamingBehavior:
         ):
             await send_streaming_response(
                 client=mock_client,
-                room_id="!test:localhost",
-                reply_to_event_id="$original_123",
-                thread_id=None,
+                target=MessageTarget.resolve("!test:localhost", None, "$original_123", room_mode=True),
                 config=self.config,
                 runtime_paths=runtime_paths_for(self.config),
                 response_stream=cancelling_stream(),
                 existing_event_id="$thinking_123",
-                room_mode=True,
             )
 
         assert len(edited_texts) == 2
@@ -2421,10 +2304,7 @@ class TestStreamingBehavior:
             _event_id: str,
             _new_content: dict[str, object],
             new_text: str,
-            *,
-            config: Config,
         ) -> DeliveredMatrixEvent:
-            assert isinstance(config, Config)
             edited_texts.append(new_text)
             return DeliveredMatrixEvent(event_id="$edit", content_sent={})
 
@@ -2438,14 +2318,11 @@ class TestStreamingBehavior:
         ):
             await send_streaming_response(
                 client=mock_client,
-                room_id="!test:localhost",
-                reply_to_event_id="$original_123",
-                thread_id=None,
+                target=MessageTarget.resolve("!test:localhost", None, "$original_123", room_mode=True),
                 config=self.config,
                 runtime_paths=runtime_paths_for(self.config),
                 response_stream=interrupted_stream(),
                 existing_event_id="$thinking_123",
-                room_mode=True,
             )
 
         assert len(edited_texts) == 2
@@ -2470,14 +2347,11 @@ class TestStreamingBehavior:
         ):
             await send_streaming_response(
                 client=mock_client,
-                room_id="!test:localhost",
-                reply_to_event_id="$original_123",
-                thread_id=None,
+                target=MessageTarget.resolve("!test:localhost", None, "$original_123", room_mode=True),
                 config=self.config,
                 runtime_paths=runtime_paths_for(self.config),
                 response_stream=cancelling_stream(),
                 existing_event_id="$thinking_123",
-                room_mode=True,
                 visible_event_id_callback=visible_event_ids.append,
             )
 
@@ -2506,13 +2380,10 @@ class TestStreamingBehavior:
         ):
             await send_streaming_response(
                 client=mock_client,
-                room_id="!test:localhost",
-                reply_to_event_id="$original_123",
-                thread_id=None,
+                target=MessageTarget.resolve("!test:localhost", None, "$original_123", room_mode=True),
                 config=self.config,
                 runtime_paths=runtime_paths_for(self.config),
                 response_stream=cancelling_stream(),
-                room_mode=True,
                 visible_event_id_callback=visible_event_ids.append,
             )
 
@@ -2530,10 +2401,7 @@ class TestStreamingBehavior:
             _event_id: str,
             new_content: dict[str, object],
             new_text: str,
-            *,
-            config: Config,
         ) -> DeliveredMatrixEvent:
-            assert isinstance(config, Config)
             edited_messages.append((new_content, new_text))
             return DeliveredMatrixEvent(event_id="$edit", content_sent=dict(new_content))
 
@@ -2547,14 +2415,11 @@ class TestStreamingBehavior:
         ):
             await send_streaming_response(
                 client=mock_client,
-                room_id="!test:localhost",
-                reply_to_event_id="$original_123",
-                thread_id=None,
+                target=MessageTarget.resolve("!test:localhost", None, "$original_123", room_mode=True),
                 config=self.config,
                 runtime_paths=runtime_paths_for(self.config),
                 response_stream=cancelling_stream(),
                 existing_event_id="$thinking_123",
-                room_mode=True,
             )
 
         assert len(edited_messages) == 2
@@ -2586,10 +2451,8 @@ class TestStreamingBehavior:
                 new_content: dict[str, object],
                 _new_text: str,
                 *,
-                config: Config,
                 _edited_messages: list[dict[str, object]] = edited_messages,
             ) -> DeliveredMatrixEvent:
-                assert isinstance(config, Config)
                 _edited_messages.append(new_content)
                 return DeliveredMatrixEvent(event_id="$edit", content_sent=new_content)
 
@@ -2608,14 +2471,11 @@ class TestStreamingBehavior:
             ):
                 await send_streaming_response(
                     client=mock_client,
-                    room_id="!test:localhost",
-                    reply_to_event_id="$original_123",
-                    thread_id=None,
+                    target=MessageTarget.resolve("!test:localhost", None, "$original_123", room_mode=True),
                     config=self.config,
                     runtime_paths=runtime_paths_for(self.config),
                     response_stream=cancelling_stream(),
                     existing_event_id="$thinking_123",
-                    room_mode=True,
                 )
 
             observed_statuses[label] = str(edited_messages[-1][STREAM_STATUS_KEY])
@@ -2635,10 +2495,7 @@ class TestStreamingBehavior:
             _event_id: str,
             _new_content: dict[str, object],
             new_text: str,
-            *,
-            config: Config,
         ) -> DeliveredMatrixEvent:
-            assert isinstance(config, Config)
             edited_texts.append(new_text)
             return DeliveredMatrixEvent(event_id="$edit", content_sent={})
 
@@ -2653,14 +2510,11 @@ class TestStreamingBehavior:
         ):
             await send_streaming_response(
                 client=mock_client,
-                room_id="!test:localhost",
-                reply_to_event_id="$original_123",
-                thread_id=None,
+                target=MessageTarget.resolve("!test:localhost", None, "$original_123", room_mode=True),
                 config=self.config,
                 runtime_paths=runtime_paths_for(self.config),
                 response_stream=failing_stream(),
                 existing_event_id="$thinking_123",
-                room_mode=True,
             )
 
         assert isinstance(exc_info.value.error, RuntimeError)
@@ -2686,10 +2540,7 @@ class TestStreamingBehavior:
             _event_id: str,
             _new_content: dict[str, object],
             new_text: str,
-            *,
-            config: Config,
         ) -> DeliveredMatrixEvent:
-            assert isinstance(config, Config)
             edited_texts.append(new_text)
             return DeliveredMatrixEvent(event_id="$edit", content_sent={})
 
@@ -2705,14 +2556,11 @@ class TestStreamingBehavior:
         ):
             await send_streaming_response(
                 client=mock_client,
-                room_id="!test:localhost",
-                reply_to_event_id="$original_123",
-                thread_id=None,
+                target=MessageTarget.resolve("!test:localhost", None, "$original_123", room_mode=True),
                 config=self.config,
                 runtime_paths=runtime_paths_for(self.config),
                 response_stream=failing_stream(),
                 existing_event_id="$thinking_123",
-                room_mode=True,
             )
 
         assert isinstance(exc_info.value.error, RuntimeError)
@@ -2736,10 +2584,7 @@ class TestStreamingBehavior:
             _event_id: str,
             _new_content: dict[str, object],
             new_text: str,
-            *,
-            config: Config,
         ) -> DeliveredMatrixEvent:
-            assert isinstance(config, Config)
             if "Preparing isolated worker" in new_text:
                 msg = "edit blew up"
                 raise RuntimeError(msg)
@@ -2769,15 +2614,12 @@ class TestStreamingBehavior:
         ):
             await send_streaming_response(
                 client=mock_client,
-                room_id="!test:localhost",
-                reply_to_event_id="$original_123",
-                thread_id=None,
+                target=MessageTarget.resolve("!test:localhost", None, "$original_123", room_mode=True),
                 config=self.config,
                 runtime_paths=runtime_paths_for(self.config),
                 response_stream=stream(),
                 existing_event_id="$thinking_123",
                 adopt_existing_placeholder=True,
-                room_mode=True,
             )
 
         assert isinstance(exc_info.value.error, RuntimeError)
@@ -2797,10 +2639,7 @@ class TestStreamingBehavior:
             _event_id: str,
             new_content: dict[str, object],
             new_text: str,
-            *,
-            config: Config,
         ) -> DeliveredMatrixEvent:
-            assert isinstance(config, Config)
             terminal_statuses.append(str(new_content[STREAM_STATUS_KEY]))
             edited_texts.append(new_text)
             if "Preparing isolated worker" in new_text:
@@ -2832,15 +2671,12 @@ class TestStreamingBehavior:
         ):
             await send_streaming_response(
                 client=mock_client,
-                room_id="!test:localhost",
-                reply_to_event_id="$original_123",
-                thread_id=None,
+                target=MessageTarget.resolve("!test:localhost", None, "$original_123", room_mode=True),
                 config=self.config,
                 runtime_paths=runtime_paths_for(self.config),
                 response_stream=stream(),
                 existing_event_id="$thinking_123",
                 adopt_existing_placeholder=True,
-                room_mode=True,
             )
 
         assert terminal_statuses[-1] == STREAM_STATUS_ERROR
@@ -2860,10 +2696,7 @@ class TestStreamingBehavior:
             _event_id: str,
             _new_content: dict[str, object],
             new_text: str,
-            *,
-            config: Config,
         ) -> DeliveredMatrixEvent:
-            assert isinstance(config, Config)
             edited_texts.append(new_text)
             if "Preparing isolated worker" in new_text:
                 msg = "edit blew up"
@@ -2896,15 +2729,12 @@ class TestStreamingBehavior:
         ):
             await send_streaming_response(
                 client=mock_client,
-                room_id="!test:localhost",
-                reply_to_event_id="$original_123",
-                thread_id=None,
+                target=MessageTarget.resolve("!test:localhost", None, "$original_123", room_mode=True),
                 config=self.config,
                 runtime_paths=runtime_paths_for(self.config),
                 response_stream=stream(),
                 existing_event_id="$thinking_123",
                 adopt_existing_placeholder=True,
-                room_mode=True,
             )
 
         assert later_chunk_reached is False
@@ -2919,10 +2749,7 @@ class TestStreamingBehavior:
             _client: object,
             _room_id: str,
             content: dict[str, object],
-            *,
-            config: Config,
         ) -> DeliveredMatrixEvent:
-            assert isinstance(config, Config)
             return DeliveredMatrixEvent(event_id="$event123", content_sent=dict(content))
 
         async def lingering_drain(
@@ -2946,13 +2773,11 @@ class TestStreamingBehavior:
                 "mindroom.streaming.edit_message_result",
                 new=AsyncMock(return_value=DeliveredMatrixEvent(event_id="$edit123", content_sent={})),
             ),
-            patch("mindroom.streaming.drain_worker_progress_events", new=lingering_drain),
+            patch("mindroom.streaming._drain_worker_progress_events", new=lingering_drain),
         ):
             outcome = await send_streaming_response(
                 client=mock_client,
-                room_id="!test:localhost",
-                reply_to_event_id="$original_123",
-                thread_id=None,
+                target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
                 config=self.config,
                 runtime_paths=runtime_paths_for(self.config),
                 response_stream=stream(),
@@ -2985,10 +2810,7 @@ class TestStreamingBehavior:
             _event_id: str,
             _new_content: dict[str, object],
             new_text: str,
-            *,
-            config: Config,
         ) -> DeliveredMatrixEvent:
-            assert isinstance(config, Config)
             edited_texts.append(new_text)
             if "Preparing isolated worker" in new_text and "hello" not in new_text and "world" not in new_text:
                 warmup_edit_started.set()
@@ -3022,15 +2844,12 @@ class TestStreamingBehavior:
         ):
             await send_streaming_response(
                 client=mock_client,
-                room_id="!test:localhost",
-                reply_to_event_id="$original_123",
-                thread_id=None,
+                target=MessageTarget.resolve("!test:localhost", None, "$original_123", room_mode=True),
                 config=self.config,
                 runtime_paths=runtime_paths_for(self.config),
                 response_stream=stream(),
                 existing_event_id="$thinking_123",
                 adopt_existing_placeholder=True,
-                room_mode=True,
                 streaming_cls=ImmediateStreamingResponse,
             )
 
@@ -3061,10 +2880,7 @@ class TestStreamingBehavior:
             _event_id: str,
             _new_content: dict[str, object],
             _new_text: str,
-            *,
-            config: Config,
         ) -> DeliveredMatrixEvent:
-            assert isinstance(config, Config)
             await stream_finished.wait()
             if _new_content.get("io.mindroom.stream_status") == "streaming":
                 msg = "late edit blew up"
@@ -3081,15 +2897,12 @@ class TestStreamingBehavior:
         ):
             await send_streaming_response(
                 client=mock_client,
-                room_id="!test:localhost",
-                reply_to_event_id="$original_123",
-                thread_id=None,
+                target=MessageTarget.resolve("!test:localhost", None, "$original_123", room_mode=True),
                 config=self.config,
                 runtime_paths=runtime_paths_for(self.config),
                 response_stream=stream(),
                 existing_event_id="$thinking_123",
                 adopt_existing_placeholder=True,
-                room_mode=True,
                 streaming_cls=ImmediateStreamingResponse,
             )
 
@@ -3120,10 +2933,7 @@ class TestStreamingBehavior:
             _event_id: str,
             _new_content: dict[str, object],
             new_text: str,
-            *,
-            config: Config,
         ) -> DeliveredMatrixEvent | None:
-            assert isinstance(config, Config)
             terminal_texts.append(new_text)
             return edit_results.pop(0)
 
@@ -3136,15 +2946,12 @@ class TestStreamingBehavior:
         ):
             await send_streaming_response(
                 client=mock_client,
-                room_id="!test:localhost",
-                reply_to_event_id="$original_123",
-                thread_id=None,
+                target=MessageTarget.resolve("!test:localhost", None, "$original_123", room_mode=True),
                 config=self.config,
                 runtime_paths=runtime_paths_for(self.config),
                 response_stream=stream(),
                 existing_event_id="$thinking_123",
                 adopt_existing_placeholder=True,
-                room_mode=True,
                 streaming_cls=ImmediateStreamingResponse,
             )
 
@@ -3163,14 +2970,10 @@ class TestStreamingBehavior:
             room_mode=True,
         )
         streaming = StreamingResponse(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
+            target=target,
             config=self.config,
             runtime_paths=runtime_paths,
-            target=target,
             latest_thread_event_id=None,
-            room_mode=True,
             show_tool_calls=True,
             extra_content=None,
         )
@@ -3194,10 +2997,7 @@ class TestStreamingBehavior:
             _event_id: str,
             _new_content: dict[str, object],
             _new_text: str,
-            *,
-            config: Config,
         ) -> DeliveredMatrixEvent:
-            assert isinstance(config, Config)
             streaming.accumulated_text = "hello"
             return DeliveredMatrixEvent(event_id="$edit", content_sent={})
 
@@ -3224,7 +3024,7 @@ class TestStreamingBehavior:
         delivery_task = asyncio.create_task(stuck_delivery())
         await task_started.wait()
 
-        shutdown_error = await shutdown_stream_delivery(
+        shutdown_error = await _shutdown_stream_delivery(
             delivery_queue,
             delivery_task,
             drain_timeout_seconds=0.01,
@@ -3254,7 +3054,7 @@ class TestStreamingBehavior:
         await task_started.wait()
         asyncio.get_running_loop().call_later(0.05, release_task.set)
 
-        shutdown_error = await shutdown_stream_delivery(
+        shutdown_error = await _shutdown_stream_delivery(
             delivery_queue,
             delivery_task,
             drain_timeout_seconds=0.1,
@@ -3269,9 +3069,7 @@ class TestStreamingBehavior:
         """Merged requests must retain the oldest unsent delta so idle flush still fires."""
         mock_client = _make_matrix_client_mock()
         streaming = StreamingResponse(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
             update_interval=10.0,
@@ -3290,13 +3088,13 @@ class TestStreamingBehavior:
         streaming.chars_since_last_update = len(streaming.accumulated_text)
         streaming._send_content = AsyncMock(return_value=True)
 
-        delivery_queue: asyncio.Queue[DeliveryRequest | None] = asyncio.Queue()
-        delivery_task = asyncio.create_task(drive_stream_delivery(mock_client, streaming, delivery_queue))
-        delivery_queue.put_nowait(DeliveryRequest(prior_delta_at=100.0))
-        delivery_queue.put_nowait(DeliveryRequest(prior_delta_at=105.0))
+        delivery_queue: asyncio.Queue[_DeliveryRequest | None] = asyncio.Queue()
+        delivery_task = asyncio.create_task(_drive_stream_delivery(mock_client, streaming, delivery_queue))
+        delivery_queue.put_nowait(_DeliveryRequest(prior_delta_at=100.0))
+        delivery_queue.put_nowait(_DeliveryRequest(prior_delta_at=105.0))
 
         with patch("mindroom.streaming.time.time", return_value=105.02):
-            shutdown_error = await shutdown_stream_delivery(delivery_queue, delivery_task)
+            shutdown_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
 
         assert shutdown_error is None
         assert streaming._send_content.await_count == 1
@@ -3312,9 +3110,7 @@ class TestStreamingBehavior:
         mock_client.room_send.return_value = mock_response
 
         streaming = ReplacementStreamingResponse(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
         )
@@ -3322,15 +3118,15 @@ class TestStreamingBehavior:
         streaming.chars_since_last_update = len(streaming.accumulated_text)
 
         capture_completion = asyncio.get_running_loop().create_future()
-        delivery_queue: asyncio.Queue[DeliveryRequest | None] = asyncio.Queue()
-        delivery_task = asyncio.create_task(drive_stream_delivery(mock_client, streaming, delivery_queue))
-        delivery_queue.put_nowait(DeliveryRequest(force_refresh=True))
+        delivery_queue: asyncio.Queue[_DeliveryRequest | None] = asyncio.Queue()
+        delivery_task = asyncio.create_task(_drive_stream_delivery(mock_client, streaming, delivery_queue))
+        delivery_queue.put_nowait(_DeliveryRequest(force_refresh=True))
         delivery_queue.put_nowait(
-            DeliveryRequest(boundary_refresh=True, capture_completion=capture_completion),
+            _DeliveryRequest(boundary_refresh=True, capture_completion=capture_completion),
         )
 
         with patch("mindroom.streaming.time.time", return_value=101.0):
-            shutdown_error = await shutdown_stream_delivery(delivery_queue, delivery_task)
+            shutdown_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
 
         assert shutdown_error is None
         assert capture_completion.done()
@@ -3382,11 +3178,11 @@ class TestStreamingBehavior:
                 delivery_task.cancel()
                 with suppress(asyncio.CancelledError):
                     await delivery_task
-            return StreamDeliveryShutdownTimeoutError("Timed out shutting down stream delivery controller")
+            return _StreamDeliveryShutdownTimeoutError("Timed out shutting down stream delivery controller")
 
         with (
-            patch("mindroom.streaming.consume_stream_with_progress_supervision", new=fail_stream_supervision),
-            patch("mindroom.streaming.shutdown_stream_delivery", new=timeout_shutdown),
+            patch("mindroom.streaming._consume_stream_with_progress_supervision", new=fail_stream_supervision),
+            patch("mindroom.streaming._shutdown_stream_delivery", new=timeout_shutdown),
             pytest.raises(
                 StreamingDeliveryError,
                 match="Timed out shutting down stream delivery controller",
@@ -3394,9 +3190,7 @@ class TestStreamingBehavior:
         ):
             await send_streaming_response(
                 client=mock_client,
-                room_id="!test:localhost",
-                reply_to_event_id="$original_123",
-                thread_id=None,
+                target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
                 config=self.config,
                 runtime_paths=runtime_paths_for(self.config),
                 response_stream=_aiter(),
@@ -3431,10 +3225,7 @@ class TestStreamingBehavior:
             _event_id: str,
             _new_content: dict[str, object],
             new_text: str,
-            *,
-            config: Config,
         ) -> DeliveredMatrixEvent:
-            assert isinstance(config, Config)
             nonlocal in_flight, max_in_flight
             in_flight += 1
             max_in_flight = max(max_in_flight, in_flight)
@@ -3468,15 +3259,12 @@ class TestStreamingBehavior:
         with patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=record_edit)):
             await send_streaming_response(
                 client=mock_client,
-                room_id="!test:localhost",
-                reply_to_event_id="$original_123",
-                thread_id=None,
+                target=MessageTarget.resolve("!test:localhost", None, "$original_123", room_mode=True),
                 config=self.config,
                 runtime_paths=runtime_paths_for(self.config),
                 response_stream=stream(),
                 existing_event_id="$thinking_123",
                 adopt_existing_placeholder=True,
-                room_mode=True,
                 streaming_cls=ImmediateStreamingResponse,
             )
 
@@ -3492,9 +3280,7 @@ class TestStreamingBehavior:
         mock_client.room_send.return_value = mock_response
 
         streaming = StreamingResponse(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
         )
@@ -3586,9 +3372,7 @@ class TestStreamingBehavior:
 
         outcome = await send_streaming_response(
             client=mock_client,
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
             response_stream=stream(),
@@ -3608,9 +3392,7 @@ class TestStreamingBehavior:
         mock_client.room_send.return_value = mock_response
 
         streaming = StreamingResponse(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
             show_tool_calls=False,
@@ -3646,9 +3428,7 @@ class TestStreamingBehavior:
         mock_client.room_send.return_value = mock_response
 
         streaming = StreamingResponse(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
         )
@@ -3686,9 +3466,7 @@ class TestStreamingBehavior:
         mock_client.room_send.return_value = mock_response
 
         streaming = StreamingResponse(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
         )
@@ -3734,10 +3512,7 @@ class TestStreamingBehavior:
             _event_id: str,
             _new_content: dict[str, object],
             new_text: str,
-            *,
-            config: Config,
         ) -> DeliveredMatrixEvent:
-            assert isinstance(config, Config)
             captured_texts.append(new_text)
             return DeliveredMatrixEvent(event_id="$edit", content_sent={})
 
@@ -3797,28 +3572,22 @@ class TestStreamingBehavior:
                 with pytest.raises(StreamingDeliveryError):
                     await send_streaming_response(
                         client=mock_client,
-                        room_id="!test:localhost",
-                        reply_to_event_id="$original_123",
-                        thread_id=None,
+                        target=MessageTarget.resolve("!test:localhost", None, "$original_123", room_mode=True),
                         config=self.config,
                         runtime_paths=runtime_paths_for(self.config),
                         response_stream=stream(),
                         existing_event_id="$thinking_123",
                         adopt_existing_placeholder=True,
-                        room_mode=True,
                     )
             else:
                 await send_streaming_response(
                     client=mock_client,
-                    room_id="!test:localhost",
-                    reply_to_event_id="$original_123",
-                    thread_id=None,
+                    target=MessageTarget.resolve("!test:localhost", None, "$original_123", room_mode=True),
                     config=self.config,
                     runtime_paths=runtime_paths_for(self.config),
                     response_stream=stream(),
                     existing_event_id="$thinking_123",
                     adopt_existing_placeholder=True,
-                    room_mode=True,
                 )
 
         assert late_event_thread is not None
@@ -3845,10 +3614,7 @@ class TestStreamingBehavior:
             _event_id: str,
             _new_content: dict[str, object],
             new_text: str,
-            *,
-            config: Config,
         ) -> DeliveredMatrixEvent:
-            assert isinstance(config, Config)
             captured_texts.append(new_text)
             return DeliveredMatrixEvent(event_id="$edit", content_sent={})
 
@@ -3908,15 +3674,12 @@ class TestStreamingBehavior:
         ):
             await send_streaming_response(
                 client=mock_client,
-                room_id="!test:localhost",
-                reply_to_event_id="$original_123",
-                thread_id=None,
+                target=MessageTarget.resolve("!test:localhost", None, "$original_123", room_mode=True),
                 config=self.config,
                 runtime_paths=runtime_paths_for(self.config),
                 response_stream=failing_stream(),
                 existing_event_id="$thinking_123",
                 adopt_existing_placeholder=True,
-                room_mode=True,
             )
 
         assert late_event_thread is not None
@@ -3939,9 +3702,7 @@ class TestStreamingBehavior:
         mock_client.room_send.return_value = mock_response
 
         streaming = StreamingResponse(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
         )
@@ -3979,9 +3740,7 @@ class TestStreamingBehavior:
         mock_client.room_send.return_value = mock_response
 
         streaming = StreamingResponse(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
         )
@@ -4014,9 +3773,7 @@ class TestStreamingBehavior:
         mock_client.room_send.return_value = mock_response
 
         streaming = StreamingResponse(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
         )
@@ -4062,9 +3819,7 @@ class TestStreamingBehavior:
         mock_client.room_send.return_value = mock_response
 
         streaming = StreamingResponse(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
         )
@@ -4096,15 +3851,16 @@ class TestStreamingBehavior:
         """A clean streamed success may replace the final visible text exactly once."""
         response_envelope = MessageEnvelope(
             source_event_id="$event123",
-            room_id="!test:localhost",
             target=MessageTarget.resolve("!test:localhost", None, "$event123"),
-            requester_id="@user:localhost",
-            sender_id="@user:localhost",
             body="hello",
             attachment_ids=(),
             mentioned_agents=(),
             agent_name="helper",
-            source_kind="message",
+            origin=message_origin(
+                sender_id="@user:localhost",
+                requester_id="@user:localhost",
+                source_kind=MESSAGE_SOURCE_KIND,
+            ),
         )
         response_hooks = SimpleNamespace(
             apply_before_response=AsyncMock(
@@ -4155,9 +3911,11 @@ class TestStreamingBehavior:
                     visible_body_state="visible_body",
                 ),
                 initial_delivery_kind="sent",
-                response_kind="ai",
-                response_envelope=response_envelope,
-                correlation_id="corr-final-transform-success",
+                identity=ResponseIdentity(
+                    response_kind="ai",
+                    response_envelope=response_envelope,
+                    correlation_id="corr-final-transform-success",
+                ),
                 tool_trace=None,
                 extra_content=None,
             ),
@@ -4178,10 +3936,12 @@ class TestStreamingBehavior:
                 response_hooks=response_hooks,
                 logger=MagicMock(),
             ),
-            response_kind="ai",
+            identity=ResponseIdentity(
+                response_kind="ai",
+                response_envelope=response_envelope,
+                correlation_id="corr-final-transform-success",
+            ),
             pipeline_timing=None,
-            response_envelope=response_envelope,
-            correlation_id="corr-final-transform-success",
         )
         finalized = await lifecycle.finalize(
             outcome,
@@ -4202,15 +3962,16 @@ class TestStreamingBehavior:
         """Canonical final content must not rewrite the visible stream unless the hook changes it."""
         response_envelope = MessageEnvelope(
             source_event_id="$event123",
-            room_id="!test:localhost",
             target=MessageTarget.resolve("!test:localhost", None, "$event123"),
-            requester_id="@user:localhost",
-            sender_id="@user:localhost",
             body="hello",
             attachment_ids=(),
             mentioned_agents=(),
             agent_name="helper",
-            source_kind="message",
+            origin=message_origin(
+                sender_id="@user:localhost",
+                requester_id="@user:localhost",
+                source_kind=MESSAGE_SOURCE_KIND,
+            ),
         )
         response_hooks = SimpleNamespace(
             apply_before_response=AsyncMock(),
@@ -4251,9 +4012,11 @@ class TestStreamingBehavior:
                     canonical_final_body_candidate="canonical final",
                 ),
                 initial_delivery_kind="sent",
-                response_kind="ai",
-                response_envelope=response_envelope,
-                correlation_id="corr-final-transform-noop",
+                identity=ResponseIdentity(
+                    response_kind="ai",
+                    response_envelope=response_envelope,
+                    correlation_id="corr-final-transform-noop",
+                ),
                 tool_trace=None,
                 extra_content=None,
             ),
@@ -4268,10 +4031,12 @@ class TestStreamingBehavior:
                 response_hooks=response_hooks,
                 logger=MagicMock(),
             ),
-            response_kind="ai",
+            identity=ResponseIdentity(
+                response_kind="ai",
+                response_envelope=response_envelope,
+                correlation_id="corr-final-transform-noop",
+            ),
             pipeline_timing=None,
-            response_envelope=response_envelope,
-            correlation_id="corr-final-transform-noop",
         )
         finalized = await lifecycle.finalize(
             outcome,
@@ -4292,15 +4057,16 @@ class TestStreamingBehavior:
         """No-op final transforms should keep interactive metadata when the canonical block matches visible text."""
         response_envelope = MessageEnvelope(
             source_event_id="$event123",
-            room_id="!test:localhost",
             target=MessageTarget.resolve("!test:localhost", None, "$event123"),
-            requester_id="@user:localhost",
-            sender_id="@user:localhost",
             body="hello",
             attachment_ids=(),
             mentioned_agents=(),
             agent_name="helper",
-            source_kind="message",
+            origin=message_origin(
+                sender_id="@user:localhost",
+                requester_id="@user:localhost",
+                source_kind=MESSAGE_SOURCE_KIND,
+            ),
         )
         raw_interactive = (
             "```interactive\n"
@@ -4351,9 +4117,11 @@ class TestStreamingBehavior:
                     canonical_final_body_candidate=raw_interactive,
                 ),
                 initial_delivery_kind="sent",
-                response_kind="ai",
-                response_envelope=response_envelope,
-                correlation_id="corr-final-transform-interactive",
+                identity=ResponseIdentity(
+                    response_kind="ai",
+                    response_envelope=response_envelope,
+                    correlation_id="corr-final-transform-interactive",
+                ),
                 tool_trace=None,
                 extra_content=None,
             ),
@@ -4378,9 +4146,7 @@ class TestStreamingBehavior:
         mock_client.room_send.return_value = mock_response
 
         streaming = StreamingResponse(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
             show_tool_calls=True,
@@ -4420,9 +4186,7 @@ class TestStreamingBehavior:
         mock_client.room_send.return_value = mock_response
 
         streaming = StreamingResponse(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
             show_tool_calls=False,
@@ -4478,9 +4242,7 @@ class TestStreamingBehavior:
         mock_client.room_send.side_effect = room_send
 
         streaming = StreamingResponse(
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
             show_tool_calls=False,
@@ -4506,9 +4268,9 @@ class TestStreamingBehavior:
             ),
         )
 
-        delivery_queue: asyncio.Queue[DeliveryRequest | None] = asyncio.Queue()
-        delivery_task = asyncio.create_task(drive_stream_delivery(mock_client, streaming, delivery_queue))
-        delivery_queue.put_nowait(DeliveryRequest(force_refresh=True, allow_empty_progress=True))
+        delivery_queue: asyncio.Queue[_DeliveryRequest | None] = asyncio.Queue()
+        delivery_task = asyncio.create_task(_drive_stream_delivery(mock_client, streaming, delivery_queue))
+        delivery_queue.put_nowait(_DeliveryRequest(force_refresh=True, allow_empty_progress=True))
 
         async def response_stream() -> AsyncIterator[object]:
             await first_send_started.wait()
@@ -4524,7 +4286,7 @@ class TestStreamingBehavior:
             await asyncio.sleep(0)
             allow_first_send_to_finish.set()
             await consume_task
-            shutdown_error = await shutdown_stream_delivery(delivery_queue, delivery_task)
+            shutdown_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
 
         assert shutdown_error is None
         assert mock_client.room_send.call_count == 2
@@ -4581,14 +4343,11 @@ class TestStreamingConfig:
 
         outcome = await send_streaming_response(
             client=mock_client,
-            room_id="!r:localhost",
-            reply_to_event_id="$orig",
-            thread_id=None,
+            target=MessageTarget.resolve("!r:localhost", None, "$orig", room_mode=True),
             config=config,
             runtime_paths=runtime_paths,
             response_stream=empty_stream(),
             streaming_cls=CapturingStreamingResponse,
-            room_mode=True,
         )
 
         event_id = outcome.last_physical_stream_event_id

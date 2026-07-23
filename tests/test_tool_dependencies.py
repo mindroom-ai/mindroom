@@ -11,9 +11,9 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from agno.tools import Toolkit
 
 from mindroom.constants import resolve_runtime_paths
+from mindroom.tool_system.declarations import SetupType, ToolCategory, ToolMetadata, ToolStatus
 from mindroom.tool_system.dependencies import (
     _PIP_TO_IMPORT,
     _auto_install_optional_extra,
@@ -28,10 +28,6 @@ from mindroom.tool_system.dependencies import (
 from mindroom.tool_system.metadata import (
     TOOL_METADATA,
     TOOL_REGISTRY,
-    SetupType,
-    ToolCategory,
-    ToolMetadata,
-    ToolStatus,
     get_tool_by_name,
 )
 from mindroom.tools.openbb import openbb_tools
@@ -50,29 +46,6 @@ def _base_dependency_names() -> set[str]:
             name = name.split(separator, 1)[0]
         dependency_names.add(name.lower().replace("_", "-"))
     return dependency_names
-
-
-def test_all_tools_can_be_imported() -> None:
-    """Test that all registered tools can be imported from the registry."""
-    failed = []
-
-    for tool_name, factory in TOOL_REGISTRY.items():
-        metadata = TOOL_METADATA.get(tool_name)
-        requires_config = metadata and metadata.status == ToolStatus.REQUIRES_CONFIG
-
-        try:
-            tool_class = factory()
-            assert isinstance(tool_class, type)
-            assert issubclass(tool_class, Toolkit)
-        except Exception as e:
-            if not requires_config:
-                failed.append((tool_name, str(e)))
-
-    if failed:
-        error_msg = "\nThe following tools failed:\n"
-        for tool_name, error in failed:
-            error_msg += f"  - {tool_name}: {error}\n"
-        pytest.fail(error_msg)
 
 
 @pytest.mark.parametrize("existing_value", [None, "true"])

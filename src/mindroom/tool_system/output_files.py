@@ -296,7 +296,11 @@ def _validate_raw_output_path(raw_path: object) -> tuple[str, Path] | str:
     elif "\x00" in raw_path:
         error = "mindroom_output_path must not contain NUL bytes."
     elif _path_has_environment_expansion(raw_path):
-        error = "mindroom_output_path must not use environment or user expansion."
+        error = (
+            f"mindroom_output_path must be a plain path relative to the agent workspace, but got {raw_path!r}. "
+            "Paths must not start with `~` or contain `$` or `%`; pass a workspace-relative path like 'output.json', "
+            "then copy the file elsewhere with shell tools if needed."
+        )
     else:
         relative_path = Path(raw_path)
         if relative_path.is_absolute():
@@ -731,7 +735,7 @@ def _wrap_entrypoint(
     return wrapper
 
 
-def _wrap_function_for_output_files(function: Function, policy: ToolOutputFilePolicy) -> Function:
+def wrap_function_for_output_files(function: Function, policy: ToolOutputFilePolicy) -> Function:
     """Expose and handle ``mindroom_output_path`` on one Agno function."""
     if function.entrypoint is None or getattr(function.entrypoint, _WRAPPED_ATTR, False):
         return function
@@ -765,5 +769,5 @@ def wrap_toolkit_for_output_files(
         if id(function) in seen_functions:
             continue
         seen_functions.add(id(function))
-        _wrap_function_for_output_files(function, policy)
+        wrap_function_for_output_files(function, policy)
     return toolkit

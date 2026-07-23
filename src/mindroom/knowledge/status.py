@@ -84,6 +84,60 @@ def get_knowledge_index_status(
     )
 
 
+def _mark_existing_semantic_state_stale(
+    base_id: str,
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    reason: str,
+) -> bool:
+    key = registry.resolve_published_index_key(
+        base_id,
+        config=config,
+        runtime_paths=runtime_paths,
+        create=False,
+    )
+    if not registry.published_index_metadata_path(key).exists():
+        return False
+    return registry.mark_published_index_stale_and_evict(key, reason=reason)
+
+
+def reconcile_knowledge_mode_transition_states(
+    previous_config: Config,
+    current_config: Config,
+    runtime_paths: RuntimePaths,
+) -> tuple[str, ...]:
+    """Mark semantic indexes stale when config changes cross the files/semantic boundary."""
+    changed_base_ids: list[str] = []
+    for base_id in sorted(previous_config.knowledge_bases.keys() & current_config.knowledge_bases.keys()):
+        previous_mode = previous_config.get_knowledge_base_config(base_id).mode
+        current_mode = current_config.get_knowledge_base_config(base_id).mode
+        if previous_mode == current_mode:
+            continue
+
+        marked = False
+        if previous_mode == "semantic":
+            marked = _mark_existing_semantic_state_stale(
+                base_id,
+                config=previous_config,
+                runtime_paths=runtime_paths,
+                reason=f"mode_changed_to_{current_mode}",
+            )
+        if current_mode == "semantic":
+            marked = (
+                _mark_existing_semantic_state_stale(
+                    base_id,
+                    config=current_config,
+                    runtime_paths=runtime_paths,
+                    reason="mode_changed_to_semantic",
+                )
+                or marked
+            )
+        if marked:
+            changed_base_ids.append(base_id)
+    return tuple(changed_base_ids)
+
+
 async def mark_knowledge_source_changed_async(
     base_id: str,
     *,

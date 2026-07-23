@@ -16,12 +16,13 @@ from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestrator import _MultiAgentOrchestrator
-from mindroom.thread_utils import should_agent_respond
 from tests.conftest import (
     TEST_PASSWORD,
+    agent_response_should_respond,
     bind_runtime_paths,
     drain_coalescing,
     install_generate_response_mock,
+    install_runtime_cache_support,
     orchestrator_runtime_paths,
     runtime_paths_for,
     test_runtime_paths,
@@ -62,7 +63,7 @@ class TestDMResponseLogic:
         room.users = {agent_matrix_id: None}
 
         # In DM mode, agent should respond when no one else has
-        should_respond = should_agent_respond(
+        should_respond = agent_response_should_respond(
             agent_name="test_agent",
             am_i_mentioned=False,  # Not mentioned
             is_thread=False,
@@ -93,7 +94,7 @@ class TestDMResponseLogic:
         room.users = {agent_matrix_id: None}
 
         # When mentioned, always respond
-        should_respond = should_agent_respond(
+        should_respond = agent_response_should_respond(
             agent_name="test_agent",
             am_i_mentioned=True,  # Mentioned
             is_thread=False,
@@ -126,7 +127,7 @@ class TestDMResponseLogic:
         room.users = {test_agent_id: None, other_agent_id: None}
 
         # Another agent is mentioned, not this one
-        should_respond = should_agent_respond(
+        should_respond = agent_response_should_respond(
             agent_name="test_agent",
             am_i_mentioned=False,
             is_thread=False,
@@ -162,7 +163,7 @@ class TestDMResponseLogic:
         room.users = {test_agent_id: None, other_agent_id: None}
 
         # No mentions - agents should not respond individually (team formation happens at a higher level)
-        should_respond_test = should_agent_respond(
+        should_respond_test = agent_response_should_respond(
             agent_name="test_agent",
             am_i_mentioned=False,
             is_thread=False,
@@ -174,7 +175,7 @@ class TestDMResponseLogic:
             sender_id="@user:localhost",
         )
 
-        should_respond_other = should_agent_respond(
+        should_respond_other = agent_response_should_respond(
             agent_name="other_agent",
             am_i_mentioned=False,
             is_thread=False,
@@ -281,6 +282,7 @@ class TestDMIntegration:
             runtime_paths=runtime_paths_for(config),
             rooms=[],
         )
+        install_runtime_cache_support(bot)
 
         bot.client = AsyncMock()
         bot.client.user_id = bot.agent_user.user_id
@@ -340,8 +342,8 @@ class TestDMIntegration:
             else "@mindroom_researcher:localhost"
         )
         bot.orchestrator = orchestrator
-        bot._generate_response = AsyncMock()
-        install_generate_response_mock(bot, bot._generate_response)
+        generate_response = AsyncMock()
+        install_generate_response_mock(bot, generate_response)
 
         # Mock helper functions
         async def mock_handle(*args: object, **kwargs: object) -> None:
@@ -356,7 +358,7 @@ class TestDMIntegration:
             patch("mindroom.conversation_resolver.check_agent_mentioned", return_value=([], False, False)),
             patch("mindroom.matrix.event_info.EventInfo.from_event") as mock_thread_info,
             patch("mindroom.conversation_resolver._should_skip_mentions", return_value=False),
-            patch("mindroom.turn_controller.is_dm_room", return_value=True),  # This is a DM room
+            patch("mindroom.text_ingress_dispatch.is_dm_room", return_value=True),  # This is a DM room
             patch("mindroom.turn_controller.interactive.handle_text_response", new=mock_handle),
         ):
             # Mock thread info to return no thread
@@ -405,9 +407,9 @@ class TestDMIntegration:
             await drain_coalescing(bot)
 
             # Verify the bot decided to respond even though not configured for the room
-            bot._generate_response.assert_called_once()
-            call_args = bot._generate_response.call_args
-            assert call_args.kwargs["room_id"] == "!dm:localhost"
+            generate_response.assert_called_once()
+            call_args = generate_response.call_args
+            assert call_args.kwargs["response_envelope"].target.room_id == "!dm:localhost"
             assert call_args.kwargs["prompt"] == "Hello researcher, can you help?"
 
     async def test_agent_processes_dm_messages_when_not_configured_for_room(self, tmp_path: Path) -> None:
@@ -438,8 +440,8 @@ class TestDMIntegration:
         bot.client = AsyncMock()
         bot.client.user_id = entity_ids(config, runtime_paths_for(config))["test_agent"].full_id
         bot.logger = MagicMock()
-        bot._generate_response = AsyncMock()
-        install_generate_response_mock(bot, bot._generate_response)
+        generate_response = AsyncMock()
+        install_generate_response_mock(bot, generate_response)
 
         async def mock_handle(*args: object, **kwargs: object) -> None:
             pass
@@ -453,7 +455,7 @@ class TestDMIntegration:
             patch("mindroom.conversation_resolver.check_agent_mentioned", return_value=([], False, False)),
             patch("mindroom.matrix.event_info.EventInfo.from_event") as mock_thread_info,
             patch("mindroom.conversation_resolver._should_skip_mentions", return_value=False),
-            patch("mindroom.turn_controller.is_dm_room", return_value=True),  # This is a DM room
+            patch("mindroom.text_ingress_dispatch.is_dm_room", return_value=True),  # This is a DM room
             patch("mindroom.turn_controller.interactive.handle_text_response", new=mock_handle),
         ):
             # Mock thread info to return no thread
@@ -498,7 +500,7 @@ class TestDMIntegration:
             await drain_coalescing(bot)
 
             # Verify the bot decided to respond in the DM room
-            bot._generate_response.assert_called_once()
-            call_args = bot._generate_response.call_args
-            assert call_args[1]["room_id"] == "!dm:localhost"
+            generate_response.assert_called_once()
+            call_args = generate_response.call_args
+            assert call_args[1]["response_envelope"].target.room_id == "!dm:localhost"
             assert call_args[1]["prompt"] == "Hello agent!"

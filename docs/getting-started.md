@@ -10,13 +10,16 @@ This guide will help you set up MindRoom and create your first AI agent.
 
 If you do not want to self-host Matrix yet, this is the simplest setup.
 You only run MindRoom locally.
+Watch the 2-minute setup video:
+
+[![MindRoom: installing and talking to my first AI agent in 2 minutes](https://img.youtube.com/vi/jR3xLUxyWhg/maxresdefault.jpg)](https://youtu.be/jR3xLUxyWhg)
 
 **Prerequisite:** Install [uv](https://docs.astral.sh/uv/getting-started/installation/).
 
 ### 1. Initialize local config
 
 ```bash
-uvx mindroom config init --profile public
+uvx mindroom config init
 ```
 
 This creates:
@@ -24,45 +27,60 @@ This creates:
 - `~/.mindroom/config.yaml`
 - `~/.mindroom/.env` prefilled with `MATRIX_HOMESERVER=https://mindroom.chat`
 
-The `--profile public` template defaults to the `openai` provider.
+The default `--matrix-server mindroom.chat` preset uses hosted Matrix and defaults to the `openai` provider.
 Use `--provider` to select a different provider preset:
 
 ```bash
 # Use Anthropic Claude
-uvx mindroom config init --profile public --provider anthropic
+uvx mindroom config init --provider anthropic
 
-# Use Codex CLI ChatGPT subscription auth
-uvx mindroom config init --profile public-codex
+# Use Azure OpenAI
+uvx mindroom config init --provider azure
+
+# Use a Codex CLI ChatGPT login
+uvx mindroom config init --provider codex
+
+# Use local Ollama
+uvx mindroom config init --provider ollama
+
+# Use local llama.cpp through its OpenAI-compatible server
+uvx mindroom config init --provider llama.cpp
 
 # Use Vertex AI Claude (Google Cloud)
-uvx mindroom config init --profile public-vertexai-anthropic
+uvx mindroom config init --provider vertexai_claude
 ```
 
-`public-codex` is the canonical profile name for hosted Matrix with Codex CLI subscription auth.
-The shorter `codex` profile alias is also accepted.
-Run `codex login` before starting MindRoom when using this profile.
+Use `--matrix-server mindroom.chat` for hosted Matrix and `--matrix-server self-hosted` when you run your own homeserver.
+Use `--provider` for the model provider.
+Run `codex login` before starting MindRoom when using `--provider codex`.
 
-`public-vertexai-anthropic` is the canonical profile name for Vertex AI Claude on hosted Matrix.
-Aliases `public-vertexai-claude`, `vertexai-anthropic`, and `vertexai-claude` are also accepted.
+`--provider azure` uses Azure OpenAI through your deployment name.
+Set `models.default.id` to the Azure deployment name you created.
 
-Other profiles:
+`--provider ollama` uses local Ollama with `gemma4` by default and also configures `qwen3.6:27b`.
+Run `ollama pull gemma4` and `ollama pull qwen3.6:27b` before starting MindRoom.
 
-- `--profile full` — rich starter config with interactive provider selection (default)
-- `--profile minimal` or `--minimal` — bare-minimum config
+`--provider llama.cpp` uses a local OpenAI-compatible llama.cpp server on `http://localhost:8080/v1`.
+Start `llama-server` with one of the configured Unsloth GGUF refs before starting MindRoom.
+These local provider configs run entirely locally and do not require real cloud API keys such as `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` unless you switch the config to a remote provider.
 
-### 2. Add model API key(s)
+Use `--provider vertexai_claude` for Vertex AI Claude on hosted Matrix.
+
+### 2. Add remote-provider credentials when needed
 
 ```bash
 $EDITOR ~/.mindroom/.env
 ```
 
-Set at least one key:
+For hosted providers, set the credentials for the provider you selected:
 
 - `ANTHROPIC_API_KEY=...`, or
+- `AZURE_OPENAI_API_KEY=...` and `AZURE_OPENAI_ENDPOINT=...`, or
 - `OPENAI_API_KEY=...`, or
 - `OPENROUTER_API_KEY=...`, or
-- For Codex CLI subscription auth: run `codex login`.
+- For Codex CLI ChatGPT authentication: run `codex login`.
 - For Vertex AI Claude: set `ANTHROPIC_VERTEX_PROJECT_ID` and `CLOUD_ML_REGION` and authenticate with `gcloud auth application-default login`.
+Skip this step for `--provider ollama` or `--provider llama.cpp` unless you also add a remote provider.
 
 ### 3. Pair your local install from chat UI
 
@@ -99,6 +117,23 @@ Protect the dashboard API in non-localhost environments by setting `MINDROOM_API
 For a detailed architecture and credential model, see:
 [Hosted Matrix deployment guide](deployment/hosted-matrix.md).
 
+## Preferred alternative: NixOS LXC container (agent-controlled machine)
+
+Use this when you want to give a MindRoom agent full freedom over its own virtual machine while you, from the host, control precisely what it can see.
+The [mindroom-ai/lxc-nixos](https://github.com/mindroom-ai/lxc-nixos) flake provisions the virtual machine — an Incus LXC system container running NixOS — with the full MindRoom stack (MindRoom, Tuwunel Matrix homeserver, MindRoom Chat, Element, Caddy) plus Docker and `ragenix`-based secrets wiring.
+Because the whole virtual machine is declared in the flake, the agent can rebuild and manage the persistent system it runs on — unlike the mostly stateless Docker Compose stack below — without ever touching the host.
+It is slightly harder to set up by hand, but asking a coding agent such as Codex or Claude Code to do it is trivial: the repo ships machine-oriented instructions in `AGENTS.md`.
+It requires a Linux host running [Incus](https://linuxcontainers.org/incus/docs/main/installing/).
+
+```bash
+git clone https://github.com/mindroom-ai/lxc-nixos.git
+cd lxc-nixos
+incus launch images:nixos/unstable mindroom -c security.nesting=true
+incus config device add mindroom repo disk source="$PWD" path=/mnt/repo shift=true
+```
+
+Then follow the repo README for operator SSH keys, secrets bootstrap, and the `nixos-rebuild switch` deployment flow.
+
 ## Alternative: Full Stack Docker Compose (bundled dashboard + Matrix + MindRoom client)
 
 Use this when you want everything local: the bundled MindRoom dashboard, Matrix homeserver, and a Matrix client in one stack.
@@ -131,7 +166,7 @@ Open:
 - MindRoom client: http://localhost:8080
 - Matrix homeserver: http://localhost:8008
 
-The stack uses published `mindroom`, `mindroom-cinny`, and `mindroom-tuwunel` images by default.
+The stack uses published `mindroom`, `mindroom-chat`, and `mindroom-tuwunel` images by default.
 
 If you access the stack from another device, set `CLIENT_HOMESERVER_URL=http://<host-ip>:8008` in `.env` before starting it.
 
@@ -188,7 +223,7 @@ agents:
 models:
   default:
     provider: openai
-    id: gpt-5.4
+    id: gpt-5.6
 
 defaults:
   tools: [scheduler]
@@ -220,7 +255,7 @@ OPENAI_API_KEY=your_openai_key
 # MINDROOM_API_KEY=your-secret-key
 ```
 
-#### Optional: Bootstrap local Synapse + Cinny with Docker (Linux/macOS)
+#### Optional: Bootstrap local Synapse + MindRoom Chat with Docker (Linux/macOS)
 
 If you want a local Matrix + client setup without running the full `mindroom-stack` app, use the helper command:
 
@@ -234,7 +269,7 @@ If you're running from source in this repo, use:
 uv run mindroom local-stack-setup --synapse-dir /path/to/mindroom-stack/local/matrix
 ```
 
-This starts Synapse from the `mindroom-stack` compose files, starts a MindRoom Cinny container, waits for both services to be healthy, and by default writes local Matrix settings to `.env` next to your active `config.yaml`.
+This starts Synapse from the `mindroom-stack` compose files, starts a MindRoom Chat container, waits for both services to be healthy, and by default writes local Matrix settings to `.env` next to your active `config.yaml`.
 
 > [!NOTE]
 > MindRoom automatically creates Matrix user accounts for each agent. Your Matrix homeserver must allow open registration, or you need to configure it to allow registration from localhost. If registration fails, check your homeserver's registration settings.

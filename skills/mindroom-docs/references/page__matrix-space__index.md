@@ -20,6 +20,13 @@ matrix_space:
 
 When `enabled` is `true`, MindRoom creates a Space on startup and adds all managed rooms as children.
 Rooms created later (by agents joining new rooms or config changes) are automatically added to the Space.
+MindRoom grants root Space admin power to concrete Matrix users in `authorization.global_users`.
+MindRoom also grants root Space admin power to the configured `mindroom_user` when that internal account exists.
+Room-specific users in `authorization.room_permissions` are not root Space admins unless they are also listed in `authorization.global_users`.
+This lets owners add, remove, and reorder Space children in Matrix clients while keeping room-specific collaborators scoped to their rooms.
+Root Space admin reconciliation is grant-only and preserves existing Matrix admins.
+Removing a user from `authorization.global_users` stops future MindRoom authorization but does not automatically demote that user in the Space.
+Demote stale Space admins manually in a Matrix client when needed.
 
 Set `enabled: false` to disable Space creation entirely.
 The `name` field controls the Space's display name and can be changed at any time.

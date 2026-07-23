@@ -9,46 +9,64 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, ValidationInfo, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    PrivateAttr,
+    ValidationError,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 
+from mindroom import yaml_io
 from mindroom.agent_policy import (
     build_agent_policy_seeds,
     get_agent_delegation_closure,
-    get_private_team_targets,
     get_unsupported_team_agents,
     resolve_agent_policy_from_data,
     resolve_private_knowledge_base_agent,
     unsupported_team_agent_message,
 )
-from mindroom.config.agent import AgentConfig, CultureConfig, TeamConfig  # noqa: TC001
+from mindroom.config.agent import AgentConfig, CultureConfig, RoomConfig, TeamConfig  # noqa: TC001
 from mindroom.config.approval import ToolApprovalConfig
 from mindroom.config.auth import AuthorizationConfig
+from mindroom.config.calls import CallsConfig, CascadedCallProfile
+from mindroom.config.entity_view import ResolvedEntityView
+from mindroom.config.external_trigger_policy import ExternalTriggerPolicyConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.matrix import (
     CacheConfig,
-    MatrixDeliveryConfig,
     MatrixRoomAccessConfig,
     MatrixSpaceConfig,
     MatrixSyncConfig,
     MindRoomUserConfig,
 )
-from mindroom.config.memory import MemoryBackend, MemoryConfig
+from mindroom.config.memory import MemoryBackend, MemoryConfig, MemorySearchConfig
 from mindroom.config.models import (
     CompactionConfig,
+    CompactionOverrideConfig,
     DebugConfig,
     DefaultsConfig,
+    EffectiveToolConfig,
     ModelConfig,
-    ResolvedToolConfig,
     RouterConfig,
     ToolConfigEntry,
-    ToolkitDefinition,
 )
 from mindroom.config.plugin import PluginEntryConfig  # noqa: TC001
+from mindroom.config.runtime_overlays import (
+    apply_runtime_approved_egress_overlay,
+    strip_runtime_approved_egress_overlay_from_dump,
+)
+from mindroom.config.tool_entries import raw_tool_entry_name_and_lazy_flag_fields, raw_tools_entries
 from mindroom.config.voice import VoiceConfig
+from mindroom.config.yaml_includes import ConfigIncludeError, attach_partial_source_files, load_yaml_config_source
 from mindroom.constants import (
     DEFAULT_WORKER_GRANTABLE_CREDENTIALS,
     ROUTER_AGENT_NAME,
     RuntimePaths,
+    config_relative_path,
     matrix_state_file,
     resolve_config_relative_path,
     runtime_matrix_homeserver,
@@ -66,17 +84,23 @@ from mindroom.matrix_identifiers import (
 from mindroom.mcp.config import MCPServerConfig, normalize_mcp_server_id
 from mindroom.prompt_templates import render_prompt_template, validate_prompt_template_fields
 from mindroom.prompts import PROMPT_DEFAULT_NAMES, PROMPT_DEFAULTS
+from mindroom.room_thread_modes import resolve_room_thread_mode_override
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
+from mindroom.thread_models import resolve_thread_model_override
 from mindroom.tool_system.plugin_imports import PluginValidationError
 from mindroom.tool_system.worker_routing import unsupported_shared_only_integration_names
 from mindroom.workspaces import validate_workspace_template_dir
 
 if TYPE_CHECKING:
+    from collections.abc import Collection
+
     from mindroom.tool_system.catalog import ToolValidationInfo
     from mindroom.tool_system.worker_routing import WorkerScope
 
+# Keep synchronized with todo_poke._SAFE_ASSIGNEE_PATTERN without importing runtime tools into config.
 _AGENT_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_]+$")
 _RESERVED_ENTITY_NAMES = frozenset({ROUTER_AGENT_NAME, "user"})
+_DEFER_PROHIBITED_CONTROL_TOOLS = frozenset({"delegate", "dynamic_tools", "external_trigger_manager", "self_config"})
 _OPENCLAW_COMPAT_PRESET_TOOLS: tuple[str, ...] = (
     "shell",
     "coding",
@@ -96,7 +120,7 @@ def _persisted_entity_account_usernames(runtime_paths: RuntimePaths) -> dict[str
     state_file = matrix_state_file(runtime_paths=runtime_paths)
     if not state_file.exists():
         return {}
-    data = yaml.safe_load(state_file.read_text(encoding="utf-8")) or {}
+    data = yaml_io.safe_load(state_file.read_text(encoding="utf-8")) or {}
     if not isinstance(data, dict):
         return {}
     accounts = data.get("accounts")
@@ -117,16 +141,16 @@ def _persisted_entity_account_usernames(runtime_paths: RuntimePaths) -> dict[str
 _OPTIONAL_DICT_SECTION_NAMES = (
     "teams",
     "cultures",
+    "rooms",
     "room_models",
-    "toolkits",
+    "room_thread_summary_models",
     "knowledge_bases",
     "mcp_servers",
     "prompts",
     "matrix_room_access",
     "matrix_space",
-    "matrix_delivery",
 )
-_OPTIONAL_MODEL_SECTION_NAMES = ("debug", "tool_approval", "matrix_sync")
+_OPTIONAL_MODEL_SECTION_NAMES = ("debug", "external_trigger_policy", "matrix_sync", "tool_approval")
 
 
 class ConfigRuntimeValidationError(ValueError):
@@ -155,6 +179,8 @@ def iter_config_validation_messages(
         return [(" → ".join(str(x) for x in error["loc"]), error["msg"]) for error in exc.errors(include_context=False)]
     if isinstance(exc, ConfigRuntimeValidationError):
         return [("config", str(exc))]
+    if isinstance(exc, ConfigIncludeError):
+        return [("config", str(exc))]
     if isinstance(exc, yaml.YAMLError):
         return [("config", f"Could not parse configuration YAML: {exc}")]
     if isinstance(exc, UnicodeError):
@@ -175,9 +201,6 @@ def format_invalid_config_message(
     return response
 
 
-_RESERVED_DYNAMIC_TOOLKIT_TOOLS = frozenset({"delegate", "dynamic_tools", "self_config"})
-
-
 @dataclass(frozen=True)
 class ResolvedRuntimeModel:
     """Resolved active runtime model and context window for one execution context."""
@@ -196,9 +219,10 @@ class _AuthoredOptionalModel:
 
 @dataclass(frozen=True)
 class _StaticCompactionConfigSemantics:
-    """Static compaction semantics for one config scope."""
+    """Static compaction semantics for one optional model field in one config scope."""
 
     scope_label: str
+    field_name: str
     authored_model: _AuthoredOptionalModel
 
 
@@ -259,17 +283,34 @@ def _strip_empty_root_sections(payload: dict[str, Any]) -> dict[str, Any]:
     return authored_payload
 
 
+def _authored_compaction_model_fields(
+    compaction: CompactionConfig | CompactionOverrideConfig,
+) -> dict[str, _AuthoredOptionalModel]:
+    """Return authored tri-state semantics for every optional compaction model field."""
+    return {
+        "model": _authored_optional_model(
+            compaction.model,
+            field_is_set="model" in compaction.model_fields_set,
+        ),
+        "fallback_model": _authored_optional_model(
+            compaction.fallback_model,
+            field_is_set="fallback_model" in compaction.model_fields_set,
+        ),
+    }
+
+
 def _effective_static_compaction_enabled(
     *,
     defaults_enabled: bool,
     override_enabled: bool | None,
     override_fields_set: set[str],
-    authored_model: _AuthoredOptionalModel,
+    authored_model_fields: dict[str, _AuthoredOptionalModel],
 ) -> bool:
     """Resolve whether one authored override block is statically enabled."""
     if "enabled" in override_fields_set:
         return override_enabled is True
-    if authored_model.kind == "clear" and override_fields_set == {"model"}:
+    cleared_model_fields = {name for name, authored in authored_model_fields.items() if authored.kind == "clear"}
+    if override_fields_set and override_fields_set <= cleared_model_fields:
         return defaults_enabled
     if override_fields_set:
         return True
@@ -323,10 +364,21 @@ def _skip_private_template_dir_validation(runtime_paths: RuntimePaths | None) ->
     )
 
 
+def _tool_entry_has_lazy_flag_field(entry: ToolConfigEntry) -> bool:
+    """Return whether one normalized tool entry authored a lazy-loading field."""
+    return bool(entry.model_fields_set & {"defer", "initial"})
+
+
 class Config(BaseModel):
     """Complete configuration from YAML."""
 
     model_config = ConfigDict(extra="forbid")
+    _source_files: frozenset[Path] = PrivateAttr(default=frozenset())
+    _unavailable_plugin_tool_names: set[str] = PrivateAttr(default_factory=set)
+    _unresolved_plugin_tool_sources: frozenset[str] = PrivateAttr(default=frozenset())
+    _runtime_approved_egress_injected_default_tool: bool = PrivateAttr(default=False)
+    _runtime_approved_egress_injected_approval_rule: bool = PrivateAttr(default=False)
+    _runtime_knowledge_base_overlays: dict[str, KnowledgeBaseConfig] = PrivateAttr(default_factory=dict)
 
     PRIVATE_KNOWLEDGE_BASE_ID_PREFIX: ClassVar[str] = "__agent_private__:"
     TOOL_PRESETS: ClassVar[dict[str, tuple[str, ...]]] = {
@@ -339,10 +391,11 @@ class Config(BaseModel):
     agents: dict[str, AgentConfig] = Field(default_factory=dict, description="Agent configurations")
     teams: dict[str, TeamConfig] = Field(default_factory=dict, description="Team configurations")
     cultures: dict[str, CultureConfig] = Field(default_factory=dict, description="Culture configurations")
+    rooms: dict[str, RoomConfig] = Field(default_factory=dict, description="Managed Matrix room metadata")
     room_models: dict[str, str] = Field(default_factory=dict, description="Room-specific model overrides")
-    toolkits: dict[str, ToolkitDefinition] = Field(
+    room_thread_summary_models: dict[str, str] = Field(
         default_factory=dict,
-        description="Dynamically loadable tool bundles keyed by public toolkit name",
+        description="Room-specific model overrides for automatic thread summaries",
     )
     plugins: list[PluginEntryConfig] = Field(default_factory=list, description="Plugin entries")
     debug: DebugConfig = Field(default_factory=DebugConfig, description="Debug and diagnostic settings")
@@ -360,6 +413,10 @@ class Config(BaseModel):
         default_factory=dict,
         description="MCP server configurations keyed by server id",
     )
+    external_trigger_policy: ExternalTriggerPolicyConfig = Field(
+        default_factory=ExternalTriggerPolicyConfig,
+        description="Global policy for tool-managed signed external triggers",
+    )
     models: dict[str, ModelConfig] = Field(default_factory=dict, description="Model configurations")
     tool_approval: ToolApprovalConfig = Field(
         default_factory=ToolApprovalConfig,
@@ -367,6 +424,7 @@ class Config(BaseModel):
     )
     router: RouterConfig = Field(default_factory=RouterConfig, description="Router configuration")
     voice: VoiceConfig = Field(default_factory=VoiceConfig, description="Voice configuration")
+    calls: CallsConfig = Field(default_factory=CallsConfig, description="Voice call (MatrixRTC) configuration")
     cache: CacheConfig = Field(default_factory=CacheConfig, description="Persistent Matrix event cache")
     matrix_sync: MatrixSyncConfig = Field(
         default_factory=MatrixSyncConfig,
@@ -374,7 +432,7 @@ class Config(BaseModel):
     )
     timezone: str = Field(
         default="UTC",
-        description="Timezone for displaying scheduled tasks (e.g., 'America/New_York')",
+        description="Timezone for interpreting scheduling requests and displaying scheduled tasks (e.g., 'America/New_York')",
     )
     mindroom_user: MindRoomUserConfig | None = Field(
         default=None,
@@ -388,10 +446,6 @@ class Config(BaseModel):
         default_factory=MatrixSpaceConfig,
         description="Optional root Matrix Space for grouping managed rooms",
     )
-    matrix_delivery: MatrixDeliveryConfig = Field(
-        default_factory=MatrixDeliveryConfig,
-        description="Outgoing Matrix event delivery behavior",
-    )
     authorization: AuthorizationConfig = Field(
         default_factory=AuthorizationConfig,
         description="Authorization configuration with fine-grained permissions",
@@ -401,11 +455,76 @@ class Config(BaseModel):
         description="Matrix user IDs of non-MindRoom bots (e.g., bridge bots) that should be treated like agents for response logic — their messages won't trigger the multi-human-thread mention requirement",
     )
 
+    @classmethod
+    def _lazy_flag_prohibited_message(cls, *, tool_name: str, config_path: str) -> str | None:
+        if cls.is_tool_preset(tool_name):
+            return (
+                f"{config_path}: '{tool_name}' is a preset and cannot be deferred; "
+                "defer/initial are only valid on individual tools."
+            )
+        if tool_name in _DEFER_PROHIBITED_CONTROL_TOOLS:
+            return (
+                f"{config_path}: '{tool_name}' is a control-plane tool and cannot be deferred; "
+                "defer/initial are only valid on runtime tools."
+            )
+        return None
+
+    @classmethod
+    def _validate_raw_tool_lazy_flag_boundary(cls, entry: object, *, config_path: str) -> None:
+        name, defer, initial = raw_tool_entry_name_and_lazy_flag_fields(entry)
+        if name is None or not (defer or initial):
+            return
+        if msg := cls._lazy_flag_prohibited_message(tool_name=name, config_path=config_path):
+            raise ValueError(msg)
+
     @model_validator(mode="before")
     @classmethod
     def validate_raw_root_config(cls, data: object) -> object:
-        """Normalize optional root sections before nested model validation."""
-        return normalized_config_data(data)
+        """Normalize optional root sections and reject preset lazy flags before nested validation."""
+        normalized = normalized_config_data(data)
+        if not isinstance(normalized, dict):
+            return normalized
+
+        raw_data = cast("dict[object, object]", normalized)
+        for entry in raw_tools_entries(raw_data, "defaults"):
+            cls._validate_raw_tool_lazy_flag_boundary(entry, config_path="defaults.tools")
+
+        raw_agents = raw_data.get("agents")
+        if not isinstance(raw_agents, dict):
+            return normalized
+
+        for agent_name, raw_agent in raw_agents.items():
+            if not isinstance(agent_name, str) or not isinstance(raw_agent, dict):
+                continue
+            agent_data = cast("dict[object, object]", raw_agent)
+            tools = agent_data.get("tools")
+            if not isinstance(tools, list):
+                continue
+            for entry in tools:
+                cls._validate_raw_tool_lazy_flag_boundary(entry, config_path=f"agents.{agent_name}.tools")
+
+        return normalized
+
+    @model_validator(mode="after")
+    def validate_tool_presets_do_not_use_lazy_flags(self) -> Config:
+        """Reject lazy-loading control fields on presets after tool-entry coercion."""
+        for entry in self.defaults.tools:
+            if _tool_entry_has_lazy_flag_field(entry) and (
+                msg := self._lazy_flag_prohibited_message(tool_name=entry.name, config_path="defaults.tools")
+            ):
+                raise ValueError(msg)
+
+        for agent_name, agent_config in self.agents.items():
+            for entry in agent_config.tools:
+                if _tool_entry_has_lazy_flag_field(entry) and (
+                    msg := self._lazy_flag_prohibited_message(
+                        tool_name=entry.name,
+                        config_path=f"agents.{agent_name}.tools",
+                    )
+                ):
+                    raise ValueError(msg)
+
+        return self
 
     @field_validator("plugins", mode="before")
     @classmethod
@@ -473,6 +592,39 @@ class Config(BaseModel):
         return self
 
     @model_validator(mode="after")
+    def validate_call_agents(self) -> Config:
+        """Ensure call agents and cascaded model references are valid."""
+        unknown_agents = sorted(set(self.calls.agents) - set(self.agents))
+        if unknown_agents:
+            msg = f"calls.agents references unknown agent(s): {', '.join(unknown_agents)}"
+            raise ValueError(msg)
+
+        invalid_models = sorted(
+            f"{profile_name} -> {profile.model}"
+            for profile_name, profile in self.calls.profiles.items()
+            if isinstance(profile, CascadedCallProfile)
+            and profile.model is not None
+            and profile.model not in self.models
+        )
+        if invalid_models:
+            msg = "calls.profiles references unknown cascaded model(s): " + ", ".join(invalid_models)
+            raise ValueError(msg)
+
+        agents_by_room: dict[str, list[str]] = {}
+        for agent_name in self.calls.agents:
+            for room in self.agents[agent_name].rooms:
+                agents_by_room.setdefault(room, []).append(agent_name)
+        conflicts = [
+            f"{room} ({', '.join(sorted(agent_names))})"
+            for room, agent_names in sorted(agents_by_room.items())
+            if len(agent_names) > 1
+        ]
+        if conflicts:
+            msg = "calls.agents configures multiple agents for room(s): " + "; ".join(conflicts)
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
     def validate_agent_reply_permissions(self) -> Config:
         """Ensure per-agent reply permissions reference known entities."""
         known_entities = set(self.agents) | set(self.teams) | {ROUTER_AGENT_NAME}
@@ -497,23 +649,6 @@ class Config(BaseModel):
         return self
 
     @model_validator(mode="after")
-    def validate_toolkit_references(self) -> Config:
-        """Ensure agent dynamic toolkit references point at configured toolkits."""
-        for agent_name, agent_config in self.agents.items():
-            for field_name, toolkit_names in (
-                ("allowed_toolkits", agent_config.allowed_toolkits),
-                ("initial_toolkits", agent_config.initial_toolkits),
-            ):
-                for index, toolkit_name in enumerate(toolkit_names):
-                    if toolkit_name not in self.toolkits:
-                        msg = f"agents.{agent_name}.{field_name}[{index}]: Unknown toolkit '{toolkit_name}'."
-                        raise ValueError(msg)
-            if not set(agent_config.initial_toolkits).issubset(agent_config.allowed_toolkits):
-                msg = f"agents.{agent_name}.initial_toolkits: initial_toolkits must be a subset of allowed_toolkits."
-                raise ValueError(msg)
-        return self
-
-    @model_validator(mode="after")
     def validate_team_agents(self) -> Config:
         """Ensure team members exist and do not use private requester-local state."""
         for team_name, team_config in self.teams.items():
@@ -521,7 +656,7 @@ class Config(BaseModel):
         return self
 
     def _invalid_compaction_model_references(self) -> list[str]:
-        """Return any compaction.model references that point at unknown models."""
+        """Return any compaction model references that point at unknown models."""
         invalid_references: list[str] = []
         for semantics in self._static_compaction_semantics():
             if semantics.authored_model.kind != "value":
@@ -529,13 +664,13 @@ class Config(BaseModel):
             assert semantics.authored_model.value is not None
             if semantics.authored_model.value not in self.models:
                 invalid_references.append(
-                    f"{semantics.scope_label}.compaction.model -> {semantics.authored_model.value}",
+                    f"{semantics.scope_label}.compaction.{semantics.field_name} -> {semantics.authored_model.value}",
                 )
 
         return invalid_references
 
     def _compaction_models_missing_context_window(self) -> list[str]:
-        """Return explicit compaction.model references whose target model lacks context_window."""
+        """Return explicit compaction model references whose target model lacks context_window."""
         invalid_references: list[str] = []
         for semantics in self._static_compaction_semantics():
             if semantics.authored_model.kind != "value":
@@ -543,63 +678,40 @@ class Config(BaseModel):
             assert semantics.authored_model.value is not None
             if self.models[semantics.authored_model.value].context_window is None:
                 invalid_references.append(
-                    f"{semantics.scope_label}.compaction.model -> {semantics.authored_model.value}",
+                    f"{semantics.scope_label}.compaction.{semantics.field_name} -> {semantics.authored_model.value}",
                 )
 
         return invalid_references
 
     def _static_compaction_semantics(self) -> list[_StaticCompactionConfigSemantics]:
         """Return static compaction semantics for defaults, agents, and teams."""
-        semantics: list[_StaticCompactionConfigSemantics] = []
+        scoped_compactions: list[tuple[str, CompactionConfig | CompactionOverrideConfig]] = []
         defaults_compaction = self.defaults.compaction
 
         if defaults_compaction is not None:
-            authored_model = _authored_optional_model(
-                defaults_compaction.model,
-                field_is_set="model" in defaults_compaction.model_fields_set,
-            )
-            semantics.append(
-                _StaticCompactionConfigSemantics(
-                    scope_label="defaults",
-                    authored_model=authored_model,
-                ),
-            )
+            scoped_compactions.append(("defaults", defaults_compaction))
 
         for agent_name, agent_config in self.agents.items():
-            override = agent_config.compaction
-            if override is None:
-                continue
-            authored_model = _authored_optional_model(
-                override.model,
-                field_is_set="model" in override.model_fields_set,
-            )
-            semantics.append(
-                _StaticCompactionConfigSemantics(
-                    scope_label=f"agents.{agent_name}",
-                    authored_model=authored_model,
-                ),
-            )
+            if agent_config.compaction is not None:
+                scoped_compactions.append((f"agents.{agent_name}", agent_config.compaction))
 
         for team_name, team_config in self.teams.items():
-            override = team_config.compaction
-            if override is None:
-                continue
-            authored_model = _authored_optional_model(
-                override.model,
-                field_is_set="model" in override.model_fields_set,
-            )
-            semantics.append(
-                _StaticCompactionConfigSemantics(
-                    scope_label=f"teams.{team_name}",
-                    authored_model=authored_model,
-                ),
-            )
+            if team_config.compaction is not None:
+                scoped_compactions.append((f"teams.{team_name}", team_config.compaction))
 
-        return semantics
+        return [
+            _StaticCompactionConfigSemantics(
+                scope_label=scope_label,
+                field_name=field_name,
+                authored_model=authored_model,
+            )
+            for scope_label, compaction in scoped_compactions
+            for field_name, authored_model in _authored_compaction_model_fields(compaction).items()
+        ]
 
     @model_validator(mode="after")
     def validate_compaction_model_references(self) -> Config:
-        """Ensure explicit compaction.model references are statically valid."""
+        """Ensure explicit compaction model and fallback_model references are statically valid."""
         invalid_references = self._invalid_compaction_model_references()
         if invalid_references:
             msg = "Compaction model references unknown models: " + ", ".join(sorted(invalid_references))
@@ -607,7 +719,7 @@ class Config(BaseModel):
 
         missing_context_windows = self._compaction_models_missing_context_window()
         if missing_context_windows:
-            msg = "Explicit compaction.model requires a model with context_window: " + ", ".join(
+            msg = "Explicit compaction model references require a model with context_window: " + ", ".join(
                 sorted(missing_context_windows),
             )
             raise ValueError(msg)
@@ -619,19 +731,20 @@ class Config(BaseModel):
         """Reject shared-only integrations on isolating scopes for static and dynamic tool assignments."""
         invalid_assignments: list[str] = []
         for agent_name in sorted(self.agents):
-            scope_label = self.get_agent_scope_label(agent_name)
-            execution_scope = self.get_agent_execution_scope(agent_name)
+            scope_label = self._agent_scope_label(agent_name)
+            execution_scope = self._agent_execution_scope(agent_name)
             unsupported_tools = unsupported_shared_only_integration_names(
-                self.get_agent_tools(agent_name),
+                self._get_agent_eager_tools(agent_name),
                 execution_scope,
-                configured_mcp_server_ids=self.mcp_servers,
             )
             invalid_assignments.extend(
                 f"{agent_name} -> {tool_name} ({scope_label})" for tool_name in unsupported_tools
             )
-            for toolkit_name, incompatible_tools in self.get_agent_scope_incompatible_toolkits(agent_name).items():
+            for authored_name, incompatible_tools in self._agent_scope_incompatible_deferred_tools(
+                agent_name,
+            ).items():
                 invalid_assignments.extend(
-                    f"{agent_name} -> toolkit '{toolkit_name}' -> {tool_name} ({scope_label})"
+                    f"{agent_name} -> deferred tool '{authored_name}' -> {tool_name} ({scope_label})"
                     for tool_name in incompatible_tools
                 )
         if invalid_assignments:
@@ -660,38 +773,30 @@ class Config(BaseModel):
             raise ValueError(msg)
         return self
 
-    @model_validator(mode="after")
-    def validate_reserved_knowledge_base_ids(self) -> Config:
-        """Reject top-level knowledge base IDs that collide with synthetic private IDs."""
+    @classmethod
+    def _validate_knowledge_base_ids(cls, base_ids: Collection[str]) -> None:
+        """Apply authored knowledge-base ID constraints to any config entry point."""
         reserved_ids = sorted(
-            base_id for base_id in self.knowledge_bases if base_id.startswith(self.PRIVATE_KNOWLEDGE_BASE_ID_PREFIX)
+            base_id for base_id in base_ids if base_id.startswith(cls.PRIVATE_KNOWLEDGE_BASE_ID_PREFIX)
         )
         if reserved_ids:
             formatted = ", ".join(reserved_ids)
             msg = (
                 "knowledge_bases keys must not use the reserved private prefix "
-                f"'{self.PRIVATE_KNOWLEDGE_BASE_ID_PREFIX}'; invalid keys: {formatted}"
+                f"'{cls.PRIVATE_KNOWLEDGE_BASE_ID_PREFIX}'; invalid keys: {formatted}"
             )
             raise ValueError(msg)
-        return self
 
-    @model_validator(mode="after")
-    def validate_knowledge_base_ids_do_not_use_line_breaks(self) -> Config:
-        """Reject knowledge base IDs that would create multi-line source-list labels."""
-        invalid_ids = sorted(base_id for base_id in self.knowledge_bases if "\n" in base_id or "\r" in base_id)
+        invalid_ids = sorted(base_id for base_id in base_ids if "\n" in base_id or "\r" in base_id)
         if invalid_ids:
             formatted = ", ".join(invalid_ids)
             msg = f"knowledge_bases keys must not contain line breaks; invalid keys: {formatted}"
             raise ValueError(msg)
-        return self
 
-    @model_validator(mode="after")
-    def validate_knowledge_base_ids_are_path_safe(self) -> Config:
-        """Reject knowledge base IDs that would create nested or overlapping alias paths."""
         invalid_ids = sorted(
             base_id
-            for base_id in self.knowledge_bases
-            if not base_id or base_id in {".", ".."} or "/" in base_id or "\\" in base_id
+            for base_id in base_ids
+            if not base_id.strip() or base_id in {".", ".."} or "/" in base_id or "\\" in base_id
         )
         if invalid_ids:
             formatted = ", ".join(invalid_ids)
@@ -700,6 +805,11 @@ class Config(BaseModel):
                 f"or dot segments; invalid keys: {formatted}"
             )
             raise ValueError(msg)
+
+    @model_validator(mode="after")
+    def validate_knowledge_base_ids(self) -> Config:
+        """Reject reserved, multiline, empty, and path-unsafe knowledge base IDs."""
+        self._validate_knowledge_base_ids(self.knowledge_bases)
         return self
 
     @model_validator(mode="after")
@@ -773,13 +883,12 @@ class Config(BaseModel):
                     "and outside scaffolded private workspace content"
                 )
                 raise ValueError(msg)
-            overlaps_private_file_memory = self.get_agent_memory_backend(
-                agent_name,
-            ) == "file" and _relative_paths_overlap(
+            uses_file_memory_backend = self._agent_memory_backend(agent_name) == "file"
+            overlaps_private_file_memory = uses_file_memory_backend and _relative_paths_overlap(
                 knowledge_path,
                 memory_notes_dir,
             )
-            if self.get_agent_memory_backend(agent_name) == "file" and _relative_paths_overlap(
+            if uses_file_memory_backend and _relative_paths_overlap(
                 knowledge_path,
                 memory_notes_entrypoint,
             ):
@@ -789,7 +898,7 @@ class Config(BaseModel):
                 if _relative_paths_overlap(knowledge_path, memory_notes_dir):
                     overlaps_template_scaffold = True
                 elif runtime_paths is not None:
-                    template_dir = resolve_config_relative_path(private_config.template_dir, runtime_paths)
+                    template_dir = config_relative_path(private_config.template_dir, runtime_paths)
                     overlaps_template_scaffold = _template_contains_overlapping_subtree(template_dir, knowledge_path)
             if overlaps_private_file_memory or overlaps_template_scaffold:
                 msg = (
@@ -810,7 +919,7 @@ class Config(BaseModel):
             private_config = agent_config.private
             if private_config is None or private_config.template_dir is None:
                 continue
-            template_dir = resolve_config_relative_path(private_config.template_dir, runtime_paths)
+            template_dir = config_relative_path(private_config.template_dir, runtime_paths)
             try:
                 validate_workspace_template_dir(template_dir)
             except ValueError as exc:
@@ -915,6 +1024,14 @@ class Config(BaseModel):
         homeserver = runtime_matrix_homeserver(runtime_paths)
         return extract_server_name_from_homeserver(homeserver, runtime_paths)
 
+    @property
+    def source_files(self) -> frozenset[Path]:
+        """Files this config was loaded from: the top-level file plus every include.
+
+        Empty when the config was not loaded from disk via :func:`load_config`.
+        """
+        return self._source_files
+
     @classmethod
     def validate_with_runtime(
         cls,
@@ -924,7 +1041,14 @@ class Config(BaseModel):
         tolerate_plugin_load_errors: bool = False,
     ) -> Config:
         """Validate config data against one explicit runtime context."""
-        config = cls.model_validate(normalized_config_data(data), context={"runtime_paths": runtime_paths})
+        normalized_data = normalized_config_data(data)
+        approved_egress_overlay = apply_runtime_approved_egress_overlay(normalized_data, runtime_paths)
+        config = cls.model_validate(approved_egress_overlay.data, context={"runtime_paths": runtime_paths})
+        from mindroom.entity_resolution import validate_call_agent_room_ownership  # noqa: PLC0415
+
+        validate_call_agent_room_ownership(config, runtime_paths)
+        config._runtime_approved_egress_injected_default_tool = approved_egress_overlay.injected_default_tool
+        config._runtime_approved_egress_injected_approval_rule = approved_egress_overlay.injected_approval_rule
         # why-lazy: module-top catalog import pulls runtime tool registry paths and loads agents+tools at config import.
         from mindroom.tool_system.catalog import ToolConfigOverrideError, ToolMetadataValidationError  # noqa: PLC0415
 
@@ -942,9 +1066,44 @@ class Config(BaseModel):
 
     def authored_model_dump(self) -> dict[str, Any]:
         """Serialize authored config."""
-        return _strip_empty_root_sections(cast("dict[str, Any]", self.model_dump(exclude_unset=True)))
+        payload = cast("dict[str, Any]", self.model_dump(exclude_unset=True))
+        knowledge_bases = payload.get("knowledge_bases")
+        if isinstance(knowledge_bases, dict):
+            for base_id in self._runtime_knowledge_base_overlays:
+                knowledge_bases.pop(base_id, None)
+            if not knowledge_bases:
+                payload.pop("knowledge_bases", None)
+        payload = strip_runtime_approved_egress_overlay_from_dump(
+            payload,
+            injected_default_tool=self._runtime_approved_egress_injected_default_tool,
+            injected_approval_rule=self._runtime_approved_egress_injected_approval_rule,
+        )
+        return _strip_empty_root_sections(payload)
 
-    def get_agent_culture(self, agent_name: str) -> tuple[str, CultureConfig] | None:
+    def with_runtime_knowledge_base_overlay(
+        self,
+        base_id: str,
+        base_config: KnowledgeBaseConfig,
+    ) -> Config:
+        """Return an effective config with one non-authored knowledge base."""
+        self._validate_knowledge_base_ids([base_id])
+        if base_id in self.knowledge_bases and base_id not in self._runtime_knowledge_base_overlays:
+            msg = f"Runtime knowledge base '{base_id}' conflicts with an authored knowledge base"
+            raise ValueError(msg)
+        config = self.model_copy(
+            update={"knowledge_bases": {**self.knowledge_bases, base_id: base_config}},
+        )
+        config._runtime_knowledge_base_overlays = {
+            **self._runtime_knowledge_base_overlays,
+            base_id: base_config,
+        }
+        return config
+
+    def runtime_knowledge_base_overlay(self, base_id: str) -> KnowledgeBaseConfig | None:
+        """Return one runtime-only knowledge base overlay, when present."""
+        return self._runtime_knowledge_base_overlays.get(base_id)
+
+    def _agent_culture(self, agent_name: str) -> tuple[str, CultureConfig] | None:
         """Get the configured culture assignment for an agent, if any."""
         for culture_name, culture_config in self.cultures.items():
             if agent_name in culture_config.agents:
@@ -970,15 +1129,7 @@ class Config(BaseModel):
             raise ValueError(msg)
         return self.agents[agent_name]
 
-    def get_team(self, team_name: str) -> TeamConfig:
-        """Get a team configuration by name."""
-        if team_name not in self.teams:
-            available = ", ".join(sorted(self.teams.keys()))
-            msg = f"Unknown team: {team_name}. Available teams: {available}"
-            raise ValueError(msg)
-        return self.teams[team_name]
-
-    def get_default_history_settings(self) -> ResolvedHistorySettings:
+    def _default_history_settings(self) -> ResolvedHistorySettings:
         """Return defaults-only replay settings for ad hoc shared team scope."""
         return ResolvedHistorySettings(
             policy=_history_policy_from_limits(
@@ -987,15 +1138,14 @@ class Config(BaseModel):
             ),
             max_tool_calls_from_history=self.defaults.max_tool_calls_from_history,
             system_message_role="system",
-            skip_history_system_role=True,
         )
 
-    def get_entity_history_settings(self, entity_name: str) -> ResolvedHistorySettings:
+    def _entity_history_settings(self, entity_name: str) -> ResolvedHistorySettings:
         """Return effective replay settings for one configured agent or team."""
         if entity_name in self.agents:
             entity = self.get_agent(entity_name)
         elif entity_name in self.teams:
-            entity = self.get_team(entity_name)
+            entity = self.teams[entity_name]
         else:
             msg = f"Unknown entity: {entity_name}"
             raise ValueError(msg)
@@ -1018,20 +1168,19 @@ class Config(BaseModel):
             ),
             max_tool_calls_from_history=max_tool_calls_from_history,
             system_message_role="system",
-            skip_history_system_role=True,
         )
 
-    def get_default_compaction_config(self) -> CompactionConfig:
+    def _default_compaction_config(self) -> CompactionConfig:
         """Return the effective destructive compaction config for defaults-only scope."""
         base = self.defaults.compaction
         merged = base.model_dump() if base is not None else {}
         return CompactionConfig.model_validate(merged)
 
-    def has_authored_default_compaction_config(self) -> bool:
+    def _has_authored_default_compaction_config(self) -> bool:
         """Return whether defaults-only scope has authored destructive compaction config."""
         return self.defaults.compaction is not None
 
-    def get_entity_compaction_config(self, entity_name: str) -> CompactionConfig:
+    def _entity_compaction_config(self, entity_name: str) -> CompactionConfig:
         """Return the effective destructive compaction config for one configured agent or team."""
         base = self.defaults.compaction
         defaults_enabled = base.enabled if base is not None else False
@@ -1039,16 +1188,12 @@ class Config(BaseModel):
         if entity_name in self.agents:
             override = self.get_agent(entity_name).compaction
         elif entity_name in self.teams:
-            override = self.get_team(entity_name).compaction
+            override = self.teams[entity_name].compaction
         else:
             msg = f"Unknown entity: {entity_name}"
             raise ValueError(msg)
         if override is not None:
             authored_override = override.model_dump(exclude_unset=True)
-            authored_model = _authored_optional_model(
-                override.model,
-                field_is_set="model" in override.model_fields_set,
-            )
             explicit_enabled = authored_override.pop(
                 "enabled",
                 override.enabled if "enabled" in override.model_fields_set else None,
@@ -1066,54 +1211,51 @@ class Config(BaseModel):
                 defaults_enabled=defaults_enabled,
                 override_enabled=explicit_enabled,
                 override_fields_set=override.model_fields_set,
-                authored_model=authored_model,
+                authored_model_fields=_authored_compaction_model_fields(override),
             )
         return CompactionConfig.model_validate(merged)
 
-    def has_authored_entity_compaction_config(self, entity_name: str) -> bool:
+    def _has_authored_entity_compaction_config(self, entity_name: str) -> bool:
         """Return whether destructive compaction was explicitly configured for one configured entity."""
         if entity_name in self.agents:
             override = self.get_agent(entity_name).compaction
         elif entity_name in self.teams:
-            override = self.get_team(entity_name).compaction
+            override = self.teams[entity_name].compaction
         else:
             msg = f"Unknown entity: {entity_name}"
             raise ValueError(msg)
         return self.defaults.compaction is not None or override is not None
+
+    def resolve_entity(self, entity_name: str | None) -> ResolvedEntityView:
+        """Return the resolved config view for one entity, or the defaults-only scope for None."""
+        return ResolvedEntityView(_config=self, name=entity_name)
 
     def get_model_context_window(self, model_name: str) -> int | None:
         """Return the configured context window for one model name, when known."""
         model_config = self.models.get(model_name)
         return model_config.context_window if model_config and model_config.context_window else None
 
-    def get_toolkit(self, toolkit_name: str) -> ToolkitDefinition:
-        """Get one dynamic toolkit definition by name."""
-        toolkit = self.toolkits.get(toolkit_name)
-        if toolkit is None:
-            available = ", ".join(sorted(self.toolkits)) or "(none)"
-            msg = f"Unknown toolkit: {toolkit_name}. Available toolkits: {available}"
-            raise ValueError(msg)
-        return toolkit
-
-    def get_toolkit_scope_incompatible_tools(
+    def _deferred_tool_scope_incompatible_tools(
         self,
         agent_name: str,
-        toolkit_name: str,
+        authored_tool_name: str,
     ) -> list[str]:
-        """Return toolkit tools that are invalid for one agent's effective execution scope."""
-        execution_scope = self.get_agent_execution_scope(agent_name)
+        """Return expanded deferred tools invalid for one agent's effective execution scope."""
+        authored_config = self._agent_authored_deferred_tool_config(agent_name, authored_tool_name)
+        if authored_config is None:
+            return []
+        execution_scope = self._agent_execution_scope(agent_name)
         return unsupported_shared_only_integration_names(
-            [entry.name for entry in self.get_toolkit_tool_configs(toolkit_name)],
+            self.expand_tool_names([authored_tool_name]),
             execution_scope,
-            configured_mcp_server_ids=self.mcp_servers,
         )
 
-    def get_agent_scope_incompatible_toolkits(self, agent_name: str) -> dict[str, list[str]]:
-        """Return allowed toolkits whose contents are invalid for one agent's execution scope."""
+    def _agent_scope_incompatible_deferred_tools(self, agent_name: str) -> dict[str, list[str]]:
+        """Return deferred authored tools whose expanded contents are invalid for one agent scope."""
         return {
-            toolkit_name: incompatible_tools
-            for toolkit_name in self.get_agent(agent_name).allowed_toolkits
-            if (incompatible_tools := self.get_toolkit_scope_incompatible_tools(agent_name, toolkit_name))
+            entry.name: incompatible_tools
+            for entry in self._agent_authored_deferred_tool_configs(agent_name)
+            if (incompatible_tools := self._deferred_tool_scope_incompatible_tools(agent_name, entry.name))
         }
 
     def get_worker_grantable_credentials(self) -> frozenset[str]:
@@ -1123,7 +1265,7 @@ class Config(BaseModel):
             return DEFAULT_WORKER_GRANTABLE_CREDENTIALS
         return frozenset(configured)
 
-    def get_agent_execution_scope(self, agent_name: str) -> WorkerScope | None:
+    def _agent_execution_scope(self, agent_name: str) -> WorkerScope | None:
         """Return the internal derived execution scope for one agent.
 
         This is not the authored config field.
@@ -1138,10 +1280,10 @@ class Config(BaseModel):
         )
         return policy.effective_execution_scope
 
-    def get_agent_scope_label(self, agent_name: str) -> str:
+    def _agent_scope_label(self, agent_name: str) -> str:
         """Return the user-facing authored scope label for one agent.
 
-        Keep this separate from `get_agent_execution_scope()`: the internal runtime uses
+        Keep this separate from `_agent_execution_scope()`: the internal runtime uses
         one derived execution scope, but user-facing messages should still distinguish
         authored `worker_scope=...` from private `private.per=...`.
         """
@@ -1153,7 +1295,16 @@ class Config(BaseModel):
         )
         return policy.scope_label
 
-    def get_agent_private_knowledge_base_id(self, agent_name: str) -> str | None:
+    def _get_agent_eager_tools(self, agent_name: str) -> list[str]:
+        """Return expanded non-deferred tools visible without a dynamic load."""
+        tool_names: list[str] = []
+        for entry in self._get_agent_authored_tool_configs(agent_name):
+            if entry.defer:
+                continue
+            tool_names.extend(self.expand_tool_names([entry.name]))
+        return tool_names
+
+    def _agent_private_knowledge_base_id(self, agent_name: str) -> str | None:
         """Return the synthetic knowledge base ID for one agent's private knowledge."""
         policy = resolve_agent_policy_from_data(
             agent_name,
@@ -1174,11 +1325,11 @@ class Config(BaseModel):
             private_knowledge_base_id_prefix=self.PRIVATE_KNOWLEDGE_BASE_ID_PREFIX,
         )
 
-    def get_agent_knowledge_base_ids(self, agent_name: str) -> list[str]:
+    def _agent_knowledge_base_ids(self, agent_name: str) -> list[str]:
         """Return shared and private knowledge base IDs assigned to one agent."""
         agent_config = self.get_agent(agent_name)
         base_ids = list(agent_config.knowledge_bases)
-        private_base_id = self.get_agent_private_knowledge_base_id(agent_name)
+        private_base_id = self._agent_private_knowledge_base_id(agent_name)
         if private_base_id is not None:
             base_ids.append(private_base_id)
         return base_ids
@@ -1233,9 +1384,27 @@ class Config(BaseModel):
             validate_authored_tool_entry_overrides,
         )
 
+        validation_info = tool_validation_snapshot.get(entry.name)
         if entry.name not in tool_validation_snapshot and not self.is_tool_preset(entry.name):
+            if self._unresolved_plugin_tool_sources:
+                logger.warning(
+                    "Unknown tool may belong to a plugin whose tool names could not be resolved; "
+                    "disabling it for this run (verify the tool name is not a typo)",
+                    config_path=config_path_prefix,
+                    tool_name=entry.name,
+                    unresolved_plugin_sources=sorted(self._unresolved_plugin_tool_sources),
+                )
+                self._unavailable_plugin_tool_names.add(entry.name)
+                return
             msg = f"{config_path_prefix}.{entry.name}: Unknown tool '{entry.name}'."
             raise ToolConfigOverrideError(msg)
+        if validation_info is not None and validation_info.unavailable_due_to_plugin_load_error:
+            logger.warning(
+                "Plugin tool unavailable because plugin failed to load",
+                config_path=config_path_prefix,
+                tool_name=entry.name,
+            )
+            return
 
         validate_authored_tool_entry_overrides(
             entry.name,
@@ -1252,13 +1421,26 @@ class Config(BaseModel):
     ) -> None:
         """Validate authored tool references against one resolved validation snapshot."""
         # why-lazy: module-top catalog import pulls runtime tool registry paths and loads agents+tools at config import.
-        from mindroom.tool_system.catalog import resolved_tool_validation_snapshot_for_runtime  # noqa: PLC0415
+        from mindroom.tool_system.catalog import (  # noqa: PLC0415
+            resolved_tool_validation_snapshot_for_runtime,
+            unresolved_plugin_tool_sources_for_runtime,
+        )
 
         tool_validation_snapshot = resolved_tool_validation_snapshot_for_runtime(
             runtime_paths,
             self,
             tolerate_plugin_load_errors=tolerate_plugin_load_errors,
         )
+        self._unresolved_plugin_tool_sources = unresolved_plugin_tool_sources_for_runtime(
+            runtime_paths,
+            self,
+            tolerate_plugin_load_errors=tolerate_plugin_load_errors,
+        )
+        self._unavailable_plugin_tool_names = {
+            tool_name
+            for tool_name, validation_info in tool_validation_snapshot.items()
+            if validation_info.unavailable_due_to_plugin_load_error
+        }
         self._validate_authored_tool_entries_with_snapshot(
             tool_validation_snapshot=tool_validation_snapshot,
         )
@@ -1282,86 +1464,128 @@ class Config(BaseModel):
                     config_path_prefix=f"agents.{agent_name}.tools[{index}]",
                     tool_validation_snapshot=tool_validation_snapshot,
                 )
-        for toolkit_name, toolkit in self.toolkits.items():
-            for index, entry in enumerate(toolkit.tools):
-                config_path_prefix = f"toolkits.{toolkit_name}.tools[{index}]"
-                if entry.name in _RESERVED_DYNAMIC_TOOLKIT_TOOLS:
-                    msg = (
-                        f"{config_path_prefix}.{entry.name}: Toolkit definitions cannot include reserved "
-                        f"control-plane tool '{entry.name}'."
-                    )
-                    raise ValueError(msg)
-                validation_info = tool_validation_snapshot.get(entry.name)
-                if validation_info is None or not validation_info.runtime_loadable:
-                    msg = (
-                        f"{config_path_prefix}.{entry.name}: Toolkit tools must resolve through the normal "
-                        f"tool registry; '{entry.name}' is not supported."
-                    )
-                    raise ValueError(msg)
-                self._validate_authored_tool_entry(
-                    entry,
-                    config_path_prefix=config_path_prefix,
-                    tool_validation_snapshot=tool_validation_snapshot,
-                )
 
-    def get_toolkit_tool_configs(self, toolkit_name: str) -> list[ResolvedToolConfig]:
-        """Return effective authored tool config entries for one dynamic toolkit."""
-        from mindroom.tool_system.catalog import apply_authored_overrides  # noqa: PLC0415
-
-        toolkit = self.get_toolkit(toolkit_name)
-        merged_overrides = {entry.name: apply_authored_overrides({}, entry.overrides) for entry in toolkit.tools}
-        return [
-            ResolvedToolConfig(
-                name=tool_name,
-                tool_config_overrides=dict(merged_overrides.get(tool_name, {})),
-            )
-            for tool_name in self.expand_tool_names(toolkit.tool_names)
-        ]
-
-    def get_agent_tool_configs(self, agent_name: str) -> list[ResolvedToolConfig]:
-        """Return effective authored tool config entries for one agent."""
+    def _get_agent_authored_tool_configs(self, agent_name: str) -> list[EffectiveToolConfig]:
+        """Return effective authored tool config entries before preset/implied expansion."""
         from mindroom.tool_system.catalog import apply_authored_overrides  # noqa: PLC0415
 
         agent_config = self.get_agent(agent_name)
-        merged_overrides: dict[str, dict[str, object]] = {}
-        explicit_names = list(agent_config.tool_names)
+        default_entries_by_name = {entry.name: entry for entry in self.defaults.tools}
+        agent_entry_names = {entry.name for entry in agent_config.tools}
+        effective_authored_entries: list[EffectiveToolConfig] = []
 
         if agent_config.include_default_tools:
-            explicit_names.extend(self.defaults.tool_names)
+            for entry in agent_config.tools:
+                if not self._tool_name_is_available(entry.name):
+                    continue
+                base_overrides: dict[str, object] = {}
+                if default_entry := default_entries_by_name.get(entry.name):
+                    base_overrides = apply_authored_overrides({}, default_entry.overrides)
+                effective_authored_entries.append(
+                    EffectiveToolConfig(
+                        name=entry.name,
+                        tool_config_overrides=apply_authored_overrides(base_overrides, entry.overrides),
+                        defer=entry.defer,
+                        initial=entry.initial,
+                        authored_order=len(effective_authored_entries),
+                        authored_name=entry.name,
+                    ),
+                )
             for entry in self.defaults.tools:
-                merged_overrides[entry.name] = apply_authored_overrides({}, entry.overrides)
+                if entry.name in agent_entry_names:
+                    continue
+                if not self._tool_name_is_available(entry.name):
+                    continue
+                effective_authored_entries.append(
+                    EffectiveToolConfig(
+                        name=entry.name,
+                        tool_config_overrides=apply_authored_overrides({}, entry.overrides),
+                        authored_order=len(effective_authored_entries),
+                        authored_name=entry.name,
+                    ),
+                )
+        else:
+            for entry in agent_config.tools:
+                if not self._tool_name_is_available(entry.name):
+                    continue
+                effective_authored_entries.append(
+                    EffectiveToolConfig(
+                        name=entry.name,
+                        tool_config_overrides=apply_authored_overrides({}, entry.overrides),
+                        defer=entry.defer,
+                        initial=entry.initial,
+                        authored_order=len(effective_authored_entries),
+                        authored_name=entry.name,
+                    ),
+                )
 
-        for entry in agent_config.tools:
-            base_overrides = merged_overrides.get(entry.name, {})
-            merged_overrides[entry.name] = apply_authored_overrides(base_overrides, entry.overrides)
+        return effective_authored_entries
 
-        return [
-            ResolvedToolConfig(
-                name=tool_name,
-                tool_config_overrides=dict(merged_overrides.get(tool_name, {})),
+    def _tool_name_is_available(self, tool_name: str) -> bool:
+        """Return whether an authored tool survived tolerant plugin-load validation."""
+        return tool_name not in self._unavailable_plugin_tool_names
+
+    def _agent_tool_configs(self, agent_name: str) -> list[EffectiveToolConfig]:
+        """Return effective runtime tool config entries for each authored owner."""
+        effective_entries = []
+        for authored_entry in self._get_agent_authored_tool_configs(agent_name):
+            if not self._tool_name_is_available(authored_entry.name):
+                continue
+            effective_entries.extend(
+                (
+                    EffectiveToolConfig(
+                        name=tool_name,
+                        tool_config_overrides=(
+                            dict(authored_entry.tool_config_overrides) if tool_name == authored_entry.name else {}
+                        ),
+                        defer=authored_entry.defer,
+                        initial=authored_entry.initial,
+                        authored_order=authored_entry.authored_order,
+                        authored_name=authored_entry.name,
+                    )
+                )
+                for tool_name in self.expand_tool_names([authored_entry.name])
+                if tool_name not in self._unavailable_plugin_tool_names
             )
-            for tool_name in self.expand_tool_names(explicit_names)
+        return effective_entries
+
+    def _agent_available_tools(self, agent_name: str) -> list[str]:
+        """Get all tools the agent may use after dynamic loading."""
+        agent_config = self.get_agent(agent_name)
+        explicit_names = [name for name in agent_config.tool_names if self._tool_name_is_available(name)]
+        if agent_config.include_default_tools:
+            explicit_names.extend(name for name in self.defaults.tool_names if self._tool_name_is_available(name))
+        return self.expand_tool_names(explicit_names)
+
+    def _agent_authored_deferred_tool_configs(self, agent_name: str) -> list[EffectiveToolConfig]:
+        """Return one entry per authored deferred tool in effective order."""
+        return [
+            EffectiveToolConfig(
+                name=entry.name,
+                tool_config_overrides=dict(entry.tool_config_overrides),
+                defer=entry.defer,
+                initial=entry.initial,
+                authored_order=entry.authored_order,
+                authored_name=entry.name,
+            )
+            for entry in self._get_agent_authored_tool_configs(agent_name)
+            if entry.defer and self._tool_name_is_available(entry.name)
         ]
 
-    def get_agent_tools(self, agent_name: str) -> list[str]:
-        """Get effective tool names for an agent."""
-        return [entry.name for entry in self.get_agent_tool_configs(agent_name)]
-
-    def get_agent_tool_runtime_overrides(
+    def _agent_authored_deferred_tool_config(
         self,
         agent_name: str,
-        tool_name: str,
-        *,
-        runtime_paths: RuntimePaths | None = None,
-    ) -> dict[str, object] | None:
-        """Return runtime kwargs derived from one agent's authored tool overrides."""
-        from mindroom.tool_system.catalog import (  # noqa: PLC0415
-            authored_tool_overrides_to_runtime,
-            ensure_tool_registry_loaded,
-        )
+        authored_tool_name: str,
+    ) -> EffectiveToolConfig | None:
+        """Return one authored deferred tool config by authored name."""
+        for entry in self._agent_authored_deferred_tool_configs(agent_name):
+            if entry.name == authored_tool_name:
+                return entry
+        return None
 
-        if runtime_paths is not None:
-            ensure_tool_registry_loaded(runtime_paths, self)
+    def _agent_tool_runtime_overrides(self, agent_name: str, tool_name: str) -> dict[str, object] | None:
+        """Return runtime kwargs derived from one agent's authored tool overrides."""
+        from mindroom.tool_system.catalog import authored_tool_overrides_to_runtime  # noqa: PLC0415
 
         agent_config = self.get_agent(agent_name)
         overrides = agent_config.get_tool_overrides(tool_name)
@@ -1372,10 +1596,10 @@ class Config(BaseModel):
 
     def _agent_hard_dependency_tool_names(self, agent_name: str) -> set[str]:
         """Return tool names that are hard startup dependencies for one agent."""
-        agent_config = self.get_agent(agent_name)
-        referenced_tool_names = set(self.get_agent_tools(agent_name))
-        for toolkit_name in agent_config.initial_toolkits:
-            referenced_tool_names.update(entry.name for entry in self.get_toolkit_tool_configs(toolkit_name))
+        referenced_tool_names: set[str] = set()
+        for entry in self._agent_tool_configs(agent_name):
+            if not entry.defer or entry.initial:
+                referenced_tool_names.add(entry.name)
         return referenced_tool_names
 
     def get_entities_referencing_tools(self, tool_names: set[str]) -> set[str]:
@@ -1406,27 +1630,12 @@ class Config(BaseModel):
             closures=closures,
         )
 
-    def get_private_team_targets(
-        self,
-        agent_name: str,
-        *,
-        closures: dict[str, frozenset[str]] | None = None,
-    ) -> tuple[str, ...]:
-        """Return private agents reachable from one team member, including itself."""
-        return get_private_team_targets(
-            agent_name,
-            build_agent_policy_seeds(
-                self.agents,
-                default_worker_scope=self.defaults.worker_scope,
-            ),
-            closures=closures,
-        )
-
     def get_unsupported_team_agents(
         self,
         agent_names: list[str],
         *,
         closures: dict[str, frozenset[str]] | None = None,
+        allow_direct_private_agents: bool = False,
     ) -> dict[str, tuple[str, ...] | None]:
         """Return unsupported team members keyed by agent name.
 
@@ -1441,6 +1650,7 @@ class Config(BaseModel):
                 default_worker_scope=self.defaults.worker_scope,
             ),
             closures=closures,
+            allow_direct_private_agents=allow_direct_private_agents,
         )
 
     @staticmethod
@@ -1462,11 +1672,16 @@ class Config(BaseModel):
         agent_names: list[str],
         *,
         team_name: str | None = None,
+        allow_direct_private_agents: bool = False,
     ) -> None:
         """Reject unknown or currently unsupported team members."""
         prefix = f"Team '{team_name}'" if team_name is not None else "Team request"
         closure_cache: dict[str, frozenset[str]] = {}
-        unsupported_agents = self.get_unsupported_team_agents(agent_names, closures=closure_cache)
+        unsupported_agents = self.get_unsupported_team_agents(
+            agent_names,
+            closures=closure_cache,
+            allow_direct_private_agents=allow_direct_private_agents,
+        )
         if not unsupported_agents:
             return
         first_unsupported_agent, private_targets = next(iter(unsupported_agents.items()))
@@ -1505,7 +1720,7 @@ class Config(BaseModel):
             queue.extend(implied_tool for implied_tool in next_tools if implied_tool not in seen)
         return expanded
 
-    def get_agent_memory_backend(self, agent_name: str) -> MemoryBackend:
+    def _agent_memory_backend(self, agent_name: str) -> MemoryBackend:
         """Get effective memory backend for one agent."""
         agent_config = self.agents.get(agent_name)
         if agent_config is None:
@@ -1514,20 +1729,29 @@ class Config(BaseModel):
             return agent_config.memory_backend
         return self.memory.backend
 
+    def _agent_memory_search(self, agent_name: str) -> MemorySearchConfig:
+        """Get effective file-memory search settings for one agent."""
+        agent_config = self.agents.get(agent_name)
+        override = agent_config.memory_search if agent_config is not None else None
+        if override is None:
+            return self.memory.search
+        # exclude_none keeps the "None inherits" tri-state; deep copy avoids aliasing memory.search.include.
+        return self.memory.search.model_copy(update=override.model_dump(exclude_none=True), deep=True)
+
     def uses_file_memory(self) -> bool:
         """Return whether any configured agent uses file-backed memory."""
         if not self.agents:
             return self.memory.backend == "file"
-        return any(self.get_agent_memory_backend(agent_name) == "file" for agent_name in self.agents)
+        return any(self._agent_memory_backend(agent_name) == "file" for agent_name in self.agents)
 
     def get_all_configured_rooms(self) -> set[str]:
-        """Extract all room aliases configured for agents and teams.
+        """Extract all configured room references.
 
         Returns:
-            Set of all unique room aliases from agent and team configurations
+            Set of all unique room references from room, agent, and team configurations
 
         """
-        all_room_aliases = set()
+        all_room_aliases = set(self.rooms)
         for agent_config in self.agents.values():
             all_room_aliases.update(agent_config.rooms)
         for team_config in self.teams.values():
@@ -1548,6 +1772,10 @@ class Config(BaseModel):
         In ambiguous cases, default to "thread".
         """
         from mindroom.entity_resolution import resolve_agent_thread_mode, router_agents_for_room  # noqa: PLC0415
+
+        runtime_room_override = resolve_room_thread_mode_override(runtime_paths, room_id)
+        if runtime_room_override is not None:
+            return runtime_room_override
 
         if entity_name in self.agents:
             return resolve_agent_thread_mode(
@@ -1589,7 +1817,7 @@ class Config(BaseModel):
 
         return "thread"
 
-    def get_entity_model_name(self, entity_name: str) -> str:
+    def _entity_model_name(self, entity_name: str) -> str:
         """Get the model name for an agent, team, or router.
 
         Args:
@@ -1621,17 +1849,6 @@ class Config(BaseModel):
         msg = f"Unknown entity: {entity_name}. Available entities: {', '.join(available)}"
         raise ValueError(msg)
 
-    def get_effective_entity_model_name(
-        self,
-        entity_name: str,
-        room_id: str | None,
-        runtime_paths: RuntimePaths,
-    ) -> str:
-        """Return the effective model for one entity in one room context."""
-        from mindroom.entity_resolution import effective_entity_model_name  # noqa: PLC0415
-
-        return effective_entity_model_name(self, entity_name, room_id, runtime_paths)
-
     def resolve_runtime_model(
         self,
         *,
@@ -1639,11 +1856,27 @@ class Config(BaseModel):
         active_model_name: str | None = None,
         active_context_window: int | None = None,
         room_id: str | None = None,
+        thread_id: str | None = None,
         runtime_paths: RuntimePaths | None = None,
         default_model_name: str = "default",
     ) -> ResolvedRuntimeModel:
-        """Resolve the active runtime model plus its configured context window."""
+        """Resolve the active runtime model plus its configured context window.
+
+        Precedence: explicit `active_model_name`, then a persisted per-thread
+        override, then the room override, then the entity's authored model.
+        """
         resolved_model_name = active_model_name
+        if resolved_model_name is None and thread_id is not None:
+            if runtime_paths is None:
+                msg = "runtime_paths are required to resolve a thread-specific runtime model"
+                raise ValueError(msg)
+            thread_override = resolve_thread_model_override(
+                runtime_paths,
+                thread_id,
+                configured_models=self.models,
+            ).active
+            if thread_override is not None:
+                resolved_model_name = thread_override
         if resolved_model_name is None:
             if entity_name is None:
                 resolved_model_name = default_model_name
@@ -1651,9 +1884,11 @@ class Config(BaseModel):
                 if runtime_paths is None:
                     msg = "runtime_paths are required to resolve a room-specific runtime model"
                     raise ValueError(msg)
-                resolved_model_name = self.get_effective_entity_model_name(entity_name, room_id, runtime_paths)
+                from mindroom.entity_resolution import effective_entity_model_name  # noqa: PLC0415
+
+                resolved_model_name = effective_entity_model_name(self, entity_name, room_id, runtime_paths)
             else:
-                resolved_model_name = self.get_entity_model_name(entity_name)
+                resolved_model_name = self._entity_model_name(entity_name)
 
         resolved_context_window = active_context_window
         if resolved_context_window is None:
@@ -1673,15 +1908,21 @@ def load_config(
         msg = f"Agent configuration file not found: {path}"
         raise FileNotFoundError(msg)
 
-    with path.open() as f:
-        data = yaml.safe_load(f) or {}
+    data, source_files = load_yaml_config_source(path)
 
-    config = Config.validate_with_runtime(
-        data,
-        runtime_paths,
-        tolerate_plugin_load_errors=tolerate_plugin_load_errors,
-    )
-    logger.info("loaded_agent_configuration", path=str(path))
+    try:
+        config = Config.validate_with_runtime(
+            data,
+            runtime_paths,
+            tolerate_plugin_load_errors=tolerate_plugin_load_errors,
+        )
+    except CONFIG_LOAD_USER_ERROR_TYPES as exc:
+        # Parsing succeeded, so the full file set is known; expose it the same
+        # way as parse-time failures so reload watchers keep covering it.
+        attach_partial_source_files(exc, source_files)
+        raise
+    config._source_files = source_files
+    logger.info("loaded_agent_configuration", path=str(path), source_file_count=len(source_files))
     logger.info("loaded_agent_configuration_count", agent_count=len(config.agents))
     return config
 

@@ -2,7 +2,17 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
+
+from mindroom.path_globs import validate_safe_relative_pattern
+
+KnowledgeBaseMode = Literal["semantic", "files"]
+
+
+def _validate_relative_patterns(value: list[str], *, field_name: str) -> list[str]:
+    return [validate_safe_relative_pattern(pattern, field_name=field_name) for pattern in value]
 
 
 class KnowledgeGitConfig(BaseModel):
@@ -43,10 +53,23 @@ class KnowledgeGitConfig(BaseModel):
         description="Optional root-anchored glob patterns to exclude after include filtering",
     )
 
+    @field_validator("include_patterns", "exclude_patterns")
+    @classmethod
+    def validate_include_patterns(cls, value: list[str], info: ValidationInfo) -> list[str]:
+        """Validate include and exclude patterns stay inside the knowledge root."""
+        return _validate_relative_patterns(value, field_name=f"knowledge_bases.git.{info.field_name}")
+
 
 class KnowledgeBaseConfig(BaseModel):
     """Knowledge base configuration."""
 
+    mode: KnowledgeBaseMode = Field(
+        default="semantic",
+        description=(
+            "Knowledge access mode. 'semantic' builds an embedding-backed search index; "
+            "'files' skips embeddings and exposes source files for agentic file-tool search."
+        ),
+    )
     description: str = Field(
         default="",
         description="Short description of what this knowledge base contains, shown to agents in knowledge-search tool metadata",
@@ -68,18 +91,47 @@ class KnowledgeBaseConfig(BaseModel):
     )
     include_extensions: list[str] | None = Field(
         default=None,
-        description="Optional file extensions to include for indexing, for example ['.md', '.py']",
+        description="Optional file extensions to index instead of the default text-like set, for example ['.md', '.py']",
+    )
+    extra_extensions: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Optional file extensions to index in addition to the default text-like set, "
+            "for example ['.pdf', '.docx']; the matching reader package must be installed"
+        ),
     )
     exclude_extensions: list[str] = Field(
         default_factory=list,
         description="Optional file extensions to exclude from indexing after include filtering",
+    )
+    include_patterns: list[str] = Field(
+        default_factory=list,
+        description="Optional root-anchored glob patterns to include before extension filtering",
+    )
+    exclude_patterns: list[str] = Field(
+        default_factory=list,
+        description="Optional root-anchored glob patterns to exclude after include filtering",
+    )
+    skip_hidden: bool = Field(
+        default=True,
+        description=(
+            "Skip hidden files/folders (paths with components starting with '.') during indexing; "
+            "writers that update knowledge folders in place use dot-prefixed temp files. "
+            "Git-backed bases ignore this field and use git.skip_hidden instead"
+        ),
     )
     git: KnowledgeGitConfig | None = Field(
         default=None,
         description="Optional Git sync configuration for this knowledge base",
     )
 
-    @field_validator("include_extensions", "exclude_extensions")
+    @field_validator("include_patterns", "exclude_patterns")
+    @classmethod
+    def validate_include_patterns(cls, value: list[str], info: ValidationInfo) -> list[str]:
+        """Validate include and exclude patterns stay inside the knowledge root."""
+        return _validate_relative_patterns(value, field_name=f"knowledge_bases.{info.field_name}")
+
+    @field_validator("include_extensions", "extra_extensions", "exclude_extensions")
     @classmethod
     def normalize_extensions(cls, value: list[str] | None) -> list[str] | None:
         """Normalize configured extensions to lowercase dotted suffixes."""

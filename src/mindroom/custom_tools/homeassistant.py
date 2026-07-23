@@ -12,6 +12,8 @@ import httpx
 from agno.tools import Toolkit
 
 from mindroom.credentials import CredentialsManager, load_scoped_credentials
+from mindroom.homeassistant_url_validation import homeassistant_url_error_detail, validate_homeassistant_instance_url
+from mindroom.server_fetch_url import ServerFetchAsyncHTTPTransport, ServerFetchUrlError
 from mindroom.tool_system.worker_routing import (
     ResolvedWorkerTarget,
     unsupported_shared_only_integration_message,
@@ -90,11 +92,20 @@ class HomeAssistantTools(Toolkit):
         if not instance_url or not token:
             return {"error": "Missing Home Assistant credentials"}
 
+        allow_private_url = config.get("allow_private_url") is True
         try:
-            async with httpx.AsyncClient() as client:
+            fetch_url = validate_homeassistant_instance_url(
+                instance_url,
+                allow_private_url=allow_private_url,
+            )
+            async with httpx.AsyncClient(
+                transport=ServerFetchAsyncHTTPTransport(
+                    allow_private_networks=allow_private_url,
+                ),
+            ) as client:
                 response = await client.request(
                     method=method,
-                    url=urljoin(instance_url, endpoint),
+                    url=urljoin(fetch_url, endpoint),
                     headers={"Authorization": f"Bearer {token}"},
                     json=json_data,
                     timeout=10.0,
@@ -103,10 +114,14 @@ class HomeAssistantTools(Toolkit):
                 if response.status_code == 401:
                     return {"error": "Invalid authentication token. Please reconnect Home Assistant."}
                 if response.status_code not in (200, 201):
-                    return {"error": f"API error: {response.text}"}
+                    return {"error": f"Home Assistant API returned status {response.status_code}"}
 
                 return response.json() if response.text else {"success": True}
 
+        except ServerFetchUrlError as e:
+            return {
+                "error": homeassistant_url_error_detail(e, allow_private_url=allow_private_url),
+            }
         except (httpx.ConnectTimeout, httpx.ReadTimeout, httpx.WriteTimeout, httpx.PoolTimeout):
             return {"error": "Connection timeout - check if Home Assistant is accessible"}
         except httpx.RequestError as e:

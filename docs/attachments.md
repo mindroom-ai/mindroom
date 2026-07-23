@@ -47,11 +47,21 @@ Attachments work in both direct messages and threads, and with both individual a
 ## Attachment IDs
 
 Each uploaded file or video is assigned a stable attachment ID (e.g., `att_abc123`).
-The agent's prompt is augmented with the available IDs:
+Attachments sent with the current message are listed in the prompt with full provenance (kind, filename, sender, send time, and originating event ID):
 
 ```
-Available attachment IDs: att_abc123. Use tool calls to inspect or process them.
+Attachments sent with the current message (use tool calls to inspect or process them by ID):
+- att_abc123 (image, "car.jpg", from @user:example.org, sent 2026-06-06 09:00 UTC, event $abc)
 ```
+
+Earlier attachments stay attached to the conversation messages that carried them: when thread history is rendered for the model, each message gets an inline annotation and (for user messages) the media itself, so attachments appear in chronological position:
+
+```
+@user:example.org: check this out
+[attachments: att_def456 (image, "house.jpg")]
+```
+
+Keeping media bytes pinned to their original messages also keeps the request prefix stable across turns, so provider prompt caching covers previously sent media instead of re-processing it every turn.
 
 Attachment IDs are **context-scoped** -- an attachment registered in one room or thread is not accessible from another.
 This prevents cross-room data leakage for ID-based access.
@@ -76,19 +86,21 @@ agents:
 
 | Operation | Description |
 |-----------|-------------|
-| `list_attachments(target?)` | List metadata for attachments in the current context (ID, kind, local_path, filename, MIME type, size, room_id, thread_id, sender, created_at) |
+| `list_attachments(target?)` | List metadata for attachments in the current context (ID, kind, local_path, filename, MIME type, size, room_id, thread_id, sender, event_timestamp, created_at) |
 | `get_attachment(attachment_id, mindroom_output_path?)` | Return one context attachment record, or save its bytes to a workspace-relative path and return a save receipt |
 | `register_attachment(file_path)` | Register a local file path as a context attachment ID (`att_*`) |
 
 When `mindroom_output_path` is omitted, `get_attachment()` returns the attachment metadata response, including the runtime-local `local_path`.
 For worker-routed agents, prefer `get_attachment("att_...", mindroom_output_path="incoming/file.ext")` before processing an attachment with `file`, `coding`, `python`, or `shell`, because the runtime-local path may not exist inside the worker workspace.
 `mindroom_output_path` must be a file path relative to the agent workspace.
-It must not be empty, absolute, point at the workspace root, contain `..` or NUL bytes, or use environment or user expansion.
+It must not be empty, absolute, point at the workspace root, contain `..` or NUL bytes, start with `~`, or contain `$` or `%` characters.
 When the save succeeds, the response includes `mindroom_tool_output` with `status: "saved_to_file"`, `path`, byte count, `format: "binary"`, and `sha256`.
-In worker-routed shell and python tools, that workspace is also exposed as `~`, `$HOME`, and `$MINDROOM_AGENT_WORKSPACE`, so `incoming/file.ext` and `~/incoming/file.ext` refer to the same saved file.
+In shell tools, that workspace is exposed as `$MINDROOM_AGENT_WORKSPACE`; in worker-routed shell and python tools it is also `~` and `$HOME`, so `incoming/file.ext` and `~/incoming/file.ext` refer to the same saved file.
 
 `attachment_ids` accepts only context attachment IDs (`att_*`).
 `attachment_file_paths` accepts local file paths and auto-registers them in the current context before sending.
+Relative paths resolve from the agent workspace when one is available.
+Relative paths must stay inside the workspace.
 Use `matrix_message(action="send"|"reply"|"thread-reply", attachment_ids=..., attachment_file_paths=...)` to send attachments.
 
 ### Why use this tool?

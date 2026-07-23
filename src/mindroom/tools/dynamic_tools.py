@@ -5,19 +5,19 @@ The actual toolkit requires agent and session context and is instantiated
 directly in ``create_agent()``, so it is NOT added to ``TOOL_REGISTRY``.
 """
 
-from mindroom.tool_system.metadata import (
+from mindroom.tool_system.declarations import (
     SetupType,
     ToolCategory,
     ToolMetadata,
     ToolStatus,
-    register_builtin_tool_metadata,
 )
+from mindroom.tool_system.registration import register_builtin_tool_metadata
 
 register_builtin_tool_metadata(
     ToolMetadata(
         name="dynamic_tools",
         display_name="Dynamic Tools",
-        description="Load and unload allowed toolkits for the current session",
+        description="Load and unload deferred tools for the current session",
         category=ToolCategory.DEVELOPMENT,
         status=ToolStatus.AVAILABLE,
         setup_type=SetupType.NONE,
@@ -25,5 +25,6 @@ register_builtin_tool_metadata(
         icon_color="text-sky-500",
         config_fields=[],
         dependencies=[],
+        function_names=("list_tools", "load_tool", "unload_tool", "tool_search"),
     ),
 )

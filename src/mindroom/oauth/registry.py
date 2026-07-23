@@ -9,13 +9,15 @@ from typing import TYPE_CHECKING, Any
 
 from mindroom.config.main import Config
 from mindroom.logging_config import get_logger
+from mindroom.mcp.oauth import mcp_oauth_providers_for_config
 from mindroom.oauth.google_calendar import google_calendar_oauth_provider
+from mindroom.oauth.google_docs import google_docs_oauth_provider
 from mindroom.oauth.google_drive import google_drive_oauth_provider
 from mindroom.oauth.google_gmail import google_gmail_oauth_provider
 from mindroom.oauth.google_sheets import google_sheets_oauth_provider
 from mindroom.oauth.providers import OAuthProvider
 from mindroom.tool_system import plugin_imports
-from mindroom.tool_system.metadata import TOOL_METADATA
+from mindroom.tool_system.catalog import TOOL_METADATA
 from mindroom.tool_system.plugins import load_plugin_module
 
 if TYPE_CHECKING:
@@ -45,6 +47,7 @@ def clear_oauth_provider_cache() -> None:
 def _builtin_oauth_providers() -> tuple[OAuthProvider, ...]:
     return (
         google_calendar_oauth_provider(),
+        google_docs_oauth_provider(),
         google_drive_oauth_provider(),
         google_gmail_oauth_provider(),
         google_sheets_oauth_provider(),
@@ -81,7 +84,7 @@ def _load_plugin_oauth_providers(
     skip_broken_plugins: bool,
 ) -> list[OAuthProvider]:
     providers: list[OAuthProvider] = []
-    plugin_bases = plugin_imports._collect_plugin_bases(
+    plugin_bases, _unresolved_plugin_sources = plugin_imports._collect_plugin_bases(
         config.plugins,
         runtime_paths,
         skip_broken_plugins=skip_broken_plugins,
@@ -102,8 +105,11 @@ def _load_plugin_oauth_providers(
             callback = _module_oauth_provider_callback(module)
             registered = callback(plugin_entry.settings, runtime_paths)
             providers.extend(_coerce_oauth_providers(registered))
-        except Exception as exc:
+        except (Exception, SystemExit) as exc:
             if not skip_broken_plugins:
+                if isinstance(exc, SystemExit):
+                    msg = f"Plugin OAuth provider registration failed for {plugin_base.root}: {exc}"
+                    raise plugin_imports.PluginValidationError(msg) from exc
                 raise
             plugin_imports._log_skipped_plugin_entry(plugin_entry.path, plugin_base.root, exc)
     return providers
@@ -195,7 +201,8 @@ def _load_oauth_provider_registry(
         runtime_paths,
         skip_broken_plugins=skip_broken_plugins,
     )
-    providers = (*_builtin_oauth_providers(), *plugin_providers)
+    mcp_providers = tuple(mcp_oauth_providers_for_config(config.mcp_servers))
+    providers = (*_builtin_oauth_providers(), *mcp_providers, *plugin_providers)
     registry = _provider_registry(providers)
     with _provider_cache_lock:
         _provider_cache = _ProviderCacheEntry(cache_key, registry)
@@ -221,10 +228,10 @@ def load_oauth_providers_for_snapshot(
 ) -> dict[str, OAuthProvider]:
     """Return OAuth providers cached by one API config snapshot."""
     cache_key = ("snapshot", snapshot.generation, id(snapshot), snapshot.runtime_paths, skip_broken_plugins)
-    if snapshot.runtime_config is not None:
-        config = snapshot.runtime_config
-    else:
-        config = Config.model_validate(snapshot.config_data or {}, context={"runtime_paths": snapshot.runtime_paths})
+    config = snapshot.runtime_config
+    if config is None:
+        # Only pre-first-load snapshots lack a runtime config; they expose built-in providers only.
+        config = Config.model_validate({}, context={"runtime_paths": snapshot.runtime_paths})
     return _load_oauth_provider_registry(
         config,
         snapshot.runtime_paths,

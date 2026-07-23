@@ -14,16 +14,16 @@ import nio
 import pytest
 
 from mindroom.config.main import Config
+from mindroom.constants import SOURCE_KIND_KEY
 from mindroom.hooks import EVENT_SCHEDULE_FIRED, HookRegistry, ScheduleFiredContext, build_hook_matrix_admin, hook
 from mindroom.logging_config import setup_logging
 from mindroom.scheduling import (
     CronSchedule,
     ScheduledWorkflow,
-    _execute_scheduled_workflow,
     _run_cron_task,
     _run_once_task,
-    set_scheduling_hook_registry,
 )
+from mindroom.scheduling_executor import execute_scheduled_workflow, set_scheduling_hook_registry
 from tests.conftest import (
     bind_runtime_paths,
     delivered_matrix_side_effect,
@@ -98,7 +98,7 @@ async def test_schedule_hook_rewrites_message_text(tmp_path: Path) -> None:
         "mindroom.hooks.sender._send_message_result",
         new=AsyncMock(side_effect=delivered_matrix_side_effect("$scheduled")),
     ) as mock_send:
-        await _execute_scheduled_workflow(
+        await execute_scheduled_workflow(
             AsyncMock(),
             _workflow("Prepare for meeting"),
             config,
@@ -125,7 +125,7 @@ async def test_schedule_hook_can_suppress_synthetic_message(tmp_path: Path) -> N
         "mindroom.hooks.sender._send_message_result",
         new=AsyncMock(side_effect=delivered_matrix_side_effect("$scheduled")),
     ) as mock_send:
-        await _execute_scheduled_workflow(
+        await execute_scheduled_workflow(
             AsyncMock(),
             _workflow("Do not send"),
             config,
@@ -158,7 +158,7 @@ async def test_schedule_hook_suppression_log_includes_workflow_thread_context(
         "mindroom.hooks.sender._send_message_result",
         new=AsyncMock(side_effect=delivered_matrix_side_effect("$scheduled")),
     ):
-        await _execute_scheduled_workflow(
+        await execute_scheduled_workflow(
             AsyncMock(),
             _workflow("Do not send"),
             config,
@@ -290,7 +290,7 @@ async def test_schedule_hook_send_message_inherits_context_thread_id(tmp_path: P
         "mindroom.hooks.sender._send_message_result",
         new=AsyncMock(side_effect=delivered_matrix_side_effect("$hook-event")),
     ) as mock_hook_send:
-        await _execute_scheduled_workflow(
+        await execute_scheduled_workflow(
             client,
             _workflow("Resume work"),
             config,
@@ -328,7 +328,7 @@ async def test_schedule_hook_send_message_allows_explicit_room_level_opt_out(tmp
         "mindroom.hooks.sender._send_message_result",
         new=AsyncMock(side_effect=delivered_matrix_side_effect("$hook-event")),
     ) as mock_hook_send:
-        await _execute_scheduled_workflow(
+        await execute_scheduled_workflow(
             client,
             _workflow("Resume work"),
             config,
@@ -369,7 +369,7 @@ async def test_schedule_hook_exposes_matrix_admin(tmp_path: Path) -> None:
         servers=["localhost"],
     )
 
-    await _execute_scheduled_workflow(
+    await execute_scheduled_workflow(
         client,
         _workflow("Resume work"),
         config,
@@ -398,7 +398,7 @@ async def test_schedule_hook_matrix_admin_is_unavailable_without_router_binding(
     client.user_id = "@mindroom_general:localhost"
     client.homeserver = "http://agent.local:8008"
 
-    await _execute_scheduled_workflow(
+    await execute_scheduled_workflow(
         client,
         _workflow("Resume work"),
         config,
@@ -428,7 +428,7 @@ async def test_schedule_hook_send_message_can_trigger_dispatch(tmp_path: Path) -
         "mindroom.hooks.sender._send_message_result",
         new=AsyncMock(side_effect=delivered_matrix_side_effect("$hook-event")),
     ) as mock_hook_send:
-        await _execute_scheduled_workflow(
+        await execute_scheduled_workflow(
             client,
             _workflow("Resume work"),
             config,
@@ -439,7 +439,7 @@ async def test_schedule_hook_send_message_can_trigger_dispatch(tmp_path: Path) -
     mock_hook_send.assert_awaited_once()
     content = mock_hook_send.await_args.args[2]
     assert content["body"] == "dispatch"
-    assert content["com.mindroom.source_kind"] == "hook_dispatch"
+    assert content[SOURCE_KIND_KEY] == "hook_dispatch"
 
 
 @pytest.mark.asyncio
@@ -466,7 +466,7 @@ async def test_schedule_hook_room_state_helpers_use_live_client(tmp_path: Path) 
     client.room_get_state_event.return_value = SimpleNamespace(content={"name": "Lobby"})
     client.room_put_state.return_value = object()
 
-    await _execute_scheduled_workflow(
+    await execute_scheduled_workflow(
         client,
         _workflow("Resume work"),
         config,

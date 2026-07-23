@@ -1,4 +1,17 @@
-"""Matrix thread ordering and projection helpers."""
+"""Matrix thread ordering and projection helpers.
+
+Ordering and projection invariants:
+
+1. Thread order is root first, then ``(origin_server_ts, stable input order, event_id)``.
+
+2. Within one equal-timestamp group, relation ancestors precede their descendants (topological order
+   seeded by input order); events outside any relation chain keep their plain sort position.
+
+3. ``resolve_thread_ids_for_event_infos`` derives membership for a local event graph by iterating the
+   canonical resolver (``thread_membership``) to a fixpoint, so transitive implied membership (reply to
+   a reply to a threaded event) resolves regardless of input order.
+   It is the only sanctioned way to batch-resolve membership; it adds no rules of its own.
+"""
 
 from __future__ import annotations
 

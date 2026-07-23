@@ -5,14 +5,26 @@ from types import UnionType
 from typing import Union, get_args, get_origin, get_type_hints
 
 import pytest
+from agno.tools import Toolkit
+from agno.tools.dalle import DalleTools
 
 # Import tools to ensure they're registered
 import mindroom.tools  # noqa: F401
 from mindroom.constants import RuntimePaths
-from mindroom.tool_system.metadata import TOOL_METADATA, TOOL_REGISTRY, ToolManagedInitArg
+from mindroom.tool_system.declarations import ToolManagedInitArg, ToolStatus
+from mindroom.tool_system.metadata import TOOL_METADATA, TOOL_REGISTRY
 from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
-SKIP_CUSTOM = {"homeassistant", "gmail", "google_calendar", "google_drive", "google_sheets", "openclaw_compat"}
+SKIP_CONFIG_FIELD_VALIDATION = {
+    "agent_vault_access",
+    "homeassistant",
+    "gmail",
+    "google_calendar",
+    "google_drive",
+    "google_sheets",
+    "openclaw_compat",
+}
+OPTIONAL_TOOL_IMPORTS = frozenset({"scrapegraph", "telegram"})
 IGNORED_AGNO_PARAMS = {
     # Agno still exposes deprecated BigQuery aliases in its constructor, but MindRoom intentionally only surfaces canonical flags.
     "google_bigquery": {"enable_list_tables", "enable_describe_table", "enable_run_sql_query"},
@@ -21,37 +33,79 @@ IGNORED_AGNO_PARAMS = {
     # Agno accepts a live HTTP session object, which MindRoom cannot serialize safely in UI/YAML config.
     "yfinance": {"session"},
 }
+IGNORED_EXTRA_CONFIG_FIELDS = {
+    # DockerTools accepts toolkit options through **kwargs, so inspect.signature cannot see include_tools.
+    "docker": {"include_tools"},
+}
+
+
+def test_dalle_default_model_is_accepted_by_agno() -> None:
+    """The dashboard default for the DALL-E tool must satisfy Agno's constructor validation."""
+    model_field = next(field for field in TOOL_METADATA["dalle"].config_fields or [] if field.name == "model")
+
+    assert isinstance(model_field.default, str)
+    assert model_field.default
+    DalleTools(model=model_field.default, api_key="sk-test")
 
 
 @pytest.mark.parametrize("tool_name", list(TOOL_REGISTRY.keys()))
-def test_all(tool_name: str) -> None:
-    """Test that all tools have matching ConfigFields and agno parameters."""
-    if tool_name in SKIP_CUSTOM:
-        pytest.skip(f"{tool_name} is a custom tool, skipping test")
+def test_registered_tool_contract(tool_name: str) -> None:
+    """Validate one registered tool's import, managed inputs, and authored config fields."""
+    metadata = TOOL_METADATA[tool_name]
     tool_factory = TOOL_REGISTRY[tool_name]
     try:
         tool_class = tool_factory()
-    except NotImplementedError:
-        pytest.skip(f"{tool_name} tool is not implemented, skipping test")
-    except ImportError as e:
-        pytest.skip(f"{tool_name} dependency not installed: {e}")
-    except RuntimeError as e:
-        if tool_name == "openbb" and ".build.lock" in str(e):
-            pytest.skip(f"{tool_name} import is transiently locked by upstream build process: {e}")
+    except Exception as exc:
+        if (
+            metadata.status == ToolStatus.REQUIRES_CONFIG
+            and isinstance(exc, ImportError)
+            and tool_name in OPTIONAL_TOOL_IMPORTS
+        ):
+            pytest.skip(f"{tool_name} optional dependency not installed: {exc}")
+        if metadata.status == ToolStatus.REQUIRES_CONFIG and isinstance(exc, NotImplementedError):
+            pytest.skip(f"{tool_name} tool is not implemented: {exc}")
         raise
-    verify_tool_configfields(tool_name, tool_class)
+
+    assert isinstance(tool_class, type)
+    if metadata.status != ToolStatus.REQUIRES_CONFIG:
+        assert issubclass(tool_class, Toolkit)
+
+    init_signature = inspect.signature(tool_class.__init__)
+    verify_managed_init_args(tool_name, init_signature)
+    if tool_name not in SKIP_CONFIG_FIELD_VALIDATION:
+        verify_tool_configfields(tool_name, tool_class, init_signature)
 
 
-def verify_tool_configfields(tool_name: str, tool_class: type) -> None:  # noqa: C901, PLR0912, PLR0915
+def verify_managed_init_args(tool_name: str, init_signature: inspect.Signature) -> None:
+    """Verify one tool explicitly declares every MindRoom-managed constructor input."""
+    metadata = TOOL_METADATA[tool_name]
+    managed_arg_names = {managed_arg.value for managed_arg in ToolManagedInitArg}
+    constructor_param_names = {name for name in init_signature.parameters if name != "self"}
+    expected_managed_args = tuple(
+        managed_arg for managed_arg in ToolManagedInitArg if managed_arg.value in constructor_param_names
+    )
+
+    assert metadata.managed_init_args == expected_managed_args, (
+        f"{tool_name} declares constructor inputs "
+        f"{sorted(constructor_param_names & managed_arg_names)} but metadata lists "
+        f"{[managed_arg.value for managed_arg in metadata.managed_init_args]}"
+    )
+
+
+def verify_tool_configfields(  # noqa: C901, PLR0912, PLR0915
+    tool_name: str,
+    tool_class: type,
+    init_signature: inspect.Signature,
+) -> None:
     """Verify tool ConfigFields match agno tool parameters.
 
     Args:
         tool_name: Name of the tool in the registry
         tool_class: The agno tool class to check against
+        init_signature: Constructor signature shared with managed-input validation
 
     """
     # Get the actual parameters from agno
-    sig = inspect.signature(tool_class.__init__)
     resolved_type_hints = get_type_hints(
         tool_class.__init__,
         globalns=tool_class.__init__.__globals__
@@ -62,7 +116,7 @@ def verify_tool_configfields(tool_name: str, tool_class: type) -> None:  # noqa:
     )
     agno_params = {}
 
-    for name, param in sig.parameters.items():
+    for name, param in init_signature.parameters.items():
         if name == "self":
             continue
         # Skip **kwargs as it's for forward compatibility
@@ -89,7 +143,7 @@ def verify_tool_configfields(tool_name: str, tool_class: type) -> None:  # noqa:
     config_field_names = set(config_field_map.keys())
 
     missing_fields = agno_param_names - config_field_names
-    extra_fields = config_field_names - agno_param_names
+    extra_fields = config_field_names - agno_param_names - IGNORED_EXTRA_CONFIG_FIELDS.get(tool_name, set())
 
     # Build error message if there are issues
     errors = []

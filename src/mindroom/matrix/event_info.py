@@ -10,6 +10,13 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import cast
 
+_THREAD_RELATION_EVENT_TYPES = frozenset({"m.room.encrypted", "m.room.message"})
+
+
+def event_type_supports_thread_relations(event_type: object) -> bool:
+    """Return whether this Matrix event family can affect conversation thread state."""
+    return isinstance(event_type, str) and event_type in _THREAD_RELATION_EVENT_TYPES
+
 
 def origin_server_ts_from_event_source(event_source: object) -> int | float | None:
     """Return a Matrix origin timestamp from one raw event source if present."""
@@ -88,6 +95,9 @@ class EventInfo:
     thread_id_from_edit: str | None = None
     """For edit events: the thread root event ID found in ``m.new_content``."""
 
+    event_type: str | None = None
+    """The Matrix event type carrying these relations, when known."""
+
     @staticmethod
     def from_event(event_source: dict | None) -> EventInfo:
         """Create EventInfo from a raw event source dictionary."""
@@ -108,6 +118,22 @@ class EventInfo:
                 continue
             return normalized_related_event_id
         return None
+
+
+def is_thread_affecting_relation(
+    event_info: EventInfo,
+    *,
+    event_type: str | None,
+) -> bool:
+    """Return whether one event relation can affect visible thread-scoped cache state.
+
+    Relation names are reused by non-message event families.
+    Only relations carried by plaintext or encrypted room messages can add visible
+    conversation history, so every non-message relation stays room-level.
+    """
+    return event_type_supports_thread_relations(event_type) and (
+        event_info.is_thread or event_info.is_edit or event_info.is_reply or event_info.relation_type == "m.reference"
+    )
 
 
 def _analyze_event_relations(event_source: dict | None) -> EventInfo:
@@ -148,6 +174,8 @@ def _analyze_event_relations(event_source: dict | None) -> EventInfo:
             thread_id_from_edit=None,
         )
 
+    raw_event_type = event_source.get("type")
+    event_type = raw_event_type if isinstance(raw_event_type, str) else None
     content = event_source.get("content", {})
     if not isinstance(content, dict):
         content = {}
@@ -183,6 +211,7 @@ def _analyze_event_relations(event_source: dict | None) -> EventInfo:
     can_be_thread_root = not has_relations
 
     return EventInfo(
+        event_type=event_type,
         # Thread info
         is_thread=is_thread,
         thread_id=thread_id,

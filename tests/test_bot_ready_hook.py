@@ -6,7 +6,7 @@ import asyncio
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
-from unittest.mock import ANY, AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, call, patch
 
 import nio
 import pytest
@@ -14,9 +14,11 @@ import pytest
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
+from mindroom.config.calls import CallsConfig, RealtimeCallProfile
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.config.plugin import PluginEntryConfig
+from mindroom.constants import SOURCE_KIND_KEY
 from mindroom.hooks import (
     EVENT_AGENT_STARTED,
     EVENT_AGENT_STOPPED,
@@ -26,12 +28,16 @@ from mindroom.hooks import (
     hook,
 )
 from mindroom.matrix.cache import ThreadHistoryResult, thread_history_result
+from mindroom.matrix.sync_certification import SyncCacheWriteResult
+from mindroom.matrix.to_device import AuthenticatedToDeviceEvent
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestrator import _MultiAgentOrchestrator
+from mindroom.runtime_support import StartupThreadPrewarmRegistry
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
     delivered_matrix_event,
+    install_call_manager_mock,
     install_runtime_cache_support,
     make_matrix_client_mock,
     orchestrator_runtime_paths,
@@ -110,6 +116,32 @@ def _thread_root_event(
     return event
 
 
+def _sync_response_with_room_membership_section(
+    room_id: str,
+    *,
+    membership: str,
+) -> nio.SyncResponse:
+    room_section = "join" if membership == "join" else "leave"
+    room_info = {
+        "state": {"events": []},
+        "timeline": {
+            "events": [],
+            "limited": False,
+            "prev_batch": "s-before-membership",
+        },
+    }
+    rooms: dict[str, object] = {"join": {}, "invite": {}, "leave": {}}
+    rooms[room_section] = {room_id: room_info}
+    response = nio.SyncResponse.from_dict(
+        {
+            "next_batch": f"s-after-{membership}",
+            "rooms": rooms,
+        },
+    )
+    assert isinstance(response, nio.SyncResponse)
+    return response
+
+
 def _plugin(name: str, callbacks: list[object]) -> object:
     return type(
         "PluginStub",
@@ -144,6 +176,241 @@ async def test_bot_ready_fires_on_first_sync_response(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_call_reconciliation_runs_once_per_sync_loop(tmp_path: Path) -> None:
+    """Calls reconcile after each sync-loop's first successful response."""
+    bot = _agent_bot(tmp_path)
+    bot.client = AsyncMock()
+    call_manager = MagicMock()
+    call_manager.reconcile_joined_rooms = AsyncMock()
+    install_call_manager_mock(bot, call_manager)
+
+    with (
+        patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)),
+        patch.object(bot, "_maybe_start_startup_thread_prewarm"),
+        patch.object(bot, "_maybe_start_deferred_overdue_task_drain"),
+    ):
+        bot.mark_sync_loop_started()
+        await bot._on_sync_response(MagicMock())
+        await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
+        await bot._on_sync_response(MagicMock())
+        await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
+
+        bot.mark_sync_loop_started()
+        await bot._on_sync_response(MagicMock())
+        await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
+
+    assert call_manager.reconcile_joined_rooms.await_count == 2
+
+
+def test_call_manager_registers_call_and_room_membership_callbacks(tmp_path: Path) -> None:
+    """Call admission is rechecked for call-state and underlying room-member changes."""
+    bot = _agent_bot(tmp_path)
+    client = MagicMock(spec=nio.AsyncClient)
+    call_manager = MagicMock()
+
+    with patch("mindroom.bot.maybe_build_call_manager", return_value=call_manager):
+        bot._register_call_manager_callbacks(client)
+
+    assert bot._call_manager is call_manager
+    assert [call.args[1] for call in client.add_event_callback.call_args_list] == [
+        nio.RoomMemberEvent,
+        nio.UnknownEvent,
+    ]
+    client.add_to_device_callback.assert_called_once_with(ANY, AuthenticatedToDeviceEvent)
+
+
+def test_room_membership_cleanup_registers_without_call_runtime(tmp_path: Path) -> None:
+    """Persisted ad-hoc ownership is cleaned even when voice dependencies are absent."""
+    bot = _agent_bot(tmp_path)
+    client = MagicMock(spec=nio.AsyncClient)
+
+    with patch("mindroom.bot.maybe_build_call_manager", return_value=None):
+        bot._register_call_manager_callbacks(client)
+
+    assert bot._call_manager is None
+    client.add_event_callback.assert_called_once_with(ANY, nio.RoomMemberEvent)
+    client.add_to_device_callback.assert_not_called()
+
+
+def test_call_admission_reads_live_invites_from_managed_agents(tmp_path: Path) -> None:
+    """Call admission gets one live snapshot from each managed calls-enabled agent."""
+    bot = _agent_bot(tmp_path)
+    other = _agent_bot(tmp_path, agent_name="other")
+    bot.config.agents["other"] = AgentConfig(display_name="Other")
+    bot.config.calls = CallsConfig(
+        enabled=True,
+        profiles={
+            "voice": RealtimeCallProfile(
+                backend="realtime",
+                model="gpt-realtime",
+                credentials_service="openai",
+                voice="marin",
+            ),
+        },
+        agents={"code": "voice", "other": "voice"},
+    )
+    bot.orchestrator = MagicMock(agent_bots={"code": bot, "other": other})
+    bot._room_lifecycle.invited_rooms.add("!code-call:localhost")
+    other._room_lifecycle.invited_rooms.add("!other-call:localhost")
+
+    assert bot._invited_call_rooms_by_agent() == {
+        "code": frozenset({"!code-call:localhost"}),
+        "other": frozenset({"!other-call:localhost"}),
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend_available", [False, True])
+async def test_presence_uses_voice_backend_availability(
+    tmp_path: Path,
+    backend_available: bool,
+) -> None:
+    """Presence advertises calls only when the constructed manager can answer them."""
+    bot = _agent_bot(tmp_path)
+    bot.client = AsyncMock()
+    install_call_manager_mock(bot, MagicMock(voice_backend_available=backend_available))
+
+    with (
+        patch("mindroom.bot.build_agent_status_message", return_value="status") as build_status,
+        patch("mindroom.bot.set_presence_status", new_callable=AsyncMock) as set_presence,
+    ):
+        await bot._set_presence_with_model_info()
+
+    build_status.assert_called_once_with(
+        bot.agent_name,
+        bot.config,
+        voice_calls_available=backend_available,
+    )
+    set_presence.assert_awaited_once_with(bot.client, "status")
+
+
+@pytest.mark.asyncio
+async def test_sync_leave_section_forgets_invited_room_before_call_teardown(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Own departures delivered under rooms.leave reach the lifecycle cleanup path."""
+    bot = _agent_bot(tmp_path)
+    client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    room_id = "!agent-call:localhost"
+    bot.client = client
+    bot._room_lifecycle._update_invited_room(room_id, remember=True)
+    call_manager = MagicMock()
+
+    async def assert_invite_was_forgotten(**_kwargs: object) -> None:
+        assert bot._room_lifecycle.invited_rooms == set()
+
+    call_manager.on_sync_room_membership = AsyncMock(side_effect=assert_invite_was_forgotten)
+    install_call_manager_mock(bot, call_manager)
+    monkeypatch.setattr(
+        bot._conversation_cache,
+        "cache_sync_timeline_for_certification",
+        AsyncMock(return_value=SyncCacheWriteResult(complete=True)),
+    )
+
+    await bot._on_sync_response(
+        _sync_response_with_room_membership_section(
+            room_id,
+            membership="leave",
+        ),
+    )
+
+    assert bot._room_lifecycle.invited_rooms == set()
+    call_manager.on_sync_room_membership.assert_awaited_once_with(
+        joined_room_ids=set(),
+        left_room_ids={room_id},
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("membership", ["leave", "ban"])
+async def test_joined_sync_timeline_departure_purges_before_reopening_room(
+    tmp_path: Path,
+    membership: str,
+) -> None:
+    """A leave and rejoin compressed into one sync must purge before restoring access."""
+    bot = _agent_bot(tmp_path)
+    room_id = "!departed:localhost"
+    response = nio.SyncResponse.from_dict(
+        {
+            "next_batch": "s-after-rejoin",
+            "rooms": {
+                "invite": {},
+                "join": {
+                    room_id: {
+                        "state": {"events": []},
+                        "timeline": {
+                            "events": [
+                                {
+                                    "content": {"membership": membership},
+                                    "event_id": "$departure",
+                                    "origin_server_ts": 1,
+                                    "sender": "@admin:localhost",
+                                    "state_key": bot.agent_user.user_id,
+                                    "type": "m.room.member",
+                                },
+                                {
+                                    "content": {"membership": "join"},
+                                    "event_id": "$rejoin",
+                                    "origin_server_ts": 2,
+                                    "sender": bot.agent_user.user_id,
+                                    "state_key": bot.agent_user.user_id,
+                                    "type": "m.room.member",
+                                },
+                            ],
+                            "limited": False,
+                            "prev_batch": "s-before-rejoin",
+                        },
+                    },
+                },
+                "leave": {},
+            },
+        },
+    )
+    operation_order: list[str] = []
+    bot._conversation_cache.purge_rooms = AsyncMock(side_effect=lambda _rooms: operation_order.append("purge"))
+    bot._conversation_cache.mark_room_joined = AsyncMock(side_effect=lambda _room: operation_order.append("join"))
+
+    await bot._apply_own_room_membership_from_sync(response)
+
+    assert operation_order == ["purge", "join"]
+    bot._conversation_cache.purge_rooms.assert_awaited_once_with({room_id})
+    bot._conversation_cache.mark_room_joined.assert_awaited_once_with(room_id)
+
+
+@pytest.mark.asyncio
+async def test_sync_join_section_reaches_call_manager(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A room in the sync join section can clear departed call state."""
+    bot = _agent_bot(tmp_path)
+    client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    room_id = "!configured-call:localhost"
+    bot.client = client
+    call_manager = MagicMock()
+    call_manager.on_sync_room_membership = AsyncMock()
+    install_call_manager_mock(bot, call_manager)
+    monkeypatch.setattr(
+        bot._conversation_cache,
+        "cache_sync_timeline_for_certification",
+        AsyncMock(return_value=SyncCacheWriteResult(complete=True)),
+    )
+
+    await bot._on_sync_response(
+        _sync_response_with_room_membership_section(
+            room_id,
+            membership="join",
+        ),
+    )
+
+    call_manager.on_sync_room_membership.assert_awaited_once_with(
+        joined_room_ids={room_id},
+        left_room_ids=set(),
+    )
+
+
+@pytest.mark.asyncio
 async def test_installed_runtime_cache_support_runs_fire_and_forget_sync_cache_writes(tmp_path: Path) -> None:
     """The shared test runtime helper must preserve the coordinator's synchronous queue contract."""
     bot = _agent_bot(tmp_path)
@@ -167,7 +434,7 @@ async def test_installed_runtime_cache_support_runs_fire_and_forget_sync_cache_w
     sync_response.__class__ = nio.SyncResponse
     sync_response.rooms = MagicMock(
         join={
-            "!room:localhost": MagicMock(timeline=MagicMock(events=[message_event])),
+            "!room:localhost": MagicMock(timeline=MagicMock(events=[message_event], limited=False)),
         },
     )
 
@@ -257,7 +524,7 @@ async def test_bot_ready_hook_can_send_messages(tmp_path: Path) -> None:
     ):
         await bot._on_sync_response(MagicMock())
 
-    assert captured_content["com.mindroom.source_kind"] == "hook"
+    assert captured_content[SOURCE_KIND_KEY] == "hook"
     assert captured_content["com.mindroom.hook_source"] == "test-plugin:bot:ready"
 
 
@@ -663,6 +930,7 @@ async def test_startup_thread_prewarm_refreshes_threads_concurrently(tmp_path: P
     bot = _agent_bot(tmp_path)
     bot._conversation_cache.logger = MagicMock()
     thread_ids = [f"$thread-{index}:localhost" for index in range(40)]
+    expected_concurrency = 8
     all_concurrent_refreshes_started = asyncio.Event()
     release_refreshes = asyncio.Event()
     started_thread_ids: list[str] = []
@@ -675,7 +943,7 @@ async def test_startup_thread_prewarm_refreshes_threads_concurrently(tmp_path: P
         active_refreshes += 1
         max_active_refreshes = max(max_active_refreshes, active_refreshes)
         started_thread_ids.append(thread_id)
-        if len(started_thread_ids) == 32:
+        if len(started_thread_ids) == expected_concurrency:
             all_concurrent_refreshes_started.set()
         await release_refreshes.wait()
         active_refreshes -= 1
@@ -697,7 +965,7 @@ async def test_startup_thread_prewarm_refreshes_threads_concurrently(tmp_path: P
         )
         try:
             await asyncio.wait_for(all_concurrent_refreshes_started.wait(), timeout=1.0)
-            assert started_thread_ids == thread_ids[:32]
+            assert started_thread_ids == thread_ids[:expected_concurrency]
             release_refreshes.set()
             assert await prewarm_task
         finally:
@@ -705,7 +973,7 @@ async def test_startup_thread_prewarm_refreshes_threads_concurrently(tmp_path: P
             await asyncio.gather(prewarm_task, return_exceptions=True)
 
     assert started_thread_ids == thread_ids
-    assert max_active_refreshes == 32
+    assert max_active_refreshes == expected_concurrency
     bot._conversation_cache.logger.info.assert_any_call(
         "startup_thread_prewarm_complete",
         room_id="!room:localhost",
@@ -713,6 +981,80 @@ async def test_startup_thread_prewarm_refreshes_threads_concurrently(tmp_path: P
         threads_failed=0,
         elapsed_ms=ANY,
     )
+
+
+@pytest.mark.asyncio
+async def test_startup_thread_prewarm_limits_room_work_across_bots(tmp_path: Path) -> None:
+    """Startup prewarm should not let many enabled bots warm different rooms at the same time."""
+    first_bot = _agent_bot(tmp_path, agent_name="router")
+    second_bot = _agent_bot(tmp_path, agent_name="research")
+    shared_registry = StartupThreadPrewarmRegistry()
+    first_bot.startup_thread_prewarm_registry = shared_registry
+    second_bot.startup_thread_prewarm_registry = shared_registry
+    first_bot._get_startup_thread_prewarm_joined_rooms = AsyncMock(return_value=["!first:localhost"])
+    second_bot._get_startup_thread_prewarm_joined_rooms = AsyncMock(return_value=["!second:localhost"])
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+    second_waiting_for_slot = asyncio.Event()
+    active_rooms = 0
+    max_active_rooms = 0
+    room_slot_attempts = 0
+    warmed_rooms: list[str] = []
+
+    original_room_slot = shared_registry.room_slot
+
+    @asynccontextmanager
+    async def observed_room_slot() -> AsyncIterator[None]:
+        nonlocal room_slot_attempts
+        room_slot_attempts += 1
+        if room_slot_attempts == 2:
+            second_waiting_for_slot.set()
+        async with original_room_slot():
+            yield
+
+    async def prewarm_room(room_id: str, *, is_shutting_down: object) -> bool:
+        nonlocal active_rooms, max_active_rooms
+        del is_shutting_down
+        active_rooms += 1
+        max_active_rooms = max(max_active_rooms, active_rooms)
+        warmed_rooms.append(room_id)
+        if room_id == "!first:localhost":
+            first_started.set()
+            await release_first.wait()
+        active_rooms -= 1
+        return True
+
+    first_bot._conversation_cache.prewarm_recent_room_threads = AsyncMock(side_effect=prewarm_room)
+    second_bot._conversation_cache.prewarm_recent_room_threads = AsyncMock(side_effect=prewarm_room)
+    shared_registry.room_slot = observed_room_slot
+
+    first_task = asyncio.create_task(first_bot._run_startup_thread_prewarm())
+    await asyncio.wait_for(first_started.wait(), timeout=1.0)
+    second_task = asyncio.create_task(second_bot._run_startup_thread_prewarm())
+    await asyncio.wait_for(second_waiting_for_slot.wait(), timeout=1.0)
+
+    assert warmed_rooms == ["!first:localhost"]
+    release_first.set()
+    await asyncio.gather(first_task, second_task)
+
+    assert warmed_rooms == ["!first:localhost", "!second:localhost"]
+    assert max_active_rooms == 1
+
+
+@pytest.mark.asyncio
+async def test_startup_thread_prewarm_releases_room_claim_after_failure(tmp_path: Path) -> None:
+    """Unexpected room prewarm errors should release the claim so another bot can retry."""
+    bot = _agent_bot(tmp_path)
+    room_id = "!room:localhost"
+    registry = StartupThreadPrewarmRegistry()
+    bot.startup_thread_prewarm_registry = registry
+    assert await registry.try_claim(bot.event_cache.principal_id, room_id)
+    bot._conversation_cache.prewarm_recent_room_threads = AsyncMock(side_effect=RuntimeError("boom"))
+
+    with pytest.raises(RuntimeError, match="boom"):
+        await bot._prewarm_claimed_startup_thread_room(room_id)
+
+    assert await registry.try_claim(bot.event_cache.principal_id, room_id)
 
 
 @pytest.mark.asyncio
@@ -854,8 +1196,8 @@ async def test_agent_only_ad_hoc_room_still_prewarms_when_router_exists(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_first_syncing_bot_wins_shared_room_startup_prewarm_claim(tmp_path: Path) -> None:
-    """When multiple bots share a room, the first syncing bot should claim startup prewarm."""
+async def test_each_principal_claims_shared_room_startup_prewarm(tmp_path: Path) -> None:
+    """Each principal must prewarm its own isolated rows in a shared room."""
     router_bot = _agent_bot(tmp_path, agent_name="router")
     router_bot.client = make_matrix_client_mock(user_id=router_bot.agent_user.user_id or "@mindroom_router:localhost")
     router_bot.client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=["!room:localhost"])
@@ -888,11 +1230,10 @@ async def test_first_syncing_bot_wins_shared_room_startup_prewarm_claim(tmp_path
             await router_bot._on_sync_response(MagicMock())
             await wait_for_background_tasks(timeout=1.0, owner=router_bot._runtime_view)
 
-    mock_get_room_threads_page.assert_awaited_once_with(
-        agent_bot.client,
-        "!room:localhost",
-        limit=32,
-    )
+    assert mock_get_room_threads_page.await_args_list == [
+        call(agent_bot.client, "!room:localhost", limit=32),
+        call(router_bot.client, "!room:localhost", limit=32),
+    ]
 
 
 @pytest.mark.asyncio
@@ -938,7 +1279,10 @@ async def test_room_thread_listing_failure_releases_claim_for_later_joined_bot(t
     ] == [
         ("!room:localhost", "$thread-a:localhost"),
     ]
-    assert "!room:localhost" in agent_bot.startup_thread_prewarm_registry._claimed_room_ids
+    assert (
+        agent_bot.event_cache.principal_id,
+        "!room:localhost",
+    ) in agent_bot.startup_thread_prewarm_registry._claimed_rooms
 
 
 @pytest.mark.asyncio
@@ -990,12 +1334,15 @@ async def test_shutdown_mid_room_prewarm_releases_claim_for_later_joined_bot(tmp
         ("!room:localhost", "$thread-a:localhost"),
         ("!room:localhost", "$thread-b:localhost"),
     ]
-    assert "!room:localhost" in agent_bot.startup_thread_prewarm_registry._claimed_room_ids
+    assert (
+        agent_bot.event_cache.principal_id,
+        "!room:localhost",
+    ) in agent_bot.startup_thread_prewarm_registry._claimed_rooms
 
 
 @pytest.mark.asyncio
-async def test_later_started_bot_does_not_rewarm_room_after_startup_wave(tmp_path: Path) -> None:
-    """A later-started bot should not rewarm a room that was already warmed in this orchestrator runtime."""
+async def test_later_started_principal_warms_its_own_room_rows(tmp_path: Path) -> None:
+    """A later principal must warm its isolated rows even when another principal already did."""
     first_bot = _agent_bot(tmp_path, agent_name="router")
     first_bot.client = make_matrix_client_mock(user_id=first_bot.agent_user.user_id or "@mindroom_router:localhost")
     first_bot.client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=["!room:localhost"])
@@ -1020,10 +1367,13 @@ async def test_later_started_bot_does_not_rewarm_room_after_startup_wave(tmp_pat
             await later_bot._on_sync_response(MagicMock())
             await wait_for_background_tasks(timeout=1.0, owner=later_bot._runtime_view)
 
-    assert mock_get_room_threads_page.await_count == 1
+    assert mock_get_room_threads_page.await_count == 2
     assert mock_get_room_threads_page.await_args_list[0].args == (first_bot.client, "!room:localhost")
     assert mock_get_room_threads_page.await_args_list[0].kwargs == {"limit": 32}
-    assert "!room:localhost" in later_bot.startup_thread_prewarm_registry._claimed_room_ids
+    assert (
+        later_bot.event_cache.principal_id,
+        "!room:localhost",
+    ) in later_bot.startup_thread_prewarm_registry._claimed_rooms
 
 
 @pytest.mark.asyncio

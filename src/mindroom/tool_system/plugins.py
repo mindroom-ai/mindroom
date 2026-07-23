@@ -5,12 +5,14 @@ from __future__ import annotations
 import asyncio
 import sys
 import tokenize
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
 from mindroom.config.plugin import PluginEntryConfig  # noqa: TC001
 from mindroom.hooks import HookRegistry, iter_module_hooks
 from mindroom.logging_config import get_logger
+from mindroom.tool_schema_cache import clear_tool_schema_cache
 from mindroom.tool_system import plugin_imports
 from mindroom.tool_system.registry_state import (
     capture_tool_registry_snapshot,
@@ -25,13 +27,14 @@ from mindroom.tool_system.registry_state import (
 from mindroom.tool_system.skills import get_plugin_skill_roots, set_plugin_skill_roots
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from pathlib import Path
     from types import ModuleType
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.hooks import HookCallback
-    from mindroom.tool_system.metadata import ToolMetadata
+    from mindroom.tool_system.declarations import ToolMetadata
 
 logger = get_logger(__name__)
 
@@ -88,6 +91,11 @@ def _hook_display_name(callback: HookCallback) -> str:
     return cast("Any", callback).__name__
 
 
+def _raise_if_host_control_exception(exc: BaseException) -> None:
+    if not isinstance(exc, (Exception, SystemExit)):
+        raise exc
+
+
 def _sync_loaded_plugin_tools(plugins: list[_Plugin]) -> None:
     """Remove plugin tool registrations for plugins no longer present in config."""
     active_tool_modules = [
@@ -130,7 +138,7 @@ def load_plugins(
             return []
         plugins: list[_Plugin] = []
         skill_roots: list[Path] = []
-        plugin_bases = plugin_imports._collect_plugin_bases(
+        plugin_bases, _unresolved_plugin_sources = plugin_imports._collect_plugin_bases(
             plugin_entries,
             runtime_paths,
             skip_broken_plugins=skip_broken_plugins,
@@ -143,9 +151,12 @@ def load_plugins(
                 plugin_snapshot = capture_tool_registry_snapshot()
                 try:
                     plugin = _materialize_plugin(plugin_base, plugin_entry, plugin_order)
-                except Exception as exc:
+                except (Exception, SystemExit) as exc:
                     restore_tool_registry_snapshot(plugin_snapshot)
                     if not skip_broken_plugins:
+                        if isinstance(exc, SystemExit):
+                            msg = f"Plugin materialization failed for {plugin_base.root}: {exc}"
+                            raise _PluginValidationError(msg) from exc
                         raise
                     plugin_imports._log_skipped_plugin_entry(plugin_entry.path, plugin_base.root, exc)
                     continue
@@ -159,11 +170,51 @@ def load_plugins(
 
             if set_skill_roots:
                 set_plugin_skill_roots(skill_roots)
-        except Exception:
+        except BaseException:
             restore_tool_registry_snapshot(snapshot)
             raise
 
         return plugins
+
+
+@contextmanager
+def isolated_plugin_runtime(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    *,
+    skip_broken_plugins: bool = False,
+) -> Iterator[list[_Plugin]]:
+    """Load plugins transactionally, then restore all process-global plugin state."""
+    import mindroom.tools  # noqa: F401, PLC0415
+
+    with locked_tool_registry_state():
+        previous_snapshot = capture_tool_registry_snapshot()
+        previous_skill_roots = tuple(get_plugin_skill_roots())
+        previous_manifest_cache = plugin_imports._PLUGIN_CACHE.copy()
+        previous_package_roots = {
+            cached.module_name.split(".", 1)[0] for cached in plugin_imports._MODULE_IMPORT_CACHE.values()
+        }
+        try:
+            _clear_plugin_reload_caches()
+            _evict_synthetic_plugin_subtrees(previous_package_roots)
+            yield load_plugins(
+                config,
+                runtime_paths,
+                skip_broken_plugins=skip_broken_plugins,
+            )
+        finally:
+            current_package_roots = {
+                cached.module_name.split(".", 1)[0] for cached in plugin_imports._MODULE_IMPORT_CACHE.values()
+            }
+            _cancel_plugin_module_tasks(current_package_roots)
+            # This also restores _MODULE_IMPORT_CACHE and the prior synthetic modules.
+            restore_tool_registry_snapshot(previous_snapshot)
+            set_plugin_skill_roots(previous_skill_roots)
+            plugin_imports._PLUGIN_CACHE.clear()
+            plugin_imports._PLUGIN_CACHE.update(previous_manifest_cache)
+            _clear_configured_plugin_roots_cache()
+            _clear_oauth_provider_cache_after_plugin_change()
+            clear_tool_schema_cache()
 
 
 def get_configured_plugin_roots(
@@ -319,6 +370,7 @@ def _iter_module_tasks(value: object) -> tuple[asyncio.Task[Any], ...]:
 
 def _clear_plugin_reload_caches() -> None:
     """Drop cached plugin manifests and imported plugin modules before one rebuild."""
+    clear_tool_schema_cache()
     _clear_configured_plugin_roots_cache()
     plugin_imports._PLUGIN_CACHE.clear()
     plugin_imports._MODULE_IMPORT_CACHE.clear()
@@ -439,7 +491,7 @@ def load_plugin_module(
                 _exec_plugin_source(module_path, module)
         else:
             _exec_plugin_source(module_path, module)
-    except Exception as exc:
+    except BaseException as exc:
         if kind == "tools":
             _restore_failed_plugin_tool_module_reload(
                 module_path,
@@ -455,6 +507,7 @@ def load_plugin_module(
             else:
                 plugin_imports._MODULE_IMPORT_CACHE.pop(module_path, None)
         plugin_imports._restore_plugin_package_chain(previous_packages)
+        _raise_if_host_control_exception(exc)
         msg = f"Plugin {kind} module execution failed for {module_path}: {exc}"
         logger.exception("Plugin module execution failed", path=str(module_path), kind=kind, error=str(exc))
         raise _PluginValidationError(msg) from exc

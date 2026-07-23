@@ -145,7 +145,7 @@ def provision_via_platform_api(
             {
                 "subscription_id": "smoke-subscription",
                 "account_id": account_id,
-                "tier": "starter",
+                "tier": "byok",
             },
         ).encode("utf-8"),
     )

@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from agno.run.base import RunStatus
+
 from mindroom.history.interrupted_replay import InterruptedReplaySnapshot, build_interrupted_replay_snapshot
 
 if TYPE_CHECKING:
@@ -18,6 +20,7 @@ class TurnRecorder:
     """Accumulate trusted runtime facts for one top-level turn."""
 
     user_message: str
+    user_message_is_structured: bool = False
     run_metadata: dict[str, Any] | None = None
     run_id: str | None = None
     response_event_id: str | None = None
@@ -25,6 +28,7 @@ class TurnRecorder:
     completed_tools: list[ToolTraceEntry] = field(default_factory=list)
     interrupted_tools: list[ToolTraceEntry] = field(default_factory=list)
     outcome: str = "pending"
+    original_status: RunStatus | None = None
     interrupted_persisted: bool = False
 
     def set_run_metadata(self, metadata: dict[str, Any] | None) -> None:
@@ -60,7 +64,8 @@ class TurnRecorder:
         interrupted_tools: Sequence[ToolTraceEntry],
     ) -> None:
         """Refresh the latest observed streaming state without deciding the final outcome."""
-        self.set_run_metadata(dict(run_metadata) if run_metadata is not None else None)
+        if run_metadata is not None:
+            self.set_run_metadata(dict(run_metadata))
         self.set_assistant_text(assistant_text)
         self.set_completed_tools(list(completed_tools))
         self.set_interrupted_tools(list(interrupted_tools))
@@ -73,7 +78,8 @@ class TurnRecorder:
         completed_tools: Sequence[ToolTraceEntry],
     ) -> None:
         """Record one completed top-level turn."""
-        self.set_run_metadata(dict(run_metadata) if run_metadata is not None else None)
+        if run_metadata is not None:
+            self.set_run_metadata(dict(run_metadata))
         self.set_assistant_text(assistant_text)
         self.set_completed_tools(list(completed_tools))
         self.set_interrupted_tools([])
@@ -86,31 +92,36 @@ class TurnRecorder:
         assistant_text: str,
         completed_tools: Sequence[ToolTraceEntry],
         interrupted_tools: Sequence[ToolTraceEntry],
+        original_status: RunStatus = RunStatus.cancelled,
     ) -> None:
         """Record one interrupted top-level turn."""
-        self.set_run_metadata(dict(run_metadata) if run_metadata is not None else None)
+        if run_metadata is not None:
+            self.set_run_metadata(dict(run_metadata))
         self.set_assistant_text(assistant_text)
         self.set_completed_tools(list(completed_tools))
         self.set_interrupted_tools(list(interrupted_tools))
-        self.mark_interrupted()
+        self.mark_interrupted(original_status)
 
     def mark_completed(self) -> None:
         """Record successful completion."""
         self.outcome = "completed"
 
-    def mark_interrupted(self) -> None:
+    def mark_interrupted(self, original_status: RunStatus = RunStatus.cancelled) -> None:
         """Record interruption."""
         self.outcome = "interrupted"
+        self.original_status = original_status
 
     def interrupted_snapshot(self) -> InterruptedReplaySnapshot:
         """Build one canonical interrupted snapshot from the recorded facts."""
         return build_interrupted_replay_snapshot(
             user_message=self.user_message,
+            user_message_is_structured=self.user_message_is_structured,
             partial_text=self.assistant_text,
             completed_tools=self.completed_tools,
             interrupted_tools=self.interrupted_tools,
             run_metadata=self.run_metadata,
             response_event_id=self.response_event_id,
+            original_status=self.original_status or RunStatus.cancelled,
         )
 
     def claim_interrupted_persistence(self) -> bool:

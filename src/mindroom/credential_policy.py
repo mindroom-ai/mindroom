@@ -7,6 +7,8 @@ from typing import Literal
 
 _WorkerScope = Literal["shared", "user", "user_agent"]
 
+RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY = "_oauth_client_runtime_bootstrap"
+
 OAUTH_CREDENTIAL_FIELDS = frozenset(
     {
         "_id_token",
@@ -30,17 +32,18 @@ OAUTH_CREDENTIAL_FIELDS = frozenset(
 )
 
 _OAUTH_CLIENT_CONFIG_SERVICE_SUFFIX = "_oauth_client"
+_OAUTH_TOKEN_SERVICE_SUFFIX = "_oauth"  # noqa: S105
+# OAuth provider token services use the *_oauth naming contract. The separate
+# *_oauth_client app-client config contract intentionally does not match it.
 
 _LOCAL_ONLY_SHARED_CREDENTIAL_SERVICES = frozenset(
     {
+        "desktop",
         "google_calendar",
-        "google_calendar_oauth",
+        "google_docs",
         "google_drive",
-        "google_drive_oauth",
         "google_gmail",
-        "google_gmail_oauth",
         "google_sheets",
-        "google_sheets_oauth",
         "gmail",
         "homeassistant",
     },
@@ -48,13 +51,15 @@ _LOCAL_ONLY_SHARED_CREDENTIAL_SERVICES = frozenset(
 
 _UNSUPPORTED_WORKER_GRANTABLE_CREDENTIALS = frozenset(
     {
+        "desktop",
         "google_vertex_adc",
-        "google_calendar_oauth",
-        "google_drive_oauth",
-        "google_gmail_oauth",
-        "google_sheets_oauth",
     },
 )
+
+
+def _is_oauth_token_service(service: str) -> bool:
+    """Return whether a service name follows the OAuth token naming contract."""
+    return service.endswith(_OAUTH_TOKEN_SERVICE_SUFFIX)
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,22 +71,30 @@ class _CredentialServicePolicy:
     uses_local_shared_credentials: bool
     uses_primary_runtime_global_credentials: bool
     uses_primary_runtime_scoped_credentials: bool
+    uses_primary_runtime_agent_scoped_credentials: bool
     worker_grantable_supported: bool
 
 
 def credential_service_policy(service: str, worker_scope: _WorkerScope | None) -> _CredentialServicePolicy:
     """Return credential placement policy for one service in one worker scope."""
-    is_local_only = service in _LOCAL_ONLY_SHARED_CREDENTIAL_SERVICES
+    is_oauth_token_service = _is_oauth_token_service(service)
+    is_local_only = service in _LOCAL_ONLY_SHARED_CREDENTIAL_SERVICES or is_oauth_token_service
     is_primary_runtime_global = is_oauth_client_config_service(service)
+    # OAuth tokens carry one external account identity, so a shared-scope agent's
+    # connection must stay bound to that agent instead of the deployment-wide store
+    # every other agent reads.
+    uses_agent_scoped = worker_scope == "shared" and is_oauth_token_service
     return _CredentialServicePolicy(
         service=service,
         worker_scope=worker_scope,
-        uses_local_shared_credentials=worker_scope == "shared" and is_local_only,
+        uses_local_shared_credentials=worker_scope == "shared" and is_local_only and not uses_agent_scoped,
         uses_primary_runtime_global_credentials=is_primary_runtime_global,
         uses_primary_runtime_scoped_credentials=(
             worker_scope in {"user", "user_agent"} and is_local_only and not is_primary_runtime_global
         ),
+        uses_primary_runtime_agent_scoped_credentials=uses_agent_scoped,
         worker_grantable_supported=not is_primary_runtime_global
+        and not is_oauth_token_service
         and service not in _UNSUPPORTED_WORKER_GRANTABLE_CREDENTIALS,
     )
 

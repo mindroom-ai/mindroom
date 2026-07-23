@@ -48,7 +48,7 @@ locals {
   repo_ssh_key_pub_path = "${path.module}/cluster_ssh_key.pub"
   use_repo_ssh_key      = fileexists(local.repo_ssh_key_path) && fileexists(local.repo_ssh_key_pub_path)
   ssh_public_key_value  = local.use_repo_ssh_key ? file(local.repo_ssh_key_pub_path) : tls_private_key.cluster.public_key_openssh
-  ssh_private_key_value = local.use_repo_ssh_key ? file(local.repo_ssh_key_path)     : tls_private_key.cluster.private_key_pem
+  ssh_private_key_value = local.use_repo_ssh_key ? file(local.repo_ssh_key_path) : tls_private_key.cluster.private_key_pem
 }
 
 module "kube-hetzner" {

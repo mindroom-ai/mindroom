@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.logging_config import get_logger
 from mindroom.mcp.registry import mcp_tool_name
 
@@ -34,6 +35,7 @@ _ENTITY_CONSTRUCTION_PROMPTS = frozenset(
         "PERSONALITY_CONTEXT_SECTION_HEADING",
         "QUEUED_MESSAGE_NOTICE_TEXT",
         "SKILLS_TOOL_USAGE_PROMPT",
+        "WORKSPACE_SKILL_AUTHORING_PROMPT",
     },
 )
 
@@ -52,6 +54,7 @@ class ConfigUpdatePlan:
     matrix_room_access_changed: bool
     matrix_space_changed: bool
     authorization_changed: bool
+    room_metadata_changed: bool = False
     added_entities: set[str] = field(default_factory=set)
 
     @property
@@ -68,7 +71,23 @@ class ConfigUpdatePlan:
             or self.matrix_room_access_changed
             or self.matrix_space_changed
             or self.authorization_changed
+            or self.room_metadata_changed
         )
+
+
+def configured_entity_names(config: Config) -> list[str]:
+    """Return configured entity names with the router first."""
+    return [ROUTER_AGENT_NAME, *config.agents.keys(), *config.teams.keys()]
+
+
+def plugin_change_paths(current_config: Config, new_config: Config) -> tuple[str, ...]:
+    """Return plugin paths whose entry config changed across a reload."""
+    old_entries = {entry.path: entry.model_dump(mode="python") for entry in current_config.plugins}
+    new_entries = {entry.path: entry.model_dump(mode="python") for entry in new_config.plugins}
+    changed_paths = {
+        path for path in set(old_entries) | set(new_entries) if old_entries.get(path) != new_entries.get(path)
+    }
+    return tuple(sorted(changed_paths))
 
 
 def _config_entries_differ(old_entry: BaseModel | None, new_entry: BaseModel | None) -> bool:
@@ -89,6 +108,7 @@ def _identify_entities_to_restart(
     teams_to_restart = _get_changed_teams(config, new_config, agent_bots)
 
     entities_to_restart = agents_to_restart | teams_to_restart
+    entities_to_restart |= _call_agents_to_restart(config, new_config)
     if changed_mcp_servers:
         entities_to_restart |= _entities_referencing_mcp_servers(config, new_config, changed_mcp_servers)
 
@@ -96,6 +116,15 @@ def _identify_entities_to_restart(
         entities_to_restart.add("router")
 
     return entities_to_restart
+
+
+def _call_agents_to_restart(config: Config | None, new_config: Config) -> set[str]:
+    """Return call agents whose managers captured an obsolete config snapshot."""
+    if config is None or config.authored_model_dump() == new_config.authored_model_dump():
+        return set()
+    old_agents = set(config.calls.agents) if config.calls.enabled else set()
+    new_agents = set(new_config.calls.agents) if new_config.calls.enabled else set()
+    return old_agents | new_agents
 
 
 def _get_changed_agents(
@@ -136,7 +165,7 @@ def _get_changed_agents(
 
 def _culture_signature_for_agent(agent_name: str, config: Config) -> tuple[str, str, str] | None:
     """Return the relevant culture tuple used for restart decisions."""
-    assignment = config.get_agent_culture(agent_name)
+    assignment = config.resolve_entity(agent_name).culture
     if assignment is None:
         return None
     culture_name, culture_config = assignment
@@ -174,6 +203,11 @@ def _router_needs_restart(config: Config | None, new_config: Config) -> bool:
     old_rooms = config.get_all_configured_rooms()
     new_rooms = new_config.get_all_configured_rooms()
     return old_rooms != new_rooms
+
+
+def _room_metadata_changed(config: Config, new_config: Config) -> bool:
+    """Return whether managed room metadata changed without implying bot reconstruction."""
+    return config.rooms != new_config.rooms
 
 
 def _changed_mcp_servers(
@@ -275,5 +309,6 @@ def build_config_update_plan(
         matrix_room_access_changed=current_config.matrix_room_access != new_config.matrix_room_access,
         matrix_space_changed=current_config.matrix_space != new_config.matrix_space,
         authorization_changed=current_config.authorization != new_config.authorization,
+        room_metadata_changed=_room_metadata_changed(current_config, new_config),
         added_entities=added_entities,
     )

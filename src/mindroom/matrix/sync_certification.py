@@ -23,6 +23,7 @@ class SyncCheckpoint:
     """A sync token saved after its sync response was durably cached."""
 
     token: str
+    cache_generation: str | None = None
 
 
 @dataclass(frozen=True)
@@ -51,37 +52,6 @@ class SyncCertificationDecision:
     clear_saved_token: bool = False
     reset_client_token: bool = False
     reason: str | None = None
-
-
-@dataclass(frozen=True)
-class _SyncCertificationStart:
-    """Initial runtime sync-token trust state."""
-
-    state: SyncTrustState
-    sync_token: str | None
-    legacy_token: bool = False
-
-
-def start_from_loaded_token(loaded: SyncCheckpoint | str | None) -> _SyncCertificationStart:
-    """Build initial certifier state from a loaded token or checkpoint."""
-    if isinstance(loaded, SyncCheckpoint):
-        token = normalize_sync_token(loaded.token)
-        if token is None:
-            return _SyncCertificationStart(
-                state=SyncTrustState.COLD,
-                sync_token=None,
-            )
-        return _SyncCertificationStart(
-            state=SyncTrustState.PENDING,
-            sync_token=token,
-        )
-
-    token = normalize_sync_token(loaded)
-    return _SyncCertificationStart(
-        state=SyncTrustState.COLD,
-        sync_token=token,
-        legacy_token=token is not None,
-    )
 
 
 def _uncertain_decision(

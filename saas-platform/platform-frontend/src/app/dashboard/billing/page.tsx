@@ -2,33 +2,11 @@
 
 import { useState, useEffect } from 'react'
 import { useSubscription } from '@/hooks/useSubscription'
-import { createPortalSession, getPricingConfig } from '@/lib/api'
+import { createPortalSession, getPricingConfig, type PricingConfig } from '@/lib/api'
 import { logger } from '@/lib/logger'
 import { PLAN_GRADIENTS, type PlanId } from '@/lib/pricing-config'
 import { DashboardLoader } from '@/components/dashboard/DashboardLoader'
 import { Loader2, CreditCard, TrendingUp, Check, RefreshCw } from 'lucide-react'
-
-interface PricingPlan {
-  name: string
-  price_monthly: string
-  price_yearly: string
-  price_model?: string
-  description: string
-  features: string[]
-  recommended?: boolean
-  limits?: {
-    max_agents: number | string
-    max_messages_per_day: number | string
-    storage_gb: number | string
-  }
-}
-
-interface PricingConfig {
-  plans: Record<string, PricingPlan>
-  discounts?: {
-    annual_percentage: number
-  }
-}
 
 function formatLimit(value: number | string | undefined): string {
   if (!value) return 'N/A'
@@ -39,6 +17,11 @@ function formatLimit(value: number | string | undefined): string {
     return value.toString()
   }
   return value
+}
+
+function formatMonthlyPrice(price: string): string {
+  if (price === 'custom') return 'Custom'
+  return `${price}/month`
 }
 
 export default function BillingPage() {
@@ -99,7 +82,7 @@ export default function BillingPage() {
   const tierInfo = {
     name: currentPlan?.name || 'Free',
     price: currentPlan ?
-      `${currentPlan.price_monthly}${currentPlan.price_model === 'per_user' ? '/user/month' : '/month'}` :
+      formatMonthlyPrice(currentPlan.price_monthly) :
       '$0/month',
   }
 
@@ -345,7 +328,11 @@ export default function BillingPage() {
             .filter(([key]) => key !== 'free' && key !== 'enterprise')
             .map(([key, plan]) => {
               const isCurrentPlan = key === currentTier
-              const isDowngrade = ['starter', 'professional'].indexOf(key) < ['starter', 'professional'].indexOf(currentTier)
+              const tierOrder: PlanId[] = ['free', 'byok', 'hobby', 'pro', 'enterprise']
+              const currentTierRank = tierOrder.indexOf(currentTier)
+              const candidateTierRank = tierOrder.indexOf(key as PlanId)
+              const isDowngrade =
+                currentTierRank !== -1 && candidateTierRank !== -1 && candidateTierRank < currentTierRank
 
               return (
                 <div
@@ -367,7 +354,7 @@ export default function BillingPage() {
                   <p className="text-2xl font-bold mb-2">
                     {plan.price_monthly}
                     <span className="text-sm text-gray-500 dark:text-gray-400">
-                      {plan.price_model === 'per_user' ? '/user/month' : '/month'}
+                      /month
                     </span>
                   </p>
                   <p className="text-sm text-gray-600 dark:text-gray-400 mb-3">{plan.description}</p>

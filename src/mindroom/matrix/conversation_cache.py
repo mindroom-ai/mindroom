@@ -1,4 +1,15 @@
-"""Facade for Matrix conversation reads and advisory cache notifications."""
+"""Facade for Matrix conversation reads and advisory cache notifications.
+
+``MatrixConversationCache`` is the facade for conversation reads and advisory thread bookkeeping; it
+composes the read policy (``cache.thread_reads``), the three write policies (``cache.thread_writes``),
+and the mutation resolver (``thread_bookkeeping``) over one shared write coordinator.
+Bots and tools still read the event cache directly for non-thread point lookups such as agent message
+snapshots and recent room events, but all thread reads and thread bookkeeping go through this facade.
+
+Per-turn memoization invariant: ``turn_scope`` may replay an event lookup or thread read within one
+inbound turn, but degraded or stale thread reads are never memoized, so a failed read early in a turn
+cannot poison later reads in the same turn.
+"""
 
 from __future__ import annotations
 
@@ -7,7 +18,7 @@ import time
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
 
 import nio
 from nio.responses import RoomGetEventError
@@ -30,15 +41,20 @@ from mindroom.matrix.client_thread_history import (
     get_room_threads_page,
 )
 from mindroom.matrix.event_info import EventInfo
+from mindroom.matrix.media import (
+    is_encrypted_media_event_source,
+    parse_matrix_media_event_source,
+)
+from mindroom.matrix.membership_fence import UNCERTIFIED_MEMBERSHIP_EPOCH
 from mindroom.matrix.message_content import extract_edit_body
 from mindroom.matrix.thread_bookkeeping import ThreadMutationResolver
 from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
-from mindroom.matrix.thread_membership import (
+from mindroom.matrix.thread_membership import resolve_event_thread_membership
+from mindroom.matrix.thread_room_scan import (
     fetch_event_info_for_client,
     lookup_thread_id_from_conversation_cache,
-    resolve_event_thread_membership,
+    room_scan_membership_access_for_client,
 )
-from mindroom.matrix.thread_room_scan import room_scan_membership_access_for_client
 from mindroom.timing import elapsed_ms_since
 
 if TYPE_CHECKING:
@@ -53,18 +69,10 @@ if TYPE_CHECKING:
 
 type ThreadReadResult = ThreadHistoryResult
 type EventLookupResult = nio.RoomGetEventResponse | RoomGetEventError
-type _ThreadReadCacheKey = tuple[str, str, ThreadReadMode]
+type _TurnEventCacheKey = tuple[str, str, int]
+type _ThreadReadCacheKey = tuple[str, str, ThreadReadMode, int]
 
 logger = get_logger(__name__)
-
-
-@dataclass
-class _TurnEventLookup:
-    """One memoized event lookup plus metadata for deferred cache persistence."""
-
-    response: EventLookupResult
-    fetched_event_source: dict[str, Any] | None
-    lookup_fill_persisted: bool
 
 
 __all__ = [
@@ -78,7 +86,7 @@ __all__ = [
 
 
 _STARTUP_PREWARM_THREAD_LIMIT = 32
-_STARTUP_PREWARM_THREAD_CONCURRENCY = 32
+_STARTUP_PREWARM_THREAD_CONCURRENCY = 8
 type _StartupThreadPrewarmOutcome = Literal["warmed", "failed", "aborted"]
 
 
@@ -171,8 +179,20 @@ class ConversationCacheProtocol(Protocol):
     ) -> ThreadReadResult:
         """Resolve strict full thread history without live dispatch timeouts or stale fallback."""
 
+    async def get_fresh_strict_thread_history(
+        self,
+        room_id: str,
+        thread_id: str,
+        *,
+        caller_label: str = "unknown",
+    ) -> ThreadReadResult:
+        """Resolve strict full history without reusing the current turn's memoized read."""
+
     async def get_thread_id_for_event(self, room_id: str, event_id: str) -> str | None:
         """Resolve the cached thread root for one event when known."""
+
+    async def purge_rooms(self, room_ids: Collection[str]) -> None:
+        """Fence and purge one authoritative batch of departed rooms."""
 
     async def get_latest_thread_event_id_if_needed(
         self,
@@ -191,7 +211,7 @@ class ConversationCacheProtocol(Protocol):
         event_id: str | None,
         content: dict[str, Any],
     ) -> None:
-        """Schedule one locally sent threaded message or edit for advisory cache bookkeeping.
+        """Schedule one locally sent message or edit for advisory cache bookkeeping.
 
         This is advisory post-send bookkeeping and must fail open.
         Callers should treat Matrix delivery as complete before this local cache work runs.
@@ -201,7 +221,7 @@ class ConversationCacheProtocol(Protocol):
         """Schedule one locally sent outbound event for advisory cache bookkeeping."""
 
     def notify_outbound_redaction(self, room_id: str, redacted_event_id: str) -> None:
-        """Schedule one locally redacted threaded message for advisory cache bookkeeping.
+        """Schedule one locally redacted message for advisory cache bookkeeping.
 
         This is advisory post-redaction bookkeeping and must fail open.
         """
@@ -222,6 +242,7 @@ async def _apply_cached_latest_edit(
     room_id: str,
     client: nio.AsyncClient,
     event_cache: ConversationEventCache,
+    expected_membership_epoch: int | None = None,
     trusted_sender_ids: Collection[str] = (),
 ) -> dict[str, Any]:
     """Project one cached original event into its latest visible edited state."""
@@ -242,6 +263,7 @@ async def _apply_cached_latest_edit(
         client,
         event_cache=event_cache,
         room_id=room_id,
+        expected_membership_epoch=expected_membership_epoch,
         trusted_sender_ids=trusted_sender_ids,
     )
     if edited_body is None or edited_content is None:
@@ -271,6 +293,7 @@ async def _cached_room_get_event_response(
     *,
     room_id: str,
     event_source: dict[str, Any],
+    expected_membership_epoch: int | None = None,
     trusted_sender_ids: Collection[str] = (),
 ) -> nio.RoomGetEventResponse | None:
     """Reconstruct one cached room-get-event response, applying visible edits when present."""
@@ -279,8 +302,17 @@ async def _cached_room_get_event_response(
         room_id=room_id,
         client=client,
         event_cache=event_cache,
+        expected_membership_epoch=expected_membership_epoch,
         trusted_sender_ids=trusted_sender_ids,
     )
+    if is_encrypted_media_event_source(visible_event_source):
+        parsed_media_event = parse_matrix_media_event_source(visible_event_source)
+        if parsed_media_event is None:
+            return None
+        cached_response = nio.RoomGetEventResponse()
+        # nio's response parser also assigns BadEvent to this Event-typed field.
+        cached_response.event = cast("nio.Event", parsed_media_event)
+        return cached_response
     cached_response = nio.RoomGetEventResponse.from_dict(visible_event_source)
     return cached_response if isinstance(cached_response, nio.RoomGetEventResponse) else None
 
@@ -291,6 +323,7 @@ async def _cached_room_get_event(
     room_id: str,
     event_id: str,
     *,
+    expected_membership_epoch: int | None = None,
     trusted_sender_ids: Collection[str] = (),
 ) -> tuple[nio.RoomGetEventResponse | RoomGetEventError, dict[str, Any] | None]:
     """Return one event through the persistent cache when available."""
@@ -312,6 +345,7 @@ async def _cached_room_get_event(
                     event_cache,
                     room_id=room_id,
                     event_source=cached_event,
+                    expected_membership_epoch=expected_membership_epoch,
                     trusted_sender_ids=trusted_sender_ids,
                 )
                 if cached_response is not None:
@@ -337,6 +371,7 @@ async def _cached_room_get_event(
         event_cache,
         room_id=room_id,
         event_source=normalized_event_source,
+        expected_membership_epoch=expected_membership_epoch,
         trusted_sender_ids=trusted_sender_ids,
     )
     return (visible_response if visible_response is not None else response), normalized_event_source
@@ -348,7 +383,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
 
     logger: structlog.stdlib.BoundLogger
     runtime: BotRuntimeView
-    _turn_event_cache: ContextVar[dict[tuple[str, str], _TurnEventLookup] | None] = field(
+    _turn_event_cache: ContextVar[dict[_TurnEventCacheKey, EventLookupResult] | None] = field(
         default_factory=lambda: ContextVar("mindroom_turn_event_lookup_cache", default=None),
     )
     _turn_thread_read_cache: ContextVar[dict[_ThreadReadCacheKey, ThreadReadResult] | None] = field(
@@ -449,7 +484,12 @@ class MatrixConversationCache(ConversationCacheProtocol):
         caller_label: str,
     ) -> ThreadReadResult:
         """Resolve one thread read through per-turn memoization."""
-        cache_key: _ThreadReadCacheKey = (room_id, thread_id, mode)
+        cache_key: _ThreadReadCacheKey = (
+            room_id,
+            thread_id,
+            mode,
+            self._write_cache_ops.room_departure_epoch(room_id),
+        )
         turn_cache = self._turn_thread_read_cache.get()
         if turn_cache is not None and cache_key in turn_cache:
             return self._copy_thread_read_result(turn_cache[cache_key])
@@ -469,54 +509,55 @@ class MatrixConversationCache(ConversationCacheProtocol):
         self,
         room_id: str,
         event_id: str,
-        *,
-        persist_lookup_fill: bool = True,
     ) -> EventLookupResult:
         """Resolve one event through per-turn memoization and the advisory cache."""
         normalized_event_id = event_id.strip()
-        cache_key = (room_id, normalized_event_id)
+        cache_key: _TurnEventCacheKey = (
+            room_id,
+            normalized_event_id,
+            self._write_cache_ops.room_departure_epoch(room_id),
+        )
         turn_cache = self._turn_event_cache.get()
         if turn_cache is not None and cache_key in turn_cache:
-            cached_lookup = turn_cache[cache_key]
-            if (
-                persist_lookup_fill
-                and not cached_lookup.lookup_fill_persisted
-                and cached_lookup.fetched_event_source is not None
-            ):
-                await self._persist_lookup_fill(
-                    room_id=room_id,
-                    event_id=normalized_event_id,
-                    fetched_event_source=cached_lookup.fetched_event_source,
-                    queue_write=False,
-                )
-                turn_cache[cache_key] = _TurnEventLookup(
-                    response=cached_lookup.response,
-                    fetched_event_source=cached_lookup.fetched_event_source,
-                    lookup_fill_persisted=True,
-                )
-            return cached_lookup.response
+            return turn_cache[cache_key]
 
+        coordinator = self.runtime.event_cache_write_coordinator
+        if coordinator is not None:
+            await coordinator.wait_for_prior_room_updates(room_id)
+
+        membership_epoch = await self._capture_membership_epoch(room_id)
         response, fetched_event_source = await _cached_room_get_event(
             self._require_client(),
             self.runtime.event_cache,
             room_id,
             event_id,
+            expected_membership_epoch=membership_epoch,
             trusted_sender_ids=self._trusted_sender_ids(),
         )
-        if fetched_event_source is not None and persist_lookup_fill:
+        if fetched_event_source is not None:
             await self._persist_lookup_fill(
                 room_id=room_id,
                 event_id=normalized_event_id,
                 fetched_event_source=fetched_event_source,
-                queue_write=True,
+                expected_membership_epoch=membership_epoch,
+                queue_write=coordinator is not None,
             )
         if turn_cache is not None:
-            turn_cache[cache_key] = _TurnEventLookup(
-                response=response,
-                fetched_event_source=fetched_event_source,
-                lookup_fill_persisted=fetched_event_source is None or persist_lookup_fill,
-            )
+            turn_cache[cache_key] = response
         return response
+
+    async def _capture_membership_epoch(self, room_id: str) -> int:
+        """Return a durable lookup generation or one that rejects every cache write."""
+        try:
+            membership_epoch = await self.runtime.event_cache.room_membership_epoch(room_id)
+        except Exception as exc:
+            self.logger.warning(
+                "Failed to certify Matrix lookup cache generation; continuing without cache writes",
+                room_id=room_id,
+                error=str(exc),
+            )
+            return UNCERTIFIED_MEMBERSHIP_EPOCH
+        return UNCERTIFIED_MEMBERSHIP_EPOCH if membership_epoch is None else membership_epoch
 
     async def _persist_lookup_fill(
         self,
@@ -524,12 +565,18 @@ class MatrixConversationCache(ConversationCacheProtocol):
         room_id: str,
         event_id: str,
         fetched_event_source: dict[str, Any],
+        expected_membership_epoch: int,
         queue_write: bool,
     ) -> None:
         """Persist one point-lookup fill without reintroducing same-room barrier deadlocks."""
 
         async def persist_lookup_event() -> None:
-            await self.runtime.event_cache.store_event(event_id, room_id, fetched_event_source)
+            await self.runtime.event_cache.store_event(
+                event_id,
+                room_id,
+                fetched_event_source,
+                expected_membership_epoch=expected_membership_epoch,
+            )
 
         try:
             if queue_write:
@@ -553,8 +600,16 @@ class MatrixConversationCache(ConversationCacheProtocol):
         room_id: str,
         event_id: str,
     ) -> EventInfo | None:
-        """Resolve one related event through the shared conversation-cache lookup path."""
-        response = await self.get_event(room_id, event_id, persist_lookup_fill=False)
+        """Resolve one related event without memoizing pre-mutation state in the active turn."""
+        membership_epoch = await self._capture_membership_epoch(room_id)
+        response, _fetched_event_source = await _cached_room_get_event(
+            self._require_client(),
+            self.runtime.event_cache,
+            room_id,
+            event_id,
+            expected_membership_epoch=membership_epoch,
+            trusted_sender_ids=self._trusted_sender_ids(),
+        )
         if not isinstance(response, nio.RoomGetEventResponse):
             return None
         return EventInfo.from_event(response.event.source)
@@ -832,6 +887,21 @@ class MatrixConversationCache(ConversationCacheProtocol):
             caller_label=caller_label,
         )
 
+    async def get_fresh_strict_thread_history(
+        self,
+        room_id: str,
+        thread_id: str,
+        *,
+        caller_label: str = "unknown",
+    ) -> ThreadReadResult:
+        """Resolve strict full history without reusing the current turn's memoized read."""
+        return await self._reads.read_thread(
+            room_id,
+            thread_id,
+            mode=ThreadReadMode.STRICT_FULL,
+            caller_label=caller_label,
+        )
+
     async def get_thread_id_for_event(self, room_id: str, event_id: str) -> str | None:
         """Resolve the cached thread root for one event when known."""
         try:
@@ -869,7 +939,13 @@ class MatrixConversationCache(ConversationCacheProtocol):
         event_id: str | None,
         content: dict[str, Any],
     ) -> None:
-        """Schedule one locally sent threaded message or edit for advisory cache bookkeeping."""
+        """Schedule one locally sent message or edit for advisory cache bookkeeping."""
+        self._evict_turn_thread_reads_for_room(room_id)
+        self._evict_turn_event_lookups_for_outbound_event(
+            room_id,
+            event_id=event_id,
+            event_info=EventInfo.from_event({"type": "m.room.message", "content": content}),
+        )
         self._outbound.notify_outbound_message(room_id, event_id, content)
 
     def notify_outbound_event(
@@ -878,11 +954,60 @@ class MatrixConversationCache(ConversationCacheProtocol):
         event_source: dict[str, Any],
     ) -> None:
         """Schedule one locally sent outbound event for advisory cache bookkeeping."""
+        self._evict_turn_thread_reads_for_room(room_id)
+        event_id = event_source.get("event_id")
+        self._evict_turn_event_lookups_for_outbound_event(
+            room_id,
+            event_id=event_id if isinstance(event_id, str) else None,
+            event_info=EventInfo.from_event(event_source),
+        )
         self._outbound.notify_outbound_event(room_id, event_source)
 
     def notify_outbound_redaction(self, room_id: str, redacted_event_id: str) -> None:
-        """Schedule one locally redacted threaded message for advisory cache bookkeeping."""
+        """Schedule one locally redacted message for advisory cache bookkeeping."""
+        self._evict_turn_thread_reads_for_room(room_id)
+        self._evict_turn_event_lookups_for_room(room_id)
         self._outbound.notify_outbound_redaction(room_id, redacted_event_id)
+
+    def _evict_turn_thread_reads_for_room(self, room_id: str) -> None:
+        """Discard thread reads changed by a successful outbound mutation."""
+        turn_cache = self._turn_thread_read_cache.get()
+        if turn_cache is None:
+            return
+        for cache_key in tuple(turn_cache):
+            if cache_key[0] == room_id:
+                turn_cache.pop(cache_key)
+
+    def _evict_turn_event_lookup(self, room_id: str, event_id: str) -> None:
+        """Discard point-read memoization invalidated by one successful outbound mutation."""
+        turn_cache = self._turn_event_cache.get()
+        if turn_cache is None:
+            return
+        normalized_event_id = event_id.strip()
+        for cache_key in tuple(turn_cache):
+            if cache_key[:2] == (room_id, normalized_event_id):
+                turn_cache.pop(cache_key)
+
+    def _evict_turn_event_lookups_for_room(self, room_id: str) -> None:
+        """Discard point reads that one outbound redaction could change indirectly."""
+        turn_cache = self._turn_event_cache.get()
+        if turn_cache is None:
+            return
+        for cache_key in tuple(turn_cache):
+            if cache_key[0] == room_id:
+                turn_cache.pop(cache_key)
+
+    def _evict_turn_event_lookups_for_outbound_event(
+        self,
+        room_id: str,
+        *,
+        event_id: str | None,
+        event_info: EventInfo,
+    ) -> None:
+        """Discard point reads changed by one outbound event or edit."""
+        for changed_event_id in (event_id, event_info.original_event_id):
+            if isinstance(changed_event_id, str):
+                self._evict_turn_event_lookup(room_id, changed_event_id)
 
     async def append_live_event(
         self,
@@ -897,6 +1022,35 @@ class MatrixConversationCache(ConversationCacheProtocol):
     async def apply_redaction(self, room_id: str, event: nio.RedactionEvent) -> None:
         """Apply one redaction to the advisory cache when the affected thread is known."""
         await self._live.apply_redaction(room_id, event)
+
+    async def purge_rooms(self, room_ids: Collection[str]) -> None:
+        """Fence an entire authoritative leave batch before awaiting any purge."""
+        departed_room_ids = tuple(dict.fromkeys(room_ids))
+        for room_id in departed_room_ids:
+            self._write_cache_ops.mark_room_departed(room_id)
+        tasks = tuple(
+            self._write_cache_ops.queue_room_cache_update(
+                room_id,
+                lambda room_id=room_id: self._write_cache_ops.purge_room(room_id),
+                name="matrix_cache_purge_departed_room",
+            )
+            for room_id in departed_room_ids
+        )
+        if tasks:
+            await asyncio.gather(*tasks)
+
+    async def mark_room_joined(self, room_id: str) -> None:
+        """Allow principal-owned caching again after an authoritative rejoin."""
+        expected_departure_epoch = self._write_cache_ops.room_departure_epoch(room_id)
+        task = self._write_cache_ops.queue_room_cache_update(
+            room_id,
+            lambda: self._write_cache_ops.mark_room_joined(
+                room_id,
+                expected_departure_epoch=expected_departure_epoch,
+            ),
+            name="matrix_cache_mark_room_joined",
+        )
+        await task
 
     def cache_sync_timeline(
         self,

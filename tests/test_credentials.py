@@ -8,12 +8,13 @@ from typing import Any
 import pytest
 
 import mindroom.constants as constants_mod
-import mindroom.credentials
-from mindroom.api.credentials import RequestCredentialsTarget
+import mindroom.credentials as credentials_module
+from mindroom.api.credentials_target import RequestCredentialsTarget
 from mindroom.api.integrations import _save_spotify_credentials
 from mindroom.credentials import (
     CredentialsManager,
     _merge_credential_layers,
+    _reset_credentials_manager_cache,
     get_runtime_credentials_manager,
     load_scoped_credentials,
     save_scoped_credentials,
@@ -122,6 +123,66 @@ class TestCredentialsManager:
         loaded_creds = credentials_manager.load_credentials("test_service")
         assert loaded_creds == test_creds
 
+    def test_plaintext_credentials_storage_is_private(self, tmp_path: Path) -> None:
+        """Plaintext credential storage should only be accessible to the owning OS user."""
+        credentials_dir = tmp_path / "credentials"
+        credentials_dir.mkdir(mode=0o755)
+        existing_path = credentials_dir / "existing_credentials.json"
+        existing_path.write_text('{"token":"existing"}', encoding="utf-8")
+        existing_path.chmod(0o644)
+
+        manager = CredentialsManager(credentials_dir)
+        manager.save_credentials("new", {"token": "new"})
+
+        assert stat.S_IMODE(credentials_dir.stat().st_mode) == 0o700
+        assert stat.S_IMODE(existing_path.stat().st_mode) == 0o600
+        assert stat.S_IMODE(manager.get_credentials_path("new").stat().st_mode) == 0o600
+
+    def test_credentials_hardening_permission_error_is_actionable(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Permission failures should identify the path, mode, and ownership fix."""
+        credentials_dir = tmp_path / "credentials"
+        credentials_dir.mkdir()
+        original_chmod = Path.chmod
+
+        def deny_credentials_chmod(path: Path, mode: int) -> None:
+            if path == credentials_dir:
+                raise PermissionError
+            original_chmod(path, mode)
+
+        monkeypatch.setattr(Path, "chmod", deny_credentials_chmod)
+
+        with pytest.raises(
+            PermissionError,
+            match=rf"{credentials_dir}.*0o700.*MindRoom OS user owns",
+        ):
+            CredentialsManager(credentials_dir)
+
+    def test_primary_manager_hardens_existing_worker_credentials(self, tmp_path: Path) -> None:
+        """Root initialization should secure dormant worker credential stores."""
+        storage_root = tmp_path / "mindroom_data"
+        worker_root = storage_root / "workers" / "worker-existing"
+        worker_credentials = worker_root / "credentials"
+        worker_shared_credentials = worker_root / ".shared_credentials"
+        worker_credentials.mkdir(parents=True, mode=0o755)
+        worker_shared_credentials.mkdir(mode=0o755)
+        credentials_path = worker_credentials / "google_credentials.json"
+        shared_credentials_path = worker_shared_credentials / "openai_credentials.json"
+        credentials_path.write_text('{"token":"worker"}', encoding="utf-8")
+        shared_credentials_path.write_text('{"api_key":"shared"}', encoding="utf-8")
+        credentials_path.chmod(0o644)
+        shared_credentials_path.chmod(0o644)
+
+        CredentialsManager(storage_root / "credentials")
+
+        assert stat.S_IMODE(worker_credentials.stat().st_mode) == 0o700
+        assert stat.S_IMODE(worker_shared_credentials.stat().st_mode) == 0o700
+        assert stat.S_IMODE(credentials_path.stat().st_mode) == 0o600
+        assert stat.S_IMODE(shared_credentials_path.stat().st_mode) == 0o600
+
     def test_encrypted_save_and_load_credentials_round_trip(
         self,
         tmp_path: Path,
@@ -220,7 +281,7 @@ class TestCredentialsManager:
         encryption_key = _test_encryption_key()
         captured_logger = CapturingLogger()
         monkeypatch.setenv("MINDROOM_CREDENTIALS_ENCRYPTION_KEY", encryption_key)
-        monkeypatch.setattr(mindroom.credentials, "logger", captured_logger)
+        monkeypatch.setattr(credentials_module, "logger", captured_logger)
         manager = CredentialsManager(tmp_path / "credentials", encryption_key=encryption_key)
         creds_path = manager.get_credentials_path("oauth_service")
         creds_path.write_text('{"token":"plaintext-token"}', encoding="utf-8")
@@ -268,7 +329,7 @@ class TestCredentialsManager:
 
         captured_logger = CapturingLogger()
         monkeypatch.delenv("MINDROOM_CREDENTIALS_ENCRYPTION_KEY")
-        monkeypatch.setattr(mindroom.credentials, "logger", captured_logger)
+        monkeypatch.setattr(credentials_module, "logger", captured_logger)
         plaintext_manager = CredentialsManager(tmp_path / "credentials")
 
         assert plaintext_manager.load_credentials("oauth_service") is None
@@ -357,7 +418,7 @@ class TestCredentialsManager:
         """Encrypted scoped credentials should harden pre-existing credential-owned parents."""
         encryption_key = _test_encryption_key()
         monkeypatch.setenv("MINDROOM_CREDENTIALS_ENCRYPTION_KEY", encryption_key)
-        requester_dir = mindroom.credentials._scoped_credentials_dir_part("@user:example.test")
+        requester_dir = credentials_module._scoped_credentials_dir_part("@user:example.test")
         scoped_root = tmp_path / "private_oauth"
         scoped_requester_path = scoped_root / requester_dir
         scoped_requester_path.mkdir(parents=True)
@@ -533,6 +594,50 @@ class TestCredentialsManager:
         assert shared_credentials is None
         assert worker_credentials == {"token": "worker-token", "_source": "ui"}
 
+    @pytest.mark.parametrize("worker_scope", [None, "shared", "user", "user_agent"])
+    def test_scoped_credentials_path_matches_save_and_delete_target(
+        self,
+        temp_credentials_dir: Path,
+        worker_scope: str | None,
+    ) -> None:
+        """Scoped path resolution should be the write-path source of truth."""
+        manager = CredentialsManager(temp_credentials_dir)
+        execution_identity = ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="general",
+            requester_id="@alice:example.org",
+            room_id="!room:example.org",
+            thread_id=None,
+            resolved_thread_id=None,
+            session_id=None,
+            tenant_id="tenant-123",
+            account_id="account-456",
+        )
+        worker_target = _worker_target(worker_scope, "general", execution_identity)
+        credentials_path = credentials_module.scoped_credentials_path(
+            "mcp_demo_oauth",
+            credentials_manager=manager,
+            worker_target=worker_target,
+        )
+
+        save_scoped_credentials(
+            "mcp_demo_oauth",
+            {"token": "scoped-token", "_source": "oauth"},
+            credentials_manager=manager,
+            worker_target=worker_target,
+        )
+
+        assert credentials_path.exists()
+        assert credentials_path.read_text(encoding="utf-8")
+
+        credentials_module.delete_scoped_credentials(
+            "mcp_demo_oauth",
+            credentials_manager=manager,
+            worker_target=worker_target,
+        )
+
+        assert not credentials_path.exists()
+
     def test_load_scoped_credentials_shared_scope_inherits_shared_ui_credentials(
         self,
         temp_credentials_dir: Path,
@@ -674,6 +779,89 @@ class TestCredentialsManager:
         )
 
         assert loaded_credentials == {"api_key": "worker-key", "_source": "ui"}
+
+    def test_shared_scope_oauth_tokens_stay_isolated_per_agent(
+        self,
+        temp_credentials_dir: Path,
+    ) -> None:
+        """OAuth tokens saved for one shared-scope agent should stay invisible to other agents."""
+        manager = CredentialsManager(temp_credentials_dir)
+        connecting_target = _worker_target("shared", "alpha", None, tenant_id="tenant-123", account_id="account-456")
+        other_agent_target = _worker_target("shared", "beta", None, tenant_id="tenant-123", account_id="account-456")
+
+        save_scoped_credentials(
+            "google_drive_oauth",
+            {"token": "alpha-token", "refresh_token": "alpha-refresh", "_source": "oauth"},
+            credentials_manager=manager,
+            worker_target=connecting_target,
+        )
+
+        connecting_agent_credentials = load_scoped_credentials(
+            "google_drive_oauth",
+            credentials_manager=manager,
+            worker_target=connecting_target,
+        )
+        assert connecting_agent_credentials is not None
+        assert connecting_agent_credentials["token"] == "alpha-token"  # noqa: S105
+        assert (
+            load_scoped_credentials(
+                "google_drive_oauth",
+                credentials_manager=manager,
+                worker_target=other_agent_target,
+            )
+            is None
+        )
+        assert manager.load_credentials("google_drive_oauth") is None
+        assert (
+            load_scoped_credentials(
+                "google_drive_oauth",
+                credentials_manager=manager,
+                worker_target=None,
+            )
+            is None
+        )
+
+    def test_shared_scope_oauth_tokens_ignore_global_store(
+        self,
+        temp_credentials_dir: Path,
+    ) -> None:
+        """Shared-scope agents should not inherit OAuth tokens from the global credentials store."""
+        manager = CredentialsManager(temp_credentials_dir)
+        manager.save_credentials(
+            "google_drive_oauth",
+            {"token": "global-token", "refresh_token": "global-refresh", "_source": "oauth"},
+        )
+
+        loaded_credentials = load_scoped_credentials(
+            "google_drive_oauth",
+            credentials_manager=manager,
+            worker_target=_worker_target("shared", "alpha", None, tenant_id="tenant-123", account_id="account-456"),
+        )
+
+        assert loaded_credentials is None
+
+    def test_shared_scope_oauth_save_requires_agent_name(
+        self,
+        temp_credentials_dir: Path,
+    ) -> None:
+        """Agent-scoped OAuth saves should fail loudly instead of widening to the global store."""
+        manager = CredentialsManager(temp_credentials_dir)
+        worker_target = ResolvedWorkerTarget(
+            worker_scope="shared",
+            routing_agent_name=None,
+            execution_identity=None,
+            tenant_id="tenant-123",
+            account_id="account-456",
+            worker_key=None,
+        )
+
+        with pytest.raises(ValueError, match="require an agent name"):
+            save_scoped_credentials(
+                "google_drive_oauth",
+                {"token": "orphan-token", "_source": "oauth"},
+                credentials_manager=manager,
+                worker_target=worker_target,
+            )
 
     def test_load_scoped_credentials_uses_shared_mirror_for_unscoped_worker_manager(
         self,
@@ -1068,18 +1256,17 @@ class TestGlobalCredentialsManager:
     @pytest.fixture(autouse=True)
     def reset_global_manager(self) -> None:
         """Reset the global credentials manager before each test."""
-        mindroom.credentials._credentials_manager = None
-        mindroom.credentials._credentials_manager_signature = None
+        _reset_credentials_manager_cache()
 
-    def test_get_credentials_manager_singleton(self, tmp_path: Path) -> None:
-        """Test that get_credentials_manager returns the same instance."""
+    def test_get_credentials_manager_returns_same_cached_instance(self, tmp_path: Path) -> None:
+        """Same storage roots should reuse the same cached manager."""
         runtime_paths = constants_mod.resolve_runtime_paths(storage_path=tmp_path)
         manager1 = get_runtime_credentials_manager(runtime_paths)
         manager2 = get_runtime_credentials_manager(runtime_paths)
         assert manager1 is manager2
 
-    def test_global_manager_uses_explicit_storage_root(self, tmp_path: Path) -> None:
-        """Test that global manager uses the provided storage root."""
+    def test_cached_manager_uses_explicit_storage_root(self, tmp_path: Path) -> None:
+        """The cached manager should use the provided storage root."""
         runtime_paths = constants_mod.resolve_runtime_paths(storage_path=tmp_path)
         manager = get_runtime_credentials_manager(runtime_paths)
         assert manager.base_path == tmp_path / "credentials"
@@ -1135,6 +1322,34 @@ class TestGlobalCredentialsManager:
 
         assert keyless_manager.load_credentials("oauth_service") is None
 
+    def test_runtime_manager_rebuilds_when_shared_credentials_path_changes(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Distinct runtime credential mirrors should not reuse the same cached manager."""
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+            encoding="utf-8",
+        )
+        first_runtime_paths = constants_mod.resolve_runtime_paths(
+            config_path=config_path,
+            storage_path=tmp_path,
+            process_env={SHARED_CREDENTIALS_PATH_ENV: str((tmp_path / "shared-a").resolve())},
+        )
+        second_runtime_paths = constants_mod.resolve_runtime_paths(
+            config_path=config_path,
+            storage_path=tmp_path,
+            process_env={SHARED_CREDENTIALS_PATH_ENV: str((tmp_path / "shared-b").resolve())},
+        )
+
+        first_manager = get_runtime_credentials_manager(first_runtime_paths)
+        second_manager = get_runtime_credentials_manager(second_runtime_paths)
+
+        assert first_manager is not second_manager
+        assert first_manager.shared_base_path == (tmp_path / "shared-a").resolve()
+        assert second_manager.shared_base_path == (tmp_path / "shared-b").resolve()
+
     def test_global_manager_rebuilds_when_storage_root_changes(self, tmp_path: Path) -> None:
         """Changing the explicit storage root should invalidate the cached manager."""
         config_path = tmp_path / "config.yaml"
@@ -1159,7 +1374,7 @@ class TestGlobalCredentialsManager:
         self,
         tmp_path: Path,
     ) -> None:
-        """Dedicated worker processes should load mirrored shared credentials through the global manager."""
+        """Dedicated worker processes should load mirrored shared credentials through the runtime cache."""
         root = (tmp_path / "shared-storage").resolve()
         base_manager = CredentialsManager(root / "credentials")
         config_path = tmp_path / "config.yaml"
@@ -1187,7 +1402,7 @@ class TestGlobalCredentialsManager:
         )
         worker_root = base_manager.for_worker(worker_key).storage_root
 
-        mindroom.credentials._credentials_manager = None
+        _reset_credentials_manager_cache()
 
         runtime_paths = constants_mod.resolve_runtime_paths(
             config_path=config_path,

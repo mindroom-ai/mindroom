@@ -6,51 +6,55 @@ import asyncio
 import base64
 import hashlib
 import os
-import subprocess
 import time
 import uuid
 from contextlib import suppress
 from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from fnmatch import fnmatchcase
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, NoReturn, Protocol, cast, runtime_checkable
 from urllib.parse import quote, urlparse, urlunparse
 
-from agno.knowledge.embedder.base import Embedder
-from agno.knowledge.embedder.ollama import OllamaEmbedder
-from agno.knowledge.knowledge import Knowledge
 from agno.knowledge.reader import ReaderFactory
 from agno.knowledge.reader.markdown_reader import MarkdownReader
 from agno.knowledge.reader.text_reader import TextReader
 from agno.vectordb.chroma import ChromaDb
 
+from mindroom.chunking import SafeFixedSizeChunking
 from mindroom.constants import RuntimePaths, resolve_config_relative_path
 from mindroom.credentials import get_runtime_shared_credentials_manager
-from mindroom.credentials_sync import get_api_key_for_provider, get_ollama_host
-from mindroom.embeddings import (
-    MindRoomOpenAIEmbedder,
-    create_sentence_transformers_embedder,
-    effective_knowledge_embedder_signature,
+from mindroom.embedding_errors import classified_embedder_error
+from mindroom.embedding_factory import create_configured_embedder
+from mindroom.knowledge.file_listing import (
+    git_checkout_present,
+    git_tracked_relative_paths_from_checkout,
+    include_knowledge_relative_path,
+    knowledge_files_from_relative_paths,
+    list_knowledge_files,
 )
-from mindroom.knowledge.chunking import SafeFixedSizeChunking
 from mindroom.knowledge.index_metadata import (
     load_index_metadata_payload,
     parse_index_metadata_fields,
     write_index_metadata_payload,
 )
+from mindroom.knowledge.indexing_config import (
+    IndexingSettings,
+    chroma_collection_exists,
+    indexing_settings_key,
+    storage_key_for_base,
+)
 from mindroom.knowledge.redaction import (
     credential_free_repo_url,
-    credential_free_url_identity,
     embedded_http_userinfo,
     redact_credentials_in_text,
     redact_url_credentials,
 )
 from mindroom.logging_config import get_logger
+from mindroom.strict_knowledge import StrictInsertKnowledge as Knowledge
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
+    from pathlib import Path
 
     from agno.knowledge.reader.base import Reader
 
@@ -64,9 +68,8 @@ _SOURCE_PATH_KEY = "source_path"
 _SOURCE_MTIME_NS_KEY = "source_mtime_ns"
 _SOURCE_SIZE_KEY = "source_size"
 _SOURCE_DIGEST_KEY = "source_digest"
-_MAX_CONCURRENT_KNOWLEDGE_FILE_INDEXES = 32
+_MAX_CONCURRENT_KNOWLEDGE_FILE_INDEXES = 4
 _POST_INDEX_VECTOR_VISIBILITY_RETRY_DELAYS_SECONDS = (0.0, 0.01, 0.05)
-_GIT_CHECKOUT_DETECTION_TIMEOUT_SECONDS = 5.0
 _INDEXING_STATUS_RESETTING = "resetting"
 _INDEXING_STATUS_INDEXING = "indexing"
 _INDEXING_STATUS_COMPLETE = "complete"
@@ -75,82 +78,7 @@ _INDEXING_STATUSES = {
     _INDEXING_STATUS_INDEXING,
     _INDEXING_STATUS_COMPLETE,
 }
-_TEXT_LIKE_EXTENSIONS = {
-    ".md",
-    ".markdown",
-    ".txt",
-    ".text",
-    ".rst",
-    ".json",
-    ".yaml",
-    ".yml",
-    ".toml",
-    ".ini",
-    ".csv",
-    ".tsv",
-    ".html",
-    ".xml",
-    ".py",
-    ".pyi",
-    ".js",
-    ".jsx",
-    ".ts",
-    ".tsx",
-    ".mjs",
-    ".cjs",
-    ".c",
-    ".cc",
-    ".cpp",
-    ".cxx",
-    ".h",
-    ".hh",
-    ".hpp",
-    ".java",
-    ".kt",
-    ".kts",
-    ".go",
-    ".rs",
-    ".rb",
-    ".php",
-    ".swift",
-    ".scala",
-    ".sc",
-    ".sh",
-    ".bash",
-    ".zsh",
-    ".fish",
-    ".ps1",
-    ".sql",
-    ".css",
-    ".scss",
-    ".sass",
-    ".less",
-    ".vue",
-    ".svelte",
-    ".proto",
-}
 _FileSignature = tuple[int, int, str]
-_INDEXING_SETTINGS_BASE_ID_INDEX = 0
-_INDEXING_SETTINGS_STORAGE_ROOT_INDEX = 1
-_INDEXING_SETTINGS_KNOWLEDGE_PATH_INDEX = 2
-INDEXING_SETTINGS_QUERY_COMPATIBLE_PREFIX_LENGTH = 7
-_INDEXING_SETTINGS_CHUNK_SIZE_INDEX = 7
-_INDEXING_SETTINGS_CHUNK_OVERLAP_INDEX = 8
-_INDEXING_SETTINGS_REPO_IDENTITY_INDEX = 9
-INDEXING_SETTINGS_CORPUS_COMPATIBLE_INDEXES = (
-    _INDEXING_SETTINGS_BASE_ID_INDEX,
-    _INDEXING_SETTINGS_STORAGE_ROOT_INDEX,
-    _INDEXING_SETTINGS_KNOWLEDGE_PATH_INDEX,
-    _INDEXING_SETTINGS_REPO_IDENTITY_INDEX,
-    10,
-    11,
-    12,
-    13,
-    14,
-    15,
-    16,
-)
-_INDEXING_SETTINGS_LAYOUT_LENGTH = 17
 
 
 @runtime_checkable
@@ -169,33 +97,9 @@ class _NamedCollection(Protocol):
     name: str
 
 
-class _CollectionExistenceEmbedder(Embedder):
-    """Minimal embedder for collection probes that must never embed content."""
-
-    def get_embedding(self, text: str) -> list[float]:
-        _ = text
-        msg = "Knowledge collection existence checks must not embed content"
-        raise NotImplementedError(msg)
-
-    def get_embedding_and_usage(self, text: str) -> tuple[list[float], dict[str, object] | None]:
-        _ = text
-        msg = "Knowledge collection existence checks must not embed content"
-        raise NotImplementedError(msg)
-
-    async def async_get_embedding(self, text: str) -> list[float]:
-        _ = text
-        msg = "Knowledge collection existence checks must not embed content"
-        raise NotImplementedError(msg)
-
-    async def async_get_embedding_and_usage(self, text: str) -> tuple[list[float], dict[str, object] | None]:
-        _ = text
-        msg = "Knowledge collection existence checks must not embed content"
-        raise NotImplementedError(msg)
-
-
 @dataclass(frozen=True)
 class _PersistedIndexState:
-    settings: tuple[str, ...]
+    settings: IndexingSettings
     status: Literal["resetting", "indexing", "complete"]
     collection: str | None = None
     last_published_at: str | None = None
@@ -227,121 +131,12 @@ def _ensure_knowledge_directory_ready(knowledge_path: Path) -> None:
     knowledge_path.mkdir(parents=True, exist_ok=True)
 
 
-def git_checkout_present(root: Path, *, timeout_seconds: float | None = None) -> bool:
-    """Return whether root itself is a Git worktree checkout."""
-    if not root.is_dir():
-        return False
-    effective_timeout_seconds = _GIT_CHECKOUT_DETECTION_TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds
-    if effective_timeout_seconds <= 0:
-        effective_timeout: float | None = None
-    else:
-        effective_timeout = effective_timeout_seconds
-    try:
-        result = subprocess.run(
-            ["git", "-C", str(root), "rev-parse", "--is-inside-work-tree", "--show-toplevel"],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=effective_timeout,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return False
-    if result.returncode != 0:
-        return False
-    lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
-    if len(lines) < 2 or lines[0] != "true":
-        return False
-    try:
-        return Path(lines[1]).resolve() == root.resolve()
-    except OSError:
-        return False
-
-
-def chroma_collection_exists(storage_path: Path, collection_name: str) -> bool:
-    """Check collection existence without constructing Agno Knowledge."""
-    vector_db = ChromaDb(
-        collection=collection_name,
-        path=str(storage_path),
-        persistent_client=True,
-        embedder=_CollectionExistenceEmbedder(),
-    )
-    return vector_db.exists()
-
-
-def _safe_identifier(value: str) -> str:
-    sanitized = "".join(char if char.isalnum() or char in {"_", "-"} else "_" for char in value)
-    return sanitized or "default"
-
-
-def _base_storage_key(base_id: str, knowledge_path: Path) -> str:
-    digest_source = f"{base_id}:{knowledge_path.resolve()}"
-    digest = hashlib.sha256(digest_source.encode("utf-8")).hexdigest()[:8]
-    return f"{_safe_identifier(base_id)}_{digest}"
-
-
 def _collection_name(base_id: str, knowledge_path: Path) -> str:
-    return f"{_COLLECTION_PREFIX}_{_base_storage_key(base_id, knowledge_path)}"
+    return f"{_COLLECTION_PREFIX}_{storage_key_for_base(base_id, knowledge_path)}"
 
 
-def _indexing_settings_key(config: Config, storage_path: Path, base_id: str, knowledge_path: Path) -> tuple[str, ...]:
-    embedder_config = config.memory.embedder.config
-    base_config = config.get_knowledge_base_config(base_id)
-    git_config = base_config.git
-    settings = (
-        base_id,
-        str(storage_path.resolve()),
-        str(knowledge_path.resolve()),
-        *effective_knowledge_embedder_signature(
-            config.memory.embedder.provider,
-            embedder_config.model,
-            host=embedder_config.host,
-            dimensions=embedder_config.dimensions,
-        ),
-        str(base_config.chunk_size),
-        str(base_config.chunk_overlap),
-        credential_free_url_identity(git_config.repo_url) if git_config is not None else "",
-        git_config.branch if git_config is not None else "",
-        str(git_config.lfs) if git_config is not None else "",
-        str(git_config.skip_hidden) if git_config is not None else "",
-        str(tuple(git_config.include_patterns)) if git_config is not None else "",
-        str(tuple(git_config.exclude_patterns)) if git_config is not None else "",
-        str(tuple(base_config.include_extensions)) if base_config.include_extensions is not None else "",
-        str(tuple(base_config.exclude_extensions)),
-    )
-    if len(settings) != _INDEXING_SETTINGS_LAYOUT_LENGTH:
-        msg = "Knowledge indexing settings layout constants must match _indexing_settings_key"
-        raise AssertionError(msg)
-    return settings
-
-
-def _create_embedder(config: Config, runtime_paths: RuntimePaths) -> Embedder:
-    provider = config.memory.embedder.provider
-    embedder_config = config.memory.embedder.config
-
-    if provider == "openai":
-        return MindRoomOpenAIEmbedder(
-            id=embedder_config.model,
-            api_key=get_api_key_for_provider("openai", runtime_paths=runtime_paths),
-            base_url=embedder_config.host,
-            dimensions=embedder_config.dimensions,
-        )
-
-    if provider == "ollama":
-        host = get_ollama_host(runtime_paths=runtime_paths) or embedder_config.host or "http://localhost:11434"
-        return OllamaEmbedder(id=embedder_config.model, host=host)
-
-    if provider == "sentence_transformers":
-        return create_sentence_transformers_embedder(
-            runtime_paths,
-            embedder_config.model,
-            dimensions=embedder_config.dimensions,
-        )
-
-    msg = (
-        f"Unsupported knowledge embedder provider: {provider}. "
-        "Supported providers: openai, ollama, sentence_transformers"
-    )
-    raise ValueError(msg)
+def _semantic_indexing_enabled(config: Config, base_id: str) -> bool:
+    return config.get_knowledge_base_config(base_id).mode == "semantic"
 
 
 def _authenticated_repo_url(
@@ -462,223 +257,6 @@ def _merge_git_env(*envs: dict[str, str] | None) -> dict[str, str] | None:
     return merged or None
 
 
-def _split_posix_parts(value: str) -> tuple[str, ...]:
-    normalized = value.replace("\\", "/").strip()
-    normalized = normalized.removeprefix("./")
-    normalized = normalized.strip("/")
-    if not normalized:
-        return ()
-    return tuple(part for part in normalized.split("/") if part and part != ".")
-
-
-def _matches_root_glob(relative_path: str, pattern: str) -> bool:
-    """Return True when relative path matches the root-anchored glob pattern."""
-    path_parts = _split_posix_parts(relative_path)
-    pattern_parts = _split_posix_parts(pattern)
-    if not pattern_parts:
-        return False
-
-    cache: dict[tuple[int, int], bool] = {}
-
-    def _match(path_index: int, pattern_index: int) -> bool:
-        key = (path_index, pattern_index)
-        if key in cache:
-            return cache[key]
-
-        if pattern_index == len(pattern_parts):
-            result = path_index == len(path_parts)
-        else:
-            pattern_part = pattern_parts[pattern_index]
-            if pattern_part == "**":
-                next_index = pattern_index
-                while next_index < len(pattern_parts) and pattern_parts[next_index] == "**":
-                    next_index += 1
-                if next_index == len(pattern_parts):
-                    result = True
-                else:
-                    result = any(_match(next_path, next_index) for next_path in range(path_index, len(path_parts) + 1))
-            elif path_index < len(path_parts) and fnmatchcase(path_parts[path_index], pattern_part):
-                result = _match(path_index + 1, pattern_index + 1)
-            else:
-                result = False
-
-        cache[key] = result
-        return result
-
-    return _match(0, 0)
-
-
-def _is_hidden_relative_path(relative_path: Path) -> bool:
-    return any(part.startswith(".") for part in relative_path.parts)
-
-
-def _include_knowledge_relative_path(config: Config, base_id: str, relative_path: str) -> bool:
-    """Return whether a relative path is managed by the base path filters."""
-    path_obj = Path(relative_path)
-    if path_obj.is_absolute() or ".." in path_obj.parts:
-        return False
-
-    base_config = config.get_knowledge_base_config(base_id)
-    git_config = base_config.git
-    if git_config is not None and git_config.skip_hidden and _is_hidden_relative_path(path_obj):
-        return False
-
-    if git_config is None:
-        return True
-
-    if git_config.include_patterns and not any(
-        _matches_root_glob(relative_path, pattern) for pattern in git_config.include_patterns
-    ):
-        return False
-
-    return not any(_matches_root_glob(relative_path, pattern) for pattern in git_config.exclude_patterns)
-
-
-def include_semantic_knowledge_relative_path(config: Config, base_id: str, relative_path: str) -> bool:
-    """Return whether a relative path is semantically indexable for one base."""
-    if not _include_knowledge_relative_path(config, base_id, relative_path):
-        return False
-
-    base_config = config.get_knowledge_base_config(base_id)
-    include_extensions = set(base_config.include_extensions) if base_config.include_extensions is not None else None
-    exclude_extensions = set(base_config.exclude_extensions)
-    allowed_extensions = include_extensions if include_extensions is not None else _TEXT_LIKE_EXTENSIONS
-
-    suffix = Path(relative_path).suffix.lower()
-    if suffix not in allowed_extensions:
-        return False
-    return suffix not in exclude_extensions
-
-
-def _path_is_symlink_or_under_symlink(root: Path, path: Path) -> bool:
-    try:
-        relative_path = path.relative_to(root)
-    except ValueError:
-        return True
-
-    current = root
-    for part in relative_path.parts:
-        current = current / part
-        if current.is_symlink():
-            return True
-    return False
-
-
-def _include_knowledge_file(config: Config, base_id: str, knowledge_root: Path, file_path: Path) -> bool:
-    """Return whether a file belongs to the managed semantic file set."""
-    root = knowledge_root.resolve()
-    candidate = file_path if file_path.is_absolute() else root / file_path
-    try:
-        candidate.relative_to(root)
-    except ValueError:
-        return False
-    if _path_is_symlink_or_under_symlink(root, candidate):
-        return False
-    try:
-        resolved_candidate = candidate.resolve(strict=True)
-        resolved_candidate.relative_to(root)
-    except (OSError, ValueError):
-        return False
-    if not candidate.is_file():
-        return False
-    relative_path = candidate.relative_to(root)
-    return include_semantic_knowledge_relative_path(config, base_id, relative_path.as_posix())
-
-
-def list_knowledge_files(config: Config, base_id: str, knowledge_root: Path) -> list[Path]:
-    """List managed semantic files without constructing a knowledge manager."""
-    root = knowledge_root.resolve()
-    if not root.is_dir():
-        return []
-
-    files: list[Path] = []
-    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
-        current_dir = Path(dirpath)
-        dirnames[:] = [dirname for dirname in dirnames if not (current_dir / dirname).is_symlink()]
-        for filename in filenames:
-            path = current_dir / filename
-            if _include_knowledge_file(config, base_id, root, path):
-                files.append(path)
-    return sorted(files)
-
-
-def _semantic_file_paths_from_relative_paths(
-    config: Config,
-    base_id: str,
-    knowledge_root: Path,
-    relative_paths: Iterable[str],
-) -> list[Path]:
-    root = knowledge_root.resolve()
-    files: list[Path] = []
-    for relative_path in sorted(set(relative_paths)):
-        path = root / relative_path
-        if _include_knowledge_file(config, base_id, root, path):
-            files.append(path)
-    return files
-
-
-def _git_tracked_relative_paths_from_checkout(
-    config: Config,
-    base_id: str,
-    knowledge_root: Path,
-    *,
-    timeout_seconds: float | None = None,
-) -> set[str]:
-    git_config = config.get_knowledge_base_config(base_id).git
-    if git_config is None:
-        return set()
-    effective_timeout_seconds = float(
-        git_config.sync_timeout_seconds if timeout_seconds is None else timeout_seconds,
-    )
-    try:
-        result = subprocess.run(
-            ["git", "ls-files", "-z"],
-            cwd=str(knowledge_root),
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=effective_timeout_seconds,
-        )
-    except subprocess.TimeoutExpired as exc:
-        msg = f"Git command timed out after {effective_timeout_seconds:g}s: git ls-files -z"
-        raise RuntimeError(msg) from exc
-    except OSError as exc:
-        msg = f"Git command failed: git ls-files -z\n{exc}"
-        raise RuntimeError(msg) from exc
-
-    if result.returncode != 0:
-        details = redact_credentials_in_text((result.stderr or result.stdout).strip())
-        msg = f"Git command failed with exit code {result.returncode}: git ls-files -z"
-        if details:
-            msg = f"{msg}\n{details}"
-        raise RuntimeError(msg)
-
-    return {
-        path
-        for path in result.stdout.split("\x00")
-        if path and include_semantic_knowledge_relative_path(config, base_id, path)
-    }
-
-
-def list_git_tracked_knowledge_files(
-    config: Config,
-    base_id: str,
-    knowledge_root: Path,
-    *,
-    timeout_seconds: float | None = None,
-) -> list[Path]:
-    """List Git-tracked semantic files using the same source set as indexing."""
-    root = knowledge_root.resolve()
-    if not git_checkout_present(root, timeout_seconds=timeout_seconds):
-        return []
-    return _semantic_file_paths_from_relative_paths(
-        config,
-        base_id,
-        root,
-        _git_tracked_relative_paths_from_checkout(config, base_id, root, timeout_seconds=timeout_seconds),
-    )
-
-
 def _file_content_digest(file_path: Path) -> str:
     digest = hashlib.sha256()
     with file_path.open("rb") as handle:
@@ -704,9 +282,9 @@ def knowledge_source_signature(
         tracked_paths = (
             set(tracked_relative_paths)
             if tracked_relative_paths is not None
-            else _git_tracked_relative_paths_from_checkout(config, base_id, root)
+            else git_tracked_relative_paths_from_checkout(config, base_id, root)
         )
-        files = _semantic_file_paths_from_relative_paths(config, base_id, root, tracked_paths)
+        files = knowledge_files_from_relative_paths(config, base_id, root, tracked_paths)
     for path in files:
         try:
             stat = path.stat()
@@ -749,7 +327,7 @@ class KnowledgeManager:
     runtime_paths: RuntimePaths
     storage_path: Path | None = None
     knowledge_path: Path | None = None
-    _indexing_settings: tuple[str, ...] = field(init=False)
+    _indexing_settings: IndexingSettings = field(init=False)
     _base_storage_path: Path = field(init=False)
     _indexing_settings_path: Path = field(init=False)
     _git_lfs_hydrated_head_path: Path = field(init=False)
@@ -761,6 +339,7 @@ class KnowledgeManager:
     _git_sync_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
     _git_last_successful_commit: str | None = field(default=None, init=False)
     _last_refresh_error: str | None = field(default=None, init=False)
+    _last_file_index_error: str | None = field(default=None, init=False)
     _git_lfs_checked: bool = field(default=False, init=False)
     _git_lfs_repository_ready: bool = field(default=False, init=False)
     _git_tracked_relative_paths: set[str] | None = field(default=None, init=False, repr=False)
@@ -781,12 +360,16 @@ class KnowledgeManager:
         _ensure_knowledge_directory_ready(self.knowledge_path)
         self._set_settings(self.config, self.runtime_paths, self.storage_path, self.knowledge_path)
         self._base_storage_path = (
-            self.storage_path / "knowledge_db" / _base_storage_key(self.base_id, self.knowledge_path)
+            self.storage_path / "knowledge_db" / storage_key_for_base(self.base_id, self.knowledge_path)
         ).resolve()
         self._base_storage_path.mkdir(parents=True, exist_ok=True)
         self._indexing_settings_path = self._base_storage_path / "indexing_settings.json"
         self._git_lfs_hydrated_head_path = self._base_storage_path / "git_lfs_hydrated_head.txt"
         persisted_state = self._load_persisted_index_state()
+        if not _semantic_indexing_enabled(self.config, self.base_id):
+            self._persisted_collection_missing_on_init = False
+            self._knowledge = Knowledge()
+            return
         self._persisted_collection_missing_on_init = self._persisted_collection_missing(persisted_state)
         collection_name = (
             persisted_state.collection
@@ -810,7 +393,7 @@ class KnowledgeManager:
         self.runtime_paths = runtime_paths
         self.storage_path = storage_path
         self.knowledge_path = knowledge_path.resolve()
-        self._indexing_settings = _indexing_settings_key(
+        self._indexing_settings = indexing_settings_key(
             config,
             storage_path,
             self.base_id,
@@ -859,8 +442,11 @@ class KnowledgeManager:
             indexed_count,
             source_signature,
         ) = fields
+        indexing_settings = IndexingSettings.from_metadata(settings)
+        if indexing_settings is None:
+            return None
         return _PersistedIndexState(
-            settings,
+            indexing_settings,
             cast('Literal["resetting", "indexing", "complete"]', status),
             collection=collection,
             last_published_at=last_published_at,
@@ -873,7 +459,7 @@ class KnowledgeManager:
         self,
         status: Literal["resetting", "indexing", "complete"],
         *,
-        settings: tuple[str, ...] | None = None,
+        settings: IndexingSettings | None = None,
         collection: str | None = None,
         last_published_at: str | None = None,
         published_revision: str | None = None,
@@ -882,7 +468,7 @@ class KnowledgeManager:
     ) -> None:
         write_index_metadata_payload(
             self._indexing_settings_path,
-            settings=settings or self._indexing_settings,
+            settings=(settings or self._indexing_settings).to_metadata(),
             status=status,
             collection=collection,
             last_published_at=last_published_at,
@@ -938,14 +524,8 @@ class KnowledgeManager:
             timeout_seconds=self._git_sync_timeout_seconds(),
         )
 
-    def _include_semantic_relative_path(self, relative_path: str) -> bool:
-        if not self._include_relative_path(relative_path):
-            return False
-
-        return include_semantic_knowledge_relative_path(self.config, self.base_id, relative_path)
-
-    def _include_relative_path(self, relative_path: str) -> bool:
-        return _include_knowledge_relative_path(self.config, self.base_id, relative_path)
+    def _include_active_relative_path(self, relative_path: str) -> bool:
+        return include_knowledge_relative_path(self.config, self.base_id, relative_path)
 
     async def _run_git(
         self,
@@ -1055,7 +635,7 @@ class KnowledgeManager:
     async def _git_list_tracked_files(self) -> set[str]:
         output = await self._run_git(["ls-files", "-z"])
         raw_paths = [entry for entry in output.split("\x00") if entry]
-        tracked_files = {path for path in raw_paths if self._include_semantic_relative_path(path)}
+        tracked_files = {path for path in raw_paths if self._include_active_relative_path(path)}
         self._git_tracked_relative_paths = set(tracked_files)
         return tracked_files
 
@@ -1139,7 +719,7 @@ class KnowledgeManager:
             changed_paths = after_files
         else:
             diff_output = await self._run_git(["diff", "--name-only", "--no-renames", f"{before_head}..HEAD"])
-            changed_paths = {path for path in diff_output.splitlines() if self._include_semantic_relative_path(path)}
+            changed_paths = {path for path in diff_output.splitlines() if self._include_active_relative_path(path)}
 
         removed_files = before_files - after_files
         changed_files = {path for path in changed_paths if path in after_files} | (after_files - before_files)
@@ -1152,12 +732,12 @@ class KnowledgeManager:
             if self._git_tracked_relative_paths is None:
                 if not git_checkout_present(knowledge_root, timeout_seconds=self._git_sync_timeout_seconds()):
                     return []
-                self._git_tracked_relative_paths = _git_tracked_relative_paths_from_checkout(
+                self._git_tracked_relative_paths = git_tracked_relative_paths_from_checkout(
                     self.config,
                     self.base_id,
                     knowledge_root,
                 )
-            return _semantic_file_paths_from_relative_paths(
+            return knowledge_files_from_relative_paths(
                 self.config,
                 self.base_id,
                 knowledge_root,
@@ -1242,7 +822,7 @@ class KnowledgeManager:
             collection=collection_name,
             path=str(self._base_storage_path),
             persistent_client=True,
-            embedder=_create_embedder(self.config, self.runtime_paths),
+            embedder=create_configured_embedder(self.config, self.runtime_paths),
         )
 
     def _build_knowledge(self, collection_name: str) -> Knowledge:
@@ -1429,7 +1009,17 @@ class KnowledgeManager:
             _SOURCE_SIZE_KEY: source_size,
             _SOURCE_DIGEST_KEY: source_digest,
         }
-        reader = self._build_reader(resolved_path)
+        try:
+            reader = self._build_reader(resolved_path)
+        except ImportError as exc:
+            logger.warning(
+                "Skipping knowledge file because its reader dependency is not installed",
+                base_id=self.base_id,
+                path=relative_path,
+                extension=resolved_path.suffix.lower(),
+                error=str(exc),
+            )
+            return False
         target_knowledge = knowledge or self._knowledge
 
         try:
@@ -1451,7 +1041,11 @@ class KnowledgeManager:
                 upsert=upsert,
                 reader=reader,
             )
-        except Exception:
+        except Exception as exc:
+            if self._last_file_index_error is None:
+                self._last_file_index_error = classified_embedder_error(exc) or (
+                    f"knowledge indexing failed ({type(exc).__name__})"
+                )
             logger.exception("Failed to index knowledge file", base_id=self.base_id, path=str(resolved_path))
             return False
 
@@ -1460,26 +1054,12 @@ class KnowledgeManager:
             knowledge=target_knowledge,
         )
         if not has_vectors:
-            if source_size == 0:
-                if indexed_files is not None and indexed_signatures is not None:
-                    indexed_files.add(relative_path)
-                    indexed_signatures[relative_path] = (source_mtime_ns, source_size, source_digest)
-                else:
-                    async with self._state_lock:
-                        self._indexed_files.add(relative_path)
-                        self._indexed_signatures[relative_path] = (source_mtime_ns, source_size, source_digest)
-                logger.info("Scanned empty knowledge file with no vectors", base_id=self.base_id, path=relative_path)
-                return True
-
-            logger.warning("Indexing produced no vectors for file", base_id=self.base_id, path=relative_path)
-            if indexed_files is not None and indexed_signatures is not None:
-                indexed_files.discard(relative_path)
-                indexed_signatures.pop(relative_path, None)
-            else:
-                async with self._state_lock:
-                    self._indexed_files.discard(relative_path)
-                    self._indexed_signatures.pop(relative_path, None)
-            return False
+            return await self._handle_vectorless_file(
+                relative_path,
+                (source_mtime_ns, source_size, source_digest),
+                indexed_files=indexed_files,
+                indexed_signatures=indexed_signatures,
+            )
 
         if indexed_files is not None and indexed_signatures is not None:
             indexed_files.add(relative_path)
@@ -1491,6 +1071,37 @@ class KnowledgeManager:
         logger.info("Indexed knowledge file", base_id=self.base_id, path=relative_path)
         return True
 
+    async def _handle_vectorless_file(
+        self,
+        relative_path: str,
+        signature: _FileSignature,
+        *,
+        indexed_files: set[str] | None,
+        indexed_signatures: dict[str, _FileSignature | None] | None,
+    ) -> bool:
+        """Record one insert that produced no vectors; success only for empty sources."""
+        source_size = signature[1]
+        if source_size == 0:
+            if indexed_files is not None and indexed_signatures is not None:
+                indexed_files.add(relative_path)
+                indexed_signatures[relative_path] = signature
+            else:
+                async with self._state_lock:
+                    self._indexed_files.add(relative_path)
+                    self._indexed_signatures[relative_path] = signature
+            logger.info("Scanned empty knowledge file with no vectors", base_id=self.base_id, path=relative_path)
+            return True
+
+        logger.warning("Indexing produced no vectors for file", base_id=self.base_id, path=relative_path)
+        if indexed_files is not None and indexed_signatures is not None:
+            indexed_files.discard(relative_path)
+            indexed_signatures.pop(relative_path, None)
+        else:
+            async with self._state_lock:
+                self._indexed_files.discard(relative_path)
+                self._indexed_signatures.pop(relative_path, None)
+        return False
+
     async def _reindex_files_locked(
         self,
         files: list[Path],
@@ -1498,30 +1109,14 @@ class KnowledgeManager:
         knowledge: Knowledge | None = None,
         indexed_files: set[str] | None = None,
         indexed_signatures: dict[str, _FileSignature | None] | None = None,
+        vanished_files: set[str] | None = None,
     ) -> int:
         """Reindex resolved files with bounded concurrency while holding the operation lock."""
         if not files:
             return 0
 
-        concurrency = min(_MAX_CONCURRENT_KNOWLEDGE_FILE_INDEXES, len(files))
-        if concurrency <= 1:
-            indexed_count = 0
-            for file_path in files:
-                indexed_count += int(
-                    await self._index_file_locked(
-                        file_path,
-                        upsert=True,
-                        knowledge=knowledge,
-                        indexed_files=indexed_files,
-                        indexed_signatures=indexed_signatures,
-                    ),
-                )
-            return indexed_count
-
-        semaphore = asyncio.Semaphore(concurrency)
-
-        async def _index_one(file_path: Path) -> bool:
-            async with semaphore:
+        async def _index_or_skip_vanished(file_path: Path) -> bool:
+            try:
                 return await self._index_file_locked(
                     file_path,
                     upsert=True,
@@ -1529,14 +1124,48 @@ class KnowledgeManager:
                     indexed_files=indexed_files,
                     indexed_signatures=indexed_signatures,
                 )
+            except FileNotFoundError:
+                # Live source folders (e.g. thread exports) delete files while
+                # a refresh runs; a file vanishing between listing and indexing
+                # is not an indexing failure. Record it so the caller can drop
+                # it from its completeness accounting: the trailing
+                # source-signature comparison then decides whether the
+                # surviving corpus is publishable or another refresh is needed.
+                relative_path = self._relative_path(file_path)
+                logger.warning(
+                    "Knowledge file vanished during refresh; skipping",
+                    base_id=self.base_id,
+                    path=relative_path,
+                )
+                if vanished_files is not None:
+                    vanished_files.add(relative_path)
+                return False
+
+        concurrency = min(_MAX_CONCURRENT_KNOWLEDGE_FILE_INDEXES, len(files))
+        if concurrency <= 1:
+            indexed_count = 0
+            for file_path in files:
+                indexed_count += int(await _index_or_skip_vanished(file_path))
+            return indexed_count
+
+        semaphore = asyncio.Semaphore(concurrency)
+
+        async def _index_one(file_path: Path) -> bool:
+            async with semaphore:
+                return await _index_or_skip_vanished(file_path)
 
         results = await asyncio.gather(*(_index_one(file_path) for file_path in files))
         return sum(int(indexed) for indexed in results)
 
     async def reindex_all(self) -> int:
         """Clear and rebuild the knowledge index from disk."""
+        if not _semantic_indexing_enabled(self.config, self.base_id):
+            self._last_refresh_error = None
+            return 0
+
         async with self._lock:
             self._last_refresh_error = None
+            self._last_file_index_error = None
             files = await asyncio.to_thread(self.list_files)
             candidate_knowledge = self._build_knowledge(self._candidate_collection_name())
             candidate_vector_db = candidate_knowledge.vector_db
@@ -1548,6 +1177,7 @@ class KnowledgeManager:
             candidate_publish_state = _CandidatePublishState()
             candidate_indexed_files: set[str] = set()
             candidate_indexed_signatures: dict[str, _FileSignature | None] = {}
+            candidate_vanished_files: set[str] = set()
 
             try:
                 indexed_count = await self._reindex_files_locked(
@@ -1555,12 +1185,21 @@ class KnowledgeManager:
                     knowledge=candidate_knowledge,
                     indexed_files=candidate_indexed_files,
                     indexed_signatures=candidate_indexed_signatures,
+                    vanished_files=candidate_vanished_files,
                 )
-                if indexed_count != len(files):
-                    self._last_refresh_error = f"Indexed {indexed_count} of {len(files)} managed knowledge files"
+                # Files deleted mid-refresh by a live source (e.g. thread
+                # exports) are not indexing failures: drop them from the
+                # completeness accounting and let the live source-signature
+                # comparison below decide whether the surviving corpus still
+                # matches the folder.
+                if indexed_count != len(files) - len(candidate_vanished_files):
+                    summary = f"Indexed {indexed_count} of {len(files)} managed knowledge files"
+                    if self._last_file_index_error is not None:
+                        summary = f"{summary} (first error: {self._last_file_index_error})"
+                    self._last_refresh_error = summary
                     return indexed_count
 
-                expected_paths = {self._relative_path(file_path) for file_path in files}
+                expected_paths = {self._relative_path(file_path) for file_path in files} - candidate_vanished_files
                 candidate_signatures = {
                     relative_path: signature
                     for relative_path, signature in candidate_indexed_signatures.items()

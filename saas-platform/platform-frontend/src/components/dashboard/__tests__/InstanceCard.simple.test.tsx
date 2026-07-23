@@ -5,21 +5,7 @@ import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { InstanceCard } from '../InstanceCard'
 import { provisionInstance } from '@/lib/api'
-
-// Define the Instance type
-type Instance = {
-  instance_id: number
-  account_id: string
-  status: 'running' | 'provisioning' | 'stopped' | 'error' | 'failed'
-  frontend_url: string | null
-  backend_url: string | null
-  matrix_server_url: string | null
-  tier: string | null
-  created_at: string
-  updated_at: string
-  kubernetes_synced_at?: string | null
-  status_hint?: string | null
-}
+import type { Instance } from '@/hooks/useInstance'
 
 // Mock the API
 jest.mock('@/lib/api', () => ({
@@ -80,8 +66,9 @@ describe('InstanceCard - Simplified Tests', () => {
 
   describe('When instance exists', () => {
     const mockInstance: Instance = {
+      id: 'inst-1',
       instance_id: 1,
-      account_id: 'acc-123',
+      subscription_id: 'sub-123',
       status: 'running',
       frontend_url: 'https://customer.mindroom.chat',
       backend_url: 'https://customer.api.mindroom.chat',
@@ -103,7 +90,8 @@ describe('InstanceCard - Simplified Tests', () => {
       // Check URLs are displayed (use getAllByText since domain appears multiple times)
       expect(screen.getAllByText('customer.mindroom.chat')).toHaveLength(2) // Domain and Frontend
       expect(screen.getByText('customer.api.mindroom.chat')).toBeInTheDocument()
-      expect(screen.getByText('customer.matrix.mindroom.chat')).toBeInTheDocument()
+      expect(screen.getByText('Chat Interface')).toBeInTheDocument()
+      expect(screen.getByRole('link', { name: /^Open chat$/i })).toBeInTheDocument()
 
       // Check tier (it's showing as 'pro' not 'Pro' due to capitalize class)
       expect(screen.getByText(/pro/i)).toBeInTheDocument()
@@ -138,6 +126,17 @@ describe('InstanceCard - Simplified Tests', () => {
       expect(openButton).toHaveAttribute('href', 'https://customer.mindroom.chat')
     })
 
+    it('should display Open Chat Interface button for running instances', () => {
+      render(<InstanceCard instance={mockInstance} />)
+
+      const openButton = screen.getByRole('link', { name: /Open Chat Interface/i })
+      expect(openButton).toBeInTheDocument()
+      expect(openButton).toHaveAttribute(
+        'href',
+        'https://chat.mindroom.chat/login/https%3A%2F%2Fcustomer.matrix.mindroom.chat/'
+      )
+    })
+
     it('should not display Open MindRoom button for stopped instances', () => {
       const stoppedInstance = { ...mockInstance, status: 'stopped' as Instance['status'] }
       render(<InstanceCard instance={stoppedInstance} />)
@@ -163,6 +162,7 @@ describe('InstanceCard - Simplified Tests', () => {
       expect(screen.queryByText('Domain')).not.toBeInTheDocument()
       expect(screen.queryByText('Frontend')).not.toBeInTheDocument()
       expect(screen.queryByText('API')).not.toBeInTheDocument()
+      expect(screen.queryByText('Chat Interface')).not.toBeInTheDocument()
     })
 
     it('should show default tier when not specified', () => {
@@ -175,8 +175,9 @@ describe('InstanceCard - Simplified Tests', () => {
 
   describe('Relative time formatting', () => {
     const mockInstance: Instance = {
+      id: 'inst-1',
       instance_id: 1,
-      account_id: 'acc-123',
+      subscription_id: 'sub-123',
       status: 'running',
       frontend_url: null,
       backend_url: null,

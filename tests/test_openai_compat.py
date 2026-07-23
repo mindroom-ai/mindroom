@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import hashlib
 import json
 import re
@@ -40,21 +41,23 @@ from mindroom.api.openai_compat import (
     _ChatMessage,
     _convert_messages,
     _derive_session_id,
-    _extract_content_text,
     _is_error_response,
 )
+from mindroom.api.openai_request_parsing import _extract_content_text
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.main import Config
-from mindroom.config.models import ModelConfig, RouterConfig
+from mindroom.config.models import ModelConfig, RouterConfig, ToolConfigEntry
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.execution_preparation import _PreparedExecutionContext
 from mindroom.history.runtime import ScopeSessionContext, open_bound_scope_session_context
-from mindroom.history.types import CompactionDecision, HistoryScope, ResolvedReplayPlan
+from mindroom.history.types import CompactionDecision, HistoryScope, PreparedHistoryState, ResolvedReplayPlan
 from mindroom.knowledge.availability import KnowledgeAvailability
+from mindroom.knowledge.indexing_config import IndexingSettings
 from mindroom.knowledge.utils import KnowledgeAvailabilityDetail, _KnowledgeResolution
 from mindroom.llm_request_logging import current_llm_request_log_context
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.memory import MemoryPromptParts
+from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.prompts import QUEUED_MESSAGE_NOTICE_TEXT
 from mindroom.team_exact_members import ResolvedExactTeamMembers
 from mindroom.teams import TeamMode
@@ -93,6 +96,31 @@ def _runtime_paths_for_config(config: Config, process_env: dict[str, str] | None
     return runtime_paths
 
 
+def _fake_indexing_settings(base_id: str) -> IndexingSettings:
+    return IndexingSettings(
+        base_id=base_id,
+        storage_root="memory",
+        knowledge_path=f"memory/{base_id}",
+        mode="semantic",
+        embedder_provider="openai",
+        embedder_model="text-embedding-3-small",
+        embedder_host="",
+        embedder_dimensions="",
+        chunk_size="5000",
+        chunk_overlap="0",
+        repo_identity="",
+        git_branch="",
+        git_lfs="",
+        git_skip_hidden="",
+        git_include_patterns="",
+        git_exclude_patterns="",
+        include_patterns="",
+        exclude_patterns="",
+        include_extensions="",
+        exclude_extensions="()",
+    )
+
+
 def _knowledge_lookup(
     knowledge: object | None,
     *,
@@ -106,6 +134,7 @@ def _knowledge_lookup(
                 source_signature=hashlib.sha256().hexdigest(),
                 last_published_at="2999-01-01T00:00:00+00:00",
                 last_refresh_at=None,
+                last_error=None,
             ),
         )
         if knowledge is not None
@@ -115,7 +144,7 @@ def _knowledge_lookup(
         base_id=base_id,
         storage_root="memory",
         knowledge_path=f"memory/{base_id}",
-        indexing_settings=(),
+        indexing_settings=_fake_indexing_settings(base_id),
     )
     return SimpleNamespace(
         key=key,
@@ -137,14 +166,12 @@ def _prepared_team_execution_context(
 ) -> SimpleNamespace:
     prepared_context = _PreparedExecutionContext(
         messages=tuple(messages or [Message(role="user", content=final_prompt)]),
-        replay_plan=replay_plan,
         unseen_event_ids=[],
-        replays_persisted_history=replays_persisted_history,
-        compaction_outcomes=[],
-        compaction_decision=CompactionDecision(mode="none", reason="unclassified"),
-        compaction_reply_outcome="none",
-        prepared_context_tokens=prepared_context_tokens,
-        estimated_context_tokens=prepared_context_tokens,
+        prepared_history=PreparedHistoryState(
+            replay_plan=replay_plan,
+            replays_persisted_history=replays_persisted_history,
+            prepared_context_tokens=prepared_context_tokens,
+        ),
     )
     return SimpleNamespace(
         messages=prepared_context.messages,
@@ -157,7 +184,6 @@ def _prepared_team_execution_context(
         compaction_decision=CompactionDecision(mode="none", reason="unclassified"),
         compaction_reply_outcome="none",
         prepared_context_tokens=prepared_context_tokens,
-        estimated_context_tokens=prepared_context_tokens,
         prepared_history=prepared_context.prepared_history,
     )
 
@@ -413,12 +439,120 @@ def test_openai_compatible_agent_hides_approval_gated_tools(test_config: Config,
         )
 
     exposed_tool_names = {
-        *(function_name for toolkit in agent.tools for function_name in getattr(toolkit, "functions", {})),
-        *(function_name for toolkit in agent.tools for function_name in getattr(toolkit, "async_functions", {})),
+        *(function_name for toolkit in agent.tools for function_name in toolkit.functions),
+        *(function_name for toolkit in agent.tools for function_name in toolkit.async_functions),
     }
     assert "run_shell_command" not in exposed_tool_names
     assert "check_shell_command" in exposed_tool_names
     assert "kill_shell_command" in exposed_tool_names
+
+
+def test_openai_compatible_agent_hides_context_bound_todo_tool(tmp_path: Path) -> None:
+    """OpenAI-compatible agent construction should hide Matrix-context-bound todo tools."""
+    runtime_paths = constants.resolve_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})
+    config = Config(
+        agents={
+            "code": AgentConfig(
+                display_name="CodeAgent",
+                role="Generate code and manage files",
+                tools=["todo"],
+                rooms=[],
+            ),
+        },
+        models={"default": ModelConfig(provider="ollama", id="test-model")},
+        router=RouterConfig(model="default"),
+    )
+    persist_entity_accounts(config, runtime_paths)
+    execution_identity = build_tool_execution_identity(
+        channel="openai_compat",
+        agent_name="code",
+        runtime_paths=runtime_paths,
+        requester_id=None,
+        room_id=None,
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="openai-session",
+    )
+
+    with patch("mindroom.model_loading.get_model_instance", return_value=Ollama(id="test-model")):
+        agent = create_agent(
+            "code",
+            config=config,
+            runtime_paths=runtime_paths,
+            execution_identity=execution_identity,
+            include_openai_compat_guidance=True,
+        )
+
+    exposed_tool_names = {
+        *(function_name for toolkit in agent.tools for function_name in toolkit.functions),
+        *(function_name for toolkit in agent.tools for function_name in toolkit.async_functions),
+    }
+    assert "todo" not in {toolkit.name for toolkit in agent.tools}
+    assert (
+        not {
+            "add_todo",
+            "apply_template",
+            "list_templates",
+            "list_todos",
+            "plan",
+            "update_todo",
+        }
+        & exposed_tool_names
+    )
+
+
+def test_openai_compatible_dynamic_tools_hide_deferred_context_bound_todo(tmp_path: Path) -> None:
+    """OpenAI-compatible dynamic tooling should not advertise or load context-bound todo."""
+    runtime_paths = constants.resolve_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})
+    config = Config(
+        agents={
+            "code": AgentConfig(
+                display_name="CodeAgent",
+                role="Generate code and manage files",
+                tools=[
+                    ToolConfigEntry(name="todo", defer=True),
+                    ToolConfigEntry(name="sleep", defer=True),
+                ],
+                rooms=[],
+            ),
+        },
+        models={"default": ModelConfig(provider="ollama", id="test-model")},
+        router=RouterConfig(model="default"),
+    )
+    persist_entity_accounts(config, runtime_paths)
+    execution_identity = build_tool_execution_identity(
+        channel="openai_compat",
+        agent_name="code",
+        runtime_paths=runtime_paths,
+        requester_id=None,
+        room_id=None,
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="openai-session",
+    )
+
+    with patch("mindroom.model_loading.get_model_instance", return_value=Ollama(id="test-model")):
+        agent = create_agent(
+            "code",
+            config=config,
+            runtime_paths=runtime_paths,
+            execution_identity=execution_identity,
+            session_id="openai-session",
+            include_openai_compat_guidance=True,
+        )
+
+    toolkits = {toolkit.name: toolkit for toolkit in agent.tools}
+    assert "todo" not in toolkits
+    dynamic_tools = toolkits["dynamic_tools"]
+    listing = json.loads(dynamic_tools.list_tools())
+    search_result = json.loads(dynamic_tools.tool_search("todo"))
+    load_result = json.loads(dynamic_tools.load_tool("todo"))
+
+    assert [tool["name"] for tool in listing["tools"]] == ["sleep"]
+    assert listing["loaded_tools"] == []
+    assert search_result["matches"] == []
+    assert load_result["status"] == "unknown"
+    assert load_result["available_tools"] == ["sleep"]
 
 
 def test_openai_compatible_agent_hides_script_gated_tools(test_config: Config, tmp_path: Path) -> None:
@@ -461,8 +595,8 @@ def test_openai_compatible_agent_hides_script_gated_tools(test_config: Config, t
         )
 
     exposed_tool_names = {
-        *(function_name for toolkit in agent.tools for function_name in getattr(toolkit, "functions", {})),
-        *(function_name for toolkit in agent.tools for function_name in getattr(toolkit, "async_functions", {})),
+        *(function_name for toolkit in agent.tools for function_name in toolkit.functions),
+        *(function_name for toolkit in agent.tools for function_name in toolkit.async_functions),
     }
     assert "run_shell_command" not in exposed_tool_names
 
@@ -890,7 +1024,7 @@ class TestChatCompletions:
         """Cancellation after lock acquisition must not leave the OpenAI session locked."""
         completion_lock = asyncio.Lock()
 
-        async def cancelled_response(**_kwargs: object) -> str:
+        async def cancelled_response(_ctx: object, **_kwargs: object) -> str:
             raise asyncio.CancelledError
 
         with (
@@ -923,7 +1057,26 @@ class TestChatCompletions:
 
             assert "include_default_tools" not in mock_ai.call_args.kwargs
             assert mock_ai.call_args.kwargs["include_interactive_questions"] is False
-            assert mock_ai.call_args.kwargs["active_event_ids"] == set()
+            assert mock_ai.call_args.args[0].active_event_ids == frozenset()
+
+    def test_agent_completion_mints_fresh_uuid_correlation_id(self, app_client: TestClient) -> None:
+        """Each OpenAI-compatible agent completion mints its own uuid-hex correlation id."""
+        with patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai:
+            mock_ai.return_value = "Response"
+
+            for _ in range(2):
+                app_client.post(
+                    "/v1/chat/completions",
+                    json={
+                        "model": "general",
+                        "messages": [{"role": "user", "content": "Hi"}],
+                    },
+                )
+
+            first_ctx, second_ctx = (call.args[0] for call in mock_ai.call_args_list)
+            assert re.fullmatch(r"[0-9a-f]{32}", first_ctx.correlation_id)
+            assert re.fullmatch(r"[0-9a-f]{32}", second_ctx.correlation_id)
+            assert first_ctx.correlation_id != second_ctx.correlation_id
 
     def test_passes_knowledge_none(self, app_client: TestClient) -> None:
         """Passes knowledge=None when agent has no knowledge_bases."""
@@ -954,7 +1107,7 @@ class TestChatCompletions:
                 },
             )
 
-            assert mock_ai.call_args.kwargs["user_id"] is None
+            assert mock_ai.call_args.args[0].requester_id is None
 
     def test_request_body_user_is_not_used_for_openai_execution_identity(self, app_client: TestClient) -> None:
         """The OpenAI user field should not become credential-routing identity."""
@@ -1226,7 +1379,7 @@ class TestChatCompletions:
         observed_session_ids: list[str] = []
 
         async def _capture(*args: object, **kwargs: object) -> str:  # noqa: ARG001
-            observed_session_ids.append(kwargs["session_id"])
+            observed_session_ids.append(args[0].session_id)
             return "Response"
 
         with patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai:
@@ -1258,7 +1411,7 @@ class TestChatCompletions:
         observed_session_ids: list[str] = []
 
         async def _capture(*args: object, **kwargs: object) -> str:  # noqa: ARG001
-            observed_session_ids.append(kwargs["session_id"])
+            observed_session_ids.append(args[0].session_id)
             return "Response"
 
         with patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai:
@@ -1407,7 +1560,7 @@ class TestStreamingCompletion:
     def test_streaming_sse_format(self, app_client: TestClient) -> None:
         """Streaming returns valid SSE format."""
 
-        async def mock_stream(**_kw: object) -> AsyncIterator[RunContentEvent]:
+        async def mock_stream(_ctx: object, **_kw: object) -> AsyncIterator[RunContentEvent]:
             yield RunContentEvent(content="Hello ")
             yield RunContentEvent(content="world!")
 
@@ -1451,7 +1604,7 @@ class TestStreamingCompletion:
     def test_streaming_passes_include_interactive_questions_false(self, app_client: TestClient) -> None:
         """Streaming disables interactive question prompting for OpenAI compatibility."""
 
-        async def mock_stream(**_kw: object) -> AsyncIterator[RunContentEvent]:
+        async def mock_stream(_ctx: object, **_kw: object) -> AsyncIterator[RunContentEvent]:
             yield RunContentEvent(content="ok")
 
         with patch("mindroom.api.openai_compat.stream_agent_response", side_effect=mock_stream) as mock_stream_fn:
@@ -1467,12 +1620,12 @@ class TestStreamingCompletion:
         assert response.status_code == 200
         assert "include_default_tools" not in mock_stream_fn.call_args.kwargs
         assert mock_stream_fn.call_args.kwargs["include_interactive_questions"] is False
-        assert mock_stream_fn.call_args.kwargs["active_event_ids"] == set()
+        assert mock_stream_fn.call_args.args[0].active_event_ids == frozenset()
 
     def test_streaming_consistent_id(self, app_client: TestClient) -> None:
         """All streaming chunks have the same completion ID."""
 
-        async def mock_stream(**_kw: object) -> AsyncIterator[RunContentEvent]:
+        async def mock_stream(_ctx: object, **_kw: object) -> AsyncIterator[RunContentEvent]:
             yield RunContentEvent(content="test")
 
         with patch("mindroom.api.openai_compat.stream_agent_response", side_effect=mock_stream):
@@ -1501,7 +1654,7 @@ class TestStreamingCompletion:
         """Worker-routing identity must stay active after the first streamed event."""
         observed_session_ids: list[str | None] = []
 
-        async def mock_stream(**_kw: object) -> AsyncIterator[RunContentEvent]:
+        async def mock_stream(_ctx: object, **_kw: object) -> AsyncIterator[RunContentEvent]:
             identity = get_tool_execution_identity()
             observed_session_ids.append(identity.session_id if identity is not None else None)
             yield RunContentEvent(content="Hello ")
@@ -1540,7 +1693,7 @@ class TestStreamingCompletion:
         )
         observed_final_identities: list[ToolExecutionIdentity | None] = []
 
-        async def mock_stream(**_kw: object) -> AsyncIterator[RunContentEvent]:
+        async def mock_stream(_ctx: object, **_kw: object) -> AsyncIterator[RunContentEvent]:
             try:
                 assert get_tool_execution_identity() == execution_identity
                 yield RunContentEvent(content="Hello")
@@ -1570,7 +1723,7 @@ class TestStreamingCompletion:
     def test_streaming_cached_response(self, app_client: TestClient) -> None:
         """Cached full response (string) is streamed correctly."""
 
-        async def mock_stream(**_kw: object) -> AsyncIterator[str]:
+        async def mock_stream(_ctx: object, **_kw: object) -> AsyncIterator[str]:
             yield "This is a cached response"
 
         with patch("mindroom.api.openai_compat.stream_agent_response", side_effect=mock_stream):
@@ -1591,7 +1744,7 @@ class TestStreamingCompletion:
     def test_streaming_first_event_error_returns_500(self, app_client: TestClient) -> None:
         """If first stream event is an error string, return HTTP 500 instead of SSE."""
 
-        async def mock_stream(**_kw: object) -> AsyncIterator[str]:
+        async def mock_stream(_ctx: object, **_kw: object) -> AsyncIterator[str]:
             yield "❌ Authentication failed (openai): Invalid API key"
 
         with patch("mindroom.api.openai_compat.stream_agent_response", side_effect=mock_stream):
@@ -1626,7 +1779,7 @@ class TestStreamingCompletion:
             result="3 results",
         )
 
-        async def mock_stream(**_kw: object) -> AsyncIterator[object]:
+        async def mock_stream(_ctx: object, **_kw: object) -> AsyncIterator[object]:
             yield RunContentEvent(content="Let me search. ")
             yield ToolCallStartedEvent(tool=tool_started)
             yield ToolCallCompletedEvent(tool=tool_completed)
@@ -1678,7 +1831,7 @@ class TestStreamingCompletion:
             result="</tool><i>boom</i>" + ("x" * 600),
         )
 
-        async def mock_stream(**_kw: object) -> AsyncIterator[object]:
+        async def mock_stream(_ctx: object, **_kw: object) -> AsyncIterator[object]:
             yield ToolCallStartedEvent(tool=tool_started)
             yield ToolCallCompletedEvent(tool=tool_completed)
 
@@ -1742,7 +1895,7 @@ class TestStreamingCompletion:
             result="two-result",
         )
 
-        async def mock_stream(**_kw: object) -> AsyncIterator[object]:
+        async def mock_stream(_ctx: object, **_kw: object) -> AsyncIterator[object]:
             yield RunContentEvent(content="Start ")
             yield ToolCallStartedEvent(tool=first_started)
             yield ToolCallCompletedEvent(tool=first_completed)
@@ -2031,6 +2184,30 @@ async def test_openai_completion_lock_releases_after_response_background() -> No
 
     assert events == ["background"]
     assert not completion_lock.locked()
+
+
+@pytest.mark.asyncio
+async def test_openai_completion_lock_is_shared_and_dropped_when_unreferenced(tmp_path: Path) -> None:
+    """Same-session requests share one lock; cache entries vanish once no request holds the lock."""
+    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "data")
+    key = (str(runtime_paths.storage_root), "general", "session-1")
+
+    lock = openai_compat._openai_completion_lock(
+        runtime_paths=runtime_paths,
+        agent_name="general",
+        session_id="session-1",
+    )
+    same_session_lock = openai_compat._openai_completion_lock(
+        runtime_paths=runtime_paths,
+        agent_name="general",
+        session_id="session-1",
+    )
+    assert same_session_lock is lock
+    assert key in openai_compat._OPENAI_COMPLETION_LOCKS
+
+    del lock, same_session_lock
+    gc.collect()
+    assert key not in openai_compat._OPENAI_COMPLETION_LOCKS
 
 
 @pytest.mark.asyncio
@@ -2521,7 +2698,7 @@ class TestAutoRouting:
     def test_auto_streaming(self, app_client: TestClient) -> None:
         """Auto model works with streaming, chunks carry resolved agent name."""
 
-        async def mock_stream(**_kw: object) -> AsyncIterator[RunContentEvent]:
+        async def mock_stream(_ctx: object, **_kw: object) -> AsyncIterator[RunContentEvent]:
             yield RunContentEvent(content="Streamed!")
 
         with (
@@ -2598,10 +2775,10 @@ class TestAutoRouting:
                 headers={"X-LibreChat-Conversation-Id": "conv-abc"},
             )
 
-            # ai_response should receive agent_name="code", not "auto"
-            assert mock_ai.call_args.kwargs["agent_name"] == "code"
+            # ai_response should receive entity_label="code", not "auto"
+            assert mock_ai.call_args.args[0].entity_label == "code"
             # Session ID should use the resolved model name with LibreChat IDs.
-            session_id = mock_ai.call_args.kwargs["session_id"]
+            session_id = mock_ai.call_args.args[0].session_id
             assert session_id.endswith(":conv-abc:code")
             assert "auto" not in session_id
 
@@ -2733,22 +2910,22 @@ class TestTeamCompletion:
         assert prepared.run_metadata is run_metadata
         assert mock_prepare.await_count == 1
         preparation_kwargs = mock_prepare.await_args.kwargs
+        preparation_ctx = mock_prepare.await_args.args[0]
         assert preparation_kwargs["agents"] == mock_agents
         assert preparation_kwargs["team"] is mock_team
         assert preparation_kwargs["message"] == "Build it"
         assert preparation_kwargs["thread_history"] == []
-        assert preparation_kwargs["reply_to_event_id"] is None
-        assert preparation_kwargs["active_event_ids"] == frozenset()
+        assert preparation_ctx.reply_to_event_id is None
+        assert preparation_ctx.active_event_ids == frozenset()
         assert preparation_kwargs["response_sender_id"] is None
         assert preparation_kwargs["current_sender_id"] is None
-        assert preparation_kwargs["room_id"] is None
-        assert preparation_kwargs["thread_id"] is None
-        assert preparation_kwargs["requester_id"] is None
-        assert re.fullmatch(r"[0-9a-f]{32}", preparation_kwargs["correlation_id"])
-        assert preparation_kwargs["compaction_outcomes_collector"] is None
+        assert preparation_ctx.room_id is None
+        assert preparation_ctx.thread_id is None
+        assert preparation_ctx.requester_id is None
+        assert re.fullmatch(r"[0-9a-f]{32}", preparation_ctx.correlation_id)
         assert preparation_kwargs["configured_team_name"] == "super_team"
-        assert preparation_kwargs["matrix_run_metadata"] is None
-        assert preparation_kwargs["active_model_name"] == "default"
+        assert preparation_ctx.matrix_run_metadata is None
+        assert preparation_kwargs["runtime_model"].model_name == "default"
 
     def test_team_listed_in_models(self, team_app_client: TestClient) -> None:
         """Teams appear in /v1/models with team/ prefix."""
@@ -2908,10 +3085,10 @@ class TestTeamCompletion:
         prepared_correlation_ids: list[str] = []
         request_log_contexts: list[dict[str, object]] = []
 
-        async def mock_prepare_team_execution(**kwargs: object) -> SimpleNamespace:
-            correlation_id = kwargs["correlation_id"]
+        async def mock_prepare_team_execution(ctx: object, **_kwargs: object) -> SimpleNamespace:
+            correlation_id = ctx.correlation_id
             assert isinstance(correlation_id, str)
-            assert kwargs["requester_id"] is None
+            assert ctx.requester_id is None
             prepared_correlation_ids.append(correlation_id)
             return _prepared_team_execution_context(
                 final_prompt="Build it",
@@ -3170,10 +3347,10 @@ class TestTeamCompletion:
         prepared_correlation_ids: list[str] = []
         request_log_contexts: list[dict[str, object]] = []
 
-        async def mock_prepare_team_execution(**kwargs: object) -> SimpleNamespace:
-            correlation_id = kwargs["correlation_id"]
+        async def mock_prepare_team_execution(ctx: object, **_kwargs: object) -> SimpleNamespace:
+            correlation_id = ctx.correlation_id
             assert isinstance(correlation_id, str)
-            assert kwargs["requester_id"] is None
+            assert ctx.requester_id is None
             prepared_correlation_ids.append(correlation_id)
             return _prepared_team_execution_context(
                 final_prompt="Build it",
@@ -4168,7 +4345,13 @@ class TestTeamCompletion:
 
         assert response.status_code == 200
         prompt = mock_team.arun.call_args.args[0]
-        assert prompt == "user: Start\n\nassistant: Ack\n\nFollow-up"
+        assert prompt == "\n\n".join(
+            (
+                render_msg_tag(sender="user", body="Start", event_id="$openai-1"),
+                render_msg_tag(sender="assistant", body="Ack", event_id="$openai-2"),
+                "Follow-up",
+            ),
+        )
 
     def test_team_non_streaming_preserves_full_request_history_for_ad_hoc_team_runs(
         self,
@@ -4206,8 +4389,8 @@ class TestTeamCompletion:
 
         assert response.status_code == 200
         run_input = mock_team.arun.call_args.args[0]
-        assert "user: msg 0" in run_input
-        assert f"assistant: {long_body}" in run_input
+        assert render_msg_tag(sender="user", body="msg 0", event_id="$openai-1") in run_input
+        assert render_msg_tag(sender="assistant", body=long_body, event_id="$openai-2") in run_input
         assert run_input.endswith("Final prompt")
 
     def test_team_non_streaming_prefers_persisted_history_over_thread_history(
@@ -4237,8 +4420,6 @@ class TestTeamCompletion:
                     add_history_to_context=True,
                     num_history_runs=1,
                     num_history_messages=None,
-                    history_limit_mode="runs",
-                    history_limit=1,
                 ),
                 replays_persisted_history=True,
             )
@@ -4372,7 +4553,7 @@ class TestTeamCompletion:
             assert scope_context is not None
             assert scope_context.session is not None
 
-            async def fake_prepare_bound_team_run_context(**kwargs: object) -> SimpleNamespace:
+            async def fake_prepare_bound_team_run_context(_ctx: object, **kwargs: object) -> SimpleNamespace:
                 prepared_scope_context = kwargs["scope_context"]
                 assert prepared_scope_context is not None
                 assert prepared_scope_context.session is not None
@@ -4472,12 +4653,23 @@ class TestTeamCompletion:
 
             from mindroom.api.openai_compat import _build_team  # noqa: PLC0415
 
-            _build_team(
-                "collab_team",
-                collaborate_config,
-                _runtime_paths_for_config(collaborate_config),
+            runtime_paths = _runtime_paths_for_config(collaborate_config)
+            with open_bound_scope_session_context(
+                agents=[],
+                session_id="session-1",
+                runtime_paths=runtime_paths,
+                config=collaborate_config,
                 execution_identity=None,
-            )
+                team_name="collab_team",
+            ) as scope_context:
+                assert scope_context is not None
+                _build_team(
+                    "collab_team",
+                    collaborate_config,
+                    runtime_paths,
+                    execution_identity=None,
+                    scope_context=scope_context,
+                )
 
             mock_team_init.assert_called_once()
             assert mock_team_init.call_args.kwargs["delegate_to_all_members"] is True
@@ -4507,7 +4699,23 @@ class TestTeamCompletion:
                     ),
                 },
             )
-            _build_team("coord_team", config, _runtime_paths_for_config(config), execution_identity=None)
+            runtime_paths = _runtime_paths_for_config(config)
+            with open_bound_scope_session_context(
+                agents=[],
+                session_id="session-1",
+                runtime_paths=runtime_paths,
+                config=config,
+                execution_identity=None,
+                team_name="coord_team",
+            ) as scope_context:
+                assert scope_context is not None
+                _build_team(
+                    "coord_team",
+                    config,
+                    runtime_paths,
+                    execution_identity=None,
+                    scope_context=scope_context,
+                )
 
             mock_team_init.assert_called_once()
             assert mock_team_init.call_args.kwargs["delegate_to_all_members"] is False
@@ -4581,12 +4789,23 @@ class TestTeamCompletion:
         ):
             from mindroom.api.openai_compat import _build_team  # noqa: PLC0415
 
-            _agents, team, _mode = _build_team(
-                "coord_team",
-                config,
-                _runtime_paths_for_config(config),
+            runtime_paths = _runtime_paths_for_config(config)
+            with open_bound_scope_session_context(
+                agents=[],
+                session_id="session-1",
+                runtime_paths=runtime_paths,
+                config=config,
                 execution_identity=None,
-            )
+                team_name="coord_team",
+            ) as scope_context:
+                assert scope_context is not None
+                _agents, team, _mode = _build_team(
+                    "coord_team",
+                    config,
+                    runtime_paths,
+                    execution_identity=None,
+                    scope_context=scope_context,
+                )
 
         assert team.num_history_runs is None
         assert team.num_history_messages is None
@@ -4614,12 +4833,24 @@ class TestTeamCompletion:
 
         agents: list[AgnoAgent] | None = None
         team: AgnoTeam | None = None
-        with patch("mindroom.model_loading.get_model_instance", return_value=Ollama(id="test-model")):
+        with (
+            open_bound_scope_session_context(
+                agents=[],
+                session_id="openai-team-session",
+                runtime_paths=runtime_paths,
+                config=team_config,
+                execution_identity=execution_identity,
+                team_name="super_team",
+            ) as scope_context,
+            patch("mindroom.model_loading.get_model_instance", return_value=Ollama(id="test-model")),
+        ):
+            assert scope_context is not None
             agents, team, mode = openai_compat._build_team(
                 "super_team",
                 team_config,
                 runtime_paths,
                 execution_identity=execution_identity,
+                scope_context=scope_context,
                 session_id="openai-team-session",
             )
 
@@ -4651,32 +4882,47 @@ class TestTeamCompletion:
             },
         )
         built_agent = _make_test_agent("GeneralAgent")
+        runtime_paths = _runtime_paths()
 
-        with (
-            patch(
-                "mindroom.api.openai_compat.materialize_exact_team_members",
-                return_value=ResolvedExactTeamMembers(
-                    requested_agent_names=["general"],
-                    agents=[built_agent],
-                    display_names=["GeneralAgent"],
-                    materialized_agent_names={"general"},
-                    failed_agent_names=[],
+        with open_bound_scope_session_context(
+            agents=[],
+            session_id="session-1",
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=None,
+            team_name="coord_team",
+        ) as scope_context:
+            assert scope_context is not None
+            with (
+                patch(
+                    "mindroom.api.openai_compat.materialize_exact_team_members",
+                    return_value=ResolvedExactTeamMembers(
+                        requested_agent_names=["general"],
+                        agents=[built_agent],
+                        display_names=["GeneralAgent"],
+                        materialized_agent_names={"general"},
+                        failed_agent_names=[],
+                    ),
                 ),
-            ),
-            patch(
-                "mindroom.api.openai_compat.build_materialized_team_instance",
-                side_effect=RuntimeError("team build failed"),
-            ),
-            patch("mindroom.api.openai_compat.close_team_runtime_state_dbs") as mock_close,
-            pytest.raises(RuntimeError, match="team build failed"),
-        ):
-            openai_compat._build_team("coord_team", config, _runtime_paths(), execution_identity=None)
-
-        mock_close.assert_called_once_with(
-            agents=[built_agent],
-            team_db=None,
-            shared_scope_storage=None,
-        )
+                patch(
+                    "mindroom.api.openai_compat.build_materialized_team_instance",
+                    side_effect=RuntimeError("team build failed"),
+                ),
+                patch("mindroom.api.openai_compat.close_team_runtime_state_dbs") as mock_close,
+                pytest.raises(RuntimeError, match="team build failed"),
+            ):
+                openai_compat._build_team(
+                    "coord_team",
+                    config,
+                    runtime_paths,
+                    execution_identity=None,
+                    scope_context=scope_context,
+                )
+            mock_close.assert_called_once_with(
+                agents=[built_agent],
+                team_db=None,
+                shared_scope_storage=scope_context.storage,
+            )
 
     def test_build_team_passes_knowledge_to_member_agents(self) -> None:
         """Team member creation resolves and passes configured knowledge."""
@@ -4717,7 +4963,23 @@ class TestTeamCompletion:
 
             from mindroom.api.openai_compat import _build_team  # noqa: PLC0415
 
-            _build_team("team_with_kb", config, _runtime_paths_for_config(config), execution_identity=None)
+            runtime_paths = _runtime_paths_for_config(config)
+            with open_bound_scope_session_context(
+                agents=[],
+                session_id="session-1",
+                runtime_paths=runtime_paths,
+                config=config,
+                execution_identity=None,
+                team_name="team_with_kb",
+            ) as scope_context:
+                assert scope_context is not None
+                _build_team(
+                    "team_with_kb",
+                    config,
+                    runtime_paths,
+                    execution_identity=None,
+                    scope_context=scope_context,
+                )
 
             assert mock_create.call_args.kwargs["knowledge"] is mock_knowledge
             assert "include_default_tools" not in mock_create.call_args.kwargs
@@ -4934,7 +5196,7 @@ class TestKnowledgeIntegration:
         """Knowledge is passed through in streaming mode too."""
         mock_knowledge = MagicMock()
 
-        async def mock_stream(**_kw: object) -> AsyncIterator[RunContentEvent]:
+        async def mock_stream(_ctx: object, **_kw: object) -> AsyncIterator[RunContentEvent]:
             yield RunContentEvent(content="Streamed!")
 
         with (

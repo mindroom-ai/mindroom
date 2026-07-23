@@ -47,9 +47,11 @@ async def test_voice_handler_returns_transcription() -> None:
     config.voice.enabled = True
 
     # Mock audio download
-    mock_response = MagicMock()
-    mock_response.body = b"fake audio data"
-    client.download.return_value = mock_response
+    client.download.return_value = nio.DownloadResponse(
+        body=b"fake audio data",
+        content_type="audio/ogg",
+        filename=None,
+    )
 
     # Mock transcription and AI processing
     with (

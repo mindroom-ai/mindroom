@@ -343,7 +343,7 @@ describe('API Client', () => {
           new Response(JSON.stringify(sessionData), { status: 200 })
         )
 
-        const result = await createCheckoutSession('pro', 'yearly', 3)
+        const result = await createCheckoutSession('pro', 'yearly')
 
         expect(mockFetch).toHaveBeenCalledWith(
           'http://localhost:8000/stripe/checkout',
@@ -351,8 +351,7 @@ describe('API Client', () => {
             method: 'POST',
             body: JSON.stringify({
               tier: 'pro',
-              billing_cycle: 'yearly',
-              quantity: 3
+              billing_cycle: 'yearly'
             })
           })
         )
@@ -371,8 +370,7 @@ describe('API Client', () => {
           expect.objectContaining({
             body: JSON.stringify({
               tier: 'basic',
-              billing_cycle: 'monthly',
-              quantity: 1
+              billing_cycle: 'monthly'
             })
           })
         )

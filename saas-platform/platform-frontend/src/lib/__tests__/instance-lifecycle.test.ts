@@ -51,9 +51,9 @@ describe('Instance Lifecycle Operations', () => {
     it('should handle complete provisioning flow', async () => {
       // Step 1: User provisions instance
       const provisionResponse = {
-        instance_id: 1,
-        status: 'provisioning',
-        message: 'Instance is being provisioned'
+        success: true,
+        message: 'Instance is being provisioned',
+        customer_id: 1
       }
       mockFetch.mockResolvedValueOnce(
         new Response(JSON.stringify(provisionResponse), { status: 200 })
@@ -101,7 +101,7 @@ describe('Instance Lifecycle Operations', () => {
   describe('Instance State Management', () => {
     describe('Starting Instances', () => {
       it('should start a stopped instance', async () => {
-        const response = { success: true, status: 'running' }
+        const response = { success: true, message: 'Instance started' }
         mockFetch.mockResolvedValueOnce(
           new Response(JSON.stringify(response), { status: 200 })
         )
@@ -134,7 +134,7 @@ describe('Instance Lifecycle Operations', () => {
 
     describe('Stopping Instances', () => {
       it('should stop a running instance', async () => {
-        const response = { success: true, status: 'stopped' }
+        const response = { success: true, message: 'Instance stopped' }
         mockFetch.mockResolvedValueOnce(
           new Response(JSON.stringify(response), { status: 200 })
         )
@@ -159,7 +159,7 @@ describe('Instance Lifecycle Operations', () => {
 
     describe('Restarting Instances', () => {
       it('should restart a running instance', async () => {
-        const response = { success: true, status: 'restarting' }
+        const response = { success: true, message: 'Instance restarting' }
         mockFetch.mockResolvedValueOnce(
           new Response(JSON.stringify(response), { status: 200 })
         )
@@ -256,10 +256,10 @@ describe('Instance Lifecycle Operations', () => {
 
       // Now can start the instance
       mockFetch.mockResolvedValueOnce(
-        new Response('{"status": "running"}', { status: 200 })
+        new Response('{"success": true, "message": "Instance started"}', { status: 200 })
       )
       const result = await startInstance(1)
-      expect(result.status).toBe('running')
+      expect(result.success).toBe(true)
     })
 
     it('should handle provisioning retry after failure', async () => {
@@ -271,10 +271,10 @@ describe('Instance Lifecycle Operations', () => {
 
       // Retry succeeds
       mockFetch.mockResolvedValueOnce(
-        new Response('{"instance_id": 2, "status": "provisioning"}', { status: 200 })
+        new Response('{"success": true, "message": "Provisioning started", "customer_id": 2}', { status: 200 })
       )
       const result = await provisionInstance()
-      expect(result.instance_id).toBe(2)
+      expect(result.customer_id).toBe(2)
     })
 
     it('should handle network failures during operations', async () => {
@@ -286,10 +286,10 @@ describe('Instance Lifecycle Operations', () => {
 
       // Retry after network recovery
       mockFetch.mockResolvedValueOnce(
-        new Response('{"status": "running"}', { status: 200 })
+        new Response('{"success": true, "message": "Instance started"}', { status: 200 })
       )
       const result = await startInstance(1)
-      expect(result.status).toBe('running')
+      expect(result.success).toBe(true)
 
       consoleSpy.mockRestore()
     })
@@ -299,39 +299,39 @@ describe('Instance Lifecycle Operations', () => {
     it('should handle complete lifecycle: provision -> start -> stop -> restart -> uninstall', async () => {
       // 1. Provision
       mockFetch.mockResolvedValueOnce(
-        new Response('{"instance_id": 1, "status": "provisioning"}', { status: 200 })
+        new Response('{"success": true, "message": "Provisioning started", "customer_id": 1}', { status: 200 })
       )
       const provision = await provisionInstance()
-      expect(provision.status).toBe('provisioning')
+      expect(provision.success).toBe(true)
 
       // 2. Start (after provisioning completes)
       mockFetch.mockResolvedValueOnce(
-        new Response('{"status": "running"}', { status: 200 })
+        new Response('{"success": true, "message": "Instance started"}', { status: 200 })
       )
       const start = await startInstance(1)
-      expect(start.status).toBe('running')
+      expect(start.success).toBe(true)
 
       // 3. Stop
       mockFetch.mockResolvedValueOnce(
-        new Response('{"status": "stopped"}', { status: 200 })
+        new Response('{"success": true, "message": "Instance stopped"}', { status: 200 })
       )
       const stop = await stopInstance(1)
-      expect(stop.status).toBe('stopped')
+      expect(stop.success).toBe(true)
 
       // 4. Restart
       mockFetch.mockResolvedValueOnce(
-        new Response('{"status": "running"}', { status: 200 })
+        new Response('{"success": true, "message": "Instance restarting"}', { status: 200 })
       )
       const restart = await restartInstance(1)
-      expect(restart.status).toBe('running')
+      expect(restart.success).toBe(true)
 
       // 5. Uninstall/Deprovision
       mockFetch.mockResolvedValueOnce(
-        new Response('{"status": "deprovisioned"}', { status: 200 })
+        new Response('{"success": true, "message": "Instance uninstalled"}', { status: 200 })
       )
       const uninstall = await apiCall('/admin/instances/1/uninstall', { method: 'DELETE' })
       const uninstallData = await uninstall.json()
-      expect(uninstallData.status).toBe('deprovisioned')
+      expect(uninstallData.success).toBe(true)
     })
 
     it('should validate invalid state transitions', async () => {
@@ -350,22 +350,6 @@ describe('Instance Lifecycle Operations', () => {
   })
 
   describe('Billing and Resource Management', () => {
-    it('should track billing during instance lifecycle', async () => {
-      // Start instance - billing starts
-      mockFetch.mockResolvedValueOnce(
-        new Response('{"status": "running", "billing_started": true}', { status: 200 })
-      )
-      const start = await startInstance(1)
-      expect(start.billing_started).toBe(true)
-
-      // Stop instance - billing pauses
-      mockFetch.mockResolvedValueOnce(
-        new Response('{"status": "stopped", "billing_paused": true}', { status: 200 })
-      )
-      const stop = await stopInstance(1)
-      expect(stop.billing_paused).toBe(true)
-    })
-
     it('should enforce resource limits', async () => {
       mockFetch.mockResolvedValueOnce(
         new Response('Resource limit exceeded: max instances reached', { status: 429 })

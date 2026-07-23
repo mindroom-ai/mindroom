@@ -25,6 +25,10 @@ class AuthorizationConfig(BaseModel):
         default=False,
         description="Default permission for rooms not explicitly configured",
     )
+    config_command_enabled: bool = Field(
+        default=False,
+        description="Enable the chat !config command for global admin users.",
+    )
     aliases: dict[str, list[str]] = Field(
         default_factory=dict,
         description=(

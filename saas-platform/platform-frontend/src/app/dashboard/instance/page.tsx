@@ -2,28 +2,15 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { Loader2, RefreshCw, CheckCircle, AlertCircle, Clock, Play, Pause, ExternalLink, Server, Database, Globe } from 'lucide-react'
-import { listInstances, startInstance, stopInstance, restartInstance as apiRestartInstance } from '@/lib/api'
+import { Loader2, RefreshCw, CheckCircle, AlertCircle, Clock, Play, Pause, ExternalLink, Server, MessageCircle, Globe } from 'lucide-react'
+import { listInstances, startInstance, stopInstance, restartInstance as apiRestartInstance, type Instance } from '@/lib/api'
 import { cache } from '@/lib/cache'
+import { buildCinnyLoginUrl } from '@/lib/cinny'
 import { getRuntimeConfig } from '@/lib/runtime-config'
 import { logger } from '@/lib/logger'
 import { Card, CardHeader, CardSection } from '@/components/ui/Card'
 
-type InstanceStatus = 'provisioning' | 'running' | 'stopped' | 'failed' | 'error' | 'deprovisioned' | 'restarting'
-
-type Instance = {
-  id: string
-  instance_id: number | string
-  subscription_id: string
-  subdomain: string
-  status: InstanceStatus
-  backend_url: string | null
-  frontend_url: string | null
-  matrix_server_url: string | null
-  config: any
-  created_at: string
-  updated_at: string
-}
+type InstanceStatus = Instance['status']
 
 export default function InstancePage() {
   const router = useRouter()
@@ -199,6 +186,19 @@ export default function InstancePage() {
     )
   }
 
+  const subdomain = instance.subdomain?.trim()
+  const subdomainDisplay = subdomain
+    ? platformDomain
+      ? `${subdomain}.${platformDomain}`
+      : subdomain
+    : instance.frontend_url || instance.backend_url || '—'
+  const supportSubdomain = subdomain || '—'
+  const supportMailtoHref =
+    `mailto:support@mindroom.chat?subject=${encodeURIComponent('Instance Error - Reprovision Request')}` +
+    `&body=${encodeURIComponent(
+      `My instance ID: ${String(instance.instance_id)} (subdomain: ${supportSubdomain}) is showing an error status and needs to be reprovisioned.`
+    )}`
+
   return (
     <div className="max-w-6xl mx-auto space-y-6">
       {/* Header */}
@@ -308,13 +308,13 @@ export default function InstancePage() {
 
           {instance.status === 'error' && (
             <div className="flex gap-2">
-              <button
-                onClick={() => window.location.href = 'mailto:support@mindroom.chat?subject=Instance Error - Reprovision Request&body=My instance ID: ' + String(instance.instance_id) + ' (subdomain: ' + instance.subdomain + ') is showing an error status and needs to be reprovisioned.'}
+              <a
+                href={supportMailtoHref}
                 className="flex items-center gap-2 px-4 py-2 bg-orange-600 text-white rounded-lg hover:bg-orange-700 transition-colors"
               >
                 <AlertCircle className="w-4 h-4" />
                 Contact Support
-              </button>
+              </a>
               <button
                 onClick={handleRefresh}
                 disabled={refreshing}
@@ -334,18 +334,16 @@ export default function InstancePage() {
             <div>
               <p className="text-sm text-gray-600 dark:text-gray-400">Subdomain</p>
               <p className="font-mono text-sm">
-                {platformDomain
-                  ? `${instance.subdomain}.${platformDomain}`
-                  : instance.frontend_url || instance.backend_url || instance.subdomain}
+                {subdomainDisplay}
               </p>
             </div>
             <div>
               <p className="text-sm text-gray-600 dark:text-gray-400">Created</p>
-              <p className="text-sm">{new Date(instance.created_at).toLocaleString()}</p>
+              <p className="text-sm">{instance.created_at ? new Date(instance.created_at).toLocaleString() : '—'}</p>
             </div>
             <div>
               <p className="text-sm text-gray-600 dark:text-gray-400">Last Updated</p>
-              <p className="text-sm">{new Date(instance.updated_at).toLocaleString()}</p>
+              <p className="text-sm">{instance.updated_at ? new Date(instance.updated_at).toLocaleString() : '—'}</p>
             </div>
           </div>
         </CardSection>
@@ -399,31 +397,27 @@ export default function InstancePage() {
             {instance.matrix_server_url && (
               <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 p-5 bg-gray-50 dark:bg-gray-700 rounded-2xl">
                 <div className="flex items-center gap-3">
-                  <Database className="w-5 h-5 text-gray-600 dark:text-gray-400" />
+                  <MessageCircle className="w-5 h-5 text-gray-600 dark:text-gray-400" />
                   <div>
-                    <p className="font-medium dark:text-white">Matrix Server</p>
+                    <p className="font-medium dark:text-white">Chat Interface</p>
                     <p className="text-sm text-gray-600 dark:text-gray-400">{instance.matrix_server_url}</p>
                   </div>
                 </div>
+                <a
+                  href={buildCinnyLoginUrl(instance.matrix_server_url)}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="flex items-center justify-center gap-2 px-4 py-2 border border-gray-300 dark:border-gray-600 dark:text-gray-300 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-600 transition-colors whitespace-nowrap"
+                >
+                  Open Chat Interface
+                  <ExternalLink className="w-4 h-4" />
+                </a>
               </div>
             )}
           </div>
         </Card>
       )}
 
-      {/* Configuration (collapsible) */}
-      <Card className="overflow-hidden p-0">
-        <details>
-        <summary className="p-8 cursor-pointer hover:bg-gray-50/50 dark:hover:bg-gray-700/50 transition-colors">
-          <CardHeader>Instance Configuration</CardHeader>
-        </summary>
-        <div className="px-8 pb-8">
-          <pre className="bg-gray-50 dark:bg-gray-900/50 p-6 rounded-2xl overflow-x-auto text-sm dark:text-gray-300 font-mono border border-gray-200 dark:border-gray-700">
-            {JSON.stringify(instance.config, null, 2)}
-          </pre>
-        </div>
-      </details>
-      </Card>
     </div>
   )
 }

@@ -12,13 +12,13 @@ from typing import TYPE_CHECKING
 from unittest.mock import patch
 
 import pytest
-from agno.tools.function import Function, FunctionCall, FunctionExecutionResult
 
 from mindroom.constants import RuntimePaths, resolve_runtime_paths, workspace_home_identity_env
+from mindroom.shell_execution import _MAX_OUTPUT_BYTES
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tools.shell import (
-    _MAX_OUTPUT_BYTES,
     _process_registry,
+    _shell_subprocess_env,
     _workspace_home_contract_env_from_process_env,
     shell_tools,
 )
@@ -26,12 +26,13 @@ from mindroom.tools.shell import (
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from agno.tools.function import Function
     from agno.tools.toolkit import Toolkit
 
     from mindroom.constants import RuntimePaths
 
 
-def _make_runtime_paths(tmp_path: Path) -> RuntimePaths:
+def _make_runtime_paths(tmp_path: Path, *, process_env: dict[str, str] | None = None) -> RuntimePaths:
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
@@ -41,7 +42,7 @@ def _make_runtime_paths(tmp_path: Path) -> RuntimePaths:
     return resolve_runtime_paths(
         config_path=config_path,
         storage_path=tmp_path / "storage",
-        process_env={},
+        process_env={} if process_env is None else process_env,
     )
 
 
@@ -73,11 +74,14 @@ def _fork_child_holding_stdio_script(*, parent_stderr: str = "", parent_exit_cod
 
 
 async def _wait_for_pid_file(pid_file: Path) -> int:
+    last_text: str | None = None
     for _ in range(50):
         if pid_file.exists():
-            return int(pid_file.read_text(encoding="utf-8").strip())
+            last_text = pid_file.read_text(encoding="utf-8").strip()
+            if last_text:
+                return int(last_text)
         await asyncio.sleep(0.05)
-    message = f"PID file was not written: {pid_file}"
+    message = f"PID file was not written: {pid_file}" if last_text is None else f"PID file was empty: {pid_file}"
     raise AssertionError(message)
 
 
@@ -112,10 +116,6 @@ def _get_run_shell_command_function(tool: Toolkit) -> Function:
     return tool.async_functions["run_shell_command"]
 
 
-async def _aexecute_run_shell_command(tool: Toolkit, args: object) -> FunctionExecutionResult:
-    return await FunctionCall(function=_get_run_shell_command_function(tool), arguments={"args": args}).aexecute()
-
-
 # ---------------------------------------------------------------------------
 # run_shell_command
 # ---------------------------------------------------------------------------
@@ -143,14 +143,60 @@ async def test_run_shell_command_bash_echo_returns_output(tmp_path: Path) -> Non
     assert result == "hello"
 
 
-def test_run_shell_command_schema_keeps_args_as_string_array(tmp_path: Path) -> None:
-    """The tool schema should expose args as array<string>, not anyOf."""
+@pytest.mark.asyncio
+async def test_run_shell_command_accepts_shell_command_string(tmp_path: Path) -> None:
+    """Natural shell command strings should execute through bash."""
+    tool = _get_toolkit(tmp_path)
+    entrypoint = tool.async_functions["run_shell_command"].entrypoint
+    assert entrypoint is not None
+
+    result = await entrypoint("echo $HOME")
+    assert result
+    assert not result.startswith("Error:")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("[ 1 -eq 1 ] && echo ok", "ok"),
+        ("{ echo ok; }", "ok"),
+    ],
+)
+async def test_run_shell_command_accepts_bracketed_shell_command_strings(
+    tmp_path: Path,
+    command: str,
+    expected: str,
+) -> None:
+    """Shell grammar that starts with JSON-like characters should still execute through bash."""
+    tool = _get_toolkit(tmp_path)
+    entrypoint = tool.async_functions["run_shell_command"].entrypoint
+    assert entrypoint is not None
+
+    result = await entrypoint(command)
+    assert result == expected
+
+
+@pytest.mark.asyncio
+async def test_run_shell_command_accepts_single_item_shell_command_line(tmp_path: Path) -> None:
+    """LLMs often send one shell command line inside the argv array."""
+    tool = _get_toolkit(tmp_path)
+    entrypoint = tool.async_functions["run_shell_command"].entrypoint
+    assert entrypoint is not None
+
+    result = await entrypoint(["printf '%s' ok"])
+    assert result == "ok"
+
+
+def test_run_shell_command_schema_accepts_string_or_string_array(tmp_path: Path) -> None:
+    """The tool schema should expose both natural command strings and argv lists."""
     tool = _get_toolkit(tmp_path)
     args_schema = _get_run_shell_command_function(tool).parameters["properties"]["args"]
 
-    assert args_schema["type"] == "array"
-    assert args_schema["items"] == {"type": "string"}
-    assert "anyOf" not in args_schema
+    assert args_schema["anyOf"] == [
+        {"type": "array", "items": {"type": "string"}},
+        {"type": "string"},
+    ]
 
 
 @pytest.mark.asyncio
@@ -182,7 +228,6 @@ async def test_run_shell_command_parses_single_item_json_args(tmp_path: Path) ->
     [
         '["echo",',
         '{"cmd": "ls"}',
-        '"echo"',
         "",
         '["echo", 42]',
         '["bash", ["-c", "ls"]]',
@@ -192,11 +237,12 @@ async def test_run_shell_command_parses_single_item_json_args(tmp_path: Path) ->
 async def test_run_shell_command_rejects_invalid_stringified_args(tmp_path: Path, args: str) -> None:
     """Malformed or non-flat stringified args should fail validation."""
     tool = _get_toolkit(tmp_path)
-    result = await _aexecute_run_shell_command(tool, args)
+    entrypoint = tool.async_functions["run_shell_command"].entrypoint
+    assert entrypoint is not None
 
-    assert result.status == "failure"
-    assert result.error is not None
-    assert "'args' must be a flat list of strings" in result.error
+    result = await entrypoint(args)
+    assert result.startswith("Error:")
+    assert "'args' must be a shell command string or a flat list of strings" in result
 
 
 @pytest.mark.asyncio
@@ -208,6 +254,19 @@ async def test_run_shell_command_empty_json_list_uses_existing_empty_behavior(tm
 
     result = await entrypoint("[]")
     assert result.startswith("Error:")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("args", ["", "   "])
+async def test_run_shell_command_entrypoint_returns_error_for_empty_string_args(tmp_path: Path, args: str) -> None:
+    """Direct entrypoint calls should return validation errors instead of raising."""
+    tool = _get_toolkit(tmp_path)
+    entrypoint = tool.async_functions["run_shell_command"].entrypoint
+    assert entrypoint is not None
+
+    result = await entrypoint(args)
+    assert result.startswith("Error:")
+    assert "'args' must be a shell command string or a flat list of strings" in result
 
 
 @pytest.mark.asyncio
@@ -380,8 +439,15 @@ async def test_run_shell_command_truncates_oversized_single_stderr_line(tmp_path
 
 @pytest.mark.asyncio
 async def test_run_shell_command_returns_handle_on_timeout(tmp_path: Path) -> None:
-    """Command exceeding timeout should return a handle."""
-    tool = _get_toolkit(tmp_path)
+    """A workspace-prefixed timeout result should expose a usable handle identifier."""
+    runtime_paths = _make_runtime_paths(tmp_path)
+    tool = get_tool_by_name(
+        "shell",
+        runtime_paths,
+        disable_sandbox_proxy=True,
+        worker_target=None,
+        tool_init_overrides={"base_dir": str(tmp_path)},
+    )
     entrypoint = tool.async_functions["run_shell_command"].entrypoint
     check_fn = tool.functions["check_shell_command"].entrypoint
     assert entrypoint is not None
@@ -389,6 +455,7 @@ async def test_run_shell_command_returns_handle_on_timeout(tmp_path: Path) -> No
 
     result = await entrypoint(["sleep", "300"], timeout=1)
 
+    assert result.startswith(f"[cwd: {tmp_path}]\n")
     assert "timed out" in result.lower()
     assert "Handle: shell:" in result
     assert "check_shell_command" in result
@@ -427,7 +494,7 @@ async def test_run_shell_command_respects_base_dir(tmp_path: Path) -> None:
     assert entrypoint is not None
 
     result = await entrypoint(["pwd"])
-    assert result.strip() == str(tmp_path)
+    assert result.splitlines() == [f"[cwd: {tmp_path}]", str(tmp_path)]
 
 
 # ---------------------------------------------------------------------------
@@ -444,7 +511,7 @@ async def test_check_shell_command_running(tmp_path: Path) -> None:
     assert run_fn is not None
     assert check_fn is not None
 
-    result = await run_fn(["sleep", "300"], timeout=1)
+    result = await run_fn(["sleep", "300"], timeout=0)
     handle = result.split("Handle: ")[1].split("\n")[0]
 
     status = check_fn(handle)
@@ -465,9 +532,9 @@ async def test_check_shell_command_finished(tmp_path: Path) -> None:
     assert run_fn is not None
     assert check_fn is not None
 
-    # Use a command that sleeps longer than the timeout to guarantee backgrounding,
-    # but emits output first so we can verify it after finish.
-    result = await run_fn(["bash", "-c", "echo done-output; sleep 3"], timeout=1)
+    # Force backgrounding immediately, but let the command live long enough for
+    # the monitor path to observe its output and final status.
+    result = await run_fn(["bash", "-c", "echo done-output; sleep 0.05"], timeout=0)
     assert "Handle:" in result
     handle = result.split("Handle: ")[1].split("\n")[0]
 
@@ -476,7 +543,7 @@ async def test_check_shell_command_finished(tmp_path: Path) -> None:
         status = check_fn(handle)
         if "FINISHED" in status:
             break
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(0.02)
     assert "FINISHED" in status
     assert "done-output" in status
 
@@ -504,15 +571,16 @@ async def test_check_shell_command_partial_output(tmp_path: Path) -> None:
 
     result = await run_fn(
         ["bash", "-c", "for i in 1 2 3; do echo partial-line-$i; done; sleep 300"],
-        timeout=1,
+        timeout=0,
     )
     assert "Handle:" in result
     handle = result.split("Handle: ")[1].split("\n")[0]
 
-    # Give readers a moment to consume output
-    await asyncio.sleep(0.3)
-
-    status = check_fn(handle)
+    for _ in range(50):
+        status = check_fn(handle)
+        if "partial-line" in status:
+            break
+        await asyncio.sleep(0.02)
     assert "RUNNING" in status
     assert "lines buffered" in status
     assert "lines so far" not in status
@@ -540,7 +608,7 @@ async def test_kill_shell_command(tmp_path: Path) -> None:
     assert kill_fn is not None
     assert check_fn is not None
 
-    result = await run_fn(["sleep", "300"], timeout=1)
+    result = await run_fn(["sleep", "300"], timeout=0)
     handle = result.split("Handle: ")[1].split("\n")[0]
 
     kill_result = kill_fn(handle)
@@ -551,7 +619,7 @@ async def test_kill_shell_command(tmp_path: Path) -> None:
         status = check_fn(handle)
         if "FINISHED" in status:
             break
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(0.02)
 
     assert "FINISHED" in status
 
@@ -565,7 +633,7 @@ async def test_kill_shell_command_force(tmp_path: Path) -> None:
     assert run_fn is not None
     assert kill_fn is not None
 
-    result = await run_fn(["sleep", "300"], timeout=1)
+    result = await run_fn(["sleep", "300"], timeout=0)
     handle = result.split("Handle: ")[1].split("\n")[0]
 
     kill_result = kill_fn(handle, force=True)
@@ -717,6 +785,131 @@ def test_workspace_home_contract_env_requires_full_identity_fragment(tmp_path: P
     assert _workspace_home_contract_env_from_process_env(mismatched_env) == {}
 
 
+def test_shell_subprocess_env_exports_workspace_from_base_dir_without_home_contract(tmp_path: Path) -> None:
+    """Local execution keeps the host HOME but still exports the workspace env var."""
+    workspace = tmp_path / "workspace"
+
+    env = _shell_subprocess_env({}, base_process_env={"HOME": "/home/host-user"}, workspace_dir=workspace)
+
+    assert env["MINDROOM_AGENT_WORKSPACE"] == str(workspace.resolve())
+    assert env["HOME"] == "/home/host-user"
+
+
+def test_shell_subprocess_env_replaces_incomplete_workspace_contract(tmp_path: Path) -> None:
+    """An unvalidated process workspace must not override the local agent workspace."""
+    workspace = tmp_path / "workspace"
+    stale_workspace = tmp_path / "stale-workspace"
+    base_env = {
+        "HOME": "/home/host-user",
+        "MINDROOM_AGENT_WORKSPACE": str(stale_workspace),
+    }
+
+    env = _shell_subprocess_env(
+        {"MINDROOM_AGENT_WORKSPACE": str(stale_workspace)},
+        base_process_env=base_env,
+        workspace_dir=workspace,
+    )
+
+    assert env["MINDROOM_AGENT_WORKSPACE"] == str(workspace.resolve())
+    assert env["HOME"] == "/home/host-user"
+
+
+def test_shell_subprocess_env_prefers_worker_home_contract_over_base_dir(tmp_path: Path) -> None:
+    """The worker workspace HOME contract stays authoritative over the base_dir fallback."""
+    contract_workspace = tmp_path / "contract-workspace"
+    base_env = {
+        **workspace_home_identity_env(contract_workspace),
+        "XDG_CACHE_HOME": str(tmp_path / "cache"),
+        "PIP_CACHE_DIR": str(tmp_path / "cache" / "pip"),
+        "UV_CACHE_DIR": str(tmp_path / "cache" / "uv"),
+        "PYTHONPYCACHEPREFIX": str(tmp_path / "cache" / "pycache"),
+        "VIRTUAL_ENV": str(tmp_path / "venv"),
+    }
+
+    env = _shell_subprocess_env({}, base_process_env=base_env, workspace_dir=tmp_path / "other-base-dir")
+
+    assert env["MINDROOM_AGENT_WORKSPACE"] == str(contract_workspace)
+    assert env["HOME"] == str(contract_workspace)
+
+
+@pytest.mark.asyncio
+async def test_local_shell_replaces_stale_agent_workspace_env(tmp_path: Path) -> None:
+    """Local shell execution should replace a stale process workspace with base_dir."""
+    workspace = tmp_path / "agent-workspace"
+    workspace.mkdir()
+    runtime_paths = _make_runtime_paths(
+        tmp_path,
+        process_env={
+            "HOME": str(tmp_path / "host-home"),
+            "MINDROOM_AGENT_WORKSPACE": str(tmp_path / "stale-workspace"),
+        },
+    )
+    tool = get_tool_by_name(
+        "shell",
+        runtime_paths,
+        disable_sandbox_proxy=True,
+        worker_target=None,
+        tool_init_overrides={"base_dir": str(workspace)},
+    )
+    entrypoint = tool.async_functions["run_shell_command"].entrypoint
+    assert entrypoint is not None
+
+    result = await entrypoint('printf %s "$MINDROOM_AGENT_WORKSPACE"')
+    assert result.splitlines() == [f"[cwd: {workspace}]", str(workspace.resolve())]
+
+
+def test_run_shell_command_description_uses_portable_workspace_paths(tmp_path: Path) -> None:
+    """The shell description should give workspace guidance valid in every execution mode."""
+    workspace = tmp_path / "workspace"
+    runtime_paths = _make_runtime_paths(tmp_path, process_env={"HOME": "/home/host-user"})
+    tool = get_tool_by_name(
+        "shell",
+        runtime_paths,
+        disable_sandbox_proxy=True,
+        worker_target=None,
+        tool_init_overrides={"base_dir": str(workspace)},
+    )
+
+    description = tool.async_functions["run_shell_command"].description
+    assert description is not None
+    assert "Always use relative paths" in description
+    assert "$MINDROOM_AGENT_WORKSPACE" in description
+    assert "worker-routed execution maps `~` to the workspace" in description
+    assert "local execution maps it to the host home" in description
+
+
+def test_proxied_run_shell_command_description_does_not_claim_host_home(tmp_path: Path) -> None:
+    """The model-facing proxy description must not misidentify worker execution as local."""
+    workspace = tmp_path / "workspace"
+    runtime_paths = _make_runtime_paths(
+        tmp_path,
+        process_env={
+            "HOME": "/home/host-user",
+            "MINDROOM_SANDBOX_EXECUTION_MODE": "all",
+        },
+    )
+    tool = get_tool_by_name(
+        "shell",
+        runtime_paths,
+        worker_target=None,
+        tool_init_overrides={"base_dir": str(workspace)},
+    )
+
+    description = tool.async_functions["run_shell_command"].description
+    assert description is not None
+    assert "worker-routed execution maps `~` to the workspace" in description
+    assert "`~` and `$HOME` point at the host home" not in description
+
+
+def test_run_shell_command_description_has_no_workspace_note_without_base_dir(tmp_path: Path) -> None:
+    """Without a workspace there is no cwd contract to describe."""
+    tool = _get_toolkit(tmp_path)
+
+    description = tool.async_functions["run_shell_command"].description
+    assert description is not None
+    assert "[cwd:" not in description
+
+
 @pytest.mark.asyncio
 async def test_env_passthrough_preserved(tmp_path: Path) -> None:
     """Runtime env values from .env should be visible in shell commands."""
@@ -791,7 +984,7 @@ async def test_handle_persists_across_toolkit_instances(tmp_path: Path) -> None:
     run_fn = tool1.async_functions["run_shell_command"].entrypoint
     assert run_fn is not None
 
-    result = await run_fn(["sleep", "300"], timeout=1)
+    result = await run_fn(["sleep", "300"], timeout=0)
     assert "Handle:" in result
     handle = result.split("Handle: ")[1].split("\n")[0]
 
@@ -818,17 +1011,19 @@ async def test_handle_check_then_kill_across_instances(tmp_path: Path) -> None:
     run_fn = tool_run.async_functions["run_shell_command"].entrypoint
     assert run_fn is not None
 
-    result = await run_fn(["bash", "-c", "for i in 1 2 3; do echo line-$i; done; sleep 300"], timeout=1)
+    result = await run_fn(["bash", "-c", "for i in 1 2 3; do echo line-$i; done; sleep 300"], timeout=0)
     assert "Handle:" in result
     handle = result.split("Handle: ")[1].split("\n")[0]
-
-    await asyncio.sleep(0.3)
 
     # Check from a fresh instance
     tool_check = _get_toolkit(tmp_path)
     check_fn = tool_check.functions["check_shell_command"].entrypoint
     assert check_fn is not None
-    status = check_fn(handle)
+    for _ in range(50):
+        status = check_fn(handle)
+        if "line-" in status:
+            break
+        await asyncio.sleep(0.02)
     assert "RUNNING" in status
     assert "line-" in status
 
@@ -845,7 +1040,7 @@ async def test_handle_check_then_kill_across_instances(tmp_path: Path) -> None:
         status = final_check(handle)
         if "FINISHED" in status:
             break
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(0.02)
 
     assert "FINISHED" in status
 
@@ -899,7 +1094,7 @@ async def test_max_backgrounded_limit(tmp_path: Path) -> None:
     handles: list[str] = []
 
     # Patch to a small limit
-    with patch("mindroom.tools.shell._MAX_BACKGROUNDED", 2):
+    with patch("mindroom.shell_execution._MAX_BACKGROUNDED", 2):
         # Fill up to the limit
         for _ in range(2):
             result = await run_fn(["sleep", "300"], timeout=0)

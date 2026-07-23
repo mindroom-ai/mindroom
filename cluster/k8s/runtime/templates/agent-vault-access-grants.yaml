@@ -1,0 +1,89 @@
+{{- $av := .Values.workers.kubernetes.agentVault -}}
+{{- $accessGrants := $av.accessGrants -}}
+{{- if and $accessGrants.enabled (gt (len $accessGrants.grants) 0) }}
+{{- $name := include "mindroom-runtime.agentVaultAccessGrantsName" . -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "mindroom-runtime.agentVaultAccessGrantsLabels" . | nindent 4 }}
+data:
+  access-grants.yaml: |
+    apiUrl: {{ $av.apiUrl | quote }}
+    vaultNamePrefix: {{ $av.vaultNamePrefix | quote }}
+    {{- if $accessGrants.tenantId }}
+    tenantId: {{ $accessGrants.tenantId | quote }}
+    {{- end }}
+    {{- if $accessGrants.accountId }}
+    accountId: {{ $accessGrants.accountId | quote }}
+    {{- end }}
+    grants:
+      {{- range $grant := $accessGrants.grants }}
+      - email: {{ $grant.email | quote }}
+        workerScope: {{ $grant.workerScope | quote }}
+        {{- if $grant.requester }}
+        requester: {{ $grant.requester | quote }}
+        {{- end }}
+        {{- if $grant.agent }}
+        agent: {{ $grant.agent | quote }}
+        {{- end }}
+        role: {{ default "admin" $grant.role | quote }}
+      {{- end }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "mindroom-runtime.agentVaultAccessGrantsLabels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        {{- include "mindroom-runtime.agentVaultAccessGrantsLabels" . | nindent 8 }}
+    spec:
+      restartPolicy: OnFailure
+      automountServiceAccountToken: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: access-grants
+          image: {{ include "mindroom-runtime.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy | quote }}
+          command:
+            - python
+            - -m
+            - mindroom.agent_vault_access_grants
+            - apply
+            - --config
+            - {{ include "mindroom-runtime.agentVaultAccessGrantsConfigPath" . | quote }}
+            - --admin-token-file
+            - {{ include "mindroom-runtime.agentVaultAccessGrantsTokenPath" . | quote }}
+            - --wait-ready-seconds
+            - {{ $accessGrants.waitReadySeconds | quote }}
+          resources:
+            {{- toYaml $accessGrants.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          volumeMounts:
+            - name: access-grants-config
+              mountPath: /etc/mindroom-agent-vault-access-grants
+              readOnly: true
+            - name: access-grants-admin-token
+              mountPath: /etc/agent-vault-access-grants
+              readOnly: true
+      volumes:
+        - name: access-grants-config
+          configMap:
+            name: {{ $name }}
+        - name: access-grants-admin-token
+          secret:
+            secretName: {{ $accessGrants.adminTokenSecret.name }}
+{{- end }}

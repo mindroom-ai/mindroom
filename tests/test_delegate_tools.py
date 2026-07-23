@@ -16,7 +16,10 @@ from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools.delegate import MAX_DELEGATION_DEPTH, DelegateTools
 from mindroom.knowledge.availability import KnowledgeAvailability
+from mindroom.knowledge.indexing_config import IndexingSettings
 from mindroom.knowledge.utils import _KnowledgeResolution
+from mindroom.message_target import MessageTarget
+from mindroom.tool_schema_cache import process_function_schema_for_prompt
 from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context, tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -47,6 +50,31 @@ def _runtime_paths(storage_path: Path) -> RuntimePaths:
 
 def _bind_runtime_paths(config: Config, storage_path: Path) -> Config:
     return bind_runtime_paths(config, _runtime_paths(storage_path))
+
+
+def _fake_indexing_settings(base_id: str) -> IndexingSettings:
+    return IndexingSettings(
+        base_id=base_id,
+        storage_root="storage",
+        knowledge_path=f"knowledge/{base_id}",
+        mode="semantic",
+        embedder_provider="openai",
+        embedder_model="text-embedding-3-small",
+        embedder_host="",
+        embedder_dimensions="",
+        chunk_size="5000",
+        chunk_overlap="0",
+        repo_identity="",
+        git_branch="",
+        git_lfs="",
+        git_skip_hidden="",
+        git_include_patterns="",
+        git_exclude_patterns="",
+        include_patterns="",
+        exclude_patterns="",
+        include_extensions="",
+        exclude_extensions="()",
+    )
 
 
 class TestDelegateTools:
@@ -113,6 +141,22 @@ class TestDelegateTools:
         assert "Generate code" in instructions
         assert "Research topics" in instructions
 
+    def test_model_facing_tool_description_lists_allowed_targets(self, tools: DelegateTools) -> None:
+        """Test that the model-visible function description includes delegation targets."""
+        function = tools.async_functions["delegate_task"].model_copy(deep=True)
+
+        process_function_schema_for_prompt(function, strict=False)
+
+        assert function.description is not None
+        description = function.description
+        assert "Allowed delegate targets for this caller:" in description
+        for target in ("code", "research"):
+            assert target in description
+        assert "Do not use any other agent names." in description
+        assert "Use this when" in description
+        assert "delegated agent runs independently" in description
+        assert "no shared conversation history" in description
+
     @pytest.mark.asyncio
     async def test_delegate_to_unknown_agent(self, tools: DelegateTools) -> None:
         """Test that delegating to an unknown agent returns an error."""
@@ -146,16 +190,17 @@ class TestDelegateTools:
 
             assert mock_ai_response.await_count == 1
             call_kwargs = mock_ai_response.await_args.kwargs
-            assert call_kwargs["agent_name"] == "code"
+            call_ctx = mock_ai_response.await_args.args[0]
+            assert call_ctx.entity_label == "code"
             assert call_kwargs["prompt"] == "Write a hello world program"
             assert call_kwargs["runtime_paths"] == tools._runtime_paths
             assert call_kwargs["config"] == tools._config
             assert call_kwargs["knowledge"] is None
-            assert call_kwargs["user_id"] is None
+            assert call_ctx.requester_id is None
             assert call_kwargs["include_interactive_questions"] is False
             assert call_kwargs["execution_identity"] is None
             assert call_kwargs["delegation_depth"] == 1
-            assert call_kwargs["session_id"].startswith("delegate:leader:code:")
+            assert call_ctx.session_id.startswith("delegate:leader:code:")
             assert result == "Here is the generated code: print('hello')"
 
     @pytest.mark.asyncio
@@ -282,7 +327,8 @@ class TestDelegateKnowledge:
             assert args == ("researcher", config, runtime_paths)
             assert kwargs["execution_identity"] is None
             ai_kwargs = mock_ai_response.await_args.kwargs
-            assert ai_kwargs["agent_name"] == "researcher"
+            ai_ctx = mock_ai_response.await_args.args[0]
+            assert ai_ctx.entity_label == "researcher"
             assert ai_kwargs["config"] == config
             assert ai_kwargs["runtime_paths"] == runtime_paths
             assert ai_kwargs["knowledge"] is mock_knowledge
@@ -322,10 +368,11 @@ class TestDelegateKnowledge:
                     base_id=base_id,
                     storage_root=str(tmp_path),
                     knowledge_path=str(tmp_path / base_id),
-                    indexing_settings=(),
+                    indexing_settings=_fake_indexing_settings(base_id),
                 ),
                 index=None,
                 availability=KnowledgeAvailability.INITIALIZING,
+                state=None,
             )
 
         config = Config(
@@ -397,7 +444,7 @@ class TestDelegateKnowledge:
             return_value="done",
         ) as mock_ai_response:
             await tools.delegate_task("worker", "do work")
-            assert mock_ai_response.await_args.kwargs["agent_name"] == "worker"
+            assert mock_ai_response.await_args.args[0].entity_label == "worker"
             assert mock_ai_response.await_args.kwargs["knowledge"] is None
 
     @pytest.mark.asyncio
@@ -444,7 +491,8 @@ class TestDelegateKnowledge:
             await tools.delegate_task("worker", "do work")
 
         call_kwargs = mock_ai_response.await_args.kwargs
-        assert call_kwargs["agent_name"] == "worker"
+        call_ctx = mock_ai_response.await_args.args[0]
+        assert call_ctx.entity_label == "worker"
         assert call_kwargs["config"] == config
         assert call_kwargs["runtime_paths"] == runtime_paths
         delegated_identity = call_kwargs["execution_identity"]
@@ -454,15 +502,15 @@ class TestDelegateKnowledge:
         assert delegated_identity.requester_id == "@alice:example.org"
         assert delegated_identity.room_id == "!room:example.org"
         assert delegated_identity.thread_id == "$thread"
-        assert delegated_identity.session_id == call_kwargs["session_id"]
+        assert delegated_identity.session_id == call_ctx.session_id
         assert delegated_identity.session_id.startswith("delegate:leader:worker:")
-        assert call_kwargs["room_id"] == "!room:example.org"
-        assert call_kwargs["user_id"] == "@alice:example.org"
+        assert call_ctx.room_id == "!room:example.org"
+        assert call_ctx.requester_id == "@alice:example.org"
         assert call_kwargs["delegation_depth"] == 1
 
     @pytest.mark.asyncio
     async def test_delegation_rebinds_runtime_context_for_child_agent(self, tmp_path: Path) -> None:
-        """Nested delegated runs should not inherit the parent agent/session runtime context."""
+        """Nested runs rebind identity while retaining the parent channel's tool policy."""
         config = _make_config(
             {
                 "leader": AgentConfig(
@@ -495,31 +543,38 @@ class TestDelegateKnowledge:
             execution_identity=execution_identity,
             delegation_depth=0,
         )
+        tool_function_filter = MagicMock(return_value=True)
         runtime_context = ToolRuntimeContext(
             agent_name="leader",
-            room_id="!room:example.org",
-            thread_id="$thread",
-            resolved_thread_id="$thread",
+            target=MessageTarget(
+                room_id="!room:example.org",
+                source_thread_id="$thread",
+                resolved_thread_id="$thread",
+                reply_to_event_id=None,
+                session_id="session-1",
+            ),
             requester_id="@alice:example.org",
             client=MagicMock(),
             config=config,
             runtime_paths=runtime_paths,
             event_cache=make_event_cache_mock(),
             conversation_cache=make_conversation_cache_mock(),
-            session_id="session-1",
             correlation_id="corr-parent",
+            tool_function_filter=tool_function_filter,
         )
 
-        async def fake_ai_response(**kwargs: object) -> str:
+        async def fake_ai_response(ctx: object, **kwargs: object) -> str:
             context = get_tool_runtime_context()
             assert context is not None
             assert context.agent_name == "worker"
-            assert context.session_id == kwargs["session_id"]
+            assert context.session_id == ctx.session_id
             assert context.room_id == "!room:example.org"
-            assert kwargs["room_id"] == "!room:example.org"
+            assert ctx.room_id == "!room:example.org"
             assert context.correlation_id == "corr-parent"
-            assert kwargs["correlation_id"] == "corr-parent"
+            assert ctx.correlation_id == "corr-parent"
             assert context.active_model_name == "default"
+            assert context.tool_function_filter is tool_function_filter
+            assert kwargs["tool_function_filter"] is tool_function_filter
             return "done"
 
         with (
@@ -580,9 +635,13 @@ class TestDelegateKnowledge:
         )
         runtime_context = ToolRuntimeContext(
             agent_name="leader",
-            room_id="!room:example.org",
-            thread_id="$thread",
-            resolved_thread_id="$thread",
+            target=MessageTarget(
+                room_id="!room:example.org",
+                source_thread_id="$thread",
+                resolved_thread_id="$thread",
+                reply_to_event_id=None,
+                session_id="session-1",
+            ),
             requester_id="@alice:example.org",
             client=MagicMock(),
             config=config,
@@ -590,16 +649,15 @@ class TestDelegateKnowledge:
             event_cache=make_event_cache_mock(),
             conversation_cache=make_conversation_cache_mock(),
             active_model_name="default",
-            session_id="session-1",
         )
 
-        async def fake_ai_response(**kwargs: object) -> str:
+        async def fake_ai_response(ctx: object, **_kwargs: object) -> str:
             context = get_tool_runtime_context()
             assert context is not None
             assert context.agent_name == "worker"
             assert context.room_id == "!room:example.org"
             assert context.active_model_name == "large"
-            assert kwargs["room_id"] == "!room:example.org"
+            assert ctx.room_id == "!room:example.org"
             return "done"
 
         with (

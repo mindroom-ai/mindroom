@@ -164,44 +164,47 @@ def _needs_block_html_boundary_after_line(line: str) -> bool:
     )
 
 
-def _transform_markdown_outside_fenced_code(text: str, transform: Callable[[str], str]) -> str:
-    """Apply a transform only to Markdown outside fenced code blocks."""
-    transformed_parts: list[str] = []
-    prose_buffer: list[str] = []
-    fence_buffer: list[str] = []
+def markdown_fenced_code_ranges(text: str) -> list[tuple[int, int]]:
+    """Return source ranges occupied by Markdown fenced code blocks."""
+    ranges: list[tuple[int, int]] = []
+    fence_start: int | None = None
     fence_character: str | None = None
     opening_length = 0
+    offset = 0
     for line in text.splitlines(keepends=True):
         if fence_character is None:
             fence_match = _FENCE_OPEN_PATTERN.match(line)
-            if fence_match is None:
-                prose_buffer.append(line)
-                continue
-            if prose_buffer and _needs_block_html_boundary_after_line(prose_buffer[-1]):
-                if prose_buffer[-1].endswith("\n"):
-                    prose_buffer.append("\n")
-                else:
-                    prose_buffer[-1] = f"{prose_buffer[-1]}\n\n"
-            transformed_parts.append(transform("".join(prose_buffer)))
-            prose_buffer = []
-            fence_character = fence_match.group(1)[0]
-            opening_length = len(fence_match.group(1))
-            fence_buffer.append(line)
-            continue
-
-        fence_buffer.append(line)
-        if _is_fence_closing_line(line, fence_character, opening_length):
-            transformed_parts.append("".join(fence_buffer))
-            fence_buffer = []
+            if fence_match is not None and (fence_match.group(1)[0] == "~" or "`" not in line[fence_match.end() :]):
+                fence_start = offset
+                fence_character = fence_match.group(1)[0]
+                opening_length = len(fence_match.group(1))
+        elif _is_fence_closing_line(line, fence_character, opening_length):
+            if fence_start is None:
+                msg = "Fenced code range is missing its opening offset"
+                raise RuntimeError(msg)
+            ranges.append((fence_start, offset + len(line)))
+            fence_start = None
             fence_character = None
             opening_length = 0
+        offset += len(line)
 
-    if fence_buffer:
-        transformed_parts.append("".join(prose_buffer))
-        transformed_parts.append("".join(fence_buffer))
-        return "".join(transformed_parts)
+    if fence_start is not None:
+        ranges.append((fence_start, len(text)))
+    return ranges
 
-    transformed_parts.append(transform("".join(prose_buffer)))
+
+def _transform_markdown_outside_fenced_code(text: str, transform: Callable[[str], str]) -> str:
+    """Apply a transform only to Markdown outside fenced code blocks."""
+    transformed_parts: list[str] = []
+    cursor = 0
+    for fence_start, fence_end in markdown_fenced_code_ranges(text):
+        prose = text[cursor:fence_start]
+        if prose and _needs_block_html_boundary_after_line(prose.splitlines(keepends=True)[-1]):
+            prose = f"{prose}\n" if prose.endswith("\n") else f"{prose}\n\n"
+        transformed_parts.append(transform(prose))
+        transformed_parts.append(text[fence_start:fence_end])
+        cursor = fence_end
+    transformed_parts.append(transform(text[cursor:]))
     return "".join(transformed_parts)
 
 
@@ -235,7 +238,10 @@ def _sanitize_url_attribute(value: str) -> str | None:
     normalized = "".join(char for char in candidate if not char.isspace())
     if normalized.startswith(("#", "/", "//")):
         return candidate
-    scheme = urlsplit(normalized).scheme.lower()
+    try:
+        scheme = urlsplit(normalized).scheme.lower()
+    except ValueError:
+        return None
     if scheme in _ALLOWED_URL_SCHEMES:
         return candidate
     if not scheme and ":" not in normalized:

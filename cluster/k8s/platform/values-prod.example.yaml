@@ -15,8 +15,53 @@ stripe:
   secretKey: # sk_live_...
   webhookSecret: # whsec_...
 
+apiKeys:
+  openrouterProvisioning: # OpenRouter management key for per-customer included AI budget keys.
+
 cleanupScheduler:
   enabled: "true"
+
+platformSecrets:
+  # Production should pre-create this Secret outside Helm so API keys and
+  # private keys are not stored in Helm release values.
+  create: false
+  name: platform-secrets
+
+provisioner:
+  # Hetzner Cloud Volumes keep tenant PVCs movable across K3s nodes.
+  instanceStorageClassName: hcloud-volumes
+
+resources:
+  frontend:
+    requests:
+      cpu: "100m"
+      memory: "256Mi"
+    limits:
+      cpu: "500m"
+      memory: "512Mi"
+  backend:
+    requests:
+      cpu: "250m"
+      memory: "512Mi"
+    limits:
+      cpu: "1000m"
+      memory: "1Gi"
+
+autoscaling:
+  # Keep false on a single-node cluster; enable after metrics-server is installed and tested.
+  enabled: false
+  frontend:
+    minReplicas: 1
+    maxReplicas: 3
+    targetCPUUtilizationPercentage: 70
+  backend:
+    minReplicas: 1
+    maxReplicas: 4
+    targetCPUUtilizationPercentage: 65
+
+# The apex mindroom.chat is the Matrix server name and must stay on hetzner-matrix.
+apexRedirect:
+  enabled: false
 
 monitoring:
   enabled: true

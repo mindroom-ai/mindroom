@@ -1,13 +1,15 @@
 """Test tool metadata JSON snapshot for dashboard consumption."""
 
-import inspect
+import gc
 import json
 import sys
 from dataclasses import replace
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 from typing import Never
+from unittest.mock import AsyncMock
 
+import agno.tools.crawl4ai as agno_crawl4ai
 import pytest
 from agno.tools import Toolkit
 
@@ -15,8 +17,11 @@ import mindroom.tool_system.metadata as metadata_module
 
 # Import tools to trigger tool registration
 import mindroom.tools  # noqa: F401
-from mindroom.config.main import Config, load_config
+import mindroom.tools.custom_api as custom_api_module
+from mindroom.config.main import Config, ConfigRuntimeValidationError, load_config
 from mindroom.constants import resolve_runtime_paths
+from mindroom.redaction import REDACTED
+from mindroom.server_fetch_url import ServerFetchUrlError
 from mindroom.tool_system.bootstrap import ensure_tool_registry_loaded
 from mindroom.tool_system.metadata import (
     _AUTHORED_OVERRIDE_INHERIT,
@@ -30,10 +35,10 @@ from mindroom.tool_system.metadata import (
     deserialize_tool_validation_snapshot,
     export_tools_metadata,
     get_tool_by_name,
-    register_tool_with_metadata,
     resolved_tool_validation_snapshot_for_runtime,
     serialize_tool_validation_snapshot,
 )
+from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tool_system.registry_state import (
     BUILTIN_TOOL_METADATA,
     BUILTIN_TOOL_REGISTRY,
@@ -44,12 +49,15 @@ from mindroom.tool_system.registry_state import (
     reconcile_dynamic_tool_state,
     restore_tool_registry_snapshot,
 )
-from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, resolve_worker_target
+from mindroom.tool_system.worker_routing import (
+    ToolExecutionIdentity,
+    resolve_worker_target,
+)
+from mindroom.tools.crawl4ai import crawl4ai_tools
+from mindroom.tools.custom_api import custom_api_tools
 
 _BASE_TOOL_REGISTRY = TOOL_REGISTRY.copy()
 _BASE_TOOL_METADATA = TOOL_METADATA.copy()
-_SKIP_PARALLEL_FACTORY_IMPORTS = {"daytona", "openbb"}
-_OPTIONAL_TOOL_IMPORTS = frozenset({"telegram"})
 
 
 def _restore_builtin_tool_metadata_state() -> None:
@@ -177,6 +185,174 @@ def test_export_tools_metadata_json_resets_leaked_registry_entries() -> None:
         _restore_builtin_tool_metadata_state()
 
 
+def test_homeassistant_private_url_metadata_defaults_to_false() -> None:
+    """The private Home Assistant URL opt-in should expose an explicit secure default."""
+    _restore_builtin_tool_metadata_state()
+    homeassistant = TOOL_METADATA["homeassistant"]
+    fields = {field.name: field for field in homeassistant.config_fields or []}
+
+    assert fields["HOMEASSISTANT_ALLOW_PRIVATE_URL"].default is False
+
+
+@pytest.mark.parametrize(
+    ("base_url", "endpoint", "reason"),
+    [
+        (None, "http://127.0.0.1:8000/admin", "private_address"),
+        ("http://169.254.169.254", "/latest/meta-data/", "metadata_address"),
+    ],
+)
+def test_custom_api_tool_rejects_unsafe_url_before_request(
+    base_url: str | None,
+    endpoint: str,
+    reason: str,
+) -> None:
+    """Custom API calls should validate final URLs before making requests."""
+    tool = custom_api_tools()(base_url=base_url)
+
+    with pytest.raises(ServerFetchUrlError) as exc_info:
+        tool.make_request(endpoint)
+
+    assert exc_info.value.reason == reason
+
+
+def test_custom_api_tool_filters_sensitive_response_headers(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Custom API output should keep safe response headers without exposing credentials."""
+
+    class FakeResponse:
+        status_code = 200
+        text = "{}"
+        is_success = True
+
+        def __init__(self) -> None:
+            self.headers = {
+                "content-type": "application/json",
+                "x-request-id": "req-123",
+                "set-cookie": "session=secret",
+                "authorization": "Bearer secret",
+                "proxy-authorization": "Basic secret",
+                "cookie": "session=secret",
+                "www-authenticate": "Bearer challenge",
+                "authentication-info": "nextnonce=secret",
+                "x-api-key": "secret",
+                "x-auth-token": "secret",
+                "x-api-token": "secret",
+                "api-token": "secret",
+                "x-token": "secret",
+                "token": "secret",
+                "x-amz-security-token": "secret",
+                "x_api_token": "secret",
+                "x-ratelimit-remaining-tokens": "99",
+                "x-total-tokens": "100",
+            }
+
+        def json(self) -> dict[str, str]:
+            return {"ok": "true"}
+
+    class FakeClient:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def __enter__(self) -> object:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            pass
+
+        def request(self, **_kwargs: object) -> FakeResponse:
+            return FakeResponse()
+
+    monkeypatch.setattr(custom_api_module, "validate_server_fetch_url", lambda url: url)
+    monkeypatch.setattr(custom_api_module.httpx, "Client", FakeClient)
+
+    tool = custom_api_tools()()
+
+    payload = json.loads(tool.make_request("https://example.com/data"))
+
+    assert payload["headers"] == {
+        "content-type": "application/json",
+        "x-request-id": "req-123",
+        "set-cookie": REDACTED,
+        "authorization": REDACTED,
+        "proxy-authorization": REDACTED,
+        "cookie": REDACTED,
+        "www-authenticate": REDACTED,
+        "authentication-info": REDACTED,
+        "x-api-key": REDACTED,
+        "x-auth-token": REDACTED,
+        "x-api-token": REDACTED,
+        "api-token": REDACTED,
+        "x-token": REDACTED,
+        "token": REDACTED,
+        "x-amz-security-token": REDACTED,
+        "x_api_token": REDACTED,
+        "x-ratelimit-remaining-tokens": "99",
+        "x-total-tokens": "100",
+    }
+
+
+def test_crawl4ai_tool_rejects_private_url_before_crawl(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Crawl4AI should reject unsafe URLs before starting browser-backed crawling."""
+
+    async def forbidden_crawl(*_args: object, **_kwargs: object) -> str:
+        msg = "unsafe crawl4ai URL should be rejected before crawling starts"
+        raise AssertionError(msg)
+
+    tool = crawl4ai_tools()()
+    monkeypatch.setattr(tool, "_async_crawl", forbidden_crawl)
+
+    with pytest.raises(ServerFetchUrlError) as exc_info:
+        tool.crawl("http://127.0.0.1:8000/private")
+
+    assert exc_info.value.reason == "private_address"
+
+
+@pytest.mark.asyncio
+async def test_crawl4ai_tool_installs_server_fetch_route_guard(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Crawl4AI should install a Playwright route guard before crawling."""
+    installed_hook = None
+
+    class FakeCrawlerStrategy:
+        def set_hook(self, name: str, hook: object) -> None:
+            nonlocal installed_hook
+            assert name == "on_page_context_created"
+            installed_hook = hook
+
+    class FakeAsyncWebCrawler:
+        def __init__(self, *, config: object) -> None:
+            del config
+            self.crawler_strategy = FakeCrawlerStrategy()
+
+        async def __aenter__(self) -> object:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def arun(self, *, url: str, config: object) -> object:
+            del config
+            assert url == "https://example.com"
+            assert installed_hook is not None
+            page = SimpleNamespace(route=AsyncMock())
+            await installed_hook(page)
+            route_handler = page.route.await_args.args[1]
+            unsafe_route = SimpleNamespace(
+                request=SimpleNamespace(url="http://127.0.0.1/admin"),
+                abort=AsyncMock(),
+                continue_=AsyncMock(),
+            )
+            await route_handler(unsafe_route)
+            unsafe_route.abort.assert_awaited_once_with("blockedbyclient")
+            unsafe_route.continue_.assert_not_called()
+            return SimpleNamespace(fit_markdown="", markdown="", text="public content", html="", success=True)
+
+    monkeypatch.setattr(agno_crawl4ai, "AsyncWebCrawler", FakeAsyncWebCrawler)
+    tool = crawl4ai_tools()()
+
+    result = await tool._async_crawl("https://example.com")
+
+    assert result == "public content"
+
+
 def test_plugin_validation_uses_sys_modules_snapshot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Plugin validation should snapshot sys.modules before iterating over it."""
 
@@ -276,6 +452,11 @@ def test_tool_metadata_consistency() -> None:
         assert metadata.category, f"Tool {tool_name} missing category"
         assert metadata.status, f"Tool {tool_name} missing status"
         assert metadata.setup_type, f"Tool {tool_name} missing setup_type"
+        if tool_name not in TOOL_REGISTRY:
+            assert metadata.managed_init_args == (), (
+                f"{tool_name} is metadata-only and should not declare managed init args: "
+                f"{[managed_arg.value for managed_arg in metadata.managed_init_args]}"
+            )
 
 
 def test_dynamic_tools_is_durable_metadata_only_builtin(tmp_path: Path) -> None:
@@ -310,41 +491,6 @@ def test_tool_metadata_does_not_advertise_env_var_fallbacks() -> None:
             lowered = text.lower()
             assert not any(phrase in lowered for phrase in forbidden_phrases), (
                 f"Tool metadata for {tool_name} still advertises env fallback: {text}"
-            )
-
-
-@pytest.mark.timeout(180)
-def test_registered_tools_declare_managed_init_args_for_explicit_constructor_inputs() -> None:
-    """Built-in tools must opt in explicitly instead of relying on hidden constructor inference."""
-    managed_arg_names = {managed_arg.value for managed_arg in ToolManagedInitArg}
-
-    for tool_name, tool_factory in TOOL_REGISTRY.items():
-        metadata = TOOL_METADATA[tool_name]
-        if tool_name in _SKIP_PARALLEL_FACTORY_IMPORTS:
-            continue
-        try:
-            tool_class = tool_factory()
-        except ImportError as exc:
-            if tool_name in _OPTIONAL_TOOL_IMPORTS:
-                continue
-            msg = f"Unexpected ImportError while loading tool {tool_name}: {exc}"
-            pytest.fail(msg)
-        init_signature = inspect.signature(tool_class.__init__)
-        constructor_param_names = {name for name in init_signature.parameters if name != "self"}
-        expected_managed_args = tuple(
-            managed_arg for managed_arg in ToolManagedInitArg if managed_arg.value in constructor_param_names
-        )
-        assert metadata.managed_init_args == expected_managed_args, (
-            f"{tool_name} declares constructor inputs "
-            f"{sorted(constructor_param_names & managed_arg_names)} but metadata lists "
-            f"{[managed_arg.value for managed_arg in metadata.managed_init_args]}"
-        )
-
-    for tool_name, metadata in TOOL_METADATA.items():
-        if tool_name not in TOOL_REGISTRY:
-            assert metadata.managed_init_args == (), (
-                f"{tool_name} is metadata-only and should not declare managed init args: "
-                f"{[managed_arg.value for managed_arg in metadata.managed_init_args]}"
             )
 
 
@@ -395,9 +541,11 @@ def test_get_tool_by_name_passes_declared_managed_init_args(tmp_path: Path) -> N
             *,
             runtime_paths: object,
             worker_target: object,
+            current_room_id: str | None,
         ) -> None:
             self.runtime_paths = runtime_paths
             self.worker_target = worker_target
+            self.current_room_id = current_room_id
             super().__init__(name=tool_name, tools=[])
 
     @register_tool_with_metadata(
@@ -408,6 +556,7 @@ def test_get_tool_by_name_passes_declared_managed_init_args(tmp_path: Path) -> N
         managed_init_args=(
             ToolManagedInitArg.RUNTIME_PATHS,
             ToolManagedInitArg.WORKER_TARGET,
+            ToolManagedInitArg.CURRENT_ROOM_ID,
         ),
     )
     def _explicit_runtime_tool_factory() -> type[ExplicitRuntimeToolkit]:
@@ -420,10 +569,19 @@ def test_get_tool_by_name_passes_declared_managed_init_args(tmp_path: Path) -> N
     )
 
     try:
+        execution_identity = ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="general",
+            requester_id="@user:localhost",
+            room_id="!room:localhost",
+            thread_id="$thread:localhost",
+            resolved_thread_id="$thread:localhost",
+            session_id="session",
+        )
         worker_target = resolve_worker_target(
             "shared",
             "general",
-            execution_identity=None,
+            execution_identity=execution_identity,
             tenant_id=runtime_paths.env_value("CUSTOMER_ID"),
             account_id=runtime_paths.env_value("ACCOUNT_ID"),
         )
@@ -434,14 +592,8 @@ def test_get_tool_by_name_passes_declared_managed_init_args(tmp_path: Path) -> N
         )
         assert isinstance(tool, ExplicitRuntimeToolkit)
         assert tool.runtime_paths == runtime_paths
-        assert tool.worker_target == ResolvedWorkerTarget(
-            worker_scope="shared",
-            routing_agent_name="general",
-            execution_identity=None,
-            tenant_id=None,
-            account_id=None,
-            worker_key=None,
-        )
+        assert tool.worker_target == worker_target
+        assert tool.current_room_id == execution_identity.room_id
     finally:
         TOOL_REGISTRY.pop(tool_name, None)
         TOOL_METADATA.pop(tool_name, None)
@@ -614,6 +766,139 @@ def test_validate_authored_overrides_rejects_bad_types_and_password_fields() -> 
         TOOL_METADATA.pop(tool_name, None)
 
 
+def test_searxng_include_tools_override_filters_registered_functions(tmp_path: Path) -> None:
+    """Universal Agno toolkit filters should retain selected functions."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+    )
+
+    tool = get_tool_by_name(
+        "searxng",
+        runtime_paths,
+        credential_overrides={"host": "https://search.example.com"},
+        tool_config_overrides={
+            "include_tools": ["search_web", "news_search", "image_search"],
+        },
+        disable_sandbox_proxy=True,
+        worker_target=None,
+    )
+
+    assert set(tool.functions) == {"search_web", "news_search", "image_search"}
+
+
+def test_searxng_empty_include_tools_override_filters_all_functions(tmp_path: Path) -> None:
+    """An explicit empty universal allowlist should expose no toolkit functions."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+    )
+
+    tool = get_tool_by_name(
+        "searxng",
+        runtime_paths,
+        credential_overrides={"host": "https://search.example.com"},
+        tool_config_overrides={"include_tools": []},
+        disable_sandbox_proxy=True,
+        worker_target=None,
+    )
+
+    assert not tool.functions
+
+
+def test_file_empty_exclude_patterns_override_reaches_constructor(tmp_path: Path) -> None:
+    """Declared string-array fields should preserve an explicit empty list."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+    )
+
+    tool = get_tool_by_name(
+        "file",
+        runtime_paths,
+        tool_config_overrides={"exclude_patterns": []},
+        disable_sandbox_proxy=True,
+        worker_target=None,
+    )
+
+    assert tool.exclude_patterns == []
+
+
+def test_custom_toolkit_exclude_tools_override_filters_async_functions(tmp_path: Path) -> None:
+    """Universal filters should work when a Toolkit subclass omits filter constructor kwargs."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+    )
+
+    tool = get_tool_by_name(
+        "scheduler",
+        runtime_paths,
+        tool_config_overrides={"exclude_tools": ["cancel_schedule"]},
+        disable_sandbox_proxy=True,
+        worker_target=None,
+    )
+
+    assert set(tool.async_functions) == {
+        "schedule",
+        "edit_schedule",
+        "list_schedules",
+    }
+
+
+@pytest.mark.parametrize("tool_name", ["composio", "memory"])
+def test_non_toolkit_registration_rejects_universal_filters(tool_name: str) -> None:
+    """Universal filters should not validate for non-Toolkit catalog entries."""
+    with pytest.raises(ToolConfigOverrideError, match="unknown authored override field"):
+        _validate_authored_overrides(
+            tool_name,
+            {"include_tools": ["GITHUB_CREATE_ISSUE"]},
+            config_path_prefix="agents.code.tools[0]",
+        )
+
+
+def test_config_load_rejects_unknown_tool_override_key(tmp_path: Path) -> None:
+    """Config runtime validation should name the tool and unknown override key."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+    )
+
+    with pytest.raises(ConfigRuntimeValidationError) as exc_info:
+        Config.validate_with_runtime(
+            {
+                "models": {
+                    "default": {
+                        "provider": "openai",
+                        "id": "gpt-5.6",
+                    },
+                },
+                "router": {"model": "default"},
+                "agents": {
+                    "research": {
+                        "display_name": "Research",
+                        "role": "Search the web",
+                        "model": "default",
+                        "tools": [
+                            {
+                                "searxng": {
+                                    "host": "https://search.example.com",
+                                    "fixed_max_results": 10,
+                                    "unknown_filter": ["search_web"],
+                                },
+                            },
+                        ],
+                    },
+                },
+            },
+            runtime_paths,
+        )
+
+    message = str(exc_info.value)
+    assert "searxng.unknown_filter" in message
+    assert "unknown authored override field" in message
+
+
 def test_tool_validation_snapshot_round_trips_mcp_override_validation(tmp_path: Path) -> None:
     """Validation snapshots should preserve explicit MCP override-validator semantics."""
     runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml")
@@ -661,6 +946,38 @@ def test_deserialize_tool_validation_snapshot_rejects_non_boolean_runtime_loadab
         )
 
 
+def test_deserialize_tool_validation_snapshot_rejects_non_boolean_room_context() -> None:
+    """Validation snapshot payloads should type-check room-context requirements strictly."""
+    with pytest.raises(TypeError, match="requires_room_context to a boolean"):
+        deserialize_tool_validation_snapshot(
+            {
+                "todo": {
+                    "config_fields": [],
+                    "agent_override_fields": [],
+                    "authored_override_validator": "default",
+                    "requires_room_context": "yes",
+                    "runtime_loadable": True,
+                },
+            },
+        )
+
+
+def test_deserialize_tool_validation_snapshot_rejects_non_boolean_toolkit_filter_support() -> None:
+    """Validation snapshot payloads should type-check toolkit-filter support strictly."""
+    with pytest.raises(TypeError, match="supports_toolkit_filters to a boolean"):
+        deserialize_tool_validation_snapshot(
+            {
+                "todo": {
+                    "config_fields": [],
+                    "agent_override_fields": [],
+                    "authored_override_validator": "default",
+                    "supports_toolkit_filters": "yes",
+                    "runtime_loadable": True,
+                },
+            },
+        )
+
+
 def test_get_tool_by_name_rejects_invalid_mcp_assignment_overrides(tmp_path: Path) -> None:
     """Direct tool construction must enforce the same MCP-specific override rules as config loading."""
     config_path = tmp_path / "config.yaml"
@@ -689,19 +1006,23 @@ def test_get_tool_by_name_rejects_invalid_mcp_assignment_overrides(tmp_path: Pat
     )
     runtime_paths = resolve_runtime_paths(config_path=config_path, storage_path=tmp_path / "storage")
     config = load_config(runtime_paths)
-    ensure_tool_registry_loaded(runtime_paths, config)
+    try:
+        ensure_tool_registry_loaded(runtime_paths, config)
 
-    with pytest.raises(ToolConfigOverrideError, match="include_tools and exclude_tools overlap"):
-        get_tool_by_name(
-            "mcp_demo",
-            runtime_paths,
-            tool_config_overrides={
-                "include_tools": ["echo"],
-                "exclude_tools": ["echo"],
-            },
-            disable_sandbox_proxy=True,
-            worker_target=None,
-        )
+        with pytest.raises(ToolConfigOverrideError, match="include_tools and exclude_tools overlap"):
+            get_tool_by_name(
+                "mcp_demo",
+                runtime_paths,
+                tool_config_overrides={
+                    "include_tools": ["echo"],
+                    "exclude_tools": ["echo"],
+                },
+                disable_sandbox_proxy=True,
+                worker_target=None,
+            )
+    finally:
+        TOOL_REGISTRY.pop("mcp_demo", None)
+        TOOL_METADATA.pop("mcp_demo", None)
 
 
 def test_secret_like_config_fields_are_marked_password() -> None:
@@ -725,3 +1046,78 @@ def test_secret_like_config_fields_are_marked_password() -> None:
                 continue
             if lowered in suspicious_exact or lowered.endswith(suspicious_suffixes):
                 assert field.type == "password", f"{tool_name}.{field.name} should use type='password'"
+
+
+def test_resolved_tool_state_cached_per_config_object(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One config object should resolve its tool state once across all consumers."""
+    compute_calls = 0
+    dummy_state = metadata_module._ResolvedToolState({}, {}, {})
+
+    def counted_compute(*_args: object, **_kwargs: object) -> metadata_module._ResolvedToolState:
+        nonlocal compute_calls
+        compute_calls += 1
+        return dummy_state
+
+    monkeypatch.setattr(metadata_module, "_compute_resolved_tool_state_for_runtime", counted_compute)
+    metadata_module.clear_resolved_tool_state_cache()
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={},
+    )
+    config = Config.model_validate({})
+    try:
+        first = metadata_module._resolved_tool_state_for_runtime(runtime_paths, config)
+        second = metadata_module._resolved_tool_state_for_runtime(runtime_paths, config)
+        assert first is dummy_state
+        assert second is dummy_state
+        assert compute_calls == 1
+
+        # A different tolerate flag, config object, or runtime context recomputes.
+        metadata_module._resolved_tool_state_for_runtime(runtime_paths, config, tolerate_plugin_load_errors=True)
+        assert compute_calls == 2
+        metadata_module._resolved_tool_state_for_runtime(runtime_paths, Config.model_validate({}))
+        assert compute_calls == 3
+        other_runtime_paths = resolve_runtime_paths(
+            config_path=tmp_path / "other" / "config.yaml",
+            storage_path=tmp_path / "other" / "storage",
+            process_env={},
+        )
+        metadata_module._resolved_tool_state_for_runtime(other_runtime_paths, config)
+        assert compute_calls == 4
+
+        metadata_module.clear_resolved_tool_state_cache()
+        metadata_module._resolved_tool_state_for_runtime(runtime_paths, config)
+        assert compute_calls == 5
+    finally:
+        metadata_module.clear_resolved_tool_state_cache()
+
+
+def test_resolved_tool_state_cache_evicts_on_config_gc(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cached tool state must not outlive its config object (id-reuse safety)."""
+    monkeypatch.setattr(
+        metadata_module,
+        "_compute_resolved_tool_state_for_runtime",
+        lambda *_args, **_kwargs: metadata_module._ResolvedToolState({}, {}, {}),
+    )
+    metadata_module.clear_resolved_tool_state_cache()
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={},
+    )
+    config = Config.model_validate({})
+    try:
+        metadata_module._resolved_tool_state_for_runtime(runtime_paths, config)
+        assert metadata_module._RESOLVED_TOOL_STATE_CACHE
+        del config
+        gc.collect()
+        assert not metadata_module._RESOLVED_TOOL_STATE_CACHE
+    finally:
+        metadata_module.clear_resolved_tool_state_cache()

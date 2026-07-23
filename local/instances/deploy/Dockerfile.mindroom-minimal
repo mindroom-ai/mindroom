@@ -8,11 +8,15 @@ FROM oven/bun:1 AS bun
 FROM public.ecr.aws/docker/library/python:3.13-slim AS builder
 # Copy uv from the uv image
 COPY --from=uv /uv /uvx /bin/
-# Copy bun for frontend builds triggered by the editable install hook
+# Copy bun for explicit frontend builds in the builder stage
 COPY --from=bun /usr/local/bin/bun /usr/local/bin/bun
 COPY --from=bun /usr/local/bin/bunx /usr/local/bin/bunx
 
 WORKDIR /app
+
+# Compile bytecode at install time so pod boots skip the first-import .pyc
+# compilation of the whole dependency tree (several seconds on small pods).
+ENV UV_COMPILE_BYTECODE=1
 
 # Copy project files
 COPY pyproject.toml uv.lock README.md hatch_build.py /app/
@@ -28,11 +32,19 @@ COPY skills /app/skills
 COPY frontend /app/frontend
 
 # Install the project itself (base only, no extras)
+# Opt into the editable-install frontend build so the final image has
+# `/app/frontend/dist` without carrying Bun into the runtime stage.
+ENV MINDROOM_BUILD_FRONTEND=1
+ENV PUPPETEER_SKIP_DOWNLOAD=true
 # Set pretend version for setuptools-scm (no .git in container)
 ARG VERSION=0.0.0
 ENV SETUPTOOLS_SCM_PRETEND_VERSION=${VERSION}
+# mindroom itself installs editable (its modules import from /app/src), so
+# UV_COMPILE_BYTECODE only covers site-packages; compile the src tree too.
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --locked --no-dev
+    uv sync --locked --no-dev --reinstall-package mindroom \
+    && /app/.venv/bin/python -m compileall -q /app/src \
+    && rm -rf frontend/node_modules
 
 # Final production stage
 FROM public.ecr.aws/docker/library/python:3.13-slim AS final
@@ -49,8 +61,9 @@ WORKDIR /app
 # - curl for health checks
 # - git and git-lfs for remote knowledge base cloning/sync
 # - bash and tmux for shell tooling and detached interactive CLI flows
+# - tini to reap orphaned subprocesses when MindRoom runs as PID 1
 # - common small CLI utilities used by headless auth/install workflows
-RUN apt-get update && apt-get install -y bash bzip2 curl git git-lfs jq nano procps ripgrep tmux unzip \
+RUN apt-get update && apt-get install -y bash bzip2 curl git git-lfs jq nano procps ripgrep tini tmux unzip \
     && printf 'set-option -g exit-empty off\n' > /etc/tmux.conf \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
@@ -74,10 +87,14 @@ RUN chmod +x /app/run-sandbox-runner.sh \
 # Set environment variable to indicate Docker mode
 ENV DOCKER_CONTAINER=1
 ENV PATH="/app/.venv/bin:${PATH}"
+# Runtime tool-dependency auto-installs also compile bytecode on install.
+ENV UV_COMPILE_BYTECODE=1
 
 # Run as non-root user
 USER 1000:1000
 
 EXPOSE 8765
+# Run through an init process so orphaned subprocesses do not accumulate as zombies.
+ENTRYPOINT ["tini", "--"]
 # Run the app from the prebuilt virtualenv to avoid rebuilding at runtime
 CMD ["/app/.venv/bin/mindroom", "run"]

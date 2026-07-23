@@ -15,15 +15,12 @@ from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from threading import Lock
-from typing import TYPE_CHECKING, Any, TypedDict
+from typing import TYPE_CHECKING, TypedDict, cast
 
-if os.name != "nt":
-    import fcntl
-else:
-    fcntl = None
-
+from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths, runtime_env_values
+from mindroom.file_locks import async_exclusive_file_lock
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.manager import KnowledgeManager, knowledge_source_signature
 from mindroom.knowledge.redaction import redact_credentials_in_text
@@ -85,6 +82,7 @@ class _SubprocessRefreshRequest:
     config_data: dict[str, object]
     config_path: str
     storage_root: str
+    runtime_knowledge_base: dict[str, object] | None = None
     execution_identity: SerializedToolExecutionIdentity | None = None
     force_reindex: bool = False
 
@@ -98,6 +96,14 @@ _active_refresh_counts: dict[KnowledgeRefreshTarget, int] = {}
 _active_refresh_counts_guard = Lock()
 _MAX_REFRESH_LOCKS = 512
 _REFRESH_FILE_LOCK_POLL_SECONDS = 0.1
+_REFRESH_SUBPROCESS_THREAD_ENV = {
+    "OMP_NUM_THREADS": "1",
+    "OPENBLAS_NUM_THREADS": "1",
+    "MKL_NUM_THREADS": "1",
+    "NUMEXPR_NUM_THREADS": "1",
+    "VECLIB_MAXIMUM_THREADS": "1",
+    "TOKENIZERS_PARALLELISM": "false",
+}
 
 
 @dataclass
@@ -231,6 +237,7 @@ async def refresh_knowledge_binding_in_subprocess(
         force_reindex=force_reindex,
     )
     env = dict(runtime_env_values(runtime_paths))
+    env.update(_REFRESH_SUBPROCESS_THREAD_ENV)
     env["MINDROOM_KNOWLEDGE_REFRESH_SUBPROCESS"] = "1"
     process = await asyncio.create_subprocess_exec(
         sys.executable,
@@ -275,11 +282,17 @@ def _serialize_subprocess_refresh_request(
     execution_identity: ToolExecutionIdentity | None,
     force_reindex: bool,
 ) -> bytes:
+    runtime_knowledge_base = config.runtime_knowledge_base_overlay(base_id)
     payload = _SubprocessRefreshRequest(
         base_id=base_id,
         config_data=config.authored_model_dump(),
         config_path=str(runtime_paths.config_path),
         storage_root=str(runtime_paths.storage_root),
+        runtime_knowledge_base=(
+            None
+            if runtime_knowledge_base is None
+            else cast("dict[str, object]", runtime_knowledge_base.model_dump(mode="json", exclude_unset=True))
+        ),
         execution_identity=None
         if execution_identity is None
         else serialize_tool_execution_identity(execution_identity),
@@ -307,57 +320,11 @@ def _refresh_file_lock_path(key: KnowledgeSourceRoot) -> Path:
     return Path(tempfile.gettempdir()) / "mindroom" / "knowledge_refresh_locks" / f"{digest}.lock"
 
 
-def _open_refresh_file_lock_sync(key: KnowledgeSourceRoot) -> tuple[Any, Any] | None:
-    if fcntl is None:
-        return None
-
-    lock_path = _refresh_file_lock_path(key)
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    return fcntl, lock_path.open("a", encoding="utf-8")
-
-
-def _try_acquire_refresh_file_lock_sync(handle: tuple[Any, Any] | None) -> bool:
-    if handle is None:
-        return True
-    fcntl, lock_file = handle
-    try:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        return False
-    return True
-
-
-def _close_refresh_file_lock_sync(handle: tuple[Any, Any] | None) -> None:
-    if handle is not None:
-        _fcntl, lock_file = handle
-        lock_file.close()
-
-
-def _release_refresh_file_lock_sync(handle: tuple[Any, Any] | None) -> None:
-    if handle is None:
-        return
-    fcntl, lock_file = handle
-    try:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
-    finally:
-        lock_file.close()
-
-
 @asynccontextmanager
 async def _acquire_refresh_file_lock(key: KnowledgeSourceRoot) -> AsyncIterator[None]:
     """Serialize source-root refresh and mutation work across processes."""
-    handle = _open_refresh_file_lock_sync(key)
-    acquired = False
-    try:
-        while not _try_acquire_refresh_file_lock_sync(handle):  # noqa: ASYNC110
-            await asyncio.sleep(_REFRESH_FILE_LOCK_POLL_SECONDS)
-        acquired = True
+    async with async_exclusive_file_lock(_refresh_file_lock_path(key), poll_seconds=_REFRESH_FILE_LOCK_POLL_SECONDS):
         yield
-    finally:
-        if acquired:
-            _release_refresh_file_lock_sync(handle)
-        else:
-            _close_refresh_file_lock_sync(handle)
 
 
 def _subprocess_session_kwargs() -> _SubprocessSessionKwargs:
@@ -462,6 +429,23 @@ async def refresh_knowledge_binding(
         execution_identity=execution_identity,
         create=True,
     )
+    return await _refresh_resolved_knowledge_binding(
+        key,
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=execution_identity,
+        force_reindex=force_reindex,
+    )
+
+
+async def _refresh_resolved_knowledge_binding(
+    key: PublishedIndexKey,
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None,
+    force_reindex: bool,
+) -> KnowledgeRefreshResult:
     refresh_target = refresh_target_for_published_index_key(key)
     source_root = source_root_for_published_index_key(key)
     mark_refresh_active(refresh_target)
@@ -519,6 +503,14 @@ async def _refresh_knowledge_binding_locked(
     base_id = key.base_id
     manager: KnowledgeManager | None = None
     try:
+        if config.get_knowledge_base_config(base_id).mode == "files":
+            return await _refresh_file_mode_binding_locked(
+                key,
+                config=config,
+                runtime_paths=runtime_paths,
+                execution_identity=execution_identity,
+            )
+
         binding = resolve_knowledge_binding(
             base_id,
             config,
@@ -563,6 +555,132 @@ async def _refresh_knowledge_binding_locked(
         config=config,
         runtime_paths=runtime_paths,
     )
+
+
+async def _publish_file_mode_source_metadata(
+    key: PublishedIndexKey,
+    manager: KnowledgeManager,
+) -> KnowledgeRefreshResult:
+    """Publish current source metadata for a file-only base without building vectors."""
+    source_signature = await asyncio.to_thread(
+        knowledge_source_signature,
+        manager.config,
+        manager.base_id,
+        manager._knowledge_source_path(),
+        tracked_relative_paths=manager._git_tracked_relative_paths,
+    )
+    now = datetime.now(tz=UTC).isoformat()
+    await asyncio.to_thread(
+        save_published_index_state,
+        published_index_metadata_path(key),
+        PublishedIndexState(
+            settings=key.indexing_settings,
+            status="complete",
+            collection=None,
+            last_published_at=now,
+            published_revision=manager._git_last_successful_commit,
+            indexed_count=0,
+            source_signature=source_signature,
+            refresh_job="idle",
+            reason=None,
+            last_error=None,
+            updated_at=now,
+            last_refresh_at=now,
+        ),
+    )
+    return KnowledgeRefreshResult(
+        key=key,
+        indexed_count=0,
+        index_published=True,
+        availability=KnowledgeAvailability.READY,
+        last_error=None,
+    )
+
+
+async def publish_file_mode_source_metadata_for_base(
+    base_id: str,
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None = None,
+) -> KnowledgeRefreshResult:
+    """Resolve and publish current source metadata for a file-only base."""
+    key = resolve_published_index_key(
+        base_id,
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=execution_identity,
+        create=True,
+    )
+    return await _publish_file_mode_source_metadata_for_resolved(
+        key,
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=execution_identity,
+    )
+
+
+async def _publish_file_mode_source_metadata_for_resolved(
+    key: PublishedIndexKey,
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None,
+) -> KnowledgeRefreshResult:
+    base_id = key.base_id
+    binding = resolve_knowledge_binding(
+        base_id,
+        config,
+        runtime_paths,
+        execution_identity=execution_identity,
+        start_watchers=False,
+        create=True,
+    )
+    manager = KnowledgeManager(
+        base_id=base_id,
+        config=config,
+        runtime_paths=runtime_paths,
+        storage_path=binding.storage_root,
+        knowledge_path=binding.knowledge_path,
+    )
+    return await _publish_file_mode_source_metadata(key, manager)
+
+
+async def _refresh_file_mode_binding_locked(
+    key: PublishedIndexKey,
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None,
+) -> KnowledgeRefreshResult:
+    """Refresh source metadata for a file-only base without building vectors."""
+    binding = resolve_knowledge_binding(
+        key.base_id,
+        config,
+        runtime_paths,
+        execution_identity=execution_identity,
+        start_watchers=False,
+        create=True,
+    )
+    manager = KnowledgeManager(
+        base_id=key.base_id,
+        config=config,
+        runtime_paths=runtime_paths,
+        storage_path=binding.storage_root,
+        knowledge_path=binding.knowledge_path,
+    )
+    if manager._git_config() is not None:
+        git_sync_result = await manager.sync_git_source()
+        if git_sync_result.get("updated", False):
+            await mark_knowledge_source_changed_async(
+                key.base_id,
+                config=manager.config,
+                runtime_paths=manager.runtime_paths,
+                execution_identity=execution_identity,
+                reason="git_source_updated",
+            )
+
+    return await _publish_file_mode_source_metadata(key, manager)
 
 
 async def _maybe_publish_unchanged_index(
@@ -765,6 +883,7 @@ def _published_state_fingerprint(state: PublishedIndexState | None) -> tuple[obj
         state.refresh_job,
         state.reason,
         state.last_error,
+        state.consecutive_refresh_failures,
     )
 
 
@@ -820,8 +939,13 @@ async def _reconcile_cancelled_refresh(
         and state.status == "complete"
         and published_index_settings_compatible(state.settings, key.indexing_settings)
         and published_index_availability_for_state(key=key, state=state) is KnowledgeAvailability.READY
-        and await asyncio.to_thread(published_index_collection_exists_for_state, key, state)
     ):
+        if state.settings.mode == "files":
+            await asyncio.to_thread(mark_published_index_refresh_succeeded, key)
+            return
+        if not await asyncio.to_thread(published_index_collection_exists_for_state, key, state):
+            await asyncio.to_thread(mark_published_index_stale, key, reason="refresh_cancelled", refresh_job="idle")
+            return
         index = publish_knowledge_index_from_state(
             key,
             state=state,
@@ -844,6 +968,7 @@ def _load_subprocess_refresh_request(payload: bytes) -> _SubprocessRefreshReques
     raw_config_data = raw_payload.get("config_data")
     raw_config_path = raw_payload.get("config_path")
     raw_storage_root = raw_payload.get("storage_root")
+    raw_runtime_knowledge_base = raw_payload.get("runtime_knowledge_base")
     raw_execution_identity = raw_payload.get("execution_identity")
     raw_force_reindex = raw_payload.get("force_reindex", False)
     if not isinstance(raw_base_id, str) or not raw_base_id.strip():
@@ -858,6 +983,9 @@ def _load_subprocess_refresh_request(payload: bytes) -> _SubprocessRefreshReques
     if not isinstance(raw_storage_root, str) or not raw_storage_root.strip():
         msg = "Knowledge refresh subprocess request is missing storage_root"
         raise TypeError(msg)
+    if raw_runtime_knowledge_base is not None and not isinstance(raw_runtime_knowledge_base, dict):
+        msg = "Knowledge refresh subprocess request runtime_knowledge_base must be an object when present"
+        raise TypeError(msg)
     if raw_execution_identity is not None and not isinstance(raw_execution_identity, dict):
         msg = "Knowledge refresh subprocess request execution_identity must be an object when present"
         raise TypeError(msg)
@@ -866,6 +994,7 @@ def _load_subprocess_refresh_request(payload: bytes) -> _SubprocessRefreshReques
         config_data=raw_config_data,
         config_path=raw_config_path,
         storage_root=raw_storage_root,
+        runtime_knowledge_base=cast("dict[str, object] | None", raw_runtime_knowledge_base),
         execution_identity=raw_execution_identity,
         force_reindex=bool(raw_force_reindex),
     )
@@ -879,6 +1008,9 @@ async def _run_subprocess_refresh_request(payload: bytes) -> KnowledgeRefreshRes
         process_env=dict(os.environ),
     )
     config = Config.validate_with_runtime(request.config_data, runtime_paths, tolerate_plugin_load_errors=True)
+    if request.runtime_knowledge_base is not None:
+        base_config = KnowledgeBaseConfig.model_validate(request.runtime_knowledge_base)
+        config = config.with_runtime_knowledge_base_overlay(request.base_id, base_config)
     execution_identity = (
         None
         if request.execution_identity is None

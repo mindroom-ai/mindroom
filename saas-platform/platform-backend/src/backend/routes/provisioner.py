@@ -1,75 +1,19 @@
-"""Instance provisioning and management routes."""
+"""Instance provisioning and management routes.
 
-import base64
-import binascii
-import contextlib
-import hashlib
+Thin HTTP shell over the provisioner service: validate the provisioner API key,
+parse the request, and delegate to `backend.services.provisioner_service`.
+"""
+
 import hmac
-import os
-import secrets
-import tempfile
-from datetime import UTC, datetime
 from typing import Annotated, Any
 
-from backend.config import (
-    ANTHROPIC_API_KEY,
-    DEEPSEEK_API_KEY,
-    GOOGLE_API_KEY,
-    INSTANCE_BASE_DOMAIN,
-    INSTANCE_CREDENTIALS_ENCRYPTION_SECRET,
-    INSTANCE_MATRIX_HOMESERVER_STARTUP_TIMEOUT_SECONDS,
-    INSTANCE_MINDROOM_IMAGE,
-    INSTANCE_MINDROOM_IMAGE_PULL_POLICY,
-    INSTANCE_SYNAPSE_IMAGE,
-    INSTANCE_SYNAPSE_IMAGE_PULL_POLICY,
-    INSTANCE_STORAGE_CLASS_NAME,
-    INSTANCE_TRUSTED_UPSTREAM_AUTH_ENABLED,
-    INSTANCE_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE,
-    INSTANCE_TRUSTED_UPSTREAM_EMAIL_HEADER,
-    INSTANCE_TRUSTED_UPSTREAM_JWKS_URL,
-    INSTANCE_TRUSTED_UPSTREAM_JWT_AUDIENCE,
-    INSTANCE_TRUSTED_UPSTREAM_JWT_EMAIL_CLAIM,
-    INSTANCE_TRUSTED_UPSTREAM_JWT_HEADER,
-    INSTANCE_TRUSTED_UPSTREAM_JWT_ISSUER,
-    INSTANCE_TRUSTED_UPSTREAM_JWT_MATRIX_USER_ID_CLAIM,
-    INSTANCE_TRUSTED_UPSTREAM_JWT_USER_ID_CLAIM,
-    INSTANCE_TRUSTED_UPSTREAM_MATRIX_USER_ID_HEADER,
-    INSTANCE_TRUSTED_UPSTREAM_REQUIRE_JWT,
-    INSTANCE_TRUSTED_UPSTREAM_USER_ID_HEADER,
-    OPENAI_API_KEY,
-    OPENROUTER_API_KEY,
-    PLATFORM_DOMAIN,
-    PROVISIONER_API_KEY,
-    SANDBOX_PROXY_TOKEN,
-    SUPABASE_ANON_KEY,
-    SUPABASE_SERVICE_KEY,
-    SUPABASE_URL,
-    logger,
-)
-from backend.db_utils import update_instance_status
+from backend.config import PROVISIONER_API_KEY, logger
 from backend.deps import _extract_bearer_token, ensure_supabase, limiter
-from backend.k8s import check_deployment_exists, instance_deployment_ref, run_kubectl, wait_for_deployment_ready
-from backend.models import ActionResult, ProvisionResponse, SyncResult, SyncUpdateOut
-from backend.process import run_helm
+from backend.models import ActionResult, ProvisionResponse, SyncResult
+from backend.services import provisioner_service
 from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Request
 
 router = APIRouter()
-
-
-async def _background_mark_running_when_ready(instance_id: str, namespace: str = "mindroom-instances") -> None:
-    """Background task: wait longer and mark instance running when ready."""
-    try:
-        ready = await wait_for_deployment_ready(instance_id, namespace=namespace, timeout_seconds=600)
-        if ready:
-            try:
-                sb = ensure_supabase()
-                sb.table("instances").update({"status": "running", "updated_at": datetime.now(UTC).isoformat()}).eq(
-                    "instance_id", instance_id
-                ).execute()
-            except Exception:
-                logger.warning("Background update: failed to mark instance %s as running", instance_id)
-    except Exception:
-        logger.exception("Background readiness wait failed for instance %s", instance_id)
 
 
 def _require_provisioner_auth(authorization: str | None) -> None:
@@ -85,88 +29,9 @@ def _require_provisioner_auth(authorization: str | None) -> None:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
 
-def _instance_credentials_encryption_key(instance_id: str) -> str:
-    """Derive a stable per-instance credential encryption key."""
-    root_secret = (INSTANCE_CREDENTIALS_ENCRYPTION_SECRET or PROVISIONER_API_KEY).strip()
-    if not root_secret:
-        msg = "INSTANCE_CREDENTIALS_ENCRYPTION_SECRET or PROVISIONER_API_KEY must be configured"
-        raise HTTPException(status_code=500, detail=msg)
-    digest = hmac.digest(
-        root_secret.encode("utf-8"),
-        f"mindroom.instance-credentials.v1:{instance_id}".encode("utf-8"),
-        hashlib.sha256,
-    )
-    return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
-
-
-def _write_helm_secret_value_file(value: str) -> str:
-    """Write one Helm --set-file secret value to a private temporary file."""
-    fd, path = tempfile.mkstemp(prefix="mindroom-credentials-encryption-key-", text=True)
-    try:
-        os.write(fd, value.encode("utf-8"))
-    finally:
-        os.close(fd)
-    return path
-
-
-def _append_credentials_encryption_key_helm_args(helm_args: list[str], key: str) -> str | None:
-    """Append credential encryption key Helm args without putting key material in argv."""
-    if not key:
-        helm_args += ["--set", "credentials_encryption_key="]
-        return None
-    secret_file_path = _write_helm_secret_value_file(key)
-    helm_args += ["--set-file", f"credentials_encryption_key={secret_file_path}"]
-    return secret_file_path
-
-
-async def _existing_instance_credentials_encryption_key(instance_id: str, namespace: str) -> str | None:
-    """Return the existing credential encryption key from an instance Secret when present."""
-    secret_name = f"mindroom-api-keys-{instance_id}"
-    code, out, err = await run_kubectl(
-        [
-            "get",
-            "secret",
-            secret_name,
-            "--ignore-not-found",
-            "-o=jsonpath={.data.credentials_encryption_key}",
-        ],
-        namespace=namespace,
-    )
-    if code != 0:
-        msg = f"Failed to inspect existing credential encryption state for instance {instance_id}: {err or out}"
-        raise HTTPException(status_code=500, detail=msg)
-    encoded_key = out.strip()
-    if not encoded_key:
-        return None
-    try:
-        key = base64.b64decode(encoded_key, validate=True).decode("utf-8").strip()
-    except (binascii.Error, UnicodeDecodeError) as exc:
-        msg = f"Instance {instance_id} has an invalid credential encryption key Secret value"
-        raise HTTPException(status_code=500, detail=msg) from exc
-    return key or None
-
-
-async def _provision_credentials_encryption_key(
-    *,
-    customer_id: str,
-    existing_instance_id: Any,
-    data: dict,
-    namespace: str,
-) -> str:
-    """Return the instance chart credential encryption key value for this provision run."""
-    existing_key = (
-        await _existing_instance_credentials_encryption_key(customer_id, namespace) if existing_instance_id else None
-    )
-    if existing_key is not None:
-        return existing_key
-    if not existing_instance_id or data.get("enable_credentials_encryption") is True:
-        return _instance_credentials_encryption_key(customer_id)
-    return ""
-
-
 @router.post("/system/provision", response_model=ProvisionResponse)
 @limiter.limit("5/minute")
-async def provision_instance(  # noqa: C901, PLR0912, PLR0915
+async def provision_instance(
     request: Request,  # noqa: ARG001
     data: dict,
     authorization: Annotated[str | None, Header()] = None,
@@ -174,253 +39,7 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
 ) -> dict[str, Any]:
     """Provision a new instance (compatible with customer portal)."""
     _require_provisioner_auth(authorization)
-
-    sb = ensure_supabase()
-
-    subscription_id = data.get("subscription_id")
-    account_id = data.get("account_id")
-    tier = data.get("tier", "free")
-    existing_instance_id = data.get("instance_id")  # For re-provisioning
-
-    # If re-provisioning, update existing instance; otherwise insert new
-    if existing_instance_id:
-        customer_id = str(existing_instance_id)
-        try:
-            update_res = (
-                sb.table("instances")
-                .update({"status": "provisioning", "updated_at": datetime.now(UTC).isoformat()})
-                .eq("instance_id", customer_id)
-                .execute()
-            )
-            if not update_res.data:
-                msg = f"Instance {customer_id} not found"
-                raise HTTPException(status_code=404, detail=msg)  # noqa: TRY301
-            logger.info("Re-provisioning existing instance %s", customer_id)
-        except HTTPException:
-            raise
-        except Exception as e:
-            logger.exception("Failed to update instance for re-provisioning")
-            raise HTTPException(status_code=500, detail=f"Failed to update instance: {e!s}") from e
-    else:
-        # Insert instance first to get a generated numeric instance_id (as text)
-        try:
-            now = datetime.now(UTC).isoformat()
-            insert_res = (
-                sb.table("instances")
-                .insert(
-                    {
-                        "subscription_id": subscription_id,
-                        "account_id": account_id,
-                        "status": "provisioning",
-                        "tier": tier,
-                        "created_at": now,
-                        "updated_at": now,
-                    }
-                )
-                .execute()
-            )
-            if not insert_res.data:
-                msg = "Failed to insert instance"
-                raise HTTPException(status_code=500, detail=msg)  # noqa: TRY301
-            customer_id = insert_res.data[0]["instance_id"]
-        except HTTPException:
-            raise
-        except Exception as e:
-            logger.exception("Failed to insert instance")
-            raise HTTPException(status_code=500, detail=f"Failed to insert instance: {e!s}") from e
-
-    helm_release_name = f"instance-{customer_id}"
-    logger.info("Provisioning instance for subscription %s, new id: %s, tier: %s", subscription_id, customer_id, tier)
-
-    namespace = "mindroom-instances"
-    try:
-        await run_kubectl(["create", "namespace", namespace])
-    except FileNotFoundError:
-        error_msg = "Kubectl command not found. Kubernetes provisioning not available in this environment."
-        logger.exception(error_msg)
-        raise HTTPException(status_code=503, detail=error_msg) from None
-    except Exception as e:
-        logger.warning("Could not create namespace (may already exist): %s", e)
-
-    logger.info("Deploying instance %s to namespace %s", customer_id, namespace)
-
-    # Compute URLs and persist them (subdomain is set via trigger if null)
-    base_domain = INSTANCE_BASE_DOMAIN or PLATFORM_DOMAIN
-    frontend_url = f"https://{customer_id}.{base_domain}"
-    api_url = f"https://{customer_id}.api.{base_domain}"
-    matrix_url = f"https://{customer_id}.matrix.{base_domain}"
-    try:
-        sb.table("instances").update(
-            {
-                "instance_url": frontend_url,
-                "frontend_url": frontend_url,
-                "backend_url": api_url,
-                "api_url": api_url,
-                "matrix_url": matrix_url,
-                "matrix_server_url": matrix_url,
-                "updated_at": datetime.now(UTC).isoformat(),
-            }
-        ).eq("instance_id", customer_id).execute()
-    except Exception:
-        logger.warning("Failed to update URLs for instance %s", customer_id)
-
-    # Keep this non-empty so shell/file/python proxying doesn't fail at runtime.
-    sandbox_proxy_token = SANDBOX_PROXY_TOKEN or secrets.token_hex(32)
-    # Existing instances may have plaintext credential files; preserve their current encryption state.
-    credentials_encryption_key = await _provision_credentials_encryption_key(
-        customer_id=customer_id,
-        existing_instance_id=existing_instance_id,
-        data=data,
-        namespace=namespace,
-    )
-
-    try:
-        # Use upgrade --install to handle both new and re-provisioning cases
-        helm_args = [
-            "upgrade",
-            "--install",
-            helm_release_name,
-            "/app/k8s/instance/",
-            "--namespace",
-            namespace,
-            "--create-namespace",
-            "--set",
-            f"customer={customer_id}",
-            "--set",
-            f"baseDomain={base_domain}",
-            "--set",
-            f"accountId={account_id}",
-            "--set",
-            f"supabaseUrl={SUPABASE_URL or ''}",
-            "--set",
-            f"supabaseAnonKey={SUPABASE_ANON_KEY or ''}",
-            "--set",
-            f"supabaseServiceKey={SUPABASE_SERVICE_KEY or ''}",
-            "--set",
-            f"openai_key={OPENAI_API_KEY}",
-            "--set",
-            f"anthropic_key={ANTHROPIC_API_KEY}",
-            "--set",
-            f"google_key={GOOGLE_API_KEY}",
-            "--set",
-            f"openrouter_key={OPENROUTER_API_KEY}",
-            "--set",
-            f"deepseek_key={DEEPSEEK_API_KEY}",
-            "--set",
-            f"sandbox_proxy_token={sandbox_proxy_token}",
-        ]
-        if INSTANCE_STORAGE_CLASS_NAME:
-            helm_args += ["--set", f"storageClassName={INSTANCE_STORAGE_CLASS_NAME}"]
-        if INSTANCE_MINDROOM_IMAGE:
-            helm_args += ["--set", f"mindroom_image={INSTANCE_MINDROOM_IMAGE}"]
-        if INSTANCE_MINDROOM_IMAGE_PULL_POLICY:
-            helm_args += ["--set", f"mindroom_image_pull_policy={INSTANCE_MINDROOM_IMAGE_PULL_POLICY}"]
-        if INSTANCE_MATRIX_HOMESERVER_STARTUP_TIMEOUT_SECONDS:
-            helm_args += [
-                "--set",
-                (f"matrixHomeserverStartupTimeoutSeconds={INSTANCE_MATRIX_HOMESERVER_STARTUP_TIMEOUT_SECONDS}"),
-            ]
-        if INSTANCE_SYNAPSE_IMAGE:
-            helm_args += ["--set", f"synapse_image={INSTANCE_SYNAPSE_IMAGE}"]
-        if INSTANCE_SYNAPSE_IMAGE_PULL_POLICY:
-            helm_args += ["--set", f"synapse_image_pull_policy={INSTANCE_SYNAPSE_IMAGE_PULL_POLICY}"]
-        if INSTANCE_TRUSTED_UPSTREAM_AUTH_ENABLED:
-            helm_args += ["--set", f"trustedUpstreamAuth.enabled={INSTANCE_TRUSTED_UPSTREAM_AUTH_ENABLED}"]
-        if INSTANCE_TRUSTED_UPSTREAM_USER_ID_HEADER:
-            helm_args += ["--set", f"trustedUpstreamAuth.userIdHeader={INSTANCE_TRUSTED_UPSTREAM_USER_ID_HEADER}"]
-        if INSTANCE_TRUSTED_UPSTREAM_EMAIL_HEADER:
-            helm_args += ["--set", f"trustedUpstreamAuth.emailHeader={INSTANCE_TRUSTED_UPSTREAM_EMAIL_HEADER}"]
-        if INSTANCE_TRUSTED_UPSTREAM_MATRIX_USER_ID_HEADER:
-            helm_args += [
-                "--set",
-                f"trustedUpstreamAuth.matrixUserIdHeader={INSTANCE_TRUSTED_UPSTREAM_MATRIX_USER_ID_HEADER}",
-            ]
-        if INSTANCE_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE:
-            helm_args += [
-                "--set",
-                (
-                    "trustedUpstreamAuth.emailToMatrixUserIdTemplate="
-                    f"{INSTANCE_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE}"
-                ),
-            ]
-        if INSTANCE_TRUSTED_UPSTREAM_REQUIRE_JWT:
-            helm_args += ["--set", f"trustedUpstreamAuth.requireJwt={INSTANCE_TRUSTED_UPSTREAM_REQUIRE_JWT}"]
-        if INSTANCE_TRUSTED_UPSTREAM_JWT_HEADER:
-            helm_args += ["--set", f"trustedUpstreamAuth.jwtHeader={INSTANCE_TRUSTED_UPSTREAM_JWT_HEADER}"]
-        if INSTANCE_TRUSTED_UPSTREAM_JWKS_URL:
-            helm_args += ["--set", f"trustedUpstreamAuth.jwksUrl={INSTANCE_TRUSTED_UPSTREAM_JWKS_URL}"]
-        if INSTANCE_TRUSTED_UPSTREAM_JWT_AUDIENCE:
-            helm_args += ["--set", f"trustedUpstreamAuth.jwtAudience={INSTANCE_TRUSTED_UPSTREAM_JWT_AUDIENCE}"]
-        if INSTANCE_TRUSTED_UPSTREAM_JWT_ISSUER:
-            helm_args += ["--set", f"trustedUpstreamAuth.jwtIssuer={INSTANCE_TRUSTED_UPSTREAM_JWT_ISSUER}"]
-        if INSTANCE_TRUSTED_UPSTREAM_JWT_EMAIL_CLAIM:
-            helm_args += ["--set", f"trustedUpstreamAuth.jwtEmailClaim={INSTANCE_TRUSTED_UPSTREAM_JWT_EMAIL_CLAIM}"]
-        if INSTANCE_TRUSTED_UPSTREAM_JWT_USER_ID_CLAIM:
-            helm_args += ["--set", f"trustedUpstreamAuth.jwtUserIdClaim={INSTANCE_TRUSTED_UPSTREAM_JWT_USER_ID_CLAIM}"]
-        if INSTANCE_TRUSTED_UPSTREAM_JWT_MATRIX_USER_ID_CLAIM:
-            helm_args += [
-                "--set",
-                f"trustedUpstreamAuth.jwtMatrixUserIdClaim={INSTANCE_TRUSTED_UPSTREAM_JWT_MATRIX_USER_ID_CLAIM}",
-            ]
-
-        credentials_encryption_key_file_path = _append_credentials_encryption_key_helm_args(
-            helm_args,
-            credentials_encryption_key,
-        )
-        try:
-            code, stdout, stderr = await run_helm(helm_args)
-        finally:
-            if credentials_encryption_key_file_path is not None:
-                with contextlib.suppress(FileNotFoundError):
-                    os.unlink(credentials_encryption_key_file_path)
-        if code != 0:
-            # Mark as error in DB
-            try:
-                sb.table("instances").update({"status": "error", "updated_at": datetime.now(UTC).isoformat()}).eq(
-                    "instance_id", customer_id
-                ).execute()
-            except Exception:
-                logger.warning("Failed to update instance status to error after helm failure")
-            msg = f"Helm install failed: {stderr}"
-            raise HTTPException(status_code=500, detail=msg)  # noqa: TRY301
-        logger.info("Helm install output: %s", stdout)
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.exception("Failed to deploy instance")
-        # Mark as error in DB
-        try:
-            sb.table("instances").update({"status": "error", "updated_at": datetime.now(UTC).isoformat()}).eq(
-                "instance_id", customer_id
-            ).execute()
-        except Exception:
-            logger.warning("Failed to update instance status to error after deploy exception")
-        raise HTTPException(status_code=500, detail=f"Failed to deploy instance: {e!s}") from e
-
-    # Optional readiness poll; if ready, mark running. Otherwise remain provisioning.
-    ready = await wait_for_deployment_ready(customer_id, namespace=namespace, timeout_seconds=180)
-    try:
-        sb.table("instances").update(
-            {"status": "running" if ready else "provisioning", "updated_at": datetime.now(UTC).isoformat()}
-        ).eq("instance_id", customer_id).execute()
-    except Exception:
-        logger.warning("Failed to update instance status after readiness poll")
-
-    if not ready and background_tasks is not None:
-        # Fire-and-forget longer background wait to mark running later
-        try:
-            background_tasks.add_task(_background_mark_running_when_ready, customer_id, namespace)
-        except Exception:
-            logger.warning("Failed to schedule background readiness task for instance %s", customer_id)
-
-    return {
-        "customer_id": customer_id,
-        "frontend_url": frontend_url,
-        "api_url": api_url,
-        "matrix_url": matrix_url,
-        "success": True,
-        "message": "Instance provisioned successfully" if ready else "Provisioning started; instance is getting ready",
-    }
+    return await provisioner_service.provision_instance(ensure_supabase(), data=data, background_tasks=background_tasks)
 
 
 @router.post("/system/instances/{instance_id}/start", response_model=ActionResult)
@@ -432,30 +51,7 @@ async def start_instance_provisioner(
 ) -> dict[str, Any]:
     """Start an instance (provisioner API compatible)."""
     _require_provisioner_auth(authorization)
-
-    logger.info("Starting instance %s", instance_id)
-
-    if not await check_deployment_exists(instance_id):
-        error_msg = f"Deployment {instance_deployment_ref(instance_id)} not found"
-        logger.warning(error_msg)
-        raise HTTPException(status_code=404, detail=error_msg)
-
-    try:
-        code, out, err = await run_kubectl(
-            ["scale", instance_deployment_ref(instance_id), "--replicas=1"], namespace="mindroom-instances"
-        )
-        if code != 0:
-            msg = f"kubectl command failed: {err}"
-            raise RuntimeError(msg)  # noqa: TRY301
-        logger.info("Started instance %s: %s", instance_id, out)
-        # Reflect desired state in DB immediately
-        if not update_instance_status(instance_id, "running"):
-            logger.warning("Failed to update DB status to running for instance %s", instance_id)
-    except Exception as e:
-        logger.exception("Failed to start instance %s", instance_id)
-        raise HTTPException(status_code=500, detail=f"Failed to start instance: {e}") from e
-
-    return {"success": True, "message": f"Instance {instance_id} started successfully"}
+    return await provisioner_service.start_instance(instance_id)
 
 
 @router.post("/system/instances/{instance_id}/stop", response_model=ActionResult)
@@ -467,30 +63,7 @@ async def stop_instance_provisioner(
 ) -> dict[str, Any]:
     """Stop an instance (provisioner API compatible)."""
     _require_provisioner_auth(authorization)
-
-    logger.info("Stopping instance %s", instance_id)
-
-    if not await check_deployment_exists(instance_id):
-        error_msg = f"Deployment {instance_deployment_ref(instance_id)} not found"
-        logger.warning(error_msg)
-        raise HTTPException(status_code=404, detail=error_msg)
-
-    try:
-        code, out, err = await run_kubectl(
-            ["scale", instance_deployment_ref(instance_id), "--replicas=0"], namespace="mindroom-instances"
-        )
-        if code != 0:
-            msg = f"kubectl command failed: {err}"
-            raise RuntimeError(msg)  # noqa: TRY301
-        logger.info("Stopped instance %s: %s", instance_id, out)
-        # Reflect desired state in DB immediately
-        if not update_instance_status(instance_id, "stopped"):
-            logger.warning("Failed to update DB status to stopped for instance %s", instance_id)
-    except Exception as e:
-        logger.exception("Failed to stop instance %s", instance_id)
-        raise HTTPException(status_code=500, detail=f"Failed to stop instance: {e}") from e
-
-    return {"success": True, "message": f"Instance {instance_id} stopped successfully"}
+    return await provisioner_service.stop_instance(instance_id)
 
 
 @router.post("/system/instances/{instance_id}/restart", response_model=ActionResult)
@@ -502,27 +75,7 @@ async def restart_instance_provisioner(
 ) -> dict[str, Any]:
     """Restart an instance (provisioner API compatible)."""
     _require_provisioner_auth(authorization)
-
-    logger.info("Restarting instance %s", instance_id)
-
-    if not await check_deployment_exists(instance_id):
-        error_msg = f"Deployment {instance_deployment_ref(instance_id)} not found"
-        logger.warning(error_msg)
-        raise HTTPException(status_code=404, detail=error_msg)
-
-    try:
-        code, out, err = await run_kubectl(
-            ["rollout", "restart", instance_deployment_ref(instance_id)], namespace="mindroom-instances"
-        )
-        if code != 0:
-            msg = f"kubectl command failed: {err}"
-            raise RuntimeError(msg)  # noqa: TRY301
-        logger.info("Restarted instance %s: %s", instance_id, out)
-    except Exception as e:
-        logger.exception("Failed to restart instance %s", instance_id)
-        raise HTTPException(status_code=500, detail=f"Failed to restart instance: {e}") from e
-
-    return {"success": True, "message": f"Instance {instance_id} restarted successfully"}
+    return await provisioner_service.restart_instance(instance_id)
 
 
 @router.delete("/system/instances/{instance_id}/uninstall", response_model=ActionResult)
@@ -534,34 +87,7 @@ async def uninstall_instance(
 ) -> dict[str, Any]:
     """Completely uninstall/deprovision an instance."""
     _require_provisioner_auth(authorization)
-
-    logger.info("Uninstalling instance %s", instance_id)
-
-    try:
-        helm_release_name = f"instance-{instance_id}"
-        code, stdout, stderr = await run_helm(["uninstall", helm_release_name, "--namespace=mindroom-instances"])
-
-        if code != 0:
-            error_msg = stderr
-            if "not found" in error_msg.lower():
-                logger.info("Instance %s was already uninstalled", instance_id)
-            else:
-                logger.error("Failed to uninstall instance: %s", error_msg)
-                msg = f"Failed to uninstall instance: {error_msg}"
-                raise HTTPException(status_code=500, detail=msg)  # noqa: TRY301
-        else:
-            logger.info("Successfully uninstalled instance %s: %s", instance_id, stdout)
-
-        if not update_instance_status(instance_id, "deprovisioned"):
-            logger.warning("Failed to update database for instance %s", instance_id)
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.exception("Failed to uninstall instance %s", instance_id)
-        raise HTTPException(status_code=500, detail=f"Failed to uninstall instance: {e}") from e
-
-    return {"success": True, "message": f"Instance {instance_id} uninstalled successfully", "instance_id": instance_id}
+    return await provisioner_service.uninstall_instance(instance_id)
 
 
 @router.post("/system/sync-instances", response_model=SyncResult)
@@ -572,78 +98,4 @@ async def sync_instances(
 ) -> dict[str, Any]:
     """Sync instance states between database and Kubernetes cluster."""
     _require_provisioner_auth(authorization)
-
-    sb = ensure_supabase()
-
-    logger.info("Starting instance sync")
-
-    try:
-        result = sb.table("instances").select("*").execute()
-        instances = result.data if result.data else []
-
-        sync_results: dict[str, Any] = {"total": len(instances), "synced": 0, "errors": 0, "updates": []}
-
-        for instance in instances:
-            instance_id = instance.get("instance_id") or instance.get("subdomain")
-            if not instance_id:
-                logger.warning("Instance %s has no instance_id or subdomain", instance.get("id"))
-                sync_results["errors"] += 1
-                continue
-
-            exists = await check_deployment_exists(instance_id)
-            current_status = instance.get("status", "unknown")
-
-            if not exists:
-                if current_status not in ["error", "deprovisioned"]:
-                    logger.info("Instance %s not found in cluster, marking as error", instance_id)
-                    now = datetime.now(UTC).isoformat()
-                    sb.table("instances").update(
-                        {"status": "error", "kubernetes_synced_at": now, "updated_at": now}
-                    ).eq("id", instance["id"]).execute()
-
-                    sync_results["updates"].append(
-                        SyncUpdateOut(
-                            instance_id=instance_id,
-                            old_status=current_status,
-                            new_status="error",
-                            reason="deployment_not_found",
-                        ).model_dump()
-                    )
-                    sync_results["synced"] += 1
-            else:
-                try:
-                    code, out, _ = await run_kubectl(
-                        ["get", instance_deployment_ref(instance_id), "-o=jsonpath={.spec.replicas}"],
-                        namespace="mindroom-instances",
-                    )
-                    if code == 0:
-                        replicas = int(out.strip() or "0")
-                        actual_status = "running" if replicas > 0 else "stopped"
-
-                        if current_status != actual_status:
-                            logger.info(
-                                "Instance %s status mismatch: DB=%s, K8s=%s", instance_id, current_status, actual_status
-                            )
-                            now = datetime.now(UTC).isoformat()
-                            sb.table("instances").update(
-                                {"status": actual_status, "kubernetes_synced_at": now, "updated_at": now}
-                            ).eq("id", instance["id"]).execute()
-
-                            sync_results["updates"].append(
-                                SyncUpdateOut(
-                                    instance_id=instance_id,
-                                    old_status=current_status,
-                                    new_status=actual_status,
-                                    reason="status_mismatch",
-                                ).model_dump()
-                            )
-                            sync_results["synced"] += 1
-                except Exception:
-                    logger.exception("Error checking instance %s state", instance_id)
-                    sync_results["errors"] += 1
-
-        logger.info("Instance sync completed: %s", sync_results)
-        return sync_results  # noqa: TRY300
-    except Exception as e:
-        logger.exception("Failed to sync instances")
-        raise HTTPException(status_code=500, detail=f"Failed to sync instances: {e}") from e
+    return await provisioner_service.sync_instances(ensure_supabase())

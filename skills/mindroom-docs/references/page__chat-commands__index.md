@@ -1,7 +1,8 @@
 # Chat Commands
 
 MindRoom provides chat commands that users can type in any Matrix room where MindRoom agents or teams are present.
-Commands start with `!` and are handled by the router agent.
+Commands start with `!` and are normally handled by the router agent.
+`!desktop` uses the direct Desktop pairing flow in a room containing only the requester and one Desktop-enabled agent, plus the router when it serves the command.
 
 ## Quick Reference
 
@@ -13,13 +14,18 @@ Commands start with `!` and are handled by the router agent.
 | `!list_schedules` | List pending scheduled tasks |
 | `!cancel_schedule <id>` | Cancel a scheduled task |
 | `!edit_schedule <id> <task>` | Edit an existing scheduled task |
-| `!config <operation>` | View and modify configuration |
+| `!desktop [setup\|status\|confirm\|rotate\|disconnect]` | Manage your Desktop target for one agent |
+| `!model [name\|list\|reset]` | Show or switch the model used in the current thread |
+| `!thread_mode [room\|thread\|reset\|show]` | Show or switch the thread mode used in the current room |
+| `!encrypt [confirm]` | Enable end-to-end encryption for this room (irreversible, room admin only) |
+| `!e2ee` | Show encryption diagnostics for this room |
+| `!config <operation>` | View and modify configuration (disabled by default, admin only when enabled) |
 | `!reload-plugins` | Force-reload all configured plugins (admin only) |
 
 ## Who Handles Commands
 
-The **router** handles all commands exclusively.
-Even in single-responder rooms, commands are always processed by the router, not the responder.
+The **router** normally handles commands.
+`!desktop` uses the direct Desktop pairing flow in a room containing only the requester and one Desktop-enabled agent, plus the router when it serves the command.
 Commands work in both main room messages and within threads.
 
 Voice messages that contain commands (e.g., spoken `!schedule`) are recognized after transcription and processed the same way.
@@ -30,6 +36,9 @@ Commands are subject to the same authorization rules as normal messages.
 The sender must be authorized to interact with MindRoom entities in the room (via `global_users`, `room_permissions`, or `default_room_access`).
 See [Authorization](https://docs.mindroom.chat/authorization/) for details.
 
+`!config` is disabled by default.
+Set `authorization.config_command_enabled: true` to enable it.
+When enabled, callers must be in `authorization.global_users`.
 For `!config set`, only the user who requested the change can confirm or cancel it via reactions.
 Pending config changes expire after 24 hours.
 
@@ -47,7 +56,7 @@ Display available commands or get detailed help on a specific topic.
 !help edit_schedule
 ```
 
-**Topics:** `schedule`, `config`, `list_schedules`, `inspect_schedules`, `cancel`, `cancel_schedule`, `edit`, `edit_schedule`
+**Topics:** `schedule`, `config`, `model`, `thread_mode`, `thread-mode`, `threadmode`, `list_schedules`, `inspect_schedules`, `cancel`, `cancel_schedule`, `edit`, `edit_schedule`
 
 ### `!hi`
 
@@ -61,7 +70,7 @@ Show the welcome message for the current room, listing available agents and team
 
 Schedule a one-time or recurring task using natural language.
 
-Tasks run in the thread where they were created.
+Tasks run in the same scope where they were created: the room timeline for room-level schedules, or the current thread for threaded schedules.
 
 ```
 !schedule <natural-language-request>
@@ -88,14 +97,25 @@ Conditional requests are converted to recurring cron-based polling schedules.
 
 These are periodic checks, not real event subscriptions.
 
+For predictable behavior, include an explicit polling cadence.
+
 ```
-!schedule If I get an email about "urgent", @phone_agent call me
-!schedule When Bitcoin drops below $40k, @crypto_agent notify me
+!schedule Every 5 minutes, check if I got an email about "urgent"; if so, @phone_agent call me
+!schedule Every 10 minutes, check whether Bitcoin dropped below $40k; if so, @crypto_agent notify me
 ```
 
 Include `@agent_name` or `@team_name` in your schedule to target specific responders.
 
 The scheduler validates that mentioned agents and teams are available in the room before creating the task.
+
+Add `with no history`, `without context`, or `context-free` when each scheduled run should see no prior conversation messages.
+
+Add a phrase such as `with only the last 5 messages of context` to cap each scheduled run to recent context.
+
+```
+!schedule Every hour, @ops check deployment health with no history
+!schedule Daily at 9am, @research summarize AI news with only the last 5 messages
+```
 
 Schedules use the timezone from `config.yaml` (defaults to UTC).
 
@@ -127,6 +147,8 @@ Use `!list_schedules` to find task IDs.
 ### `!edit_schedule`
 
 Replace an existing scheduled task with new timing and content.
+Omitted fields stay unchanged, including any existing history limit.
+Use `restore full history` or `use unlimited history` to remove a history limit.
 
 ```
 !edit_schedule <task-id> <new-task-description>
@@ -136,11 +158,103 @@ The task description is re-parsed to update timing and content.
 
 Schedule type cannot be changed (one-time to recurring or vice versa) -- cancel and recreate instead.
 
+```
+!edit_schedule task42 keep the same schedule but restore full history
+!edit_schedule task42 every weekday at 8am check build status with no history
+```
+
 **Aliases:** `!editschedule`, `!edit-schedule`
+
+### `!desktop`
+
+Manage the current requester's Desktop target for one Desktop-enabled agent.
+
+Run these commands in a private Matrix room containing only the requester and one Desktop-enabled agent, plus the router when it serves the command:
+
+```text
+!desktop setup
+!desktop status
+!desktop confirm <code> <verification>
+!desktop rotate
+!desktop disconnect
+!desktop disconnect confirm
+```
+
+`!desktop setup` returns a local `mindroom desktop pair` command and a short-lived pairing code.
+The local pairing command presents that code through an authenticated encrypted Matrix device event.
+It then prints an exact chat confirmation command with a verification value derived from the authenticated local device key.
+Only the same Matrix requester in the same agent scope can confirm the matching claim.
+`!desktop rotate` starts the same flow while leaving the current target active until confirmation.
+The agent can report setup status, but it cannot start, confirm, rotate, or disconnect pairing on the requester's behalf.
+See [Matrix Desktop Bridge](https://docs.mindroom.chat/tools/desktop/) for local login and allowlist instructions.
+
+### `!model`
+
+Show or switch the model that every agent, team, and the router uses in the current thread.
+
+```
+!model
+!model list
+!model opus
+!model reset
+```
+
+`!model` and `!model list` show the current override and the available model names.
+Model names come from the `models:` section of `config.yaml`.
+The override applies from the next message in the thread and survives restarts.
+Other threads and rooms keep their configured models; room-wide overrides are configured via `room_models` in `config.yaml`.
+Agents can also switch the thread model themselves when they have the `thread_model` tool.
+
+### `!thread_mode`
+
+Show or switch how future agent replies are grouped in the current Matrix room.
+
+```
+!thread_mode
+!thread_mode show
+!thread_mode room
+!thread_mode thread
+!thread_mode reset
+```
+
+`!thread_mode` and `!thread_mode show` show the current room override.
+`!thread_mode room` uses one continuous conversation for the whole room.
+`!thread_mode thread` uses Matrix threads for separate conversations in this room.
+`!thread_mode reset` removes the room override so agents use configured `thread_mode` and `room_thread_modes` values again.
+Set and reset are Matrix room-admin-only actions.
+The override is stored in MindRoom runtime state under `mindroom_data/tracking`, not in `config.yaml`, so it works when config is static or read-only.
+
+### `!encrypt`
+
+Enable Matrix end-to-end encryption for the current room.
+
+```
+!encrypt
+!encrypt confirm
+```
+
+`!encrypt` reviews what enabling encryption means for the room without changing anything.
+`!encrypt confirm` enables encryption and is a Matrix room-admin-only action.
+Enabling encryption is irreversible: a room can never go back to unencrypted, and people joining later cannot read messages sent before they joined.
+Managed rooms can also be encrypted from config via `rooms.<key>.encrypted: true` or `matrix_room_access.encrypt_managed_rooms: true`.
+
+### `!e2ee`
+
+Show encryption diagnostics for the current room.
+
+```
+!e2ee
+```
+
+The report includes the room's encryption state, the responding bot account and device, the encryption store status, and decryption-failure counters since startup.
+Use it when an agent seems to ignore messages in an encrypted room.
 
 ### `!config`
 
 View and modify MindRoom configuration from chat.
+This command is disabled by default.
+Set `authorization.config_command_enabled: true` to enable it.
+When enabled, only users in `authorization.global_users` can use it.
 Changes are validated against the Pydantic config schema before applying.
 
 **View configuration:**
@@ -156,7 +270,7 @@ Changes are validated against the Pydantic config schema before applying.
 
 ```
 !config set agents.analyst.display_name "Research Expert"
-!config set models.default.id gpt-5.4
+!config set models.default.id gpt-5.6
 !config set defaults.markdown false
 !config set timezone America/New_York
 ```

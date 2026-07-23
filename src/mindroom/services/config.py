@@ -14,6 +14,7 @@ if TYPE_CHECKING:
 
 
 SERVICE_NAME = "mindroom"
+SERVICE_NOT_INSTALLED_MESSAGE = "Service is not installed. Run `mindroom service install` first."
 _PACKAGE_NAME = "mindroom"
 
 
@@ -44,6 +45,14 @@ class UninstallResult:
     was_running: bool = False
 
 
+@dataclass(frozen=True)
+class ServiceActionResult:
+    """Result of starting, stopping, or restarting the MindRoom user service."""
+
+    success: bool
+    message: str
+
+
 class ServiceManager(NamedTuple):
     """Platform-specific MindRoom service manager interface."""
 
@@ -51,8 +60,12 @@ class ServiceManager(NamedTuple):
     install_uv: Callable[[], tuple[bool, str]]
     install_service: Callable[[], InstallResult]
     uninstall_service: Callable[[], UninstallResult]
+    start_service: Callable[[], ServiceActionResult]
+    stop_service: Callable[[], ServiceActionResult]
+    restart_service: Callable[[], ServiceActionResult]
     get_service_status: Callable[[], ServiceStatus]
     get_log_command: Callable[[], str]
+    get_log_args: Callable[[], list[str]]
     get_recent_logs: Callable[[int], list[str]]
 
 

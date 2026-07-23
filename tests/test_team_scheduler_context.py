@@ -14,13 +14,14 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import STREAM_STATUS_ERROR, STREAM_STATUS_KEY
+from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
+from mindroom.final_delivery import StreamTransportOutcome
 from mindroom.hooks import MessageEnvelope
-from mindroom.inbound_turn_normalizer import DispatchPayload
 from mindroom.matrix.client import DeliveredMatrixEvent
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.orchestration.runtime import SYNC_RESTART_CANCEL_MSG
-from mindroom.response_runner import ResponseRunner
+from mindroom.response_runner import ResponseRequest, ResponseRunner
 from mindroom.streaming import _INTERRUPTED_RESPONSE_NOTE, build_restart_interrupted_body
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from tests.conftest import (
@@ -28,6 +29,7 @@ from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
     install_runtime_cache_support,
+    message_origin,
     patch_response_runner_module,
     runtime_paths_for,
     test_runtime_paths,
@@ -49,15 +51,16 @@ async def _noop_typing_indicator(*_args: object, **_kwargs: object) -> AsyncIter
 def _response_envelope() -> MessageEnvelope:
     return MessageEnvelope(
         source_event_id="$user_event",
-        room_id="!team:localhost",
         target=MessageTarget.resolve("!team:localhost", "$thread_root", "$user_event"),
-        requester_id="@user:localhost",
-        sender_id="@user:localhost",
         body="Please coordinate and schedule a reminder",
         attachment_ids=(),
         mentioned_agents=(),
         agent_name="general",
-        source_kind="message",
+        origin=message_origin(
+            sender_id="@user:localhost",
+            requester_id="@user:localhost",
+            source_kind=MESSAGE_SOURCE_KIND,
+        ),
     )
 
 
@@ -93,8 +96,6 @@ def _make_bot(tmp_path: Path) -> AgentBot:
     bot.client.user_id = agent_user.user_id
     bot.client.rooms = {"!team:localhost": MagicMock(room_id="!team:localhost")}
     bot.orchestrator = MagicMock(config=config)
-    bot._send_response = AsyncMock(return_value="$team_response")
-    bot._handle_interactive_question = AsyncMock()
     return install_runtime_cache_support(bot)
 
 
@@ -120,9 +121,9 @@ async def test_team_non_streaming_has_scheduler_context(tmp_path: Path) -> None:
 
     async def fake_team_response(*_args: object, **_kwargs: object) -> str:
         assert get_tool_runtime_context() is not None
-        assert _kwargs["session_id"] == "!team:localhost:$thread_root"
+        assert _kwargs["ctx"].session_id == "!team:localhost:$thread_root"
         assert _kwargs["user_id"] == "@user:localhost"
-        assert _kwargs["run_id"] == response_run_id
+        assert _kwargs["ctx"].run_id == response_run_id
         return "team non-streaming response"
 
     with (
@@ -137,17 +138,16 @@ async def test_team_non_streaming_has_scheduler_context(tmp_path: Path) -> None:
             team_response=fake_team_response,
         ),
     ):
-        await bot._generate_team_response_helper(
-            room_id="!team:localhost",
-            reply_to_event_id="$user_event",
-            thread_id="$thread_root",
-            payload=DispatchPayload(prompt="Please coordinate and schedule a reminder"),
+        await bot._response_runner.generate_team_response_helper(
+            ResponseRequest(
+                thread_history=[],
+                prompt="Please coordinate and schedule a reminder",
+                user_id="@user:localhost",
+                response_envelope=_response_envelope(),
+                correlation_id="corr-team-non-streaming",
+            ),
             team_agents=team_agents,
             team_mode="coordinate",
-            thread_history=[],
-            requester_user_id="@user:localhost",
-            response_envelope=_response_envelope(),
-            correlation_id="corr-team-non-streaming",
         )
 
 
@@ -186,17 +186,16 @@ async def test_team_non_streaming_cancellation_edits_placeholder(tmp_path: Path)
             team_response=fake_team_response,
         ),
     ):
-        await bot._generate_team_response_helper(
-            room_id="!team:localhost",
-            reply_to_event_id="$user_event",
-            thread_id="$thread_root",
-            payload=DispatchPayload(prompt="Please coordinate and schedule a reminder"),
+        await bot._response_runner.generate_team_response_helper(
+            ResponseRequest(
+                thread_history=[],
+                prompt="Please coordinate and schedule a reminder",
+                user_id="@user:localhost",
+                response_envelope=_response_envelope(),
+                correlation_id="corr-team-cancelled",
+            ),
             team_agents=team_agents,
             team_mode="coordinate",
-            thread_history=[],
-            requester_user_id="@user:localhost",
-            response_envelope=_response_envelope(),
-            correlation_id="corr-team-cancelled",
         )
 
     assert mock_edit.await_args.args[2] == "$thinking"
@@ -239,17 +238,16 @@ async def test_team_non_streaming_sync_restart_edits_placeholder_with_restart_no
             team_response=fake_team_response,
         ),
     ):
-        await bot._generate_team_response_helper(
-            room_id="!team:localhost",
-            reply_to_event_id="$user_event",
-            thread_id="$thread_root",
-            payload=DispatchPayload(prompt="Please coordinate and schedule a reminder"),
+        await bot._response_runner.generate_team_response_helper(
+            ResponseRequest(
+                thread_history=[],
+                prompt="Please coordinate and schedule a reminder",
+                user_id="@user:localhost",
+                response_envelope=_response_envelope(),
+                correlation_id="corr-team-restart",
+            ),
             team_agents=team_agents,
             team_mode="coordinate",
-            thread_history=[],
-            requester_user_id="@user:localhost",
-            response_envelope=_response_envelope(),
-            correlation_id="corr-team-restart",
         )
 
     assert mock_edit.await_args.args[2] == "$thinking"
@@ -272,16 +270,21 @@ async def test_team_streaming_has_scheduler_context(tmp_path: Path) -> None:
         response_function = kwargs["response_function"]
         await response_function(None)
 
-    async def fake_send_streaming_response(*args: object, **_kwargs: object) -> tuple[str, str]:
-        response_stream = args[6]
+    async def fake_send_streaming_response(*args: object, **_kwargs: object) -> StreamTransportOutcome:
+        response_stream = args[4]
         chunks = [str(chunk) async for chunk in response_stream]
-        return "$stream_event", "".join(chunks)
+        return StreamTransportOutcome(
+            last_physical_stream_event_id="$stream_event",
+            terminal_status="completed",
+            rendered_body="".join(chunks),
+            visible_body_state="visible_body",
+        )
 
     async def fake_team_response_stream(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
         assert get_tool_runtime_context() is not None
-        assert _kwargs["session_id"] == "!team:localhost:$thread_root"
+        assert _kwargs["ctx"].session_id == "!team:localhost:$thread_root"
         assert _kwargs["user_id"] == "@user:localhost"
-        assert _kwargs["run_id"] == response_run_id
+        assert _kwargs["ctx"].run_id == response_run_id
         yield "stream chunk"
 
     with (
@@ -300,17 +303,16 @@ async def test_team_streaming_has_scheduler_context(tmp_path: Path) -> None:
             team_response_stream=fake_team_response_stream,
         ),
     ):
-        await bot._generate_team_response_helper(
-            room_id="!team:localhost",
-            reply_to_event_id="$user_event",
-            thread_id="$thread_root",
-            payload=DispatchPayload(prompt="Please collaborate and schedule a reminder"),
+        await bot._response_runner.generate_team_response_helper(
+            ResponseRequest(
+                thread_history=[],
+                prompt="Please collaborate and schedule a reminder",
+                user_id="@user:localhost",
+                response_envelope=_response_envelope(),
+                correlation_id="corr-team-streaming",
+            ),
             team_agents=team_agents,
             team_mode="collaborate",
-            thread_history=[],
-            requester_user_id="@user:localhost",
-            response_envelope=_response_envelope(),
-            correlation_id="corr-team-streaming",
         )
 
 
@@ -345,17 +347,16 @@ async def test_team_late_cancellation_during_post_effects_propagates(tmp_path: P
         ),
     ):
         task = asyncio.create_task(
-            bot._generate_team_response_helper(
-                room_id="!team:localhost",
-                reply_to_event_id="$user_event",
-                thread_id="$thread_root",
-                payload=DispatchPayload(prompt="Please coordinate and schedule a reminder"),
+            bot._response_runner.generate_team_response_helper(
+                ResponseRequest(
+                    thread_history=[],
+                    prompt="Please coordinate and schedule a reminder",
+                    user_id="@user:localhost",
+                    response_envelope=_response_envelope(),
+                    correlation_id="corr-team-late-cancel",
+                ),
                 team_agents=team_agents,
                 team_mode="coordinate",
-                thread_history=[],
-                requester_user_id="@user:localhost",
-                response_envelope=_response_envelope(),
-                correlation_id="corr-team-late-cancel",
             ),
         )
         await started.wait()

@@ -15,7 +15,7 @@ from agno.tools import Toolkit
 
 from mindroom.agent_descriptions import describe_agent
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
-from mindroom.ai import ai_response
+from mindroom.ai import ResponseTurnContext, ai_response
 from mindroom.knowledge import resolve_agent_knowledge_access
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context, tool_runtime_context
@@ -57,6 +57,7 @@ class DelegateTools(Toolkit):
             instructions=self._build_instructions(),
             tools=[self.delegate_task],
         )
+        self.async_functions["delegate_task"].description = self._build_delegate_task_description()
 
     def _build_instructions(self) -> str:
         """Build toolkit instructions listing available delegation targets."""
@@ -69,11 +70,22 @@ class DelegateTools(Toolkit):
             agent_descriptions="\n\n".join(lines),
         )
 
-    async def delegate_task(self, agent_name: str, task: str) -> str:
-        """Delegate a task to another agent and return its response.
+    def _build_delegate_task_description(self) -> str:
+        """Build the model-facing function description with this caller's allowlist."""
+        available_targets = ", ".join(self._delegate_to)
+        return (
+            "Delegate a task to one allowed agent and return its response.\n"
+            f"Allowed delegate targets for this caller: {available_targets}.\n"
+            "Do not use any other agent names.\n"
+            "Use this when you need one listed specialist agent to handle a specific subtask.\n"
+            "The delegated agent runs independently with no shared conversation history."
+        )
 
-        Use this when you need a specialist agent to handle a specific subtask.
-        The delegated agent runs independently with no shared history.
+    async def delegate_task(self, agent_name: str, task: str) -> str:
+        """Delegate a task to one allowed agent and return its response.
+
+        The runtime-generated tool description lists caller-specific allowed
+        targets and model guidance.
 
         Args:
             agent_name: Name of the agent to delegate to (must be one of your configured targets).
@@ -108,7 +120,7 @@ class DelegateTools(Toolkit):
                 refresh_scheduler=self._refresh_scheduler,
                 execution_identity=execution_identity,
             )
-            system_enrichment_items = append_knowledge_availability_enrichment(
+            transient_enrichment_items = append_knowledge_availability_enrichment(
                 (),
                 knowledge_resolution.unavailable,
             )
@@ -130,23 +142,34 @@ class DelegateTools(Toolkit):
                 room_id=room_id,
                 runtime_context=runtime_context,
             )
+            delegated_correlation_id = (
+                delegated_runtime_context.correlation_id if delegated_runtime_context is not None else None
+            )
+            turn_ctx = ResponseTurnContext(
+                entity_label=agent_name,
+                session_id=session_id,
+                run_id=None,
+                correlation_id=delegated_correlation_id or uuid4().hex,
+                reply_to_event_id=None,
+                room_id=room_id,
+                thread_id=None,
+                requester_id=execution_identity.requester_id if execution_identity is not None else None,
+                matrix_run_metadata=None,
+                transient_enrichment_items=tuple(transient_enrichment_items),
+            )
             with tool_runtime_context(delegated_runtime_context):
                 response = await ai_response(
-                    agent_name=agent_name,
+                    turn_ctx,
                     prompt=task,
-                    session_id=session_id,
                     runtime_paths=self._runtime_paths,
                     config=self._config,
                     knowledge=knowledge_resolution.knowledge,
-                    user_id=execution_identity.requester_id if execution_identity is not None else None,
-                    room_id=room_id,
-                    correlation_id=(
-                        delegated_runtime_context.correlation_id if delegated_runtime_context is not None else None
-                    ),
                     include_interactive_questions=False,
+                    tool_function_filter=(
+                        runtime_context.tool_function_filter if runtime_context is not None else None
+                    ),
                     execution_identity=execution_identity,
                     delegation_depth=self._delegation_depth + 1,
-                    system_enrichment_items=system_enrichment_items,
                     refresh_scheduler=self._refresh_scheduler,
                 )
         except Exception as e:
@@ -174,13 +197,14 @@ class DelegateTools(Toolkit):
         runtime_model = self._config.resolve_runtime_model(
             entity_name=agent_name,
             room_id=room_id,
+            thread_id=runtime_context.resolved_thread_id,
             runtime_paths=self._runtime_paths,
         )
         return replace(
             runtime_context,
             agent_name=agent_name,
             active_model_name=runtime_model.model_name,
-            session_id=session_id,
+            target=replace(runtime_context.target, session_id=session_id),
         )
 
 

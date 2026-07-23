@@ -8,13 +8,12 @@ from typing import TYPE_CHECKING, Any
 
 import nio
 
-from mindroom.config.matrix import ignore_unverified_devices_for_config
+from mindroom.delivery_gateway import SendTextRequest
 from mindroom.logging_config import get_logger
 from mindroom.matrix.message_builder import build_reaction_content
 
 if TYPE_CHECKING:
     from mindroom.bot import AgentBot
-    from mindroom.config.main import Config
 
 logger = get_logger(__name__)
 
@@ -302,8 +301,6 @@ async def add_confirmation_reactions(
     client: nio.AsyncClient,
     room_id: str,
     event_id: str,
-    *,
-    config: Config,
 ) -> None:
     """Add confirmation reaction buttons to a config change message.
 
@@ -311,16 +308,14 @@ async def add_confirmation_reactions(
         client: The Matrix client
         room_id: The room ID
         event_id: The event ID of the message to add reactions to
-        config: Active config for Matrix delivery policy
 
     """
-    ignore_unverified_devices = ignore_unverified_devices_for_config(config)
     for reaction_name, reaction_key in (("confirm", "✅"), ("cancel", "❌")):
         response = await client.room_send(
             room_id=room_id,
             message_type="m.reaction",
             content=build_reaction_content(event_id, reaction_key),
-            ignore_unverified_devices=ignore_unverified_devices,
+            ignore_unverified_devices=True,
         )
         if not isinstance(response, nio.RoomSendResponse):
             logger.warning("Failed to add %s reaction", reaction_name, error=str(response))
@@ -341,12 +336,16 @@ async def handle_confirmation_reaction(
         pending_change: The pending configuration change
 
     """
+    authorization = bot.config.authorization
+    resolved_sender = authorization.resolve_alias(event.sender)
+
     # Only process reactions from the requester
-    if event.sender != pending_change.requester:
+    if resolved_sender != pending_change.requester:
         logger.debug(
             "Ignoring config reaction from non-requester",
             sender=event.sender,
             requester=pending_change.requester,
+            resolved_sender=resolved_sender,
         )
         return
 
@@ -370,20 +369,35 @@ async def handle_confirmation_reaction(
     )
 
     if reaction_key == "✅":
-        # User confirmed - apply the change
-        from mindroom.commands.config_commands import apply_config_change  # noqa: PLC0415
+        if not authorization.config_command_enabled:
+            response_text = "❌ Config command disabled."
+            logger.info(
+                "Config change rejected because command is disabled",
+                path=pending_change.config_path,
+                requester=event.sender,
+            )
+        elif resolved_sender not in authorization.global_users:
+            response_text = "❌ Admin only."
+            logger.info(
+                "Config change rejected because requester is not admin",
+                path=pending_change.config_path,
+                requester=event.sender,
+            )
+        else:
+            # User confirmed - apply the change
+            from mindroom.commands.config_commands import apply_config_change  # noqa: PLC0415
 
-        response_text = await apply_config_change(
-            pending_change.config_path,
-            pending_change.new_value,
-            runtime_paths=bot.runtime_paths,
-        )
+            response_text = await apply_config_change(
+                pending_change.config_path,
+                pending_change.new_value,
+                runtime_paths=bot.runtime_paths,
+            )
 
-        logger.info(
-            "Config change confirmed",
-            path=pending_change.config_path,
-            requester=event.sender,
-        )
+            logger.info(
+                "Config change confirmed",
+                path=pending_change.config_path,
+                requester=event.sender,
+            )
     else:
         # User cancelled
         response_text = "❌ Configuration change cancelled."
@@ -394,10 +408,15 @@ async def handle_confirmation_reaction(
         )
 
     # Send the response
-    await bot._send_response(
-        room.room_id,
-        event.reacts_to,  # Reply to the confirmation message
-        response_text,
-        pending_change.thread_id,
-        skip_mentions=True,
+    target = bot._conversation_resolver.build_message_target(
+        room_id=room.room_id,
+        thread_id=pending_change.thread_id,
+        reply_to_event_id=event.reacts_to,
+    )
+    await bot._delivery_gateway.send_text(
+        SendTextRequest(
+            target=target,
+            response_text=response_text,
+            skip_mentions=True,
+        ),
     )

@@ -1,18 +1,18 @@
-import { ReactElement } from "react";
-// Import just the Mono (simple) variant of each icon to avoid heavy dependencies
-import Ollama from "@lobehub/icons/es/Ollama/components/Mono";
-import OpenRouter from "@lobehub/icons/es/OpenRouter/components/Mono";
-import Groq from "@lobehub/icons/es/Groq/components/Mono";
-import DeepSeek from "@lobehub/icons/es/DeepSeek/components/Mono";
-import Together from "@lobehub/icons/es/Together/components/Mono";
-import Mistral from "@lobehub/icons/es/Mistral/components/Mono";
-import Cohere from "@lobehub/icons/es/Cohere/components/Mono";
-import XAI from "@lobehub/icons/es/XAI/components/Mono";
-import Cerebras from "@lobehub/icons/es/Cerebras/components/Mono";
-import OpenAI from "@lobehub/icons/es/OpenAI/components/Mono";
+import type { ReactElement } from "react";
 import Anthropic from "@lobehub/icons/es/Anthropic/components/Mono";
+import Cerebras from "@lobehub/icons/es/Cerebras/components/Mono";
+import Cohere from "@lobehub/icons/es/Cohere/components/Mono";
+import DeepSeek from "@lobehub/icons/es/DeepSeek/components/Mono";
 import Google from "@lobehub/icons/es/Google/components/Mono";
+import Groq from "@lobehub/icons/es/Groq/components/Mono";
+import Mistral from "@lobehub/icons/es/Mistral/components/Mono";
+import Ollama from "@lobehub/icons/es/Ollama/components/Mono";
+import OpenAI from "@lobehub/icons/es/OpenAI/components/Mono";
+import OpenRouter from "@lobehub/icons/es/OpenRouter/components/Mono";
 import Perplexity from "@lobehub/icons/es/Perplexity/components/Mono";
+import Together from "@lobehub/icons/es/Together/components/Mono";
+import XAI from "@lobehub/icons/es/XAI/components/Mono";
+import ZAI from "@lobehub/icons/es/ZAI/components/Mono";
 import { Brain } from "lucide-react";
 
 export interface ProviderInfo {
@@ -160,6 +160,15 @@ export const PROVIDERS: Record<string, ProviderInfo> = {
     color:
       "bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/20",
     icon: (className = "h-5 w-5") => <Cerebras className={className} />,
+    requiresApiKey: true,
+  },
+  zai: {
+    id: "zai",
+    name: "Z.ai",
+    description: "Configure your Z.ai API key for GLM models",
+    color:
+      "bg-slate-500/10 text-slate-600 dark:text-slate-400 border-slate-500/20",
+    icon: (className = "h-5 w-5") => <ZAI className={className} />,
     requiresApiKey: true,
   },
 };

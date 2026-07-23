@@ -53,15 +53,6 @@ class TestAdminEndpoints:
             mock.return_value = (0, "1", "")  # Default success with 1 replica
             yield mock
 
-    @pytest.fixture
-    def mock_provisioner_api_key(self):
-        """Mock PROVISIONER_API_KEY."""
-        with (
-            patch("backend.routes.admin.PROVISIONER_API_KEY", "test-api-key"),
-            patch("backend.routes.provisioner.PROVISIONER_API_KEY", "test-api-key"),
-        ):
-            yield
-
     def test_admin_stats_success(self, client: TestClient, mock_supabase: MagicMock, mock_verify_admin: Mock):
         """Test getting admin statistics successfully."""
         # Setup - create separate mock chains for each table query
@@ -125,12 +116,10 @@ class TestAdminEndpoints:
         finally:
             app.dependency_overrides.clear()
 
-    def test_admin_start_instance(
-        self, client: TestClient, mock_supabase: MagicMock, mock_verify_admin: Mock, mock_provisioner_api_key
-    ):
+    def test_admin_start_instance(self, client: TestClient, mock_supabase: MagicMock, mock_verify_admin: Mock):
         """Test admin starting an instance."""
         # Setup - mock the provisioner function
-        with patch("backend.routes.admin.start_instance_provisioner") as mock_start:
+        with patch("backend.services.provisioner_service.start_instance") as mock_start:
             mock_start.return_value = {"success": True, "message": "Instance started"}
 
             # Make request
@@ -141,13 +130,35 @@ class TestAdminEndpoints:
             data = response.json()
             assert data["success"] is True
             assert "started" in data["message"]
+            mock_start.assert_called_once_with(123)
 
-    def test_admin_stop_instance(
-        self, client: TestClient, mock_supabase: MagicMock, mock_verify_admin: Mock, mock_provisioner_api_key
-    ):
+    def test_admin_start_instance_reaches_kubernetes(self, client: TestClient, mock_verify_admin: Mock):
+        """Admin start should drive the service down to kubectl without any provisioner bearer token."""
+        from unittest.mock import call  # noqa: PLC0415
+
+        with (
+            patch("backend.services.provisioner_service.check_deployment_exists", return_value=True),
+            patch("backend.services.provisioner_service.run_kubectl") as mock_kubectl,
+            patch("backend.services.provisioner_service.update_instance_status", return_value=True) as mock_update,
+        ):
+            mock_kubectl.return_value = (0, "scaled", "")
+
+            response = client.post("/admin/instances/123/start")
+
+        assert response.status_code == 200
+        assert response.json()["success"] is True
+        mock_kubectl.assert_has_awaits(
+            [
+                call(["scale", "deployment/synapse-123", "--replicas=1"], namespace="mindroom-instances"),
+                call(["scale", "deployment/mindroom-123", "--replicas=1"], namespace="mindroom-instances"),
+            ]
+        )
+        mock_update.assert_called_once_with(123, "running")
+
+    def test_admin_stop_instance(self, client: TestClient, mock_supabase: MagicMock, mock_verify_admin: Mock):
         """Test admin stopping an instance."""
         # Setup - mock the provisioner function
-        with patch("backend.routes.admin.stop_instance_provisioner") as mock_stop:
+        with patch("backend.services.provisioner_service.stop_instance") as mock_stop:
             mock_stop.return_value = {"success": True, "message": "Instance stopped"}
 
             # Make request
@@ -158,11 +169,12 @@ class TestAdminEndpoints:
             data = response.json()
             assert data["success"] is True
             assert "stopped" in data["message"]
+            mock_stop.assert_called_once_with(456)
 
-    def test_admin_restart_instance(self, client: TestClient, mock_verify_admin: Mock, mock_provisioner_api_key):
+    def test_admin_restart_instance(self, client: TestClient, mock_verify_admin: Mock):
         """Test admin restarting an instance."""
         # Setup - mock the provisioner function
-        with patch("backend.routes.admin.restart_instance_provisioner") as mock_restart:
+        with patch("backend.services.provisioner_service.restart_instance") as mock_restart:
             mock_restart.return_value = {"success": True, "message": "Instance restarted"}
 
             # Make request
@@ -173,12 +185,11 @@ class TestAdminEndpoints:
             data = response.json()
             assert data["success"] is True
             assert "restarted" in data["message"]
+            mock_restart.assert_called_once_with(789)
 
-    def test_admin_uninstall_instance(
-        self, client: TestClient, mock_supabase: MagicMock, mock_verify_admin: Mock, mock_provisioner_api_key
-    ):
+    def test_admin_uninstall_instance(self, client: TestClient, mock_supabase: MagicMock, mock_verify_admin: Mock):
         """Test admin uninstalling an instance."""
-        with patch("backend.routes.admin.uninstall_instance") as mock_uninstall:
+        with patch("backend.services.provisioner_service.uninstall_instance") as mock_uninstall:
             mock_uninstall.return_value = {"success": True, "message": "Instance uninstalled"}
 
             # Make request
@@ -189,10 +200,9 @@ class TestAdminEndpoints:
             data = response.json()
             assert data["success"] is True
             assert "uninstalled" in data["message"]
+            mock_uninstall.assert_called_once_with(123)
 
-    def test_admin_provision_instance(
-        self, client: TestClient, mock_supabase: MagicMock, mock_verify_admin: Mock, mock_provisioner_api_key
-    ):
+    def test_admin_provision_instance(self, client: TestClient, mock_supabase: MagicMock, mock_verify_admin: Mock):
         """Test admin provisioning an instance."""
         # Setup - Mock instance query
         mock_supabase.table().select().eq().execute.return_value = Mock(
@@ -201,10 +211,10 @@ class TestAdminEndpoints:
 
         # Mock subscription query for provision_instance
         mock_supabase.table().select().eq().single().execute.return_value = Mock(
-            data={"id": "sub_123", "account_id": "acc_123", "tier": "starter"}
+            data={"id": "sub_123", "account_id": "acc_123", "tier": "byok"}
         )
 
-        with patch("backend.routes.admin.provision_instance") as mock_provision:
+        with patch("backend.services.provisioner_service.provision_instance") as mock_provision:
             mock_provision.return_value = {
                 "success": True,
                 "message": "Instance provisioned",
@@ -222,11 +232,11 @@ class TestAdminEndpoints:
             data = response.json()
             assert data["success"] is True
 
-    def test_admin_sync_instances(self, client: TestClient, mock_verify_admin: Mock, mock_provisioner_api_key):
+    def test_admin_sync_instances(self, client: TestClient, mock_supabase: MagicMock, mock_verify_admin: Mock):
         """Test admin syncing instances."""
-        with patch("backend.routes.admin.sync_instances") as mock_sync:
+        with patch("backend.services.provisioner_service.sync_instances") as mock_sync:
 
-            async def mock_sync_func(request, auth):
+            async def mock_sync_func(sb):
                 return {"total": 5, "synced": 2, "errors": 0, "updates": []}
 
             mock_sync.side_effect = mock_sync_func
@@ -249,7 +259,7 @@ class TestAdminEndpoints:
             "status": "active",
             "created_at": datetime.now(UTC).isoformat(),
         }
-        subscription_data = {"id": "sub_123", "account_id": "acc_123", "tier": "professional", "status": "active"}
+        subscription_data = {"id": "sub_123", "account_id": "acc_123", "tier": "pro", "status": "active"}
         instance_data = {"id": "inst_123", "instance_id": "123", "account_id": "acc_123", "status": "running"}
 
         # Setup mocks for different queries
@@ -298,7 +308,7 @@ class TestAdminEndpoints:
         data = response.json()
         assert data["account"]["id"] == "acc_123"
         assert data["account"]["email"] == "user@example.com"
-        assert data["subscription"]["tier"] == "professional"
+        assert data["subscription"]["tier"] == "pro"
         assert len(data["instances"]) == 1
 
     def test_admin_update_account_status(self, client: TestClient, mock_supabase: MagicMock, mock_verify_admin: Mock):
@@ -409,8 +419,18 @@ class TestAdminEndpoints:
         data = response.json()
         assert "data" in data
 
-    def test_admin_dashboard_metrics(self, client: TestClient, mock_supabase: MagicMock, mock_verify_admin: Mock):
+    def test_admin_dashboard_metrics(
+        self, client: TestClient, mock_supabase: MagicMock, mock_verify_admin: Mock, monkeypatch: pytest.MonkeyPatch
+    ):
         """Test admin dashboard metrics."""
+        from backend import pricing
+        from backend.routes import admin
+
+        pricing_config = pricing.load_pricing_config()
+        pricing_config["plans"]["byok"]["price_monthly"] = 3100
+        pricing_config["plans"]["pro"]["price_monthly"] = 9700
+        monkeypatch.setattr(admin, "PRICING_CONFIG_MODEL", pricing.PricingConfig(**pricing_config))
+
         # Setup mock queries for each specific table call
         # Mock accounts query
         accounts_mock = MagicMock()
@@ -439,7 +459,7 @@ class TestAdminEndpoints:
         subs_data_mock = MagicMock()
         subs_data_mock.select.return_value = subs_data_mock
         subs_data_mock.eq.return_value = subs_data_mock
-        subs_data_mock.execute.return_value = Mock(data=[{"tier": "starter"}, {"tier": "professional"}])
+        subs_data_mock.execute.return_value = Mock(data=[{"tier": "byok"}, {"tier": "pro"}])
 
         # Mock usage metrics for messages
         usage_mock = MagicMock()
@@ -520,6 +540,7 @@ class TestAdminEndpoints:
         assert data["total_accounts"] == 100
         assert data["active_subscriptions"] == 70
         assert data["total_instances"] == 2  # We have 2 instances total in the mock
+        assert data["subscription_revenue"] == 128.0
 
     def test_admin_resource_not_in_allowlist(self, client: TestClient, mock_verify_admin: Mock):
         """Test admin accessing resource not in allowlist."""
@@ -530,12 +551,12 @@ class TestAdminEndpoints:
         assert response.status_code == 400
         assert "Invalid resource" in response.json()["detail"]
 
-    def test_admin_instance_not_found(self, client: TestClient, mock_verify_admin: Mock, mock_provisioner_api_key):
+    def test_admin_instance_not_found(self, client: TestClient, mock_verify_admin: Mock):
         """Test admin operations on non-existent instance."""
-        # Setup - mock the start_instance_provisioner function to raise 404
-        with patch("backend.routes.admin.start_instance_provisioner") as mock_start:
+        # Setup - mock the provisioner service start function to raise 404
+        with patch("backend.services.provisioner_service.start_instance") as mock_start:
 
-            async def mock_start_func(request, instance_id, auth):
+            async def mock_start_func(instance_id):
                 raise HTTPException(status_code=404, detail="Deployment not found")
 
             mock_start.side_effect = mock_start_func
@@ -548,12 +569,12 @@ class TestAdminEndpoints:
             assert "not found" in response.json()["detail"].lower()
 
     def test_admin_sync_instances_with_errors(
-        self, client: TestClient, mock_verify_admin: Mock, mock_provisioner_api_key
+        self, client: TestClient, mock_supabase: MagicMock, mock_verify_admin: Mock
     ):
         """Test admin sync with some errors."""
-        with patch("backend.routes.admin.sync_instances") as mock_sync:
+        with patch("backend.services.provisioner_service.sync_instances") as mock_sync:
 
-            async def mock_sync_func(request, auth):
+            async def mock_sync_func(sb):
                 return {
                     "total": 10,
                     "synced": 7,

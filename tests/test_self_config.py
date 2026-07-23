@@ -98,7 +98,7 @@ def _plugin_tool_config_path(tmp_path: Path, *, tool_name: str = "self_config_pl
     )
     (plugin_root / "tools.py").write_text(
         "from agno.tools import Toolkit\n"
-        "from mindroom.tool_system.metadata import ToolCategory, register_tool_with_metadata\n"
+        "from mindroom.tool_system.declarations import ToolCategory\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
         "\n"
         "class DemoTool(Toolkit):\n"
         "    def __init__(self) -> None:\n"
@@ -269,7 +269,7 @@ class TestUpdateOwnConfig:
 
             reloaded = load_config_yaml(config_path)
             assert reloaded.agents["coder"].tool_names == ["openclaw_compat", "python"]
-            effective = reloaded.get_agent_tools("coder")
+            effective = reloaded.resolve_entity("coder").available_tools
             assert effective[0] == "openclaw_compat"
             assert "shell" in effective
             assert "matrix_message" in effective
@@ -314,6 +314,21 @@ class TestUpdateOwnConfig:
 
             reloaded = load_config_yaml(config_path)
             assert reloaded.agents["coder"].tool_names == ["self_config"]
+        finally:
+            config_path.unlink(missing_ok=True)
+
+    def test_update_tools_allows_thread_resolution(self) -> None:
+        """Self-config may opt its own agent into thread resolution."""
+        _, config_path = _make_config(
+            agents={"coder": AgentConfig(display_name="Coder", role="Code", tools=["self_config"])},
+        )
+        try:
+            tool = _self_config_tools(agent_name="coder", config_path=config_path)
+            result = tool.update_own_config(tools=["self_config", "thread_resolution"])
+
+            assert "Successfully" in result
+            reloaded = load_config_yaml(config_path)
+            assert reloaded.agents["coder"].tool_names == ["self_config", "thread_resolution"]
         finally:
             config_path.unlink(missing_ok=True)
 

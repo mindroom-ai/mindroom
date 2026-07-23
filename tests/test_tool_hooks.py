@@ -49,10 +49,12 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.oauth.providers import OAuthConnectionRequired
 from mindroom.orchestrator import _MultiAgentOrchestrator
+from mindroom.session_ids import create_session_id
 from mindroom.sync_bridge_state import is_loop_blocked_by_sync_tool_bridge
-from mindroom.tool_approval import _shutdown_approval_store
+from mindroom.tool_approval import ToolCallWorkflowOrigin, _shutdown_approval_store
 from mindroom.tool_system import tool_hooks
-from mindroom.tool_system.metadata import TOOL_METADATA, TOOL_REGISTRY, ToolCategory, register_tool_with_metadata
+from mindroom.tool_system.metadata import TOOL_METADATA, TOOL_REGISTRY, ToolCategory
+from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tool_system.runtime_context import (
     ToolDispatchContext,
     ToolRuntimeContext,
@@ -61,6 +63,7 @@ from mindroom.tool_system.runtime_context import (
 )
 from mindroom.tool_system.tool_hooks import build_tool_hook_bridge, prepend_tool_hook_bridge
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, tool_execution_identity
+from mindroom.tools import approved_egress as _approved_egress
 from tests.approval_test_support import resolve_pending_approval as _resolve_pending_approval
 from tests.conftest import (
     bind_runtime_paths,
@@ -71,7 +74,7 @@ from tests.conftest import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Generator
+    from collections.abc import Awaitable, Callable, Generator
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
@@ -224,16 +227,19 @@ def _tool_runtime_context(
     config = _config(tmp_path, log_llm_requests=log_llm_requests)
     return ToolRuntimeContext(
         agent_name=agent_name,
-        room_id="!room:localhost",
-        thread_id="$thread",
-        resolved_thread_id="$resolved-thread",
+        target=MessageTarget(
+            room_id="!room:localhost",
+            source_thread_id="$thread",
+            resolved_thread_id="$resolved-thread",
+            reply_to_event_id=None,
+            session_id=_SESSION_ID,
+        ),
         requester_id="@user:localhost",
         client=AsyncMock(),
         config=config,
         runtime_paths=runtime_paths_for(config),
         event_cache=make_event_cache_mock(),
         conversation_cache=make_conversation_cache_mock(),
-        session_id=_SESSION_ID,
         correlation_id="corr-runtime",
         hook_registry=hook_registry or HookRegistry.empty(),
         hook_message_sender=hook_message_sender,
@@ -528,6 +534,7 @@ async def test_tool_hook_bridge_records_failures_without_registered_hooks(tmp_pa
         "success",
         "error_type",
         "error_message",
+        "timing",
         "traceback",
     }
     assert records[0]["tool_name"] == "explode"
@@ -541,6 +548,9 @@ async def test_tool_hook_bridge_records_failures_without_registered_hooks(tmp_pa
     assert records[0]["correlation_id"] == "corr-runtime"
     assert records[0]["success"] is False
     assert records[0]["error_type"] == "ValueError"
+    assert isinstance(records[0]["timing"]["approval_ms"], float)
+    assert isinstance(records[0]["timing"]["result_ready_ms"], float)
+    assert isinstance(records[0]["timing"]["tool_body_ms"], float)
     assert records[0]["arguments"] == {
         "api_key": "***redacted***",
         "nested": [{"refresh_token": "***redacted***"}],
@@ -1208,7 +1218,6 @@ async def test_tool_hook_contexts_expose_router_backed_matrix_admin(tmp_path: Pa
     execution_identity = bot._tool_runtime_support.build_execution_identity(
         target=target,
         user_id="@user:localhost",
-        session_id=target.session_id,
     )
     bridge = build_tool_hook_bridge(
         registry,
@@ -1340,7 +1349,6 @@ async def test_agent_bot_tool_runtime_context_room_state_helpers_fallback_to_rou
     execution_identity = bot._tool_runtime_support.build_execution_identity(
         target=target,
         user_id="@user:localhost",
-        session_id=target.session_id,
     )
     bridge = build_tool_hook_bridge(
         registry,
@@ -1487,7 +1495,7 @@ async def test_sync_tool_approval_send_uses_runtime_loop(tmp_path: Path) -> None
         assert current_loop is request_loop
         assert room_id == "!room:localhost"
         assert message_type == "io.mindroom.tool_approval"
-        assert ignore_unverified_devices is False
+        assert ignore_unverified_devices is True
         assert content["status"] == "pending"
         return nio.RoomSendResponse(event_id="$approval", room_id=room_id)
 
@@ -1588,6 +1596,99 @@ async def test_sync_execute_async_tool_entrypoint_still_runs_approval_gate(tmp_p
     assert executed == []
     client.room_send.assert_awaited_once()
     mock_log_warning.assert_not_called()
+
+
+def _request_network_access_config(runtime_paths: RuntimePaths) -> Config:
+    return bind_runtime_paths(
+        Config(
+            agents={
+                "code": AgentConfig(display_name="Code", role="Help with coding.", rooms=["!room:localhost"]),
+            },
+            models={"default": ModelConfig(provider="openai", id="test-model")},
+            tool_approval={
+                "timeout_days": 0.000001,
+                "rules": [{"match": "request_network_access", "action": "require_approval"}],
+            },
+        ),
+        runtime_paths,
+    )
+
+
+def _request_network_access_bridge(config: Config, runtime_paths: RuntimePaths) -> Callable[..., Awaitable[object]]:
+    bridge = build_tool_hook_bridge(
+        HookRegistry.empty(),
+        agent_name="code",
+        dispatch_context=_dispatch_context(_execution_identity()),
+        config=config,
+        runtime_paths=runtime_paths,
+    )
+    assert bridge is not None
+    return bridge
+
+
+@pytest.mark.parametrize("ttl_minutes", [5, "5"])
+@pytest.mark.asyncio
+async def test_request_network_access_static_allowlist_skips_matrix_approval(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    ttl_minutes: object,
+) -> None:
+    """Static-allowlisted egress requests should answer without an approval card or a grant."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    monkeypatch.setenv("MINDROOM_APPROVED_EGRESS_ALLOWLIST", ".example.com")
+    config = _request_network_access_config(runtime_paths)
+    client, _ = _initialize_router_approval_store(runtime_paths)
+    bridge = _request_network_access_bridge(config, runtime_paths)
+
+    def post_grant(_payload: dict[str, object]) -> dict[str, object]:
+        msg = "a static-allowlisted request must not create a temporary grant"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(_approved_egress, "_post_grant", post_grant)
+    toolkit = _approved_egress._ApprovedEgressTools()
+    function = toolkit.async_functions["request_network_access"]
+    prepend_tool_hook_bridge(toolkit, bridge)
+
+    result = await FunctionCall(
+        function=function,
+        arguments={"hostnames": ["docs.example.com"], "ttl_minutes": ttl_minutes, "reason": "Need docs."},
+        call_id="call-1",
+    ).aexecute()
+
+    assert result.status == "success"
+    assert (
+        result.result
+        == "Already allowed by the static egress allowlist: docs.example.com. No temporary grant was created."
+    )
+    client.room_send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_request_network_access_blocked_host_still_uses_matrix_approval(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Batches containing any blocked hostname should still go through Matrix approval before reaching the tool."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    monkeypatch.setenv("MINDROOM_APPROVED_EGRESS_ALLOWLIST", ".example.com")
+    config = _request_network_access_config(runtime_paths)
+    client, _ = _initialize_router_approval_store(runtime_paths)
+    bridge = _request_network_access_bridge(config, runtime_paths)
+    toolkit = _approved_egress._ApprovedEgressTools()
+
+    result = await bridge(
+        "request_network_access",
+        toolkit.async_functions["request_network_access"].entrypoint,
+        {"hostnames": ["docs.example.com", "docs.other.test"], "ttl_minutes": 5, "reason": "Need docs."},
+    )
+
+    assert result == (
+        "[TOOL CALL DECLINED]\n"
+        "Tool: request_network_access\n"
+        "Reason: Tool approval request timed out.\n\n"
+        "Adjust your approach — try a different tool or different arguments."
+    )
+    client.room_send.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -2392,6 +2493,53 @@ async def test_tool_before_call_hooks_run_before_tool_approval_gate(tmp_path: Pa
 
 
 @pytest.mark.asyncio
+async def test_bridge_workflow_origin_reaches_approval_card(tmp_path: Path) -> None:
+    """A bridge built with workflow provenance must surface it on the approval card."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={"code": AgentConfig(display_name="Code", role="Help with coding.", rooms=[])},
+            models={"default": ModelConfig(provider="openai", id="test-model")},
+            tool_approval={"rules": [{"match": "read_file", "action": "require_approval"}]},
+        ),
+        runtime_paths,
+    )
+    sender, _ = _initialize_test_approval_store(runtime_paths)
+    bridge = build_tool_hook_bridge(
+        HookRegistry.empty(),
+        agent_name="code",
+        dispatch_context=_dispatch_context(_execution_identity()),
+        config=config,
+        runtime_paths=runtime_paths,
+        workflow_origin=ToolCallWorkflowOrigin(workflow_id="research-report", participant_id="writer"),
+    )
+    assert bridge is not None
+
+    async def next_func(**kwargs: object) -> str:
+        del kwargs
+        return "ok"
+
+    with tool_execution_identity(_execution_identity()):
+        task = asyncio.create_task(bridge("read_file", next_func, {"path": "notes.txt"}))
+        await asyncio.sleep(0)
+        store = get_approval_store()
+        assert store is not None
+        pending = await _wait_for_sent_pending(store, sender)
+
+        card_content = sender.await_args.args[2]
+        assert card_content["workflow_id"] == "research-report"
+        assert card_content["participant_id"] == "writer"
+        assert card_content["body"] == (
+            "🔒 Approval required: read_file — Dynamic Workflow 'research-report' participant 'writer'"
+        )
+
+        await _resolve_pending_approval(store, pending, status="approved")
+        result = await task
+
+    assert result == "ok"
+
+
+@pytest.mark.asyncio
 async def test_tool_before_call_decline_short_circuits_tool_approval(tmp_path: Path) -> None:
     """Denied policy hooks should prevent approval cards from being shown."""
     runtime_paths = test_runtime_paths(tmp_path)
@@ -2703,7 +2851,6 @@ async def test_agent_bot_tool_runtime_context_routes_custom_events_from_tool_hoo
             execution_identity = bot._tool_runtime_support.build_execution_identity(
                 target=target,
                 user_id="@user:localhost",
-                session_id=target.session_id,
             )
             toolkit = next(tool for tool in bot.agent.tools if tool.name == "tool-hooks-runtime-demo")
             function = _first_function(toolkit)
@@ -2811,10 +2958,15 @@ async def test_emit_custom_event_ignores_raw_room_mode_thread_id(tmp_path: Path)
         seen_thread_ids.append(ctx.thread_id)
 
     registry = HookRegistry.from_plugins([_plugin("tool-policy", [on_custom_event])])
+    base_context = _tool_runtime_context(tmp_path, hook_registry=registry)
     runtime_context = replace(
-        _tool_runtime_context(tmp_path, hook_registry=registry),
-        thread_id="$raw-thread",
-        resolved_thread_id=None,
+        base_context,
+        target=replace(
+            base_context.target,
+            source_thread_id="$raw-thread",
+            resolved_thread_id=None,
+            session_id=create_session_id(base_context.room_id, None),
+        ),
     )
 
     with tool_runtime_context(runtime_context):

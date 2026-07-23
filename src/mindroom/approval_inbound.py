@@ -84,7 +84,6 @@ async def handle_tool_approval_action(
         config,
         room.room_id,
         runtime_paths,
-        room_alias=room.canonical_alias,
     ):
         logger.debug("ignoring_tool_approval_action_from_unauthorized_sender", user_id=sender_id)
         return False

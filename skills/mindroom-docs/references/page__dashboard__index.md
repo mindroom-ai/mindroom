@@ -73,7 +73,7 @@ Configure AI model providers:
 - **Test connection** to verify model accessibility
 - **Provider API keys** section for configuring credentials
 
-**Runtime-supported providers:** OpenAI, Codex CLI subscription auth (`codex`), Anthropic, Google Gemini (`google`/`gemini`), Vertex AI Claude (`vertexai_claude`), Ollama, OpenRouter, Groq, DeepSeek, Cerebras
+**Runtime-supported providers:** OpenAI, Codex CLI ChatGPT authentication (`codex`), Anthropic, Google Gemini (`google`/`gemini`), Vertex AI Claude (`vertexai_claude`), Ollama, OpenRouter, Groq, DeepSeek, Cerebras
 
 ### Memory
 
@@ -82,6 +82,7 @@ Configure global memory defaults:
 - **Backend** - Global default backend (`mem0`, `file`, or `none`)
 - **Provider** - Ollama (local), OpenAI, or Sentence Transformers
 - **Model** - Provider-specific embedding models
+- **Credential service** - Strictly bind an OpenAI-compatible embedder to a dedicated stored key
 - **Host URL** - For Ollama provider
 - **File backend settings** - Path and file memory tuning options
 - **Auto-flush settings** - Background extraction and flush controls for file-backed memory
@@ -90,12 +91,13 @@ Per-agent overrides are configured from the **Agents** tab using the **Memory ba
 
 ### Knowledge
 
-Manage file-backed RAG knowledge bases:
+Manage file-backed semantic or files-only knowledge bases:
 
-- **Create/edit/delete knowledge bases** with `description`, `path`, and refresh-on-access `watch` settings
+- **Create/edit/delete knowledge bases** with `description`, `mode`, `path`, and refresh-on-access `watch` settings
+- **Choose semantic search or files-only access** depending on whether a base should build embeddings
 - **Configure Git repository, branch, filtering, credentials service, and sync options**
 - **Upload and remove files** for non-Git-backed knowledge bases
-- **Reindex** a knowledge base on demand
+- **Reindex or sync** a knowledge base on demand
 - **Track index status** (`file_count` and `indexed_count`)
 - **Assign agents** to a specific knowledge base from the Agents tab
 
@@ -104,8 +106,8 @@ Git-backed knowledge bases are managed from the dashboard, but file mutations st
 - The dashboard hides upload, dropzone, and per-file delete controls for Git-backed bases.
 - `/api/knowledge/bases/{base_id}/files` reflects the manager's filtered file set (for example `include_patterns`/`exclude_patterns`).
 - Private HTTPS repo auth can be managed in the **Credentials** tab, then referenced by `knowledge_bases.<id>.git.credentials_service`.
-- `POST /api/knowledge/bases/{base_id}/reindex` syncs Git first for Git-backed bases before rebuilding the index.
-- `POST /api/knowledge/bases/{base_id}/upload` and `DELETE /api/knowledge/bases/{base_id}/files/{path}` reject Git-backed bases with `409`; update the repository and reindex instead.
+- `POST /api/knowledge/bases/{base_id}/reindex` syncs Git first for Git-backed bases, then rebuilds semantic indexes or publishes files-mode source metadata.
+- `POST /api/knowledge/bases/{base_id}/upload` and `DELETE /api/knowledge/bases/{base_id}/files/{path}` reject Git-backed bases with `409`; update the repository and sync or reindex instead.
 - Chat/runtime requests use last successfully published indexes and do not wait for indexing or Git sync.
 
 ### Credentials
@@ -151,7 +153,7 @@ Manage OpenClaw-compatible skills:
 Configure voice message handling:
 
 - **Enable/disable** voice message support
-- **Speech-to-Text** - OpenAI Whisper or self-hosted
+- **Speech-to-Text** - OpenAI transcription or a self-hosted OpenAI-compatible service
 - **Command Intelligence** - Model selection for command recognition
 
 ### Integrations
@@ -205,6 +207,10 @@ The dashboard communicates with the backend API at `/api/`:
 
 When `/api/config/load` returns validation errors, the dashboard fetches `/api/config/raw`, opens the recovery editor, and saves a full replacement through `PUT /api/config/raw` before retrying the structured reload.
 
+When the loaded configuration is composed from multiple files via `!include`, structured save endpoints reject writes with HTTP 409 and the machine-readable error code `config_composed_from_includes`, distinguishing this permanent rejection from a retryable stale-write conflict.
+`POST /api/config/load` reports the includes state in the `x-mindroom-config-uses-includes` response header, `GET /api/config/raw` includes a `uses_includes` field in its response body, and the dashboard shows a banner explaining that changes must be made by editing the include source files directly.
+The raw recovery editor keeps working on the top-level file's literal text; see the configuration guide's section on splitting the configuration into multiple files for the full semantics.
+
 ### Credentials
 
 | Method | Endpoint | Description |
@@ -223,6 +229,11 @@ Credentials support scoping via query parameters:
 
 - `agent_name` — scope credentials to a specific agent
 - `execution_scope` — scope credentials to a specific worker scope (e.g., `shared`, `unscoped`)
+
+When `agent_name` is present, credential routes require the authenticated dashboard requester to be allowed by `authorization.agent_reply_permissions` for that agent.
+Unauthorized agent-scoped requests return HTTP 403.
+Trusted upstream deployments should provide a Matrix requester identity through the configured Matrix user ID header or email-to-Matrix template.
+Standalone deployments should set `MINDROOM_OWNER_USER_ID` so API-key dashboard requests manage credentials as the owner Matrix user.
 
 ### Knowledge
 
@@ -276,6 +287,7 @@ MindRoom tracks runtime phases internally:
 | `ready` | Orchestrator booted, serving requests |
 | `failed` | Startup or runtime failure (detail message available) |
 
+When the semantic-search embedder is failing, the health payload additionally carries `"embedder": {"status": "failing", "detail": ...}` with the classified cause; this block is diagnostic only and never flips liveness.
 Use `/api/health` for liveness probes and `/api/ready` for readiness probes in container orchestrators. Note: `/api/health` returns `503` when Matrix sync is stale (>180s without successful sync, after the 120s watchdog timeout has attempted recovery). Configure liveness probe `failureThreshold` to allow sufficient time for watchdog self-healing.
 
 ### Tools & Matrix

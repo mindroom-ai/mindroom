@@ -6,17 +6,16 @@ from functools import lru_cache
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 
-import yaml
 from pydantic import BaseModel, Field, field_serializer
 
-from mindroom import constants
+from mindroom import constants, yaml_io
 
 
 class MatrixAccount(BaseModel):
     """Represents a Matrix account (user or agent)."""
 
     username: str
-    password: str
+    password: str | None = None
     requested_username: str | None = None
     domain: str | None = None
     device_id: str | None = None
@@ -71,7 +70,7 @@ class MatrixState(BaseModel):
         self,
         key: str,
         username: str,
-        password: str,
+        password: str | None,
         *,
         requested_username: str | None = None,
         domain: str | None = None,
@@ -106,8 +105,13 @@ class MatrixState(BaseModel):
         self.rooms[key] = MatrixRoom(room_id=room_id, alias=alias, name=name, created_at=datetime.now(tz=UTC))
 
     def get_room_aliases(self) -> dict[str, str]:
-        """Get mapping of room aliases to room IDs."""
-        return {key: room.room_id for key, room in self.rooms.items()}
+        """Get mapping of room keys and full aliases to room IDs."""
+        aliases: dict[str, str] = {}
+        for key, room in self.rooms.items():
+            aliases[key] = room.room_id
+            if room.alias:
+                aliases[room.alias] = room.room_id
+        return aliases
 
     def set_space_room_id(self, room_id: str | None) -> None:
         """Persist the root Matrix Space room ID."""
@@ -157,6 +161,11 @@ def resolve_room_aliases(
     """Resolve room aliases to room IDs."""
     aliases = _room_aliases(runtime_paths)
     return [aliases.get(room, room) for room in room_list]
+
+
+def resolve_room_id(room_id_or_alias: str, runtime_paths: constants.RuntimePaths) -> str:
+    """Resolve one room alias to its Matrix room ID when known."""
+    return resolve_room_aliases([room_id_or_alias], runtime_paths=runtime_paths)[0]
 
 
 def get_room_alias_from_id(room_id: str, runtime_paths: constants.RuntimePaths) -> str | None:
@@ -213,7 +222,7 @@ def _load_matrix_state_file(state_file: Path, *, current_domain: str) -> MatrixS
     if not state_file.exists():
         return MatrixState()
     with state_file.open(encoding="utf-8") as f:
-        data = yaml.safe_load(f) or {}
+        data = yaml_io.safe_load(f) or {}
     state = MatrixState.model_validate(data)
     migrated = _migrate_accounts_to_current_schema(state, current_domain=current_domain)
     normalized_data = state.model_dump(mode="json")
@@ -236,7 +245,7 @@ def _write_matrix_state_file(state_file: Path, data: dict[str, object]) -> None:
             delete=False,
         ) as temp_file:
             temp_path = Path(temp_file.name)
-            yaml.safe_dump(data, temp_file, default_flow_style=False, sort_keys=False)
+            yaml_io.safe_dump(data, temp_file, default_flow_style=False, sort_keys=False)
             temp_file.flush()
             os.fsync(temp_file.fileno())
         temp_path.replace(state_file)

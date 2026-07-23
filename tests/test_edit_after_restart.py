@@ -12,7 +12,7 @@ from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
-from mindroom.handled_turns import HandledTurnState
+from mindroom.handled_turns import TurnRecord
 from mindroom.matrix.users import AgentMatrixUser
 from tests.conftest import install_runtime_cache_support, replace_turn_controller_deps, wrap_extracted_collaborators
 from tests.identity_helpers import entity_ids
@@ -84,7 +84,7 @@ async def test_bot_handles_redelivered_edit_after_restart(tmp_path: Path) -> Non
     original_event_id = "$original:example.com"
     response_event_id = "$response:example.com"
     bot._turn_store.record_turn(
-        HandledTurnState.create(
+        TurnRecord.create(
             [original_event_id],
             response_event_id=response_event_id,
         ),
@@ -93,7 +93,7 @@ async def test_bot_handles_redelivered_edit_after_restart(tmp_path: Path) -> Non
     # Also mark the edit event as "seen" (simulating it was delivered before restart)
     # With the correct implementation, edits should still be processed
     edit_event_id = "$edit:example.com"
-    bot._turn_store.record_turn(HandledTurnState.create([edit_event_id]))
+    bot._turn_store.record_turn(TurnRecord.create([edit_event_id]))
 
     # Create an edit event that would be redelivered after restart
     edit_event = nio.RoomMessageText.from_dict(
@@ -137,7 +137,7 @@ async def test_bot_handles_redelivered_edit_after_restart(tmp_path: Path) -> Non
     # Mock the methods needed for regeneration
     with (
         patch.object(bot._edit_regenerator, "handle_message_edit", new_callable=AsyncMock) as mock_handle_edit,
-        patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
+        patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
     ):
         # Process the redelivered edit event
         await bot._on_message(room, edit_event)
@@ -192,7 +192,7 @@ async def test_bot_skips_duplicate_regular_message_after_restart(tmp_path: Path)
 
     # Mark a message as already responded to
     message_event_id = "$message:example.com"
-    bot._turn_store.record_turn(HandledTurnState.create([message_event_id]))
+    bot._turn_store.record_turn(TurnRecord.create([message_event_id]))
 
     # Create a regular message event (not an edit)
     message_event = nio.RoomMessageText.from_dict(
@@ -220,7 +220,7 @@ async def test_bot_skips_duplicate_regular_message_after_restart(tmp_path: Path)
     # Mock methods
     with (
         patch.object(bot._turn_controller, "_dispatch_text_message", new_callable=AsyncMock) as mock_dispatch,
-        patch("mindroom.turn_controller.is_authorized_sender", return_value=True),
+        patch("mindroom.ingress_validation.is_authorized_sender", return_value=True),
     ):
         # Process the redelivered message
         await bot._on_message(room, message_event)

@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, NoReturn
 
 import httpx
 
-from mindroom.constants import RuntimePaths, runtime_matrix_ssl_verify
+from mindroom.constants import RuntimePaths, runtime_env_path, runtime_matrix_ssl_verify
+from mindroom.http_error_detail import error_detail_from_response
 from mindroom.matrix.client_session import matrix_startup_error
 from mindroom.matrix.identity import parse_current_matrix_user_id
 
@@ -22,6 +23,22 @@ def registration_token_from_env(runtime_paths: RuntimePaths) -> str | None:
     """Get MATRIX_REGISTRATION_TOKEN from environment if configured."""
     token = (runtime_paths.env_value("MATRIX_REGISTRATION_TOKEN") or "").strip()
     return token or None
+
+
+def registration_shared_secret_from_env(runtime_paths: RuntimePaths) -> str | None:
+    """Get Synapse shared-secret registration credentials from env or file."""
+    secret = (runtime_paths.env_value("MATRIX_REGISTRATION_SHARED_SECRET") or "").strip()
+    if secret:
+        return secret
+
+    file_path = runtime_env_path(runtime_paths, "MATRIX_REGISTRATION_SHARED_SECRET_FILE")
+    if file_path is None:
+        return None
+    try:
+        return file_path.read_text(encoding="utf-8").strip() or None
+    except OSError as exc:
+        msg = f"MATRIX_REGISTRATION_SHARED_SECRET_FILE is not readable: {file_path}"
+        raise matrix_startup_error(msg, permanent=True) from exc
 
 
 def _local_provisioning_client_credentials_from_env(
@@ -70,6 +87,47 @@ class _ProvisioningRegisterResult:
     user_id: str
 
 
+# Kept in sync with scripts/local_mindroom_provisioning_service.py by a contract
+# test. The service's other credential failures ("Missing/Invalid local client
+# credentials") always use HTTP 401, so only the revoked detail matters for 403.
+_CONNECTION_REVOKED_DETAIL = "Connection revoked"
+_NAMESPACE_MISMATCH_DETAIL = "Requested username is outside this local connection namespace"
+
+
+def _raise_for_register_agent_error(response: httpx.Response, *, username: str) -> NoReturn:
+    """Raise the appropriate error for a failed register-agent response."""
+    detail = error_detail_from_response(response)
+    if response.status_code == 401 or (response.status_code == 403 and detail == _CONNECTION_REVOKED_DETAIL):
+        msg = (
+            f"Provisioning credentials are invalid or revoked (server said: {detail}). "
+            "Run `mindroom connect --pair-code ...` again."
+        )
+        raise matrix_startup_error(msg, permanent=True)
+    if response.status_code == 403:
+        msg = f"Provisioning service refused to register agent user {username!r}: {detail}"
+        if detail == _NAMESPACE_MISMATCH_DETAIL:
+            msg += (
+                ". Usernames must match mindroom_<entity>_<namespace>; check that MINDROOM_NAMESPACE "
+                "matches this connection's namespace or re-run `mindroom connect --pair-code ...`."
+            )
+        raise matrix_startup_error(msg, permanent=True)
+    if response.status_code == 404:
+        msg = "Provisioning service does not support /register-agent yet. Deploy the latest local provisioning service."
+        raise matrix_startup_error(msg, permanent=True)
+    if response.status_code in {400, 422}:
+        msg = f"Provisioning service rejected the register-agent request (HTTP {response.status_code}): {detail}"
+        raise matrix_startup_error(msg, permanent=True)
+    if 300 <= response.status_code < 400:
+        location = response.headers.get("location", "unknown")
+        msg = (
+            f"Provisioning service URL redirects (HTTP {response.status_code} to {location}). "
+            "Update MINDROOM_PROVISIONING_URL to the final URL."
+        )
+        raise matrix_startup_error(msg, permanent=True)
+    msg = f"Provisioning service returned HTTP {response.status_code}: {detail}"
+    raise ValueError(msg)
+
+
 async def register_user_via_provisioning_service(
     *,
     provisioning_url: str,
@@ -104,18 +162,7 @@ async def register_user_via_provisioning_service(
         raise ValueError(msg) from exc
 
     if not response.is_success:
-        detail = response.text.strip() or "unknown error"
-        if response.status_code in {401, 403}:
-            msg = "Provisioning credentials are invalid or revoked. Run `mindroom connect --pair-code ...` again."
-            raise matrix_startup_error(msg, permanent=True)
-        if response.status_code == 404:
-            msg = (
-                "Provisioning service does not support /register-agent yet. "
-                "Deploy the latest local provisioning service."
-            )
-            raise matrix_startup_error(msg, permanent=True)
-        msg = f"Provisioning service returned HTTP {response.status_code}: {detail}"
-        raise ValueError(msg)
+        _raise_for_register_agent_error(response, username=username)
 
     try:
         body = response.json()

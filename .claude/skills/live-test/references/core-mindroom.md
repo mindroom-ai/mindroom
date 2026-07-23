@@ -1,5 +1,8 @@
-## IMPORTANT: Tuwunel Already Running
-On this machine, the Matrix homeserver (Tuwunel/Conduwuit) is ALREADY RUNNING on localhost:8008. Do NOT start a new one. Skip `just local-matrix-up`. Use `MATRIX_HOMESERVER=http://localhost:8008 MATRIX_SSL_VERIFY=false`.
+## IMPORTANT: Check for an Existing Homeserver First
+Some dev machines already run a Matrix homeserver (Tuwunel/Conduwuit) on localhost:8008; do not start a second one there.
+Probe first with `curl -s --max-time 5 http://localhost:8008/_matrix/client/versions`.
+If it responds, skip `just local-matrix-up`; if it does not, boot the Docker stack with `just local-matrix-up` (and `just local-matrix-down` when you are done).
+Either way, use `MATRIX_HOMESERVER=http://localhost:8008 MATRIX_SSL_VERIFY=false`.
 
 # Core MindRoom Live Run
 
@@ -7,7 +10,7 @@ Use this reference for the local Matrix stack, the Python backend, Matty smoke t
 
 ## NixOS Environment (CRITICAL)
 
-On NixOS hosts (e.g., Incus containers), enter the repo dev shell before running `uv run` commands.
+On NixOS hosts (e.g., Incus containers), enter the repo Node.js 24 dev shell before running `uv run` commands.
 The shell provides `libstdc++.so.6`, which is needed for numpy, qdrant, and chromadb.
 
 ```bash
@@ -24,7 +27,9 @@ nix-shell -I nixpkgs=/nix/var/nix/profiles/per-user/root/channels/nixos shell.ni
 ```
 
 Without this shell, imports fail with `AttributeError: module 'mindroom' has no attribute 'bot'`.
-The repo root `shell.nix` adds `stdenv.cc.cc.lib` to `LD_LIBRARY_PATH`, which is what provides `libstdc++.so.6`.
+The repo root `shell.nix` adds `stdenv.cc.cc.lib` to `LD_LIBRARY_PATH` on Linux, which is what provides `libstdc++.so.6`.
+
+The shell includes Chromium and its shared libraries only on Linux so the backend and Node.js tools also work on macOS.
 
 ## Preflight
 
@@ -32,7 +37,9 @@ Run from the repo root.
 
 ```bash
 uv sync --all-extras
-just local-matrix-up
+if ! curl -fsS --max-time 5 http://localhost:8008/_matrix/client/versions >/dev/null; then
+  just local-matrix-up
+fi
 curl -s http://localhost:8008/_matrix/client/versions | head -c 200
 curl -s http://localhost:9292/v1/models | head -c 200
 ```
@@ -70,8 +77,11 @@ Use this when the machine already has local MindRoom instances, existing Matrix 
 
 ```bash
 tmp="$(mktemp -d /tmp/mindroom-live-test.XXXXXX)"
-uv run mindroom config init --minimal --provider openai --force --path "$tmp/config.yaml"
+uv run mindroom config init --provider openai --force --path "$tmp/config.yaml"
 ```
+
+`config init` has no `--minimal` flag; write the config YAML directly when you need a precise minimal shape (models, agents, teams, authorization, `mindroom_user`).
+If no local model server is running on 9292 and no provider key is available, a ~60-line FastAPI stub serving `/v1/models` and `/v1/chat/completions` (JSON + SSE stream) is enough for deterministic end-to-end turns; run it with `uvicorn` from the venv.
 
 Patch the generated config so it can run locally without private credentials and without restrictive room auth.
 When you are targeting the local OpenAI-compatible server on `http://localhost:9292/v1`, start with `gpt-oss-low:20b`.
@@ -166,14 +176,20 @@ The repo's documented local path suggests `gpt-oss-low:20b` because it has been 
 When open registration is enabled on local Synapse, create a throwaway user directly through the Matrix client API.
 
 ```bash
+set +x
 username="smoketest$(date +%H%M%S)"
 password="smoketestpass"
-curl -sS -X POST 'http://localhost:8008/_matrix/client/v3/register' \
+registration_response="$(curl -sS -X POST 'http://localhost:8008/_matrix/client/v3/register' \
   -H 'Content-Type: application/json' \
-  -d "{\"auth\":{\"type\":\"m.login.dummy\"},\"username\":\"$username\",\"password\":\"$password\"}"
+  -d "{\"auth\":{\"type\":\"m.login.dummy\"},\"username\":\"$username\",\"password\":\"$password\"}")"
+read -r user_id access_token < <(
+  REGISTRATION_RESPONSE="$registration_response" python -c \
+    'import json, os; response = json.loads(os.environ["REGISTRATION_RESPONSE"]); print(response["user_id"], response["access_token"])'
+)
+unset registration_response
 ```
 
-The response includes `user_id` and `access_token`.
+The response is captured without printing its `access_token`, and shell tracing must remain disabled while the credential variables exist.
 
 ## Join a Public Room
 
@@ -203,6 +219,7 @@ Use the actual alias created by the active config.
 ## Read and Send Messages with Matty
 
 Matty accepts per-command credentials with `-u` and `-p`.
+Matty may be absent from a fresh worktree venv; if `matty` is not found after `uv sync --all-extras`, fall back to the raw Matrix client API with `curl` (register, `/join/{roomId}`, `PUT /rooms/{roomId}/send/m.room.message/{txn}`, and `GET /rooms/{roomId}/messages?dir=b` filtering `m.relates_to.rel_type == "m.thread"`), which is fully sufficient for send/read smoke tests.
 
 List rooms:
 

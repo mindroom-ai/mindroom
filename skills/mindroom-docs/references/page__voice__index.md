@@ -28,8 +28,8 @@ voice:
   visible_router_echo: true
   stt:
     provider: openai
-    model: whisper-1
-    # Optional: custom endpoint (without /v1 suffix)
+    model: gpt-4o-transcribe
+    # Optional: custom service root or /v1 base URL
     # host: http://localhost:8080
   intelligence:
     model: default  # Model used for command recognition
@@ -45,14 +45,14 @@ With `voice.visible_router_echo: true`, the router also posts the normalized tra
 
 MindRoom uses the OpenAI-compatible transcription API. Any service that implements the `/v1/audio/transcriptions` endpoint will work.
 
-### OpenAI Whisper (Cloud)
+### OpenAI Transcription (Cloud)
 
 ```yaml
 voice:
   enabled: true
   stt:
     provider: openai
-    model: whisper-1
+    model: gpt-4o-transcribe
 ```
 
 Requires `OPENAI_API_KEY` environment variable.
@@ -63,12 +63,12 @@ Requires `OPENAI_API_KEY` environment variable.
 voice:
   enabled: true
   stt:
-    provider: openai
+    provider: openai_compatible
     model: whisper-1
     host: http://localhost:8080
 ```
 
-Note: Do not include `/v1` in the host URL - MindRoom appends `/v1/audio/transcriptions` automatically.
+The host may be either the service root or its `/v1` base URL.
 
 Use with [faster-whisper-server](https://github.com/fedirz/faster-whisper-server) or similar OpenAI-compatible STT servers.
 
@@ -80,13 +80,14 @@ For self-hosted solutions that require authentication:
 voice:
   enabled: true
   stt:
-    provider: openai
+    provider: openai_compatible
     model: whisper-1
     host: http://localhost:8080
     api_key: your-custom-api-key
 ```
 
-If `api_key` is not set, MindRoom falls back to the `OPENAI_API_KEY` environment variable.
+If a custom endpoint has no `api_key`, MindRoom sends a non-secret placeholder rather than requiring a cloud key.
+Cloud OpenAI transcription falls back to the `OPENAI_API_KEY` environment variable.
 
 ## Command Recognition
 
@@ -178,6 +179,8 @@ Set `voice.visible_router_echo: false` to suppress the display-only echo without
 The original audio is always registered as a context-scoped attachment before dispatch continues.
 That means the responding agent or team can inspect the file directly, use audio-capable models, or fetch it later with the `attachments` tool.
 This is true whether the prompt came from a transcript, a fallback message, or a router handoff.
+For successful STT turns, MindRoom adds hidden model-facing guidance that says the `🎤` text is already the transcript and the raw audio attachment is optional.
+For raw fallback turns, MindRoom does not add that guidance because the audio attachment remains the primary content.
 
 ## Matrix Integration
 
@@ -198,17 +201,21 @@ Reply-permission checks still use the original human sender, not a later router 
 
 | Variable | Description |
 |----------|-------------|
-| `OPENAI_API_KEY` | For OpenAI Whisper API (used as fallback if no `api_key` configured) |
+| `OPENAI_API_KEY` | For OpenAI transcription (used as fallback if no `api_key` is configured) |
 
 ## Text-to-Speech Tools
 
 MindRoom also supports text-to-speech (TTS) through agent tools.
 These are separate from voice message transcription and allow agents to generate audio responses:
 
+- **Matrix Voice Message** - One-call OpenAI TTS delivery to the current Matrix room or thread via `matrix_voice_message`
 - **OpenAI** - Speech synthesis via `openai` tool
 - **ElevenLabs** - High-quality AI voices and sound effects via `eleven_labs` tool
 - **Cartesia** - Voice AI with optional voice localization via `cartesia` tool
 - **Groq** - Fast speech generation via `groq` tool
+
+Use `matrix_voice_message` when an agent should send a playable Opus Matrix voice note directly.
+It defaults to the current room and active thread, accepts `thread_id="room"` for room-level delivery, and can add readable text through `companion_message`.
 
 See the [Tools documentation](https://docs.mindroom.chat/tools/) for configuration details.
 

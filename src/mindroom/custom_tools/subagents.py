@@ -13,28 +13,24 @@ import nio
 from agno.tools import Toolkit
 
 from mindroom.agent_descriptions import describe_agent
-from mindroom.authorization import (
-    responder_candidate_entities_for_room,
-    responder_candidate_entities_from_cached_room,
-)
+from mindroom.authorization import responder_candidate_entities_for_room, responder_candidate_entities_from_cached_room
 from mindroom.constants import ORIGINAL_SENDER_KEY
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.matrix.client_delivery import send_message_result
 from mindroom.matrix.mentions import format_message_with_mentions
-from mindroom.message_target import MessageTarget
 from mindroom.responder_availability import (
     filter_materializable_responders,
     live_responder_entity_names,
     materializable_agent_names_for_orchestrator,
 )
+from mindroom.session_ids import create_session_id, parse_session_id
 from mindroom.thread_summary import (
     THREAD_SUMMARY_MAX_LENGTH,
     normalize_thread_summary_text,
     send_thread_summary_event,
     update_last_summary_count,
 )
-from mindroom.thread_tags import ThreadTagsError, normalize_tag_name, set_thread_tag
-from mindroom.thread_utils import create_session_id, parse_session_id
+from mindroom.thread_tags import RESOLVED_THREAD_TAG, ThreadTagsError, normalize_tag_name, set_thread_tag
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
 
 if TYPE_CHECKING:
@@ -92,6 +88,9 @@ def _normalize_spawn_summary(summary: object) -> str:
 def _validate_spawn_metadata(summary: object, tag: object) -> tuple[str, str]:
     normalized_summary = _normalize_spawn_summary(summary)
     normalized_tag = normalize_tag_name(tag)
+    if normalized_tag == RESOLVED_THREAD_TAG:
+        msg = "sessions_spawn tag cannot set thread lifecycle state."
+        raise ValueError(msg)
     return normalized_summary, normalized_tag
 
 
@@ -385,7 +384,7 @@ async def _send_matrix_text(
     )
     if original_sender:
         content[ORIGINAL_SENDER_KEY] = original_sender
-    delivered = await send_message_result(context.client, room_id, content, config=context.config)
+    delivered = await send_message_result(context.client, room_id, content)
     if delivered is not None:
         context.conversation_cache.notify_outbound_message(room_id, delivered.event_id, delivered.content_sent)
     if delivered is not None:
@@ -424,7 +423,6 @@ async def _spawn_followup_warnings(
             summary_message_count,
             "manual",
             context.conversation_cache,
-            config=context.config,
         )
     except Exception as exc:
         warnings.append(f"Failed to set thread summary: {exc}")
@@ -709,7 +707,7 @@ class SubAgentsTools(Toolkit):
         if not message.strip():
             return _payload("sessions_send", "error", message="Message cannot be empty.")
 
-        target_session = session_key or MessageTarget.from_runtime_context(context).session_id
+        target_session = session_key or context.target.session_id
         if label and not session_key:
             resolved = await asyncio.to_thread(_resolve_by_label, context, label)
             if resolved:
@@ -769,7 +767,7 @@ class SubAgentsTools(Toolkit):
         label: str | None = None,
         agent_id: str | None = None,
     ) -> str:
-        """Spawn an isolated background session with a required summary and tag."""
+        """Spawn an isolated background session with a required summary and topic tag."""
         context = _get_context()
         if context is None:
             return _context_error("sessions_spawn")

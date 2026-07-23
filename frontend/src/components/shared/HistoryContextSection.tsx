@@ -333,7 +333,7 @@ export function HistoryContextSection<T extends HistoryContextFormValues>({
                   placeholder={
                     defaultCompaction?.threshold_tokens != null
                       ? `Default: ${defaultCompaction.threshold_tokens}`
-                      : "Default: derived from context window"
+                      : "Default: derived from replay window"
                   }
                   onChange={(e) => {
                     const value = parseOptionalInt(e.target.value, 1);
@@ -351,7 +351,7 @@ export function HistoryContextSection<T extends HistoryContextFormValues>({
 
               <FieldGroup
                 label="Threshold Percent"
-                helperText="Soft replay budget as a fraction of the context window. Crossing it records planning metadata; destructive compaction waits for the hard budget."
+                helperText="Soft replay budget as a fraction of the effective replay window. Crossing it records planning metadata; destructive compaction waits for the hard budget."
                 htmlFor="compaction_threshold_percent"
               >
                 <Input
@@ -396,6 +396,31 @@ export function HistoryContextSection<T extends HistoryContextFormValues>({
                           : "",
                       );
                     }
+                  }}
+                />
+              </FieldGroup>
+
+              <FieldGroup
+                label="Replay Window Tokens"
+                helperText="Optional persisted-replay and compaction-planning cap. This does not lower the model provider's request limit."
+                htmlFor="compaction_replay_window_tokens"
+              >
+                <Input
+                  id="compaction_replay_window_tokens"
+                  type="number"
+                  min={1}
+                  value={compactionConfig?.replay_window_tokens ?? ""}
+                  placeholder={
+                    defaultCompaction?.replay_window_tokens != null
+                      ? `Default: ${defaultCompaction.replay_window_tokens}`
+                      : "Default: model context window"
+                  }
+                  onChange={(e) => {
+                    const value = parseOptionalInt(e.target.value, 1);
+                    mutateCompaction((current) => ({
+                      ...(current ?? {}),
+                      replay_window_tokens: value ?? undefined,
+                    }));
                   }}
                 />
               </FieldGroup>

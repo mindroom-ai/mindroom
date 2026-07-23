@@ -5,19 +5,16 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
 
-from mindroom.constants import (
-    resolve_config_relative_path,
-    runtime_mindroom_namespace,
-)
+from mindroom.config.validation import duplicate_items
+from mindroom.constants import resolve_config_relative_path, runtime_mindroom_namespace
 from mindroom.matrix_identifiers import managed_room_key_from_alias_localpart, room_alias_localpart
 from mindroom.runtime_env_policy import is_runtime_database_url_env_name
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
 
 _RoomAccessMode = Literal["single_user_private", "multi_user"]
@@ -110,25 +107,6 @@ class MatrixSpaceConfig(BaseModel):
         return normalized
 
 
-class MatrixDeliveryConfig(BaseModel):
-    """Configuration for outgoing Matrix event delivery."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    ignore_unverified_devices: bool = Field(
-        default=False,
-        description=(
-            "Whether outgoing encrypted Matrix sends should ignore unverified devices. "
-            "The default keeps nio's device-trust checks enabled."
-        ),
-    )
-
-
-def ignore_unverified_devices_for_config(config: Config) -> bool:
-    """Return the explicit Matrix delivery trust policy for outgoing sends."""
-    return config.matrix_delivery.ignore_unverified_devices
-
-
 class MatrixRoomAccessConfig(BaseModel):
     """Configuration for managed Matrix room access and discoverability."""
 
@@ -158,17 +136,32 @@ class MatrixRoomAccessConfig(BaseModel):
             "on startup and config reload"
         ),
     )
+    encrypt_managed_rooms: bool = Field(
+        default=False,
+        description=(
+            "Whether managed rooms should have Matrix end-to-end encryption enabled by default. "
+            "Per-room rooms.<key>.encrypted overrides this. "
+            "Enabling encryption on a Matrix room is irreversible; MindRoom never disables it."
+        ),
+    )
+    room_admins: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Matrix user IDs granted room admin power (100) in every managed room. "
+            "Applied at room creation and reconciled on startup and config reload; "
+            "membership is unchanged, so listed users become admins once they are in the room."
+        ),
+    )
 
-    @field_validator("invite_only_rooms")
+    @field_validator("invite_only_rooms", "room_admins")
     @classmethod
-    def validate_unique_invite_only_rooms(cls, invite_only_rooms: list[str]) -> list[str]:
-        """Ensure each invite-only room identifier appears at most once."""
-        if len(invite_only_rooms) != len(set(invite_only_rooms)):
-            seen: set[str] = set()
-            duplicates = {r for r in invite_only_rooms if r in seen or seen.add(r)}
-            msg = f"Duplicate invite_only_rooms are not allowed: {', '.join(sorted(duplicates))}"
+    def validate_unique_entries(cls, values: list[str], info: ValidationInfo) -> list[str]:
+        """Ensure each configured entry appears at most once."""
+        duplicates = duplicate_items(values)
+        if duplicates:
+            msg = f"Duplicate {info.field_name} are not allowed: {', '.join(duplicates)}"
             raise ValueError(msg)
-        return invite_only_rooms
+        return values
 
     def is_multi_user_mode(self) -> bool:
         """Return whether multi-user room access mode is enabled."""

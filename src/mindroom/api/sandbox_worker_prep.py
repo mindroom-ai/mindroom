@@ -160,7 +160,7 @@ def _prepare_worker(
             raise WorkerBackendError(msg)
         paths = local_worker_state_paths_for_root(dedicated_root)
         try:
-            ensure_local_worker_state_locked(worker_key, paths)
+            ensure_local_worker_state_locked(paths)
         except Exception as exc:
             failure_reason = f"Failed to initialize dedicated worker '{worker_key}': {exc}"
             raise WorkerBackendError(failure_reason) from exc

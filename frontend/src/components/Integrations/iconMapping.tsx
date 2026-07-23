@@ -43,6 +43,7 @@ import {
   SiDocker,
   SiElevenlabs,
   SiGooglegemini,
+  SiGiphy,
   SiGithub,
   SiGooglebigquery,
   SiGooglemaps,
@@ -53,7 +54,6 @@ import {
   SiOpenai,
   SiPostgresql,
   SiPython,
-  SiAmazonredshift,
   SiTrello,
   SiZendesk,
   SiGmail,
@@ -62,11 +62,13 @@ import {
   SiShopify,
   SiClickup,
   SiGooglecalendar,
+  SiGoogledocs,
   SiGoogledrive,
   SiNotion,
   SiTodoist,
   SiArxiv,
   SiDuckduckgo,
+  SiGooglescholar,
   SiPubmed,
   SiUnsplash,
   SiWikipedia,
@@ -74,6 +76,9 @@ import {
   SiX,
   SiZoom,
 } from "react-icons/si";
+import { TbBrain } from "react-icons/tb";
+import { WiDaySunny } from "react-icons/wi";
+import { AwsRedshift } from "./awsIcons";
 
 // Map of all icons we use
 const iconMap: Record<string, any> = {
@@ -114,6 +119,7 @@ const iconMap: Record<string, any> = {
   SiDocker,
   SiElevenlabs,
   SiGooglegemini,
+  SiGiphy,
   SiGithub,
   SiGooglebigquery,
   SiGooglemaps,
@@ -124,7 +130,6 @@ const iconMap: Record<string, any> = {
   SiOpenai,
   SiPostgresql,
   SiPython,
-  SiAmazonredshift,
   SiTrello,
   SiZendesk,
   SiGmail,
@@ -133,18 +138,22 @@ const iconMap: Record<string, any> = {
   SiShopify,
   SiClickup,
   SiGooglecalendar,
+  SiGoogledocs,
   SiGoogledrive,
   SiNotion,
   SiTodoist,
   SiArxiv,
   SiDuckduckgo,
+  SiGooglescholar,
   SiPubmed,
   SiUnsplash,
   SiWikipedia,
   SiReddit,
   SiX,
   SiZoom,
-  GiGift: LucideIcons.Gift, // Fallback icon
+  TbBrain,
+  WiDaySunny,
+  AwsRedshift,
 };
 
 /**

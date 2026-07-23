@@ -31,13 +31,14 @@ from mindroom.execution_preparation import (
     _sanitize_thread_history_for_replay,
 )
 from mindroom.history.interrupted_replay import (
-    _INTERRUPTED_RESPONSE_MARKER,
     InterruptedReplaySnapshot,
     _render_interrupted_replay_content,
 )
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.client_thread_history import fetch_thread_history
 from mindroom.matrix.client_visible_messages import _stream_status_from_content
+from mindroom.message_target import MessageTarget
+from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.streaming import (
     _CANCELLED_RESPONSE_NOTE,
     _INTERRUPTED_RESPONSE_NOTE,
@@ -96,11 +97,7 @@ def _render_normalized_interrupted_replay(body: str) -> str:
             partial_text=_clean_partial_reply_body(body),
             completed_tools=(),
             interrupted_tools=(),
-            seen_event_ids=(),
-            source_event_id=None,
-            source_event_ids=(),
-            source_event_prompts=(),
-            response_event_id=None,
+            run_metadata={},
         ),
     )
 
@@ -337,7 +334,7 @@ class TestCleanPartialReplyBody:
         ]
 
         assert rendered[0] == rendered[1] == rendered[2]
-        assert rendered[0] == f"Partial answer\n\n{_INTERRUPTED_RESPONSE_MARKER}".encode()
+        assert rendered[0] == b"Partial answer\n\n(turn stopped before completion)"
 
 
 class TestUnseenMessagesPartialReplies:
@@ -404,7 +401,11 @@ class TestUnseenMessagesPartialReplies:
         assert [message.role for message in context_messages] == ["user", "user", "user"]
         assert "Your previous response is still being delivered." in str(context_messages[0].content)
         assert "Do NOT repeat or redo that work." in str(context_messages[0].content)
-        assert context_messages[1].content == "You (reply still streaming): Partial reply"
+        assert context_messages[1].content == render_msg_tag(
+            sender=agent_id,
+            body="You (reply still streaming): Partial reply",
+            event_id="e2",
+        )
         assert context_messages[2].content == "Answer the new question."
 
     def test_replay_fallback_sanitizer_matches_unseen_context_rules(self) -> None:
@@ -764,9 +765,7 @@ class TestStreamingFinalizeStatuses:
             mock_edit_message.return_value = delivered_matrix_event("$edit1")
 
             streaming = StreamingResponse(
-                room_id="!room:localhost",
-                reply_to_event_id=None,
-                thread_id=None,
+                target=MessageTarget.resolve("!room:localhost", None, None),
                 config=config,
                 runtime_paths=runtime_paths,
             )
@@ -794,9 +793,7 @@ class TestStreamingFinalizeStatuses:
             mock_edit_message.return_value = delivered_matrix_event("$edit1")
 
             streaming = StreamingResponse(
-                room_id="!room:localhost",
-                reply_to_event_id=None,
-                thread_id=None,
+                target=MessageTarget.resolve("!room:localhost", None, None),
                 config=config,
                 runtime_paths=runtime_paths,
             )
@@ -822,9 +819,7 @@ class TestStreamingFinalizeStatuses:
             mock_edit_message.return_value = delivered_matrix_event("$edit1")
 
             streaming = StreamingResponse(
-                room_id="!room:localhost",
-                reply_to_event_id=None,
-                thread_id=None,
+                target=MessageTarget.resolve("!room:localhost", None, None),
                 config=config,
                 runtime_paths=runtime_paths,
             )
@@ -850,9 +845,7 @@ class TestStreamingFinalizeStatuses:
             mock_edit_message.side_effect = [None, delivered_matrix_event("$edit2")]
 
             streaming = StreamingResponse(
-                room_id="!room:localhost",
-                reply_to_event_id=None,
-                thread_id=None,
+                target=MessageTarget.resolve("!room:localhost", None, None),
                 config=config,
                 runtime_paths=runtime_paths,
             )
@@ -879,9 +872,7 @@ class TestStreamingFinalizeStatuses:
             mock_edit_message.side_effect = [RuntimeError("transport boom"), delivered_matrix_event("$edit2")]
 
             streaming = StreamingResponse(
-                room_id="!room:localhost",
-                reply_to_event_id=None,
-                thread_id=None,
+                target=MessageTarget.resolve("!room:localhost", None, None),
                 config=config,
                 runtime_paths=runtime_paths,
             )

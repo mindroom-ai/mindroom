@@ -8,11 +8,13 @@ Deploy MindRoom on Kubernetes for production multi-tenant deployments.
 
 ## Architecture
 
-MindRoom uses three Helm charts:
+MindRoom uses five Helm charts:
 
 - **Instance Chart** (`cluster/k8s/instance/`) - Individual MindRoom runtime with bundled dashboard/API plus Matrix/Synapse
 - **Platform Chart** (`cluster/k8s/platform/`) - SaaS control plane (API, frontend, provisioner)
 - **Runtime Chart** (`cluster/k8s/runtime/`) - MindRoom runtime only, for clusters that provide Matrix, storage, secrets, ingress, and platform services externally
+- **Tuwunel Chart** (`cluster/k8s/tuwunel/`) - Standalone Tuwunel homeserver (MindRoom fork) for clusters that pair the runtime chart with a chart-managed Matrix homeserver
+- **Client Chart** (`cluster/k8s/client/`) - Standalone MindRoom web client behind unprivileged nginx, for clusters that already provide a homeserver, ingress, and TLS
 
 ## Prerequisites
 
@@ -20,6 +22,27 @@ MindRoom uses three Helm charts:
 - kubectl and helm installed
 - NGINX Ingress Controller
 - cert-manager (for TLS certificates)
+- Hetzner Cloud Controller Manager and Hetzner CSI Driver when using `hcloud-volumes`
+
+## Hetzner Scaling Baseline
+
+Start with one K3s server node and keep tenant storage on Hetzner Cloud Volumes.
+This keeps the current bill low while making later worker nodes possible.
+Use `hcloud-volumes` for provisioned instance PVCs and avoid `local-path` for tenant data that must survive node replacement.
+The platform frontend and backend are stateless and can use HPA once metrics-server is installed.
+Tenant MindRoom and Synapse releases stay single-replica stateful workloads; scale capacity by placing more tenants across more nodes.
+
+Production platform values should make the storage class explicit:
+
+```yaml
+provisioner:
+  instanceStorageClassName: hcloud-volumes
+
+autoscaling:
+  enabled: false
+```
+
+Enable `autoscaling.enabled` only after the cluster has metrics-server and enough nodes or headroom to schedule the extra replicas.
 
 ## Instance Deployment
 
@@ -57,7 +80,7 @@ Only enable trusted upstream auth when the instance is behind a verified access 
 ```bash
 helm upgrade --install instance-1 ./cluster/k8s/instance \
   --namespace mindroom-instances \
-  --reuse-values \
+  --reset-then-reuse-values \
   --set-string trustedUpstreamAuth.enabled=true \
   --set trustedUpstreamAuth.userIdHeader=X-MindRoom-User-Id \
   --set trustedUpstreamAuth.emailHeader=X-MindRoom-User-Email \
@@ -74,6 +97,7 @@ The email-to-Matrix template must contain exactly one `{localpart}` placeholder 
 Use the runtime chart when you already operate the surrounding platform and only want Kubernetes to run the MindRoom runtime.
 
 The chart intentionally does not create Matrix, ingress, a model gateway, or platform services.
+For a chart-managed homeserver, deploy the Tuwunel chart (`cluster/k8s/tuwunel/`) alongside it and point `matrix.homeserverUrl`, `matrix.serverName`, and `matrix.registrationToken` at it as described in `cluster/k8s/tuwunel/README.md`.
 
 ```bash
 helm upgrade --install mindroom-runtime ./cluster/k8s/runtime \
@@ -115,10 +139,11 @@ workers:
 ```
 
 See `cluster/k8s/runtime/README.md` and `cluster/k8s/runtime/values.yaml` for the full values surface.
+For chart-managed worker egress with human-approved temporary hostname grants, see [Approved Egress](approved-egress.md).
 
 ## Worker Backends
 
-The instance and runtime charts support two worker backend modes for worker-routed tools such as `shell`, `file`, and `python`.
+The instance and runtime charts support two worker backend modes for worker-routed tools such as `coding`, `docker`, `file`, `python`, and `shell`.
 
 The dedicated-worker provisioning flow is implemented today.
 
@@ -179,6 +204,8 @@ Important behavior and constraints:
 
 - `kubernetesWorkerImage` and `kubernetesWorkerImagePullPolicy` default to the main MindRoom image settings when left empty.
 - `workerCleanupIntervalSeconds` controls how often the primary runtime runs idle-worker cleanup.
+- Worker pod-template drift (image, env, resources) is reconciled automatically: each cleanup pass recreates scaled-down worker Deployments whose pod template no longer matches the configured spec, and running workers are recreated on their next provisioning after they scale down.
+- Reconciliation is controlled by `workers.kubernetes.reconcilePodTemplates` in the runtime chart (`MINDROOM_KUBERNETES_WORKER_RECONCILE_POD_TEMPLATES`, default on), so worker Deployments do not need manual recycling after image or pod-template changes.
 - `kubernetesWorkerIdleTimeoutSeconds` controls when a worker is considered idle and eligible to scale down.
 - `kubernetesWorkerReadyTimeoutSeconds` controls how long the primary runtime waits for a worker Deployment to become ready.
 - `kubernetesWorkerPort` is the internal Service and container port used by dedicated workers.
@@ -202,6 +229,8 @@ Dedicated workers need access to the same PVC as the primary runtime.
 Set `storageAccessMode: ReadWriteMany` so multiple workers can access agent storage concurrently.
 If your storage class only supports `ReadWriteOnce`, set `controlPlaneNodeName` so the control plane and dedicated workers stay on the same node.
 The chart enforces this constraint during template rendering.
+For the hosted SaaS instance chart, keep the default `static_runner` backend on single-node clusters.
+Switching hosted instances to dedicated Kubernetes workers on a multi-node cluster requires either a real `ReadWriteMany` storage class or explicit node pinning.
 
 ### RBAC And Network Policy
 
@@ -232,6 +261,9 @@ env:
     value: "/etc/secrets/openrouter_key"
 ```
 
+For production SaaS instance provisioning, the platform backend creates `mindroom-api-keys-{instance_id}` directly with Kubernetes before running Helm.
+The instance chart is then rendered with `instanceSecrets.create=false`, `instanceSecrets.name`, and a non-secret `instanceSecrets.hash`, so tenant API keys and OIDC client secrets do not enter Helm release values or rendered Helm Secret manifests.
+
 ## Ingress
 
 Each instance gets three hosts:
@@ -253,12 +285,14 @@ helm upgrade --install platform ./cluster/k8s/platform \
 ```
 
 The namespace must match `mindroom-{environment}` where `environment` is set in values.
+For production, set `platformSecrets.create=false` and pre-create the named Secret so API keys, webhook secrets, and Matrix OIDC private keys do not enter Helm release values.
+The Secret must contain the same keys rendered by the chart-managed `platform-secrets` Secret, including `supabase_service_key`, `stripe_secret_key`, `stripe_webhook_secret`, `provisioner_api_key`, `instance_credentials_encryption_secret`, provider API keys, and the optional `matrix_oidc_*` keys.
 
 Platform ingress hosts:
 
 - `app.{domain}` - Platform frontend
 - `api.{domain}` - Platform backend API
-- `webhooks.{domain}/stripe` - Stripe webhooks
+- `webhooks.{domain}/webhooks/stripe` - Stripe webhooks
 
 ## Local Development with Kind
 
@@ -303,7 +337,7 @@ Example provision request:
 curl -X POST "https://api.mindroom.chat/system/provision" \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $PROVISIONER_API_KEY" \
-  -d '{"account_id": "uuid", "subscription_id": "sub-123", "tier": "starter"}'
+  -d '{"account_id": "uuid", "subscription_id": "sub-123", "tier": "byok"}'
 ```
 
 The provisioner creates the namespace, generates URLs, deploys via Helm, and updates status in Supabase.
@@ -338,3 +372,7 @@ Each customer instance gets:
 - Dedicated ingress routes
 
 Platform services run in `mindroom-{environment}` namespace.
+The hosted SaaS chart currently runs Synapse per tenant, with server names such as `{customer}.mindroom.chat`.
+The public `mindroom.chat` Matrix server is the separate Tuwunel server on `hetzner-matrix`.
+Do not reuse `mindroom.chat` as the default SaaS tenant homeserver until the product has an explicit shared-homeserver mode with tenant isolation, provisioning, room ownership, SSO, and deprovisioning semantics.
+The runtime-only chart is the better starting point for a future bring-your-own-homeserver or shared-homeserver mode.

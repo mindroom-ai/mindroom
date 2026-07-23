@@ -23,3 +23,12 @@ def validate_history_limit_choice(
     if num_history_runs is not None and num_history_messages is not None:
         msg = "num_history_runs and num_history_messages are mutually exclusive"
         raise ValueError(msg)
+
+
+def non_empty_stripped(value: str, *, field_name: str) -> str:
+    """Return a stripped string, rejecting empty values with a field-specific message."""
+    stripped = value.strip()
+    if not stripped:
+        msg = f"{field_name} must not be empty"
+        raise ValueError(msg)
+    return stripped

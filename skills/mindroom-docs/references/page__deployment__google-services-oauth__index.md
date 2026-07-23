@@ -2,27 +2,58 @@
 
 MindRoom uses the generic OAuth framework for Google tools.
 Each Google service has its own provider ID, callback URL, token service, OAuth client config service, and editable tool settings service.
-There is no bundled `/api/google/*` OAuth flow.
+Paired local installations retrieve MindRoom's desktop OAuth client from the provisioning service and use it locally with PKCE.
+Public, unpaired, and organization-managed deployments can configure their own Google Cloud Web application client.
 
 ## Providers
 
 | Tool | Provider ID | Callback path | Token service | Client config service | Settings service | Scopes |
 | --- | --- | --- | --- | --- | --- | --- |
-| Google Drive | `google_drive` | `/api/oauth/google_drive/callback` | `google_drive_oauth` | `google_drive_oauth_client` | `google_drive` | Drive read-only plus OpenID email/profile |
-| Google Calendar | `google_calendar` | `/api/oauth/google_calendar/callback` | `google_calendar_oauth` | `google_calendar_oauth_client` | `google_calendar` | Calendar read/write plus OpenID email/profile |
+| Google Drive | `google_drive` | `/api/oauth/google_drive/callback` | `google_drive_oauth` | `google_drive_oauth_client` | `google_drive` | Full Drive access plus OpenID email/profile |
+| Google Docs | `google_docs` | `/api/oauth/google_docs/callback` | `google_docs_oauth` | `google_docs_oauth_client` | `google_docs` | Docs view/edit/create/delete plus OpenID email/profile |
+| Google Calendar | `google_calendar` | `/api/oauth/google_calendar/callback` | `google_calendar_oauth` | `google_calendar_oauth_client` | `google_calendar` | Calendar events, calendar-list read-only, free/busy, and settings read-only plus OpenID email/profile |
 | Google Sheets | `google_sheets` | `/api/oauth/google_sheets/callback` | `google_sheets_oauth` | `google_sheets_oauth_client` | `google_sheets` | Sheets read/write, plus OpenID email/profile |
-| Gmail | `google_gmail` | `/api/oauth/google_gmail/callback` | `google_gmail_oauth` | `google_gmail_oauth_client` | `gmail` | Gmail readonly, modify, compose plus OpenID email/profile |
+| Gmail | `google_gmail` | `/api/oauth/google_gmail/callback` | `google_gmail_oauth` | `google_gmail_oauth_client` | `gmail` | Gmail modify plus OpenID email/profile |
 
-## Google Cloud Setup
+## Scope Rationale
 
-Create an OAuth client in Google Cloud Console.
+MindRoom requests only the scopes required by the operations currently exposed to agents.
+
+- `drive` lets an agent search, read, upload, create folders, move or rename files, and move files to trash across the connected account.
+- Existing `drive.readonly` grants remain usable for reads, but Drive write tools ask the user to reconnect and grant full Drive access.
+  Full Drive scope also authorizes permanent deletion at the Google API layer, but MindRoom exposes only trashing and no permanent-delete tool.
+  The narrower `drive.file` scope cannot preserve account-wide search because it is limited to files created by or explicitly shared with the app.
+- `documents` lets an agent create documents, read complete document structure and content, and apply text edits without granting access to non-Docs Drive files.
+  The scope also authorizes document deletion across the connected account, although MindRoom's `google_docs` tool does not expose a delete operation.
+  Google classifies `documents` as sensitive, while the broader `drive` scope is restricted.
+  The non-sensitive `drive.file` scope is not sufficient for MindRoom's direct document-ID workflow because it limits access to files created by or explicitly opened with the app, and MindRoom does not use Google Picker.
+- `calendar.events` lets an agent read events and, when `allow_update` is enabled, create, update, delete, move, and respond to events without granting calendar sharing or calendar deletion access.
+- `calendar.calendarlist.readonly` lets an agent list subscribed calendars without adding, removing, or editing subscriptions.
+- `calendar.freebusy` lets an agent check availability without exposing event details through that operation.
+- `calendar.settings.readonly` lets an agent infer working hours and locale without changing Calendar settings.
+- `spreadsheets` lets an agent read and, when enabled, create or update arbitrary spreadsheets named by the user.
+  A read-only scope would remove the existing create and update operations.
+- `gmail.modify` is the narrowest single Gmail scope that preserves mailbox search and reading, drafts and sending, replies, labels, archiving, and other mailbox organization.
+  MindRoom does not request `mail.google.com`, and `gmail.modify` does not permit bypassing the trash for permanent message deletion.
+- OpenID email and profile scopes identify the connected account and enforce optional account-domain restrictions.
+
+Google API data is used only for the user-facing agent operation requested by the user.
+Relevant results may be sent to the AI model provider configured by the installation solely to generate that requested response, as disclosed before connection and in the [Privacy Policy](https://docs.mindroom.chat/privacy/).
+MindRoom does not use Google user data to train or improve generalized, foundational, or frontier AI models.
+
+## Custom Google Cloud Setup
+
+Skip this section for a normal local installation.
+Create a **Web application** OAuth client in Google Cloud Console when you need a public callback origin or a custom Google OAuth app.
 Enable only the APIs for the tools you plan to use.
+Enable the Google Docs API before connecting `google_docs`.
 Add one authorized redirect URI for each provider you enable.
 
 For local development, the redirect URIs are:
 
 ```text
 http://localhost:8765/api/oauth/google_drive/callback
+http://localhost:8765/api/oauth/google_docs/callback
 http://localhost:8765/api/oauth/google_calendar/callback
 http://localhost:8765/api/oauth/google_sheets/callback
 http://localhost:8765/api/oauth/google_gmail/callback
@@ -30,9 +61,17 @@ http://localhost:8765/api/oauth/google_gmail/callback
 
 For production, replace the origin with your public MindRoom origin.
 
-## Stored Client Config
+## Production Verification Follow-up
 
-OAuth app client config is stored through normal credential storage, separate from user OAuth tokens and editable tool settings.
+The Google Docs provider requests the sensitive `https://www.googleapis.com/auth/documents` scope.
+Do not add this scope to a production OAuth consent configuration while another verification submission is under review unless you intentionally choose to update that submission.
+Use a separate Google Cloud testing project and test users to enable the Docs API, add the `documents` scope, configure the Docs callback, and validate the integration without changing the production submission.
+After the current production review completes, add the Docs API and `documents` scope to the production project's Data Access configuration and submit the required sensitive-scope verification follow-up with a scope justification and end-to-end demo.
+Do not enable production Google Docs connections for general users until Google has approved the added scope, because unapproved sensitive scopes can show an unverified-app warning and remain subject to test-user limits.
+
+## Custom Client Config
+
+Custom OAuth app client config is stored through normal credential storage, separate from user OAuth tokens and editable tool settings.
 Use one provider-specific service when one Google Cloud OAuth client should apply to only that provider.
 Use `google_oauth_client` when one shared Google Cloud OAuth client should apply to every Google provider.
 Provider-specific services win over `google_oauth_client`.
@@ -53,7 +92,7 @@ The shared `google_oauth_client` service ignores `redirect_uri` and derives each
 Dashboard credential responses redact `client_secret`.
 Saving redacted client config may omit or blank `client_secret` only when `client_id` is unchanged.
 Changing `client_id` requires submitting the matching new `client_secret`.
-First-time client config saves require `client_id` and `client_secret`.
+First-time custom client config saves require `client_id` and `client_secret`.
 Client config services are not worker-grantable and are never mirrored into worker containers.
 Client config services cannot be copied into ordinary credential services.
 
@@ -80,6 +119,7 @@ Optional account restrictions are service-specific:
 
 ```bash
 GOOGLE_DRIVE_ALLOWED_EMAIL_DOMAINS=example.com
+GOOGLE_DOCS_ALLOWED_EMAIL_DOMAINS=example.com
 GOOGLE_CALENDAR_ALLOWED_HOSTED_DOMAINS=example.com
 GOOGLE_SHEETS_ALLOWED_EMAIL_DOMAINS=example.com
 GOOGLE_GMAIL_ALLOWED_HOSTED_DOMAINS=example.com
@@ -88,5 +128,10 @@ GOOGLE_GMAIL_ALLOWED_HOSTED_DOMAINS=example.com
 ## Runtime Behavior
 
 Dashboard and agent-issued connect links use `/api/oauth/{provider}/connect` or `/api/oauth/{provider}/authorize`.
+The paired desktop client is fetched only when no stored custom client exists and is cached in the local credential store for resilience.
+The provisioning service supplies the app client configuration but never receives Google authorization codes, Google tokens, or Google API data.
+Stored provider-specific or shared custom client config always takes precedence over the provisioned client.
+The provisioned client is available only when the resolved callback hostname is a loopback hostname.
 OAuth callback state is stored server-side as an opaque token and bound to the authenticated dashboard user and scoped credential target.
+Connections made for a shared-scope agent are stored per agent, so other agents never inherit that account.
 Disconnecting a provider removes the token service for the selected scope and preserves that provider's editable tool settings.

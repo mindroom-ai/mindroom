@@ -155,6 +155,7 @@ async def test_agent_processes_direct_mention(  # noqa: PLR0915
             },
         )
         message_event.sender = test_user_id
+        message_event.server_timestamp = 1234567890
 
         room = nio.MatrixRoom(test_room_id, mock_calculator_agent.user_id)
 
@@ -184,32 +185,35 @@ async def test_agent_processes_direct_mention(  # noqa: PLR0915
         # Verify AI was called with separate raw and model-facing prompts.
         mock_ai.assert_called_once()
         ai_kwargs = mock_ai.call_args.kwargs
-        assert ai_kwargs["agent_name"] == "calculator"
+        ai_ctx = mock_ai.call_args.args[0]
+        assert ai_ctx.entity_label == "calculator"
         assert (
             ai_kwargs["prompt"]
             == f"@mindroom_calculator:{config.get_domain(runtime_paths_for(config))} What's 15% of 200?"
         )
-        assert ai_kwargs["model_prompt"].startswith("[")
-        assert ai_kwargs["model_prompt"].endswith(
-            f"@mindroom_calculator:{config.get_domain(runtime_paths_for(config))} What's 15% of 200?",
+        assert (
+            ai_kwargs["model_prompt"]
+            == f"@mindroom_calculator:{config.get_domain(runtime_paths_for(config))} What's 15% of 200?"
         )
-        assert ai_kwargs["session_id"] == f"{test_room_id}:$thread_root:localhost"
+        assert ai_kwargs["current_timestamp_ms"] == 1234567890.0
+        assert ai_ctx.session_id == f"{test_room_id}:$thread_root:localhost"
         assert ai_kwargs["thread_history"] == []
         assert ai_kwargs["runtime_paths"].storage_root == runtime_paths_for(config).storage_root
         assert ai_kwargs["config"] == config
-        assert ai_kwargs["room_id"] == test_room_id
+        assert ai_ctx.room_id == test_room_id
         assert ai_kwargs["knowledge"] is None
-        assert ai_kwargs["user_id"] == test_user_id
+        assert ai_ctx.requester_id == test_user_id
         assert ai_kwargs["media"] == MediaInputs()
-        assert ai_kwargs["reply_to_event_id"] == "$test_event:localhost"
+        assert ai_ctx.reply_to_event_id == "$test_event:localhost"
         assert ai_kwargs["show_tool_calls"] is True
         assert ai_kwargs["run_metadata_collector"] == {}
 
         mock_send_streaming_response.assert_awaited_once()
         send_args = mock_send_streaming_response.await_args.args
-        assert send_args[1] == test_room_id
-        assert send_args[2] == "$test_event:localhost"
-        assert send_args[3] == "$thread_root:localhost"
+        target = send_args[1]
+        assert target.room_id == test_room_id
+        assert target.reply_to_event_id == "$test_event:localhost"
+        assert target.resolved_thread_id == "$thread_root:localhost"
 
 
 @pytest.mark.asyncio
@@ -357,7 +361,7 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
             patch.object(bot._conversation_cache, "get_thread_history") as mock_fetch,
             patch.object(bot._conversation_cache, "get_dispatch_thread_snapshot") as mock_dispatch_snapshot,
             patch.object(bot._conversation_cache, "get_dispatch_thread_history") as mock_dispatch_history,
-            patch("mindroom.turn_controller.is_dm_room", return_value=False),  # Not a DM room
+            patch("mindroom.text_ingress_dispatch.is_dm_room", return_value=False),  # Not a DM room
             patch("mindroom.turn_controller.interactive.handle_text_response", new=AsyncMock(return_value=None)),
         ):
             # Only this agent in the thread
@@ -417,7 +421,7 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
             patch.object(bot._conversation_cache, "get_thread_history") as mock_fetch,
             patch.object(bot._conversation_cache, "get_dispatch_thread_snapshot") as mock_dispatch_snapshot,
             patch.object(bot._conversation_cache, "get_dispatch_thread_history") as mock_dispatch_history,
-            patch("mindroom.turn_controller.is_dm_room", return_value=False),  # Not a DM room
+            patch("mindroom.text_ingress_dispatch.is_dm_room", return_value=False),  # Not a DM room
             patch("mindroom.turn_controller.interactive.handle_text_response", new=AsyncMock(return_value=None)),
         ):
             # Multiple agents in the thread
@@ -493,13 +497,14 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
             },
         )
         message_event_with_mention.sender = test_user_id
+        message_event_with_mention.server_timestamp = 1234567890
 
         with (
             patch.object(bot._conversation_cache, "get_thread_history") as mock_fetch,
             patch.object(bot._conversation_cache, "get_dispatch_thread_snapshot") as mock_dispatch_snapshot,
             patch.object(bot._conversation_cache, "get_dispatch_thread_history") as mock_dispatch_history,
             patch.object(bot._conversation_resolver, "fetch_thread_history") as mock_refresh_history,
-            patch("mindroom.turn_controller.is_dm_room", return_value=False),  # Not a DM room
+            patch("mindroom.text_ingress_dispatch.is_dm_room", return_value=False),  # Not a DM room
             patch("mindroom.turn_controller.interactive.handle_text_response", new=AsyncMock(return_value=None)),
         ):
             thread_history = [
@@ -533,25 +538,25 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
             # Should process the message with explicit mention
             mock_ai.assert_called_once()
             ai_kwargs = mock_ai.call_args.kwargs
-            assert ai_kwargs["agent_name"] == "calculator"
+            ai_ctx = mock_ai.call_args.args[0]
+            assert ai_ctx.entity_label == "calculator"
             assert ai_kwargs["prompt"] == f"@mindroom_calculator:{domain} What about 20% of 300?"
-            assert ai_kwargs["model_prompt"].startswith("[")
-            assert ai_kwargs["model_prompt"].endswith(
-                f"@mindroom_calculator:{domain} What about 20% of 300?",
-            )
-            assert ai_kwargs["session_id"] == f"{test_room_id}:{thread_root_id}"
+            assert ai_kwargs["model_prompt"] == f"@mindroom_calculator:{domain} What about 20% of 300?"
+            assert ai_kwargs["current_timestamp_ms"] == 1234567890.0
+            assert ai_ctx.session_id == f"{test_room_id}:{thread_root_id}"
             assert ai_kwargs["thread_history"][0].body.startswith("[")
             assert ai_kwargs["thread_history"][0].body.endswith("What's 10% of 100?")
             assert ai_kwargs["thread_history"][1].body == "10% of 100 is 10"
             assert ai_kwargs["thread_history"][2].body == "I can also help"
             assert ai_kwargs["runtime_paths"].storage_root == runtime_paths_for(config).storage_root
             assert ai_kwargs["config"] == config
-            assert ai_kwargs["room_id"] == test_room_id
+            assert ai_ctx.room_id == test_room_id
             assert ai_kwargs["knowledge"] is None
-            assert ai_kwargs["user_id"] == test_user_id
+            assert ai_ctx.requester_id == test_user_id
             assert ai_kwargs["media"] == MediaInputs()
-            assert ai_kwargs["reply_to_event_id"] == f"$test_event2:{domain}"
+            assert ai_ctx.reply_to_event_id == f"$test_event2:{domain}"
             assert ai_kwargs["show_tool_calls"] is True
+            assert ai_kwargs["collect_streamed_response"] is True
             assert ai_kwargs["tool_trace_collector"] == []
             assert ai_kwargs["run_metadata_collector"] == {}
 

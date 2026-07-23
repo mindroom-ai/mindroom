@@ -7,19 +7,16 @@ from typing import TYPE_CHECKING, Literal
 
 from mindroom.constants import ROUTER_AGENT_NAME, runtime_matrix_homeserver
 from mindroom.matrix import state as matrix_state
-from mindroom.matrix.identity import (
-    MatrixID,
-    managed_account_key,
-    managed_account_user_id,
-)
+from mindroom.matrix.identity import MatrixID, managed_account_key, managed_account_user_id
+from mindroom.matrix.invited_rooms_store import should_persist_invited_rooms
 from mindroom.matrix_identifiers import (
     extract_server_name_from_homeserver,
-    managed_room_key_from_alias_localpart,
-    room_alias_localpart,
+    room_alias_identifier_candidates,
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Iterable, Mapping
+    from collections.abc import Set as AbstractSet
 
     from mindroom.config.agent import AgentConfig, TeamConfig
     from mindroom.config.main import Config
@@ -34,6 +31,59 @@ class MissingManagedEntityAccountError(RuntimeError):
 
 class DuplicateManagedEntityIdentityError(RuntimeError):
     """Raised when persisted managed Matrix accounts are ambiguous."""
+
+
+def validate_call_agent_room_ownership(config: Config, runtime_paths: RuntimePaths) -> None:
+    """Reject runtime-resolved rooms assigned to more than one call agent."""
+    agents_by_room: dict[str, list[str]] = {}
+    for agent_name in config.calls.agents:
+        for room in config.agents[agent_name].rooms:
+            room_key = _call_room_ownership_key(room, runtime_paths)
+            agents_by_room.setdefault(room_key, []).append(agent_name)
+    conflicts = [
+        f"{room} ({', '.join(sorted(agent_names))})"
+        for room, agent_names in sorted(agents_by_room.items())
+        if len(agent_names) > 1
+    ]
+    if conflicts:
+        msg = "calls.agents configures multiple agents for room(s): " + "; ".join(conflicts)
+        raise ValueError(msg)
+
+
+def _call_room_ownership_key(room_ref: str, runtime_paths: RuntimePaths) -> str:
+    """Normalize a call-room reference before live Matrix state is available."""
+    resolved = matrix_state.resolve_room_id(room_ref, runtime_paths)
+    if resolved != room_ref:
+        return resolved
+    return room_alias_identifier_candidates(room_ref, runtime_paths)[-1]
+
+
+def configured_call_agent_name_for_room(
+    config: Config,
+    room_id: str,
+    runtime_paths: RuntimePaths,
+    *,
+    room_aliases: Iterable[str] = (),
+    invited_rooms_by_agent: Mapping[str, AbstractSet[str]],
+) -> str | None:
+    """Return the sole calls-enabled agent for a live room, failing on ambiguity."""
+    routable_names = configured_routable_entity_names_for_room(
+        config,
+        room_id,
+        runtime_paths,
+        room_aliases=room_aliases,
+    )
+    call_agents = set(routable_names).intersection(config.calls.agents)
+    for agent_name in config.calls.agents:
+        if not should_persist_invited_rooms(config, agent_name):
+            continue
+        if room_id in invited_rooms_by_agent.get(agent_name, ()):
+            call_agents.add(agent_name)
+    call_agents = sorted(call_agents)
+    if len(call_agents) > 1:
+        msg = f"calls.agents resolves multiple agents for live room {room_id}: {', '.join(call_agents)}"
+        raise ValueError(msg)
+    return call_agents[0] if call_agents else None
 
 
 def configured_bot_user_ids_for_room(
@@ -59,6 +109,18 @@ def configured_bot_user_ids_for_room(
         configured_bots.add(config_ids[ROUTER_AGENT_NAME].full_id)
 
     return configured_bots
+
+
+def is_configured_room(
+    config: Config,
+    room_id: str,
+    runtime_paths: RuntimePaths,
+    *,
+    room_aliases: Iterable[str] = (),
+) -> bool:
+    """Return whether one Matrix room is present in the configured room set."""
+    room_identifiers = _room_reference_identifiers(room_id, runtime_paths, room_aliases=room_aliases)
+    return _room_refs_match(list(config.get_all_configured_rooms()), room_identifiers, runtime_paths)
 
 
 def configured_routable_entity_names_for_room(
@@ -135,14 +197,7 @@ def _add_room_alias_identifiers(
     room_alias: str,
     runtime_paths: RuntimePaths,
 ) -> None:
-    identifiers.append(room_alias)
-    localpart = room_alias_localpart(room_alias)
-    if localpart is None:
-        return
-    identifiers.append(localpart)
-    managed_room_key = managed_room_key_from_alias_localpart(localpart, runtime_paths)
-    if managed_room_key is not None:
-        identifiers.append(managed_room_key)
+    identifiers.extend(room_alias_identifier_candidates(room_alias, runtime_paths))
 
 
 def configured_routable_entity_ids_for_room(
@@ -222,6 +277,11 @@ def entity_identity_registry(config: Config, runtime_paths: RuntimePaths) -> Ent
     _validate_unique_entity_ids(current_ids)
     _validate_internal_user_id_is_unique(config, runtime_paths, current_ids)
     return EntityIdentityRegistry(current_ids=current_ids)
+
+
+def current_entity_id(entity_name: str, runtime_paths: RuntimePaths) -> MatrixID:
+    """Return one persisted Matrix ID without resolving unrelated configured entities."""
+    return _persisted_entity_matrix_id(entity_name, _matrix_domain(runtime_paths), runtime_paths)
 
 
 def _persisted_entity_id_map(config: Config, runtime_paths: RuntimePaths) -> dict[str, MatrixID]:
@@ -358,8 +418,27 @@ def effective_entity_model_name(
     """Return the effective model for one entity in one room context."""
     if entity_name not in config.agents and entity_name not in config.teams and entity_name != ROUTER_AGENT_NAME:
         return "default"
-    if room_id is not None:
-        room_alias = matrix_state.get_room_alias_from_id(room_id, runtime_paths)
-        if room_alias and room_alias in config.room_models:
-            return config.room_models[room_alias]
-    return config.get_entity_model_name(entity_name)
+    if room_override := resolve_room_scoped_model_override(config.room_models, room_id, runtime_paths):
+        return room_override
+    return config.resolve_entity(entity_name).model_name
+
+
+def resolve_room_scoped_model_override(
+    overrides: Mapping[str, str],
+    room_id: str | None,
+    runtime_paths: RuntimePaths,
+    *,
+    allow_raw_room_id: bool = False,
+) -> str | None:
+    """Return a model override keyed by persisted room key or alias."""
+    if room_id is None or not overrides:
+        return None
+    if allow_raw_room_id and room_id in overrides:
+        return overrides[room_id]
+    room_alias = matrix_state.get_room_alias_from_id(room_id, runtime_paths)
+    if room_alias and room_alias in overrides:
+        return overrides[room_alias]
+    for room in matrix_state.matrix_state_for_runtime(runtime_paths).rooms.values():
+        if room.room_id == room_id and room.alias in overrides:
+            return overrides[room.alias]
+    return None

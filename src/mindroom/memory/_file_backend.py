@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
+from dataclasses import dataclass
 from datetime import datetime
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, ClassVar, cast
 from zoneinfo import ZoneInfo
 
 from mindroom.constants import resolve_config_relative_path
+from mindroom.embedding_errors import classified_embedder_error
 from mindroom.logging_config import get_logger
 from mindroom.timing import timed
 
@@ -21,6 +24,11 @@ from ._policy import (
     resolve_file_memory_resolution,
     storage_paths_for_scope_user_id,
 )
+from ._semantic_file_search import (
+    SemanticFileMemoryIndexUnavailableError,
+    schedule_semantic_file_memory_refresh,
+    search_semantic_file_memories,
+)
 from ._shared import (
     FILE_MEMORY_DAILY_DIR,
     FILE_MEMORY_DEFAULT_DIRNAME,
@@ -30,17 +38,37 @@ from ._shared import (
     FileMemoryResolution,
     MemoryNotFoundError,
     MemoryResult,
+    MemorySearchOutcome,
     new_memory_id,
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
     from pathlib import Path
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 logger = get_logger(__name__)
+
+
+@dataclass(frozen=True)
+class _PathMemoryLine:
+    target_path: Path
+    relative_path: str
+    line_no: int
+    raw_line: str
+    memory: str
+    lines: tuple[str, ...]
+
+
+def _tag_keyword_mode(result: MemoryResult) -> None:
+    metadata = result.get("metadata")
+    result["metadata"] = (
+        {**metadata, "search_mode": "keyword"} if isinstance(metadata, dict) else {"search_mode": "keyword"}
+    )
 
 
 def _file_memory_root(
@@ -123,6 +151,14 @@ def _scope_markdown_files(scope_path: Path) -> list[Path]:
     return files
 
 
+def _is_unstructured_memory_line(snippet: str) -> bool:
+    return bool(snippet) and not snippet.startswith("#") and FILE_MEMORY_ENTRY_PATTERN.match(snippet) is None
+
+
+def _normalize_memory_text_for_dedup(text: str) -> str:
+    return " ".join(text.lower().split())
+
+
 def _load_scope_id_entries(
     scope_user_id: str,
     resolution: FileMemoryResolution,
@@ -162,6 +198,42 @@ def _load_scope_id_entries(
     return results, id_to_file
 
 
+def _load_scope_unstructured_entries(
+    scope_user_id: str,
+    resolution: FileMemoryResolution,
+    config: Config,
+    existing_memory_text: set[str],
+) -> list[MemoryResult]:
+    scope_path = _scope_dir(scope_user_id, resolution, config, create=False)
+    if not scope_path.exists():
+        return []
+
+    results: list[MemoryResult] = []
+    seen_memory_text = set(existing_memory_text)
+    entrypoint_path = _scope_entrypoint_path(scope_path)
+    for file_path in _scope_markdown_files(scope_path):
+        if file_path == entrypoint_path:
+            continue
+        relative_path = file_path.relative_to(scope_path).as_posix()
+        for line_no, raw_line in enumerate(file_path.read_text(encoding="utf-8").splitlines(), 1):
+            snippet = raw_line.strip()
+            if not _is_unstructured_memory_line(snippet):
+                continue
+            normalized_snippet = _normalize_memory_text_for_dedup(snippet)
+            if normalized_snippet in seen_memory_text:
+                continue
+            seen_memory_text.add(normalized_snippet)
+            results.append(
+                {
+                    "id": f"file:{relative_path}:{line_no}",
+                    "memory": snippet,
+                    "user_id": scope_user_id,
+                    "metadata": {"source_file": relative_path, "line": line_no},
+                },
+            )
+    return results
+
+
 @timed("system_prompt_assembly.memory_search.file.id_entries_load")
 def _load_scope_entries_for_search(
     scope_user_id: str,
@@ -188,6 +260,46 @@ def _match_score(query_tokens: set[str], text: str) -> float:
 def _format_entry_line(memory_id: str, content: str) -> str:
     normalized_content = " ".join(content.strip().split())
     return f"- [id={memory_id}] {normalized_content}"
+
+
+def _schedule_agent_semantic_refresh(
+    agent_name: str,
+    scope_user_id: str,
+    resolution: FileMemoryResolution,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None = None,
+) -> None:
+    search_config = config.resolve_entity(agent_name).memory_search
+    if search_config.mode != "semantic":
+        return
+    schedule_semantic_file_memory_refresh(
+        scope_user_id=scope_user_id,
+        root=_scope_dir(scope_user_id, resolution, config, create=False),
+        config=config,
+        runtime_paths=runtime_paths,
+        search_config=search_config,
+        execution_identity=execution_identity,
+    )
+
+
+def _schedule_scope_semantic_refresh(
+    scope_user_id: str,
+    resolution: FileMemoryResolution,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None = None,
+) -> None:
+    if (agent_name := agent_name_from_scope_user_id(scope_user_id)) is None:
+        return
+    _schedule_agent_semantic_refresh(
+        agent_name,
+        scope_user_id,
+        resolution,
+        config,
+        runtime_paths,
+        execution_identity=execution_identity,
+    )
 
 
 def _append_scope_memory_entry(
@@ -237,9 +349,7 @@ def _search_scope_memory_entries(
     config: Config,
     *,
     limit: int,
-    timing_scope: str | None = None,
 ) -> list[MemoryResult]:
-    del timing_scope
     id_entries, _ = _load_scope_entries_for_search(scope_user_id, resolution, config)
     query_tokens = _extract_query_tokens(query)
 
@@ -247,7 +357,7 @@ def _search_scope_memory_entries(
     seen_scored_text: set[str] = set()
     for entry in id_entries:
         text = entry.get("memory", "")
-        normalized_text = text.strip().lower()
+        normalized_text = _normalize_memory_text_for_dedup(text)
         if normalized_text in seen_scored_text:
             continue
         score = _match_score(query_tokens, text)
@@ -270,7 +380,9 @@ def _search_scope_memory_entries(
     entrypoint_path = _scope_entrypoint_path(scope_path)
     snippet_results: list[MemoryResult] = []
     existing_memory_text = {
-        memory_text for entry in scored_entries if (memory_text := entry.get("memory", "").strip().lower())
+        memory_text
+        for entry in scored_entries
+        if (memory_text := _normalize_memory_text_for_dedup(entry.get("memory", "")))
     }
     snippet_results = _scan_scope_memory_snippets(
         scope_user_id,
@@ -299,11 +411,9 @@ def _scan_scope_memory_snippets(
         relative_path = file_path.relative_to(scope_path).as_posix()
         for line_no, raw_line in enumerate(file_path.read_text(encoding="utf-8").splitlines(), 1):
             snippet = raw_line.strip()
-            if not snippet or snippet.startswith("#"):
+            if not _is_unstructured_memory_line(snippet):
                 continue
-            if FILE_MEMORY_ENTRY_PATTERN.match(snippet):
-                continue
-            normalized_snippet = snippet.lower()
+            normalized_snippet = _normalize_memory_text_for_dedup(snippet)
             if normalized_snippet in existing_memory_text:
                 continue
             score = _match_score(query_tokens, snippet)
@@ -322,32 +432,60 @@ def _scan_scope_memory_snippets(
     return snippet_results
 
 
-def _get_scope_memory_by_path_id(
+def _load_scope_path_memory_line(
     scope_user_id: str,
     memory_id: str,
     resolution: FileMemoryResolution,
     config: Config,
-) -> MemoryResult | None:
+) -> _PathMemoryLine | None:
     match = FILE_MEMORY_PATH_ID_PATTERN.match(memory_id)
     if match is None:
         return None
+
     line_no = int(match.group("line"))
     relative_path = match.group("path")
     scope_path = _scope_dir(scope_user_id, resolution, config, create=False)
     target_path = _resolve_scope_markdown_path(scope_path, relative_path)
     if target_path is None or not target_path.exists():
         return None
+
+    entrypoint_path = _scope_entrypoint_path(scope_path)
+    eligible_paths = {path.resolve() for path in _scope_markdown_files(scope_path) if path != entrypoint_path}
+    if target_path not in eligible_paths:
+        return None
+
     lines = target_path.read_text(encoding="utf-8").splitlines()
     if line_no <= 0 or line_no > len(lines):
         return None
-    snippet = lines[line_no - 1].strip()
-    if not snippet:
+
+    raw_line = lines[line_no - 1]
+    snippet = raw_line.strip()
+    if not _is_unstructured_memory_line(snippet):
+        return None
+    return _PathMemoryLine(
+        target_path=target_path,
+        relative_path=relative_path,
+        line_no=line_no,
+        raw_line=raw_line,
+        memory=snippet,
+        lines=tuple(lines),
+    )
+
+
+def _get_scope_memory_by_path_id(
+    scope_user_id: str,
+    memory_id: str,
+    resolution: FileMemoryResolution,
+    config: Config,
+) -> MemoryResult | None:
+    path_memory_line = _load_scope_path_memory_line(scope_user_id, memory_id, resolution, config)
+    if path_memory_line is None:
         return None
     return {
         "id": memory_id,
-        "memory": snippet,
+        "memory": path_memory_line.memory,
         "user_id": scope_user_id,
-        "metadata": {"source_file": relative_path, "line": line_no},
+        "metadata": {"source_file": path_memory_line.relative_path, "line": path_memory_line.line_no},
     }
 
 
@@ -373,6 +511,9 @@ def _replace_scope_memory_entry(
     resolution: FileMemoryResolution,
     config: Config,
 ) -> bool:
+    if FILE_MEMORY_PATH_ID_PATTERN.match(memory_id):
+        return _replace_scope_path_memory_entry(scope_user_id, memory_id, content, resolution, config)
+
     _entries, id_to_file = _load_scope_id_entries(scope_user_id, resolution, config)
     if (file_path := id_to_file.get(memory_id)) is None:
         return False
@@ -402,15 +543,37 @@ def _replace_scope_memory_entry(
     return True
 
 
+def _replace_scope_path_memory_entry(
+    scope_user_id: str,
+    memory_id: str,
+    content: str | None,
+    resolution: FileMemoryResolution,
+    config: Config,
+) -> bool:
+    path_memory_line = _load_scope_path_memory_line(scope_user_id, memory_id, resolution, config)
+    if path_memory_line is None:
+        return False
+
+    lines = list(path_memory_line.lines)
+
+    if content is None or not content.strip():
+        lines[path_memory_line.line_no - 1] = ""
+    else:
+        prefix_len = len(path_memory_line.raw_line) - len(path_memory_line.raw_line.lstrip(" "))
+        lines[path_memory_line.line_no - 1] = (
+            f"{path_memory_line.raw_line[:prefix_len]}{' '.join(content.strip().split())}"
+        )
+    path_memory_line.target_path.write_text(f"{'\n'.join(lines)}\n" if lines else "", encoding="utf-8")
+    return True
+
+
 @timed("system_prompt_assembly.memory_file_entrypoint_read")
-def load_scope_entrypoint_context(
+def _load_scope_entrypoint_context(
     scope_user_id: str,
     resolution: FileMemoryResolution,
     config: Config,
-    timing_scope: str | None = None,
 ) -> str:
     """Load the scoped `MEMORY.md` entrypoint text."""
-    del timing_scope
     entrypoint_path = _scope_entrypoint_path(_scope_dir(scope_user_id, resolution, config, create=False))
     if not entrypoint_path.exists():
         return ""
@@ -503,8 +666,9 @@ def _mutate_file_memory_targets(
     runtime_paths: RuntimePaths,
     anchor_result: MemoryResult,
     execution_identity: ToolExecutionIdentity | None = None,
-) -> tuple[str, int]:
+) -> tuple[str, int, list[FileMemoryResolution]]:
     updated_targets = 0
+    updated_resolutions: list[FileMemoryResolution] = []
     scope_user_id = anchor_result["user_id"]
     for target_storage_path in storage_paths_for_scope_user_id(
         scope_user_id,
@@ -526,27 +690,8 @@ def _mutate_file_memory_targets(
         ):
             if _replace_scope_memory_entry(scope_user_id, target_id, content, resolution, config):
                 updated_targets += 1
-    return scope_user_id, updated_targets
-
-
-def add_file_agent_memory(
-    content: str,
-    agent_name: str,
-    storage_path: Path,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    execution_identity: ToolExecutionIdentity | None = None,
-) -> None:
-    """Append one file-backed memory for an agent scope."""
-    resolution = resolve_file_memory_resolution(
-        storage_path,
-        config,
-        runtime_paths,
-        agent_name=agent_name,
-        execution_identity=execution_identity,
-    )
-    _append_scope_memory_entry(agent_scope_user_id(agent_name), content, resolution, config)
-    logger.info("File memory added", agent=agent_name)
+                updated_resolutions.append(resolution)
+    return scope_user_id, updated_targets, updated_resolutions
 
 
 def append_agent_daily_file_memory(
@@ -570,12 +715,21 @@ def append_agent_daily_file_memory(
     )
     current_date = datetime.now(ZoneInfo(config.timezone)).date().isoformat()
     daily_relative_path = f"{FILE_MEMORY_DAILY_DIR}/{current_date}.md"
+    scope_user_id = agent_scope_user_id(agent_name)
     result = _append_scope_memory_entry(
-        agent_scope_user_id(agent_name),
+        scope_user_id,
         content,
         resolution,
         config,
         target_relative_path=daily_relative_path,
+    )
+    _schedule_agent_semantic_refresh(
+        agent_name,
+        scope_user_id,
+        resolution,
+        config,
+        runtime_paths,
+        execution_identity=execution_identity,
     )
     logger.info("File daily memory added", agent=agent_name, date=current_date)
     return result
@@ -588,7 +742,6 @@ def _search_agent_file_scope_memories(
     resolution: FileMemoryResolution,
     config: Config,
     limit: int,
-    timing_scope: str | None,
 ) -> list[MemoryResult]:
     return _search_scope_memory_entries(
         agent_scope_user_id(agent_name),
@@ -596,7 +749,6 @@ def _search_agent_file_scope_memories(
         resolution,
         config,
         limit=limit,
-        timing_scope=timing_scope,
     )
 
 
@@ -607,7 +759,6 @@ def _search_team_file_scope_memories(
     resolution: FileMemoryResolution,
     config: Config,
     limit: int,
-    timing_scope: str | None,
 ) -> list[MemoryResult]:
     return _search_scope_memory_entries(
         team_id,
@@ -615,37 +766,21 @@ def _search_team_file_scope_memories(
         resolution,
         config,
         limit=limit,
-        timing_scope=timing_scope,
     )
 
 
-def search_file_agent_memories(
+def _merge_team_scope_results(
+    results: list[MemoryResult],
+    *,
     query: str,
     agent_name: str,
     storage_path: Path,
     config: Config,
     runtime_paths: RuntimePaths,
-    execution_identity: ToolExecutionIdentity | None = None,
-    *,
     limit: int,
-    timing_scope: str | None = None,
+    execution_identity: ToolExecutionIdentity | None,
 ) -> list[MemoryResult]:
-    """Search file-backed memories visible to an agent."""
-    agent_resolution = resolve_file_memory_resolution(
-        storage_path,
-        config,
-        runtime_paths,
-        agent_name=agent_name,
-        execution_identity=execution_identity,
-    )
-    results = _search_agent_file_scope_memories(
-        query,
-        agent_name,
-        agent_resolution,
-        config,
-        limit,
-        timing_scope,
-    )
+    """Merge keyword team-scope matches into one ranked result list (filesystem-bound)."""
     existing_memories = {result.get("memory", "") for result in results}
     for team_id in get_team_ids_for_agent(agent_name, config):
         for target_storage_path in storage_paths_for_scope_user_id(
@@ -662,195 +797,409 @@ def search_file_agent_memories(
                 original_storage_path=storage_path,
                 execution_identity=execution_identity,
             )
-            team_results = _search_team_file_scope_memories(
+            for memory in _search_team_file_scope_memories(
                 team_id,
                 query,
                 team_resolution,
                 config,
                 limit,
-                timing_scope,
-            )
-            for memory in team_results:
+            ):
                 memory_text = memory.get("memory", "")
                 if memory_text in existing_memories:
                     continue
                 existing_memories.add(memory_text)
+                _tag_keyword_mode(memory)
                 results.append(memory)
     results.sort(key=lambda item: cast("float", item.get("score", 0.0)), reverse=True)
     return results[:limit]
 
 
-def list_file_agent_memories(
-    agent_name: str,
-    storage_path: Path,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    execution_identity: ToolExecutionIdentity | None = None,
-    *,
-    limit: int,
-    preserve_resolved_storage_path: bool = False,
-) -> list[MemoryResult]:
-    """List file-backed memories stored for an agent."""
-    resolution = resolve_file_memory_resolution(
-        storage_path,
-        config,
-        runtime_paths,
-        agent_name=agent_name,
-        preserve_resolved_storage_path=preserve_resolved_storage_path,
-        execution_identity=execution_identity,
-    )
-    results, _ = _load_scope_id_entries(agent_scope_user_id(agent_name), resolution, config)
-    return results[:limit]
+@dataclass(frozen=True)
+class FileMemoryBackend:
+    """File-backed adapter implementing the shared memory backend surface."""
 
+    runtime_paths: RuntimePaths
+    context_label: ClassVar[str] = "agent file"
 
-def get_file_agent_memory(
-    memory_id: str,
-    caller_context: str | list[str],
-    storage_path: Path,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    execution_identity: ToolExecutionIdentity | None = None,
-) -> MemoryResult | None:
-    """Return one file-backed memory visible to the caller."""
-    return _find_file_anchor_memory_result(
-        memory_id,
-        caller_context,
-        storage_path,
-        config,
-        runtime_paths,
-        execution_identity=execution_identity,
-    )
-
-
-def update_file_agent_memory(
-    memory_id: str,
-    content: str,
-    caller_context: str | list[str],
-    storage_path: Path,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    execution_identity: ToolExecutionIdentity | None = None,
-) -> None:
-    """Update one file-backed memory across its replica targets."""
-    if (
-        anchor_result := _find_file_anchor_memory_result(
-            memory_id,
-            caller_context,
+    async def add(
+        self,
+        content: str,
+        agent_name: str,
+        storage_path: Path,
+        config: Config,
+        *,
+        metadata: dict | None = None,
+        execution_identity: ToolExecutionIdentity | None = None,
+    ) -> None:
+        """Append one file-backed memory for an agent scope."""
+        del metadata  # File memory entries persist plain text only.
+        resolution = await asyncio.to_thread(
+            resolve_file_memory_resolution,
             storage_path,
             config,
-            runtime_paths,
+            self.runtime_paths,
+            agent_name=agent_name,
             execution_identity=execution_identity,
         )
-    ) is None:
-        raise MemoryNotFoundError(memory_id)
-
-    scope_user_id, updated_targets = _mutate_file_memory_targets(
-        memory_id=memory_id,
-        content=content,
-        storage_path=storage_path,
-        config=config,
-        runtime_paths=runtime_paths,
-        anchor_result=anchor_result,
-        execution_identity=execution_identity,
-    )
-    if updated_targets > 0:
-        logger.info(
-            "File memory updated",
-            memory_id=memory_id,
-            scope=scope_user_id,
-            storage_targets=updated_targets,
-        )
-        return
-    raise MemoryNotFoundError(memory_id)
-
-
-def delete_file_agent_memory(
-    memory_id: str,
-    caller_context: str | list[str],
-    storage_path: Path,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    execution_identity: ToolExecutionIdentity | None = None,
-) -> None:
-    """Delete one file-backed memory across its replica targets."""
-    if (
-        anchor_result := _find_file_anchor_memory_result(
-            memory_id,
-            caller_context,
-            storage_path,
-            config,
-            runtime_paths,
-            execution_identity=execution_identity,
-        )
-    ) is None:
-        raise MemoryNotFoundError(memory_id)
-
-    scope_user_id, deleted_targets = _mutate_file_memory_targets(
-        memory_id=memory_id,
-        content=None,
-        storage_path=storage_path,
-        config=config,
-        runtime_paths=runtime_paths,
-        anchor_result=anchor_result,
-        execution_identity=execution_identity,
-    )
-    if deleted_targets > 0:
-        logger.info(
-            "File memory deleted",
-            memory_id=memory_id,
-            scope=scope_user_id,
-            storage_targets=deleted_targets,
-        )
-        return
-    raise MemoryNotFoundError(memory_id)
-
-
-def store_file_conversation_memory(
-    prompt: str,
-    agent_name: str | list[str],
-    storage_path: Path,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    execution_identity: ToolExecutionIdentity | None = None,
-) -> None:
-    """Persist condensed conversation text to file-backed memory scopes."""
-    condensed_prompt = " ".join(prompt.strip().split())
-    if not condensed_prompt:
-        return
-
-    target_storage_paths = effective_storage_paths_for_context(
-        agent_name,
-        storage_path,
-        config,
-        runtime_paths,
-        execution_identity=execution_identity,
-    )
-    scope_user_id = agent_scope_user_id(agent_name) if isinstance(agent_name, str) else build_team_user_id(agent_name)
-    team_memory_id = new_memory_id() if isinstance(agent_name, list) else None
-
-    for target_storage_path in target_storage_paths:
-        resolution = resolve_file_memory_resolution(
-            target_storage_path,
-            config,
-            runtime_paths,
-            agent_name=agent_name_from_scope_user_id(scope_user_id),
-            original_storage_path=storage_path,
-            execution_identity=execution_identity,
-        )
-        _append_scope_memory_entry(
+        scope_user_id = agent_scope_user_id(agent_name)
+        await asyncio.to_thread(_append_scope_memory_entry, scope_user_id, content, resolution, config)
+        _schedule_agent_semantic_refresh(
+            agent_name,
             scope_user_id,
-            condensed_prompt,
             resolution,
             config,
-            memory_id=team_memory_id,
+            self.runtime_paths,
+            execution_identity=execution_identity,
+        )
+        logger.info("File memory added", agent=agent_name)
+
+    @timed("system_prompt_assembly.memory_search.file_backend")
+    async def search(
+        self,
+        query: str,
+        agent_name: str,
+        storage_path: Path,
+        config: Config,
+        *,
+        limit: int,
+        execution_identity: ToolExecutionIdentity | None = None,
+    ) -> MemorySearchOutcome:
+        """Search file-backed memories visible to an agent.
+
+        Keyword scans read and score every memory file in the scope, so all
+        file-reading paths run in worker threads (#1260); only the semantic
+        index query stays natively async. A semantic-path failure falls back
+        to keyword matches and surfaces its classified cause in the outcome.
+        """
+        agent_resolution = await asyncio.to_thread(
+            resolve_file_memory_resolution,
+            storage_path,
+            config,
+            self.runtime_paths,
+            agent_name=agent_name,
+            execution_identity=execution_identity,
         )
 
-    if isinstance(agent_name, list):
-        logger.info(
-            "File team memory added",
-            team_id=scope_user_id,
-            members=agent_name,
-            storage_targets=len(target_storage_paths),
+        def keyword_results() -> list[MemoryResult]:
+            results = _search_agent_file_scope_memories(
+                query,
+                agent_name,
+                agent_resolution,
+                config,
+                limit,
+            )
+            for result in results:
+                _tag_keyword_mode(result)
+            return results
+
+        degraded_reason: str | None = None
+        search_config = config.resolve_entity(agent_name).memory_search
+        if search_config.mode == "semantic":
+            scope_user_id = agent_scope_user_id(agent_name)
+            try:
+                results = await search_semantic_file_memories(
+                    query,
+                    scope_user_id=scope_user_id,
+                    root=_scope_dir(scope_user_id, agent_resolution, config, create=False),
+                    config=config,
+                    runtime_paths=self.runtime_paths,
+                    search_config=search_config,
+                    limit=limit,
+                    execution_identity=execution_identity,
+                )
+            except SemanticFileMemoryIndexUnavailableError as exc:
+                # A cold index kept unpublished by a classified embedder
+                # failure degrades loudly; plain warm-up stays silent.
+                degraded_reason = exc.degraded_reason
+                logger.debug(
+                    "File-memory semantic index unavailable; falling back to keyword search",
+                    agent=agent_name,
+                    degraded_reason=degraded_reason,
+                )
+                results = await asyncio.to_thread(keyword_results)
+            except Exception as exc:
+                degraded_reason = (
+                    classified_embedder_error(exc) or f"semantic memory search failed ({type(exc).__name__})"
+                )
+                logger.exception(
+                    "File-memory semantic search failed; falling back to keyword search",
+                    agent=agent_name,
+                )
+                results = await asyncio.to_thread(keyword_results)
+        else:
+            results = await asyncio.to_thread(keyword_results)
+
+        merged = await asyncio.to_thread(
+            _merge_team_scope_results,
+            results,
+            query=query,
+            agent_name=agent_name,
+            storage_path=storage_path,
+            config=config,
+            runtime_paths=self.runtime_paths,
+            limit=limit,
+            execution_identity=execution_identity,
         )
-    else:
-        logger.info("File memory added", agent=agent_name)
+        return MemorySearchOutcome(results=merged, degraded_reason=degraded_reason)
+
+    async def list_all(
+        self,
+        agent_name: str,
+        storage_path: Path,
+        config: Config,
+        *,
+        limit: int,
+        preserve_resolved_storage_path: bool = False,
+        execution_identity: ToolExecutionIdentity | None = None,
+    ) -> list[MemoryResult]:
+        """List file-backed memories stored for an agent."""
+        resolution = await asyncio.to_thread(
+            resolve_file_memory_resolution,
+            storage_path,
+            config,
+            self.runtime_paths,
+            agent_name=agent_name,
+            preserve_resolved_storage_path=preserve_resolved_storage_path,
+            execution_identity=execution_identity,
+        )
+        results, _ = await asyncio.to_thread(
+            _load_scope_id_entries,
+            agent_scope_user_id(agent_name),
+            resolution,
+            config,
+        )
+        if len(results) >= limit:
+            return results[:limit]
+
+        existing_memory_text = {
+            _normalize_memory_text_for_dedup(memory_text) for entry in results if (memory_text := entry.get("memory"))
+        }
+        unstructured_results = await asyncio.to_thread(
+            _load_scope_unstructured_entries,
+            agent_scope_user_id(agent_name),
+            resolution,
+            config,
+            existing_memory_text,
+        )
+        return (results + unstructured_results)[:limit]
+
+    async def get(
+        self,
+        memory_id: str,
+        caller_context: str | list[str],
+        storage_path: Path,
+        config: Config,
+        *,
+        execution_identity: ToolExecutionIdentity | None = None,
+    ) -> MemoryResult | None:
+        """Return one file-backed memory visible to the caller."""
+        return await asyncio.to_thread(
+            _find_file_anchor_memory_result,
+            memory_id,
+            caller_context,
+            storage_path,
+            config,
+            self.runtime_paths,
+            execution_identity=execution_identity,
+        )
+
+    async def update(
+        self,
+        memory_id: str,
+        content: str,
+        caller_context: str | list[str],
+        storage_path: Path,
+        config: Config,
+        *,
+        execution_identity: ToolExecutionIdentity | None = None,
+    ) -> None:
+        """Update one file-backed memory across its replica targets."""
+        if (
+            anchor_result := await asyncio.to_thread(
+                _find_file_anchor_memory_result,
+                memory_id,
+                caller_context,
+                storage_path,
+                config,
+                self.runtime_paths,
+                execution_identity=execution_identity,
+            )
+        ) is None:
+            raise MemoryNotFoundError(memory_id)
+
+        scope_user_id, updated_targets, updated_resolutions = await asyncio.to_thread(
+            _mutate_file_memory_targets,
+            memory_id=memory_id,
+            content=content,
+            storage_path=storage_path,
+            config=config,
+            runtime_paths=self.runtime_paths,
+            anchor_result=anchor_result,
+            execution_identity=execution_identity,
+        )
+        if updated_targets > 0:
+            for resolution in updated_resolutions:
+                _schedule_scope_semantic_refresh(
+                    scope_user_id,
+                    resolution,
+                    config,
+                    self.runtime_paths,
+                    execution_identity=execution_identity,
+                )
+            logger.info(
+                "File memory updated",
+                memory_id=memory_id,
+                scope=scope_user_id,
+                storage_targets=updated_targets,
+            )
+            return
+        raise MemoryNotFoundError(memory_id)
+
+    async def delete(
+        self,
+        memory_id: str,
+        caller_context: str | list[str],
+        storage_path: Path,
+        config: Config,
+        *,
+        execution_identity: ToolExecutionIdentity | None = None,
+    ) -> None:
+        """Delete one file-backed memory across its replica targets."""
+        if (
+            anchor_result := await asyncio.to_thread(
+                _find_file_anchor_memory_result,
+                memory_id,
+                caller_context,
+                storage_path,
+                config,
+                self.runtime_paths,
+                execution_identity=execution_identity,
+            )
+        ) is None:
+            raise MemoryNotFoundError(memory_id)
+
+        scope_user_id, deleted_targets, deleted_resolutions = await asyncio.to_thread(
+            _mutate_file_memory_targets,
+            memory_id=memory_id,
+            content=None,
+            storage_path=storage_path,
+            config=config,
+            runtime_paths=self.runtime_paths,
+            anchor_result=anchor_result,
+            execution_identity=execution_identity,
+        )
+        if deleted_targets > 0:
+            for resolution in deleted_resolutions:
+                _schedule_scope_semantic_refresh(
+                    scope_user_id,
+                    resolution,
+                    config,
+                    self.runtime_paths,
+                    execution_identity=execution_identity,
+                )
+            logger.info(
+                "File memory deleted",
+                memory_id=memory_id,
+                scope=scope_user_id,
+                storage_targets=deleted_targets,
+            )
+            return
+        raise MemoryNotFoundError(memory_id)
+
+    async def store_conversation(
+        self,
+        prompt: str,
+        agent_name: str | list[str],
+        storage_path: Path,
+        session_id: str,
+        config: Config,
+        *,
+        thread_history: Sequence[ResolvedVisibleMessage] | None = None,
+        user_id: str | None = None,
+        execution_identity: ToolExecutionIdentity | None = None,
+    ) -> None:
+        """Persist condensed conversation text to file-backed memory scopes."""
+        del session_id, thread_history, user_id  # File conversation memory stores condensed text only.
+        condensed_prompt = " ".join(prompt.strip().split())
+        if not condensed_prompt:
+            return
+
+        target_storage_paths = await asyncio.to_thread(
+            effective_storage_paths_for_context,
+            agent_name,
+            storage_path,
+            config,
+            self.runtime_paths,
+            execution_identity=execution_identity,
+        )
+        scope_user_id = (
+            agent_scope_user_id(agent_name) if isinstance(agent_name, str) else build_team_user_id(agent_name)
+        )
+        team_memory_id = new_memory_id() if isinstance(agent_name, list) else None
+
+        def _persist_to_targets() -> list[FileMemoryResolution]:
+            resolutions: list[FileMemoryResolution] = []
+            for target_storage_path in target_storage_paths:
+                resolution = resolve_file_memory_resolution(
+                    target_storage_path,
+                    config,
+                    self.runtime_paths,
+                    agent_name=agent_name_from_scope_user_id(scope_user_id),
+                    original_storage_path=storage_path,
+                    execution_identity=execution_identity,
+                )
+                _append_scope_memory_entry(
+                    scope_user_id,
+                    condensed_prompt,
+                    resolution,
+                    config,
+                    memory_id=team_memory_id,
+                )
+                resolutions.append(resolution)
+            return resolutions
+
+        resolutions = await asyncio.to_thread(_persist_to_targets)
+        if isinstance(agent_name, str):
+            # Semantic refresh scheduling creates loop tasks, so it stays on the loop.
+            for resolution in resolutions:
+                _schedule_agent_semantic_refresh(
+                    agent_name,
+                    scope_user_id,
+                    resolution,
+                    config,
+                    self.runtime_paths,
+                    execution_identity=execution_identity,
+                )
+
+        if isinstance(agent_name, list):
+            logger.info(
+                "File team memory added",
+                team_id=scope_user_id,
+                members=agent_name,
+                storage_targets=len(target_storage_paths),
+            )
+        else:
+            logger.info("File memory added", agent=agent_name)
+
+    @timed("system_prompt_assembly.memory_file_entrypoint_load")
+    def load_entrypoint_context(
+        self,
+        agent_name: str,
+        storage_path: Path,
+        config: Config,
+        *,
+        execution_identity: ToolExecutionIdentity | None = None,
+    ) -> str:
+        """Load the stable scoped `MEMORY.md` entrypoint text for one agent."""
+        resolution = resolve_file_memory_resolution(
+            storage_path,
+            config,
+            self.runtime_paths,
+            agent_name=agent_name,
+            execution_identity=execution_identity,
+        )
+        return _load_scope_entrypoint_context(
+            agent_scope_user_id(agent_name),
+            resolution,
+            config,
+        )

@@ -19,10 +19,14 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools.attachments import AttachmentTools, send_context_attachments
+from mindroom.matrix.runtime_media import RuntimeEncryptedMediaAttachment
+from mindroom.message_target import MessageTarget
+from mindroom.session_ids import create_session_id
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
     get_tool_runtime_context,
     list_tool_runtime_attachment_ids,
+    register_tool_runtime_media_attachment,
     tool_runtime_context,
 )
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
@@ -64,9 +68,11 @@ def _tool_context(
     conversation_cache.get_latest_thread_event_id_if_needed.side_effect = _latest_thread_event_id
     return ToolRuntimeContext(
         agent_name="openclaw",
-        room_id="!room:localhost",
-        thread_id="$thread:localhost",
-        resolved_thread_id="$thread:localhost",
+        target=MessageTarget.resolve(
+            room_id="!room:localhost",
+            thread_id="$thread:localhost",
+            reply_to_event_id=None,
+        ),
         requester_id="@user:localhost",
         client=client,
         config=config,
@@ -102,9 +108,12 @@ def _tool_context_with_thread_scope(
     context = _tool_context(tmp_path, attachment_ids=attachment_ids)
     return dataclasses.replace(
         context,
-        thread_id=thread_id,
-        resolved_thread_id=resolved_thread_id,
-        session_id=(context.room_id if resolved_thread_id is None else f"{context.room_id}:{resolved_thread_id}"),
+        target=dataclasses.replace(
+            context.target,
+            source_thread_id=thread_id,
+            resolved_thread_id=resolved_thread_id,
+            session_id=create_session_id(context.room_id, resolved_thread_id),
+        ),
     )
 
 
@@ -191,7 +200,7 @@ async def test_attachments_tool_get_attachment_rejects_out_of_context_ids(tmp_pa
 async def test_attachments_tool_get_attachment_mindroom_output_path_writes_primary_workspace(
     tmp_path: Path,
 ) -> None:
-    """Saving an attachment without a worker target should write bytes into the primary workspace."""
+    """Unsafe-local opt-in should write attachment bytes into the primary workspace."""
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     tool = AttachmentTools(tool_output_workspace_root=workspace)
@@ -205,7 +214,13 @@ async def test_attachments_tool_get_attachment_mindroom_output_path_writes_prima
     )
     assert attachment is not None
 
-    with tool_runtime_context(_tool_context(tmp_path, attachment_ids=(attachment.attachment_id,))):
+    with tool_runtime_context(
+        _tool_context(
+            tmp_path,
+            attachment_ids=(attachment.attachment_id,),
+            process_env={"MINDROOM_UNSAFE_ALLOW_LOCAL_EXECUTION_TOOLS": "true"},
+        ),
+    ):
         payload = json.loads(await tool.get_attachment("att_sample", mindroom_output_path="inputs/sample.txt"))
 
     saved_path = workspace / "inputs" / "sample.txt"
@@ -606,6 +621,107 @@ async def test_send_context_attachments_sends_attachment_ids(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
+async def test_send_context_attachments_reuses_ephemeral_encrypted_media(tmp_path: Path) -> None:
+    """Turn-scoped media sends reuse MXC ciphertext and never create a local attachment file."""
+    context = _tool_context(tmp_path)
+    attachment = RuntimeEncryptedMediaAttachment(
+        attachment_id="att_screenshot",
+        filename="desktop-screenshot.png",
+        url="mxc://example.org/screenshot",
+        key="key",
+        iv="iv",
+        sha256="hash",
+        mime_type="image/png",
+        size=123,
+    )
+    register_tool_runtime_media_attachment(context, attachment)
+
+    with (
+        patch(
+            "mindroom.custom_tools.attachments.send_runtime_encrypted_media_message",
+            new=AsyncMock(return_value="$image_evt"),
+        ) as send_runtime_media,
+        patch("mindroom.custom_tools.attachments.send_file_message", new=AsyncMock()) as send_file,
+    ):
+        result, send_error = await send_context_attachments(
+            context,
+            attachment_ids=[attachment.attachment_id],
+            attachment_file_paths=[],
+        )
+
+    assert send_error is None
+    assert result is not None
+    assert result.attachment_event_ids == ["$image_evt"]
+    assert result.resolved_attachment_ids == [attachment.attachment_id]
+    send_runtime_media.assert_awaited_once_with(
+        context.client,
+        context.room_id,
+        attachment,
+        thread_id=context.resolved_thread_id,
+        latest_thread_event_id=context.resolved_thread_id,
+        conversation_cache=context.conversation_cache,
+    )
+    send_file.assert_not_awaited()
+    assert not (tmp_path / "attachments").exists()
+    assert not (tmp_path / "incoming_media").exists()
+
+    with tool_runtime_context(context):
+        payload = json.loads(await AttachmentTools().list_attachments(attachment.attachment_id))
+    assert payload["attachments"] == [attachment.tool_payload()]
+    assert payload["missing_attachment_ids"] == []
+
+
+@pytest.mark.parametrize("existing_registry", ["attachment_ids", "runtime_attachment_ids"])
+def test_runtime_media_registration_rejects_attachment_id_namespace_collisions(
+    tmp_path: Path,
+    existing_registry: str,
+) -> None:
+    """Runtime media must not shadow another attachment registry entry."""
+    attachment = RuntimeEncryptedMediaAttachment(
+        attachment_id="att_collision",
+        filename="desktop-screenshot.png",
+        url="mxc://example.org/screenshot",
+        key="key",
+        iv="iv",
+        sha256="hash",
+        mime_type="image/png",
+        size=123,
+    )
+    context = _tool_context(
+        tmp_path,
+        attachment_ids=(attachment.attachment_id,) if existing_registry == "attachment_ids" else (),
+    )
+    if existing_registry == "runtime_attachment_ids":
+        context.runtime_attachment_ids.append(attachment.attachment_id)
+
+    with pytest.raises(ValueError, match="Runtime attachment ID collision"):
+        register_tool_runtime_media_attachment(context, attachment)
+
+    assert context.runtime_media_attachments == {}
+
+
+def test_runtime_media_registration_is_idempotent(tmp_path: Path) -> None:
+    """The same runtime media handle may be registered repeatedly without duplication."""
+    context = _tool_context(tmp_path)
+    attachment = RuntimeEncryptedMediaAttachment(
+        attachment_id="att_screenshot",
+        filename="desktop-screenshot.png",
+        url="mxc://example.org/screenshot",
+        key="key",
+        iv="iv",
+        sha256="hash",
+        mime_type="image/png",
+        size=123,
+    )
+
+    register_tool_runtime_media_attachment(context, attachment)
+    register_tool_runtime_media_attachment(context, attachment)
+
+    assert context.runtime_media_attachments == {attachment.attachment_id: attachment}
+    assert context.runtime_attachment_ids == [attachment.attachment_id]
+
+
+@pytest.mark.asyncio
 async def test_send_context_attachments_reuses_latest_thread_event_id_for_multiple_files(tmp_path: Path) -> None:
     """Threaded attachment batches should resolve the latest event once and advance it locally."""
     first_file = tmp_path / "one.txt"
@@ -769,6 +885,27 @@ async def test_attachments_tool_register_attachment_uses_resolved_thread_scope(t
     attachment = load_attachment(tmp_path, payload["attachment_id"])
     assert attachment is not None
     assert attachment.thread_id == "$thread-root:localhost"
+
+
+@pytest.mark.asyncio
+async def test_attachments_tool_register_attachment_resolves_relative_paths_from_workspace(tmp_path: Path) -> None:
+    """Registering a relative file path should use the agent workspace root."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    generated_file = workspace / "scratch" / "generated.txt"
+    generated_file.parent.mkdir()
+    generated_file.write_text("artifact", encoding="utf-8")
+    tool = AttachmentTools(tool_output_workspace_root=workspace)
+    ctx = _tool_context(tmp_path)
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(await tool.register_attachment("scratch/generated.txt"))
+
+    assert payload["status"] == "ok"
+    assert payload["attachment"]["local_path"] == str(generated_file.resolve())
+    attachment = load_attachment(tmp_path, payload["attachment_id"])
+    assert attachment is not None
+    assert attachment.local_path == generated_file.resolve()
 
 
 @pytest.mark.asyncio
@@ -992,6 +1129,32 @@ async def test_send_context_attachments_sends_local_file_paths_by_auto_registeri
     assert result.newly_registered_attachment_ids == result.resolved_attachment_ids
     assert result.newly_registered_attachment_ids[0] in list_tool_runtime_attachment_ids(current_context)
     mocked.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_send_context_attachments_rejects_workspace_relative_file_path_escape(tmp_path: Path) -> None:
+    """Workspace-relative attachment paths must not resolve outside the agent workspace."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside_file = tmp_path / "outside.txt"
+    outside_file.write_text("secret", encoding="utf-8")
+    ctx = _tool_context(tmp_path)
+
+    with (
+        tool_runtime_context(ctx),
+        patch("mindroom.custom_tools.attachments.send_file_message", new=AsyncMock(return_value="$file_evt")) as mocked,
+    ):
+        result, send_error = await send_context_attachments(
+            ctx,
+            attachment_ids=[],
+            attachment_file_paths=["../outside.txt"],
+            workspace_root=workspace,
+        )
+
+    assert result is None
+    assert send_error is not None
+    assert "workspace" in send_error
+    mocked.assert_not_awaited()
 
 
 def test_tool_runtime_context_none_temporarily_clears_nested_scope(tmp_path: Path) -> None:

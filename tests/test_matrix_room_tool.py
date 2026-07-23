@@ -17,6 +17,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.custom_tools.matrix_room import MatrixRoomTools
 from mindroom.matrix.client import RoomThreadsPageError
+from mindroom.message_target import MessageTarget
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.conftest import (
@@ -51,9 +52,11 @@ def _make_context(
     client.user_id = "@mindroom_general:localhost"
     return ToolRuntimeContext(
         agent_name="general",
-        room_id=room_id,
-        thread_id=thread_id,
-        resolved_thread_id=thread_id,
+        target=MessageTarget.resolve(
+            room_id=room_id,
+            thread_id=thread_id,
+            reply_to_event_id=None,
+        ),
         requester_id="@user:localhost",
         client=client,
         config=config,

@@ -12,8 +12,11 @@ from agno.run.team import TeamRunOutput
 from mindroom.agent_storage import create_session_storage, get_agent_session, get_team_session
 from mindroom.constants import MATRIX_RESPONSE_EVENT_ID_METADATA_KEY
 from mindroom.entity_resolution import entity_identity_registry
-from mindroom.history import HistoryScope, create_scope_session_storage
+from mindroom.history.runtime import create_scope_session_storage
+from mindroom.history.types import HistoryScope
+from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.runtime_protocols import SupportsConfig  # noqa: TC001
+from mindroom.team_scope import ad_hoc_team_scope_id
 
 if TYPE_CHECKING:
     import structlog
@@ -50,17 +53,31 @@ class ConversationStateWriter:
         """Return the Agno session type used by one persisted history scope."""
         return SessionType.TEAM if scope.kind == "team" else SessionType.AGENT
 
-    def team_history_scope(self, team_agents: list[MatrixID]) -> HistoryScope:
+    def team_history_scope(
+        self,
+        team_agents: list[MatrixID],
+        *,
+        requester_user_id: str | None = None,
+    ) -> HistoryScope:
         """Return the persisted team-history scope for one team response."""
         config = self.deps.runtime.config
         if self.deps.agent_name in config.teams:
             return HistoryScope(kind="team", scope_id=self.deps.agent_name)
         registry = entity_identity_registry(config, self.deps.runtime_paths)
-        team_member_names = [
-            registry.current_entity_name_for_user_id(matrix_id.full_id) or matrix_id.username
-            for matrix_id in team_agents
-        ]
-        return HistoryScope(kind="team", scope_id=f"team_{'+'.join(sorted(team_member_names))}")
+        member_names: list[str] = []
+        for matrix_id in team_agents:
+            member_name = registry.current_entity_name_for_user_id(matrix_id.full_id) or matrix_id.username
+            member_names.append(member_name)
+        scope_id = (
+            ad_hoc_team_scope_id(
+                member_names,
+                config.agents,
+                requester_user_id=requester_user_id,
+                missing_requester_message="Private ad hoc team history scope requires requester_user_id",
+            )
+            or "team_"
+        )
+        return HistoryScope(kind="team", scope_id=scope_id)
 
     def create_storage(
         self,
@@ -99,6 +116,7 @@ class ConversationStateWriter:
         session_type: SessionType,
         run_id: str,
         response_event_id: str,
+        response_sender_id: str,
     ) -> None:
         """Persist Matrix response linkage onto the run that produced it."""
         session = (
@@ -116,5 +134,29 @@ class ConversationStateWriter:
                 return
             metadata[MATRIX_RESPONSE_EVENT_ID_METADATA_KEY] = response_event_id
             run.metadata = metadata
+            _wrap_final_assistant_message(
+                run,
+                response_sender_id=response_sender_id,
+                response_event_id=response_event_id,
+            )
             storage.upsert_session(session)
+            return
+
+
+def _wrap_final_assistant_message(
+    run: RunOutput | TeamRunOutput,
+    *,
+    response_sender_id: str,
+    response_event_id: str,
+) -> None:
+    """Attach visible Matrix identity to the persisted assistant message."""
+    if not isinstance(run.content, str) or not run.content:
+        return
+    for message in reversed(run.messages or []):
+        if message.role == "assistant":
+            message.content = render_msg_tag(
+                sender=response_sender_id,
+                body=run.content,
+                event_id=response_event_id,
+            )
             return

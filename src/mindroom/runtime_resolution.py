@@ -53,20 +53,11 @@ class ResolvedAgentExecution:
 class ResolvedAgentRuntime:
     """Resolved runtime state for one `(agent_name, execution_identity)` materialization."""
 
-    agent_name: str
-    policy: ResolvedAgentPolicy
-    execution_scope: WorkerScope | None
-    execution_identity: ToolExecutionIdentity | None
-    worker_key: str | None
+    execution: ResolvedAgentExecution
     state_root: Path
     workspace: ResolvedAgentWorkspace | None
     tool_base_dir: Path | None
     file_memory_root: Path | None
-
-    @property
-    def is_private(self) -> bool:
-        """Return whether the resolved runtime uses a private agent definition."""
-        return self.policy.is_private
 
 
 @dataclass(frozen=True)
@@ -112,12 +103,15 @@ def resolve_private_requester_scope_root(
     worker_key: str,
 ) -> Path:
     """Return the requester-scoped private root shared across same-requester agents."""
-    requester_worker_key = worker_key
+    requester_worker_key: str | None = worker_key
     if execution_scope == "user_agent":
         requester_worker_key = resolve_worker_key("user", execution_identity, agent_name=None)
         if requester_worker_key is None:
             msg = "Requester-scoped private root requires a requester identity"
             raise ValueError(msg)
+    if requester_worker_key is None:
+        msg = "Requester-scoped private root requires a worker key"
+        raise ValueError(msg)
     return _resolve_private_scope_root(
         runtime_paths=runtime_paths,
         worker_key=requester_worker_key,
@@ -225,7 +219,7 @@ def resolve_agent_runtime(
             ).is_relative_to(workspace_knowledge_root)
         }
         knowledge_paths: dict[str, Path] = {}
-        for base_id in config.get_agent_knowledge_base_ids(agent_name):
+        for base_id in config.resolve_entity(agent_name).knowledge_base_ids:
             base_config = config.get_knowledge_base_config(base_id)
             if config.get_private_knowledge_base_agent(base_id) is None:
                 knowledge_paths[base_id] = resolve_config_relative_path(base_config.path, runtime_paths).resolve()
@@ -243,11 +237,7 @@ def resolve_agent_runtime(
     tool_base_dir = workspace.root if workspace is not None else None
     file_memory_root = workspace.file_memory_path if workspace is not None else None
     return ResolvedAgentRuntime(
-        agent_name=agent_name,
-        policy=resolved_execution.policy,
-        execution_scope=resolved_execution.execution_scope,
-        execution_identity=resolved_execution.execution_identity,
-        worker_key=resolved_execution.worker_key,
+        execution=resolved_execution,
         state_root=state_root,
         workspace=workspace,
         tool_base_dir=tool_base_dir,
@@ -308,7 +298,7 @@ def resolve_knowledge_binding(
             field_name=f"knowledge base '{base_id}' path",
         ),
         incremental_sync_on_access=(
-            refresh_enabled and (agent_runtime.policy.private_agent_knowledge_enabled or not start_watchers)
+            refresh_enabled and (agent_runtime.execution.policy.private_agent_knowledge_enabled or not start_watchers)
         ),
     )
 

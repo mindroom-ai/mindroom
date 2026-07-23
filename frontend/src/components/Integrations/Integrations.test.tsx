@@ -214,7 +214,8 @@ vi.mock("./integrations/index", () => ({
         integration: {
           id: "google_drive",
           name: "Google Drive",
-          description: "Search and read files from your connected Google Drive",
+          description:
+            "Search, read, upload, and organize files in your connected Google Drive",
           category: "productivity",
           icon: <span>Google Drive Icon</span>,
           status: "available",
@@ -285,7 +286,8 @@ vi.mock("./integrations/index", () => ({
         integration: {
           id: "google_drive",
           name: "Google Drive",
-          description: "Search and read files from your connected Google Drive",
+          description:
+            "Search, read, upload, and organize files in your connected Google Drive",
           category: "productivity",
           icon: <span>Google Drive Icon</span>,
           status: "available",
@@ -418,6 +420,78 @@ describe("Integrations", () => {
     });
   });
 
+  it("discloses Google data handling before connection", async () => {
+    render(<Integrations />);
+
+    await waitFor(() => {
+      expect(
+        screen.getAllByText(
+          /By connecting, you authorize this MindRoom installation/,
+        ).length,
+      ).toBeGreaterThan(0);
+      expect(
+        screen.getAllByText(
+          /Project maintainers have no automatic access merely because they maintain MindRoom; if they also operate this installation, they may have operator access/,
+        ).length,
+      ).toBeGreaterThan(0);
+      expect(
+        screen.getAllByText(
+          /The installation operator and anyone with administrative or filesystem access may be able to access stored credentials and data/,
+        ).length,
+      ).toBeGreaterThan(0);
+      expect(
+        screen.getAllByText(
+          /Shared or unscoped agents can use the connected account for any user authorized to invoke them/,
+        ).length,
+      ).toBeGreaterThan(0);
+    });
+    for (const link of screen.getAllByRole("link", {
+      name: "Privacy policy",
+    })) {
+      expect(link).toHaveAttribute(
+        "href",
+        "https://docs.mindroom.chat/privacy/",
+      );
+    }
+  });
+
+  it("discloses data handling for dynamically registered Google OAuth providers", async () => {
+    mockUseTools.mockReturnValue({
+      tools: [
+        ...mockTools,
+        {
+          name: "google_tasks_tool",
+          display_name: "Google Tasks Tool",
+          description: "Manage Google Tasks",
+          icon: "✅",
+          icon_color: null,
+          category: "productivity",
+          status: "available",
+          setup_type: "oauth",
+          config_fields: null,
+          helper_text: null,
+          docs_url: null,
+          dependencies: null,
+          auth_provider: "google_tasks",
+        },
+      ],
+      loading: false,
+      refetch: vi.fn(),
+      statusAuthoritative: true,
+    });
+
+    render(<Integrations />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Google Tasks")).toBeInTheDocument();
+      expect(
+        screen.getAllByText(
+          /Project maintainers have no automatic access merely because they maintain MindRoom/,
+        ),
+      ).toHaveLength(3);
+    });
+  });
+
   it("should display all integration cards", async () => {
     render(<Integrations />);
 
@@ -426,7 +500,7 @@ describe("Integrations", () => {
       expect(screen.getByText("Google Drive")).toBeInTheDocument();
       expect(
         screen.getByText(
-          "Search and read files from your connected Google Drive",
+          "Search, read, upload, and organize files in your connected Google Drive",
         ),
       ).toBeInTheDocument();
       expect(screen.getByText("Spotify")).toBeInTheDocument();
@@ -511,6 +585,7 @@ describe("Integrations", () => {
       status: "not_connected",
       connected: false,
       oauth_client_configured: true,
+      oauth_custom_client_configured: true,
       oauth_client_config_service: "google_drive_oauth_client",
     });
 
@@ -552,6 +627,7 @@ describe("Integrations", () => {
       status: "not_connected",
       connected: false,
       oauth_client_configured: true,
+      oauth_custom_client_configured: true,
       oauth_client_config_service: "google_oauth_client",
       oauth_client_redirect_uri_supported: false,
     });
@@ -581,6 +657,47 @@ describe("Integrations", () => {
         expect.arrayContaining([
           expect.objectContaining({ name: "redirect_uri" }),
         ]),
+      );
+    });
+  });
+
+  it("offers a custom client without blocking provisioned OAuth", async () => {
+    mockGoogleDriveLoadStatus.mockResolvedValueOnce({
+      status: "available",
+      connected: false,
+      oauth_client_configured: true,
+      oauth_custom_client_configured: false,
+      oauth_client_config_service: "google_drive_oauth_client",
+      oauth_client_redirect_uri_supported: true,
+    });
+
+    render(<Integrations />);
+
+    await waitFor(() => {
+      expect(
+        screen.getAllByRole("button", { name: "Connect" }).length,
+      ).toBeGreaterThan(0);
+      expect(
+        screen.getByRole("button", { name: "Use custom client" }),
+      ).toBeInTheDocument();
+      expect(
+        screen.queryByRole("button", { name: "Configure client" }),
+      ).not.toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Use custom client" }));
+
+    await waitFor(() => {
+      expect(screen.getByText(/"name":"client_secret"/)).toHaveTextContent(
+        /"required":true/,
+      );
+      expect(mockEnhancedConfigDialogProps).toHaveBeenCalledWith(
+        expect.objectContaining({
+          service: "google_drive_oauth_client",
+          configFields: expect.arrayContaining([
+            expect.objectContaining({ name: "redirect_uri" }),
+          ]),
+        }),
       );
     });
   });
@@ -719,7 +836,7 @@ describe("Integrations", () => {
     // But the elements might still be in the DOM, just hidden
     // So let's check for visibility instead
     const googleElement = screen.queryByText(
-      "Search and read files from your connected Google Drive",
+      "Search, read, upload, and organize files in your connected Google Drive",
     );
     if (googleElement) {
       // Check if it's hidden (parent tab panel might be hidden)
@@ -1177,7 +1294,7 @@ describe("Integrations", () => {
       {
         name: "google_drive",
         display_name: "Google Drive",
-        description: "Search and read files from Google Drive",
+        description: "Search, read, upload, and organize files in Google Drive",
         icon: "SiGoogledrive",
         icon_color: "text-green-600",
         category: "productivity",

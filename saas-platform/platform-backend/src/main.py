@@ -18,13 +18,14 @@ from backend.config import ALLOWED_ORIGINS, ENABLE_CLEANUP_SCHEDULER, ENVIRONMEN
 from backend.metrics import instrument_app
 from backend.deps import limiter
 from backend.middleware.audit_logging import AuditLoggingMiddleware
-from backend.tasks.cleanup import run_all_cleanup_tasks
+from backend.tasks.cleanup import cleanup_unentitled_instances, run_all_cleanup_tasks
 from backend.routes import (
     accounts,
     admin,
     gdpr,
     health,
     instances,
+    matrix_oidc,
     pricing,
     provisioner,
     sso,
@@ -47,10 +48,11 @@ if TYPE_CHECKING:
     from starlette.responses import Response as StarletteResponse
 
 
-def _run_cleanup_job() -> None:
+async def _run_cleanup_job() -> None:
     """Execute periodic cleanup tasks with logging."""
     try:
         result = run_all_cleanup_tasks()
+        result["subscription_lifecycle"] = await cleanup_unentitled_instances()
         logger = logging.getLogger("mindroom.cleanup")
         logger.info("Cleanup job completed", extra={"result": result})
     except Exception:  # noqa: BLE001
@@ -87,7 +89,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 # FastAPI app
-app = FastAPI(title="MindRoom Backend", lifespan=lifespan)
+production_docs_disabled = ENVIRONMENT == "production"
+app = FastAPI(
+    title="MindRoom Backend",
+    lifespan=lifespan,
+    docs_url=None if production_docs_disabled else "/docs",
+    redoc_url=None if production_docs_disabled else "/redoc",
+    openapi_url=None if production_docs_disabled else "/openapi.json",
+)
 
 instrument_app(app)
 
@@ -180,6 +189,18 @@ def _service_allowed_hosts(*, environment: str) -> list[str]:
     return list(base_hosts | hosts_with_ports)
 
 
+def _host_name_from_header(host_header: str) -> str:
+    """Return a lower-case host name without an optional Host-header port."""
+    host = host_header.strip().lower()
+    if host.startswith("["):
+        bracket_end = host.find("]")
+        if bracket_end != -1:
+            return host[1:bracket_end]
+    if host.count(":") == 1:
+        return host.rsplit(":", maxsplit=1)[0]
+    return host
+
+
 # Add remaining middleware BEFORE routers (but after custom middleware functions)
 # Remember: Last added = First to run
 
@@ -190,8 +211,23 @@ app.add_middleware(SlowAPIMiddleware)
 # Always allow loopback hosts so direct container health probes work in every environment.
 allowed_hosts = [f"*.{PLATFORM_DOMAIN}", PLATFORM_DOMAIN, "testserver", "localhost", "127.0.0.1"]
 
-allowed_hosts += _service_allowed_hosts(environment=ENVIRONMENT)
+service_allowed_hosts = _service_allowed_hosts(environment=ENVIRONMENT)
+metrics_allowed_hosts = frozenset(_host_name_from_header(host) for host in service_allowed_hosts)
+allowed_hosts += service_allowed_hosts
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=allowed_hosts)
+
+
+@app.middleware("http")
+async def restrict_public_metrics(
+    request: Request, call_next: Callable[[Request], Awaitable[StarletteResponse]]
+) -> StarletteResponse:
+    """Keep Prometheus samples on service hosts instead of public ingress hosts."""
+    if ENVIRONMENT == "production" and request.url.path == "/metrics":
+        host = _host_name_from_header(request.headers.get("host", ""))
+        if host not in metrics_allowed_hosts:
+            return JSONResponse({"detail": "Not found"}, status_code=404)
+    return await call_next(request)
+
 
 # 5. Compute CORS origins: exclude localhost in production
 cors_origins = [o for o in ALLOWED_ORIGINS if not (ENVIRONMENT == "production" and o.startswith("http://localhost"))]
@@ -213,6 +249,7 @@ app.include_router(accounts.router)
 app.include_router(subscriptions.router)
 app.include_router(usage.router)
 app.include_router(instances.router)
+app.include_router(matrix_oidc.router)
 app.include_router(provisioner.router)
 app.include_router(admin.router)
 app.include_router(pricing.router)

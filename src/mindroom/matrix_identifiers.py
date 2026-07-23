@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import re
+from typing import TYPE_CHECKING
 
 from mindroom.constants import RuntimePaths, runtime_matrix_server_name, runtime_mindroom_namespace
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
 
 _AGENT_USERNAME_PREFIX = "mindroom_"
 _NAMESPACE_PATTERN = re.compile(r"^[a-z0-9]{4,32}$")
@@ -34,6 +38,14 @@ def agent_username_localpart(agent_name: str, runtime_paths: RuntimePaths) -> st
     if namespace:
         return f"{_AGENT_USERNAME_PREFIX}{agent_name}_{namespace}"
     return f"{_AGENT_USERNAME_PREFIX}{agent_name}"
+
+
+def unnamespaced_agent_name_from_username_localpart(username_localpart: str) -> str | None:
+    """Extract an unnamespaced generated agent name from a Matrix username localpart."""
+    if not username_localpart.lower().startswith(_AGENT_USERNAME_PREFIX):
+        return None
+    agent_name = username_localpart[len(_AGENT_USERNAME_PREFIX) :]
+    return agent_name or None
 
 
 def managed_room_alias_localpart(room_key: str, runtime_paths: RuntimePaths) -> str:
@@ -70,6 +82,37 @@ def room_alias_localpart(room_alias: str) -> str | None:
     if not room_alias.startswith("#") or ":" not in room_alias:
         return None
     return room_alias[1:].split(":", 1)[0]
+
+
+def room_alias_identifier_candidates(room_alias: str, runtime_paths: RuntimePaths) -> list[str]:
+    """Return alias, localpart, and managed-room key identifiers for one Matrix alias."""
+    identifiers = [room_alias]
+    localpart = room_alias_localpart(room_alias)
+    if not localpart:
+        return identifiers
+    identifiers.append(localpart)
+    managed_room_key = managed_room_key_from_alias_localpart(localpart, runtime_paths)
+    if managed_room_key:
+        identifiers.append(managed_room_key)
+    return identifiers
+
+
+def _is_concrete_matrix_user_id(user_id: str) -> bool:
+    """Return whether this string is a concrete Matrix user ID (no wildcards or placeholders)."""
+    if not user_id.startswith("@") or "*" in user_id or "?" in user_id:
+        return False
+    if any(character.isspace() for character in user_id):
+        return False
+    localpart, separator, domain = user_id[1:].partition(":")
+    return bool(separator) and bool(localpart) and bool(domain)
+
+
+def split_concrete_matrix_user_ids(user_ids: Iterable[str]) -> tuple[list[str], list[str]]:
+    """Split user IDs into deduplicated concrete Matrix IDs and sorted skipped entries."""
+    unique_ids = list(dict.fromkeys(user_ids))
+    concrete = [user_id for user_id in unique_ids if _is_concrete_matrix_user_id(user_id)]
+    skipped = sorted(user_id for user_id in unique_ids if not _is_concrete_matrix_user_id(user_id))
+    return concrete, skipped
 
 
 def extract_server_name_from_homeserver(homeserver: str, runtime_paths: RuntimePaths) -> str:

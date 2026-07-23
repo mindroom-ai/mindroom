@@ -14,7 +14,7 @@ from agno.media import Audio
 from mindroom import voice_handler
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.config.voice import VoiceConfig, _VoiceLLMConfig, _VoiceSTTConfig
+from mindroom.config.voice import VoiceConfig, VoiceSTTConfig, _VoiceLLMConfig
 from mindroom.constants import ATTACHMENT_IDS_KEY
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 from tests.identity_helpers import persist_actual_entity_accounts
@@ -112,7 +112,7 @@ class TestVoiceHandler:
             Config(
                 voice=VoiceConfig(
                     enabled=True,
-                    stt=_VoiceSTTConfig(provider="openai", model="whisper-1"),
+                    stt=VoiceSTTConfig(provider="openai", model="whisper-1"),
                     intelligence=_VoiceLLMConfig(model="default"),
                 ),
             ),
@@ -121,6 +121,134 @@ class TestVoiceHandler:
         assert config.voice.stt.provider == "openai"
         assert config.voice.stt.model == "whisper-1"
         assert config.voice.intelligence.model == "default"
+
+    def test_voice_stt_keeps_model_default_for_partial_config(self) -> None:
+        """Promoting the shared speech config does not break existing partial voice STT blocks."""
+        config = VoiceConfig.model_validate({"stt": {"provider": "openai"}})
+
+        assert config.stt.model == "gpt-4o-transcribe"
+
+    @pytest.mark.parametrize(
+        ("matrix_mime_type", "expected_filename", "expected_mime_type"),
+        [
+            ("audio/mp4", "audio.m4a", "audio/mp4"),
+            ("audio/m4a", "audio.m4a", "audio/m4a"),
+            ("audio/x-m4a", "audio.m4a", "audio/x-m4a"),
+            ("audio/mp3", "audio.mp3", "audio/mp3"),
+            ("audio/webm", "audio.webm", "audio/webm"),
+            ("audio/ogg; codecs=opus", "audio.ogg", "audio/ogg"),
+            ("  AUDIO/WAV  ", "audio.wav", "audio/wav"),
+        ],
+    )
+    def test_stt_upload_metadata_preserves_matrix_audio_mime_type(
+        self,
+        matrix_mime_type: str,
+        expected_filename: str,
+        expected_mime_type: str,
+    ) -> None:
+        """Matrix audio MIME types should be uploaded to STT with matching metadata."""
+        filename, mime_type = voice_handler._stt_upload_filename_and_mime_type(matrix_mime_type)
+
+        assert filename == expected_filename
+        assert mime_type == expected_mime_type
+
+    def test_stt_upload_metadata_defaults_to_ogg(self) -> None:
+        """Missing Matrix MIME metadata should keep the legacy OGG upload shape."""
+        filename, mime_type = voice_handler._stt_upload_filename_and_mime_type(None)
+
+        assert filename == "audio.ogg"
+        assert mime_type == "audio/ogg"
+
+    def test_stt_upload_metadata_defaults_to_ogg_for_non_audio_mime_type(self) -> None:
+        """Non-audio Matrix MIME metadata should keep the legacy OGG upload shape."""
+        filename, mime_type = voice_handler._stt_upload_filename_and_mime_type("text/plain")
+
+        assert filename == "audio.ogg"
+        assert mime_type == "audio/ogg"
+
+    def test_stt_upload_metadata_preserves_unknown_audio_mime_type(self) -> None:
+        """Unknown audio MIME metadata should preserve the audio type with a generic extension."""
+        filename, mime_type = voice_handler._stt_upload_filename_and_mime_type("audio/unknown")
+
+        assert filename == "audio.bin"
+        assert mime_type == "audio/unknown"
+
+    @pytest.mark.asyncio
+    async def test_transcribe_audio_uses_configured_stt_host_and_named_credential(self) -> None:
+        """OpenAI proxy requests use their named credential and TLS verification."""
+        config = _runtime_bound_config(
+            Config(
+                voice=VoiceConfig(
+                    enabled=True,
+                    stt=VoiceSTTConfig(
+                        host="https://stt.example.test/v1",
+                        model="whisper-1",
+                        credentials_service="openai-voice",
+                        extra_kwargs={"language": "nl", "temperature": 0},
+                    ),
+                ),
+            ),
+        )
+        client_init_kwargs: list[dict[str, object]] = []
+        post_calls: list[dict[str, object]] = []
+
+        class FakeResponse:
+            status_code = 200
+
+            def json(self) -> dict[str, str]:
+                return {"text": " transcribed text "}
+
+        class FakeAsyncClient:
+            def __init__(self, **kwargs: object) -> None:
+                client_init_kwargs.append(kwargs)
+
+            async def __aenter__(self) -> FakeAsyncClient:
+                return self
+
+            async def __aexit__(self, *args: object) -> None:
+                return None
+
+            async def post(
+                self,
+                url: str,
+                *,
+                headers: dict[str, str],
+                files: dict[str, tuple[str, bytes, str]],
+                data: dict[str, str],
+            ) -> FakeResponse:
+                post_calls.append(
+                    {
+                        "url": url,
+                        "headers": headers,
+                        "files": files,
+                        "data": data,
+                    },
+                )
+                return FakeResponse()
+
+        with (
+            patch("mindroom.voice_handler.httpx.AsyncClient", FakeAsyncClient),
+            patch("mindroom.voice_handler.get_api_key_for_service", return_value="openai-provider-key") as get_key,
+        ):
+            transcription = await voice_handler._transcribe_audio(
+                b"audio-bytes",
+                config,
+                runtime_paths_for(config),
+                mime_type="audio/ogg",
+            )
+
+        assert transcription == "transcribed text"
+        get_key.assert_called_once_with("openai-voice", runtime_paths_for(config))
+        assert len(client_init_kwargs) == 1
+        assert client_init_kwargs[0].get("verify", True) is not False
+        assert post_calls == [
+            {
+                "url": "https://stt.example.test/v1/audio/transcriptions",
+                "headers": {"Authorization": "Bearer openai-provider-key"},
+                "files": {"file": ("audio.ogg", b"audio-bytes", "audio/ogg")},
+                "data": {"model": "whisper-1", "language": "nl", "temperature": 0},
+            },
+        ]
 
     def test_sanitize_unavailable_mentions_uses_exact_aliases(self) -> None:
         """Voice mention sanitizing should match exact Matrix mention aliases."""
@@ -221,13 +349,15 @@ class TestVoiceHandler:
                 "mindroom.voice_handler._download_audio",
                 new=AsyncMock(return_value=Audio(content=b"audio", mime_type="audio/ogg")),
             ),
-            patch("mindroom.voice_handler._transcribe_audio", return_value="help me"),
+            patch("mindroom.voice_handler._transcribe_audio", return_value="help me") as mock_transcribe,
             patch("mindroom.voice_handler._process_transcription", new_callable=AsyncMock) as mock_process,
         ):
             mock_process.return_value = "@openclaw help me"
             result = await _handle_voice_message(client, room, event, config)
 
         assert result == "🎤 @openclaw help me"
+        mock_transcribe.assert_awaited_once()
+        assert mock_transcribe.await_args.kwargs["mime_type"] == "audio/ogg"
         assert mock_process.await_count == 1
         assert mock_process.await_args.kwargs["available_agent_names"] == ["openclaw"]
         assert mock_process.await_args.kwargs["available_team_names"] == []
@@ -276,6 +406,18 @@ class TestVoiceHandler:
         assert result is not None
         assert result.content == b"decrypted_audio_data"
         assert result.mime_type == "audio/mpeg"
+        mock_download.assert_awaited_once_with(client, event)
+
+    @pytest.mark.asyncio
+    async def test_download_audio_returns_none_when_media_cap_rejects_payload(self) -> None:
+        """Voice downloads should inherit Matrix media byte caps from the shared helper."""
+        client = AsyncMock()
+        event = MagicMock(spec=nio.RoomMessageAudio)
+
+        with patch("mindroom.voice_handler.download_media_bytes", new=AsyncMock(return_value=None)) as mock_download:
+            result = await voice_handler._download_audio(client, event)
+
+        assert result is None
         mock_download.assert_awaited_once_with(client, event)
 
     @pytest.mark.asyncio

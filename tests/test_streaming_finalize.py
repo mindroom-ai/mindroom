@@ -22,7 +22,9 @@ from mindroom.delivery_gateway import (
     DeliveryGatewayDeps,
     FinalDeliveryRequest,
     FinalizeStreamedResponseRequest,
+    ResponseIdentity,
 )
+from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
 from mindroom.final_delivery import StreamTransportOutcome
 from mindroom.hooks import MessageEnvelope
 from mindroom.logging_config import get_logger
@@ -36,7 +38,13 @@ from mindroom.post_response_effects import (
 )
 from mindroom.response_lifecycle import ResponseLifecycle, ResponseLifecycleDeps
 from mindroom.streaming import StreamingResponse, send_streaming_response
-from tests.conftest import bind_runtime_paths, make_matrix_client_mock, runtime_paths_for, test_runtime_paths
+from tests.conftest import (
+    bind_runtime_paths,
+    make_matrix_client_mock,
+    message_origin,
+    runtime_paths_for,
+    test_runtime_paths,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -82,9 +90,7 @@ async def _empty_stream() -> AsyncIterator[str]:
 
 def _streaming_response(config: Config) -> StreamingResponse:
     return StreamingResponse(
-        room_id="!room:localhost",
-        reply_to_event_id="$reply",
-        thread_id=None,
+        target=MessageTarget.resolve("!room:localhost", None, "$reply"),
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
@@ -93,15 +99,16 @@ def _streaming_response(config: Config) -> StreamingResponse:
 def _envelope() -> MessageEnvelope:
     return MessageEnvelope(
         source_event_id="$reply",
-        room_id="!room:localhost",
         target=MessageTarget.resolve("!room:localhost", None, "$reply"),
-        requester_id="@user:localhost",
-        sender_id="@user:localhost",
         body="hello",
         attachment_ids=(),
         mentioned_agents=(),
         agent_name="code",
-        source_kind="message",
+        origin=message_origin(
+            sender_id="@user:localhost",
+            requester_id="@user:localhost",
+            source_kind=MESSAGE_SOURCE_KIND,
+        ),
     )
 
 
@@ -272,9 +279,11 @@ async def test_transport_failed_terminal_update_drops_committed_interactive_meta
             target=MessageTarget.resolve("!room:localhost", None, "$reply"),
             stream_transport_outcome=transport_outcome,
             initial_delivery_kind="sent",
-            response_kind="ai",
-            response_envelope=_envelope(),
-            correlation_id="corr-interactive-preserved",
+            identity=ResponseIdentity(
+                response_kind="ai",
+                response_envelope=_envelope(),
+                correlation_id="corr-interactive-preserved",
+            ),
             tool_trace=None,
             extra_content=None,
         ),
@@ -322,9 +331,11 @@ async def test_transport_failed_terminal_update_ignores_hidden_canonical_interac
                 failure_reason="terminal_update_failed",
             ),
             initial_delivery_kind="sent",
-            response_kind="ai",
-            response_envelope=_envelope(),
-            correlation_id="corr-hidden-canonical-interactive",
+            identity=ResponseIdentity(
+                response_kind="ai",
+                response_envelope=_envelope(),
+                correlation_id="corr-hidden-canonical-interactive",
+            ),
             tool_trace=None,
             extra_content=None,
         ),
@@ -350,15 +361,12 @@ async def test_transport_empty_adopted_placeholder_finishes_as_error_note(tmp_pa
     with patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=record_edit)):
         outcome = await send_streaming_response(
             client=client,
-            room_id="!room:localhost",
-            reply_to_event_id="$reply",
-            thread_id=None,
+            target=MessageTarget.resolve("!room:localhost", None, "$reply", room_mode=True),
             config=config,
             runtime_paths=runtime_paths_for(config),
             response_stream=_empty_stream(),
             existing_event_id="$thinking",
             adopt_existing_placeholder=True,
-            room_mode=True,
         )
 
     assert outcome.last_physical_stream_event_id == "$thinking"
@@ -410,9 +418,11 @@ async def test_final_delivery_failure_replaces_placeholder_with_failure_update(t
             existing_event_id="$placeholder",
             existing_event_is_placeholder=True,
             response_text="final answer",
-            response_kind="ai",
-            response_envelope=_envelope(),
-            correlation_id="corr-final-delivery-failure",
+            identity=ResponseIdentity(
+                response_kind="ai",
+                response_envelope=_envelope(),
+                correlation_id="corr-final-delivery-failure",
+            ),
             tool_trace=None,
             extra_content=None,
         ),
@@ -466,9 +476,11 @@ async def test_streaming_placeholder_delivery_failure_stays_terminal_when_failur
                 failure_reason="terminal_update_failed",
             ),
             initial_delivery_kind="edited",
-            response_kind="ai",
-            response_envelope=_envelope(),
-            correlation_id="corr-stream-delivery-failure",
+            identity=ResponseIdentity(
+                response_kind="ai",
+                response_envelope=_envelope(),
+                correlation_id="corr-stream-delivery-failure",
+            ),
             tool_trace=None,
             extra_content=None,
             existing_event_id="$placeholder",
@@ -508,15 +520,12 @@ async def test_transport_final_event_only_body_uses_canonical_final_candidate(tm
     with patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=record_edit)):
         outcome = await send_streaming_response(
             client=client,
-            room_id="!room:localhost",
-            reply_to_event_id="$reply",
-            thread_id=None,
+            target=MessageTarget.resolve("!room:localhost", None, "$reply", room_mode=True),
             config=config,
             runtime_paths=runtime_paths_for(config),
             response_stream=final_only_stream(),
             existing_event_id="$thinking",
             adopt_existing_placeholder=True,
-            room_mode=True,
         )
 
     assert outcome.terminal_status == "completed"
@@ -547,15 +556,12 @@ async def test_run_completed_content_does_not_rewrite_visible_stream_text(tmp_pa
     with patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=record_edit)):
         outcome = await send_streaming_response(
             client=client,
-            room_id="!room:localhost",
-            reply_to_event_id="$reply",
-            thread_id=None,
+            target=MessageTarget.resolve("!room:localhost", None, "$reply", room_mode=True),
             config=config,
             runtime_paths=runtime_paths_for(config),
             response_stream=tool_then_final_content(),
             existing_event_id="$placeholder",
             adopt_existing_placeholder=True,
-            room_mode=True,
         )
 
     assert outcome.last_physical_stream_event_id == "$placeholder"
@@ -599,16 +605,12 @@ async def test_streamed_interactive_final_reply_registers_reactions_on_root_even
     with patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=record_stream_edit)):
         stream_outcome = await send_streaming_response(
             client=client,
-            room_id=target.room_id,
-            reply_to_event_id=target.reply_to_event_id,
-            thread_id=target.resolved_thread_id,
+            target=target,
             config=config,
             runtime_paths=runtime_paths_for(config),
             response_stream=interactive_stream(),
             existing_event_id="$displayed-root",
             adopt_existing_placeholder=True,
-            target=target,
-            room_mode=target.is_room_mode,
         )
 
     assert stream_outcome.last_physical_stream_event_id == "$displayed-root"
@@ -646,9 +648,11 @@ async def test_streamed_interactive_final_reply_registers_reactions_on_root_even
             target=target,
             stream_transport_outcome=stream_outcome,
             initial_delivery_kind="sent",
-            response_kind="ai",
-            response_envelope=envelope,
-            correlation_id="corr-streamed-interactive",
+            identity=ResponseIdentity(
+                response_kind="ai",
+                response_envelope=envelope,
+                correlation_id="corr-streamed-interactive",
+            ),
             tool_trace=None,
             extra_content=None,
         ),
@@ -733,16 +737,12 @@ async def test_streamed_interactive_metadata_survives_unparseable_canonical_fina
     with patch("mindroom.streaming.edit_message_result", new=AsyncMock(return_value=DeliveredMatrixEvent("$edit", {}))):
         stream_outcome = await send_streaming_response(
             client=client,
-            room_id=target.room_id,
-            reply_to_event_id=target.reply_to_event_id,
-            thread_id=target.resolved_thread_id,
+            target=target,
             config=config,
             runtime_paths=runtime_paths_for(config),
             response_stream=interactive_stream(),
             existing_event_id="$displayed-root",
             adopt_existing_placeholder=True,
-            target=target,
-            room_mode=target.is_room_mode,
         )
 
     assert stream_outcome.rendered_body == formatted_interactive.formatted_text
@@ -780,9 +780,11 @@ async def test_streamed_interactive_metadata_survives_unparseable_canonical_fina
             target=target,
             stream_transport_outcome=stream_outcome,
             initial_delivery_kind="sent",
-            response_kind="ai",
-            response_envelope=_envelope(),
-            correlation_id="corr-streamed-interactive-unparseable-canonical",
+            identity=ResponseIdentity(
+                response_kind="ai",
+                response_envelope=_envelope(),
+                correlation_id="corr-streamed-interactive-unparseable-canonical",
+            ),
             tool_trace=None,
             extra_content=None,
         ),
@@ -847,9 +849,11 @@ async def test_final_response_transform_failure_keeps_visible_stream_text(tmp_pa
                 visible_body_state="visible_body",
             ),
             initial_delivery_kind="sent",
-            response_kind="ai",
-            response_envelope=envelope,
-            correlation_id="corr-final-transform-failure",
+            identity=ResponseIdentity(
+                response_kind="ai",
+                response_envelope=envelope,
+                correlation_id="corr-final-transform-failure",
+            ),
             tool_trace=None,
             extra_content=None,
         ),
@@ -866,10 +870,12 @@ async def test_final_response_transform_failure_keeps_visible_stream_text(tmp_pa
             response_hooks=response_hooks,
             logger=get_logger("tests.response_lifecycle"),
         ),
-        response_kind="ai",
+        identity=ResponseIdentity(
+            response_kind="ai",
+            response_envelope=envelope,
+            correlation_id="corr-final-transform-failure",
+        ),
         pipeline_timing=None,
-        response_envelope=envelope,
-        correlation_id="corr-final-transform-failure",
     )
     finalized = await lifecycle.finalize(
         outcome,
@@ -920,9 +926,11 @@ async def test_finalize_streamed_response_restart_interruption_preserves_cancell
                 failure_reason="sync_restart_cancelled",
             ),
             initial_delivery_kind="edited",
-            response_kind="ai",
-            response_envelope=envelope,
-            correlation_id="corr-stream-restart-cancelled",
+            identity=ResponseIdentity(
+                response_kind="ai",
+                response_envelope=envelope,
+                correlation_id="corr-stream-restart-cancelled",
+            ),
             tool_trace=None,
             extra_content=None,
         ),

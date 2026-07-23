@@ -1,4 +1,20 @@
-"""Shared runtime coordinator for advisory Matrix event-cache writes."""
+"""Shared runtime coordinator for advisory Matrix event-cache writes.
+
+Barrier ordering invariants (PR #716 fixed regressions in each of these):
+
+1. Room-kind updates are exclusive within their room: one starts only when no room or thread update is
+   active, and everything queued after it waits for it.
+
+2. Thread-kind updates run in parallel across different threads but are serialized within one thread,
+   and never start while a room update queued ahead of them is pending or active.
+
+3. A room update cancelled before it started leaves a fence in the queue: later thread updates still
+   wait for the earlier queue segment to drain, so cancellation cannot reorder writes.
+   Read-style operations may opt in to ``ignore_cancelled_room_fences`` because they mutate nothing.
+
+4. Readers establish the write-read barrier with ``wait_for_thread_idle``: a thread read started after a
+   mutation was queued never observes cache state older than that mutation.
+"""
 
 from __future__ import annotations
 
@@ -658,6 +674,18 @@ class EventCacheWriteCoordinator:
             except asyncio.CancelledError:
                 self._discard_waiter(room_id, waiter)
                 raise
+
+    async def wait_for_prior_room_updates(self, room_id: str) -> None:
+        """Wait for all writes in this room that were already queued when this read began."""
+        self._reevaluate_room(room_id)
+        state = self._room_states.get(room_id)
+        pending_tasks = () if state is None else self._pending_entry_tasks(state.entries)
+        for pending_task in pending_tasks:
+            await self._await_idle_task(
+                pending_task,
+                room_id=room_id,
+                log_message="Room cache update failed before the point read barrier",
+            )
 
     async def close(self) -> None:
         """Drain any queued cache writes for this coordinator."""

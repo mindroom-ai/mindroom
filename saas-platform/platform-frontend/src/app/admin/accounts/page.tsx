@@ -173,7 +173,7 @@ export default function AccountsPage() {
                           View
                         </Button>
                         <Button
-                          variant="destructive"
+                          variant="danger"
                           size="sm"
                           onClick={() => handleDelete(account.id, account.email)}
                           disabled={deletingId === account.id}

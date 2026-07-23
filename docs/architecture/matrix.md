@@ -24,6 +24,9 @@ MindRoom uses `mindroom-nio` for Matrix communication with SSL context handling 
 | `MATRIX_HOMESERVER` | `http://localhost:8008` | Matrix homeserver URL |
 | `MATRIX_SERVER_NAME` | (from homeserver) | Federation server name |
 | `MATRIX_SSL_VERIFY` | `true` | Set to `false` for dev/self-signed certs |
+| `MATRIX_MANAGED_ACCOUNT_AUTH` | `password` | Authentication for accounts created and operated by MindRoom: `password` or `appservice` |
+| `MATRIX_APPSERVICE_TOKEN` | -- | Application-service token used when managed account auth is `appservice` |
+| `MATRIX_APPSERVICE_TOKEN_FILE` | -- | File alternative to `MATRIX_APPSERVICE_TOKEN` |
 
 Streaming behavior is configured in `config.yaml` with `defaults.enable_streaming` (default: `true`).
 
@@ -38,6 +41,12 @@ Provisioning may request localparts such as `mindroom_assistant` or `mindroom_ro
 For example, a persisted Matrix account such as `@assistant_live:example.com` can become the live assistant account even if the original provisioning request used `mindroom_assistant`.
 
 Users are automatically created during orchestrator startup and credentials are persisted in `mindroom_data/matrix_state.yaml`.
+
+Password mode generates a separate password for every managed account and uses normal Matrix registration and login.
+Application-service mode registers passwordless accounts inside an exclusive application-service namespace, then obtains a normal per-user device token for encryption and sync.
+Set `MATRIX_MANAGED_ACCOUNT_AUTH=appservice` and provide exactly one of `MATRIX_APPSERVICE_TOKEN` or `MATRIX_APPSERVICE_TOKEN_FILE`.
+The application-service token is used only for account registration and fresh device login; normal agent traffic uses each account's own persisted device token.
+Existing passwords are removed from `matrix_state.yaml` after a successful application-service login.
 
 ## Room Management
 
@@ -105,7 +114,7 @@ Where `N` is 1-indexed per message and maps to `io.mindroom.tool_trace.events[N-
 
 ## Presence
 
-Agents set their Matrix presence with status messages containing model and role information (e.g., "🤖 Model: anthropic/claude-sonnet-4-6 | 💼 Code assistant | 🔧 5 tools available").
+Agents set their Matrix presence with status messages containing model and role information (e.g., "🤖 Model: anthropic/claude-sonnet-5 | 💼 Code assistant | 🔧 5 tools available").
 
 **Presence States:**
 - **online** - Agent running and ready
@@ -181,18 +190,35 @@ matrix_space:
 
 When enabled, `ensure_root_space()` creates the Space on first boot (or resolves an existing one by alias), links all managed rooms as children, and sets the Space avatar from workspace or bundled assets.
 The Space name is reconciled on each startup to match the configured value.
+Root Space admin power is granted before child links are written.
+The grant set is the concrete Matrix users in `authorization.global_users` plus the configured `mindroom_user` when that internal account exists.
+MindRoom does not remove existing Space admins during reconciliation, including manual Matrix admins or users removed from `authorization.global_users`.
+Room-scoped authorization entries are intentionally not used for root Space admin grants.
 
 ## Delivery Policy
 
-Outgoing encrypted Matrix sends keep nio's device-trust checks enabled by default.
+Outgoing encrypted Matrix sends always deliver to unverified devices.
+MindRoom bots have no interactive device-verification flow, so enforcing nio's device-trust checks would fail every send to an encrypted room with an `OlmUnverifiedDeviceError` and the agent would appear to silently ignore messages.
+A configurable trust policy only becomes meaningful once a device-verification mechanism exists (for example trust-on-first-use, a verification command, or cross-signing support).
 
-```yaml
-matrix_delivery:
-  ignore_unverified_devices: false
-```
+## End-to-End Encryption
 
-Operators can set `matrix_delivery.ignore_unverified_devices` to `true` when bot delivery should proceed even if encrypted rooms contain unverified devices.
-This is a security tradeoff because Matrix may encrypt outgoing events for devices the bot has not verified.
+Agents fully participate in encrypted rooms: they decrypt inbound text and media, reply encrypted, and re-fetch and decrypt thread history from the homeserver.
+Managed rooms can be created encrypted via `rooms.<key>.encrypted: true` or `matrix_room_access.encrypt_managed_rooms: true`, and existing managed rooms are reconciled to encrypted on startup and config reload when so configured.
+Users can also enable encryption in any room with `!encrypt confirm` (room admin only), and `!e2ee` reports encryption diagnostics.
+Enabling encryption on a Matrix room is irreversible; MindRoom never disables it.
+
+When an agent receives an event it cannot decrypt from an authorized sender, it logs a `matrix_event_decryption_failed` warning, sends a best-effort room-key request once per session (delivered to the bot account's own devices, so recovery normally needs the sender to post a new message), and posts one notice per (room, session) so the user knows to resend.
+All bots share a disk-backed notice ledger, so the first bot that fails on a session posts the only notice and multi-agent rooms never storm.
+Notices are suppressed for events that predate a bot's room join or a start without sync continuity, since pre-join and already-replayed history is expected to be undecryptable.
+Decryption-failure counters are exposed on `/api/health` under `e2ee`.
+
+Each agent bootstraps a self-managed cross-signing identity at login (master and self-signing keys persisted next to its encryption store) and signs its own device, so clients that exclude non-cross-signed devices (MSC4153) keep sharing room keys with agents.
+`!e2ee` reports the cross-signing status.
+When the homeserver no longer has the uploaded identity (for example after a dev-server reset that kept `encryption_keys/`), the bootstrap detects the divergence and re-uploads the persisted keys instead of wedging.
+
+If a bot's encryption store under `mindroom_data/encryption_keys/` is lost while its device identity persists, startup logs in as a fresh device instead of restoring a wedged crypto identity, and re-signs the new device with the persisted cross-signing keys; `mindroom doctor` reports missing stores.
+Messages encrypted only to the lost device stay undecryptable, but the durable event cache preserves the agent's conversational context.
 
 ## Configuration
 

@@ -12,29 +12,35 @@ from uuid import uuid4
 from agno.db.base import SessionType
 from agno.models.message import Message
 from agno.run.agent import RunOutput
+from agno.run.base import RunStatus
 from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
 
 from mindroom.logging_config import get_logger
 from mindroom.media_fallback import append_inline_media_fallback_prompt
-from mindroom.media_inputs import MediaInputs
+from mindroom.media_inputs import MediaInputs, MediaKind
 
 if TYPE_CHECKING:
     from agno.agent import Agent
     from agno.db.base import BaseDb
+    from agno.media import Audio, File, Image, Video
     from agno.models.base import Model
 
-    from mindroom.history import ScopeSessionContext
+    from mindroom.history.runtime import ScopeSessionContext
 
 __all__ = [
+    "EMPTY_RESPONSE_NOTICE",
     "ModelRunInput",
     "append_inline_media_fallback_to_run_input",
     "attach_media_to_run_input",
     "cached_agent_run",
     "cleanup_queued_notice_state",
     "copy_run_input",
+    "discard_empty_completed_run",
     "install_queued_message_notice_hook",
+    "is_empty_completed_run",
+    "media_inputs_from_run_input",
     "next_retry_run_id",
     "note_attempt_run_id",
     "queued_message_signal_context",
@@ -47,6 +53,8 @@ type ModelRunInput = str | Sequence[Message]
 
 _QUEUED_MESSAGE_NOTICE_MARKER_KEY = "mindroom_queued_message_notice"
 _QUEUED_MESSAGE_NOTICE_HOOK_ATTR = "_mindroom_queued_message_notice_hook_installed"
+
+EMPTY_RESPONSE_NOTICE = "The model returned an empty response — please try again."
 
 
 def _normalize_run_input(run_input: ModelRunInput) -> list[Message]:
@@ -75,20 +83,46 @@ def attach_media_to_run_input(
     return run_messages
 
 
+def media_inputs_from_run_input(run_input: ModelRunInput) -> MediaInputs:
+    """Collect media attached to canonical run-input messages.
+
+    Agent and team paths inspect the collected kinds for media-capability
+    routing while preserving media on its canonical message.
+    """
+    if isinstance(run_input, str):
+        return MediaInputs()
+    audio: list[Audio] = []
+    images: list[Image] = []
+    files: list[File] = []
+    videos: list[Video] = []
+    for message in run_input:
+        audio.extend(message.audio or ())
+        images.extend(message.images or ())
+        files.extend(message.files or ())
+        videos.extend(message.videos or ())
+    return MediaInputs.from_optional(audio=audio, images=images, files=files, videos=videos)
+
+
 def append_inline_media_fallback_to_run_input(
     run_input: ModelRunInput,
     *,
     fallback_prompt: str,
+    removed_kinds: frozenset[MediaKind],
 ) -> list[Message]:
-    """Append the inline-media fallback note to the current user turn."""
+    """Strip rejected media kinds from all run-input messages and append the fallback note."""
     run_messages = copy_run_input(run_input)
+    for message in run_messages:
+        if "audio" in removed_kinds:
+            message.audio = None
+        if "image" in removed_kinds:
+            message.images = None
+        if "file" in removed_kinds:
+            message.files = None
+        if "video" in removed_kinds:
+            message.videos = None
     current_message = run_messages[-1]
     current_text = current_message.content if isinstance(current_message.content, str) else ""
     current_message.content = append_inline_media_fallback_prompt(current_text, fallback_prompt=fallback_prompt)
-    current_message.audio = None
-    current_message.images = None
-    current_message.files = None
-    current_message.videos = None
     return run_messages
 
 
@@ -263,6 +297,89 @@ def scrub_queued_notice_session_context(
             entity=entity_name,
             session_id=scope_context.session.session_id,
             session_type="team" if isinstance(scope_context.session, TeamSession) else "agent",
+        )
+
+
+def is_empty_completed_run(response: RunOutput | TeamRunOutput) -> bool:
+    """Return whether one run completed with no tool calls and no visible content."""
+    if response.status is not RunStatus.completed or response.tools:
+        return False
+    content = response.content
+    if content is None:
+        return True
+    return isinstance(content, str) and not content.strip()
+
+
+def _remove_run_from_session(session: AgentSession | TeamSession, *, run_id: str) -> bool:
+    """Remove one run from a mutable session run list by run id."""
+    runs = session.runs or []
+    kept = [run for run in runs if not (isinstance(run, (RunOutput, TeamRunOutput)) and run.run_id == run_id)]
+    if len(kept) == len(runs):
+        return False
+    session.runs = kept
+    return True
+
+
+def _remove_run_from_session_storage(
+    storage: BaseDb,
+    session_id: str,
+    *,
+    run_id: str,
+    session_type: SessionType,
+) -> bool:
+    """Remove one run from a persisted Agno session."""
+    raw_session = storage.get_session(session_id, session_type)
+    if raw_session is None:
+        return False
+    session = _load_session_for_cleanup(
+        cast("AgentSession | TeamSession | dict[str, object]", raw_session),
+        session_type=session_type,
+    )
+    if session is None or not _remove_run_from_session(session, run_id=run_id):
+        return False
+    storage.upsert_session(session)
+    return True
+
+
+def discard_empty_completed_run(
+    *,
+    scope_context: ScopeSessionContext | None,
+    session_id: str,
+    run_id: str | None,
+    session_type: SessionType,
+    entity_name: str,
+    output_tokens: int | None,
+) -> None:
+    """Log one empty completed model response and purge its run from session history.
+
+    A persisted assistant turn with no content teaches the model that ending the
+    turn immediately is the expected continuation, so the run is removed from both
+    the loaded session and storage before the next prompt is built.
+    """
+    logger.warning(
+        "model_returned_empty_response",
+        entity=entity_name,
+        session_id=session_id,
+        run_id=run_id,
+        output_tokens=output_tokens,
+    )
+    if scope_context is None or not run_id:
+        return
+    try:
+        if scope_context.session is not None:
+            _remove_run_from_session(scope_context.session, run_id=run_id)
+        _remove_run_from_session_storage(
+            scope_context.storage,
+            session_id,
+            run_id=run_id,
+            session_type=session_type,
+        )
+    except Exception:
+        logger.exception(
+            "Failed to remove empty run from session history",
+            entity=entity_name,
+            session_id=session_id,
+            run_id=run_id,
         )
 
 

@@ -17,7 +17,13 @@ from mindroom.logging_config import setup_logging
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.stop import StopManager
-from tests.conftest import bind_runtime_paths, orchestrator_runtime_paths, runtime_paths_for, test_runtime_paths
+from tests.conftest import (
+    bind_runtime_paths,
+    install_send_response_mock,
+    orchestrator_runtime_paths,
+    runtime_paths_for,
+    test_runtime_paths,
+)
 from tests.identity_helpers import entity_ids, persist_entity_accounts
 
 
@@ -70,8 +76,8 @@ async def test_stop_emoji_only_stops_during_generation(tmp_path: Path) -> None:
     bot.client.user_id = agent_user.user_id
     bot.logger = MagicMock()
     bot.stop_manager = StopManager()
-    bot._send_response = AsyncMock(return_value="$stopping:example.com")
-    bot._generate_response = AsyncMock(return_value="$response:example.com")
+    send_response = AsyncMock(return_value="$stopping:example.com")
+    install_send_response_mock(bot, send_response)
 
     # Create a room and reaction event
     room = nio.MatrixRoom(room_id="!test:example.com", own_user_id=agent_user.user_id)
@@ -122,6 +128,7 @@ async def test_stop_emoji_only_stops_during_generation(tmp_path: Path) -> None:
 
         # Should NOT have called interactive.handle_reaction since it was handled as stop
         mock_handle_reaction.assert_not_called()
+        send_response.assert_not_awaited()
 
         # The task should have been cancelled
         task.cancel.assert_called_once_with(msg=USER_STOP_CANCEL_MSG)
@@ -145,7 +152,8 @@ async def test_stop_emoji_hard_cancels_and_schedules_agno_cleanup_when_run_id_pr
     bot.client.user_id = agent_user.user_id
     bot.logger = MagicMock()
     bot.stop_manager = StopManager()
-    bot._send_response = AsyncMock(return_value="$stopping:example.com")
+    send_response = AsyncMock(return_value="$stopping:example.com")
+    install_send_response_mock(bot, send_response)
 
     room = nio.MatrixRoom(room_id="!test:example.com", own_user_id=agent_user.user_id)
     reaction_event = nio.ReactionEvent.from_dict(
@@ -179,17 +187,12 @@ async def test_stop_emoji_hard_cancels_and_schedules_agno_cleanup_when_run_id_pr
 
     mock_schedule_cancel.assert_called_once_with("$message:example.com", "run-123")
     task.cancel.assert_called_once_with(msg=USER_STOP_CANCEL_MSG)
-    bot._send_response.assert_awaited_once_with(
-        "!test:example.com",
-        "$message:example.com",
-        "⏹️ Stopping generation...",
-        None,
-    )
+    send_response.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_stop_emoji_acknowledgement_stays_in_thread(tmp_path: Path) -> None:
-    """Threaded stop acknowledgements should preserve the tracked thread target."""
+async def test_stop_emoji_threaded_target_sends_no_acknowledgement(tmp_path: Path) -> None:
+    """Threaded stop reactions should not send a separate acknowledgement message."""
     config = _stop_test_config(tmp_path)
     agent_user = _stop_test_agent_user(config)
 
@@ -205,7 +208,8 @@ async def test_stop_emoji_acknowledgement_stays_in_thread(tmp_path: Path) -> Non
     bot.client.user_id = agent_user.user_id
     bot.logger = MagicMock()
     bot.stop_manager = StopManager()
-    bot._send_response = AsyncMock(return_value="$stopping:example.com")
+    send_response = AsyncMock(return_value="$stopping:example.com")
+    install_send_response_mock(bot, send_response)
 
     room = nio.MatrixRoom(room_id="!test:example.com", own_user_id=agent_user.user_id)
     reaction_event = nio.ReactionEvent.from_dict(
@@ -239,12 +243,7 @@ async def test_stop_emoji_acknowledgement_stays_in_thread(tmp_path: Path) -> Non
 
     mock_schedule_cancel.assert_called_once_with("$message:example.com", "run-123")
     task.cancel.assert_called_once_with(msg=USER_STOP_CANCEL_MSG)
-    bot._send_response.assert_awaited_once_with(
-        "!test:example.com",
-        "$message:example.com",
-        "⏹️ Stopping generation...",
-        "$thread:example.com",
-    )
+    send_response.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -307,7 +306,6 @@ async def test_stop_manager_add_and_remove_button_notifies_cache_bookkeeping() -
     added_event_id = await stop_manager.add_stop_button(
         client,
         "$message:example.com",
-        config=Config(),
         notify_outbound_event=notify_outbound_event,
     )
 
@@ -768,7 +766,8 @@ async def test_stop_reaction_blocked_by_reply_permissions(tmp_path: Path) -> Non
         },
     )
 
-    bot._send_response = AsyncMock()
+    send_response = AsyncMock()
+    install_send_response_mock(bot, send_response)
 
     with patch("mindroom.bot.is_authorized_sender", return_value=True):
         await bot._on_reaction(room, reaction_event)
@@ -776,4 +775,4 @@ async def test_stop_reaction_blocked_by_reply_permissions(tmp_path: Path) -> Non
     # Task should NOT have been cancelled — sender is disallowed
     task.cancel.assert_not_called()
     # No confirmation message should have been sent
-    bot._send_response.assert_not_called()
+    send_response.assert_not_called()

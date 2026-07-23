@@ -28,16 +28,22 @@ async function createProducts() {
     // Create prices for each tier
     const tiers = [
       {
-        nickname: 'Starter',
-        unit_amount: 4900, // $49.00
-        metadata: { tier: 'starter' },
-        lookup_key: 'starter',
+        nickname: 'Bring Your Own Keys',
+        unit_amount: 1000, // $10.00
+        metadata: { tier: 'byok' },
+        lookup_key: 'byok_monthly',
       },
       {
-        nickname: 'Professional',
-        unit_amount: 19900, // $199.00
-        metadata: { tier: 'professional' },
-        lookup_key: 'professional',
+        nickname: 'Hobby',
+        unit_amount: 2000, // $20.00
+        metadata: { tier: 'hobby' },
+        lookup_key: 'hobby_monthly',
+      },
+      {
+        nickname: 'Pro',
+        unit_amount: 20000, // $200.00
+        metadata: { tier: 'pro' },
+        lookup_key: 'pro_monthly',
       },
     ];
 
@@ -64,8 +70,9 @@ async function createProducts() {
     // Output environment variables to set
     console.log('\n📝 Add these to your .env file:\n');
     console.log('# Stripe Price IDs');
-    console.log(`STRIPE_PRICE_STARTER=${prices[0].id}`);
-    console.log(`STRIPE_PRICE_PROFESSIONAL=${prices[1].id}`);
+    console.log(`STRIPE_PRICE_BYOK=${prices[0].id}`);
+    console.log(`STRIPE_PRICE_HOBBY=${prices[1].id}`);
+    console.log(`STRIPE_PRICE_PRO=${prices[2].id}`);
 
     console.log('\n✨ Setup complete!');
 

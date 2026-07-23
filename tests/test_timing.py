@@ -20,8 +20,8 @@ from mindroom.timing import (
     DispatchPipelineTiming,
     elapsed_ms_between,
     emit_timing_event,
-    milliseconds,
     timed,
+    timed_block,
     timing_enabled,
     timing_scope,
 )
@@ -77,6 +77,60 @@ def test_timed_sync_logs_on_exception(
         fail()
 
     _assert_timing_logged(logger, "sync_error_label")
+
+
+def test_timed_block_logs_when_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Inline timing blocks should emit the same timing event shape as timed()."""
+    monkeypatch.setenv("MINDROOM_TIMING", "1")
+    logger = _mock_timing_logger(monkeypatch)
+
+    with timed_block("block_label", scope="scope-123", phase="setup"):
+        pass
+
+    _assert_timing_logged(logger, "block_label", scope="scope-123")
+    assert logger.debug.call_args.kwargs["phase"] == "setup"
+
+
+def test_timed_block_logs_on_exception(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Inline timing blocks should still emit a timing log when they raise."""
+    monkeypatch.setenv("MINDROOM_TIMING", "1")
+    logger = _mock_timing_logger(monkeypatch)
+
+    def fail() -> None:
+        with timed_block("block_error_label"):
+            msg = "boom"
+            raise RuntimeError(msg)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        fail()
+
+    _assert_timing_logged(logger, "block_error_label")
+
+
+def test_timed_block_does_not_log_when_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Inline timing blocks should stay quiet when timing is disabled."""
+    monkeypatch.delenv("MINDROOM_TIMING", raising=False)
+    logger = _mock_timing_logger(monkeypatch)
+
+    with timed_block("block_label"):
+        pass
+
+    logger.debug.assert_not_called()
+
+
+def test_timed_block_uses_context_scope(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Inline timing blocks should inherit the active timing scope when omitted."""
+    monkeypatch.setenv("MINDROOM_TIMING", "1")
+    logger = _mock_timing_logger(monkeypatch)
+
+    token = timing_scope.set("scope-456")
+    try:
+        with timed_block("block_label"):
+            pass
+    finally:
+        timing_scope.reset(token)
+
+    _assert_timing_logged(logger, "block_label", scope="scope-456")
 
 
 @pytest.mark.asyncio
@@ -273,7 +327,6 @@ def test_elapsed_ms_between_rounds_to_one_decimal_place() -> None:
     """Elapsed-millisecond conversion should use the shared one-decimal policy."""
     assert elapsed_ms_between(1.0, 1.23456) == 234.6
     assert elapsed_ms_between(1.0, 1.23456, ndigits=2) == 234.56
-    assert milliseconds(0.123456, ndigits=2) == 123.46
 
 
 def test_elapsed_millisecond_rounding_policy_is_shared() -> None:
@@ -396,14 +449,17 @@ def test_dispatch_pipeline_summary_emits_additive_segments_and_diagnostics() -> 
             "response_payload_ready": 9.0,
             "lock_wait_start": 10.0,
             "lock_acquired": 12.0,
+            "thread_refresh_start": 12.5,
             "thread_refresh_ready": 13.0,
             "response_runtime_start": 14.0,
             "response_runtime_ready": 15.0,
             "ai_prepare_start": 15.5,
             "memory_prepare_start": 15.6,
+            "agent_build_start": 15.6,
+            "prompt_branches_start": 15.6,
             "memory_prepare_ready": 15.8,
-            "agent_build_start": 15.8,
             "agent_build_ready": 16.0,
+            "prompt_branches_ready": 16.0,
             "history_classify_start": 16.0,
             "history_classify_ready": 16.2,
             "required_compaction_start": 16.2,
@@ -429,10 +485,9 @@ def test_dispatch_pipeline_summary_emits_additive_segments_and_diagnostics() -> 
     assert summary["first_visible_kind"] == "stream_update"
     assert summary["seg_ingress_ms"] == 1000.0
     assert summary["seg_coalescing_ms"] == 2000.0
-    assert summary["seg_dispatch_ms"] == 6000.0
-    assert summary["seg_response_queue_ms"] == 3000.0
-    assert summary["seg_thread_refresh_ms"] == 1000.0
-    assert summary["seg_first_visible_reply_ms"] == 7000.0
+    assert summary["seg_dispatch_ms"] == 7000.0
+    assert summary["seg_response_queue_ms"] == 2000.0
+    assert summary["seg_first_visible_reply_ms"] == 8000.0
     assert summary["seg_after_first_visible_ms"] == 5000.0
     assert summary["time_to_first_visible_reply_ms"] == 20000.0
     assert summary["total_pipeline_ms"] == 25000.0
@@ -441,11 +496,13 @@ def test_dispatch_pipeline_summary_emits_additive_segments_and_diagnostics() -> 
     assert summary["diag_dispatch_prepare_ms"] == 2000.0
     assert summary["diag_dispatch_plan_ms"] == 1000.0
     assert summary["diag_response_payload_setup_ms"] == 1000.0
+    assert summary["diag_thread_refresh_ms"] == 500.0
     assert summary["diag_lock_wait_ms"] == 2000.0
     assert summary["diag_runtime_prepare_ms"] == 1000.0
     assert summary["diag_llm_prepare_ms"] == 1500.0
+    assert summary["diag_prompt_branch_join_ms"] == 400.0
     assert summary["diag_memory_prepare_ms"] == 200.0
-    assert summary["diag_agent_build_ms"] == 200.0
+    assert summary["diag_agent_build_ms"] == 400.0
     assert summary["diag_history_classify_ms"] == 200.0
     assert summary["diag_required_compaction_ms"] == 400.0
     assert summary["diag_replay_plan_ms"] == 200.0

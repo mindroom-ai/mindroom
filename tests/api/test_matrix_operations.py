@@ -5,10 +5,13 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import yaml
 from fastapi.testclient import TestClient
 
 from mindroom import constants
 from mindroom.api import config_lifecycle, main
+from mindroom.config.agent import AgentConfig, TeamConfig
+from mindroom.config.main import Config
 
 
 def _add_test_team_to_runtime_config() -> None:
@@ -16,6 +19,9 @@ def _add_test_team_to_runtime_config() -> None:
     api_state = config_lifecycle.require_api_state(main.app)
     with api_state.config_lock:
         context = api_state.snapshot
+        if context.runtime_config is None:
+            msg = "runtime config should be loaded"
+            raise AssertionError(msg)
         context.config_data["teams"] = {
             "test_team": {
                 "display_name": "Test Team",
@@ -25,6 +31,13 @@ def _add_test_team_to_runtime_config() -> None:
                 "mode": "coordinate",
             },
         }
+        context.runtime_config.teams["test_team"] = TeamConfig(
+            display_name="Test Team",
+            role="A test team",
+            agents=["test_agent"],
+            rooms=["team_room"],
+            mode="coordinate",
+        )
 
 
 @pytest.fixture
@@ -144,6 +157,49 @@ class TestMatrixOperations:
             assert data["display_name"] == "Test Team"
             assert data["configured_rooms"] == ["team_room"]
             assert data["unconfigured_rooms"] == ["!external_room:localhost"]
+
+    @pytest.mark.asyncio
+    async def test_get_agent_rooms_treats_trigger_only_room_as_unconfigured(
+        self,
+        tmp_path: Path,
+        mock_agent_user: Any,  # noqa: ANN401
+        mock_matrix_client: Any,  # noqa: ANN401
+    ) -> None:
+        """Tool-managed trigger rooms should not widen authored room membership."""
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            yaml.safe_dump(
+                {
+                    "models": {"default": {"provider": "ollama", "id": "test-model"}},
+                    "agents": {
+                        "test_agent": {
+                            "display_name": "Test Agent",
+                            "role": "A test agent",
+                            "rooms": ["test_room"],
+                        },
+                    },
+                },
+            ),
+            encoding="utf-8",
+        )
+        runtime_paths = constants.resolve_primary_runtime_paths(config_path=config_path, process_env={})
+        main.initialize_api_app(main.app, runtime_paths)
+        assert config_lifecycle.load_config_into_app(runtime_paths, main.app) is True
+
+        with (
+            patch("mindroom.api.matrix_operations.create_agent_user", return_value=mock_agent_user),
+            patch("mindroom.api.matrix_operations.login_agent_user", return_value=mock_matrix_client),
+            patch(
+                "mindroom.api.matrix_operations.get_joined_rooms",
+                return_value=["test_room", "!campground:localhost", "!extra_room:localhost"],
+            ),
+        ):
+            response = TestClient(main.app).get("/api/matrix/agents/test_agent/rooms")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["configured_rooms"] == ["test_room"]
+        assert data["unconfigured_rooms"] == ["!campground:localhost", "!extra_room:localhost"]
 
     @pytest.mark.asyncio
     async def test_get_agent_rooms_not_found(self, test_client: TestClient) -> None:
@@ -298,29 +354,21 @@ class TestMatrixOperations:
         first_runtime = constants.resolve_primary_runtime_paths(config_path=tmp_path / "first.yaml", process_env={})
         second_runtime = constants.resolve_primary_runtime_paths(config_path=tmp_path / "second.yaml", process_env={})
 
-        def _fake_snapshot_read(
-            _request: Any,  # noqa: ANN401
-            reader: Any,  # noqa: ANN401
-        ) -> tuple[dict[str, Any], constants.RuntimePaths]:
+        def _fake_runtime_snapshot_read(_request: Any) -> tuple[Config, constants.RuntimePaths]:  # noqa: ANN401
             main.initialize_api_app(main.app, second_runtime)
-            return (
-                reader(
-                    {
-                        "agents": {
-                            "old_agent": {
-                                "display_name": "Old",
-                                "role": "Test",
-                                "rooms": [],
-                            },
-                        },
-                    },
-                ),
-                first_runtime,
-            )
+            return Config(
+                agents={
+                    "old_agent": AgentConfig(
+                        display_name="Old",
+                        role="Test",
+                        rooms=[],
+                    ),
+                },
+            ), first_runtime
 
         monkeypatch.setattr(
-            "mindroom.api.matrix_operations.read_committed_config_and_runtime",
-            _fake_snapshot_read,
+            "mindroom.api.matrix_operations.read_committed_runtime_config",
+            _fake_runtime_snapshot_read,
         )
 
         with (

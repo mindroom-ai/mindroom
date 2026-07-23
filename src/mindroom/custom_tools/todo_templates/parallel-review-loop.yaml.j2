@@ -1,0 +1,20 @@
+# parallel-review-loop N-reviewer code review protocol.
+
+name: parallel-review-loop
+version: "1.0"
+description: Parallel review loop that ends after reviewers approve the same revision.
+
+todos:
+  - title: "Prepare reviewer prompts for N={{ N_REVIEWERS }} independent reviewers"
+    priority: high
+  - title: "Spawn N={{ N_REVIEWERS }} reviewers"
+    depends_on: [1]
+    priority: high
+  - title: "Collect N={{ N_REVIEWERS }} verdicts"
+    depends_on: [2]
+  - title: "Triage review findings into real blockers, scoped improvements, and rejected noise"
+    depends_on: [3]
+    priority: high
+  - title: "If reviewers found blockers, apply fixes and re-apply this template for another review round; otherwise mark this branch done only after all {{ N_REVIEWERS }} reviewers approve the same current revision"
+    depends_on: [4]
+    priority: critical

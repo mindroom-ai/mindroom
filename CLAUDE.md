@@ -19,20 +19,23 @@ Coding model training data often lags recent releases, so never trust memorized 
 
 | Provider | Use | Preferred model | Model string to use |
 | --- | --- | --- | --- |
-| Anthropic | Balanced default | Claude Sonnet 4.6 | `claude-sonnet-4-6` |
-| Anthropic | Max intelligence | Claude Opus 4.7 | `claude-opus-4-7` |
+| Anthropic | Balanced default | Claude Sonnet 5 | `claude-sonnet-5` |
+| Anthropic | Max intelligence | Claude Opus 4.8 | `claude-opus-4-8` |
 | Anthropic | Fast / cheap | Claude Haiku 4.5 | `claude-haiku-4-5` |
-| OpenAI | Frontier default | GPT-5.4 | `gpt-5.4` |
-| OpenAI Codex subscription | Frontier via Codex CLI | GPT-5.5 | `gpt-5.5` |
+| OpenAI | Frontier default | GPT-5.6 | `gpt-5.6` |
+| OpenAI Codex ChatGPT login | Frontier via Codex CLI | GPT-5.6 | `gpt-5.6` |
+| Google (Gemini API) | Max intelligence | Gemini 3.1 Pro Preview | `gemini-3.1-pro-preview` |
+| Google (Gemini API) | Standard text / coding | Gemini 3.5 Flash | `gemini-3.5-flash` |
 | Google (Gemini API) | Fast / cheap text | Gemini 3.1 Flash-Lite Preview | `gemini-3.1-flash-lite-preview` |
-| Google (Gemini API) | Strongest text / coding | Gemini 3.1 Pro Preview | `gemini-3.1-pro-preview` |
 | Google (Gemini API) | Image generation / editing | Nano Banana 2 Preview | `gemini-3.1-flash-image-preview` |
 | Google (Gemini API) | Embeddings for `google` | Gemini Embedding 2 Preview | `gemini-embedding-2-preview` |
 
-For `anthropic`, prefer `claude-sonnet-4-6`, `claude-opus-4-7`, and `claude-haiku-4-5` unless you intentionally need a pinned snapshot ID.
+For `anthropic`, prefer `claude-sonnet-5`, `claude-opus-4-8`, and `claude-haiku-4-5` unless you intentionally need a pinned snapshot ID.
 For `vertexai_claude`, use the current Vertex AI request name from the provider docs instead of assuming the Anthropic API ID carries over unchanged.
-Current docs list bare Vertex IDs for current Claude models such as `claude-sonnet-4-6` and `claude-opus-4-7`, while some other Vertex models are still documented as dated snapshot IDs such as `claude-haiku-4-5@20251001`.
+Current docs list bare Vertex IDs for current Claude models such as `claude-sonnet-5` and `claude-opus-4-8`, while some other Vertex models are still documented as dated snapshot IDs such as `claude-haiku-4-5@20251001`.
 Do not assume `@default` or dated `@...` suffixes are universally required for Vertex AI Claude.
+For Gemini API text and coding work, prefer `gemini-3.5-flash` as the standard stable model unless you intentionally need the cheaper Flash-Lite tier.
+Use `gemini-3.1-pro-preview` only when you need the highest Gemini API intelligence tier and accept a preview model.
 The Google rows above are for the Gemini API / AI Studio `google` provider, not for Vertex AI.
 For `vertexai`, verify the current Vertex AI docs instead of assuming Gemini API names or defaults carry over unchanged.
 Current Vertex AI image docs prominently document `gemini-3-pro-image-preview` and `gemini-2.5-flash-image`, and the right default depends on the specific Vertex surface you are editing.
@@ -50,11 +53,60 @@ Gemini API docs call `gemini-3.1-flash-image-preview` Nano Banana 2, while Verte
 - **Agents**: Single-specialty actors defined under `agents:` in `config.yaml`
 - **Teams**: Collaborative bundles of agents that coordinate or parallelize work
 
+**Inbound turn pipeline** (the path from a Matrix message to a delivered response; see `docs/architecture/bot-runtime.md`):
+
+```text
+Matrix sync callback
+  -> bot.py (AgentBot/TeamBot runtime shell)
+  -> turn_controller.py (owns one turn: precheck -> normalize -> resolve -> coalesce -> decide -> execute -> record)
+       -> ingress_validation.py                                  (trust, dedup, echo drop; commands exit before batching)
+       -> inbound_turn_normalizer.py + conversation_resolver.py  (canonical turn input, conversation identity)
+       -> ingress_lanes.py                                       (per-(room, sender) receipt-order FIFO; STT readiness waits here)
+       -> coalescing.py                                          (text dispatches immediately; media-tailed batches debounce)
+       -> text_ingress_dispatch.py + turn_policy.py              (ignore / route / respond decision, command execution)
+       -> response_runner.py -> ai.py / teams.py                 (lifecycle lock, entity envelopes)
+            -> response_turn.py                                  (shared blocking/streaming turn drivers)
+       -> streaming.py + delivery_gateway.py                     (progressive edits, Matrix send)
+       -> turn_store.py / handled_turns.py                       (durable dedup so restarts don't double-reply)
+```
+
 **Key modules**:
 | Module | Purpose |
 |--------|---------|
 | `orchestrator.py` | MultiAgentOrchestrator - boots agents, manages sync loops, hot-reload |
-| `bot.py` | AgentBot and TeamBot runtime for Matrix event handling, responses, and room behavior |
+| `orchestration/` | Extracted orchestrator helpers (config update plans, plugin watch, rooms, runtime) |
+| `orchestration/config_lifecycle.py` | Debounced config-reload lifecycle: queueing, response drain, and update-plan dispatch |
+| `runtime_state.py` | Shared runtime readiness state for health/ready endpoints |
+| `event_loop_stall.py` | Native-thread event-loop stall detector that logs the blocking stack |
+| `runtime_resolution.py` | Authoritative runtime resolution for one agent materialization |
+| `team_exact_members.py` | Runtime resolution for exact team member materialization |
+| `bot.py` | AgentBot and TeamBot runtime shells for Matrix lifecycle, sync callbacks, and room behavior |
+| `turn_controller.py` | TurnController - owns one inbound turn from ingress to recorded outcome |
+| `ingress_validation.py` | Ingress boundary validation: trust, effective requester, handled-id dedup, router-echo drop, command detection |
+| `inbound_turn_normalizer.py` | Raw input shaping (text, voice, sidecars, media) into canonical turn inputs |
+| `conversation_resolver.py` | Conversation identity, thread history, and ingress envelope assembly |
+| `ingress_lanes.py` | Per-(room, sender) receipt-order FIFO delivering resolving ingress (voice/STT readiness) to conversations |
+| `coalescing.py` | Live message coalescing gate (text dispatches immediately; media waits for attachments and a trailing caption) |
+| `coalescing_batch.py` | Coalesced dispatch batch construction |
+| `text_ingress_dispatch.py` | Text ingress dispatch path used by TurnController |
+| `turn_policy.py` | Pure turn policy: decide ignore, route, or respond for inbound turns |
+| `dispatch_replay_guard.py` | Replay-guard checks for dispatch sequencing |
+| `turn_store.py` | Unified durable turn access (wraps the handled-turn ledger) |
+| `handled_turns.py` | Disk-backed handled-turn ledger preventing duplicate responses |
+| `redacted_turn_cleanup.py` | Source-redaction tombstoning and serialized persisted replay cleanup |
+| `sync_restart_retry.py` | One-shot re-dispatch of responses cancelled by sync-restart recovery |
+| `response_runner.py` | Response lifecycle execution (locking, streaming vs non-streaming, cancellation, detached inbox responses, shutdown drains) |
+| `response_turn.py` | Shared blocking/streaming response-turn drivers behind the agent and team envelopes (attempt loop, dynamic-tool continuation, empty-run retry, interrupt recording) |
+| `response_terminal.py` | Pending-visible classification and terminal stream outcomes for failed or cancelled turns |
+| `response_attempt.py` | Runs one visible response attempt with placeholder and stop tracking |
+| `response_lifecycle.py` | Shared response lifecycle helpers and queued-notice state |
+| `execution_preparation.py` | Request-scoped execution preparation for prompts and persisted replay |
+| `response_payload_preparation.py` | Execution-side, under-lock assembly of one response's payload from immutable ingress inputs |
+| `delivery_gateway.py` | Visible Matrix delivery for already-generated responses (send, edit, finalize) |
+| `post_response_effects.py` | Shared post-response effects after Matrix delivery |
+| `tool_approval.py` | Tool-call approval rule evaluation and public approval API |
+| `approval_manager.py` | Matrix-backed tool approval runtime state |
+| `workspaces.py` | Agent workspace scaffolding, template seeding, and context file resolution |
 | `agents.py` | Agent creation and configuration |
 | `config/` | Pydantic models for YAML config parsing (root model in `config/main.py`) |
 | `routing.py` | Intelligent responder selection when no agent or team is mentioned |
@@ -62,9 +114,11 @@ Gemini API docs call `gemini-3.1-flash-image-preview` Nano Banana 2, while Verte
 | `agent_policy.py` | Canonical execution-policy derivation from authored agent config |
 | `memory/` | Mem0 memory: agent and team-scoped |
 | `knowledge/` | Knowledge base / RAG file indexing with watcher |
+| `knowledge/file_listing.py` | Which files belong to a knowledge base: include patterns, traversal, symlink-safe inclusion rules |
 | `tool_system/skills.py` | Skill integration system (OpenClaw-compatible) |
 | `tool_system/plugins.py` | Plugin loading and tool/skill extension |
 | `scheduling.py` | Cron and natural-language task scheduling |
+| `scheduling_executor.py` | Fire one scheduled task: hook emission, message build, Matrix delivery, failure notices |
 | `tools/` | 100+ tool integrations |
 | `tool_system/dependencies.py` | Auto-install per-tool optional dependencies at runtime |
 | `ai.py` | AI response generation, streaming, and Matrix run metadata |
@@ -75,6 +129,7 @@ Gemini API docs call `gemini-3.1-flash-image-preview` Nano Banana 2, while Verte
 | `credentials.py` | Unified credential management (CredentialsManager) |
 | `matrix/` | Matrix protocol integration (client, users, rooms, presence, provisioning, message formatting) |
 | `matrix/large_messages.py` | Large-message sidecar storage and retrieval for oversized Matrix payloads |
+| `matrix/sync_cache_trust.py` | Sync-checkpoint persistence, cache-generation trust, and cold-start principal cleanup |
 | `matrix/message_content.py` | Canonical Matrix message content building for text, edits, and tool traces |
 | `matrix/message_builder.py` | Message content building helpers |
 | `matrix/provisioning.py` | Hosted provisioning client flow used for local pairing and server-side agent registration |
@@ -92,21 +147,30 @@ Gemini API docs call `gemini-3.1-flash-image-preview` Nano Banana 2, while Verte
 | `commands/config_confirmation.py` | Interactive config confirmation workflows |
 | `voice_handler.py` | Voice message download, transcription, and command recognition |
 | `tool_system/sandbox_proxy.py` | Container sandbox proxy for isolating shell/python tools |
-| `streaming.py` | Response streaming via progressive message edits |
+| `shell_execution.py` | Shell command execution core: spawning, output buffering, background handle registry |
+| `shell_supervisor.py` | Worker-local shell supervisor process owning background shell handles across sandbox request subprocesses |
+| `streaming.py` | Streaming state machine: placeholder, progressive edits, tool traces, cancellation |
 | `prompts.py` | Built-in prompt defaults and prompt override registry |
 | `attachments.py` | Attachment persistence, registration, and context-scoped resolution |
+| `attachment_ids.py` | Leaf attachment-ID helpers kept free of matrix-client imports |
 | `attachment_media.py` | Convert attachment records to Agno media objects |
 | `media_inputs.py` | Shared media-input container passed across bot, teams, and AI layers |
 | `api/` | FastAPI REST API (dashboard, credentials, OpenAI-compatible endpoint) |
 | `custom_tools/` | Built-in custom tool implementations (gmail, calendar, scheduler, etc.) |
+| `custom_tools/todo_state.py` | Leaf storage and actionability primitives for native per-thread todo state |
+| `custom_tools/todo_poke.py` | Native scanner and background worker that wakes idle agents with actionable assigned todos |
 | `background_tasks.py` | Background task management for non-blocking operations |
 | `tool_system/events.py` | Tool-event formatting and metadata for Matrix messages |
-| `tool_system/metadata.py` | Tool registry metadata and registration decorators |
+| `tool_system/declarations.py` | Leaf tool metadata enums and dataclasses shared by implementations and the runtime catalog |
+| `tool_system/registration.py` | Leaf built-in and plugin tool registration surface |
+| `tool_system/metadata.py` | Runtime tool lookup, validation, plugin resolution, and instance construction |
 | `tool_system/runtime_context.py` | Shared runtime ContextVar for tool calls (including attachment scope) |
 | `constants.py` | Shared constants, paths, and environment variable defaults |
 | `error_handling.py` | User-friendly error message extraction |
 | `authorization.py` | Sender and per-agent authorization checks |
 | `thread_utils.py` | Thread analysis and agent detection |
+| `session_ids.py` | Leaf helpers for the canonical persisted room/thread session ID |
+| `thread_models.py` | Durable per-thread model overrides backing `!model` and the `thread_model` tool |
 | `file_watcher.py` | File change detection for config hot-reload |
 | `interactive.py` | Interactive Q&A system via Matrix reactions |
 | `stop.py` | StopManager for cancelling in-progress responses |
@@ -119,7 +183,6 @@ Gemini API docs call `gemini-3.1-flash-image-preview` Nano Banana 2, while Verte
 | `cli/local_stack.py` | Local stack setup command |
 | `credentials_sync.py` | Shared provider/bootstrap env to credentials sync |
 | `logging_config.py` | Structured logging setup |
-| `response_tracker.py` | Duplicate response prevention |
 | `knowledge/utils.py` | Multi-knowledge-base vector DB utilities |
 
 **Persistent state** lives under `mindroom_data/` (next to `config.yaml`, overridable via `MINDROOM_STORAGE_PATH`):
@@ -127,7 +190,7 @@ Gemini API docs call `gemini-3.1-flash-image-preview` Nano Banana 2, while Verte
 - `learning/` – Per-agent Agno Learning preference data
 - `chroma/` – ChromaDB storage backing the memory system
 - `knowledge_db/` – Knowledge base vector stores for file-backed RAG
-- `tracking/` – Response tracking to avoid duplicate replies
+- `tracking/` – Durable handled-turn ledger to avoid duplicate replies
 - `credentials/` – JSON secrets synchronized from `.env`
 - `encryption_keys/` – Matrix E2E encryption keys
 - `culture/` – Shared culture state
@@ -159,7 +222,7 @@ MindRoom also maintains related repositories under `github.com/mindroom-ai`:
 - `mindroom-element` - our Element fork for MindRoom message UX: collapsible tool-trace rendering, `!` command autocomplete synced from backend commands, long-text sidecar hydration, AI run metadata tooltip, and MindRoom branding/thread-first defaults. See `README.md` and `FORK_CHANGES.md` in that repo.
 - `synapse` - our Synapse fork for MindRoom streaming workloads: optional compact-edit collapsing for superseded `m.replace` events across `/sync`, Sliding Sync, pagination, and context responses, plus `/versions` advertisement via `org.mindroom.compact_edits` and fork-owned Docker/CI flows. See `README.md` and `FORK_CHANGES.md`.
 - `mindroom-librechat` - our LibreChat fork that parses MindRoom inline `<tool>` / `<tool-group>` tags into native `ToolCall` cards so tool execution stays server-side; also includes fork Docker CI and MindRoom-specific UX additions. See `README.md` and `.mindroom/` docs (`fork-context.md`, `tool-tag-rendering.md`).
-- `mindroom-cinny` - our Cinny fork optimized for MindRoom agent workflows with MindRoom branding/default homeserver config, subpath deployment support (runtime/build base path for `/mindroom`), and thread/auth/sidebar UX refinements. See `README.md` and `FORK_CHANGES.md`.
+- `mindroom-chat` - our AI-native Matrix client, built on Cinny and optimized for MindRoom agent workflows with MindRoom branding/default homeserver config, subpath deployment support (runtime/build base path for `/mindroom`), and thread/auth/sidebar UX refinements. See `README.md` and `FORK_CHANGES.md`.
 - `mindroom-stack` - a full Docker Compose reference stack that boots the published MindRoom backend/frontend, a Tuwunel Matrix homeserver, and the MindRoom client together, including first-login and model/API-key setup guidance.
 
 In this dev environment, many of these repositories are cloned in the parent directory (`../`) and can be inspected directly.
@@ -197,10 +260,10 @@ bot_accounts: []
 models:
   default:
     provider: anthropic
-    id: claude-sonnet-4-6
+    id: claude-sonnet-5
   sonnet:
     provider: anthropic
-    id: claude-sonnet-4-6
+    id: claude-sonnet-5
 
 router:
   model: default
@@ -276,7 +339,8 @@ Teams (`src/mindroom/teams.py`) let multiple agents work together:
 - **Prefer dataclasses**: Use `dataclasses` that can be typed over dictionaries for better type safety and clarity.
 - **Documentation Line Style**: In Markdown docs, write one sentence per line, and never split a single sentence across multiple lines.
 - Do not wrap things in try-excepts unless it's necessary. Avoid wrapping things that should not fail.
-- NEVER put imports in the function, unless it is to avoid circular imports. Imports should be at the top of the file.
+- NEVER put imports in the function, unless it is to avoid circular imports or to keep a heavy import (for example a provider SDK) out of module import time. Prefer an explicit function-level `from x import Y` with `# noqa: PLC0415` over dynamic `import_module` indirection. Imports should be at the top of the file.
+- `tests/test_import_graph.py` pins which third-party packages the slim entry points (config, tool registry, sandbox runner) may import and bans provider SDKs from the primary runtime. If it fails on your change, defer the new import to first use; extend the allowlist only when the dependency is genuinely needed at import time.
 - Do not use `getattr()` or `hasattr()` to weaken a typed interface or probe for fields that the declared type should guarantee.
 - If mocks or tests break, fix them to use proper typed objects or stricter mocks instead of adding dynamic attribute fallbacks in production code.
 - **Merge and forget**: Code you touch should be polished enough to never revisit. Fix rough edges in code you're already changing.
@@ -394,7 +458,7 @@ uvx mindroom connect --pair-code ABCD-EFGH
 uvx mindroom run
 ```
 
-`mindroom connect` writes `MINDROOM_LOCAL_CLIENT_ID` and `MINDROOM_LOCAL_CLIENT_SECRET` to `~/.mindroom/.env` by default (unless `--no-persist-env` is used) and auto-replaces owner placeholder tokens in `config.yaml` when `owner_user_id` is returned.
+`mindroom connect` writes `MINDROOM_LOCAL_CLIENT_ID` and `MINDROOM_LOCAL_CLIENT_SECRET` to `~/.mindroom/.env` by default (unless `--no-persist-env` is used) and auto-replaces owner placeholder tokens in `config.yaml` and every file it pulls in via `!include` when `owner_user_id` is returned.
 
 ### SaaS Platform Commands
 
@@ -449,11 +513,16 @@ helm upgrade --install platform ./cluster/k8s/platform -f cluster/k8s/platform/v
 - **Check for Changes**: Before starting, review the latest changes from the main branch with `git diff origin/main | cat`. Make sure to use `--no-pager`, or pipe the output to `cat`.
 - **Commit Frequently**: Make small, frequent commits.
 - **Atomic Commits**: Ensure each commit corresponds to a tested, working state.
+- **Preserve Review History**: Do not amend commits or force-push PR branches unless the user explicitly asks for it. Prefer follow-up commits so PR history stays inspectable.
 - **Targeted Adds**: **NEVER** use `git add .`. Always add files individually (`git add <filename>`) to prevent committing unrelated changes.
 
 ### Step 4: Testing & Quality
 
 - **Test Before Committing**: **NEVER** claim a task is complete without running `pytest` to ensure all tests pass.
+- **Test at the Owning Seam**: New behavior tests target the collaborator seam that owns the behavior (`ResponseRunner`, `DeliveryGateway`, `TurnPolicy`, `TurnController`, `CoalescingGate`, `IngressValidator`, `EditRegenerator`), not the `AgentBot`/`TeamBot` facade.
+  Fake collaborators through the conftest seam installers (`install_generate_response_mock`, `install_send_response_mock`, `replace_edit_regenerator_deps`) or the `*Deps` dataclasses, never by assigning mocks onto bot attributes.
+  A test needing more than 3 patches is a smell that it is testing through the wrong seam.
+  Genuinely end-to-end tests belong in the slim integration files (`test_multi_agent_bot.py`, `test_threading_error.py`), which stay small by design.
 - **Run Pre-commit Hooks**: After `uv sync --all-extras`, run `uv run pre-commit run --all-files` before committing to enforce code style and quality.
 - **Update Tach Boundaries in the Same PR**: If your PR changes a Tach-governed boundary, update `tach.toml` in the same PR, follow the guidance in the comment at the top of that file, and run `uv run tach check --dependencies --interfaces`.
 - **Handle Linter Issues**:
@@ -480,7 +549,7 @@ Common `just` recipes for development:
 just local-matrix-up              # Boot Synapse + Postgres dev stack
 just local-platform-compose-up    # Full SaaS sandbox
 
-# Testing (IMPORTANT: enter `nix-shell shell.nix` first on NixOS hosts)
+# Testing (IMPORTANT: enter the Node.js 24 `nix-shell shell.nix` first on NixOS hosts)
 # If `uv run pytest` fails with 'module mindroom has no attribute bot',
 # use the repo dev shell so `libstdc++.so.6` is available:
 nix-shell shell.nix
@@ -510,10 +579,10 @@ Matty is a Matrix CLI client that allows you to interact with MindRoom AI agents
 
 ### Prerequisites
 ```bash
-# Matty is installed as a project dependency
-# Activate the virtual environment
+# Matty is optional and is not installed by `uv sync --all-extras`
+# Activate an environment where Matty is installed
 source .venv/bin/activate
-# Now you can use matty directly
+# If Matty is unavailable, use the authenticated raw Matrix client API
 ```
 
 ### Configuration
@@ -591,7 +660,7 @@ uv run mindroom run --storage-path mindroom_data
 # Pair local install with hosted provisioning
 mindroom connect --pair-code ABCD-EFGH
 
-# Bootstrap local Synapse + MindRoom Cinny (Docker)
+# Bootstrap local Synapse + MindRoom Chat (Docker)
 mindroom local-stack-setup --synapse-dir /path/to/mindroom-stack/local/matrix
 
 # Update credentials

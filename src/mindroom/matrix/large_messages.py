@@ -17,13 +17,20 @@ from mindroom.constants import (
     AI_RUN_METADATA_KEY,
     ATTACHMENT_IDS_KEY,
     HOOK_MESSAGE_RECEIVED_DEPTH_KEY,
+    HOOK_SOURCE_KEY,
     ORIGINAL_SENDER_KEY,
+    PER_FIRE_THREAD_ROOT_EVENT_ID_KEY,
+    PER_FIRE_THREAD_ROOT_KEY,
+    SKIP_MENTIONS_KEY,
+    SOURCE_KIND_KEY,
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
     STREAM_STATUS_STREAMING,
     STREAM_VISIBLE_BODY_KEY,
     STREAM_WARMUP_SUFFIX_KEY,
+    TOOL_TRACE_CONTENT_KEY,
     VOICE_RAW_AUDIO_FALLBACK_KEY,
+    VOICE_TRANSCRIPT_KEY,
 )
 from mindroom.logging_config import get_logger
 from mindroom.matrix.media import upload_content_uri, upload_media_bytes
@@ -34,25 +41,29 @@ logger = get_logger(__name__)
 # Conservative limits accounting for Matrix overhead
 _NORMAL_MESSAGE_LIMIT = 55000  # ~55KB for regular messages
 _EDIT_MESSAGE_LIMIT = 27000  # ~27KB for edits (they roughly double in size)
+_LARGE_MESSAGE_PREVIEW_OVERHEAD_BYTES = 5000  # Reserve room for Matrix relation and preview metadata.
 _PASSTHROUGH_CONTENT_KEYS = frozenset(
     {
         "m.mentions",
-        "com.mindroom.hook_source",
-        "com.mindroom.skip_mentions",
-        "com.mindroom.source_kind",
+        HOOK_SOURCE_KEY,
+        SKIP_MENTIONS_KEY,
+        SOURCE_KIND_KEY,
         ATTACHMENT_IDS_KEY,
         HOOK_MESSAGE_RECEIVED_DEPTH_KEY,
         ORIGINAL_SENDER_KEY,
+        PER_FIRE_THREAD_ROOT_EVENT_ID_KEY,
+        PER_FIRE_THREAD_ROOT_KEY,
         AI_RUN_METADATA_KEY,
         STREAM_STATUS_KEY,
         STREAM_WARMUP_SUFFIX_KEY,
         VOICE_RAW_AUDIO_FALLBACK_KEY,
+        VOICE_TRANSCRIPT_KEY,
     },
 )
 _SIDECAR_ONLY_MINDROOM_KEYS = frozenset(
     {
         "io.mindroom.long_text",
-        "io.mindroom.tool_trace",
+        TOOL_TRACE_CONTENT_KEY,
         STREAM_VISIBLE_BODY_KEY,
     },
 )
@@ -222,7 +233,7 @@ def _build_nonterminal_streaming_edit_preview(
             original_size=original_size,
         )
         modified_content: dict[str, Any] = {
-            "msgtype": "m.text",
+            "msgtype": source_content.get("msgtype", "m.text"),
             "body": f"* {preview}",
             "format": "org.matrix.custom.html",
             "formatted_body": formatted_preview,
@@ -255,6 +266,7 @@ def _prefix_by_bytes(text: str, max_bytes: int) -> str:
 
 _CONTINUATION_INDICATOR = "\n\n[Message continues in attached file]"
 _STREAMING_PREVIEW_TRUNCATION_INDICATOR = "\n\n[Streaming preview truncated]"
+_SIDECAR_UPLOAD_FALLBACK_INDICATOR = "\n\n[Message truncated because the attachment upload failed.]"
 
 
 def _create_preview(
@@ -386,30 +398,105 @@ async def _build_file_content(
     size_limit: int,
 ) -> tuple[str | None, dict[str, Any] | None, dict[str, Any]]:
     """Upload full original content JSON and build preview ``m.file`` event."""
-    mxc_uri, file_info = await _upload_content_json_sidecar(client, room_id, full_content)
+    mxc_uri, file_info = await upload_json_sidecar(client, room_id, full_content)
 
-    attachment_overhead = 5000  # Conservative estimate for attachment JSON structure
-    available = size_limit - attachment_overhead
+    available = size_limit - _LARGE_MESSAGE_PREVIEW_OVERHEAD_BYTES
     preview = _create_preview(preview_text, available)
 
     modified_content: dict[str, Any] = {
         "msgtype": "m.file",
         "body": preview,
         "filename": "message-content.json",
-        "info": file_info,
     }
+    if file_info is not None:
+        modified_content["info"] = file_info
 
     return mxc_uri, file_info, modified_content
 
 
-async def _upload_content_json_sidecar(
+def _sidecar_upload_has_common_metadata(file_info: dict[str, Any]) -> bool:
+    size = file_info.get("size")
+    mimetype = file_info.get("mimetype")
+    return (
+        isinstance(size, int)
+        and not isinstance(size, bool)
+        and size >= 0
+        and isinstance(mimetype, str)
+        and mimetype != ""
+    )
+
+
+def _sidecar_upload_has_encrypted_metadata(mxc_uri: str, file_info: dict[str, Any]) -> bool:
+    file_url = file_info.get("url")
+    key = file_info.get("key")
+    iv = file_info.get("iv")
+    hashes = file_info.get("hashes")
+    sha256 = hashes.get("sha256") if isinstance(hashes, dict) else None
+    version = file_info.get("v")
+    return (
+        file_url == mxc_uri
+        and isinstance(key, dict)
+        and bool(key)
+        and isinstance(iv, str)
+        and iv != ""
+        and isinstance(sha256, str)
+        and sha256 != ""
+        and version == "v2"
+    )
+
+
+def sidecar_upload_is_usable(
+    mxc_uri: str | None,
+    file_info: dict[str, Any] | None,
+    *,
+    room_encrypted: bool,
+) -> bool:
+    """Return whether one uploaded sidecar carries the metadata clients need to fetch it."""
+    if not isinstance(mxc_uri, str) or not mxc_uri or not isinstance(file_info, dict):
+        return False
+
+    if not _sidecar_upload_has_common_metadata(file_info):
+        return False
+
+    return not room_encrypted or _sidecar_upload_has_encrypted_metadata(mxc_uri, file_info)
+
+
+def content_fits_normal_event(content: dict[str, Any]) -> bool:
+    """Return whether one content payload fits a normal Matrix event send."""
+    return _calculate_event_size(content) <= _NORMAL_MESSAGE_LIMIT
+
+
+async def upload_json_sidecar(
     client: nio.AsyncClient,
     room_id: str,
-    full_content: dict[str, Any],
+    payload: dict[str, Any],
 ) -> tuple[str | None, dict[str, Any] | None]:
-    """Upload full original content JSON for supported-client hydration."""
-    upload_text = json.dumps(full_content, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    return await _upload_text_as_mxc(client, upload_text, room_id, mimetype="application/json")
+    """Upload one JSON payload as an MXC sidecar and return ``(mxc_uri, file_info)``."""
+    text = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return await _upload_text_as_mxc(client, text, room_id, mimetype="application/json")
+
+
+def _build_text_fallback_content(
+    source_content: dict[str, Any],
+    preview_text: str,
+    size_limit: int,
+) -> dict[str, Any]:
+    """Build a text preview when the full-content sidecar is unavailable."""
+    preview_limit = max(0, size_limit - _LARGE_MESSAGE_PREVIEW_OVERHEAD_BYTES)
+    preview_msgtype = "m.notice" if source_content.get("msgtype") == "m.notice" else "m.text"
+    while True:
+        preview_content: dict[str, Any] = {
+            "msgtype": preview_msgtype,
+            "body": _create_preview(
+                preview_text,
+                preview_limit,
+                continuation_indicator=_SIDECAR_UPLOAD_FALLBACK_INDICATOR,
+            ),
+        }
+        _copy_preview_metadata(source_content, preview_content)
+        if _calculate_event_size(preview_content) <= size_limit or preview_limit == 0:
+            return preview_content
+        preview_limit = max(0, preview_limit // 2)
 
 
 async def prepare_large_message(
@@ -441,6 +528,7 @@ async def prepare_large_message(
     if current_size <= size_limit:
         return content
 
+    room_encrypted = _room_is_encrypted(client, room_id)
     source_content = content["m.new_content"] if is_edit and "m.new_content" in content else content
     preview_text = source_content["body"]
     if is_edit and _is_nonterminal_stream_content(source_content):
@@ -449,12 +537,23 @@ async def prepare_large_message(
             room_id=room_id,
             original_size_bytes=current_size,
         )
-        mxc_uri, file_info = await _upload_content_json_sidecar(client, room_id, content)
+        mxc_uri, file_info = await upload_json_sidecar(client, room_id, content)
+        if not sidecar_upload_is_usable(mxc_uri, file_info, room_encrypted=room_encrypted):
+            logger.warning(
+                "large_message_sidecar_unavailable_using_inline_preview",
+                room_id=room_id,
+                original_size_bytes=current_size,
+                is_edit=True,
+                has_mxc_uri=bool(mxc_uri),
+                has_file_info=bool(file_info),
+            )
+            mxc_uri = None
+            file_info = None
         modified_content = _build_nonterminal_streaming_edit_preview(
             content,
             source_content,
             preview_text,
-            room_encrypted=_room_is_encrypted(client, room_id),
+            room_encrypted=room_encrypted,
             mxc_uri=mxc_uri,
             file_info=file_info,
             original_size=current_size,
@@ -486,21 +585,32 @@ async def prepare_large_message(
         size_limit,
     )
 
-    _copy_preview_metadata(source_content, modified_content)
-    _add_sidecar_metadata(
-        modified_content,
-        room_encrypted=_room_is_encrypted(client, room_id),
-        mxc_uri=mxc_uri,
-        file_info=file_info,
-        original_size=current_size,
-    )
+    if sidecar_upload_is_usable(mxc_uri, file_info, room_encrypted=room_encrypted):
+        _copy_preview_metadata(source_content, modified_content)
+        _add_sidecar_metadata(
+            modified_content,
+            room_encrypted=room_encrypted,
+            mxc_uri=mxc_uri,
+            file_info=file_info,
+            original_size=current_size,
+        )
+    else:
+        logger.warning(
+            "large_message_sidecar_unavailable_using_text_fallback",
+            room_id=room_id,
+            original_size_bytes=current_size,
+            is_edit=is_edit,
+            has_mxc_uri=bool(mxc_uri),
+            has_file_info=bool(file_info),
+        )
+        modified_content = _build_text_fallback_content(source_content, preview_text, size_limit)
 
     if "m.relates_to" in content:
         modified_content["m.relates_to"] = content["m.relates_to"]
 
     if is_edit and "m.new_content" in content:
         modified_content = {
-            "msgtype": "m.text",
+            "msgtype": source_content.get("msgtype", "m.text"),
             "body": f"* {modified_content['body']}",
             "m.new_content": modified_content,
             "m.relates_to": content.get("m.relates_to", {}),

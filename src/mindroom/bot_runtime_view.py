@@ -46,6 +46,11 @@ class BotRuntimeView(Protocol):
     @property
     def runtime_started_at(self) -> float: ...  # noqa: D102
 
+    @property
+    def callback_failure_count(self) -> int: ...  # noqa: D102
+
+    def mark_callback_failed(self) -> None: ...  # noqa: D102
+
 
 @dataclass
 class BotRuntimeState:
@@ -60,7 +65,12 @@ class BotRuntimeState:
     event_cache_write_coordinator: EventCacheWriteCoordinator | None
     startup_thread_prewarm_registry: StartupThreadPrewarmRegistry | None = None
     runtime_started_at: float = field(default_factory=time.time)
+    callback_failure_count: int = 0
 
     def mark_runtime_started(self) -> None:
         """Record the runtime start time for this bot start."""
         self.runtime_started_at = time.time()
+
+    def mark_callback_failed(self) -> None:
+        """Record that a Matrix callback failed after sync certification."""
+        self.callback_failure_count += 1

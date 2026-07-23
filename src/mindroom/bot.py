@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import cached_property
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
 
 import nio
@@ -19,6 +19,7 @@ from mindroom.approval_inbound import (
 )
 from mindroom.bot_room_lifecycle import BotRoomLifecycle, BotRoomLifecycleDeps
 from mindroom.bot_runtime_view import BotRuntimeState
+from mindroom.desktop.pairing_receiver import register_desktop_pairing_receiver
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.hooks import (
     EVENT_AGENT_STARTED,
@@ -27,50 +28,49 @@ from mindroom.hooks import (
     EVENT_REACTION_RECEIVED,
     EVENT_ROOM_MEMBER_JOINED,
     AgentLifecycleContext,
-    EnrichmentItem,
     HookContextSupport,
     HookRegistry,
     HookRegistryState,
-    MessageEnvelope,
     ReactionReceivedContext,
     RoomMemberJoinedContext,
     emit,
     send_hook_message,
 )
 from mindroom.matrix.conversation_cache import MatrixConversationCache
-from mindroom.matrix.event_info import origin_server_ts_from_event_source
+from mindroom.matrix.decrypt_failure import handle_decrypt_failure, raise_notice_floor
+from mindroom.matrix.event_info import EventInfo, origin_server_ts_from_event_source
 from mindroom.matrix.health import clear_matrix_sync_state, mark_matrix_sync_loop_started, mark_matrix_sync_success
 from mindroom.matrix.media import MATRIX_MEDIA_EVENT_TYPES
 from mindroom.matrix.presence import build_agent_status_message, set_presence_status
 from mindroom.matrix.room_cleanup import cleanup_all_orphaned_bots
 from mindroom.matrix.rooms import leave_non_dm_rooms
 from mindroom.matrix.state import resolve_room_aliases
+from mindroom.matrix.sync_cache_trust import SyncCacheTrust
 from mindroom.matrix.sync_certification import (
     SyncCacheWriteResult,
     SyncCertificationDecision,
-    SyncCheckpoint,
     SyncTrustState,
-    certify_sync_response,
-    handle_unknown_pos,
-    start_from_loaded_token,
-    sync_cache_write_diagnostics,
 )
 from mindroom.matrix.sync_loop import run_matrix_sync_forever
-from mindroom.matrix.sync_tokens import clear_sync_token, load_sync_token_record, save_sync_token
 from mindroom.matrix.users import AgentMatrixUser, login_agent_user
+from mindroom.matrix_rtc.call_manager import CallManager, maybe_build_call_manager
 from mindroom.memory import store_conversation_memory
 from mindroom.message_target import MessageTarget  # noqa: TC001
 from mindroom.post_response_effects import PostResponseEffectsSupport
+from mindroom.runtime_shutdown import ENTITY_REMOVED_SHUTDOWN, GENERIC_SHUTDOWN, RuntimeShutdownIntent
 from mindroom.stop import StopManager
 from mindroom.teams import TeamMode, TeamOutcome, resolve_configured_team
+from mindroom.timestamp_formatting import format_timestamp_ms
+from mindroom.tool_approval import is_process_active_approval_card
 from mindroom.tool_system.runtime_context import ToolRuntimeSupport
 from mindroom.tool_system.worker_routing import tool_execution_identity
 
 from . import constants, interactive
-from .agents import create_agent, get_rooms_for_entity, show_tool_calls_for_agent
+from .agents import create_agent, show_tool_calls_for_agent
 from .authorization import is_authorized_sender
 from .background_tasks import create_background_task, wait_for_background_tasks
 from .coalescing import CoalescingGate
+from .coalescing_batch import CoalescingKey, is_active_follow_up_coalescing_key
 from .commands import config_confirmation
 from .constants import ROUTER_AGENT_NAME, RuntimePaths, resolve_avatar_path
 from .conversation_resolver import ConversationResolver, ConversationResolverDeps
@@ -83,7 +83,9 @@ from .delivery_gateway import (
     SendTextRequest,
 )
 from .edit_regenerator import EditRegenerator, EditRegeneratorDeps
-from .inbound_turn_normalizer import DispatchPayload, InboundTurnNormalizer, InboundTurnNormalizerDeps
+from .entity_rooms import get_rooms_for_entity
+from .inbound_turn_normalizer import InboundTurnNormalizer, InboundTurnNormalizerDeps
+from .ingress_validation import IngressValidator, IngressValidatorDeps
 from .knowledge import KnowledgeAccessSupport
 from .logging_config import get_logger
 from .matrix.avatar import check_and_set_avatar
@@ -95,13 +97,11 @@ from .matrix.room_member_joins import (
     room_member_joins_from_sync_state,
     room_member_joins_from_sync_timeline,
 )
+from .matrix.to_device import AuthenticatedToDeviceEvent
 from .media_inputs import MediaInputs
-from .response_runner import (
-    ResponseRequest,
-    ResponseRunner,
-    ResponseRunnerDeps,
-    prepare_memory_and_model_context,
-)
+from .redacted_turn_cleanup import RedactedTurnCleanup, RedactedTurnCleanupDeps
+from .response_payload_preparation import ResponsePayloadPreparer
+from .response_runner import ResponseRequest, ResponseRunner, ResponseRunnerDeps, prepare_memory_and_model_context
 from .scheduling import (
     cancel_all_running_scheduled_tasks,
     clear_deferred_overdue_tasks,
@@ -110,12 +110,13 @@ from .scheduling import (
     restore_scheduled_tasks,
 )
 from .startup_errors import PermanentStartupError
+from .sync_restart_retry import SyncRestartRetryQueue
 from .turn_controller import TurnController, TurnControllerDeps
 from .turn_policy import IngressHookRunner, TurnPolicy, TurnPolicyDeps
 from .turn_store import TurnStore, TurnStoreDeps
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Sequence
+    from collections.abc import Awaitable, Callable
     from datetime import datetime
     from pathlib import Path
 
@@ -125,7 +126,6 @@ if TYPE_CHECKING:
     from mindroom.coalescing_batch import CoalescedBatch
     from mindroom.config.main import Config
     from mindroom.matrix.cache import AgentMessageSnapshot, ConversationEventCache, EventCacheWriteCoordinator
-    from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.identity import MatrixID
     from mindroom.matrix.media import MatrixMediaEvent
     from mindroom.runtime_protocols import OrchestratorRuntime
@@ -141,7 +141,6 @@ __all__ = ["AgentBot", "TeamBot", "create_bot_for_entity"]
 
 # Constants
 _SYNC_TIMEOUT_MS = 30000
-_STOPPING_RESPONSE_TEXT = "⏹️ Stopping generation..."
 
 
 @dataclass(frozen=True, slots=True)
@@ -151,12 +150,14 @@ class _RoomMemberJoinSyncHookPlan:
     arm_after_response: bool = True
     emit_state: bool = False
     emit_timeline: bool = False
+    record_state_seen: bool = False
 
 
 def _create_task_wrapper(
     callback: Callable[..., Awaitable[None]],
     *,
-    owner: object | None = None,
+    owner: BotRuntimeState | None = None,
+    on_error: Callable[[], None] | None = None,
 ) -> Callable[..., Awaitable[None]]:
     """Create a wrapper that runs the callback as a background task.
 
@@ -174,6 +175,10 @@ def _create_task_wrapper(
                 # Task was cancelled, this is expected during shutdown
                 pass
             except Exception:
+                if on_error is not None:
+                    on_error()
+                elif owner is not None:
+                    owner.mark_callback_failed()
                 # Log the exception with full traceback
                 logger.exception("Error in event callback")
 
@@ -281,18 +286,24 @@ class AgentBot:
     _conversation_cache: MatrixConversationCache
     _delivery_gateway: DeliveryGateway
     _response_runner: ResponseRunner
+    _redacted_turn_cleanup: RedactedTurnCleanup
     _turn_store: TurnStore
     _tool_runtime_support: ToolRuntimeSupport
     _post_response_effects_support: PostResponseEffectsSupport
     _ingress_hook_runner: IngressHookRunner
+    _request_payload_preparer: ResponsePayloadPreparer
     _hook_context_support: HookContextSupport
     _knowledge_access_support: KnowledgeAccessSupport
     _deferred_overdue_task_drain_task: asyncio.Task[None] | None
     _startup_thread_prewarm_task: asyncio.Task[None] | None
+    _call_manager: CallManager | None
+    _calls_reconcile_pending: bool
     _room_member_callback_registered: bool
     _room_member_join_hooks_armed: bool
     _turn_controller: TurnController
     _room_lifecycle: BotRoomLifecycle
+    _local_departures_awaiting_sync: set[str]
+    _sync_cache_trust: SyncCacheTrust
 
     def __init__(
         self,
@@ -312,13 +323,12 @@ class AgentBot:
         self.config_path = config_path
         self.logger = logger.bind(agent=self.agent_name)
         self.stop_manager = StopManager()
+        self._restart_retry_queue = SyncRestartRetryQueue()
         self.running = False
         self.last_sync_time = None
         self._last_sync_monotonic = None
         self._first_sync_done = False
         self._sync_shutting_down = False
-        self._sync_trust_state = SyncTrustState.COLD
-        self._sync_checkpoint: SyncCheckpoint | None = None
         self._hook_registry_state = HookRegistryState(HookRegistry.empty())
         self._room_member_callback_registered = False
         self._room_member_join_hooks_armed = False
@@ -332,8 +342,32 @@ class AgentBot:
             event_cache_write_coordinator=None,
             startup_thread_prewarm_registry=None,
         )
+        self._sync_cache_trust = SyncCacheTrust(
+            storage_path=self.storage_path,
+            agent_name=self.agent_name,
+            runtime=self._runtime_view,
+            logger=self.logger,
+        )
         self._deferred_overdue_task_drain_task = None
         self._startup_thread_prewarm_task = None
+        self._call_manager: CallManager | None = None
+        self._calls_reconcile_pending = False
+        self._local_departures_awaiting_sync = set()
+
+        async def send_room_lifecycle_response(
+            *,
+            target: MessageTarget,
+            response_text: str,
+            skip_mentions: bool = False,
+        ) -> str | None:
+            return await self._delivery_gateway.send_text(
+                SendTextRequest(
+                    target=target,
+                    response_text=response_text,
+                    skip_mentions=skip_mentions,
+                ),
+            )
+
         self._room_lifecycle = BotRoomLifecycle(
             BotRoomLifecycleDeps(
                 agent_name=self.agent_name,
@@ -342,8 +376,10 @@ class AgentBot:
                 runtime_paths=self.runtime_paths,
                 get_logger=lambda: self.logger,
                 get_configured_rooms=lambda: self.rooms,
-                send_response=lambda *args, **kwargs: self._send_response(*args, **kwargs),
-                on_configured_room_joined=lambda room_id: self._post_join_room_setup(room_id),
+                send_response=send_room_lifecycle_response,
+                on_room_joined=self._on_room_joined,
+                on_configured_room_joined=self._post_join_room_setup,
+                on_room_left=self._purge_left_room,
             ),
         )
         self._init_runtime_components()
@@ -357,8 +393,14 @@ class AgentBot:
         self._coalescing_gate = CoalescingGate(
             dispatch_batch=self._dispatch_coalesced_batch,
             debounce_seconds=lambda: self.config.defaults.coalescing.debounce_ms / 1000,
-            upload_grace_seconds=lambda: self.config.defaults.coalescing.upload_grace_ms / 1000,
             is_shutting_down=lambda: self._sync_shutting_down,
+            wait_until_dispatch_allowed=self._wait_until_coalesced_dispatch_allowed,
+            room_scope_is_single_conversation=self._room_scope_is_single_conversation,
+            dispatch_allowed_now=self._coalesced_dispatch_allowed_now,
+            timestamp_formatter=lambda timestamp_ms: format_timestamp_ms(
+                timestamp_ms,
+                timezone=self.config.timezone,
+            ),
         )
         self._hook_context_support = HookContextSupport(
             runtime=self._runtime_view,
@@ -371,7 +413,6 @@ class AgentBot:
         )
         self._knowledge_access_support = KnowledgeAccessSupport(
             runtime=self._runtime_view,
-            logger=self.logger,
             runtime_paths=self.runtime_paths,
         )
         self._conversation_cache = MatrixConversationCache(
@@ -402,7 +443,6 @@ class AgentBot:
                 logger=self.logger,
                 storage_path=self.storage_path,
                 runtime_paths=self.runtime_paths,
-                conversation_resolver=self._conversation_resolver,
             ),
         )
         self._delivery_gateway = DeliveryGateway(
@@ -444,6 +484,15 @@ class AgentBot:
             delivery_gateway=self._delivery_gateway,
             conversation_cache=self._conversation_cache,
         )
+        self._ingress_hook_runner = IngressHookRunner(
+            hook_context=self._hook_context_support,
+        )
+        self._request_payload_preparer = ResponsePayloadPreparer(
+            normalizer=self._inbound_turn_normalizer,
+            ingress_hook_runner=self._ingress_hook_runner,
+            agent_name=self.agent_name,
+            logger=self.logger,
+        )
         self._response_runner = ResponseRunner(
             ResponseRunnerDeps(
                 runtime=self._runtime_view,
@@ -459,10 +508,8 @@ class AgentBot:
                 delivery_gateway=self._delivery_gateway,
                 post_response_effects=self._post_response_effects_support,
                 state_writer=self._conversation_state_writer,
+                request_preparer=self._request_payload_preparer,
             ),
-        )
-        self._ingress_hook_runner = IngressHookRunner(
-            hook_context=self._hook_context_support,
         )
         self._edit_regenerator = EditRegenerator(
             EditRegeneratorDeps(
@@ -473,7 +520,11 @@ class AgentBot:
                 resolver=self._conversation_resolver,
                 turn_store=self._turn_store,
                 ingress_hook_runner=self._ingress_hook_runner,
-                generate_response=lambda **kwargs: self._generate_response(**kwargs),
+                generate_response=lambda request: self._run_regenerated_response(request),
+                timestamp_formatter=lambda timestamp_ms: format_timestamp_ms(
+                    timestamp_ms,
+                    timezone=self.config.timezone,
+                ),
             ),
         )
         self._turn_policy = TurnPolicy(
@@ -483,6 +534,21 @@ class AgentBot:
                 runtime_paths=self.runtime_paths,
                 agent_name=self.agent_name,
                 matrix_id=runtime_matrix_id,
+            ),
+        )
+        self._ingress_validator = IngressValidator(
+            IngressValidatorDeps(
+                runtime=self._runtime_view,
+                runtime_paths=self.runtime_paths,
+                matrix_id=runtime_matrix_id,
+                turn_store=self._turn_store,
+                turn_policy=self._turn_policy,
+            ),
+        )
+        self._redacted_turn_cleanup = RedactedTurnCleanup(
+            RedactedTurnCleanupDeps(
+                conversation_cache=self._conversation_cache,
+                turn_store=self._turn_store,
             ),
         )
         self._turn_controller = TurnController(
@@ -503,7 +569,30 @@ class AgentBot:
                 turn_store=self._turn_store,
                 coalescing_gate=self._coalescing_gate,
                 edit_regenerator=self._edit_regenerator,
+                ingress=self._ingress_validator,
+                restart_retry=self._restart_retry_queue,
             ),
+        )
+
+    async def _wait_until_coalesced_dispatch_allowed(self, key: CoalescingKey) -> None:
+        """Hold active follow-up dispatch until the response lock for its target is idle."""
+        if not is_active_follow_up_coalescing_key(key):
+            return
+        await self._response_runner.wait_for_thread_response_idle(key.room_id, key.thread_id)
+
+    def _coalesced_dispatch_allowed_now(self, key: CoalescingKey) -> bool:
+        """Return whether one coalescing key's target has no active response right now."""
+        return key.thread_id not in self._response_runner.active_thread_ids_for_room(key.room_id)
+
+    def _room_scope_is_single_conversation(self, room_id: str) -> bool:
+        """Return whether this agent treats the whole room as one conversation."""
+        return (
+            self.config.get_entity_thread_mode(
+                self.agent_name,
+                self.runtime_paths,
+                room_id=room_id,
+            )
+            == "room"
         )
 
     def _rebuild_runtime_components_after_login_if_identity_changed(self, matrix_id_before_login: MatrixID) -> None:
@@ -513,6 +602,7 @@ class AgentBot:
 
         self.agent_user.__dict__.pop("matrix_id", None)
         self.__dict__.pop("matrix_id", None)
+        self.event_cache = self.event_cache.for_principal(self.matrix_id.full_id)
         self._init_runtime_components()
 
     @property
@@ -637,6 +727,11 @@ class AgentBot:
         self._response_runner.in_flight_response_count = value
 
     @property
+    def pending_sync_restart_retry_room_ids(self) -> frozenset[str]:
+        """Return rooms with interrupted turns awaiting same-bot retry."""
+        return self._restart_retry_queue.pending_room_ids
+
+    @property
     def agent_name(self) -> str:
         """Get the agent name from username."""
         return self.agent_user.agent_name
@@ -695,16 +790,16 @@ class AgentBot:
 
     async def _prewarm_claimed_startup_thread_room(self, room_id: str) -> None:
         """Prewarm one claimed room and release the claim unless the room-level pass finishes."""
+        completed = False
         try:
-            completed = await self._conversation_cache.prewarm_recent_room_threads(
-                room_id,
-                is_shutting_down=lambda: self._sync_shutting_down,
-            )
-        except asyncio.CancelledError:
-            await self.startup_thread_prewarm_registry.release(room_id)
-            raise
-        if not completed:
-            await self.startup_thread_prewarm_registry.release(room_id)
+            async with self.startup_thread_prewarm_registry.room_slot():
+                completed = await self._conversation_cache.prewarm_recent_room_threads(
+                    room_id,
+                    is_shutting_down=lambda: self._sync_shutting_down,
+                )
+        finally:
+            if not completed:
+                await self.startup_thread_prewarm_registry.release(self.event_cache.principal_id, room_id)
 
     async def _run_startup_thread_prewarm(self) -> None:
         """Prewarm recent thread snapshots per joined room without blocking live dispatch behind cache seeding."""
@@ -713,7 +808,7 @@ class AgentBot:
             for room_id in joined_rooms:
                 if self._sync_shutting_down:
                     return
-                if not await self.startup_thread_prewarm_registry.try_claim(room_id):
+                if not await self.startup_thread_prewarm_registry.try_claim(self.event_cache.principal_id, room_id):
                     continue
                 await self._prewarm_claimed_startup_thread_room(room_id)
         finally:
@@ -846,6 +941,8 @@ class AgentBot:
 
     async def _post_join_room_setup(self, room_id: str) -> None:
         """Run room setup that should happen after joins and across restarts."""
+        if self._call_manager is not None:
+            self._calls_reconcile_pending = True
         if self.agent_name != ROUTER_AGENT_NAME:
             return
 
@@ -875,13 +972,18 @@ class AgentBot:
         if self._first_sync_done:
             self._maybe_start_deferred_overdue_task_drain()
 
+    async def _on_room_joined(self, room_id: str) -> None:
+        """Reopen cache access after an explicit homeserver-confirmed join."""
+        self._local_departures_awaiting_sync.discard(room_id)
+        await self._conversation_cache.mark_room_joined(room_id)
+
     async def leave_unconfigured_rooms(self) -> None:
         """Leave any rooms this agent is no longer configured for."""
         await self._room_lifecycle.leave_unconfigured_rooms()
 
     async def ensure_user_account(self) -> None:
         """Verify that orchestrator account preparation supplied this bot's account."""
-        if self.agent_user.user_id and self.agent_user.password:
+        if self.agent_user.user_id:
             return
         msg = f"Matrix account for {self.agent_name!r} was not prepared before bot startup"
         raise PermanentMatrixStartupError(msg)
@@ -909,7 +1011,11 @@ class AgentBot:
         if self.client is None:
             return
 
-        status_msg = build_agent_status_message(self.agent_name, self.config)
+        status_msg = build_agent_status_message(
+            self.agent_name,
+            self.config,
+            voice_calls_available=(self._call_manager is not None and self._call_manager.voice_backend_available),
+        )
         await set_presence_status(self.client, status_msg)
 
     def mark_sync_loop_started(self) -> None:
@@ -920,100 +1026,39 @@ class AgentBot:
         own startup timeout for the pre-first-response window.
         """
         self._sync_shutting_down = False
+        self._calls_reconcile_pending = self._call_manager is not None
         mark_matrix_sync_loop_started(self.agent_name)
 
     def reset_watchdog_clock(self) -> None:
         """Reset the monotonic watchdog clock for a fresh sync iteration."""
         self._last_sync_monotonic = None
 
-    def _loaded_sync_token_for_certification(self) -> SyncCheckpoint | str | None:
-        """Load a saved token record without deciding trust in bot code."""
-        try:
-            token_record = load_sync_token_record(self.storage_path, self.agent_name)
-        except OSError as exc:
-            self.logger.warning("matrix_sync_token_load_failed", error=str(exc))
-            return None
-        if token_record is None:
-            return None
-        self.logger.info(
-            "matrix_sync_token_restored",
-            certified=token_record.certified,
-        )
-        return token_record.checkpoint if token_record.checkpoint is not None else token_record.token
+    async def _prepare_matrix_sync_continuity(self) -> None:
+        """Apply cache-trust startup output to the authenticated Matrix client."""
+        client = self.client
+        assert client is not None
+        sync_token = await self._sync_cache_trust.prepare_startup()
+        cast("Any", client).next_batch = sync_token
+        if sync_token is None and client.user_id:
+            # A cold sync replays history handled by an older device.
+            raise_notice_floor(client.user_id)
 
-    def _restore_saved_sync_token(self) -> None:
-        """Restore Matrix sync continuity and initialize cache certification state."""
-        assert self.client is not None
-        startup = start_from_loaded_token(self._loaded_sync_token_for_certification())
-        self._sync_trust_state = startup.state
-        self._sync_checkpoint = None
-        client = cast("Any", self.client)
-        client.next_batch = startup.sync_token
-        if startup.legacy_token:
-            self.logger.warning("matrix_sync_token_uncertified_legacy")
-
-    def _save_sync_checkpoint(self, checkpoint: SyncCheckpoint | None) -> None:
-        """Persist one certified sync checkpoint if present."""
-        if checkpoint is None:
-            return
-        try:
-            save_sync_token(
-                self.storage_path,
-                self.agent_name,
-                checkpoint.token,
-            )
-        except (OSError, ValueError) as exc:
-            self.logger.warning("matrix_sync_token_save_failed", error=str(exc))
-
-    def _clear_saved_sync_token(self) -> None:
-        """Clear the saved sync token file."""
-        try:
-            clear_sync_token(self.storage_path, self.agent_name)
-        except OSError as exc:
-            self.logger.warning("matrix_sync_token_clear_failed", error=str(exc))
-
-    def _apply_sync_certification_decision(
+    def _certify_sync_response(
         self,
-        decision: SyncCertificationDecision,
         *,
-        cache_result: SyncCacheWriteResult | None = None,
-    ) -> None:
-        """Apply a certifier decision to runtime state and token storage."""
-        self._sync_trust_state = decision.state
-        self._sync_checkpoint = decision.checkpoint_to_save
-        if decision.reset_client_token and self.client is not None:
-            client = cast("Any", self.client)
-            client.next_batch = None
-        if decision.clear_saved_token:
-            self._clear_saved_sync_token()
-        if decision.checkpoint_to_save is not None:
-            self._save_sync_checkpoint(decision.checkpoint_to_save)
-        if decision.reason is not None:
-            diagnostics = sync_cache_write_diagnostics(cache_result) if cache_result is not None else {}
-            self.logger.warning(
-                "matrix_sync_certification_uncertain",
-                reason=decision.reason,
-                **diagnostics,
-            )
-
-    async def _sync_cache_result_for_certification(self, response: nio.SyncResponse) -> SyncCacheWriteResult:
-        """Return the durable cache write result for one sync response."""
-        return await self._conversation_cache.cache_sync_timeline_for_certification(response)
-
-    def _sync_certification_decision(
-        self,
-        response: nio.SyncResponse,
-        *,
+        next_batch: str | None,
         cache_result: SyncCacheWriteResult,
-        first_sync_response: bool,
+        first_sync: bool,
     ) -> SyncCertificationDecision:
-        """Return the certifier decision for one sync response."""
-        return certify_sync_response(
-            self._sync_trust_state,
-            next_batch=response.next_batch,
+        """Apply cache certification and any requested Matrix client rewind."""
+        decision = self._sync_cache_trust.certify_response(
+            next_batch=next_batch,
             cache_result=cache_result,
-            first_sync=first_sync_response,
+            first_sync=first_sync,
         )
+        if decision.reset_client_token and self.client is not None:
+            cast("Any", self.client).next_batch = None
+        return decision
 
     def seconds_since_last_sync_activity(self) -> float | None:
         """Return elapsed seconds since the last sync-loop activity seen by the watchdog."""
@@ -1049,6 +1094,7 @@ class AgentBot:
                 except asyncio.CancelledError:
                     pass
                 except Exception:
+                    self._sync_cache_trust.mark_callback_failed()
                     logger.exception("Error in event callback")
 
             create_background_task(error_handler(), owner=self._runtime_view)
@@ -1075,54 +1121,23 @@ class AgentBot:
             arm_after_response=True,
             emit_state=emit_certified_state,
             emit_timeline=restored_token_first_sync_response,
+            record_state_seen=decision.state is SyncTrustState.CERTIFIED and not emit_certified_state,
         )
 
-    async def _on_sync_response(self, _response: nio.SyncResponse) -> None:
-        """Track successful sync responses for health checks and watchdogs."""
-        first_sync_response = not self._first_sync_done
-        room_member_join_hooks_were_armed = self._room_member_join_hooks_armed
-        room_member_join_hook_plan = _RoomMemberJoinSyncHookPlan()
-        self.last_sync_time = mark_matrix_sync_success(self.agent_name)
-        self._last_sync_monotonic = time.monotonic()
-
-        if self._sync_shutting_down:
-            return
-
-        if isinstance(_response, nio.SyncResponse):
-            restored_token_first_sync_response = (
-                first_sync_response and self._sync_trust_state is SyncTrustState.PENDING
-            )
-            try:
-                cache_result = await self._sync_cache_result_for_certification(_response)
-            except asyncio.CancelledError as exc:
-                cache_result = SyncCacheWriteResult(complete=False, errors=(exc,))
-                decision = self._sync_certification_decision(
-                    _response,
-                    cache_result=cache_result,
-                    first_sync_response=first_sync_response,
-                )
-                self._apply_sync_certification_decision(decision, cache_result=cache_result)
-                raise
-            decision = self._sync_certification_decision(
-                _response,
-                cache_result=cache_result,
-                first_sync_response=first_sync_response,
-            )
-            self._apply_sync_certification_decision(decision, cache_result=cache_result)
-            room_member_join_hook_plan = self._room_member_join_sync_hook_plan(
-                first_sync_response=first_sync_response,
-                restored_token_first_sync_response=restored_token_first_sync_response,
-                hooks_were_armed=room_member_join_hooks_were_armed,
-                decision=decision,
-            )
-        self._first_sync_done = True
-        self._room_member_join_hooks_armed = room_member_join_hook_plan.arm_after_response
-
-        if isinstance(_response, nio.SyncResponse):
-            if room_member_join_hook_plan.emit_timeline:
-                await self._emit_room_member_joined_sync_timeline_hooks(_response)
-            if room_member_join_hook_plan.emit_state:
-                await self._emit_room_member_joined_sync_state_hooks(_response)
+    async def _run_sync_response_side_effects(
+        self,
+        response: nio.SyncResponse,
+        *,
+        first_sync_response: bool,
+        room_member_join_hook_plan: _RoomMemberJoinSyncHookPlan,
+    ) -> None:
+        """Run sync-response side effects that must poison certification on failure."""
+        if room_member_join_hook_plan.record_state_seen:
+            await self._emit_room_member_joined_sync_state_hooks(response, record_only=True)
+        if room_member_join_hook_plan.emit_timeline:
+            await self._emit_room_member_joined_sync_timeline_hooks(response)
+        if room_member_join_hook_plan.emit_state:
+            await self._emit_room_member_joined_sync_state_hooks(response)
 
         if first_sync_response:
             self._register_room_member_callback_after_initial_sync()
@@ -1135,12 +1150,85 @@ class AgentBot:
         if first_sync_response or has_deferred_overdue_tasks():
             self._maybe_start_deferred_overdue_task_drain()
 
+    async def _on_sync_response(self, _response: nio.SyncResponse) -> None:
+        """Track successful sync responses for health checks and watchdogs."""
+        first_sync_response = not self._first_sync_done
+        room_member_join_hooks_were_armed = self._room_member_join_hooks_armed
+        room_member_join_hook_plan = _RoomMemberJoinSyncHookPlan()
+        self.last_sync_time = mark_matrix_sync_success(self.agent_name)
+        self._last_sync_monotonic = time.monotonic()
+
+        if self._sync_shutting_down:
+            return
+
+        if self._restart_retry_queue.has_pending:
+            # The sync loop is healthy again: re-dispatch turns whose responses
+            # were cancelled by stall recovery, once each.
+            create_background_task(
+                self._restart_retry_queue.flush(),
+                name=f"sync_restart_retry_{self.agent_name}",
+                owner=self._runtime_view,
+            )
+
+        if isinstance(_response, nio.SyncResponse):
+            await self._apply_own_room_membership_from_sync(_response)
+            restored_token_first_sync_response = (
+                first_sync_response and self._sync_cache_trust.state is SyncTrustState.PENDING
+            )
+            try:
+                cache_result = await self._conversation_cache.cache_sync_timeline_for_certification(_response)
+            except asyncio.CancelledError as exc:
+                cache_result = SyncCacheWriteResult(complete=False, errors=(exc,))
+                self._certify_sync_response(
+                    next_batch=_response.next_batch,
+                    cache_result=cache_result,
+                    first_sync=first_sync_response,
+                )
+                raise
+            decision = self._certify_sync_response(
+                next_batch=_response.next_batch,
+                cache_result=cache_result,
+                first_sync=first_sync_response,
+            )
+            room_member_join_hook_plan = self._room_member_join_sync_hook_plan(
+                first_sync_response=first_sync_response,
+                restored_token_first_sync_response=restored_token_first_sync_response,
+                hooks_were_armed=room_member_join_hooks_were_armed,
+                decision=decision,
+            )
+        self._first_sync_done = True
+        self._room_member_join_hooks_armed = room_member_join_hook_plan.arm_after_response
+
+        try:
+            await self._run_sync_response_side_effects(
+                _response,
+                first_sync_response=first_sync_response,
+                room_member_join_hook_plan=room_member_join_hook_plan,
+            )
+        except asyncio.CancelledError:
+            self._sync_cache_trust.mark_callback_failed()
+            raise
+        except Exception:
+            self._sync_cache_trust.mark_callback_failed()
+            raise
+        if self._calls_reconcile_pending:
+            self._calls_reconcile_pending = False
+            call_manager = self._call_manager
+            if call_manager is not None:
+                create_background_task(
+                    call_manager.reconcile_joined_rooms(),
+                    name=f"matrix_rtc_reconcile_{self.agent_name}",
+                    owner=self._runtime_view,
+                )
+
     async def _on_sync_error(self, _response: nio.SyncError) -> None:
         """Update the watchdog clock on sync errors without marking cache state fresh."""
         logger.debug("SyncError received", agent_name=self.agent_name, error=str(_response))
         self._last_sync_monotonic = time.monotonic()
         if _response.status_code == "M_UNKNOWN_POS":
-            self._apply_sync_certification_decision(handle_unknown_pos())
+            decision = self._sync_cache_trust.reject_unknown_pos()
+            if decision.reset_client_token and self.client is not None:
+                cast("Any", self.client).next_batch = None
             self._room_member_join_hooks_armed = False
             self.logger.warning(
                 "matrix_sync_token_rejected",
@@ -1178,6 +1266,101 @@ class AgentBot:
             return
         raise PermanentMatrixStartupError(self._runtime_support_injection_error())
 
+    def _register_call_manager_callbacks(self, client: nio.AsyncClient) -> None:
+        """Build the optional call manager and wire its Matrix callbacks."""
+        callback_failed = self._sync_cache_trust.mark_callback_failed
+        self._call_manager = maybe_build_call_manager(
+            agent_name=self.agent_name,
+            config=self.config,
+            client=client,
+            runtime_paths=self.runtime_paths,
+            ssl_verify=constants.runtime_matrix_ssl_verify(self.runtime_paths),
+            tool_support=self._tool_runtime_support,
+            get_invited_rooms_by_agent=self._invited_call_rooms_by_agent,
+        )
+        client.add_event_callback(
+            _create_task_wrapper(
+                self._on_room_membership_event,
+                owner=self._runtime_view,
+                on_error=callback_failed,
+            ),
+            nio.RoomMemberEvent,
+        )
+        if self._call_manager is None:
+            return
+        client.add_event_callback(
+            _create_task_wrapper(
+                self._call_manager.on_room_event,
+                owner=self._runtime_view,
+                on_error=callback_failed,
+            ),
+            nio.UnknownEvent,
+        )
+        client.add_to_device_callback(
+            _create_task_wrapper(  # ty: ignore[invalid-argument-type]  # matrix-nio callback types are too strict here
+                self._call_manager.on_to_device_event,
+                owner=self._runtime_view,
+                on_error=callback_failed,
+            ),
+            AuthenticatedToDeviceEvent,
+        )
+
+    async def _apply_own_room_membership_from_sync(self, response: nio.SyncResponse) -> None:
+        """Apply this bot's authoritative joined/left room sections before other sync work."""
+        joined_room_ids = set(response.rooms.join)
+        left_room_ids = set(response.rooms.leave)
+        timeline_departure_room_ids = {
+            room_id
+            for room_id, room_info in response.rooms.join.items()
+            if any(
+                isinstance(event, nio.RoomMemberEvent)
+                and event.state_key == self.agent_user.user_id
+                and event.membership in {"leave", "ban"}
+                for event in room_info.timeline.events
+            )
+        }
+        departed_room_ids = left_room_ids | timeline_departure_room_ids
+        if departed_room_ids:
+            self._sync_cache_trust.invalidate_for_cache_scope_cleanup()
+        for room_id in departed_room_ids:
+            self._room_lifecycle.forget_invited_room(room_id)
+        await self._conversation_cache.purge_rooms(departed_room_ids)
+        self._local_departures_awaiting_sync.difference_update(departed_room_ids)
+        current_joined_room_ids = joined_room_ids - left_room_ids - self._local_departures_awaiting_sync
+        for room_id in current_joined_room_ids:
+            await self._conversation_cache.mark_room_joined(room_id)
+        call_manager = self._call_manager
+        if call_manager is not None:
+            await call_manager.on_sync_room_membership(
+                joined_room_ids=current_joined_room_ids,
+                left_room_ids=left_room_ids,
+            )
+
+    def _invited_call_rooms_by_agent(self) -> dict[str, frozenset[str]]:
+        """Return live accepted-invite state for the configured call agents."""
+        orchestrator = self.orchestrator
+        agent_bots_value = orchestrator.agent_bots if orchestrator is not None else None
+        if not isinstance(agent_bots_value, dict):
+            return {self.agent_name: frozenset(self._room_lifecycle.invited_rooms)}
+        agent_bots = cast("dict[str, object]", agent_bots_value)
+
+        invited_rooms: dict[str, frozenset[str]] = {}
+        for agent_name in self.config.calls.agents:
+            bot = agent_bots.get(agent_name)
+            if isinstance(bot, AgentBot):
+                invited_rooms[agent_name] = frozenset(bot._room_lifecycle.invited_rooms)
+        return invited_rooms
+
+    async def _on_room_membership_event(
+        self,
+        room: nio.MatrixRoom,
+        event: nio.RoomMemberEvent,
+    ) -> None:
+        """Apply invited-room cleanup before optional call reconciliation."""
+        call_manager = self._call_manager
+        if call_manager is not None:
+            await call_manager.on_room_membership_event(room, event)
+
     async def start(self) -> None:
         """Start the agent bot with user account setup (but don't join rooms yet)."""
         self._validate_runtime_support_injection_contract_for_startup()
@@ -1194,40 +1377,71 @@ class AgentBot:
             if orchestrator is not None:
                 orchestrator.validate_managed_entity_identities()
             self._runtime_view.mark_runtime_started()
-            self._restore_saved_sync_token()
+            await self._prepare_matrix_sync_continuity()
             await self._set_avatar_if_available()
-            await self._set_presence_with_model_info()
-            interactive.init_persistence(self.runtime_paths.storage_root)
+            # Keep durable tracking-state loading off the event loop at startup.
+            await asyncio.to_thread(self._turn_store.warm)
+            await asyncio.to_thread(interactive.init_persistence, self.runtime_paths.storage_root)
             client = self.client
             assert client is not None
+            callback_failed = self._sync_cache_trust.mark_callback_failed
 
             # Register event callbacks - wrap them to run as background tasks
             # This ensures the sync loop is never blocked, allowing stop reactions to work
             client.add_event_callback(
-                _create_task_wrapper(self._on_invite, owner=self._runtime_view),
+                _create_task_wrapper(self._on_invite, owner=self._runtime_view, on_error=callback_failed),
                 nio.InviteEvent,  # ty: ignore[invalid-argument-type]  # InviteEvent doesn't inherit Event
             )
             client.add_event_callback(
-                _create_task_wrapper(self._on_message, owner=self._runtime_view),
+                _create_task_wrapper(self._on_message, owner=self._runtime_view, on_error=callback_failed),
                 nio.RoomMessageText,
             )
             client.add_event_callback(
-                _create_task_wrapper(self._on_redaction, owner=self._runtime_view),
+                self._on_redaction,
                 nio.RedactionEvent,
             )
             client.add_event_callback(
-                _create_task_wrapper(self._on_reaction, owner=self._runtime_view),
+                _create_task_wrapper(self._on_reaction, owner=self._runtime_view, on_error=callback_failed),
                 nio.ReactionEvent,
             )
 
             # Register media callbacks on all agents (each agent handles its own routing)
-            media_callback = _create_task_wrapper(self._on_media_message, owner=self._runtime_view)
+            media_callback = _create_task_wrapper(
+                self._on_media_message,
+                owner=self._runtime_view,
+                on_error=callback_failed,
+            )
             for event_type in MATRIX_MEDIA_EVENT_TYPES:
                 client.add_event_callback(media_callback, event_type)
             client.add_event_callback(
-                _create_task_wrapper(self._on_unknown_event, owner=self._runtime_view),
+                _create_task_wrapper(
+                    self._on_unknown_event,
+                    owner=self._runtime_view,
+                    on_error=callback_failed,
+                ),
                 nio.UnknownEvent,
             )
+            client.add_event_callback(
+                _create_task_wrapper(
+                    self._on_decryption_failure,
+                    owner=self._runtime_view,
+                    on_error=callback_failed,
+                ),
+                nio.MegolmEvent,
+            )
+            self._register_call_manager_callbacks(client)
+            register_desktop_pairing_receiver(
+                self.config,
+                client=client,
+                agent_name=self.agent_name,
+                runtime_paths=self.runtime_paths,
+                callback_wrapper=lambda callback: _create_task_wrapper(
+                    callback,
+                    owner=self._runtime_view,
+                    on_error=callback_failed,
+                ),
+            )
+            await self._set_presence_with_model_info()
             client.add_response_callback(self._on_sync_response, nio.SyncResponse)  # ty: ignore[invalid-argument-type]  # matrix-nio callback types are too strict here
             client.add_response_callback(self._on_sync_error, nio.SyncError)  # ty: ignore[invalid-argument-type]
 
@@ -1293,14 +1507,28 @@ class AgentBot:
         try:
             joined_rooms = await get_joined_rooms(self.client)
             if joined_rooms:
-                await leave_non_dm_rooms(self.client, joined_rooms)
+                await leave_non_dm_rooms(
+                    self.client,
+                    joined_rooms,
+                    on_room_left=self._purge_left_room,
+                )
         except Exception:
             self.logger.exception("Error leaving rooms during cleanup")
 
         # Stop the bot
-        await self.stop(reason="entity_removed")
+        await self.stop(shutdown_intent=ENTITY_REMOVED_SHUTDOWN)
 
-    async def stop(self, *, reason: str | None = None) -> None:
+    async def _purge_left_room(self, room_id: str) -> None:
+        """Fence and purge one principal-owned room immediately after departure."""
+        self._local_departures_awaiting_sync.add(room_id)
+        self._sync_cache_trust.invalidate_for_cache_scope_cleanup()
+        await self._conversation_cache.purge_rooms((room_id,))
+
+    async def stop(
+        self,
+        *,
+        shutdown_intent: RuntimeShutdownIntent = GENERIC_SHUTDOWN,
+    ) -> None:
         """Stop the agent bot."""
         self.running = False
         self.last_sync_time = None
@@ -1309,16 +1537,15 @@ class AgentBot:
         self._room_member_join_hooks_armed = False
         self._room_member_callback_registered = False
         clear_matrix_sync_state(self.agent_name)
-        await self._emit_agent_lifecycle_event(EVENT_AGENT_STOPPED, stop_reason=reason)
+        await self._emit_agent_lifecycle_event(EVENT_AGENT_STOPPED, stop_reason=shutdown_intent.stop_reason)
 
-        await self.prepare_for_sync_shutdown()
+        call_manager = self._call_manager
+        self._call_manager = None
+        self._calls_reconcile_pending = False
+        if call_manager is not None:
+            await call_manager.shutdown()
 
-        # Wait for any pending background tasks (like memory saves) to complete
-        try:
-            await wait_for_background_tasks(timeout=5.0, owner=self._runtime_view)  # 5 second timeout
-            self.logger.info("Background tasks completed")
-        except Exception as e:
-            self.logger.warning("background_tasks_incomplete", error=str(e))
+        await self.prepare_for_sync_shutdown(shutdown_intent=shutdown_intent)
 
         if self.agent_name == ROUTER_AGENT_NAME:
             cleared_queued_tasks = clear_deferred_overdue_tasks()
@@ -1397,17 +1624,65 @@ class AgentBot:
 
         await asyncio.gather(prewarm_task, return_exceptions=True)
 
-    async def prepare_for_sync_shutdown(self) -> None:
+    async def prepare_for_sync_shutdown(
+        self,
+        *,
+        shutdown_intent: RuntimeShutdownIntent = GENERIC_SHUTDOWN,
+    ) -> None:
         """Cancel work that must not outlive the Matrix sync loop."""
         self._sync_shutting_down = True
         await self._cancel_startup_thread_prewarm()
-        await self._coalescing_gate.drain_all()
-        if self._sync_trust_state is SyncTrustState.CERTIFIED:
-            self._save_sync_checkpoint(self._sync_checkpoint)
-        if self.agent_name != ROUTER_AGENT_NAME:
-            return
-
-        await self._cancel_deferred_overdue_task_drain()
+        if self.agent_name == ROUTER_AGENT_NAME:
+            await self._cancel_deferred_overdue_task_drain()
+        background_tasks_completed = await wait_for_background_tasks(
+            timeout=5.0,
+            owner=self._runtime_view,
+            shutdown_intent=shutdown_intent,
+        )
+        drain_result = await self._coalescing_gate.drain_all(
+            ready_timeout_seconds=5.0,
+            shutdown_intent=shutdown_intent,
+        )
+        responses_drained = await self._response_runner.drain_inbox_responses(
+            cancel_after_seconds=5.0,
+            shutdown_intent=shutdown_intent,
+        )
+        post_drain_background_tasks_completed = await wait_for_background_tasks(
+            timeout=5.0,
+            owner=self._runtime_view,
+            shutdown_intent=shutdown_intent,
+        )
+        callback_failure_count = self._runtime_view.callback_failure_count
+        if (
+            background_tasks_completed
+            and drain_result.completed
+            and responses_drained
+            and post_drain_background_tasks_completed
+            and callback_failure_count == 0
+            and self._sync_cache_trust.state is SyncTrustState.CERTIFIED
+        ):
+            self._sync_cache_trust.persist_current()
+        elif (
+            not background_tasks_completed
+            or not drain_result.completed
+            or not responses_drained
+            or not post_drain_background_tasks_completed
+            or callback_failure_count
+        ):
+            self._sync_cache_trust.discard()
+            self.logger.warning(
+                "sync_checkpoint_not_saved_after_incomplete_coalescing_drain",
+                agent_name=self.agent_name,
+                callback_failure_count=callback_failure_count,
+                background_tasks_completed=background_tasks_completed,
+                post_drain_background_tasks_completed=post_drain_background_tasks_completed,
+                released_reservation_count=drain_result.released_reservation_count,
+                cancelled_unready_count=drain_result.cancelled_unready_count,
+                failed_ready_count=drain_result.failed_ready_count,
+                dropped_ready_count=drain_result.dropped_ready_count,
+                dispatch_failure_count=drain_result.dispatch_failure_count,
+                dispatch_cancelled_count=drain_result.dispatch_cancelled_count,
+            )
 
     async def sync_forever(self) -> None:
         """Run the sync loop for this agent."""
@@ -1452,21 +1727,63 @@ class AgentBot:
 
     async def _on_message(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> None:
         """Delegate one inbound text event to the turn engine."""
+        receipt_time = time.monotonic()
         self._log_matrix_event_callback_started(room, event, callback_name="message")
-        if await maybe_handle_tool_approval_reply(
-            room=room,
-            event=event,
-            config=self.config,
-            runtime_paths=self.runtime_paths,
-            orchestrator=self.orchestrator,
-            logger=self.logger,
-        ):
-            return
-        await self._turn_controller.handle_text_event(room, event)
+        early_reservation_owner = None
+        approval_reply_to_event_id = EventInfo.from_event(event.source).reply_to_event_id
+        if approval_reply_to_event_id is not None and is_process_active_approval_card(approval_reply_to_event_id):
+            requester_user_id = self._ingress_validator.requester_user_id(
+                sender=event.sender,
+                source=event.source,
+            )
+            early_reservation_owner = self._turn_controller._reserve_prompt_ingress_order(
+                room,
+                requester_user_id,
+                receipt_time=receipt_time,
+            )
+        try:
+            if await maybe_handle_tool_approval_reply(
+                room=room,
+                event=event,
+                config=self.config,
+                runtime_paths=self.runtime_paths,
+                orchestrator=self.orchestrator,
+                logger=self.logger,
+            ):
+                return
+            await self._turn_controller.handle_text_event(
+                room,
+                event,
+                receipt_time=receipt_time,
+                reservation_owner=early_reservation_owner,
+            )
+        finally:
+            if early_reservation_owner is not None:
+                await early_reservation_owner.release()
 
-    async def _on_redaction(self, room: nio.MatrixRoom, event: nio.RedactionEvent) -> None:
-        """Keep cached thread history consistent when Matrix redactions arrive."""
-        await self._conversation_cache.apply_redaction(room.room_id, event)
+    async def _on_redaction(self, room: nio.MatrixRoom, event: nio.Event) -> None:
+        """Persist one redaction before updating advisory cache state."""
+        assert isinstance(event, nio.RedactionEvent)
+        try:
+            await self._redacted_turn_cleanup.handle(room, event)
+        except asyncio.CancelledError:
+            self._rewind_sync_after_redaction_failure()
+            raise
+        except Exception:
+            self._rewind_sync_after_redaction_failure()
+            raise
+
+    def _rewind_sync_after_redaction_failure(self) -> None:
+        """Replay a sync response whose critical redaction callback did not finish."""
+        client = self.client
+        if client is None:
+            return
+        retry_token = self._sync_cache_trust.retry_token()
+        cast("Any", client).next_batch = retry_token
+        self.logger.warning(
+            "matrix_redaction_callback_failed_replaying_sync",
+            has_retry_token=retry_token is not None,
+        )
 
     async def _on_reaction(self, room: nio.MatrixRoom, event: nio.ReactionEvent) -> None:
         """Handle reaction events for interactive questions, stop functionality, and config confirmations."""
@@ -1493,17 +1810,24 @@ class AgentBot:
             config=self.config,
             runtime_paths=self.runtime_paths,
             storage_root=self.runtime_paths.storage_root,
+            # Live callbacks are armed only after startup sync; prev_content may be absent.
+            require_previous_membership=False,
         )
         if join is None:
             return
 
         await self._emit_room_member_joined_hooks(join)
 
-    async def _emit_room_member_joined_sync_state_hooks(self, response: nio.SyncResponse) -> None:
-        """Expose human joins that matrix-nio delivers through sync room state."""
+    async def _emit_room_member_joined_sync_state_hooks(
+        self,
+        response: nio.SyncResponse,
+        *,
+        record_only: bool = False,
+    ) -> None:
+        """Expose or record human joins that matrix-nio delivers through sync room state."""
         if self.agent_name != ROUTER_AGENT_NAME or not self._first_sync_done or not self._room_member_join_hooks_armed:
             return
-        if not self.hook_registry.has_hooks(EVENT_ROOM_MEMBER_JOINED):
+        if not record_only and not self.hook_registry.has_hooks(EVENT_ROOM_MEMBER_JOINED):
             return
         client = self.client
         if client is None:
@@ -1515,6 +1839,7 @@ class AgentBot:
             config=self.config,
             runtime_paths=self.runtime_paths,
             storage_root=self.runtime_paths.storage_root,
+            record_only=record_only,
         ):
             await self._emit_room_member_joined_hooks(join)
 
@@ -1536,6 +1861,24 @@ class AgentBot:
             storage_root=self.runtime_paths.storage_root,
         ):
             await self._emit_room_member_joined_hooks(join)
+
+    async def _on_decryption_failure(self, room: nio.MatrixRoom, event: nio.MegolmEvent) -> None:
+        client = self.client
+        assert client is not None
+        if not is_authorized_sender(event.sender, self.config, room.room_id, self.runtime_paths):
+            self.logger.debug(
+                "ignoring_decrypt_failure_from_unauthorized_sender",
+                user_id=event.sender,
+                room_id=room.room_id,
+            )
+            return
+        await handle_decrypt_failure(
+            client,
+            room,
+            event,
+            agent_name=self.agent_name,
+            runtime_paths=self.runtime_paths,
+        )
 
     async def _on_unknown_event(self, room: nio.MatrixRoom, event: nio.UnknownEvent) -> None:
         """Handle custom Matrix events that are not part of nio's typed event set."""
@@ -1565,77 +1908,86 @@ class AgentBot:
         """Handle one reaction inside the per-turn thread-history cache scope."""
         assert self.client is not None
 
-        if event.key == "✅" and await handle_tool_approval_action(
-            room=room,
-            sender_id=event.sender,
-            config=self.config,
-            runtime_paths=self.runtime_paths,
-            orchestrator=self.orchestrator,
-            logger=self.logger,
-            approval_event_id=event.reacts_to,
-            status="approved",
-            reason=None,
-        ):
-            return
-
         if not is_authorized_sender(
             event.sender,
             self.config,
             room.room_id,
             self.runtime_paths,
-            room_alias=room.canonical_alias,
         ):
             self.logger.debug("ignoring_reaction_from_unauthorized_sender", user_id=event.sender)
             return
 
-        if not self._turn_policy.can_reply_to_sender(event.sender):
-            self.logger.debug("Ignoring reaction due to reply permissions", sender=event.sender)
-            return
-
-        if event.key == "🛑":
-            sender_agent_name = entity_identity_registry(
-                self.config,
-                self.runtime_paths,
-            ).current_entity_name_for_user_id(event.sender)
-            tracked_target = self.stop_manager.get_tracked_target(event.reacts_to)
-            if not sender_agent_name and await self.stop_manager.handle_stop_reaction(event.reacts_to):
-                self.logger.info(
-                    "Stop requested for message",
-                    message_id=event.reacts_to,
-                    requested_by=event.sender,
-                )
-                await self.stop_manager.remove_stop_button(
-                    self.client,
-                    event.reacts_to,
-                    notify_outbound_redaction=self._conversation_cache.notify_outbound_redaction,
-                )
-                await self._send_response(
-                    room.room_id,
-                    event.reacts_to,
-                    _STOPPING_RESPONSE_TEXT,
-                    tracked_target.resolved_thread_id if tracked_target is not None else None,
-                )
+        requester_user_id = self._ingress_validator.requester_user_id(
+            sender=event.sender,
+            source=event.source,
+        )
+        reservation_owner = self._turn_controller._reserve_prompt_ingress_order(
+            room,
+            requester_user_id,
+            receipt_time=time.monotonic(),
+        )
+        try:
+            if event.key == "✅" and await handle_tool_approval_action(
+                room=room,
+                sender_id=event.sender,
+                config=self.config,
+                runtime_paths=self.runtime_paths,
+                orchestrator=self.orchestrator,
+                logger=self.logger,
+                approval_event_id=event.reacts_to,
+                status="approved",
+                reason=None,
+            ):
                 return
 
-        pending_change = config_confirmation.get_pending_change(event.reacts_to)
-        if pending_change and self.agent_name == ROUTER_AGENT_NAME:
-            await config_confirmation.handle_confirmation_reaction(self, room, event, pending_change)
-            return
+            if not self._turn_policy.can_reply_to_sender(event.sender):
+                self.logger.debug("Ignoring reaction due to reply permissions", sender=event.sender)
+                return
 
-        result = await interactive.handle_reaction(
-            self.client,
-            event,
-            self.agent_name,
-            self.config,
-            self.runtime_paths,
-        )
-        if result:
-            await self._turn_controller.handle_interactive_selection(
-                room,
-                selection=result,
-                user_id=event.sender,
+            if event.key == "🛑":
+                sender_agent_name = entity_identity_registry(
+                    self.config,
+                    self.runtime_paths,
+                ).current_entity_name_for_user_id(event.sender)
+                if not sender_agent_name and await self.stop_manager.handle_stop_reaction(event.reacts_to):
+                    self.logger.info(
+                        "Stop requested for message",
+                        message_id=event.reacts_to,
+                        requested_by=event.sender,
+                    )
+                    await self.stop_manager.remove_stop_button(
+                        self.client,
+                        event.reacts_to,
+                        notify_outbound_redaction=self._conversation_cache.notify_outbound_redaction,
+                    )
+                    return
+
+            pending_change = config_confirmation.get_pending_change(event.reacts_to)
+            if pending_change and self.agent_name == ROUTER_AGENT_NAME:
+                await config_confirmation.handle_confirmation_reaction(self, room, event, pending_change)
+                return
+
+            result = await interactive.handle_reaction(
+                self.client,
+                event,
+                self.agent_name,
+                self.config,
+                self.runtime_paths,
             )
-            return
+            if result:
+                # The selection's response may wait behind this conversation's
+                # active turn; the sender's lane slot must settle now, not at
+                # response completion.
+                await reservation_owner.release()
+                await self._turn_controller.handle_interactive_selection(
+                    room,
+                    selection=result,
+                    user_id=event.sender,
+                    source_event_id=event.event_id,
+                )
+                return
+        finally:
+            await reservation_owner.release()
 
         await self._emit_reaction_received_hooks(
             room_id=room.room_id,
@@ -1649,168 +2001,13 @@ class AgentBot:
         event: MatrixMediaEvent,
     ) -> None:
         """Delegate one inbound media event to the turn engine."""
+        receipt_time = time.monotonic()
         self._log_matrix_event_callback_started(room, event, callback_name="media")
-        await self._turn_controller.handle_media_event(room, event)
+        await self._turn_controller.handle_media_event(room, event, receipt_time=receipt_time)
 
-    def _agent_has_matrix_messaging_tool(self, agent_name: str) -> bool:
-        """Return whether an agent can issue Matrix message actions."""
-        try:
-            tool_names = self.config.get_agent_tools(agent_name)
-        except ValueError:
-            return False
-        if not isinstance(tool_names, list | tuple | set):
-            return False
-        return "matrix_message" in tool_names
-
-    async def _generate_team_response_helper(
-        self,
-        room_id: str,
-        reply_to_event_id: str,
-        thread_id: str | None,
-        team_agents: list[MatrixID],
-        team_mode: str,
-        thread_history: Sequence[ResolvedVisibleMessage],
-        requester_user_id: str,
-        existing_event_id: str | None = None,
-        existing_event_is_placeholder: bool = False,
-        *,
-        target: MessageTarget | None = None,
-        payload: DispatchPayload,
-        response_envelope: MessageEnvelope | None = None,
-        system_enrichment_items: tuple[EnrichmentItem, ...] = (),
-        correlation_id: str | None = None,
-        reason_prefix: str = "Team request",
-        matrix_run_metadata: dict[str, Any] | None = None,
-        on_lifecycle_lock_acquired: Callable[[], None] | None = None,
-    ) -> str | None:
-        """Generate a team response (shared between preformed teams and TeamBot)."""
-        return await self._response_runner.generate_team_response_helper(
-            ResponseRequest(
-                room_id=room_id,
-                reply_to_event_id=reply_to_event_id,
-                thread_id=thread_id,
-                thread_history=thread_history,
-                prompt=payload.prompt,
-                model_prompt=payload.model_prompt,
-                existing_event_id=existing_event_id,
-                existing_event_is_placeholder=existing_event_is_placeholder,
-                user_id=requester_user_id,
-                media=payload.media,
-                attachment_ids=tuple(payload.attachment_ids) if payload.attachment_ids is not None else None,
-                response_envelope=response_envelope,
-                correlation_id=correlation_id,
-                target=target,
-                matrix_run_metadata=matrix_run_metadata,
-                system_enrichment_items=system_enrichment_items,
-                on_lifecycle_lock_acquired=on_lifecycle_lock_acquired,
-            ),
-            team_agents=team_agents,
-            team_mode=team_mode,
-            reason_prefix=reason_prefix,
-        )
-
-    async def _generate_response(
-        self,
-        room_id: str,
-        prompt: str,
-        reply_to_event_id: str,
-        thread_id: str | None,
-        thread_history: Sequence[ResolvedVisibleMessage],
-        existing_event_id: str | None = None,
-        existing_event_is_placeholder: bool = False,
-        user_id: str | None = None,
-        media: MediaInputs | None = None,
-        attachment_ids: list[str] | None = None,
-        model_prompt: str | None = None,
-        system_enrichment_items: tuple[EnrichmentItem, ...] = (),
-        response_envelope: MessageEnvelope | None = None,
-        correlation_id: str | None = None,
-        target: MessageTarget | None = None,
-        matrix_run_metadata: dict[str, Any] | None = None,
-        on_lifecycle_lock_acquired: Callable[[], None] | None = None,
-    ) -> str | None:
-        """Generate and send/edit a response using AI.
-
-        Args:
-            room_id: The room to send the response to
-            prompt: The prompt to send to the AI
-            reply_to_event_id: The event to reply to
-            thread_id: Thread ID if in a thread
-            thread_history: Thread history for context
-            existing_event_id: If provided, edit this message instead of sending a new one
-                             (used for placeholders and interactive acknowledgments)
-            existing_event_is_placeholder: Whether `existing_event_id` points at a
-                             provisional visible event that may be cleaned up on suppression
-            user_id: User ID of the sender for identifying user messages in history
-            media: Optional multimodal inputs (audio/images/files/videos)
-            attachment_ids: Attachment IDs available for tool-side file processing
-            model_prompt: Optional model-facing prompt for the live request and persisted history.
-            system_enrichment_items: Hook-provided transient system prompt fragments to
-                apply for this response.
-            response_envelope: Optional normalized inbound envelope for response hooks.
-            correlation_id: Optional request correlation ID propagated to hook logging.
-            target: Optional canonical response target used for lifecycle locking and delivery.
-            matrix_run_metadata: Optional Matrix-specific run metadata persisted with the run
-                for unseen-message tracking, coalesced edit regeneration, and cleanup.
-            on_lifecycle_lock_acquired: Optional callback that runs after the response
-                lifecycle lock is acquired and before response generation starts.
-
-        Returns:
-            Event ID of the visible response, or None if no visible response landed.
-
-        """
-        return await self._response_runner.generate_response(
-            ResponseRequest(
-                room_id=room_id,
-                reply_to_event_id=reply_to_event_id,
-                thread_id=thread_id,
-                thread_history=thread_history,
-                prompt=prompt,
-                model_prompt=model_prompt,
-                existing_event_id=existing_event_id,
-                existing_event_is_placeholder=existing_event_is_placeholder,
-                user_id=user_id,
-                media=media,
-                attachment_ids=tuple(attachment_ids) if attachment_ids is not None else None,
-                response_envelope=response_envelope,
-                correlation_id=correlation_id,
-                target=target,
-                matrix_run_metadata=matrix_run_metadata,
-                system_enrichment_items=system_enrichment_items,
-                on_lifecycle_lock_acquired=on_lifecycle_lock_acquired,
-            ),
-        )
-
-    async def _send_response(
-        self,
-        room_id: str,
-        reply_to_event_id: str | None,
-        response_text: str,
-        thread_id: str | None,
-        reply_to_event: nio.RoomMessageText | None = None,
-        skip_mentions: bool = False,
-        tool_trace: list[ToolTraceEntry] | None = None,
-        extra_content: dict[str, Any] | None = None,
-        thread_mode_override: Literal["thread", "room"] | None = None,
-        target: MessageTarget | None = None,
-    ) -> _MatrixEventId | None:
-        """Send a response message to a room."""
-        resolved_target = target or self._conversation_resolver.build_message_target(
-            room_id=room_id,
-            thread_id=thread_id,
-            reply_to_event_id=reply_to_event_id,
-            event_source=reply_to_event.source if reply_to_event is not None else None,
-            thread_mode_override=thread_mode_override,
-        )
-        return await self._delivery_gateway.send_text(
-            SendTextRequest(
-                target=resolved_target,
-                response_text=response_text,
-                skip_mentions=skip_mentions,
-                tool_trace=tool_trace,
-                extra_content=extra_content,
-            ),
-        )
+    async def _run_regenerated_response(self, request: ResponseRequest) -> str | None:
+        """Run one edit-regenerated turn through this bot's response path."""
+        return await self._response_runner.generate_response(request)
 
     async def _hook_send_message(
         self,
@@ -1961,107 +2158,65 @@ class TeamBot(AgentBot):
         registry = entity_identity_registry(self.config, self.runtime_paths)
         return [registry.current_id(agent_name) for agent_name in team_config.agents]
 
-    async def _generate_response(
-        self,
-        room_id: str,
-        prompt: str,
-        reply_to_event_id: str,
-        thread_id: str | None,
-        thread_history: Sequence[ResolvedVisibleMessage],
-        existing_event_id: str | None = None,
-        existing_event_is_placeholder: bool = False,
-        user_id: str | None = None,
-        media: MediaInputs | None = None,
-        attachment_ids: list[str] | None = None,
-        model_prompt: str | None = None,
-        system_enrichment_items: tuple[EnrichmentItem, ...] = (),
-        response_envelope: MessageEnvelope | None = None,
-        correlation_id: str | None = None,
-        target: MessageTarget | None = None,
-        matrix_run_metadata: dict[str, Any] | None = None,
-        on_lifecycle_lock_acquired: Callable[[], None] | None = None,
-    ) -> str | None:
-        """Generate a team response instead of individual agent response."""
-        if not prompt.strip():
+    async def _run_regenerated_response(self, request: ResponseRequest) -> str | None:
+        """Run one edit-regenerated turn through the configured team path."""
+        target = request.response_envelope.target
+        if not request.prompt.strip():
             return await self._response_runner.generate_response_for_empty_prompt(
-                ResponseRequest(
-                    room_id=room_id,
-                    reply_to_event_id=reply_to_event_id,
-                    thread_id=thread_id,
-                    thread_history=thread_history,
-                    prompt=prompt,
-                    model_prompt=model_prompt,
-                    existing_event_id=existing_event_id,
-                    existing_event_is_placeholder=existing_event_is_placeholder,
-                    user_id=user_id,
-                    media=media,
-                    attachment_ids=tuple(attachment_ids) if attachment_ids is not None else None,
-                    response_envelope=response_envelope,
-                    correlation_id=correlation_id,
-                    target=target,
-                    matrix_run_metadata=matrix_run_metadata,
-                    system_enrichment_items=system_enrichment_items,
-                    on_lifecycle_lock_acquired=on_lifecycle_lock_acquired,
-                ),
+                request,
                 response_kind="team",
             )
         assert self.client is not None
         memory_prompt, memory_thread_history, model_prompt_text, model_thread_history = (
             prepare_memory_and_model_context(
-                prompt,
-                thread_history,
+                request.prompt,
+                request.thread_history,
                 config=self.config,
                 runtime_paths=self.runtime_paths,
-                model_prompt=model_prompt,
+                model_prompt=request.model_prompt,
             )
         )
 
         configured_mode = TeamMode.COORDINATE if self.team_mode == "coordinate" else TeamMode.COLLABORATE
-        materializable_agent_names = self._turn_policy.materializable_agent_names()
+        availability = self._turn_policy.responder_availability()
         team_resolution = resolve_configured_team(
             self.agent_name,
             self.current_configured_team_agents(),
             configured_mode,
             self.config,
             self.runtime_paths,
-            materializable_agent_names=materializable_agent_names,
+            materializable_agent_names=availability.materializable_agent_names,
         )
         if team_resolution.outcome is not TeamOutcome.TEAM:
             assert team_resolution.reason is not None
             response_event_id: str | None
-            if existing_event_id:
+            if request.existing_event_id:
                 edited = await self._edit_message(
-                    room_id=room_id,
-                    event_id=existing_event_id,
+                    room_id=target.room_id,
+                    event_id=request.existing_event_id,
                     new_text=team_resolution.reason,
-                    thread_id=thread_id,
+                    thread_id=target.resolved_thread_id,
                 )
-                response_event_id = existing_event_id if edited else None
+                response_event_id = request.existing_event_id if edited else None
             else:
-                response_event_id = await self._send_response(
-                    room_id=room_id,
-                    reply_to_event_id=reply_to_event_id,
-                    response_text=team_resolution.reason,
-                    thread_id=thread_id,
+                response_event_id = await self._delivery_gateway.send_text(
+                    SendTextRequest(
+                        target=target,
+                        response_text=team_resolution.reason,
+                    ),
                 )
             return response_event_id
         assert team_resolution.mode is not None
 
-        resolved_target = target or self._conversation_resolver.build_message_target(
-            room_id=room_id,
-            thread_id=thread_id,
-            reply_to_event_id=reply_to_event_id,
-        )
         registry = entity_identity_registry(self.config, self.runtime_paths)
         agent_names = [
             registry.current_entity_name_for_user_id(mid.full_id, include_router=False) or mid.username
             for mid in team_resolution.eligible_members
         ]
-        session_id = resolved_target.session_id
+        session_id = target.session_id
         execution_identity = self._tool_runtime_support.build_execution_identity(
-            target=resolved_target,
-            user_id=user_id,
-            session_id=session_id,
+            target=target,
+            user_id=request.user_id,
         )
         with tool_execution_identity(execution_identity):
             create_background_task(
@@ -2073,48 +2228,24 @@ class TeamBot(AgentBot):
                     self.config,
                     self.runtime_paths,
                     memory_thread_history,
-                    user_id,
+                    request.user_id,
                     execution_identity=execution_identity,
                 ),
                 name=f"memory_save_team_{session_id}",
                 owner=self._runtime_view,
             )
 
-        media_inputs = media or MediaInputs()
-
-        return await self._generate_team_response_helper(
-            room_id=room_id,
-            reply_to_event_id=reply_to_event_id,
-            thread_id=thread_id,
-            target=resolved_target,
-            payload=DispatchPayload(
+        return await self._response_runner.generate_team_response_helper(
+            replace(
+                request,
                 prompt=memory_prompt,
                 model_prompt=model_prompt_text,
-                media=media_inputs,
-                attachment_ids=attachment_ids,
+                thread_history=model_thread_history,
+                media=request.media or MediaInputs(),
+                user_id=request.user_id or "",
+                correlation_id=request.correlation_id or target.reply_to_event_id,
             ),
             team_agents=team_resolution.eligible_members,
             team_mode=team_resolution.mode.value,
-            thread_history=model_thread_history,
-            requester_user_id=user_id or "",
-            existing_event_id=existing_event_id,
-            existing_event_is_placeholder=existing_event_is_placeholder,
-            response_envelope=response_envelope
-            or MessageEnvelope(
-                source_event_id=reply_to_event_id,
-                room_id=room_id,
-                target=resolved_target,
-                requester_id=user_id or self.matrix_id.full_id,
-                sender_id=user_id or self.matrix_id.full_id,
-                body=memory_prompt,
-                attachment_ids=tuple(attachment_ids or ()),
-                mentioned_agents=(),
-                agent_name=self.agent_name,
-                source_kind="message",
-            ),
-            system_enrichment_items=system_enrichment_items,
-            correlation_id=correlation_id or reply_to_event_id,
             reason_prefix=f"Team '{self.agent_name}'",
-            matrix_run_metadata=matrix_run_metadata,
-            on_lifecycle_lock_acquired=on_lifecycle_lock_acquired,
         )

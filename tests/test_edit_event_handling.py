@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path  # noqa: TC003
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -16,6 +17,7 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.turn_controller import _PrecheckedEvent
 from tests.conftest import (
     bind_runtime_paths,
+    install_generate_response_mock,
     install_runtime_cache_support,
     replace_turn_controller_deps,
     wrap_extracted_collaborators,
@@ -137,6 +139,84 @@ async def test_bot_ignores_edit_events(tmp_path: Path) -> None:
 
         mock_dispatch.assert_not_awaited()
         mock_handle_edit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_edit_event_reserves_prompt_order_while_regenerating(tmp_path: Path) -> None:
+    """Edit regeneration should occupy receive order until the edit path finishes."""
+    agent_user = AgentMatrixUser(
+        agent_name=ROUTER_AGENT_NAME,
+        user_id="@router:example.com",
+        display_name="Router",
+        password="test_password",  # noqa: S106
+    )
+    config, runtime_paths = _runtime_config_and_paths(
+        tmp_path,
+        usernames={ROUTER_AGENT_NAME: "router"},
+    )
+    bot = AgentBot(
+        agent_user=agent_user,
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths,
+        rooms=["!test:example.com"],
+    )
+    wrap_extracted_collaborators(bot)
+    bot.client = AsyncMock(spec=nio.AsyncClient)
+    bot.client.user_id = "@router:example.com"
+    install_runtime_cache_support(bot)
+    bot.logger = MagicMock()
+    replace_turn_controller_deps(bot, logger=bot.logger)
+    room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@router:example.com")
+    edit_event = nio.RoomMessageText.from_dict(
+        {
+            "content": {
+                "body": "* Edited message",
+                "msgtype": "m.text",
+                "m.new_content": {"body": "Edited message", "msgtype": "m.text"},
+                "m.relates_to": {"event_id": "$original:example.com", "rel_type": "m.replace"},
+            },
+            "event_id": "$edit:example.com",
+            "sender": "@user:example.com",
+            "origin_server_ts": 1000001,
+            "type": "m.room.message",
+            "room_id": "!test:example.com",
+        },
+    )
+    edit_event.source = {
+        "content": {
+            "body": "* Edited message",
+            "msgtype": "m.text",
+            "m.new_content": {"body": "Edited message", "msgtype": "m.text"},
+            "m.relates_to": {"event_id": "$original:example.com", "rel_type": "m.replace"},
+        },
+        "event_id": "$edit:example.com",
+        "sender": "@user:example.com",
+    }
+    edit_started = asyncio.Event()
+    release_edit = asyncio.Event()
+
+    async def handle_edit(*_args: object) -> None:
+        edit_started.set()
+        assert bot._coalescing_gate.lanes.unsettled_slots()
+        await release_edit.wait()
+
+    with (
+        patch.object(
+            bot._turn_controller,
+            "_precheck_dispatch_event",
+            return_value=_PrecheckedEvent(event=edit_event, requester_user_id="@user:example.com"),
+        ),
+        patch.object(bot._edit_regenerator, "handle_message_edit", side_effect=handle_edit),
+    ):
+        edit_task = asyncio.create_task(bot._on_message(room, edit_event))
+        await asyncio.wait_for(edit_started.wait(), timeout=0.5)
+        release_edit.set()
+        await edit_task
+
+    for slot in bot._coalescing_gate.lanes.unsettled_slots():
+        await asyncio.wait_for(slot.settled.wait(), timeout=1.0)
+    assert bot._coalescing_gate.lanes.all_settled()
 
 
 @pytest.mark.asyncio
@@ -311,11 +391,10 @@ async def test_regular_agent_ignores_edits(tmp_path: Path) -> None:
         "sender": "@user:example.com",
     }
 
-    # Mock the generate_response method
-    with (
-        patch.object(bot, "_generate_response", new_callable=AsyncMock) as mock_generate,
-        patch.object(bot._turn_store, "load_turn", return_value=None),
-    ):
+    # Mock the generate_response seam covering both dispatch and edit-regeneration paths
+    mock_generate = AsyncMock()
+    install_generate_response_mock(bot, mock_generate)
+    with patch.object(bot._turn_store, "load_turn", return_value=None):
         # Process the edit event
         await bot._on_message(room, edit_event)
 

@@ -9,11 +9,12 @@ from typing import TYPE_CHECKING, Any, Protocol, TypeVar
 
 import nio
 
-from mindroom.config.matrix import ignore_unverified_devices_for_config
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.logging_config import get_logger
 from mindroom.matrix.cache import normalize_nio_event_for_cache
 from mindroom.matrix.client_delivery import can_send_to_encrypted_room
+from mindroom.matrix.large_messages import content_fits_normal_event, sidecar_upload_is_usable, upload_json_sidecar
+from mindroom.matrix.membership_fence import UNCERTIFIED_MEMBERSHIP_EPOCH
 from mindroom.matrix.message_builder import build_matrix_edit_content, build_message_content, build_thread_relation
 from mindroom.sync_bridge_state import is_loop_blocked_by_sync_tool_bridge
 from mindroom.tool_approval import (
@@ -67,6 +68,40 @@ def _approval_relation_agent_name(content: dict[str, Any], *, fallback: str) -> 
     return agent_name if isinstance(agent_name, str) and agent_name else fallback
 
 
+async def _offload_oversized_full_arguments(
+    client: nio.AsyncClient,
+    room_id: str,
+    send_content: dict[str, Any],
+) -> dict[str, Any]:
+    """Move full arguments that would overflow the card event into an uploaded JSON sidecar.
+
+    A failed upload strips the payload and marks the card non-approvable so the manager's
+    fail-closed resolution still holds: nothing approvable ships without complete arguments.
+    """
+    full_arguments = send_content.get("full_arguments")
+    if not isinstance(full_arguments, dict) or content_fits_normal_event(send_content):
+        return send_content
+
+    offloaded = {key: value for key, value in send_content.items() if key != "full_arguments"}
+    room_encrypted = room_id in client.rooms and client.rooms[room_id].encrypted
+    mxc_uri, file_info = await upload_json_sidecar(client, room_id, full_arguments)
+    if not sidecar_upload_is_usable(mxc_uri, file_info, room_encrypted=room_encrypted):
+        logger.warning(
+            "approval_full_arguments_sidecar_unavailable",
+            room_id=room_id,
+            has_mxc_uri=bool(mxc_uri),
+            has_file_info=bool(file_info),
+        )
+        offloaded["approvable"] = False
+        return offloaded
+    if room_encrypted:
+        offloaded["full_arguments_file"] = file_info
+    else:
+        offloaded["full_arguments_url"] = mxc_uri
+        offloaded["full_arguments_info"] = file_info
+    return offloaded
+
+
 @dataclass
 class ApprovalMatrixTransport:
     """Own Matrix delivery for tool approval cards and terminal edits."""
@@ -77,6 +112,10 @@ class ApprovalMatrixTransport:
     event_cache_provider: Callable[[], ConversationEventCache]
     _runtime_loop: asyncio.AbstractEventLoop | None = field(default=None, init=False, repr=False)
     _cache_write_tasks: set[asyncio.Task[None]] = field(default_factory=set, init=False, repr=False)
+    _startup_router_ready_for_cleanup: bool = field(default=False, init=False, repr=False)
+    _startup_runtime_support_ready_for_cleanup: bool = field(default=False, init=False, repr=False)
+    _startup_cleanup_done: bool = field(default=False, init=False, repr=False)
+    _startup_cleanup_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
 
     def capture_runtime_loop(self) -> None:
         """Remember the runtime loop that owns Matrix client I/O."""
@@ -182,11 +221,12 @@ class ApprovalMatrixTransport:
                 thread_id,
                 _approval_relation_agent_name(send_content, fallback=bot.agent_name),
             )
+        send_content = await _offload_oversized_full_arguments(bot.client, room_id, send_content)
         response = await bot.client.room_send(
             room_id=room_id,
             message_type="io.mindroom.tool_approval",
             content=send_content,
-            ignore_unverified_devices=self._ignore_unverified_devices(),
+            ignore_unverified_devices=True,
         )
         if isinstance(response, nio.RoomSendResponse):
             sender_user_id = bot.client.user_id
@@ -198,7 +238,7 @@ class ApprovalMatrixTransport:
                     agent_name=bot.agent_name,
                 )
             self.track_cache_write(bot, room_id, str(response.event_id))
-            return SentApprovalEvent(event_id=str(response.event_id))
+            return SentApprovalEvent(event_id=str(response.event_id), sent_content=send_content)
         logger.warning(
             "Failed to send approval Matrix event",
             room_id=room_id,
@@ -261,14 +301,6 @@ class ApprovalMatrixTransport:
             room_ids.update(bot.client.rooms)
         return room_ids
 
-    def _ignore_unverified_devices(self) -> bool:
-        """Return the active Matrix delivery trust policy for approval sends."""
-        config = self.config_provider()
-        if config is None:
-            msg = "Approval Matrix transport requires an active config."
-            raise ToolApprovalTransportError(msg)
-        return ignore_unverified_devices_for_config(config)
-
     async def edit_approval_event_now(
         self,
         room_id: str,
@@ -298,7 +330,7 @@ class ApprovalMatrixTransport:
             room_id=room_id,
             message_type="io.mindroom.tool_approval",
             content=build_matrix_edit_content(event_id, replacement_content),
-            ignore_unverified_devices=self._ignore_unverified_devices(),
+            ignore_unverified_devices=True,
         )
         if not isinstance(response, nio.RoomSendResponse):
             logger.warning(
@@ -340,6 +372,9 @@ class ApprovalMatrixTransport:
         if bot.client is None:
             return
         try:
+            membership_epoch = await bot.event_cache.room_membership_epoch(room_id)
+            if membership_epoch is None:
+                membership_epoch = UNCERTIFIED_MEMBERSHIP_EPOCH
             response = await bot.client.room_get_event(room_id, event_id)
             if not isinstance(response, nio.RoomGetEventResponse):
                 return
@@ -347,6 +382,7 @@ class ApprovalMatrixTransport:
                 event_id,
                 room_id,
                 normalize_nio_event_for_cache(response.event, event_id=event_id),
+                expected_membership_epoch=membership_epoch,
             )
         except Exception as exc:
             logger.warning(
@@ -386,7 +422,7 @@ class ApprovalMatrixTransport:
             room_id=room_id,
             message_type="m.room.message",
             content=content,
-            ignore_unverified_devices=self._ignore_unverified_devices(),
+            ignore_unverified_devices=True,
         )
         if isinstance(response, nio.RoomSendResponse):
             return True
@@ -400,10 +436,43 @@ class ApprovalMatrixTransport:
         )
         return False
 
+    def reset_startup_cleanup_gate(self) -> None:
+        """Reset one-shot startup approval cleanup state for a fresh runtime start."""
+        self._startup_router_ready_for_cleanup = False
+        self._startup_runtime_support_ready_for_cleanup = False
+        self._startup_cleanup_done = False
+
+    async def mark_startup_runtime_support_ready(self) -> None:
+        """Record that approval runtime support can now perform startup cleanup."""
+        self._startup_runtime_support_ready_for_cleanup = True
+        await self._run_startup_cleanup_if_ready()
+
     async def handle_bot_ready(self, bot: _ApprovalTransportBot) -> None:
-        """Discard orphaned approval cards once the router finishes first sync."""
+        """Record router first sync and run startup approval cleanup once all gates are ready."""
         if bot.agent_name != ROUTER_AGENT_NAME or not bot.running or bot.client is None:
             return
+        self._startup_router_ready_for_cleanup = True
+        await self._run_startup_cleanup_if_ready()
+
+    async def _run_startup_cleanup_if_ready(self) -> None:
+        if (
+            self._startup_cleanup_done
+            or not self._startup_router_ready_for_cleanup
+            or not self._startup_runtime_support_ready_for_cleanup
+        ):
+            return
+        async with self._startup_cleanup_lock:
+            if (
+                self._startup_cleanup_done
+                or not self._startup_router_ready_for_cleanup
+                or not self._startup_runtime_support_ready_for_cleanup
+            ):
+                return
+            await self._discard_orphaned_approval_cards_on_startup()
+            self._startup_cleanup_done = True
+
+    async def _discard_orphaned_approval_cards_on_startup(self) -> None:
+        """Discard orphaned approval cards once startup approval gates are ready."""
         config = self.config_provider()
         if config is None:
             return

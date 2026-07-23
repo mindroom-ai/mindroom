@@ -1,4 +1,21 @@
-"""Cache mutation operations for Matrix thread cache writes."""
+"""Cache mutation operations for Matrix thread cache writes.
+
+This is the application layer below the write policies in ``thread_writes``; it owns how mutations land:
+
+1. Invalidation is durable-marker-first and fails closed: ``mark_thread_stale`` and
+   ``mark_room_threads_stale`` write monotonic stale markers; when a marker cannot be written the rows
+   are deleted instead, and when even deletion fails (and the backend is not just temporarily
+   unavailable) the cache is disabled for the rest of the runtime.
+
+2. Appends are incremental-only: ``append_event`` refuses when the thread has no cached snapshot rows
+   (it then only records lookup-index rows), and a failed append re-invalidates the thread so a partial
+   snapshot is never trusted.
+
+3. After a successful append the thread is revalidated only under the conditions enforced by
+   ``revalidate_thread_after_incremental_update`` (see ``sqlite_event_cache_threads``): the prior
+   invalidation must come from an incremental mutation reason and the room must not have been
+   invalidated at or after the last validation.
+"""
 
 from __future__ import annotations
 
@@ -6,7 +23,7 @@ from typing import TYPE_CHECKING, Any
 
 from mindroom.matrix.thread_bookkeeping import MutationThreadImpact, MutationThreadImpactState
 
-from .event_cache import EventCacheBackendUnavailableError
+from .thread_cache_invalidation import mark_room_threads_stale_fail_closed, mark_thread_stale_fail_closed
 
 if TYPE_CHECKING:
     import asyncio
@@ -81,13 +98,17 @@ class ThreadMutationCacheOps:
         coalesce_log_context: dict[str, object] | None = None,
     ) -> asyncio.Task[object]:
         """Run one cache mutation under the room-ordered write barrier."""
+        event_cache = self.runtime.event_cache
         coordinator = self.runtime.event_cache_write_coordinator
+        scoped_coalesce_key = (
+            None if coalesce_key is None else (f"{event_cache.principal_id}:{coalesce_key[0]}", coalesce_key[1])
+        )
         return coordinator.queue_room_update(
             room_id,
             update_coro_factory,
             name=name,
             emit_timing=emit_timing,
-            coalesce_key=coalesce_key,
+            coalesce_key=scoped_coalesce_key,
             coalesce_log_context=coalesce_log_context,
         )
 
@@ -103,14 +124,18 @@ class ThreadMutationCacheOps:
         coalesce_log_context: dict[str, object] | None = None,
     ) -> asyncio.Task[object]:
         """Run one thread-specific cache mutation under the same-thread write barrier."""
+        event_cache = self.runtime.event_cache
         coordinator = self.runtime.event_cache_write_coordinator
+        scoped_coalesce_key = (
+            None if coalesce_key is None else (f"{event_cache.principal_id}:{coalesce_key[0]}", coalesce_key[1])
+        )
         return coordinator.queue_thread_update(
             room_id,
             thread_id,
             update_coro_factory,
             name=name,
             emit_timing=emit_timing,
-            coalesce_key=coalesce_key,
+            coalesce_key=scoped_coalesce_key,
             coalesce_log_context=coalesce_log_context,
         )
 
@@ -136,6 +161,32 @@ class ThreadMutationCacheOps:
             )
             if raise_on_failure:
                 raise
+
+    async def purge_room(self, room_id: str) -> None:
+        """Delete this bot principal's cache rows after an authoritative departure."""
+        try:
+            await self.runtime.event_cache.purge_room(room_id)
+        except Exception as exc:
+            self.logger.warning(
+                "Failed to purge principal-owned Matrix event cache room; deletion remains pending",
+                room_id=room_id,
+                error=str(exc),
+            )
+
+    def mark_room_departed(self, room_id: str) -> int:
+        """Fence reads, queue durable cleanup, and return the new room epoch."""
+        return self.runtime.event_cache.mark_room_departed(room_id)
+
+    def room_departure_epoch(self, room_id: str) -> int:
+        """Return the durable cache's current room-fence epoch."""
+        return self.runtime.event_cache.room_departure_epoch(room_id)
+
+    async def mark_room_joined(self, room_id: str, *, expected_departure_epoch: int) -> None:
+        """Lift one departed-room fence after an authoritative rejoin."""
+        await self.runtime.event_cache.mark_room_joined(
+            room_id,
+            expected_departure_epoch=expected_departure_epoch,
+        )
 
     async def redact_cached_event(
         self,
@@ -198,24 +249,14 @@ class ThreadMutationCacheOps:
         raise_on_failure: bool = False,
     ) -> None:
         """Mark one cached thread stale and fail closed if the marker cannot be written."""
-        try:
-            await self.runtime.event_cache.mark_thread_stale(room_id, thread_id, reason=reason)
-        except Exception as exc:
-            self.logger.warning(
-                "Failed to mark cached thread stale",
-                room_id=room_id,
-                thread_id=thread_id,
-                reason=reason,
-                error=str(exc),
-            )
-            await self._fail_closed_thread_invalidation(
-                room_id,
-                thread_id,
-                reason=reason,
-                stale_marker_error=exc,
-            )
-            if raise_on_failure:
-                raise
+        await mark_thread_stale_fail_closed(
+            self.runtime.event_cache,
+            room_id=room_id,
+            thread_id=thread_id,
+            reason=reason,
+            logger=self.logger,
+            raise_on_failure=raise_on_failure,
+        )
 
     async def invalidate_room_threads(
         self,
@@ -225,22 +266,13 @@ class ThreadMutationCacheOps:
         raise_on_failure: bool = False,
     ) -> None:
         """Mark one room's cached threads stale and fail closed if the marker cannot be written."""
-        try:
-            await self.runtime.event_cache.mark_room_threads_stale(room_id, reason=reason)
-        except Exception as exc:
-            self.logger.warning(
-                "Failed to mark cached room threads stale",
-                room_id=room_id,
-                reason=reason,
-                error=str(exc),
-            )
-            await self._fail_closed_room_invalidation(
-                room_id,
-                reason=reason,
-                stale_marker_error=exc,
-            )
-            if raise_on_failure:
-                raise
+        await mark_room_threads_stale_fail_closed(
+            self.runtime.event_cache,
+            room_id=room_id,
+            reason=reason,
+            logger=self.logger,
+            raise_on_failure=raise_on_failure,
+        )
 
     async def append_event_to_cache(
         self,
@@ -293,83 +325,3 @@ class ThreadMutationCacheOps:
             if raise_on_failure:
                 raise
         return True
-
-    def _disable_cache_after_fail_closed_invalidation(
-        self,
-        *,
-        room_id: str,
-        reason: str,
-        scope: str,
-    ) -> None:
-        self.runtime.event_cache.disable(f"stale_marker_failed:{scope}:{room_id}:{reason}")
-
-    async def _fail_closed_thread_invalidation(
-        self,
-        room_id: str,
-        thread_id: str,
-        *,
-        reason: str,
-        stale_marker_error: Exception,
-    ) -> None:
-        try:
-            await self.runtime.event_cache.invalidate_thread(room_id, thread_id)
-        except Exception as invalidate_exc:
-            if isinstance(stale_marker_error, EventCacheBackendUnavailableError):
-                self.logger.warning(
-                    "Cached thread stale marker is pending because cache backend is temporarily unavailable",
-                    room_id=room_id,
-                    thread_id=thread_id,
-                    reason=reason,
-                    stale_marker_error=str(stale_marker_error),
-                    error=str(invalidate_exc),
-                )
-                return
-            self.logger.warning(
-                "Failed to delete cached thread rows after stale-marker failure; disabling cache",
-                room_id=room_id,
-                thread_id=thread_id,
-                reason=reason,
-                stale_marker_error=str(stale_marker_error),
-                error=str(invalidate_exc),
-            )
-        else:
-            return
-        self._disable_cache_after_fail_closed_invalidation(
-            room_id=room_id,
-            reason=reason,
-            scope=f"thread:{thread_id}",
-        )
-
-    async def _fail_closed_room_invalidation(
-        self,
-        room_id: str,
-        *,
-        reason: str,
-        stale_marker_error: Exception,
-    ) -> None:
-        try:
-            await self.runtime.event_cache.invalidate_room_threads(room_id)
-        except Exception as invalidate_exc:
-            if isinstance(stale_marker_error, EventCacheBackendUnavailableError):
-                self.logger.warning(
-                    "Cached room stale marker is pending because cache backend is temporarily unavailable",
-                    room_id=room_id,
-                    reason=reason,
-                    stale_marker_error=str(stale_marker_error),
-                    error=str(invalidate_exc),
-                )
-                return
-            self.logger.warning(
-                "Failed to delete cached room thread rows after stale-marker failure; disabling cache",
-                room_id=room_id,
-                reason=reason,
-                stale_marker_error=str(stale_marker_error),
-                error=str(invalidate_exc),
-            )
-        else:
-            return
-        self._disable_cache_after_fail_closed_invalidation(
-            room_id=room_id,
-            reason=reason,
-            scope="room",
-        )

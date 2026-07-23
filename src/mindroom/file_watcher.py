@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Iterable
 
 logger = get_logger(__name__)
 _WATCH_SCAN_INTERVAL_SECONDS = 1.0
@@ -28,35 +28,76 @@ def _is_relevant_path(path: Path) -> bool:
     return not (name.endswith(_IGNORED_TREE_SUFFIXES) or name.startswith(".#"))
 
 
-async def watch_file(
-    file_path: Path | str,
+def paths_mtime_snapshot(paths: Iterable[Path | str]) -> dict[Path, int]:
+    """Return the current mtime snapshot for one dynamic set of files.
+
+    Missing or unreadable files snapshot as ``0`` so
+    :func:`changed_watched_paths` can apply its missing-file policy.
+    """
+    snapshot: dict[Path, int] = {}
+    for raw_path in paths:
+        path = Path(raw_path)
+        try:
+            snapshot[path] = path.stat().st_mtime_ns
+        except OSError:
+            snapshot[path] = 0
+    return snapshot
+
+
+def changed_watched_paths(previous: dict[Path, int], current: dict[Path, int]) -> list[Path]:
+    """Return the watched files that changed between two mtime snapshots, sorted.
+
+    Paths that entered the set are baselined silently, and missing files
+    (mtime ``0``) wait until they reappear, so a momentarily absent file during
+    an editor's delete-and-rename save cannot fire a change.
+    """
+    return sorted(path for path, mtime in current.items() if mtime != 0 and previous.get(path, mtime) != mtime)
+
+
+def any_paths_newly_missing(previous: dict[Path, int], current: dict[Path, int]) -> bool:
+    """Return whether any watched file vanished (mtime dropped to ``0``) since the last scan.
+
+    A vanish is burst activity for quiescence purposes: it defers a pending
+    callback so a delete-and-recreate window is not read mid-rename, but it
+    never fires a callback by itself, and a file that stays missing stops
+    counting after one scan so a permanent deletion cannot defer forever.
+    """
+    return any(mtime == 0 and previous.get(path, 0) != 0 for path, mtime in current.items())
+
+
+async def watch_paths(
+    paths_provider: Callable[[], Iterable[Path | str]],
     callback: Callable[[], Awaitable[None]],
     stop_event: asyncio.Event | None = None,
 ) -> None:
-    """Watch a file for changes and call callback when modified.
+    """Watch a dynamic set of files and call callback when any of them changes.
 
-    Args:
-        file_path: Path to the file to watch
-        callback: Async function to call when file changes
-        stop_event: Optional event to signal when to stop watching
+    ``paths_provider`` is re-evaluated every scan so the watched set can grow or
+    shrink between calls (e.g. config ``!include`` files after a reload). Change
+    detection follows :func:`changed_watched_paths`.
 
+    The callback fires only after a quiet scan: a scan that detects changes marks
+    the watcher dirty, and the callback runs on the next scan with no new changes
+    and no newly vanished files. Multi-file updates (git pull, rsync) thus land
+    completely before a reload reads the tree, at the cost of one extra scan
+    interval of latency.
     """
-    file_path = Path(file_path)
-    last_mtime = file_path.stat().st_mtime if file_path.exists() else 0
+    last_snapshot = paths_mtime_snapshot(paths_provider())
+    dirty = False
 
     while stop_event is None or not stop_event.is_set():
         await asyncio.sleep(_WATCH_SCAN_INTERVAL_SECONDS)
 
         try:
-            if file_path.exists():
-                current_mtime = file_path.stat().st_mtime
-                if current_mtime != last_mtime:
-                    last_mtime = current_mtime
-                    await callback()
-        except (OSError, PermissionError):
-            # File might have been deleted or become unreadable
-            # Reset mtime so we detect when it comes back
-            last_mtime = 0
+            current_snapshot = paths_mtime_snapshot(paths_provider())
+            changed = bool(changed_watched_paths(last_snapshot, current_snapshot))
+            vanished = any_paths_newly_missing(last_snapshot, current_snapshot)
+            last_snapshot = current_snapshot
+            if changed:
+                dirty = True
+            elif dirty and not vanished:
+                dirty = False
+                await callback()
         except Exception:
             # Don't let callback errors stop the watcher
             # The callback should handle its own errors

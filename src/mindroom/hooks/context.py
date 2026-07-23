@@ -11,7 +11,6 @@ from mindroom.logging_config import get_logger
 from mindroom.runtime_protocols import SupportsClientConfigOrchestrator  # noqa: TC001
 from mindroom.tool_system.plugin_identity import validate_plugin_name
 
-from . import matrix_admin as hook_matrix_admin
 from .state import (
     build_hook_room_state_putter,
     build_hook_room_state_querier,
@@ -43,11 +42,12 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.history import HistoryScope
+    from mindroom.history.types import HistoryScope
     from mindroom.matrix.cache import AgentMessageSnapshot
     from mindroom.message_target import MessageTarget
     from mindroom.scheduling import ScheduledWorkflow
     from mindroom.tool_system.events import ToolTraceEntry
+    from mindroom.turn_origin import TurnOrigin
 
     from .registry import HookRegistry, HookRegistryState
     from .sender import HookMessageSender
@@ -196,7 +196,15 @@ class HookContextSupport:
             if admin is not None:
                 return admin
         if self.agent_name == ROUTER_AGENT_NAME and self.runtime.client is not None:
-            return hook_matrix_admin.build_hook_matrix_admin(self.runtime.client, self.runtime_paths)
+            # Imported on first use so the tool-registry import chain stays free
+            # of the nio matrix-client import (#1436).
+            from .matrix_admin import build_hook_matrix_admin  # noqa: PLC0415
+
+            return build_hook_matrix_admin(
+                self.runtime.client,
+                self.runtime_paths,
+                config=self.runtime.config,
+            )
         return None
 
     def base_kwargs(self, event_name: str, correlation_id: str) -> dict[str, Any]:
@@ -223,18 +231,41 @@ class MessageEnvelope:
     """Normalized inbound message shape used by message hooks."""
 
     source_event_id: str
-    room_id: str
     target: MessageTarget
-    requester_id: str
-    sender_id: str
     body: str
     attachment_ids: tuple[str, ...]
     mentioned_agents: tuple[str, ...]
     agent_name: str
-    source_kind: str
+    origin: TurnOrigin = field(kw_only=True)
     hook_source: str | None = None
     message_received_depth: int = 0
     dispatch_policy_source_kind: str | None = None
+
+    def __post_init__(self) -> None:
+        """Validate runtime invariants not enforced by dataclass typing."""
+        if self.origin is None:
+            message = "MessageEnvelope.origin is required"
+            raise TypeError(message)
+
+    @property
+    def room_id(self) -> str:
+        """Return the canonical target room ID."""
+        return self.target.room_id
+
+    @property
+    def requester_id(self) -> str:
+        """Return the canonical requester ID."""
+        return self.origin.requester_id
+
+    @property
+    def sender_id(self) -> str:
+        """Return the canonical transport sender ID."""
+        return self.origin.transport_sender_id
+
+    @property
+    def source_kind(self) -> str:
+        """Return the canonical ingress source kind."""
+        return self.origin.source_kind
 
 
 @dataclass(slots=True)
@@ -406,9 +437,10 @@ class MessageEnrichContext(HookContext):
         text: str,
         *,
         cache_policy: EnrichmentCachePolicy = "volatile",
+        persist: bool = True,
     ) -> None:
         """Append one enrichment item for this hook."""
-        self._items.append(EnrichmentItem(key=key, text=text, cache_policy=cache_policy))
+        self._items.append(EnrichmentItem(key=key, text=text, cache_policy=cache_policy, persist=persist))
 
 
 @dataclass(slots=True)

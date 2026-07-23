@@ -42,6 +42,38 @@ def test_config_render_prompt_replaces_bare_fields_and_escaped_braces() -> None:
     )
 
 
+def test_config_accepts_thread_summary_enrichment_prompt_fields() -> None:
+    """The summary prompt accepts the conversation and optional tag vocabulary."""
+    config = Config.model_validate(
+        {
+            "prompts": {
+                "THREAD_SUMMARY_USER_PROMPT_TEMPLATE": ("Vocabulary:\n{tag_vocabulary}\nThread:\n{conversation}"),
+            },
+        },
+    )
+
+    assert (
+        config.render_prompt(
+            "THREAD_SUMMARY_USER_PROMPT_TEMPLATE",
+            tag_vocabulary="- bug (2)",
+            conversation="Please fix login",
+        )
+        == "Vocabulary:\n- bug (2)\nThread:\nPlease fix login"
+    )
+
+
+def test_config_rejects_unsupported_thread_summary_prompt_field() -> None:
+    """The summary prompt rejects placeholders absent from its call site."""
+    with pytest.raises(ValidationError, match="Unsupported prompt placeholder"):
+        Config.model_validate(
+            {
+                "prompts": {
+                    "THREAD_SUMMARY_USER_PROMPT_TEMPLATE": "{conversation} {room_id}",
+                },
+            },
+        )
+
+
 def test_config_rejects_unknown_prompt_override() -> None:
     """Unknown prompt override names fail config validation."""
     with pytest.raises(ValidationError, match="Unknown prompt override"):

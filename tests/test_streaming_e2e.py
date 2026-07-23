@@ -18,6 +18,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig, RouterConfig
 from mindroom.matrix.client import DeliveredMatrixEvent
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.message_target import MessageTarget
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.streaming import StreamingResponse, send_streaming_response
 from mindroom.tool_system.runtime_context import WorkerProgressEvent, get_worker_progress_pump
@@ -26,6 +27,7 @@ from tests.conftest import (
     TEST_ACCESS_TOKEN,
     TEST_PASSWORD,
     bind_runtime_paths,
+    drain_coalescing,
     install_runtime_cache_support,
     make_matrix_client_mock,
     orchestrator_runtime_paths,
@@ -40,11 +42,6 @@ if TYPE_CHECKING:
 
 def _matrix_client_mock() -> AsyncMock:
     return make_matrix_client_mock()
-
-
-def _require_config(value: Config, text: str) -> str:
-    assert isinstance(value, Config)
-    return text
 
 
 @pytest.mark.asyncio
@@ -75,10 +72,8 @@ async def test_streaming_e2e_worker_warmup_edit_sequence(tmp_path: Path) -> None
         _client: object,
         _room_id: str,
         content: dict[str, object],
-        *,
-        config: Config,
     ) -> DeliveredMatrixEvent:
-        deliveries.append(("send", _require_config(config, str(content["body"]))))
+        deliveries.append(("send", str(content["body"])))
         return DeliveredMatrixEvent(event_id="$stream_1", content_sent=dict(content))
 
     async def record_edit(
@@ -87,10 +82,8 @@ async def test_streaming_e2e_worker_warmup_edit_sequence(tmp_path: Path) -> None
         _event_id: str,
         new_content: dict[str, object],
         new_text: str,
-        *,
-        config: Config,
     ) -> DeliveredMatrixEvent:
-        deliveries.append(("edit", _require_config(config, new_text)))
+        deliveries.append(("edit", new_text))
         return DeliveredMatrixEvent(event_id="$stream_edit", content_sent=dict(new_content))
 
     async def stream() -> AsyncGenerator[object, None]:
@@ -155,9 +148,7 @@ async def test_streaming_e2e_worker_warmup_edit_sequence(tmp_path: Path) -> None
     ):
         await send_streaming_response(
             client=client,
-            room_id="!test:localhost",
-            reply_to_event_id="$original_123",
-            thread_id=None,
+            target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=runtime_config,
             runtime_paths=runtime_paths_for(runtime_config),
             response_stream=stream(),
@@ -271,7 +262,7 @@ async def test_streaming_edits_e2e(  # noqa: C901, PLR0915
         *,
         ignore_unverified_devices: bool = False,
     ) -> object:
-        assert ignore_unverified_devices is False
+        assert ignore_unverified_devices is True
         event_id = f"$helper_{len(helper_events)}"
         helper_events.append(
             {
@@ -290,7 +281,7 @@ async def test_streaming_edits_e2e(  # noqa: C901, PLR0915
         *,
         ignore_unverified_devices: bool = False,
     ) -> object:
-        assert ignore_unverified_devices is False
+        assert ignore_unverified_devices is True
         event_id = f"$calc_{len(calc_events)}"
         calc_events.append(
             {
@@ -580,7 +571,7 @@ async def test_user_edits_with_mentions_e2e(tmp_path: Path) -> None:
             ignore_unverified_devices: bool = False,
         ) -> object:
             assert message_type == "m.room.message"
-            assert ignore_unverified_devices is False
+            assert ignore_unverified_devices is True
             event_id = f"$calc_{len(events_sent)}"
             events_sent.append(
                 {
@@ -599,6 +590,10 @@ async def test_user_edits_with_mentions_e2e(tmp_path: Path) -> None:
                 agents={
                     "calculator": AgentConfig(
                         display_name="CalculatorAgent",
+                        rooms=["!test:localhost"],
+                    ),
+                    "helper": AgentConfig(
+                        display_name="HelperAgent",
                         rooms=["!test:localhost"],
                     ),
                 },
@@ -639,6 +634,7 @@ async def test_user_edits_with_mentions_e2e(tmp_path: Path) -> None:
 
         # Process - bot should not respond (not mentioned)
         await bot._on_message(test_room, initial_event)
+        await drain_coalescing(bot)
         assert len(events_sent) == 0
 
         # User edits to add mention

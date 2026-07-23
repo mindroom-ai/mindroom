@@ -6,11 +6,16 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 from unittest.mock import patch
 
+import httpx
 import pytest
+from openai import AuthenticationError
+from structlog.testing import capture_logs
 
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
+from mindroom.embedder_health import capture_embedder_health_recorder, get_embedder_failure
+from mindroom.embedding_errors import EmbedderRequestError
 from mindroom.memory import (
     add_agent_memory,
     delete_agent_memory,
@@ -20,6 +25,7 @@ from mindroom.memory import (
     store_conversation_memory,
     update_agent_memory,
 )
+from mindroom.memory.config import _Mem0StrictOpenAIEmbedder
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     _private_instance_state_root_path,
@@ -32,6 +38,12 @@ from tests.memory_test_support import FakeMem0ScopedMemory, MockTeamConfig
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+
+async def _search_memory_results(*args: object, **kwargs: object) -> list:
+    outcome = await search_agent_memories(*args, **kwargs)
+    assert outcome.degraded_reason is None
+    return outcome.results
 
 
 @pytest.fixture
@@ -104,7 +116,7 @@ async def test_store_conversation_memory_uses_explicit_execution_identity_for_de
         session_id="session-alice",
     )
 
-    with patch("mindroom.memory.functions.create_memory_instance", side_effect=create_fake_memory_instance):
+    with patch("mindroom.memory._backend.create_memory_instance", side_effect=create_fake_memory_instance):
         await store_conversation_memory(
             "Alice-authored shared memory",
             "general",
@@ -123,6 +135,99 @@ async def test_store_conversation_memory_uses_explicit_execution_identity_for_de
             {"type": "conversation", "session_id": "session-alice", "agent": "general"},
         ),
     ]
+
+
+@pytest.mark.asyncio
+async def test_store_conversation_memory_redacts_embedder_provider_error(
+    storage_path: Path,
+    config: Config,
+) -> None:
+    """Automatic Mem0 writes never log the rejected key from a provider body."""
+    config.memory.backend = "mem0"
+    secret = "sk-secret-automatic-store"  # noqa: S105
+    request = httpx.Request("POST", "http://embeddings.local/v1/embeddings")
+    response = httpx.Response(401, request=request, json={"error": {"message": f"rejected {secret}"}})
+    error = AuthenticationError(f"rejected {secret}", response=response, body=None)
+
+    class FailingMemory:
+        async def add(self, *_args: object, **_kwargs: object) -> None:
+            raise error
+
+    async def create_failing_memory(*_args: object, **_kwargs: object) -> FailingMemory:
+        return FailingMemory()
+
+    try:
+        with (
+            patch("mindroom.memory._backend.create_memory_instance", side_effect=create_failing_memory),
+            capture_logs() as logs,
+        ):
+            await store_conversation_memory(
+                "Remember this",
+                "general",
+                storage_path,
+                "session",
+                config,
+                runtime_paths_for(config),
+            )
+
+        assert secret not in str(logs)
+        assert "embedder authentication failed (HTTP 401)" in str(logs)
+        assert "Conversation memory was not stored in any target" in str(logs)
+        assert "Memory added" not in str(logs)
+    finally:
+        capture_embedder_health_recorder().record(None)
+
+
+@pytest.mark.asyncio
+async def test_store_conversation_memory_detects_embedding_failure_swallowed_by_mem0(
+    storage_path: Path,
+    config: Config,
+) -> None:
+    """Automatic writes remain degraded when Mem0 catches every embedding error."""
+    config.memory.backend = "mem0"
+    failure_detail = "embedder authentication failed (HTTP 401)"
+
+    class FailingEmbedder:
+        def get_embedding(self, _text: str) -> list[float]:
+            raise EmbedderRequestError(failure_detail)
+
+        def get_embeddings_batch(self, _texts: list[str]) -> list[list[float]]:
+            raise EmbedderRequestError(failure_detail)
+
+    class SwallowingMemory:
+        def __init__(self) -> None:
+            self.embedding_model = _Mem0StrictOpenAIEmbedder(FailingEmbedder())
+
+        async def add(self, messages: list[dict], **_kwargs: object) -> dict[str, list]:
+            try:
+                self.embedding_model.embed_batch([message["content"] for message in messages])
+            except EmbedderRequestError:
+                return {"results": []}
+            return {"results": []}
+
+    async def create_swallowing_memory(*_args: object, **_kwargs: object) -> SwallowingMemory:
+        return SwallowingMemory()
+
+    try:
+        with (
+            patch("mindroom.memory._backend.create_memory_instance", side_effect=create_swallowing_memory),
+            capture_logs() as logs,
+        ):
+            await store_conversation_memory(
+                "Remember this",
+                "general",
+                storage_path,
+                "session",
+                config,
+                runtime_paths_for(config),
+            )
+
+        assert get_embedder_failure() == "embedder authentication failed (HTTP 401)"
+        assert "embedder authentication failed (HTTP 401)" in str(logs)
+        assert "Conversation memory was not stored in any target" in str(logs)
+        assert "Memory added" not in str(logs)
+    finally:
+        capture_embedder_health_recorder().record(None)
 
 
 @pytest.mark.asyncio
@@ -160,7 +265,7 @@ async def test_private_agent_explicit_mem0_uses_private_instance_storage(
     assert worker_key is not None
 
     with (
-        patch("mindroom.memory.functions.create_memory_instance", side_effect=create_fake_memory_instance),
+        patch("mindroom.memory._backend.create_memory_instance", side_effect=create_fake_memory_instance),
         tool_execution_identity(execution_identity),
     ):
         await add_agent_memory(
@@ -171,7 +276,7 @@ async def test_private_agent_explicit_mem0_uses_private_instance_storage(
             runtime_paths_for(config),
             execution_identity=execution_identity,
         )
-        search_results = await search_agent_memories(
+        search_results = await _search_memory_results(
             "Private note",
             "general",
             storage_path,
@@ -319,7 +424,7 @@ async def test_mem0_team_conversation_memory_is_shared_across_requesters_for_use
         del runtime_paths, timing_scope
         return FakeScopedMemory(scope_storage_path)
 
-    with patch("mindroom.memory.functions.create_memory_instance", side_effect=create_fake_memory_instance):
+    with patch("mindroom.memory._backend.create_memory_instance", side_effect=create_fake_memory_instance):
         with tool_execution_identity(alice_identity):
             await store_conversation_memory(
                 "Alice-authored shared team memory",
@@ -329,7 +434,7 @@ async def test_mem0_team_conversation_memory_is_shared_across_requesters_for_use
                 config,
                 runtime_paths_for(config),
             )
-            alice_results = await search_agent_memories(
+            alice_results = await _search_memory_results(
                 "Alice-authored shared team",
                 "general",
                 storage_path,
@@ -339,7 +444,7 @@ async def test_mem0_team_conversation_memory_is_shared_across_requesters_for_use
             )
 
         with tool_execution_identity(bob_identity):
-            bob_results = await search_agent_memories(
+            bob_results = await _search_memory_results(
                 "Alice-authored shared team",
                 "general",
                 storage_path,
@@ -366,7 +471,10 @@ async def test_mixed_private_team_mem0_conversation_memory_is_rejected(
     config.agents["general"].private = AgentPrivateConfig(per="user", root="mind_data")
     config.teams = {"mixed_team": MockTeamConfig(agents=["general", "calculator"])}
 
-    with pytest.raises(ValueError, match="private agents cannot participate in teams yet"):
+    with pytest.raises(
+        ValueError,
+        match="private agents are only supported in explicit Matrix ad hoc teams with requester identity",
+    ):
         await store_conversation_memory(
             "Alice-authored private team memory",
             ["general", "calculator"],
@@ -401,13 +509,16 @@ async def test_mixed_private_team_mem0_member_crud_is_rejected(
         id_prefix = scope_storage_path.name.replace("/", "_") or "mem"
         return memories_by_path.setdefault(scope_storage_path, FakeMem0ScopedMemory(id_prefix=id_prefix))
 
-    with patch("mindroom.memory.functions.create_memory_instance", side_effect=create_fake_memory_instance):
+    with patch("mindroom.memory._backend.create_memory_instance", side_effect=create_fake_memory_instance):
         await add_agent_memory("Shared calculator note", "calculator", storage_path, config, runtime_paths_for(config))
         calculator_memory_id = (
             await list_all_agent_memories("calculator", storage_path, config, runtime_paths_for(config), limit=10)
         )[0]["id"]
 
-        with pytest.raises(ValueError, match="private agents cannot participate in teams yet"):
+        with pytest.raises(
+            ValueError,
+            match="private agents are only supported in explicit Matrix ad hoc teams with requester identity",
+        ):
             await get_agent_memory(
                 calculator_memory_id,
                 ["general", "calculator"],
@@ -416,7 +527,10 @@ async def test_mixed_private_team_mem0_member_crud_is_rejected(
                 runtime_paths_for(config),
             )
 
-        with pytest.raises(ValueError, match="private agents cannot participate in teams yet"):
+        with pytest.raises(
+            ValueError,
+            match="private agents are only supported in explicit Matrix ad hoc teams with requester identity",
+        ):
             await update_agent_memory(
                 calculator_memory_id,
                 "Updated shared calculator note",
@@ -426,7 +540,10 @@ async def test_mixed_private_team_mem0_member_crud_is_rejected(
                 runtime_paths_for(config),
             )
 
-        with pytest.raises(ValueError, match="private agents cannot participate in teams yet"):
+        with pytest.raises(
+            ValueError,
+            match="private agents are only supported in explicit Matrix ad hoc teams with requester identity",
+        ):
             await delete_agent_memory(
                 calculator_memory_id,
                 ["general", "calculator"],
@@ -472,7 +589,7 @@ async def test_worker_scoped_team_mem0_memory_can_be_read_updated_and_deleted_ac
     )
 
     with (
-        patch("mindroom.memory.functions.create_memory_instance", side_effect=create_fake_memory_instance),
+        patch("mindroom.memory._backend.create_memory_instance", side_effect=create_fake_memory_instance),
         tool_execution_identity(execution_identity),
     ):
         await store_conversation_memory(
@@ -484,7 +601,7 @@ async def test_worker_scoped_team_mem0_memory_can_be_read_updated_and_deleted_ac
             runtime_paths_for(config),
         )
 
-        general_results = await search_agent_memories(
+        general_results = await _search_memory_results(
             "shared note",
             "general",
             storage_path,
@@ -492,7 +609,7 @@ async def test_worker_scoped_team_mem0_memory_can_be_read_updated_and_deleted_ac
             runtime_paths_for(config),
             limit=10,
         )
-        calculator_results = await search_agent_memories(
+        calculator_results = await _search_memory_results(
             "shared note",
             "calculator",
             storage_path,
@@ -534,7 +651,7 @@ async def test_worker_scoped_team_mem0_memory_can_be_read_updated_and_deleted_ac
             runtime_paths_for(config),
         )
 
-        general_updated = await search_agent_memories(
+        general_updated = await _search_memory_results(
             "updated team",
             "general",
             storage_path,
@@ -542,7 +659,7 @@ async def test_worker_scoped_team_mem0_memory_can_be_read_updated_and_deleted_ac
             runtime_paths_for(config),
             limit=10,
         )
-        calculator_updated = await search_agent_memories(
+        calculator_updated = await _search_memory_results(
             "updated team",
             "calculator",
             storage_path,
@@ -561,7 +678,7 @@ async def test_worker_scoped_team_mem0_memory_can_be_read_updated_and_deleted_ac
             runtime_paths_for(config),
         )
 
-        general_deleted = await search_agent_memories(
+        general_deleted = await _search_memory_results(
             "team",
             "general",
             storage_path,
@@ -569,7 +686,7 @@ async def test_worker_scoped_team_mem0_memory_can_be_read_updated_and_deleted_ac
             runtime_paths_for(config),
             limit=10,
         )
-        calculator_deleted = await search_agent_memories(
+        calculator_deleted = await _search_memory_results(
             "team",
             "calculator",
             storage_path,

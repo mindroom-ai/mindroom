@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from mindroom.history.compaction import (
-    normalize_compaction_budget_tokens,
-    resolve_compaction_runtime_settings,
-    resolve_effective_compaction_threshold,
+from mindroom.history.types import (
+    COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS,
+    CompactionAvailabilityReason,
+    CompactionDecision,
+    ResolvedHistoryExecutionPlan,
 )
-from mindroom.history.types import CompactionAvailabilityReason, CompactionDecision, ResolvedHistoryExecutionPlan
 from mindroom.token_budget import compute_compaction_input_budget
 
 if TYPE_CHECKING:
@@ -27,16 +28,20 @@ def resolve_history_execution_plan(
     static_prompt_tokens: int | None,
 ) -> ResolvedHistoryExecutionPlan:
     """Resolve all history-budget policy for one run scope in one place."""
-    compaction_runtime = resolve_compaction_runtime_settings(
+    compaction_runtime = _resolve_compaction_runtime_settings(
         config=config,
         compaction_config=compaction_config,
         active_model_name=active_model_name,
         active_context_window=active_context_window,
     )
     compaction_context_window = compaction_runtime.context_window
-    replay_window_tokens = active_context_window
+    replay_window_tokens = _resolve_replay_window(
+        active_context_window=active_context_window,
+        configured_replay_window=compaction_config.replay_window_tokens,
+    )
     summary_input_budget_tokens, unavailable_reason = _resolve_summary_input_budget(
         compaction_context_window=compaction_context_window,
+        replay_window_tokens=replay_window_tokens,
         reserve_tokens=compaction_config.reserve_tokens,
     )
 
@@ -50,10 +55,7 @@ def resolve_history_execution_plan(
             static_prompt_tokens=static_prompt_tokens,
         )
         if compaction_config.enabled:
-            threshold_tokens = _resolve_replay_threshold_tokens(
-                compaction_config=compaction_config,
-                replay_window_tokens=replay_window_tokens,
-            )
+            threshold_tokens = _resolve_effective_compaction_threshold(compaction_config, replay_window_tokens)
             replay_budget_tokens = _resolve_replay_budget_tokens(
                 compaction_config=compaction_config,
                 has_authored_compaction_config=has_authored_compaction_config,
@@ -65,7 +67,6 @@ def resolve_history_execution_plan(
             replay_budget_tokens = hard_replay_budget_tokens
 
     return ResolvedHistoryExecutionPlan(
-        authored_compaction_config=has_authored_compaction_config,
         authored_compaction_enabled=has_authored_compaction_config and compaction_config.enabled,
         destructive_compaction_available=unavailable_reason is None,
         explicit_compaction_model=compaction_config.model is not None,
@@ -79,6 +80,7 @@ def resolve_history_execution_plan(
         summary_input_budget_tokens=summary_input_budget_tokens,
         unavailable_reason=unavailable_reason,
         hard_replay_budget_tokens=hard_replay_budget_tokens,
+        compaction_fallback_model_name=compaction_config.fallback_model,
     )
 
 
@@ -87,12 +89,10 @@ def classify_compaction_decision(  # noqa: PLR0911
     plan: ResolvedHistoryExecutionPlan,
     force_compact_before_next_run: bool,
     current_history_tokens: int | None,
-    trigger_budget_tokens: int | None = None,
-    hard_budget_tokens: int | None = None,
 ) -> CompactionDecision:
     """Classify compaction as none or required before the next reply."""
-    resolved_trigger_budget = plan.replay_budget_tokens if trigger_budget_tokens is None else trigger_budget_tokens
-    resolved_hard_budget = plan.hard_replay_budget_tokens if hard_budget_tokens is None else hard_budget_tokens
+    resolved_trigger_budget = plan.replay_budget_tokens
+    resolved_hard_budget = plan.hard_replay_budget_tokens
 
     if force_compact_before_next_run:
         if plan.destructive_compaction_available:
@@ -183,18 +183,30 @@ def describe_compaction_unavailability(plan: ResolvedHistoryExecutionPlan) -> st
         return "no context_window is configured on the active model"
     if reason == "non_positive_summary_input_budget":
         return "the active compaction model leaves no usable summary input budget after reserve and prompt overhead"
+    if reason == "summary_input_budget_without_retry_headroom":
+        return (
+            "the summary input budget must exceed "
+            f"{2 * COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS:,} tokens to provide meaningful headroom "
+            "for a smaller retry"
+        )
     return None
 
 
 def _resolve_summary_input_budget(
     *,
     compaction_context_window: int | None,
+    replay_window_tokens: int | None,
     reserve_tokens: int,
 ) -> tuple[int | None, CompactionAvailabilityReason | None]:
+    """Resolve a summary budget large enough for the request envelope and one degradation retry.
+
+    Plans require more than twice the shared retry floor so halving leaves a
+    genuinely smaller target with room for the request envelope and run content.
+    """
     if compaction_context_window is None:
         return None, "no_context_window"
 
-    normalized_reserve_tokens = normalize_compaction_budget_tokens(
+    normalized_reserve_tokens = _normalize_compaction_budget_tokens(
         reserve_tokens,
         compaction_context_window,
     )
@@ -202,26 +214,32 @@ def _resolve_summary_input_budget(
         compaction_context_window,
         reserve_tokens=normalized_reserve_tokens,
     )
+    if replay_window_tokens is not None:
+        summary_input_budget_tokens = min(summary_input_budget_tokens, replay_window_tokens)
     if summary_input_budget_tokens <= 0:
         return summary_input_budget_tokens, "non_positive_summary_input_budget"
+    if summary_input_budget_tokens <= 2 * COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS:
+        return summary_input_budget_tokens, "summary_input_budget_without_retry_headroom"
     return summary_input_budget_tokens, None
 
 
 def context_budget_after_reserve(context_window_tokens: int, reserve_tokens: int, spent_tokens: int = 0) -> int:
     """Return the usable context budget after clamped reserve and known prompt cost."""
-    normalized_reserve_tokens = normalize_compaction_budget_tokens(reserve_tokens, context_window_tokens)
+    normalized_reserve_tokens = _normalize_compaction_budget_tokens(reserve_tokens, context_window_tokens)
     return max(0, context_window_tokens - normalized_reserve_tokens - spent_tokens)
 
 
-def _resolve_replay_threshold_tokens(
+def _resolve_replay_window(
     *,
-    compaction_config: CompactionConfig,
-    replay_window_tokens: int,
-) -> int:
-    threshold_tokens = compaction_config.threshold_tokens
-    if threshold_tokens is not None:
-        return threshold_tokens
-    return resolve_effective_compaction_threshold(compaction_config, replay_window_tokens)
+    active_context_window: int | None,
+    configured_replay_window: int | None,
+) -> int | None:
+    """Cap persisted replay without changing the provider's real context window."""
+    if configured_replay_window is None:
+        return active_context_window
+    if active_context_window is None:
+        return configured_replay_window
+    return min(active_context_window, configured_replay_window)
 
 
 def _resolve_replay_budget_tokens(
@@ -248,3 +266,50 @@ def _resolve_replay_budget_without_compaction(
     static_prompt_tokens: int,
 ) -> int:
     return context_budget_after_reserve(replay_window_tokens, compaction_config.reserve_tokens, static_prompt_tokens)
+
+
+@dataclass(frozen=True)
+class _ResolvedCompactionRuntime:
+    """Resolved model/window inputs needed for one compaction attempt."""
+
+    model_name: str
+    context_window: int | None
+
+
+def _resolve_effective_compaction_threshold(compaction_config: CompactionConfig, replay_window_tokens: int) -> int:
+    """Resolve the soft replay trigger budget in tokens."""
+    threshold_tokens = compaction_config.threshold_tokens
+    if threshold_tokens is not None:
+        return threshold_tokens
+    threshold_percent = compaction_config.threshold_percent
+    if threshold_percent is not None:
+        return int(replay_window_tokens * threshold_percent)
+    return int(replay_window_tokens * 0.8)
+
+
+def _normalize_compaction_budget_tokens(tokens: int, context_window: int | None) -> int:
+    """Clamp one compaction knob against half of the available model window."""
+    if context_window is None or context_window <= 0:
+        return tokens
+    return min(tokens, context_window // 2)
+
+
+def _resolve_compaction_runtime_settings(
+    *,
+    config: Config,
+    compaction_config: CompactionConfig,
+    active_model_name: str,
+    active_context_window: int | None,
+) -> _ResolvedCompactionRuntime:
+    """Resolve the effective compaction model name and usable window for one run."""
+    model_name = compaction_config.model or active_model_name
+    model_context_window = config.get_model_context_window(model_name)
+    if compaction_config.model is not None:
+        return _ResolvedCompactionRuntime(
+            model_name=model_name,
+            context_window=model_context_window,
+        )
+    return _ResolvedCompactionRuntime(
+        model_name=model_name,
+        context_window=model_context_window or active_context_window,
+    )

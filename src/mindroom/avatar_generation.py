@@ -25,6 +25,7 @@ from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.state import MatrixAccount, MatrixState, get_room_id, matrix_state_for_runtime
 from mindroom.matrix.users import AgentMatrixUser, login_agent_user
 from mindroom.matrix_identifiers import extract_server_name_from_homeserver
+from mindroom.model_defaults import GOOGLE_AVATAR_IMAGE, GOOGLE_AVATAR_PROMPT
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -34,10 +35,17 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-_PROMPT_MODEL = "gemini-3.1-flash-lite-preview"
-# Gemini 3.1 Flash Image Preview is the current Google image-generation model.
-_IMAGE_MODEL = "gemini-3.1-flash-image-preview"
+_PROMPT_MODEL = GOOGLE_AVATAR_PROMPT
+_IMAGE_MODEL = GOOGLE_AVATAR_IMAGE
 _ROOT_SPACE_AVATAR_NAME = "root_space"
+# Team prompts include per-member breakdowns; a low cap truncates them
+# mid-sentence and the mangled prompt makes the image model answer with
+# text instead of an image.
+_PROMPT_MAX_OUTPUT_TOKENS = 400
+# The image model occasionally returns no image for a valid prompt; each
+# retry regenerates the prompt (sampled at temperature), so attempts are
+# not identical.
+_MAX_IMAGE_ATTEMPTS = 3
 
 _ROOM_PURPOSES = {
     "lobby": "Central meeting space, entrance and welcome area",
@@ -153,7 +161,7 @@ async def _generate_prompt(
         config=types.GenerateContentConfig(
             system_instruction=system_prompt,
             temperature=0.7,
-            max_output_tokens=150,
+            max_output_tokens=_PROMPT_MAX_OUTPUT_TOKENS,
         ),
     )
     if not response.text:
@@ -176,6 +184,16 @@ async def _generate_prompt(
         ),
     )
     return final_prompt
+
+
+def _no_image_diagnostic(response: types.GenerateContentResponse) -> str:
+    """Summarize a no-image response for logs without dumping the payload."""
+    finish_reasons = [
+        str(candidate.finish_reason) for candidate in response.candidates or [] if candidate.finish_reason
+    ]
+    texts = [text for part in response.parts or [] if isinstance(text := getattr(part, "text", None), str)]
+    snippet = " ".join(texts).strip()[:200]
+    return f"finish_reasons={finish_reasons or None} text={snippet!r}"
 
 
 def _extract_image_bytes(response: types.GenerateContentResponse) -> bytes | None:
@@ -208,22 +226,39 @@ async def _generate_avatar(
     if target.team_members:
         console.print(f"   [dim]Team members: {', '.join(member.name for member in target.team_members)}[/dim]")
 
-    prompt = await _generate_prompt(client, target, config)
-    response = await client.aio.models.generate_content(
-        model=_IMAGE_MODEL,
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            response_modalities=["IMAGE"],
-            image_config=types.ImageConfig(
-                aspect_ratio="1:1",
-                image_size="1K",
+    image_bytes: bytes | None = None
+    for attempt in range(1, _MAX_IMAGE_ATTEMPTS + 1):
+        prompt = await _generate_prompt(client, target, config)
+        response = await client.aio.models.generate_content(
+            model=_IMAGE_MODEL,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                response_modalities=["IMAGE"],
+                image_config=types.ImageConfig(
+                    aspect_ratio="1:1",
+                    image_size="1K",
+                ),
             ),
-        ),
-    )
+        )
+        image_bytes = _extract_image_bytes(response)
+        if image_bytes:
+            break
+        logger.warning(
+            "Image model returned no image for avatar target",
+            entity_type=target.entity_type,
+            entity_name=target.entity_name,
+            attempt=attempt,
+            max_attempts=_MAX_IMAGE_ATTEMPTS,
+            response_diagnostic=_no_image_diagnostic(response),
+        )
+        if attempt < _MAX_IMAGE_ATTEMPTS:
+            console.print(
+                f"[yellow]⟳ No image returned for {target.entity_type}/{target.entity_name} "
+                f"(attempt {attempt}/{_MAX_IMAGE_ATTEMPTS}); regenerating prompt[/yellow]",
+            )
 
-    image_bytes = _extract_image_bytes(response)
     if not image_bytes:
-        msg = f"No image data found for {target.entity_type}/{target.entity_name}"
+        msg = f"No image data found for {target.entity_type}/{target.entity_name} after {_MAX_IMAGE_ATTEMPTS} attempts"
         raise ValueError(msg)
 
     avatar_path.write_bytes(image_bytes)

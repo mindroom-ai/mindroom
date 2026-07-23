@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import re
-from typing import TYPE_CHECKING, cast
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Literal, cast
 
 from mindroom import authorization
 from mindroom.constants import ROUTER_AGENT_NAME
@@ -26,6 +27,25 @@ if TYPE_CHECKING:
 # Accepts both single and double quotes (mautrix bridges use single quotes).
 # Requires @localpart:domain format to avoid feeding malformed IDs to MatrixID.parse.
 _MATRIX_PILL_RE = re.compile(r"""href=["']https://matrix\.to/#/(@[^"':]+:[^"']+)["']""")
+
+_AgentResponseSkipReason = Literal[
+    "sender_not_allowed",
+    "agent_not_available",
+    "other_explicit_mention",
+    "multiple_non_agent_users_in_thread",
+    "multiple_agents_in_thread",
+    "different_agent_in_thread",
+    "not_single_responder",
+]
+
+
+@dataclass(frozen=True)
+class AgentResponseDecision:
+    """Individual response decision plus the policy branch that produced a skip."""
+
+    should_respond: bool
+    skip_reason: _AgentResponseSkipReason | None = None
+    sender_visible_thread_agents: tuple[MatrixID, ...] = ()
 
 
 def _extract_mentioned_user_ids(
@@ -100,18 +120,6 @@ def check_agent_mentioned(
     return mentioned_agents, am_i_mentioned, has_non_agent_mentions
 
 
-def create_session_id(room_id: str, thread_id: str | None) -> str:
-    """Create a session ID with thread awareness."""
-    # Thread sessions include thread ID
-    return f"{room_id}:{thread_id}" if thread_id else room_id
-
-
-def parse_session_id(session_id: str) -> tuple[str, str | None]:
-    """Parse the canonical persisted room/thread session ID."""
-    room_id, marker, thread_suffix = session_id.rpartition(":$")
-    return (room_id, f"${thread_suffix}") if marker else (session_id, None)
-
-
 def get_agents_in_thread(
     thread_history: Sequence[ResolvedVisibleMessage],
     config: Config,
@@ -184,21 +192,41 @@ def thread_requires_explicit_agent_targeting(
     sender_id: str,
     config: Config,
     runtime_paths: RuntimePaths,
-    available_agents_in_room: Sequence[MatrixID] | None = None,
+    available_responders_in_room: Sequence[MatrixID] | None = None,
 ) -> bool:
     """Return whether a thread already has visible ownership or multiple human participants."""
-    sender_visible_agents = authorization.filter_responders_by_sender_permissions(
+    sender_visible_responders = filter_thread_agents_for_sender(
         get_agents_in_thread(thread_history, config, runtime_paths),
         sender_id,
         config,
         runtime_paths,
+        available_responders_in_room=available_responders_in_room,
     )
-    if available_agents_in_room is not None:
-        available_agent_ids = {agent.full_id for agent in available_agents_in_room}
-        sender_visible_agents = [agent for agent in sender_visible_agents if agent.full_id in available_agent_ids]
-    if sender_visible_agents:
+    if sender_visible_responders:
         return True
     return has_multiple_non_agent_users_in_thread(thread_history, config, runtime_paths)
+
+
+def filter_thread_agents_for_sender(
+    agents_in_thread: Sequence[MatrixID],
+    sender_id: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    *,
+    available_responders_in_room: Sequence[MatrixID] | None = None,
+) -> list[MatrixID]:
+    """Return participating agents that may reply within the sender and room responder boundary."""
+    sender_visible_agents = authorization.filter_responders_by_sender_permissions(
+        agents_in_thread,
+        sender_id,
+        config,
+        runtime_paths,
+    )
+    if available_responders_in_room is None:
+        return sender_visible_agents
+
+    available_responder_ids = {responder.full_id for responder in available_responders_in_room}
+    return [agent for agent in sender_visible_agents if agent.full_id in available_responder_ids]
 
 
 def get_all_mentioned_agents_in_thread(
@@ -226,7 +254,51 @@ def get_all_mentioned_agents_in_thread(
     return mentioned_agents
 
 
-def should_agent_respond(  # noqa: PLR0911
+def _decide_thread_agent_response(
+    *,
+    agent_matrix_id: MatrixID,
+    sender_id: str,
+    thread_history: Sequence[ResolvedVisibleMessage],
+    config: Config,
+    runtime_paths: RuntimePaths,
+    available_responders: Sequence[MatrixID],
+    agents_in_thread: Sequence[MatrixID] | None,
+) -> AgentResponseDecision:
+    """Decide unmentioned thread continuation for an available agent."""
+    if has_multiple_non_agent_users_in_thread(thread_history, config, runtime_paths):
+        return AgentResponseDecision(False, "multiple_non_agent_users_in_thread")
+
+    thread_agents = agents_in_thread
+    if thread_agents is None:
+        thread_agents = get_agents_in_thread(thread_history, config, runtime_paths)
+    sender_visible_thread_agents = filter_thread_agents_for_sender(
+        thread_agents,
+        sender_id,
+        config,
+        runtime_paths,
+        available_responders_in_room=available_responders,
+    )
+    if sender_visible_thread_agents:
+        if len(sender_visible_thread_agents) == 1 and sender_visible_thread_agents[0] == agent_matrix_id:
+            return AgentResponseDecision(True, sender_visible_thread_agents=tuple(sender_visible_thread_agents))
+        reason: _AgentResponseSkipReason = (
+            "multiple_agents_in_thread" if len(sender_visible_thread_agents) > 1 else "different_agent_in_thread"
+        )
+        return AgentResponseDecision(
+            False,
+            reason,
+            tuple(sender_visible_thread_agents),
+        )
+
+    # No agents in thread yet: respond if we're the only visible responder.
+    should_respond = len(available_responders) == 1 and available_responders[0] == agent_matrix_id
+    return AgentResponseDecision(
+        should_respond,
+        None if should_respond else "not_single_responder",
+    )
+
+
+def decide_agent_response(
     agent_name: str,
     am_i_mentioned: bool,
     is_thread: bool,
@@ -238,9 +310,10 @@ def should_agent_respond(  # noqa: PLR0911
     has_non_agent_mentions: bool = False,
     *,
     sender_id: str,
-    available_agents_in_room: list[MatrixID] | None = None,
-) -> bool:
-    """Determine if an agent should respond to a message individually.
+    available_responders_in_room: list[MatrixID] | None = None,
+    agents_in_thread: Sequence[MatrixID] | None = None,
+) -> AgentResponseDecision:
+    """Decide if an agent should respond to a message individually.
 
     Team formation is handled elsewhere - this just determines individual responses.
 
@@ -255,53 +328,48 @@ def should_agent_respond(  # noqa: PLR0911
         mentioned_agents: List of all agent MatrixIDs mentioned in the message
         has_non_agent_mentions: True when the message explicitly tags a non-agent user
         sender_id: Sender Matrix ID used for per-agent reply permissions
-        available_agents_in_room: Optional precomputed sender-visible agents for the room
+        available_responders_in_room: Optional precomputed sender-visible responders for the room
+        agents_in_thread: Optional precomputed agents that have participated in the thread
 
     """
     if not authorization.is_sender_allowed_for_agent_reply(sender_id, agent_name, config, runtime_paths):
-        return False
+        return AgentResponseDecision(False, "sender_not_allowed")
 
-    available_agents = available_agents_in_room
-    if available_agents is None:
-        available_agents = authorization.responder_candidate_entities_from_cached_room(
+    available_responders = available_responders_in_room
+    if available_responders is None:
+        available_responders = authorization.responder_candidate_entities_from_cached_room(
             room,
             sender_id,
             config,
             runtime_paths,
         )
     agent_matrix_id = entity_identity_registry(config, runtime_paths).current_id(agent_name)
-    available_agent_ids = {agent.full_id for agent in available_agents}
-    if agent_matrix_id.full_id not in available_agent_ids:
-        return False
+    available_responder_ids = {responder.full_id for responder in available_responders}
+    if agent_matrix_id.full_id not in available_responder_ids:
+        return AgentResponseDecision(False, "agent_not_available")
 
     # Always respond if mentioned
     if am_i_mentioned:
-        return True
+        return AgentResponseDecision(True)
 
     # Never respond if anyone else is explicitly mentioned (agent or not)
     if mentioned_agents or has_non_agent_mentions:
-        return False
+        return AgentResponseDecision(False, "other_explicit_mention")
 
-    # Non-thread messages: auto-respond if we're the only visible agent in the room.
+    # Non-thread messages: auto-respond if we're the only visible responder in the room.
     if not is_thread:
-        return len(available_agents) == 1 and available_agents[0] == agent_matrix_id
+        should_respond = len(available_responders) == 1 and available_responders[0] == agent_matrix_id
+        return AgentResponseDecision(
+            should_respond,
+            None if should_respond else "not_single_responder",
+        )
 
-    # In threads with multiple human participants, always require explicit mention.
-    if has_multiple_non_agent_users_in_thread(thread_history, config, runtime_paths):
-        return False
-
-    # For threads, continue only if we're the single participating agent
-    # that may reply to this sender within this room's responder boundary.
-    agents_in_thread = get_agents_in_thread(thread_history, config, runtime_paths)
-    agents_in_thread = authorization.filter_responders_by_sender_permissions(
-        agents_in_thread,
-        sender_id,
-        config,
-        runtime_paths,
+    return _decide_thread_agent_response(
+        agent_matrix_id=agent_matrix_id,
+        sender_id=sender_id,
+        thread_history=thread_history,
+        config=config,
+        runtime_paths=runtime_paths,
+        available_responders=available_responders,
+        agents_in_thread=agents_in_thread,
     )
-    agents_in_thread = [agent for agent in agents_in_thread if agent.full_id in available_agent_ids]
-    if agents_in_thread:
-        return len(agents_in_thread) == 1 and agents_in_thread[0] == agent_matrix_id
-
-    # No agents in thread yet — respond if we're the only visible agent.
-    return len(available_agents) == 1 and available_agents[0] == agent_matrix_id

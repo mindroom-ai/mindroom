@@ -106,6 +106,7 @@ class ThreadSummaryTools(Toolkit):
                 normalized_thread_id,
                 summary,
                 config=context.config,
+                runtime_paths=context.runtime_paths,
                 conversation_cache=conversation_cache,
             )
         except ThreadSummaryWriteError as exc:

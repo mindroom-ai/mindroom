@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from mindroom.authorization import is_authorized_sender
+from mindroom.matrix.state import resolve_room_id
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -34,13 +35,11 @@ def room_access_allowed(context: ToolRuntimeContext, room_id: str) -> bool:
         return False
     if room_id == context.room_id:
         return True
-    room_alias = room_id if room_id.startswith("#") else None
     return is_authorized_sender(
         context.requester_id,
         context.config,
         room_id,
         context.runtime_paths,
-        room_alias=room_alias,
     )
 
 
@@ -56,7 +55,20 @@ def resolve_requested_room_id(
     normalized_room_id = room_id.strip()
     if not normalized_room_id:
         return None, "room_id must be a non-empty string."
-    return normalized_room_id, None
+    return resolve_room_id(normalized_room_id, context.runtime_paths), None
+
+
+def resolve_optional_room_id(
+    context: ToolRuntimeContext,
+    room_id: str | None,
+) -> str:
+    """Resolve an optional room target, defaulting to the active room."""
+    if room_id is None:
+        return context.room_id
+    normalized_room_id = room_id.strip()
+    if not normalized_room_id:
+        return context.room_id
+    return resolve_room_id(normalized_room_id, context.runtime_paths)
 
 
 def resolve_context_thread_id(

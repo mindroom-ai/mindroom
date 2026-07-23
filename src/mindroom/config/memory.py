@@ -4,11 +4,59 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from mindroom.config.models import EmbedderConfig
+from mindroom.path_globs import validate_safe_relative_pattern
 
 MemoryBackend = Literal["mem0", "file", "none"]
+_MemorySearchMode = Literal["keyword", "semantic"]
+
+
+def _validate_memory_search_includes(value: list[str]) -> list[str]:
+    """Validate include patterns stay inside the memory root."""
+    normalized = [validate_safe_relative_pattern(pattern, field_name="memory.search.include") for pattern in value]
+    if not normalized:
+        msg = "memory.search.include must contain at least one pattern"
+        raise ValueError(msg)
+    return normalized
+
+
+class MemorySearchConfig(BaseModel):
+    """Search behavior for file-backed memory."""
+
+    mode: _MemorySearchMode = Field(
+        default="keyword",
+        description="Search mode for file-backed memory: keyword or semantic",
+    )
+    include: list[str] = Field(
+        default_factory=lambda: ["memory/**/*.md"],
+        description="Root-relative glob patterns included in file-memory semantic search",
+    )
+    include_entrypoint: bool = Field(
+        default=False,
+        description="When true, include MEMORY.md in file-memory semantic search",
+    )
+
+    @field_validator("include")
+    @classmethod
+    def validate_include_patterns(cls, value: list[str]) -> list[str]:
+        """Validate include patterns stay inside the memory root."""
+        return _validate_memory_search_includes(value)
+
+
+class AgentMemorySearchConfig(BaseModel):
+    """Optional per-agent override for file-backed memory search."""
+
+    mode: _MemorySearchMode | None = Field(default=None, description="Per-agent memory search mode override")
+    include: list[str] | None = Field(default=None, description="Per-agent included memory-search glob patterns")
+    include_entrypoint: bool | None = Field(default=None, description="Per-agent MEMORY.md indexing override")
+
+    @field_validator("include")
+    @classmethod
+    def validate_include_patterns(cls, value: list[str] | None) -> list[str] | None:
+        """Validate include patterns stay inside the memory root."""
+        return None if value is None else _validate_memory_search_includes(value)
 
 
 class _MemoryEmbedderConfig(BaseModel):
@@ -182,6 +230,10 @@ class MemoryConfig(BaseModel):
     )
     llm: _MemoryLLMConfig | None = Field(default=None, description="LLM configuration for memory")
     file: _MemoryFileConfig = Field(default_factory=_MemoryFileConfig, description="File-backed memory configuration")
+    search: MemorySearchConfig = Field(
+        default_factory=MemorySearchConfig,
+        description="Search behavior for file-backed memory",
+    )
     auto_flush: MemoryAutoFlushConfig = Field(
         default_factory=MemoryAutoFlushConfig,
         description="Background auto-flush behavior for file-backed memory",

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import fcntl
 import json
 import os
 import secrets
@@ -13,6 +12,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
 
+from mindroom.file_locks import advisory_file_lock
 from mindroom.logging_config import get_logger
 from mindroom.oauth.providers import OAuthProviderError
 
@@ -43,19 +43,12 @@ def _locked_state_store(
     now: float,
     save_on_exit: bool = True,
 ) -> Iterator[dict[str, dict[str, Any]]]:
-    with _oauth_state_lock:
-        lock_path = _state_lock_file(runtime_paths)
-        lock_path.parent.mkdir(parents=True, exist_ok=True)
-        with lock_path.open("a+", encoding="utf-8") as lock_file:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-            try:
-                states, load_failed = _load_state_store(runtime_paths, now=now)
-                initial_states = dict(states)
-                yield states
-                if save_on_exit and (not load_failed or states != initial_states):
-                    _save_state_store(runtime_paths, states)
-            finally:
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+    with _oauth_state_lock, advisory_file_lock(_state_lock_file(runtime_paths)):
+        states, load_failed = _load_state_store(runtime_paths, now=now)
+        initial_states = dict(states)
+        yield states
+        if save_on_exit and (not load_failed or states != initial_states):
+            _save_state_store(runtime_paths, states)
 
 
 def _corrupt_state_file(path: Path) -> Path:

@@ -19,6 +19,7 @@ dependencies = [
   "prometheus-client>=0.22.1",
   "prometheus-fastapi-instrumentator>=7.1",
   "pydantic>=2.13.3",
+  "pyjwt[crypto]>=2.10",
   "python-dotenv>=1",
   "pyyaml>=6.0.2",
   "slowapi>=0.1.9",
@@ -52,11 +53,7 @@ extend-exclude = [ "tests/conftest.py" ]
 testpaths = [ "tests" ]
 python_files = "test_*.py"
 addopts = """
-    -vvv
-    --cov=backend
-    --cov-report term
-    --cov-report html
-    --cov-report xml
+    -q
     --asyncio-mode=strict
     --timeout 60
     --durations 20

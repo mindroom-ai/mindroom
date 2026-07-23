@@ -9,6 +9,7 @@ import nio
 import pytest
 
 from mindroom.config.agent import AgentConfig, TeamConfig
+from mindroom.config.calls import CallsConfig, RealtimeCallProfile
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import ROUTER_AGENT_NAME
@@ -72,13 +73,13 @@ class TestBuildAgentStatusMessage:
                     model="claude",
                 ),
             },
-            models={"claude": ModelConfig(provider="anthropic", id="claude-3-opus")},
+            models={"claude": ModelConfig(provider="anthropic", id="claude-opus-4-8")},
             defaults={"tools": []},
         )
 
         status = build_agent_status_message("researcher", config)
 
-        assert "🤖 Model: anthropic/claude-3-opus" in status
+        assert "🤖 Model: anthropic/claude-opus-4-8" in status
         assert "💼 Research specialist focused on finding information" in status
         assert "🔧 4 tools available" in status
 
@@ -101,6 +102,35 @@ class TestBuildAgentStatusMessage:
         assert "🤖 Model: ollama/llama3" in status
         assert "💼 General purpose assistant" in status
         assert "🔧" not in status  # No tools section
+
+    def test_only_runtime_ready_calls_agents_advertise_voice_calls(self) -> None:
+        """Presence gives clients an exact runtime-ready voice-call capability signal."""
+        config = Config(
+            agents={
+                "voice": AgentConfig(display_name="Voice"),
+                "text": AgentConfig(display_name="Text"),
+            },
+            calls=CallsConfig(
+                enabled=True,
+                profiles={
+                    "voice": RealtimeCallProfile(
+                        backend="realtime",
+                        model="gpt-realtime",
+                        credentials_service="openai",
+                        voice="marin",
+                    ),
+                },
+                agents={"voice": "voice"},
+            ),
+        )
+
+        assert "📞 Voice calls" in build_agent_status_message(
+            "voice",
+            config,
+            voice_calls_available=True,
+        ).split(" | ")
+        assert "📞 Voice calls" not in build_agent_status_message("voice", config).split(" | ")
+        assert "📞 Voice calls" not in build_agent_status_message("text", config).split(" | ")
 
     def test_team_agent_status(self) -> None:
         """Test building status message for team agent."""

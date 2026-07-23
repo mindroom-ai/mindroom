@@ -168,6 +168,13 @@ variable "openrouter_api_key" {
   default     = ""
 }
 
+variable "openrouter_provisioning_api_key" {
+  description = "OpenRouter management API key for provisioning per-customer included AI budget keys"
+  type        = string
+  sensitive   = true
+  default     = ""
+}
+
 variable "google_api_key" {
   description = "Google API key for MindRoom instances"
   type        = string

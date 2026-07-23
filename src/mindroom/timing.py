@@ -7,6 +7,7 @@ import functools
 import inspect
 import os
 import time
+from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, ParamSpec, TypeVar, cast
@@ -14,7 +15,7 @@ from typing import TYPE_CHECKING, Any, ParamSpec, TypeVar, cast
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+    from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping
 
     from structlog.stdlib import BoundLogger
 
@@ -37,14 +38,9 @@ def timing_enabled() -> bool:
     return _is_enabled()
 
 
-def milliseconds(seconds: float, *, ndigits: int = 1) -> float:
-    """Return seconds converted to milliseconds using the shared rounding policy."""
-    return round(seconds * 1000, ndigits)
-
-
 def elapsed_ms_between(start: float, end: float, *, ndigits: int = 1) -> float:
     """Return elapsed milliseconds rounded to the shared precision policy."""
-    return milliseconds(end - start, ndigits=ndigits)
+    return round((end - start) * 1000, ndigits)
 
 
 def elapsed_ms_since(
@@ -62,10 +58,9 @@ type _TimingMetadataValue = str | int | float | bool
 _PRIMARY_SEGMENTS: tuple[tuple[str, str, str], ...] = (
     ("seg_ingress_ms", "message_received", "gate_enter"),
     ("seg_coalescing_ms", "gate_enter", "gate_exit"),
-    ("seg_dispatch_ms", "gate_exit", "response_payload_ready"),
-    ("seg_response_queue_ms", "response_payload_ready", "lock_acquired"),
-    ("seg_thread_refresh_ms", "lock_acquired", "thread_refresh_ready"),
-    ("seg_first_visible_reply_ms", "thread_refresh_ready", "first_visible_reply"),
+    ("seg_dispatch_ms", "gate_exit", "lock_wait_start"),
+    ("seg_response_queue_ms", "lock_wait_start", "lock_acquired"),
+    ("seg_first_visible_reply_ms", "lock_acquired", "first_visible_reply"),
     ("seg_after_first_visible_ms", "first_visible_reply", "response_complete"),
 )
 
@@ -80,9 +75,11 @@ _DIAGNOSTIC_SPANS: tuple[tuple[str, str, str], ...] = (
     ("diag_dispatch_prepare_ms", "dispatch_prepare_start", "dispatch_prepare_ready"),
     ("diag_dispatch_plan_ms", "dispatch_plan_start", "dispatch_plan_ready"),
     ("diag_response_payload_setup_ms", "response_payload_start", "response_payload_ready"),
+    ("diag_thread_refresh_ms", "thread_refresh_start", "thread_refresh_ready"),
     ("diag_lock_wait_ms", "lock_wait_start", "lock_acquired"),
     ("diag_runtime_prepare_ms", "response_runtime_start", "response_runtime_ready"),
     ("diag_llm_prepare_ms", "ai_prepare_start", "history_ready"),
+    ("diag_prompt_branch_join_ms", "prompt_branches_start", "prompt_branches_ready"),
     ("diag_memory_prepare_ms", "memory_prepare_start", "memory_prepare_ready"),
     ("diag_agent_build_ms", "agent_build_start", "agent_build_ready"),
     ("diag_history_classify_ms", "history_classify_start", "history_classify_ready"),
@@ -218,6 +215,26 @@ def emit_elapsed_timing(label: str, start: float, **event_data: object) -> None:
         duration_ms=elapsed_ms_since(start),
         **event_data,
     )
+
+
+@contextmanager
+def timed_block(
+    label: str,
+    *,
+    scope: str | None = None,
+    **event_data: object,
+) -> Iterator[None]:
+    """Emit elapsed timing for a small inline block when timing diagnostics are enabled."""
+    if not _is_enabled():
+        yield
+        return
+    start = time.monotonic()
+    try:
+        yield
+    finally:
+        if scope is not None:
+            event_data["timing_scope"] = scope
+        emit_elapsed_timing(label, start, **event_data)
 
 
 def timed(label: str) -> Callable[[Callable[_P, _R]], Callable[_P, _R]]:

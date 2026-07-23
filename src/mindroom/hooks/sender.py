@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from mindroom.constants import HOOK_SOURCE_KEY, SOURCE_KIND_KEY
+from mindroom.dispatch_source import HOOK_DISPATCH_SOURCE_KIND, HOOK_SOURCE_KIND
 from mindroom.hooks.types import HookMessageSender  # noqa: TC001
 
 if TYPE_CHECKING:
@@ -19,25 +21,22 @@ async def _send_message_result(
     client: nio.AsyncClient,
     room_id: str,
     content: dict[str, Any],
-    *,
-    config: Config,
 ) -> DeliveredMatrixEvent | None:
     """Late-bind Matrix delivery to avoid the hooks facade import cycle."""
     # why-lazy: client_delivery imports config through Matrix formatting helpers during facade startup.
     from mindroom.matrix.client_delivery import send_message_result  # noqa: PLC0415
 
-    return await send_message_result(client, room_id, content, config=config)
+    return await send_message_result(client, room_id, content)
 
 
 async def send_and_track_message(
     client: nio.AsyncClient,
     room_id: str,
     content: dict[str, Any],
-    config: Config,
     conversation_cache: ConversationCacheProtocol,
 ) -> DeliveredMatrixEvent | None:
     """Send already-built Matrix content and record successful delivery in the cache."""
-    delivered = await _send_message_result(client, room_id, content, config=config)
+    delivered = await _send_message_result(client, room_id, content)
     if delivered is not None:
         conversation_cache.notify_outbound_message(room_id, delivered.event_id, delivered.content_sent)
     return delivered
@@ -61,8 +60,8 @@ async def send_hook_message(
     from mindroom.matrix.mentions import format_message_with_mentions  # noqa: PLC0415
 
     content_extra = dict(extra_content or {})
-    content_extra["com.mindroom.source_kind"] = "hook_dispatch" if trigger_dispatch else "hook"
-    content_extra["com.mindroom.hook_source"] = source_hook
+    content_extra[SOURCE_KIND_KEY] = HOOK_DISPATCH_SOURCE_KIND if trigger_dispatch else HOOK_SOURCE_KIND
+    content_extra[HOOK_SOURCE_KEY] = source_hook
 
     latest_thread_event_id = await conversation_cache.get_latest_thread_event_id_if_needed(
         room_id,
@@ -77,7 +76,7 @@ async def send_hook_message(
         latest_thread_event_id=latest_thread_event_id,
         extra_content=content_extra,
     )
-    delivered = await send_and_track_message(client, room_id, content, config, conversation_cache)
+    delivered = await send_and_track_message(client, room_id, content, conversation_cache)
     if delivered is not None:
         return delivered.event_id
     return None

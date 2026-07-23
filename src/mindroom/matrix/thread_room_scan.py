@@ -1,4 +1,13 @@
-"""Client-backed room-scan helpers for Matrix thread membership resolution."""
+"""Client-backed room-scan helpers for Matrix thread membership resolution.
+
+This module is the seam between pure resolution (``thread_membership``) and the homeserver transport
+(``client_thread_history``): it builds ``ThreadMembershipAccess`` adapters whose root proofs run real
+room scans.
+It exists as its own module because ``client_thread_history`` imports ``thread_membership`` (via
+``thread_projection`` and for ``ThreadRoomScanRootNotFoundError``), so ``thread_membership`` itself can
+never depend on the transport.
+Cache reads here are advisory accelerators only; the authoritative root proof is always the room scan.
+"""
 
 from __future__ import annotations
 
@@ -55,7 +64,7 @@ def _event_info_from_lookup_response(
     raise RuntimeError(msg)
 
 
-async def _lookup_thread_id_from_conversation_cache(
+async def lookup_thread_id_from_conversation_cache(
     conversation_cache: RoomScanConversationCache | None,
     room_id: str,
     event_id: str,
@@ -64,6 +73,22 @@ async def _lookup_thread_id_from_conversation_cache(
     if conversation_cache is None:
         return None
     return await conversation_cache.get_thread_id_for_event(room_id, event_id)
+
+
+async def fetch_event_info_for_client(
+    client: nio.AsyncClient,
+    room_id: str,
+    event_id: str,
+    *,
+    strict: bool,
+) -> EventInfo | None:
+    """Fetch one event directly from Matrix and parse its relation metadata."""
+    response = await client.room_get_event(room_id, event_id)
+    return _event_info_from_lookup_response(
+        response,
+        event_id=event_id,
+        strict=strict,
+    )
 
 
 async def fetch_event_info_from_conversation_cache(
@@ -91,7 +116,7 @@ def room_scan_membership_access_for_client(
     """Build client-backed membership access without widening the cache protocol."""
 
     async def lookup_thread_id(lookup_room_id: str, lookup_event_id: str) -> str | None:
-        return await _lookup_thread_id_from_conversation_cache(
+        return await lookup_thread_id_from_conversation_cache(
             conversation_cache,
             lookup_room_id,
             lookup_event_id,
@@ -122,6 +147,8 @@ def room_scan_membership_access_for_client(
 
 __all__ = [
     "RoomScanConversationCache",
+    "fetch_event_info_for_client",
     "fetch_event_info_from_conversation_cache",
+    "lookup_thread_id_from_conversation_cache",
     "room_scan_membership_access_for_client",
 ]

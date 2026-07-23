@@ -90,6 +90,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "requests"
@@ -111,6 +112,7 @@
       "icon": "SiDiscord",
       "icon_color": "text-indigo-500",
       "name": "discord",
+      "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -119,6 +121,7 @@
       "auth_provider": null,
       "category": "communication",
       "config_fields": null,
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "agno"
@@ -133,6 +136,7 @@
       "icon": "MessageSquare",
       "icon_color": "text-emerald-500",
       "name": "matrix_api",
+      "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
     },
@@ -141,6 +145,7 @@
       "auth_provider": null,
       "category": "communication",
       "config_fields": null,
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "agno"
@@ -155,6 +160,7 @@
       "icon": "MessageSquare",
       "icon_color": "text-green-500",
       "name": "matrix_message",
+      "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
     },
@@ -163,6 +169,7 @@
       "auth_provider": null,
       "category": "communication",
       "config_fields": null,
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "agno"
@@ -177,8 +184,94 @@
       "icon": "LayoutList",
       "icon_color": "text-blue-500",
       "name": "matrix_room",
+      "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
+    },
+    {
+      "agent_override_fields": null,
+      "auth_provider": null,
+      "category": "communication",
+      "config_fields": [
+        {
+          "authored_override": true,
+          "default": null,
+          "description": "When empty, OpenAI models use OPENAI_API_KEY and OpenRouter voice models use OPENROUTER_API_KEY.",
+          "label": "TTS API Key",
+          "name": "api_key",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "password",
+          "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": "gpt-4o-mini-tts",
+          "description": "Plain OpenAI model IDs use OpenAI; provider-prefixed IDs (e.g. hexgrad/kokoro-82m) route through OpenRouter.",
+          "label": "TTS Model",
+          "name": "model",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": null,
+          "description": "OpenAI-compatible speech endpoint (e.g. a local Kokoro server); leave empty to use OpenAI or OpenRouter based on the model ID.",
+          "label": "OpenAI-Compatible TTS Base URL",
+          "name": "base_url",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "url",
+          "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": "alloy",
+          "description": null,
+          "label": "Voice",
+          "name": "voice",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": "opus",
+          "description": "Audio format the TTS endpoint returns: aac, flac, mp3, opus, or wav. Non-opus formats require ffmpeg and ffprobe. OpenRouter voice models always use mp3.",
+          "label": "Audio Response Format",
+          "name": "response_format",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "text",
+          "validation": null
+        }
+      ],
+      "consumes_workspace_paths": false,
+      "default_execution_target": "primary",
+      "dependencies": [
+        "openai"
+      ],
+      "description": "Generate speech from text and send it as a Matrix voice message with room/thread context defaults",
+      "display_name": "Matrix Voice Message",
+      "docs_url": "https://github.com/mindroom-ai/mindroom",
+      "function_names": [
+        "matrix_voice_message"
+      ],
+      "helper_text": null,
+      "icon": "Mic",
+      "icon_color": "text-green-500",
+      "name": "matrix_voice_message",
+      "requires_room_context": true,
+      "setup_type": "api_key",
+      "status": "requires_config"
     },
     {
       "agent_override_fields": null,
@@ -219,6 +312,18 @@
           "placeholder": null,
           "required": false,
           "type": "text",
+          "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": false,
+          "description": null,
+          "label": "Save Downloads",
+          "name": "save_downloads",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
           "validation": null
         },
         {
@@ -299,6 +404,18 @@
           "description": null,
           "label": "Enable Search Messages",
           "name": "enable_search_messages",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": false,
+          "description": null,
+          "label": "Enable Search Workspace",
+          "name": "enable_search_workspace",
           "options": null,
           "placeholder": null,
           "required": false,
@@ -390,6 +507,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "slack-sdk"
@@ -407,6 +525,7 @@
         "list_channels",
         "list_users",
         "search_messages",
+        "search_workspace",
         "send_message",
         "send_message_thread",
         "upload_file"
@@ -415,6 +534,7 @@
       "icon": "SiSlack",
       "icon_color": "text-purple-600",
       "name": "slack",
+      "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -472,6 +592,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "httpx"
@@ -486,6 +607,7 @@
       "icon": "SiTelegram",
       "icon_color": "text-blue-500",
       "name": "telegram",
+      "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -494,6 +616,32 @@
       "auth_provider": null,
       "category": "communication",
       "config_fields": null,
+      "consumes_workspace_paths": false,
+      "default_execution_target": "primary",
+      "dependencies": [
+        "agno"
+      ],
+      "description": "Explicitly resolve or reopen the active Matrix thread",
+      "display_name": "Thread Resolution",
+      "docs_url": "https://github.com/mindroom-ai/mindroom",
+      "function_names": [
+        "reopen_thread",
+        "resolve_thread"
+      ],
+      "helper_text": null,
+      "icon": "CircleCheckBig",
+      "icon_color": "text-emerald-500",
+      "name": "thread_resolution",
+      "requires_room_context": true,
+      "setup_type": "none",
+      "status": "available"
+    },
+    {
+      "agent_override_fields": null,
+      "auth_provider": null,
+      "category": "communication",
+      "config_fields": null,
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "agno"
@@ -508,6 +656,7 @@
       "icon": "MessageCircleMore",
       "icon_color": "text-cyan-500",
       "name": "thread_summary",
+      "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
     },
@@ -516,6 +665,7 @@
       "auth_provider": null,
       "category": "communication",
       "config_fields": null,
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "agno"
@@ -532,6 +682,7 @@
       "icon": "Tags",
       "icon_color": "text-emerald-500",
       "name": "thread_tags",
+      "requires_room_context": true,
       "setup_type": "none",
       "status": "available"
     },
@@ -673,6 +824,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "twilio"
@@ -690,6 +842,7 @@
       "icon": "SiTwilio",
       "icon_color": "text-red-600",
       "name": "twilio",
+      "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -747,6 +900,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "webexpythonsdk"
@@ -762,6 +916,7 @@
       "icon": "SiWebex",
       "icon_color": "text-blue-600",
       "name": "webex",
+      "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -927,6 +1082,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "httpx"
@@ -948,6 +1104,7 @@
       "icon": "SiWhatsapp",
       "icon_color": "text-green-500",
       "name": "whatsapp",
+      "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -1005,6 +1162,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [],
       "description": "Apache Airflow DAG file management for workflow orchestration",
@@ -1018,6 +1176,7 @@
       "icon": "FaCog",
       "icon_color": "text-blue-600",
       "name": "airflow",
+      "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
     },
@@ -1051,6 +1210,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "apify-client"
@@ -1065,6 +1225,7 @@
       "icon": "FaCode",
       "icon_color": "text-blue-600",
       "name": "apify",
+      "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -1122,6 +1283,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "boto3"
@@ -1137,6 +1299,7 @@
       "icon": "FaAws",
       "icon_color": "text-orange-500",
       "name": "aws_lambda",
+      "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
     },
@@ -1230,6 +1393,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "requests"
@@ -1251,6 +1415,7 @@
       "icon": "SiBitbucket",
       "icon_color": "text-blue-600",
       "name": "bitbucket",
+      "requires_room_context": false,
       "setup_type": "special",
       "status": "requires_config"
     },
@@ -1368,6 +1533,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "requests",
@@ -1387,6 +1553,7 @@
       "icon": "FaCalendarAlt",
       "icon_color": "text-blue-600",
       "name": "cal_com",
+      "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -1395,6 +1562,7 @@
       "auth_provider": null,
       "category": "development",
       "config_fields": [],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "agno"
@@ -1416,6 +1584,7 @@
       "icon": "Calculator",
       "icon_color": "text-blue-500",
       "name": "calculator",
+      "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
     },
@@ -1509,6 +1678,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "cartesia"
@@ -1525,6 +1695,7 @@
       "icon": "VolumeX",
       "icon_color": "text-purple-500",
       "name": "cartesia",
+      "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -1714,6 +1885,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "claude-agent-sdk"
@@ -1732,6 +1904,7 @@
       "icon": "Bot",
       "icon_color": "text-orange-500",
       "name": "claude_agent",
+      "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -1765,6 +1938,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": true,
       "default_execution_target": "worker",
       "dependencies": [],
       "description": "Advanced code-oriented file operations (precise edits, grep, and discovery). Prefer this over file for coding agents; keep file for backward compatibility.",
@@ -1782,6 +1956,7 @@
       "icon": "Code",
       "icon_color": "text-purple-500",
       "name": "coding",
+      "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
     },
@@ -1790,17 +1965,19 @@
       "auth_provider": null,
       "category": "development",
       "config_fields": [],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "agno",
         "pydantic",
         "pyyaml"
       ],
-      "description": "Build and manage MindRoom agents with expert knowledge of the system",
+      "description": "Inspect and control the full MindRoom configuration, including agents, plugins, and authorization",
       "display_name": "Config Manager",
       "docs_url": "https://github.com/mindroom-ai/mindroom",
       "function_names": [
         "get_info",
+        "manage_config",
         "manage_agent",
         "manage_team"
       ],
@@ -1808,6 +1985,7 @@
       "icon": "Settings",
       "icon_color": "text-purple-500",
       "name": "config_manager",
+      "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
     },
@@ -1877,6 +2055,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "atlassian-python-api"
@@ -1896,6 +2075,7 @@
       "icon": "SiConfluence",
       "icon_color": "text-blue-600",
       "name": "confluence",
+      "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -2013,6 +2193,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "requests"
@@ -2027,6 +2208,7 @@
       "icon": "Globe",
       "icon_color": "text-blue-500",
       "name": "custom_api",
+      "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
     },
@@ -2132,6 +2314,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "openai"
@@ -2146,6 +2329,7 @@
       "icon": "FaImage",
       "icon_color": "text-green-600",
       "name": "dalle",
+      "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -2371,6 +2555,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "daytona"
@@ -2391,6 +2576,7 @@
       "icon": "FaTerminal",
       "icon_color": "text-blue-600",
       "name": "daytona",
+      "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -2460,6 +2646,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "requests"
@@ -2475,6 +2662,7 @@
       "icon": "FaMicrophone",
       "icon_color": "text-orange-600",
       "name": "desi_vocal",
+      "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -2482,8 +2670,22 @@
       "agent_override_fields": null,
       "auth_provider": null,
       "category": "development",
-      "config_fields": [],
-      "default_execution_target": "primary",
+      "config_fields": [
+        {
+          "authored_override": true,
+          "default": null,
+          "description": "Optional allowlist of Docker command functions to expose. Leave unset to expose all commands.",
+          "label": "Exposed Docker Commands",
+          "name": "include_tools",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "string[]",
+          "validation": null
+        }
+      ],
+      "consumes_workspace_paths": true,
+      "default_execution_target": "worker",
       "dependencies": [
         "docker"
       ],
@@ -2516,28 +2718,36 @@
         "stop_container",
         "tag_image"
       ],
-      "helper_text": null,
+      "helper_text": "Docker is privileged. Use a dedicated worker sandbox, or explicitly opt in to unsafe local execution before exposing host Docker access.",
       "icon": "SiDocker",
       "icon_color": "text-blue-500",
       "name": "docker",
-      "setup_type": "none",
-      "status": "available"
+      "requires_room_context": false,
+      "setup_type": "special",
+      "status": "requires_config"
     },
     {
       "agent_override_fields": null,
       "auth_provider": null,
       "category": "development",
       "config_fields": [],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [],
-      "description": "Load and unload allowed toolkits for the current session",
+      "description": "Load and unload deferred tools for the current session",
       "display_name": "Dynamic Tools",
       "docs_url": null,
-      "function_names": [],
+      "function_names": [
+        "list_tools",
+        "load_tool",
+        "unload_tool",
+        "tool_search"
+      ],
       "helper_text": null,
       "icon": "PackagePlus",
       "icon_color": "text-sky-500",
       "name": "dynamic_tools",
+      "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
     },
@@ -2583,6 +2793,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "e2b_code_interpreter"
@@ -2615,6 +2826,7 @@
       "icon": "Terminal",
       "icon_color": "text-blue-600",
       "name": "e2b",
+      "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -2732,6 +2944,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "elevenlabs"
@@ -2748,6 +2961,7 @@
       "icon": "SiElevenlabs",
       "icon_color": "text-orange-500",
       "name": "eleven_labs",
+      "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -2817,6 +3031,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "fal-client"
@@ -2833,6 +3048,7 @@
       "icon": "FaRobot",
       "icon_color": "text-purple-600",
       "name": "fal",
+      "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -2999,6 +3215,18 @@
         },
         {
           "authored_override": true,
+          "default": null,
+          "description": "Fnmatch-style path component patterns excluded from content search. Leave unset to use Agno defaults; set an empty list to disable exclusions.",
+          "label": "Search Content Exclude Patterns",
+          "name": "exclude_patterns",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "string[]",
+          "validation": null
+        },
+        {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "All",
@@ -3010,6 +3238,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": true,
       "default_execution_target": "worker",
       "dependencies": [
         "agno"
@@ -3032,6 +3261,7 @@
       "icon": "FaFolder",
       "icon_color": "text-yellow-500",
       "name": "file",
+      "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
     },
@@ -3092,8 +3322,44 @@
           "authored_override": true,
           "default": true,
           "description": null,
+          "label": "Enable DOCX Generation",
+          "name": "enable_docx_generation",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": true,
+          "description": null,
           "label": "Enable TXT Generation",
           "name": "enable_txt_generation",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": true,
+          "description": null,
+          "label": "Enable HTML Generation",
+          "name": "enable_html_generation",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": false,
+          "description": null,
+          "label": "Save Files",
+          "name": "save_files",
           "options": null,
           "placeholder": null,
           "required": false,
@@ -3113,15 +3379,19 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
+        "python-docx",
         "reportlab"
       ],
-      "description": "Generate JSON, CSV, PDF, and text files from data",
+      "description": "Generate JSON, CSV, PDF, DOCX, HTML, and text files from data",
       "display_name": "File Generation",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/file_generation",
       "function_names": [
         "generate_csv_file",
+        "generate_docx_file",
+        "generate_html_file",
         "generate_json_file",
         "generate_pdf_file",
         "generate_text_file"
@@ -3130,6 +3400,7 @@
       "icon": "FaFileExport",
       "icon_color": "text-green-600",
       "name": "file_generation",
+      "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
     },
@@ -3151,6 +3422,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "requests"
@@ -3178,6 +3450,7 @@
       "icon": "TrendingUp",
       "icon_color": "text-green-600",
       "name": "financial_datasets_api",
+      "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -3236,7 +3509,7 @@
         },
         {
           "authored_override": true,
-          "default": "imagen-3.0-generate-002",
+          "default": "imagen-4.0-generate-001",
           "description": null,
           "label": "Image Generation Model",
           "name": "image_generation_model",
@@ -3295,6 +3568,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "google-genai"
@@ -3310,6 +3584,7 @@
       "icon": "SiGooglegemini",
       "icon_color": "text-blue-500",
       "name": "gemini",
+      "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -3367,6 +3642,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "httpx"
@@ -3378,9 +3654,10 @@
         "search_gifs"
       ],
       "helper_text": null,
-      "icon": "GiGift",
+      "icon": "SiGiphy",
       "icon_color": "text-purple-500",
       "name": "giphy",
+      "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -3414,6 +3691,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "PyGithub"
@@ -3466,6 +3744,7 @@
       "icon": "SiGithub",
       "icon_color": "text-gray-800",
       "name": "github",
+      "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -3571,6 +3850,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "google-cloud-bigquery"
@@ -3587,6 +3867,7 @@
       "icon": "SiGooglebigquery",
       "icon_color": "text-blue-600",
       "name": "google_bigquery",
+      "requires_room_context": false,
       "setup_type": "special",
       "status": "requires_config"
     },
@@ -3704,6 +3985,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "googlemaps",
@@ -3726,6 +4008,7 @@
       "icon": "SiGooglemaps",
       "icon_color": "text-red-500",
       "name": "google_maps",
+      "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -3772,7 +4055,7 @@
         },
         {
           "authored_override": true,
-          "default": false,
+          "default": true,
           "description": "Allow creating new spreadsheets",
           "label": "Enable Create Operations",
           "name": "create",
@@ -3784,7 +4067,7 @@
         },
         {
           "authored_override": true,
-          "default": false,
+          "default": true,
           "description": "Allow updating existing spreadsheets",
           "label": "Enable Update Operations",
           "name": "update",
@@ -3795,6 +4078,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "google-api-python-client",
@@ -3813,6 +4097,7 @@
       "icon": "SiGooglesheets",
       "icon_color": "text-green-600",
       "name": "google_sheets",
+      "requires_room_context": false,
       "setup_type": "oauth",
       "status": "requires_config"
     },
@@ -3930,6 +4215,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "groq"
@@ -3946,6 +4232,7 @@
       "icon": "TbBrain",
       "icon_color": "text-orange-500",
       "name": "groq",
+      "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -4075,6 +4362,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "jira"
@@ -4093,6 +4381,7 @@
       "icon": "SiJira",
       "icon_color": "text-blue-600",
       "name": "jira",
+      "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -4114,6 +4403,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "requests"
@@ -4135,6 +4425,7 @@
       "icon": "SiLinear",
       "icon_color": "text-purple-600",
       "name": "linear",
+      "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -4228,6 +4519,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "lumaai"
@@ -4243,6 +4535,7 @@
       "icon": "FaVideo",
       "icon_color": "text-purple-600",
       "name": "lumalabs",
+      "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -4348,6 +4641,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "requests"
@@ -4362,6 +4656,7 @@
       "icon": "Video",
       "icon_color": "text-purple-600",
       "name": "modelslabs",
+      "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -4419,6 +4714,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "moviepy"
@@ -4438,6 +4734,7 @@
       "icon": "FaVideo",
       "icon_color": "text-purple-600",
       "name": "moviepy_video_tools",
+      "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
     },
@@ -4555,6 +4852,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "neo4j"
@@ -4572,6 +4870,7 @@
       "icon": "SiNeo4J",
       "icon_color": "text-blue-500",
       "name": "neo4j",
+      "requires_room_context": false,
       "setup_type": "special",
       "status": "requires_config"
     },
@@ -4642,7 +4941,7 @@
         },
         {
           "authored_override": true,
-          "default": "whisper-1",
+          "default": "gpt-4o-transcribe",
           "description": null,
           "label": "Transcription Model",
           "name": "transcription_model",
@@ -4666,7 +4965,7 @@
         },
         {
           "authored_override": true,
-          "default": "tts-1",
+          "default": "gpt-4o-mini-tts",
           "description": null,
           "label": "Text To Speech Model",
           "name": "text_to_speech_model",
@@ -4690,7 +4989,7 @@
         },
         {
           "authored_override": true,
-          "default": "dall-e-3",
+          "default": "gpt-image-2",
           "description": null,
           "label": "Image Model",
           "name": "image_model",
@@ -4737,6 +5036,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "openai"
@@ -4753,6 +5053,7 @@
       "icon": "SiOpenai",
       "icon_color": "text-green-600",
       "name": "openai",
+      "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -4761,6 +5062,7 @@
       "auth_provider": null,
       "category": "development",
       "config_fields": null,
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": null,
       "description": "Convenience bundle that implies shell, coding, browser, and other common tools",
@@ -4771,6 +5073,7 @@
       "icon": "Workflow",
       "icon_color": "text-orange-500",
       "name": "openclaw_compat",
+      "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
     },
@@ -4864,6 +5167,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "requests"
@@ -4881,6 +5185,7 @@
       "icon": "WiDaySunny",
       "icon_color": "text-orange-500",
       "name": "openweather",
+      "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -4974,6 +5279,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "psycopg"
@@ -4993,6 +5299,7 @@
       "icon": "SiPostgresql",
       "icon_color": "text-blue-700",
       "name": "postgres",
+      "requires_room_context": false,
       "setup_type": "special",
       "status": "requires_config"
     },
@@ -5050,6 +5357,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": true,
       "default_execution_target": "worker",
       "dependencies": [
         "agno"
@@ -5070,6 +5378,7 @@
       "icon": "SiPython",
       "icon_color": "text-blue-500",
       "name": "python",
+      "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
     },
@@ -5163,6 +5472,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [],
       "description": "Step-by-step reasoning scratchpad with think and analyze tools for structured problem solving",
@@ -5176,6 +5486,7 @@
       "icon": "FaBrain",
       "icon_color": "text-purple-500",
       "name": "reasoning",
+      "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
     },
@@ -5365,6 +5676,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "redshift-connector"
@@ -5381,9 +5693,10 @@
         "summarize_table"
       ],
       "helper_text": null,
-      "icon": "SiAmazonredshift",
+      "icon": "AwsRedshift",
       "icon_color": "text-red-600",
       "name": "redshift",
+      "requires_room_context": false,
       "setup_type": "special",
       "status": "requires_config"
     },
@@ -5441,6 +5754,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "replicate"
@@ -5455,6 +5769,7 @@
       "icon": "FaVideo",
       "icon_color": "text-purple-600",
       "name": "replicate",
+      "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -5463,16 +5778,21 @@
       "auth_provider": null,
       "category": "development",
       "config_fields": [],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [],
       "description": "Allow an agent to read and modify its own configuration",
       "display_name": "Self Config",
       "docs_url": null,
-      "function_names": [],
+      "function_names": [
+        "get_own_config",
+        "update_own_config"
+      ],
       "helper_text": null,
       "icon": "Settings",
       "icon_color": "text-indigo-500",
       "name": "self_config",
+      "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
     },
@@ -5567,6 +5887,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": true,
       "default_execution_target": "worker",
       "dependencies": [],
       "description": "Execute shell commands and scripts",
@@ -5581,6 +5902,7 @@
       "icon": "Terminal",
       "icon_color": "text-green-500",
       "name": "shell",
+      "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
     },
@@ -5614,6 +5936,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "agno"
@@ -5628,6 +5951,7 @@
       "icon": "Clock",
       "icon_color": "text-purple-500",
       "name": "sleep",
+      "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
     },
@@ -5636,6 +5960,7 @@
       "auth_provider": null,
       "category": "development",
       "config_fields": null,
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "agno"
@@ -5653,6 +5978,7 @@
       "icon": "Workflow",
       "icon_color": "text-teal-500",
       "name": "subagents",
+      "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
     },
@@ -5698,6 +6024,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "py-trello"
@@ -5718,6 +6045,7 @@
       "icon": "SiTrello",
       "icon_color": "text-blue-600",
       "name": "trello",
+      "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -5811,6 +6139,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "matplotlib"
@@ -5829,6 +6158,7 @@
       "icon": "FaChartBar",
       "icon_color": "text-indigo-500",
       "name": "visualization",
+      "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
     },
@@ -5862,6 +6192,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [],
       "description": "Open URLs in web browser tabs or windows",
@@ -5874,6 +6205,7 @@
       "icon": "FaGlobe",
       "icon_color": "text-blue-600",
       "name": "web_browser_tools",
+      "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
     },
@@ -5943,6 +6275,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "requests"
@@ -5957,6 +6290,7 @@
       "icon": "SiZendesk",
       "icon_color": "text-green-600",
       "name": "zendesk",
+      "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -6026,6 +6360,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "boto3"
@@ -6040,6 +6375,7 @@
       "icon": "FaAws",
       "icon_color": "text-orange-500",
       "name": "aws_ses",
+      "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -6121,6 +6457,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [],
       "description": "Send emails via SMTP (Gmail)",
@@ -6133,6 +6470,7 @@
       "icon": "Mail",
       "icon_color": "text-blue-600",
       "name": "email",
+      "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -6238,6 +6576,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "google-api-python-client",
@@ -6287,6 +6626,7 @@
       "icon": "SiGmail",
       "icon_color": "text-red-500",
       "name": "gmail",
+      "requires_room_context": false,
       "setup_type": "oauth",
       "status": "requires_config"
     },
@@ -6344,6 +6684,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "resend"
@@ -6358,6 +6699,7 @@
       "icon": "Mail",
       "icon_color": "text-blue-600",
       "name": "resend",
+      "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -6403,6 +6745,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "httpx"
@@ -6434,6 +6777,7 @@
       "icon": "SiSpotify",
       "icon_color": "text-green-500",
       "name": "spotify",
+      "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -6515,6 +6859,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "youtube_transcript_api"
@@ -6532,7 +6877,163 @@
       "icon": "SiYoutube",
       "icon_color": "text-red-600",
       "name": "youtube",
+      "requires_room_context": false,
       "setup_type": "none",
+      "status": "available"
+    },
+    {
+      "agent_override_fields": null,
+      "auth_provider": null,
+      "category": "information",
+      "config_fields": null,
+      "consumes_workspace_paths": false,
+      "default_execution_target": "primary",
+      "dependencies": [
+        "agno"
+      ],
+      "description": "Add daily-cached installed and latest MindRoom release information to the agent system prompt",
+      "display_name": "MindRoom Update Awareness",
+      "docs_url": "https://docs.mindroom.chat/tools/#mindroom-update-awareness",
+      "function_names": [
+        "get_mindroom_update_status"
+      ],
+      "helper_text": null,
+      "icon": "RefreshCw",
+      "icon_color": "text-cyan-500",
+      "name": "update_awareness",
+      "requires_room_context": false,
+      "setup_type": "none",
+      "status": "available"
+    },
+    {
+      "agent_override_fields": null,
+      "auth_provider": null,
+      "category": "integrations",
+      "config_fields": [
+        {
+          "authored_override": true,
+          "default": null,
+          "description": "Base URL of the Agent Vault server API.",
+          "label": "Agent Vault API URL",
+          "name": "MINDROOM_AGENT_VAULT_ACCESS_API_URL",
+          "options": null,
+          "placeholder": "http://agent-vault:14321",
+          "required": true,
+          "type": "url",
+          "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": null,
+          "description": "Instance-owner session or agent token used to create vaults, join them as vault-admin (the /join step is owner-only), and grant vault admin access. Provide this or the admin token file.",
+          "label": "Agent Vault Admin Token",
+          "name": "MINDROOM_AGENT_VAULT_ACCESS_ADMIN_TOKEN",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "password",
+          "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": null,
+          "description": "Path to a file holding the admin token, re-read on every call so an in-place Secret rotation takes effect without a restart. Takes precedence over the inline token.",
+          "label": "Agent Vault Admin Token File",
+          "name": "MINDROOM_AGENT_VAULT_ACCESS_ADMIN_TOKEN_FILE",
+          "options": null,
+          "placeholder": "/etc/agent-vault-access/token",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": null,
+          "description": "Public base URL of the gated Agent Vault UI.",
+          "label": "Agent Vault UI Base URL",
+          "name": "MINDROOM_AGENT_VAULT_ACCESS_UI_BASE_URL",
+          "options": null,
+          "placeholder": "https://example.com/agent-vault",
+          "required": true,
+          "type": "url",
+          "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": null,
+          "description": "Domain used to map a requester's Matrix localpart to their Agent Vault account email.",
+          "label": "Account Email Domain",
+          "name": "MINDROOM_AGENT_VAULT_ACCESS_EMAIL_DOMAIN",
+          "options": null,
+          "placeholder": "example.com",
+          "required": true,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": "agent-vault",
+          "description": "Prefix used to derive the per-worker vault name; must match workers.kubernetes.agentVault.vaultNamePrefix.",
+          "label": "Vault Name Prefix",
+          "name": "MINDROOM_AGENT_VAULT_ACCESS_VAULT_NAME_PREFIX",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": null,
+          "description": "Agent Vault owner account used by Kubernetes worker init when minting proxy tokens. When set, self-service grants keep this account admin on the worker vault too.",
+          "label": "Agent Vault Owner Email",
+          "name": "MINDROOM_AGENT_VAULT_ACCESS_OWNER_EMAIL",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "text",
+          "validation": null
+        }
+      ],
+      "consumes_workspace_paths": false,
+      "default_execution_target": "primary",
+      "dependencies": [
+        "httpx"
+      ],
+      "description": "Grant yourself UI access to manage this agent's Agent Vault secrets",
+      "display_name": "Agent Vault Access",
+      "docs_url": null,
+      "function_names": [
+        "request_vault_access"
+      ],
+      "helper_text": null,
+      "icon": "Lock",
+      "icon_color": "text-amber-600",
+      "name": "agent_vault_access",
+      "requires_room_context": false,
+      "setup_type": "special",
+      "status": "requires_config"
+    },
+    {
+      "agent_override_fields": null,
+      "auth_provider": null,
+      "category": "integrations",
+      "config_fields": null,
+      "consumes_workspace_paths": false,
+      "default_execution_target": "primary",
+      "dependencies": null,
+      "description": "Request human-approved temporary worker access to blocked external hostnames",
+      "display_name": "Approved Worker Egress",
+      "docs_url": null,
+      "function_names": [
+        "request_network_access"
+      ],
+      "helper_text": null,
+      "icon": "FiShield",
+      "icon_color": "text-emerald-600",
+      "name": "approved_egress",
+      "requires_room_context": false,
+      "setup_type": "special",
       "status": "available"
     },
     {
@@ -6733,6 +7234,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "composio-agno"
@@ -6776,6 +7278,7 @@
       "icon": "FaConnectdevelop",
       "icon_color": "text-blue-600",
       "name": "composio",
+      "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -6833,6 +7336,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "httpx"
@@ -6860,6 +7364,7 @@
       "icon": "SiShopify",
       "icon_color": "text-green-600",
       "name": "shopify",
+      "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -6868,6 +7373,7 @@
       "auth_provider": null,
       "category": "productivity",
       "config_fields": [],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [],
       "description": "List and register context-scoped file attachments",
@@ -6882,6 +7388,31 @@
       "icon": "Paperclip",
       "icon_color": "text-teal-500",
       "name": "attachments",
+      "requires_room_context": false,
+      "setup_type": "none",
+      "status": "available"
+    },
+    {
+      "agent_override_fields": null,
+      "auth_provider": null,
+      "category": "productivity",
+      "config_fields": null,
+      "consumes_workspace_paths": false,
+      "default_execution_target": "primary",
+      "dependencies": [
+        "agno"
+      ],
+      "description": "Create a single-use script that wakes this agent when background work finishes",
+      "display_name": "Callback Manager",
+      "docs_url": "https://docs.mindroom.chat/agent-callbacks/",
+      "function_names": [
+        "mint_callback"
+      ],
+      "helper_text": null,
+      "icon": "Webhook",
+      "icon_color": "text-amber-500",
+      "name": "callback_manager",
+      "requires_room_context": true,
       "setup_type": "none",
       "status": "available"
     },
@@ -6915,6 +7446,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "requests"
@@ -6935,6 +7467,7 @@
       "icon": "SiClickup",
       "icon_color": "text-purple-600",
       "name": "clickup",
+      "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -6943,16 +7476,20 @@
       "auth_provider": null,
       "category": "productivity",
       "config_fields": [],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [],
       "description": "Request context compaction before the next reply in this conversation scope",
       "display_name": "Context Compaction",
       "docs_url": null,
-      "function_names": [],
+      "function_names": [
+        "compact_context"
+      ],
       "helper_text": null,
       "icon": "Minimize2",
       "icon_color": "text-amber-500",
       "name": "compact_context",
+      "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
     },
@@ -7070,6 +7607,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "duckdb"
@@ -7087,6 +7625,7 @@
       "icon": "FaFileCsv",
       "icon_color": "text-green-600",
       "name": "csv",
+      "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
     },
@@ -7095,18 +7634,57 @@
       "auth_provider": null,
       "category": "productivity",
       "config_fields": [],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [],
       "description": "Delegate tasks to other configured agents",
       "display_name": "Agent Delegation",
       "docs_url": null,
-      "function_names": [],
+      "function_names": [
+        "delegate_task"
+      ],
       "helper_text": null,
       "icon": "Users",
       "icon_color": "text-blue-500",
       "name": "delegate",
+      "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
+    },
+    {
+      "agent_override_fields": null,
+      "auth_provider": null,
+      "category": "productivity",
+      "config_fields": [
+        {
+          "authored_override": true,
+          "default": 30,
+          "description": "Short-lived command and response timeout, from 1 to 120 seconds.",
+          "label": "Command Timeout Seconds",
+          "name": "timeout_seconds",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "number",
+          "validation": null
+        }
+      ],
+      "consumes_workspace_paths": false,
+      "default_execution_target": "primary",
+      "dependencies": null,
+      "description": "Operate exact locally allowlisted applications through accessibility state over Matrix encryption",
+      "display_name": "Matrix Desktop",
+      "docs_url": "https://docs.mindroom.chat/tools/desktop/",
+      "function_names": [
+        "desktop"
+      ],
+      "helper_text": "Ask the requester to send `!desktop setup` in a private Matrix room containing only them and one Desktop-enabled agent, plus the router when it serves the command.",
+      "icon": "MonitorUp",
+      "icon_color": "text-cyan-500",
+      "name": "desktop",
+      "requires_room_context": true,
+      "setup_type": "special",
+      "status": "requires_config"
     },
     {
       "agent_override_fields": null,
@@ -7174,6 +7752,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "duckdb"
@@ -7201,6 +7780,76 @@
       "icon": "Database",
       "icon_color": "text-yellow-600",
       "name": "duckdb",
+      "requires_room_context": false,
+      "setup_type": "none",
+      "status": "available"
+    },
+    {
+      "agent_override_fields": null,
+      "auth_provider": null,
+      "category": "productivity",
+      "config_fields": [
+        {
+          "authored_override": true,
+          "default": null,
+          "description": "Tool names workflow participants may call without per-call user approval. Use \"*\" to pre-approve every granted tool. System-mutating tools (claude_agent, config_manager, scheduler, subagents) always require per-call approval and cannot be pre-approved.",
+          "label": "Pre-approved participant tools",
+          "name": "allowed_tools",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "string[]",
+          "validation": null
+        }
+      ],
+      "consumes_workspace_paths": false,
+      "default_execution_target": "primary",
+      "dependencies": [],
+      "description": "Create, update, run, and inspect reusable multi-agent Dynamic Workflows",
+      "display_name": "Dynamic Workflows",
+      "docs_url": null,
+      "function_names": [
+        "create_workflow",
+        "validate_workflow",
+        "update_workflow",
+        "run_workflow",
+        "get_workflow_run",
+        "list_workflows",
+        "list_workflow_revisions"
+      ],
+      "helper_text": null,
+      "icon": "Workflow",
+      "icon_color": "text-violet-500",
+      "name": "dynamic_workflow",
+      "requires_room_context": false,
+      "setup_type": "none",
+      "status": "available"
+    },
+    {
+      "agent_override_fields": null,
+      "auth_provider": null,
+      "category": "productivity",
+      "config_fields": null,
+      "consumes_workspace_paths": false,
+      "default_execution_target": "primary",
+      "dependencies": [
+        "agno"
+      ],
+      "description": "Create and manage signed external trigger endpoints",
+      "display_name": "External Trigger Manager",
+      "docs_url": "https://github.com/mindroom-ai/mindroom",
+      "function_names": [
+        "create_trigger",
+        "list_triggers",
+        "disable_trigger",
+        "delete_trigger",
+        "rotate_trigger_key"
+      ],
+      "helper_text": null,
+      "icon": "Webhook",
+      "icon_color": "text-emerald-500",
+      "name": "external_trigger_manager",
+      "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
     },
@@ -7223,7 +7872,7 @@
         },
         {
           "authored_override": true,
-          "default": false,
+          "default": true,
           "description": "Allow the agent to create, update, and delete calendar events",
           "label": "Allow Updates",
           "name": "allow_update",
@@ -7234,6 +7883,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "google-api-python-client",
@@ -7264,6 +7914,74 @@
       "icon": "SiGooglecalendar",
       "icon_color": "text-blue-600",
       "name": "google_calendar",
+      "requires_room_context": false,
+      "setup_type": "oauth",
+      "status": "requires_config"
+    },
+    {
+      "agent_override_fields": null,
+      "auth_provider": "google_docs",
+      "category": "productivity",
+      "config_fields": [
+        {
+          "authored_override": true,
+          "default": true,
+          "description": "Allow creating Google Docs and adding initial text.",
+          "label": "Create Documents",
+          "name": "create_document",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": true,
+          "description": "Allow reading complete tab-aware document structure and content.",
+          "label": "Read Documents",
+          "name": "read_document",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": true,
+          "description": "Allow inserting and replacing text in Google Docs.",
+          "label": "Edit Documents",
+          "name": "edit_document",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        }
+      ],
+      "consumes_workspace_paths": false,
+      "default_execution_target": "primary",
+      "dependencies": [
+        "google-api-python-client",
+        "google-auth",
+        "google-auth-httplib2",
+        "google-auth-oauthlib"
+      ],
+      "description": "Create, read, and edit documents through the connected user's Google Docs",
+      "display_name": "Google Docs",
+      "docs_url": "https://developers.google.com/workspace/docs/api/reference/rest",
+      "function_names": [
+        "google_docs_create_document",
+        "google_docs_get_document",
+        "google_docs_insert_text",
+        "google_docs_replace_text"
+      ],
+      "helper_text": null,
+      "icon": "SiGoogledocs",
+      "icon_color": "text-blue-600",
+      "name": "google_docs",
+      "requires_room_context": false,
       "setup_type": "oauth",
       "status": "requires_config"
     },
@@ -7310,6 +8028,30 @@
         },
         {
           "authored_override": true,
+          "default": false,
+          "description": "Allow downloading or exporting Google Drive files.",
+          "label": "Download Files",
+          "name": "download_file",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": true,
+          "description": "Allow uploading, creating folders, moving or renaming files, and trashing files.",
+          "label": "Allow Write Operations",
+          "name": "write",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "authored_override": true,
           "default": 10485760,
           "description": "Maximum non-Google-Workspace file size to read in bytes.",
           "label": "Max Read Size",
@@ -7321,6 +8063,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": true,
       "default_execution_target": "primary",
       "dependencies": [
         "google-api-python-client",
@@ -7328,18 +8071,24 @@
         "google-auth-httplib2",
         "google-auth-oauthlib"
       ],
-      "description": "Search and read files from the connected user's Google Drive",
+      "description": "Search, read, upload, and organize files in the connected user's Google Drive",
       "display_name": "Google Drive",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/google_drive",
       "function_names": [
         "google_drive_list_files",
         "google_drive_search_files",
-        "google_drive_read_file"
+        "google_drive_read_file",
+        "google_drive_download_file",
+        "google_drive_upload_file",
+        "google_drive_create_folder",
+        "google_drive_move_file",
+        "google_drive_trash_file"
       ],
       "helper_text": null,
       "icon": "SiGoogledrive",
       "icon_color": "text-green-600",
       "name": "google_drive",
+      "requires_room_context": false,
       "setup_type": "oauth",
       "status": "requires_config"
     },
@@ -7481,6 +8230,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "mem0ai"
@@ -7498,6 +8248,7 @@
       "icon": "Brain",
       "icon_color": "text-purple-600",
       "name": "mem0",
+      "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -7506,16 +8257,25 @@
       "auth_provider": null,
       "category": "productivity",
       "config_fields": [],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [],
       "description": "Explicitly store and search agent memories on demand",
       "display_name": "Agent Memory",
       "docs_url": null,
-      "function_names": [],
+      "function_names": [
+        "add_memory",
+        "delete_memory",
+        "get_memory",
+        "list_memories",
+        "search_memories",
+        "update_memory"
+      ],
       "helper_text": null,
       "icon": "Brain",
       "icon_color": "text-violet-500",
       "name": "memory",
+      "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
     },
@@ -7597,6 +8357,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "notion-client"
@@ -7613,6 +8374,7 @@
       "icon": "SiNotion",
       "icon_color": "text-gray-800",
       "name": "notion",
+      "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -7730,6 +8492,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "openbb"
@@ -7748,6 +8511,7 @@
       "icon": "FaChartArea",
       "icon_color": "text-blue-500",
       "name": "openbb",
+      "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
     },
@@ -7793,6 +8557,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "pandas"
@@ -7808,6 +8573,30 @@
       "icon": "Database",
       "icon_color": "text-blue-600",
       "name": "pandas",
+      "requires_room_context": false,
+      "setup_type": "none",
+      "status": "available"
+    },
+    {
+      "agent_override_fields": null,
+      "auth_provider": null,
+      "category": "productivity",
+      "config_fields": [],
+      "consumes_workspace_paths": true,
+      "default_execution_target": "primary",
+      "dependencies": [],
+      "description": "Publish authorized report artifacts through revocable public links",
+      "display_name": "Report Publishing",
+      "docs_url": null,
+      "function_names": [
+        "publish_report",
+        "revoke_public_report"
+      ],
+      "helper_text": null,
+      "icon": "Share2",
+      "icon_color": "text-emerald-500",
+      "name": "report_publishing",
+      "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
     },
@@ -7816,6 +8605,7 @@
       "auth_provider": null,
       "category": "productivity",
       "config_fields": null,
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "agno"
@@ -7833,6 +8623,7 @@
       "icon": "Calendar",
       "icon_color": "text-emerald-500",
       "name": "scheduler",
+      "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
     },
@@ -7998,6 +8789,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "sqlalchemy"
@@ -8015,8 +8807,62 @@
       "icon": "Database",
       "icon_color": "text-blue-600",
       "name": "sql",
+      "requires_room_context": false,
       "setup_type": "special",
       "status": "requires_config"
+    },
+    {
+      "agent_override_fields": null,
+      "auth_provider": null,
+      "category": "productivity",
+      "config_fields": null,
+      "consumes_workspace_paths": false,
+      "default_execution_target": "primary",
+      "dependencies": [
+        "agno"
+      ],
+      "description": "Switch which configured model the current Matrix thread uses",
+      "display_name": "Thread Model",
+      "docs_url": "https://github.com/mindroom-ai/mindroom",
+      "function_names": [
+        "get_thread_model",
+        "switch_thread_model",
+        "reset_thread_model"
+      ],
+      "helper_text": null,
+      "icon": "Cpu",
+      "icon_color": "text-purple-500",
+      "name": "thread_model",
+      "requires_room_context": false,
+      "setup_type": "none",
+      "status": "available"
+    },
+    {
+      "agent_override_fields": null,
+      "auth_provider": null,
+      "category": "productivity",
+      "config_fields": null,
+      "consumes_workspace_paths": false,
+      "default_execution_target": "primary",
+      "dependencies": null,
+      "description": "Create and manage per-thread work plans with dependencies",
+      "display_name": "Todo",
+      "docs_url": "https://github.com/mindroom-ai/mindroom",
+      "function_names": [
+        "add_todo",
+        "apply_template",
+        "list_templates",
+        "list_todos",
+        "plan",
+        "update_todo"
+      ],
+      "helper_text": null,
+      "icon": "ListTodo",
+      "icon_color": "text-blue-500",
+      "name": "todo",
+      "requires_room_context": true,
+      "setup_type": "none",
+      "status": "available"
     },
     {
       "agent_override_fields": null,
@@ -8036,6 +8882,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "todoist-api-python"
@@ -8056,6 +8903,7 @@
       "icon": "SiTodoist",
       "icon_color": "text-red-500",
       "name": "todoist",
+      "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -8185,6 +9033,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "yfinance"
@@ -8207,6 +9056,7 @@
       "icon": "FaChartLine",
       "icon_color": "text-purple-600",
       "name": "yfinance",
+      "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
     },
@@ -8336,6 +9186,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "zep-cloud"
@@ -8353,6 +9204,7 @@
       "icon": "Brain",
       "icon_color": "text-purple-600",
       "name": "zep",
+      "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -8422,6 +9274,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "agentql",
@@ -8438,6 +9291,7 @@
       "icon": "FaSpider",
       "icon_color": "text-purple-600",
       "name": "agentql",
+      "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -8495,6 +9349,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "arxiv",
@@ -8511,6 +9366,7 @@
       "icon": "SiArxiv",
       "icon_color": "text-red-600",
       "name": "arxiv",
+      "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
     },
@@ -8616,6 +9472,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "baidusearch",
@@ -8631,6 +9488,7 @@
       "icon": "Search",
       "icon_color": "text-blue-600",
       "name": "baidusearch",
+      "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
     },
@@ -8736,6 +9594,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "httpx"
@@ -8753,6 +9612,7 @@
       "icon": "FaPalette",
       "icon_color": "text-blue-500",
       "name": "brandfetch",
+      "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -8882,6 +9742,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "requests"
@@ -8899,6 +9760,7 @@
       "icon": "FaSpider",
       "icon_color": "text-blue-600",
       "name": "brightdata",
+      "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -8910,7 +9772,7 @@
         {
           "authored_override": true,
           "default": null,
-          "description": "Optional directory for browser screenshots, PDFs, and downloads. Defaults to the active storage path's browser/ directory.",
+          "description": "Optional host target directory for browser screenshots, PDFs, and downloads. Defaults to the active storage path's browser/ directory. The desktop target instead uses its local storage path's desktop-browser/ directory.",
           "label": "Output Directory",
           "name": "output_dir",
           "options": null,
@@ -8918,8 +9780,90 @@
           "required": false,
           "type": "text",
           "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": false,
+          "description": "Allow browser navigation and page subresources to reach trusted private, local, or loopback network addresses. Cloud metadata and link-local addresses stay blocked.",
+          "label": "Allow Private Networks",
+          "name": "allow_private_networks",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": "host",
+          "description": "Use host for MindRoom's managed Playwright profile or desktop for the Playwright extension installed in the user's existing local browser profile.",
+          "label": "Default Browser Target",
+          "name": "default_target",
+          "options": [
+            {
+              "label": "MindRoom host profile",
+              "value": "host"
+            },
+            {
+              "label": "Matrix desktop profile",
+              "value": "desktop"
+            }
+          ],
+          "placeholder": null,
+          "required": false,
+          "type": "select",
+          "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": null,
+          "description": "Required for target=desktop; dedicated Matrix account used by the local desktop bridge.",
+          "label": "Desktop Matrix User ID",
+          "name": "device_user_id",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": null,
+          "description": "Required for target=desktop; exact device ID printed by 'mindroom desktop login'.",
+          "label": "Desktop Matrix Device ID",
+          "name": "device_id",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": null,
+          "description": "Required for target=desktop; exact Ed25519 fingerprint of the local bridge device.",
+          "label": "Desktop Device Fingerprint",
+          "name": "device_ed25519",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": 90,
+          "description": "Matrix and local Playwright MCP timeout from 1 to 120 seconds.",
+          "label": "Desktop Browser Timeout Seconds",
+          "name": "timeout_seconds",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "number",
+          "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "playwright"
@@ -8934,6 +9878,7 @@
       "icon": "FaChrome",
       "icon_color": "text-orange-500",
       "name": "browser",
+      "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
     },
@@ -9063,6 +10008,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "browserbase",
@@ -9085,6 +10031,7 @@
       "icon": "FaChrome",
       "icon_color": "text-blue-600",
       "name": "browserbase",
+      "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -9214,6 +10161,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "crawl4ai"
@@ -9228,6 +10176,7 @@
       "icon": "FaSpider",
       "icon_color": "text-blue-600",
       "name": "crawl4ai",
+      "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
     },
@@ -9357,6 +10306,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "ddgs"
@@ -9372,6 +10322,7 @@
       "icon": "SiDuckduckgo",
       "icon_color": "text-orange-500",
       "name": "duckduckgo",
+      "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
     },
@@ -9669,6 +10620,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "exa_py"
@@ -9687,6 +10639,7 @@
       "icon": "FaSearch",
       "icon_color": "text-blue-600",
       "name": "exa",
+      "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -9828,6 +10781,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "firecrawl-py"
@@ -9845,8 +10799,46 @@
       "icon": "FaSpider",
       "icon_color": "text-orange-500",
       "name": "firecrawl",
+      "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
+    },
+    {
+      "agent_override_fields": null,
+      "auth_provider": null,
+      "category": "research",
+      "config_fields": [
+        {
+          "authored_override": true,
+          "default": 5,
+          "description": null,
+          "label": "Max Results",
+          "name": "max_results",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "number",
+          "validation": null
+        }
+      ],
+      "consumes_workspace_paths": false,
+      "default_execution_target": "primary",
+      "dependencies": [
+        "scholarly"
+      ],
+      "description": "Search academic publications on Google Scholar",
+      "display_name": "Google Scholar",
+      "docs_url": "https://github.com/scholarly-python-package/scholarly",
+      "function_names": [
+        "search_google_scholar"
+      ],
+      "helper_text": null,
+      "icon": "SiGooglescholar",
+      "icon_color": "text-blue-500",
+      "name": "google_scholar",
+      "requires_room_context": false,
+      "setup_type": "none",
+      "status": "available"
     },
     {
       "agent_override_fields": null,
@@ -9962,6 +10954,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "ddgs"
@@ -9977,6 +10970,7 @@
       "icon": "FaGoogle",
       "icon_color": "text-blue-500",
       "name": "googlesearch",
+      "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
     },
@@ -10022,6 +11016,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "httpx"
@@ -10037,6 +11032,7 @@
       "icon": "FaHackerNews",
       "icon_color": "text-orange-600",
       "name": "hackernews",
+      "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
     },
@@ -10154,6 +11150,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "httpx",
@@ -10170,6 +11167,7 @@
       "icon": "FaGlobe",
       "icon_color": "text-blue-600",
       "name": "jina",
+      "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -10239,6 +11237,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "linkup-sdk"
@@ -10253,6 +11252,7 @@
       "icon": "FaSearch",
       "icon_color": "text-blue-600",
       "name": "linkup",
+      "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -10310,6 +11310,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "newspaper4k",
@@ -10326,6 +11327,7 @@
       "icon": "FaNewspaper",
       "icon_color": "text-blue-600",
       "name": "newspaper",
+      "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
     },
@@ -10359,6 +11361,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "oxylabs"
@@ -10376,6 +11379,7 @@
       "icon": "FaGlobe",
       "icon_color": "text-blue-600",
       "name": "oxylabs",
+      "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -10445,6 +11449,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "httpx"
@@ -10462,6 +11467,7 @@
       "icon": "SiPubmed",
       "icon_color": "text-blue-600",
       "name": "pubmed",
+      "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
     },
@@ -10534,18 +11540,6 @@
           "authored_override": true,
           "default": false,
           "description": null,
-          "label": "Enable Agentic Crawler",
-          "name": "enable_agentic_crawler",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "authored_override": true,
-          "default": false,
-          "description": null,
           "label": "Enable Scrape",
           "name": "enable_scrape",
           "options": null,
@@ -10568,6 +11562,42 @@
         },
         {
           "authored_override": true,
+          "default": null,
+          "description": null,
+          "label": "Headers",
+          "name": "headers",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": 3,
+          "description": null,
+          "label": "Crawl Poll Interval",
+          "name": "crawl_poll_interval",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "number",
+          "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": 180,
+          "description": null,
+          "label": "Crawl Max Wait",
+          "name": "crawl_max_wait",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "number",
+          "validation": null
+        },
+        {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "All",
@@ -10579,6 +11609,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "scrapegraph-py"
@@ -10587,7 +11618,6 @@
       "display_name": "ScrapeGraph",
       "docs_url": "https://docs.agno.com/tools/toolkits/web_scrape/scrapegraph",
       "function_names": [
-        "agentic_crawler",
         "crawl",
         "markdownify",
         "scrape",
@@ -10598,6 +11628,7 @@
       "icon": "FaGlobe",
       "icon_color": "text-blue-600",
       "name": "scrapegraph",
+      "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -10643,6 +11674,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [],
       "description": "Open source search engine for web, images, news, science, and specialized content",
@@ -10662,6 +11694,7 @@
       "icon": "FaSearch",
       "icon_color": "text-blue-600",
       "name": "searxng",
+      "requires_room_context": false,
       "setup_type": "none",
       "status": "requires_config"
     },
@@ -10719,6 +11752,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "google-search-results"
@@ -10734,6 +11768,7 @@
       "icon": "FaGoogle",
       "icon_color": "text-blue-500",
       "name": "serpapi",
+      "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -10863,6 +11898,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "requests"
@@ -10880,6 +11916,7 @@
       "icon": "FaSearch",
       "icon_color": "text-blue-600",
       "name": "serper",
+      "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -10973,6 +12010,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "spider-client"
@@ -10989,6 +12027,7 @@
       "icon": "FaSpider",
       "icon_color": "text-red-600",
       "name": "spider",
+      "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
     },
@@ -11178,6 +12217,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "tavily-python"
@@ -11194,6 +12234,7 @@
       "icon": "FaSearch",
       "icon_color": "text-blue-600",
       "name": "tavily",
+      "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -11443,6 +12484,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "trafilatura"
@@ -11461,6 +12503,7 @@
       "icon": "FaFileAlt",
       "icon_color": "text-teal-500",
       "name": "trafilatura",
+      "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
     },
@@ -11542,6 +12585,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [],
       "description": "Search and retrieve high-quality, royalty-free images from Unsplash",
@@ -11557,6 +12601,7 @@
       "icon": "SiUnsplash",
       "icon_color": "text-gray-800",
       "name": "unsplash",
+      "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -11578,6 +12623,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "httpx",
@@ -11594,6 +12640,7 @@
       "icon": "FaGlobe",
       "icon_color": "text-blue-600",
       "name": "website",
+      "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
     },
@@ -11616,6 +12663,18 @@
         },
         {
           "authored_override": true,
+          "default": true,
+          "description": null,
+          "label": "Auto Suggest",
+          "name": "auto_suggest",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "authored_override": true,
           "default": false,
           "description": null,
           "label": "All",
@@ -11627,6 +12686,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "wikipedia"
@@ -11642,6 +12702,7 @@
       "icon": "SiWikipedia",
       "icon_color": "text-gray-700",
       "name": "wikipedia",
+      "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
     },
@@ -11673,8 +12734,21 @@
           "required": true,
           "type": "password",
           "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": false,
+          "description": "Allow a trusted self-hosted Home Assistant URL on a private, local, or loopback network.",
+          "label": "Allow Private Home Assistant URL",
+          "name": "HOMEASSISTANT_ALLOW_PRIVATE_URL",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "httpx"
@@ -11699,6 +12773,7 @@
       "icon": "Home",
       "icon_color": "text-blue-500",
       "name": "homeassistant",
+      "requires_room_context": false,
       "setup_type": "special",
       "status": "requires_config"
     },
@@ -11780,6 +12855,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "praw"
@@ -11801,6 +12877,7 @@
       "icon": "SiReddit",
       "icon_color": "text-orange-500",
       "name": "reddit",
+      "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -11894,6 +12971,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "tweepy"
@@ -11914,6 +12992,7 @@
       "icon": "SiX",
       "icon_color": "text-blue-400",
       "name": "x",
+      "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -11959,6 +13038,7 @@
           "validation": null
         }
       ],
+      "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "requests"
@@ -11980,6 +13060,7 @@
       "icon": "SiZoom",
       "icon_color": "text-blue-500",
       "name": "zoom",
+      "requires_room_context": false,
       "setup_type": "oauth",
       "status": "requires_config"
     }

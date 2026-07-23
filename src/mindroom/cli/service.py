@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import platform
+import signal
+import subprocess
 from typing import TYPE_CHECKING
 
 import typer
@@ -10,7 +12,7 @@ from rich.console import Console
 from rich.panel import Panel
 
 if TYPE_CHECKING:
-    from mindroom.services.config import ServiceManager
+    from mindroom.services.config import ServiceActionResult, ServiceManager
 
 _console = Console()
 _err_console = Console(stderr=True)
@@ -76,6 +78,14 @@ def _ensure_uv_installed(*, no_confirm: bool) -> None:
     _console.print(f"  [green]{message}[/green]")
 
 
+def _print_service_action_result(result: ServiceActionResult) -> None:
+    """Print a service lifecycle result and exit non-zero on failure."""
+    if not result.success:
+        _err_console.print(f"[bold red]Error:[/bold red] {result.message}")
+        raise typer.Exit(1)
+    _console.print(f"[green]{result.message}[/green]")
+
+
 @service_app.command("install")
 def install_service(
     skip_deps: bool = typer.Option(False, "--skip-deps", help="Skip uv dependency check."),
@@ -132,6 +142,27 @@ def uninstall_service(
         _console.print("[dim]Log files are preserved at ~/Library/Logs/mindroom/[/dim]")
 
 
+@service_app.command("start")
+def start_service() -> None:
+    """Start the installed MindRoom user service."""
+    manager = _manager_or_exit()
+    _print_service_action_result(manager.start_service())
+
+
+@service_app.command("stop")
+def stop_service() -> None:
+    """Stop the installed MindRoom user service without removing it."""
+    manager = _manager_or_exit()
+    _print_service_action_result(manager.stop_service())
+
+
+@service_app.command("restart")
+def restart_service() -> None:
+    """Restart the installed MindRoom user service."""
+    manager = _manager_or_exit()
+    _print_service_action_result(manager.restart_service())
+
+
 @service_app.command("status")
 def service_status(
     logs: int = typer.Option(10, "--logs", "-l", help="Number of recent log lines to show. Use 0 to hide logs."),
@@ -161,3 +192,18 @@ def service_status(
 
     _console.print()
     _console.print(f"[dim]Full logs: {manager.get_log_command()}[/dim]")
+
+
+@service_app.command("logs")
+def service_logs() -> None:
+    """Follow MindRoom service logs."""
+    manager = _manager_or_exit()
+    try:
+        result = subprocess.run(manager.get_log_args(), check=False)
+    except KeyboardInterrupt:
+        raise typer.Exit(0) from None
+    except (OSError, subprocess.SubprocessError) as exc:
+        _err_console.print(f"[bold red]Error:[/bold red] Failed to run log command: {exc}")
+        raise typer.Exit(1) from None
+    if result.returncode not in (0, -signal.SIGINT):
+        raise typer.Exit(result.returncode)

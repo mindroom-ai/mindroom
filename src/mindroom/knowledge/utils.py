@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
 
 from mindroom.credentials import get_runtime_shared_credentials_manager
+from mindroom.embedding_errors import extract_classified_embedder_detail
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.redaction import embedded_http_userinfo
 from mindroom.knowledge.registry import (
@@ -25,11 +26,10 @@ from mindroom.logging_config import get_logger
 from mindroom.runtime_protocols import SupportsConfigOrchestrator  # noqa: TC001
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Hashable, Mapping
 
     from agno.knowledge.document import Document
     from agno.knowledge.knowledge import Knowledge
-    from structlog.stdlib import BoundLogger
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -39,7 +39,7 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 _REFRESH_RETRY_COOLDOWN_SECONDS = 300.0
 _MAX_REFRESH_SCHEDULED_COOLDOWNS = 512
-_refresh_scheduled_at: dict[tuple[KnowledgeRefreshTarget, KnowledgeAvailability, tuple[str, ...] | None], float] = {}
+_refresh_scheduled_at: dict[tuple[KnowledgeRefreshTarget, KnowledgeAvailability, Hashable | None], float] = {}
 _EMBEDDED_GIT_USERINFO_FINGERPRINT_KEY = secrets.token_bytes(32)
 
 
@@ -49,6 +49,7 @@ class KnowledgeAvailabilityDetail:
 
     availability: KnowledgeAvailability
     search_available: bool
+    last_error: str | None = None
 
 
 @dataclass(frozen=True)
@@ -56,8 +57,16 @@ class _KnowledgeResolution:
     """Resolved knowledge plus availability diagnostics for one agent."""
 
     knowledge: Knowledge | None
-    missing: tuple[str, ...] = ()
     unavailable: Mapping[str, KnowledgeAvailabilityDetail] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class KnowledgeBaseAccessResolution:
+    """Resolved access for one configured knowledge base."""
+
+    knowledge: Knowledge | None
+    availability: KnowledgeAvailability
+    last_error: str | None = None
 
 
 class _KnowledgeVectorDb(Protocol):
@@ -126,7 +135,7 @@ def _refresh_schedule_due(
     key: KnowledgeRefreshTarget,
     availability: KnowledgeAvailability,
     *,
-    settings: tuple[str, ...] | None = None,
+    settings: Hashable | None = None,
     cooldown_seconds: float = _REFRESH_RETRY_COOLDOWN_SECONDS,
 ) -> bool:
     now = time.monotonic()
@@ -253,11 +262,11 @@ def _refresh_retry_settings(
     config: Config,
     runtime_paths: RuntimePaths,
     availability: KnowledgeAvailability,
-) -> tuple[str, ...] | None:
+) -> Hashable | None:
     if availability is KnowledgeAvailability.CONFIG_MISMATCH:
         return lookup.key.indexing_settings
     if availability is KnowledgeAvailability.REFRESH_FAILED:
-        return lookup.key.indexing_settings + _failed_refresh_retry_fingerprint(lookup, config, runtime_paths)
+        return (lookup.key.indexing_settings, *_failed_refresh_retry_fingerprint(lookup, config, runtime_paths))
     return None
 
 
@@ -357,6 +366,49 @@ def _schedule_refresh_for_availability(
     return availability
 
 
+def _semantic_agent_knowledge_base_ids(agent_name: str, config: Config) -> tuple[str, ...]:
+    return tuple(
+        base_id
+        for base_id in config.resolve_entity(agent_name).knowledge_base_ids
+        if config.get_knowledge_base_config(base_id).mode == "semantic"
+    )
+
+
+def _resolve_base_knowledge(
+    base_id: str,
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    refresh_scheduler: KnowledgeRefreshScheduler | None,
+    execution_identity: ToolExecutionIdentity | None,
+) -> tuple[Knowledge | None, KnowledgeAvailability, str | None]:
+    """Resolve one knowledge base handle with its effective availability and last error."""
+    lookup = _lookup_knowledge_for_base(
+        base_id,
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=execution_identity,
+    )
+    availability = lookup.availability if lookup is not None else KnowledgeAvailability.INITIALIZING
+    if lookup is not None and availability is KnowledgeAvailability.READY:
+        availability = _ready_index_effective_availability(lookup, config)
+    knowledge = lookup.index.knowledge if lookup is not None and lookup.index is not None else None
+    if knowledge is not None:
+        _apply_knowledge_metadata(base_id, knowledge, config)
+    if refresh_scheduler is not None:
+        availability = _schedule_refresh_for_availability(
+            refresh_scheduler,
+            base_id,
+            config=config,
+            runtime_paths=runtime_paths,
+            execution_identity=execution_identity,
+            lookup=lookup,
+            availability=availability,
+        )
+    last_error = lookup.state.last_error if lookup is not None and lookup.state is not None else None
+    return knowledge, availability, last_error
+
+
 def resolve_agent_knowledge_access(
     agent_name: str,
     config: Config,
@@ -365,38 +417,7 @@ def resolve_agent_knowledge_access(
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> _KnowledgeResolution:
     """Resolve configured knowledge base(s) with diagnostics for one agent."""
-    resolved_knowledge: dict[str, tuple[Knowledge | None, KnowledgeAvailability]] = {}
-
-    def _resolve(base_id: str) -> tuple[Knowledge | None, KnowledgeAvailability]:
-        if base_id in resolved_knowledge:
-            return resolved_knowledge[base_id]
-
-        lookup = _lookup_knowledge_for_base(
-            base_id,
-            config=config,
-            runtime_paths=runtime_paths,
-            execution_identity=execution_identity,
-        )
-        availability = lookup.availability if lookup is not None else KnowledgeAvailability.INITIALIZING
-        if lookup is not None and availability is KnowledgeAvailability.READY:
-            availability = _ready_index_effective_availability(lookup, config)
-        knowledge = lookup.index.knowledge if lookup is not None and lookup.index is not None else None
-        if knowledge is not None:
-            _apply_knowledge_metadata(base_id, knowledge, config)
-        if refresh_scheduler is not None:
-            availability = _schedule_refresh_for_availability(
-                refresh_scheduler,
-                base_id,
-                config=config,
-                runtime_paths=runtime_paths,
-                execution_identity=execution_identity,
-                lookup=lookup,
-                availability=availability,
-            )
-        resolved_knowledge[base_id] = (knowledge, availability)
-        return resolved_knowledge[base_id]
-
-    base_ids = config.get_agent_knowledge_base_ids(agent_name)
+    base_ids = _semantic_agent_knowledge_base_ids(agent_name, config)
     if not base_ids:
         return _KnowledgeResolution(knowledge=None)
 
@@ -404,22 +425,58 @@ def resolve_agent_knowledge_access(
     unavailable_bases: dict[str, KnowledgeAvailabilityDetail] = {}
     knowledges: list[Knowledge] = []
     for base_id in base_ids:
-        knowledge, availability = _resolve(base_id)
+        knowledge, availability, last_error = _resolve_base_knowledge(
+            base_id,
+            config=config,
+            runtime_paths=runtime_paths,
+            refresh_scheduler=refresh_scheduler,
+            execution_identity=execution_identity,
+        )
         if availability is not KnowledgeAvailability.READY:
             unavailable_bases[base_id] = KnowledgeAvailabilityDetail(
                 availability=availability,
                 search_available=knowledge is not None,
+                last_error=last_error,
             )
         if knowledge is None:
             missing_base_ids.append(base_id)
             continue
         knowledges.append(knowledge)
 
+    if missing_base_ids:
+        logger.warning(
+            "Knowledge bases not available for agent",
+            agent_name=agent_name,
+            knowledge_bases=missing_base_ids,
+        )
     return _KnowledgeResolution(
         knowledge=_merge_knowledge(agent_name, knowledges),
-        missing=tuple(missing_base_ids),
         unavailable=unavailable_bases,
     )
+
+
+def resolve_knowledge_base_access(
+    base_id: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    *,
+    execution_identity: ToolExecutionIdentity | None = None,
+) -> KnowledgeBaseAccessResolution:
+    """Resolve one knowledge base without going through an agent assignment."""
+    lookup = _lookup_knowledge_for_base(
+        base_id,
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=execution_identity,
+    )
+    availability = lookup.availability if lookup is not None else KnowledgeAvailability.INITIALIZING
+    if lookup is not None and availability is KnowledgeAvailability.READY:
+        availability = _ready_index_effective_availability(lookup, config)
+    knowledge = lookup.index.knowledge if lookup is not None and lookup.index is not None else None
+    if knowledge is not None:
+        _apply_knowledge_metadata(base_id, knowledge, config)
+    last_error = lookup.state.last_error if lookup is not None and lookup.state is not None else None
+    return KnowledgeBaseAccessResolution(knowledge=knowledge, availability=availability, last_error=last_error)
 
 
 def _stale_availability_notice(base_id: str, *, search_available: bool) -> str:
@@ -465,15 +522,19 @@ def format_knowledge_availability_notice(
         elif availability is KnowledgeAvailability.STALE:
             lines.append(_stale_availability_notice(base_id, search_available=search_available))
         elif availability is KnowledgeAvailability.REFRESH_FAILED:
+            # Persisted last_error is operator-grade free text; only the fixed
+            # classified embedder vocabulary may enter model-facing prompts.
+            classified_cause = extract_classified_embedder_detail(detail.last_error)
+            cause = f" Last error: {classified_cause}" if classified_cause else ""
             if search_available:
                 lines.append(
                     f"Knowledge base `{base_id}` had a recent refresh failure and may be stale this turn. "
-                    "Do not claim to have searched the latest contents.",
+                    f"Do not claim to have searched the latest contents.{cause}",
                 )
             else:
                 lines.append(
                     f"Knowledge base `{base_id}` is unavailable for semantic search this turn after a refresh "
-                    "failure. Do not claim to have searched it.",
+                    f"failure. Do not claim to have searched it.{cause}",
                 )
     return "\n".join(lines) if lines else None
 
@@ -483,7 +544,6 @@ class KnowledgeAccessSupport:
     """Resolve live knowledge access for one runtime without routing through AgentBot."""
 
     runtime: SupportsConfigOrchestrator
-    logger: BoundLogger
     runtime_paths: RuntimePaths
 
     def for_agent(
@@ -505,20 +565,13 @@ class KnowledgeAccessSupport:
         orchestrator = self.runtime.orchestrator
         refresh_scheduler = orchestrator.knowledge_refresh_scheduler if orchestrator is not None else None
 
-        resolution = resolve_agent_knowledge_access(
+        return resolve_agent_knowledge_access(
             agent_name,
             self.runtime.config,
             self.runtime_paths,
             refresh_scheduler=refresh_scheduler,
             execution_identity=execution_identity,
         )
-        if resolution.missing:
-            self.logger.warning(
-                "Knowledge bases not available for agent",
-                agent_name=agent_name,
-                knowledge_bases=list(resolution.missing),
-            )
-        return resolution
 
 
 @dataclass
@@ -554,12 +607,20 @@ class _MultiKnowledgeVectorDb:
         limit: int,
         filters: dict[str, Any] | list[Any] | None = None,
     ) -> list[Document]:
-        """Search each assigned vector database and interleave merged results."""
+        """Search each assigned vector database and interleave merged results.
+
+        Partial failures warn and merge the surviving sources; when every
+        source failed the first captured exception re-raises so the caller
+        sees the real cause instead of silently empty results (ISSUE-237).
+        """
         results_by_db: list[list[Document]] = []
+        first_error: Exception | None = None
         for vector_db in self._resolved_vector_dbs():
             try:
                 results = vector_db.search(query=query, limit=limit, filters=filters)
-            except Exception:
+            except Exception as exc:
+                if first_error is None:
+                    first_error = exc
                 logger.warning(
                     "Knowledge vector database search failed",
                     vector_db_type=type(vector_db).__name__,
@@ -567,6 +628,8 @@ class _MultiKnowledgeVectorDb:
                 )
                 continue
             results_by_db.append(results)
+        if first_error is not None and not results_by_db:
+            raise first_error
         return _interleave_documents(results_by_db, limit)
 
     async def async_search(
@@ -578,7 +641,9 @@ class _MultiKnowledgeVectorDb:
     ) -> list[Document]:
         """Async variant of ``search`` that searches DBs concurrently."""
 
-        async def _search_one(vdb: _KnowledgeVectorDb) -> list[Document]:
+        async def _search_one(
+            vdb: _KnowledgeVectorDb,
+        ) -> tuple[list[Document] | None, Exception | None]:
             results: list[Document]
             try:
                 if isinstance(vdb, _AsyncKnowledgeVectorDb):
@@ -588,17 +653,22 @@ class _MultiKnowledgeVectorDb:
                         results = vdb.search(query=query, limit=limit, filters=filters)
                 else:
                     results = vdb.search(query=query, limit=limit, filters=filters)
-            except Exception:
+            except Exception as exc:
                 logger.warning(
                     "Knowledge vector database async search failed",
                     vector_db_type=type(vdb).__name__,
                     exc_info=True,
                 )
-                return []
-            return results
+                return None, exc
+            return results, None
 
-        results_by_db = await asyncio.gather(*[_search_one(vdb) for vdb in self._resolved_vector_dbs()])
-        return _interleave_documents(list(results_by_db), limit)
+        outcomes = await asyncio.gather(*[_search_one(vdb) for vdb in self._resolved_vector_dbs()])
+        results_by_db = [results for results, _error in outcomes if results is not None]
+        if not results_by_db:
+            for _results, error in outcomes:
+                if error is not None:
+                    raise error
+        return _interleave_documents(results_by_db, limit)
 
 
 def _interleave_documents(results_by_db: list[list[Document]], limit: int) -> list[Document]:
@@ -647,3 +717,13 @@ def _merge_knowledge(agent_name: str, knowledges: list[Knowledge]) -> Knowledge 
         max_results=max(knowledge.max_results for knowledge in queryable_knowledges),
         source_descriptions=source_descriptions,
     )
+
+
+def knowledge_runtime_identity(knowledge: Knowledge | None) -> tuple[int, ...]:
+    """Identify the stable runtime handles behind one resolved knowledge view."""
+    if knowledge is None:
+        return ()
+    vector_db = knowledge.vector_db
+    if isinstance(knowledge, KnowledgeWithSourceDescriptions) and isinstance(vector_db, _MultiKnowledgeVectorDb):
+        return tuple(id(source) for source in vector_db.vector_dbs)
+    return (id(knowledge),)

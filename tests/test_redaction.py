@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from mindroom.redaction import REDACTED, redact_sensitive_data
+import json
+import time
+
+from mindroom.redaction import REDACTED, redact_sensitive_data, redact_sensitive_text
 
 
 def test_redact_sensitive_data_redacts_nested_dicts_lists_and_header_variants() -> None:
@@ -13,9 +16,16 @@ def test_redact_sensitive_data_redacts_nested_dicts_lists_and_header_variants() 
             "COOKIE": "session=secret",
             "set-cookie": "session=secret",
             "X-Api-Key": "api-secret",
+            "x-token": "token-secret",
+            "x-amz-security-token": "security-token-secret",
+            "authentication-info": "auth-info-secret",
+            "www-authenticate": "Bearer challenge",
+            "x-ratelimit-remaining-tokens": "99",
+            "x-total-tokens": "100",
         },
         "tokens": [
             {"access_token": "access-secret"},
+            {"apiToken": "api-token-secret"},
             {"refreshToken": "refresh-secret"},
             {"id-token": "id-secret"},
             {"client_secret": "client-secret"},
@@ -29,9 +39,16 @@ def test_redact_sensitive_data_redacts_nested_dicts_lists_and_header_variants() 
             "COOKIE": REDACTED,
             "set-cookie": REDACTED,
             "X-Api-Key": REDACTED,
+            "x-token": REDACTED,
+            "x-amz-security-token": REDACTED,
+            "authentication-info": REDACTED,
+            "www-authenticate": REDACTED,
+            "x-ratelimit-remaining-tokens": "99",
+            "x-total-tokens": "100",
         },
         "tokens": [
             {"access_token": REDACTED},
+            {"apiToken": REDACTED},
             {"refreshToken": REDACTED},
             {"id-token": REDACTED},
             {"client_secret": REDACTED},
@@ -53,6 +70,30 @@ def test_redact_sensitive_data_redacts_oauth_callback_query_values_in_urls() -> 
         "url": "https://example.test/api/oauth/google/callback?code=***redacted***&state=***redacted***&keep=1",
         "query_params": {"code": REDACTED, "state": REDACTED, "keep": "1"},
     }
+
+
+def test_redact_url_in_escaped_shell_command_keeps_json_arguments_valid() -> None:
+    """URL redaction must not eat the backslash escaping the quote after the URL.
+
+    Logged tool-call arguments are JSON-encoded strings; absorbing the trailing
+    backslash of an escaped quote into the URL query re-encodes it to %5C and
+    leaves a bare quote behind, corrupting the inner JSON.
+    """
+    command = 'curl -s \\"https://example.test/repos/demo/pulls?state=open&sort=updated&per_page=10\\" | head'
+    arguments = json.dumps({"args": command})
+    payload = {
+        "messages": [
+            {"role": "assistant", "tool_calls": [{"function": {"name": "run_shell_command", "arguments": arguments}}]},
+        ],
+    }
+
+    redacted = redact_sensitive_data(payload)
+
+    redacted_arguments = redacted["messages"][0]["tool_calls"][0]["function"]["arguments"]
+    assert REDACTED in redacted_arguments
+    parsed = json.loads(redacted_arguments)
+    assert parsed["args"].startswith('curl -s \\"https://example.test/repos/demo/pulls?state=***redacted***')
+    assert '\\" | head' in parsed["args"]
 
 
 def test_redact_sensitive_data_redacts_bare_query_fragments_under_query_keys() -> None:
@@ -109,3 +150,148 @@ def test_redact_sensitive_data_supports_explicit_bounds_for_durable_tool_logs() 
         "message": "xxxxx... [truncated]",
         "items": ["0", "1", "... [truncated]"],
     }
+
+
+def test_redact_sensitive_data_redacts_secret_before_truncated_bound() -> None:
+    """Bounded redaction should keep scanning far enough to redact text that can survive truncation."""
+    redacted = redact_sensitive_data(
+        {"message": "x" * 50 + " api_key=sk-test-secret " + "y" * 5000},
+        max_string_length=120,
+    )
+
+    message = redacted["message"]
+    assert isinstance(message, str)
+    assert REDACTED in message
+    assert "sk-test-secret" not in message
+    assert len(message) <= 120
+
+
+def test_redact_sensitive_data_tolerates_malformed_ipv6_url() -> None:
+    """A URL-like token with an unbalanced IPv6 bracket must not crash redaction (ISSUE-230)."""
+    redacted = redact_sensitive_data({"message": 'see <a href="http://[">x</a> for details'})
+
+    message = redacted["message"]
+    assert isinstance(message, str)
+    assert "http://[" in message
+
+
+def test_redact_sensitive_data_uses_context_for_bare_values_in_secret_lists() -> None:
+    """List items under a secret-bearing key should be redacted without changing container shape."""
+    redacted = redact_sensitive_data(
+        {
+            "api_keys": ["plain-secret-one", "plain-secret-two"],
+            "oauth_tokens": ["plain-oauth-token"],
+            "max_tokens": 4096,
+            "next_token": "cursor-value",
+            "usage": {
+                "cache_creation_input_tokens": 2,
+                "cache_read_input_tokens": 3,
+                "input_tokens": 4,
+                "output_tokens": 5,
+            },
+            "has_credentials": True,
+            "show_passwords": False,
+            "num_secrets": 2,
+            "backup_credentials": ["plain-backup-secret"],
+            "nested": {"tokens": [{"value": "plain-token"}]},
+            "safe_values": ["plain-secret-one"],
+        },
+    )
+
+    assert redacted == {
+        "api_keys": [REDACTED, REDACTED],
+        "oauth_tokens": [REDACTED],
+        "max_tokens": 4096,
+        "next_token": "cursor-value",
+        "usage": {
+            "cache_creation_input_tokens": 2,
+            "cache_read_input_tokens": 3,
+            "input_tokens": 4,
+            "output_tokens": 5,
+        },
+        "has_credentials": True,
+        "show_passwords": False,
+        "num_secrets": 2,
+        "backup_credentials": [REDACTED],
+        "nested": {"tokens": [{"value": REDACTED}]},
+        "safe_values": ["plain-secret-one"],
+    }
+
+
+def test_redact_sensitive_data_redacts_value_fields_named_by_sibling_secret_keys() -> None:
+    """Key/value style containers should redact bare values when the sibling name is secret-like."""
+    redacted = redact_sensitive_data(
+        {
+            "environment": [
+                {"name": "OPENAI_API_KEY", "value": "plain-openai-secret"},
+                {"key": "client_secret", "value": "plain-client-secret"},
+                {"name": "mode", "value": "safe"},
+            ],
+            "headers": [{"name": "Authorization", "value": "plain-auth-secret"}],
+        },
+    )
+
+    assert redacted == {
+        "environment": [
+            {"name": "OPENAI_API_KEY", "value": REDACTED},
+            {"key": "client_secret", "value": REDACTED},
+            {"name": "mode", "value": "safe"},
+        ],
+        "headers": [{"name": "Authorization", "value": REDACTED}],
+    }
+
+
+def test_redact_sensitive_data_keeps_values_for_non_schema_label_keys() -> None:
+    """Field/parameter/variable labels should not force-redact harmless values."""
+    redacted = redact_sensitive_data(
+        [
+            {"field": "password_policy", "value": "min length 12"},
+            {"parameter": "client_secret_required", "value": False},
+            {"variable": "secret_sauce_recipe", "value": "tomatoes"},
+        ],
+    )
+
+    assert redacted == [
+        {"field": "password_policy", "value": "min length 12"},
+        {"parameter": "client_secret_required", "value": False},
+        {"variable": "secret_sauce_recipe", "value": "tomatoes"},
+    ]
+
+
+def test_redact_sensitive_text_stays_linear_on_long_unbroken_runs() -> None:
+    """Long base64url/hex-like blobs must scan linearly, not quadratically."""
+    blob = "Ab3" * 40_000
+    start = time.perf_counter()
+    assert redact_sensitive_text(blob) == blob
+    assert time.perf_counter() - start < 5.0
+
+
+def test_redact_sensitive_text_stays_linear_while_finding_value_terminator() -> None:
+    """Assignment lookahead must not repeatedly rescan long whitespace and key-like runs."""
+    value = "password=visible" + " " * 12_000 + "Ab3" * 4_000
+    start = time.perf_counter()
+    assert redact_sensitive_text(value) == f"password={REDACTED}"
+    assert time.perf_counter() - start < 5.0
+
+
+def test_redact_sensitive_text_redacts_secret_assignments_with_long_keys() -> None:
+    """Performance guards must not exempt long secret-bearing keys from redaction."""
+    key = "x" * 256 + "password"
+
+    assert redact_sensitive_text(f"{key}=hunter2") == f"{key}={REDACTED}"
+
+
+def test_redact_sensitive_text_preserves_long_inter_assignment_whitespace() -> None:
+    """Linear lookahead must not consume whitespace that separates assignments."""
+    separator = " " * 256
+
+    assert redact_sensitive_text(f"api_key=hunter2{separator}mode=safe") == f"api_key={REDACTED}{separator}mode=safe"
+
+
+def test_redact_sensitive_text_still_redacts_assignments_at_run_boundaries() -> None:
+    """The assignment key guard must not lose ordinary key=value redaction."""
+    redacted = redact_sensitive_text('api_key=hunter2 "password": "abc"')
+
+    assert "hunter2" not in redacted
+    assert "abc" not in redacted
+    assert "api_key" in redacted
