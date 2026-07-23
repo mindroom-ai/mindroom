@@ -4,7 +4,7 @@ icon: lucide/shield-check
 
 # Trusted Upstream Browser Auth
 
-Use trusted upstream auth when MindRoom API and browser routes sit behind a deployment-owned access layer that has already authenticated the human.
+Use trusted upstream auth when MindRoom API and browser routes, including origin-room report links, sit behind a deployment-owned access layer that has already authenticated the human.
 This mode is disabled by default.
 Do not enable it unless the reverse proxy or identity gateway strips client-supplied copies of the trusted headers and injects verified values itself.
 Header-only mode is a compatibility option for deployments where MindRoom is only reachable through that trusted gateway.
@@ -17,6 +17,8 @@ The connect token records the Matrix requester that triggered the missing-creden
 In a hosted multi-user private-agent deployment, the browser opening that link must authenticate as the same requester.
 The standalone `MINDROOM_OWNER_USER_ID` setting maps every dashboard request to one Matrix user, so it is only appropriate for single-owner deployments.
 It is not a hosted multi-user identity solution.
+Origin-room report routes use this authentication only to obtain a verified Matrix user ID for live room authorization.
+Report viewers do not need dashboard access, API keys, or general API permission.
 
 ## Environment
 

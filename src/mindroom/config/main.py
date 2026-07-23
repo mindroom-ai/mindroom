@@ -55,6 +55,7 @@ from mindroom.config.models import (
     ToolConfigEntry,
 )
 from mindroom.config.plugin import PluginEntryConfig  # noqa: TC001
+from mindroom.config.report_publishing import ReportPublishingConfig
 from mindroom.config.runtime_overlays import (
     apply_runtime_approved_egress_overlay,
     strip_runtime_approved_egress_overlay_from_dump,
@@ -84,6 +85,8 @@ from mindroom.matrix_identifiers import (
 from mindroom.mcp.config import MCPServerConfig, normalize_mcp_server_id
 from mindroom.prompt_templates import render_prompt_template, validate_prompt_template_fields
 from mindroom.prompts import PROMPT_DEFAULT_NAMES, PROMPT_DEFAULTS
+from mindroom.report_access_policy import ReportAccessPolicy
+from mindroom.report_viewer_auth import report_viewer_auth_configuration_error
 from mindroom.room_thread_modes import resolve_room_thread_mode_override
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.thread_models import resolve_thread_model_override
@@ -150,7 +153,13 @@ _OPTIONAL_DICT_SECTION_NAMES = (
     "matrix_room_access",
     "matrix_space",
 )
-_OPTIONAL_MODEL_SECTION_NAMES = ("debug", "external_trigger_policy", "matrix_sync", "tool_approval")
+_OPTIONAL_MODEL_SECTION_NAMES = (
+    "debug",
+    "external_trigger_policy",
+    "matrix_sync",
+    "report_publishing",
+    "tool_approval",
+)
 
 
 class ConfigRuntimeValidationError(ValueError):
@@ -416,6 +425,10 @@ class Config(BaseModel):
     external_trigger_policy: ExternalTriggerPolicyConfig = Field(
         default_factory=ExternalTriggerPolicyConfig,
         description="Global policy for tool-managed signed external triggers",
+    )
+    report_publishing: ReportPublishingConfig = Field(
+        default_factory=ReportPublishingConfig,
+        description="Access policy for newly published reports",
     )
     models: dict[str, ModelConfig] = Field(default_factory=dict, description="Model configurations")
     tool_approval: ToolApprovalConfig = Field(
@@ -994,6 +1007,23 @@ class Config(BaseModel):
             msg = f"mindroom_user.username '{self.mindroom_user.username}' conflicts with {conflict} Matrix localpart"
             raise ValueError(msg)
         return self
+
+    @model_validator(mode="after")
+    def validate_origin_room_report_default_has_browser_auth(self, info: ValidationInfo) -> Config:
+        """Require trusted browser identity integration for an origin-room default."""
+        if self.report_publishing.default_access_policy is not ReportAccessPolicy.ORIGIN_ROOM:
+            return self
+        runtime_paths = info.context.get("runtime_paths") if isinstance(info.context, dict) else None
+        if runtime_paths is None:
+            return self
+        auth_error = report_viewer_auth_configuration_error(runtime_paths)
+        if auth_error is None:
+            return self
+        msg = (
+            "report_publishing.default_access_policy origin_room requires trusted browser authentication "
+            f"with verified Matrix identity: {auth_error}"
+        )
+        raise ValueError(msg)
 
     @model_validator(mode="after")
     def validate_root_space_alias_does_not_collide_with_managed_rooms(self, info: ValidationInfo) -> Config:

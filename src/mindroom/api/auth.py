@@ -860,6 +860,33 @@ async def verify_user(
     return auth_user
 
 
+async def verify_report_viewer(request: Request) -> dict[str, Any]:
+    """Authenticate a browser report viewer without dashboard or API-key policy."""
+    existing = request.scope.get("auth_user")
+    if isinstance(existing, dict) and existing.get("auth_source") == "trusted_upstream":
+        return cast("dict[str, Any]", existing)
+
+    snapshot = _bind_authenticated_request_snapshot(request)
+    auth_state = cast("ApiAuthState", snapshot.auth_state)
+    trusted_auth_user = await _trusted_upstream_auth_user(
+        request,
+        auth_state.settings.trusted_upstream,
+        auth_state.trusted_upstream_jwt_client,
+    )
+    if trusted_auth_user is None:
+        raise HTTPException(status_code=401, detail="Missing or invalid credentials")
+    request.scope["auth_user"] = trusted_auth_user
+    return trusted_auth_user
+
+
+def verified_matrix_user_id_for_auth_user(auth_user: dict[str, Any]) -> str | None:
+    """Return verified Matrix identity carried by an authenticated principal."""
+    matrix_user_id = auth_user.get("matrix_user_id")
+    if not isinstance(matrix_user_id, str):
+        return None
+    return try_parse_historical_matrix_user_id(matrix_user_id)
+
+
 @router.post("/api/auth/session", include_in_schema=False)
 async def create_auth_session(request: Request, payload: _AuthSessionRequest, response: Response) -> dict[str, bool]:
     """Set a same-origin cookie for standalone dashboard auth."""

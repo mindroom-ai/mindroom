@@ -1,15 +1,33 @@
-"""API tests for public report publishing."""
+"""API tests for public and origin-room report publishing."""
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+from unittest.mock import AsyncMock
+
+import pytest
 
 from mindroom.api import main
+from mindroom.report_access_policy import ReportAccessPolicy
+from mindroom.report_publishing.authorization import (
+    ReportAuthorizationDecision,
+    ReportAuthorizationReason,
+)
 from mindroom.report_publishing.store import PublishableReport, ReportPublishingStore
-from tests.api.conftest import use_trusted_upstream_runtime
+from tests.api.conftest import trusted_upstream_headers, use_trusted_upstream_runtime
 
 if TYPE_CHECKING:
+    from collections.abc import Generator
+
     from fastapi.testclient import TestClient
+
+
+@pytest.fixture(autouse=True)
+def _clear_report_authorization_runtime(test_client: TestClient) -> Generator[None, None, None]:
+    """Prevent global API runtime callbacks from leaking between route tests."""
+    main.unbind_report_authorization_runtime(test_client.app)
+    yield
+    main.unbind_report_authorization_runtime(test_client.app)
 
 
 def _publish_public_report(test_client: TestClient) -> tuple[str, str]:
@@ -56,6 +74,49 @@ def _publish_static_site(test_client: TestClient) -> tuple[str, str]:
         base_url="https://mindroom.lab.mindroom.chat",
     )
     return report.slug, str(runtime_paths.storage_root)
+
+
+def _publish_origin_report(test_client: TestClient, *, static_site: bool = False) -> tuple[str, str]:
+    runtime_paths = main._app_runtime_paths(test_client.app)
+    if static_site:
+        artifact_path = runtime_paths.storage_root / "workspace-fixtures" / "protected-site"
+        artifact_path.mkdir(parents=True)
+        (artifact_path / "index.html").write_text(
+            "<!doctype html><script src='app.js'></script>",
+            encoding="utf-8",
+        )
+        (artifact_path / "app.js").write_text("document.body.dataset.protected = 'true';", encoding="utf-8")
+        artifact_kind = "static_site"
+    else:
+        artifact_path = runtime_paths.storage_root / "reports" / "protected.html"
+        artifact_path.parent.mkdir(parents=True, exist_ok=True)
+        artifact_path.write_text("<html><body>Protected report</body></html>", encoding="utf-8")
+        artifact_kind = "html_file"
+    report = ReportPublishingStore(runtime_paths.storage_root).publish_report(
+        source=PublishableReport(
+            source_type="test_report",
+            source={"id": "protected"},
+            artifact_path=artifact_path,
+            title="Protected Report",
+            requested_by="@alice:example.org",
+            artifact_kind=artifact_kind,
+        ),
+        published_by="@alice:example.org",
+        access_policy=ReportAccessPolicy.ORIGIN_ROOM,
+        origin_room_id="!origin:example.org",
+        publisher_entity_name="test_agent",
+        publisher_matrix_user_id="@mindroom_test_agent:example.org",
+    )
+    return report.slug, str(runtime_paths.storage_root)
+
+
+def _bind_authorization(
+    test_client: TestClient,
+    reason: ReportAuthorizationReason = ReportAuthorizationReason.AUTHORIZED,
+) -> AsyncMock:
+    authorize = AsyncMock(return_value=ReportAuthorizationDecision(reason))
+    main.bind_report_authorization_runtime(test_client.app, authorize)
+    return authorize
 
 
 def test_public_static_site_serves_index_and_assets_without_dashboard_auth(test_client: TestClient) -> None:
@@ -184,3 +245,180 @@ def test_public_report_returns_safe_404_for_corrupt_record(test_client: TestClie
     assert response.status_code == 404
     assert response.json()["detail"] == "Public report was not found."
     assert str(runtime_paths.storage_root) not in response.text
+
+
+def test_origin_room_report_serves_root_head_and_assets_for_joined_viewer(test_client: TestClient) -> None:
+    """Protected root and every asset should use browser identity and room authorization."""
+    use_trusted_upstream_runtime(test_client.app)
+    slug, _storage_root = _publish_origin_report(test_client, static_site=True)
+    authorize = _bind_authorization(test_client)
+    headers = trusted_upstream_headers()
+
+    index_response = test_client.get(f"/reports/room/{slug}/", headers=headers)
+    head_response = test_client.head(f"/reports/room/{slug}/app.js", headers=headers)
+    asset_response = test_client.get(f"/reports/room/{slug}/app.js?cache=1", headers=headers)
+
+    assert index_response.status_code == 200
+    assert "sandbox allow-scripts" in index_response.headers["content-security-policy"]
+    assert head_response.status_code == 200
+    assert head_response.content == b""
+    assert asset_response.status_code == 200
+    assert "dataset.protected" in asset_response.text
+    assert authorize.await_count == 3
+    assert all(call.args[1] == "@alice:example.org" for call in authorize.await_args_list)
+
+
+def test_origin_room_report_redirect_authorizes_before_trailing_slash(test_client: TestClient) -> None:
+    """Static-site redirect should not bypass protected authorization."""
+    use_trusted_upstream_runtime(test_client.app)
+    slug, _storage_root = _publish_origin_report(test_client, static_site=True)
+    authorize = _bind_authorization(test_client)
+
+    response = test_client.get(
+        f"/reports/room/{slug}",
+        headers=trusted_upstream_headers(),
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 301
+    assert response.headers["location"] == f"{slug}/"
+    authorize.assert_awaited_once()
+
+
+def test_origin_room_report_requires_authenticated_browser_principal(test_client: TestClient) -> None:
+    """Missing trusted browser identity should return 401 without API-key requirements."""
+    slug, _storage_root = _publish_origin_report(test_client)
+    authorize = _bind_authorization(test_client)
+
+    response = test_client.get(
+        f"/reports/room/{slug}?matrix_user_id=@alice:example.org",
+        headers={"X-Trusted-Matrix-User": "@alice:example.org"},
+    )
+
+    assert response.status_code == 401
+    authorize.assert_not_awaited()
+
+
+def test_origin_room_report_does_not_accept_dashboard_api_key(test_client: TestClient) -> None:
+    """A dashboard API key is not a verified Matrix browser identity."""
+    runtime_paths = main._app_runtime_paths(test_client.app)
+    api_key_runtime_paths = runtime_paths.__class__(
+        config_path=runtime_paths.config_path,
+        config_dir=runtime_paths.config_dir,
+        env_path=runtime_paths.env_path,
+        storage_root=runtime_paths.storage_root,
+        process_env={**dict(runtime_paths.process_env), "MINDROOM_API_KEY": "test-key"},
+        env_file_values=runtime_paths.env_file_values,
+    )
+    main.initialize_api_app(test_client.app, api_key_runtime_paths)
+    slug, _storage_root = _publish_origin_report(test_client)
+    authorize = _bind_authorization(test_client)
+
+    response = test_client.get(
+        f"/reports/room/{slug}",
+        headers={"Authorization": "Bearer test-key"},
+    )
+
+    assert response.status_code == 401
+    authorize.assert_not_awaited()
+
+
+def test_origin_room_report_denies_authenticated_principal_without_matrix_identity(test_client: TestClient) -> None:
+    """Authenticated principal without verified Matrix mapping should get uniform 404."""
+    use_trusted_upstream_runtime(test_client.app)
+    slug, _storage_root = _publish_origin_report(test_client)
+    authorize = _bind_authorization(test_client)
+    headers = trusted_upstream_headers(matrix_user_id="")
+
+    response = test_client.get(f"/reports/room/{slug}", headers=headers)
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Report was not found."
+    authorize.assert_not_awaited()
+
+
+def test_origin_room_direct_asset_denial_is_uniform_not_found(test_client: TestClient) -> None:
+    """Direct asset requests should not bypass denial or disclose membership state."""
+    use_trusted_upstream_runtime(test_client.app)
+    slug, storage_root = _publish_origin_report(test_client, static_site=True)
+    authorize = _bind_authorization(test_client, ReportAuthorizationReason.VIEWER_NOT_JOINED)
+
+    response = test_client.get(
+        f"/reports/room/{slug}/app.js",
+        headers=trusted_upstream_headers(),
+    )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Report was not found."
+    assert storage_root not in response.text
+    authorize.assert_awaited_once()
+
+
+def test_origin_room_report_rejects_encoded_asset_traversal(test_client: TestClient) -> None:
+    """Encoded traversal must fail after authentication without escaping snapshot root."""
+    use_trusted_upstream_runtime(test_client.app)
+    slug, storage_root = _publish_origin_report(test_client, static_site=True)
+    _bind_authorization(test_client)
+
+    response = test_client.get(
+        f"/reports/room/{slug}/%2e%2e%2fconfig.yaml",
+        headers=trusted_upstream_headers(),
+    )
+
+    assert response.status_code == 404
+    assert storage_root not in response.text
+
+
+def test_origin_room_report_fails_closed_without_runtime_binding(test_client: TestClient) -> None:
+    """Configured auth without live Matrix authorization should return 503."""
+    use_trusted_upstream_runtime(test_client.app)
+    slug, _storage_root = _publish_origin_report(test_client)
+
+    response = test_client.get(f"/reports/room/{slug}", headers=trusted_upstream_headers())
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Report authorization is temporarily unavailable."
+
+
+def test_origin_room_report_fails_closed_on_backend_unavailable(test_client: TestClient) -> None:
+    """Matrix lookup failure should stay distinct from membership denial."""
+    use_trusted_upstream_runtime(test_client.app)
+    slug, _storage_root = _publish_origin_report(test_client)
+    _bind_authorization(test_client, ReportAuthorizationReason.AUTHORIZATION_BACKEND_UNAVAILABLE)
+
+    response = test_client.get(f"/reports/room/{slug}", headers=trusted_upstream_headers())
+
+    assert response.status_code == 503
+
+
+def test_report_routes_never_cross_access_policies(test_client: TestClient) -> None:
+    """Changing route shape must not reinterpret public or protected records."""
+    use_trusted_upstream_runtime(test_client.app)
+    public_slug, _storage_root = _publish_public_report(test_client)
+    origin_slug, _storage_root = _publish_origin_report(test_client)
+    authorize = _bind_authorization(test_client)
+    headers = trusted_upstream_headers()
+
+    public_through_room = test_client.get(f"/reports/room/{public_slug}", headers=headers)
+    protected_through_public = test_client.get(f"/reports/public/{origin_slug}")
+
+    assert public_through_room.status_code == 404
+    assert protected_through_public.status_code == 404
+    authorize.assert_not_awaited()
+
+
+def test_origin_room_revocation_is_immediate_despite_cached_authorization(test_client: TestClient) -> None:
+    """Every request should re-read revocation before using membership authority."""
+    use_trusted_upstream_runtime(test_client.app)
+    slug, _storage_root = _publish_origin_report(test_client, static_site=True)
+    authorize = _bind_authorization(test_client)
+    headers = trusted_upstream_headers()
+
+    first = test_client.get(f"/reports/room/{slug}/app.js", headers=headers)
+    runtime_paths = main._app_runtime_paths(test_client.app)
+    ReportPublishingStore(runtime_paths.storage_root).revoke_report(slug, revoked_by="@alice:example.org")
+    revoked = test_client.get(f"/reports/room/{slug}/app.js", headers=headers)
+
+    assert first.status_code == 200
+    assert revoked.status_code == 404
+    authorize.assert_awaited_once()

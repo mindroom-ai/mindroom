@@ -89,7 +89,19 @@ depends_on = ["mindroom.durable_write"]
 
 [[modules]]
 path = "mindroom.report_publishing"
-depends_on = ["mindroom.durable_write"]
+depends_on = [
+    "mindroom.durable_write",
+    "mindroom.matrix.identity",
+    "mindroom.report_access_policy",
+]
+
+[[modules]]
+path = "mindroom.report_access_policy"
+depends_on = []
+
+[[modules]]
+path = "mindroom.report_viewer_auth"
+depends_on = []
 
 # Keep memory consumers explicit so imports are enforced rather than merely
 # interface-checked.
@@ -535,8 +547,11 @@ depends_on = []
 [[modules]]
 path = "mindroom.api.report_publishing"
 depends_on = [
+    "mindroom.api.auth",
     "mindroom.api.config_lifecycle",
     "mindroom.api.report_headers",
+    "mindroom.logging_config",
+    "mindroom.report_access_policy",
     "mindroom.report_publishing",
 ]
 
@@ -1248,6 +1263,17 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.orchestration.report_authorization_runtime"
+depends_on = [
+    "mindroom.api.main",
+    "mindroom.entity_resolution",
+    "mindroom.logging_config",
+    "mindroom.matrix.client_room_admin",
+    "mindroom.report_access_policy",
+    "mindroom.report_publishing",
+]
+
+[[modules]]
 path = "mindroom.orchestration.todo_poke_runtime"
 depends_on = [
     "mindroom.constants",
@@ -1289,6 +1315,7 @@ depends_on = [
     "mindroom.mcp.toolkit",
     "mindroom.orchestration.config_lifecycle",
     "mindroom.orchestration.external_trigger_runtime",
+    "mindroom.orchestration.report_authorization_runtime",
     "mindroom.orchestration.runtime",
     "mindroom.orchestration.todo_poke_runtime",
     "mindroom.runtime_support",
@@ -1450,6 +1477,7 @@ depends_on = [
     "mindroom.config.memory",
     "mindroom.config.models",
     "mindroom.config.plugin",
+    "mindroom.config.report_publishing",
     "mindroom.config.voice",
     "mindroom.config.yaml_includes",
     "mindroom.constants",
@@ -1463,6 +1491,8 @@ depends_on = [
     "mindroom.prompt_templates",
     "mindroom.prompts",
     "mindroom.room_thread_modes",
+    "mindroom.report_access_policy",
+    "mindroom.report_viewer_auth",
     "mindroom.thread_models",
     "mindroom.tool_system.catalog",
     "mindroom.tool_system.plugin_imports",
@@ -2096,6 +2126,7 @@ visibility = [
     "mindroom.matrix.rooms",
     "mindroom.matrix.stale_stream_cleanup",
     "mindroom.orchestration.external_trigger_runtime",
+    "mindroom.orchestration.report_authorization_runtime",
     "mindroom.orchestrator",
 ]
 

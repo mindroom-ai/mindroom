@@ -23,7 +23,9 @@ __all__ = [
     "managed_account_user_id",
     "parse_current_matrix_user_id",
     "parse_historical_matrix_user_id",
+    "parse_matrix_room_id",
     "try_parse_historical_matrix_user_id",
+    "try_parse_matrix_room_id",
 ]
 
 
@@ -130,6 +132,39 @@ def try_parse_historical_matrix_user_id(value: str | None) -> str | None:
         return None
     try:
         return parse_historical_matrix_user_id(value)
+    except ValueError:
+        return None
+
+
+def parse_matrix_room_id(room_id: str) -> str:
+    """Return a canonical Matrix room ID, or raise ValueError."""
+    if not room_id.startswith("!") or ":" not in room_id:
+        msg = f"Invalid Matrix room ID: {room_id}"
+        raise ValueError(msg)
+    localpart, server_name = room_id[1:].split(":", 1)
+    if not localpart or any(char.isspace() or char == "\x00" for char in localpart):
+        msg = f"Invalid Matrix room ID localpart: {room_id}"
+        raise ValueError(msg)
+    if _contains_surrogate(localpart) or not _valid_current_server_name(server_name):
+        msg = f"Invalid Matrix room ID server name: {room_id}"
+        raise ValueError(msg)
+    try:
+        encoded_room_id = room_id.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        msg = f"Invalid Matrix room ID: {room_id}"
+        raise ValueError(msg) from exc
+    if len(encoded_room_id) > 255:
+        msg = f"Invalid Matrix room ID length: {room_id}"
+        raise ValueError(msg)
+    return room_id
+
+
+def try_parse_matrix_room_id(value: str | None) -> str | None:
+    """Return a canonical Matrix room ID when a nullable value parses."""
+    if value is None:
+        return None
+    try:
+        return parse_matrix_room_id(value)
     except ValueError:
         return None
 

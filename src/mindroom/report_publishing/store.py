@@ -1,4 +1,4 @@
-"""Disk-backed public report publishing store."""
+"""Disk-backed report publishing store."""
 
 from __future__ import annotations
 
@@ -11,6 +11,8 @@ from typing import TYPE_CHECKING, cast
 from uuid import uuid4
 
 from mindroom.durable_write import write_json_file_durable
+from mindroom.matrix.identity import try_parse_historical_matrix_user_id, try_parse_matrix_room_id
+from mindroom.report_access_policy import ReportAccessPolicy
 from mindroom.report_publishing.static_site import (
     StaticSiteSnapshotError,
     resolve_static_site_asset,
@@ -54,7 +56,7 @@ class PublishableReport:
 
 @dataclass(frozen=True)
 class PublishedReport:
-    """Persistent public link record for one report artifact."""
+    """Persistent publication record for one report artifact."""
 
     slug: str
     source_type: str
@@ -66,6 +68,10 @@ class PublishedReport:
     published_by: str
     published_at: str
     public_url: str | None
+    access_policy: ReportAccessPolicy = ReportAccessPolicy.PUBLIC
+    origin_room_id: str | None = None
+    publisher_entity_name: str | None = None
+    publisher_matrix_user_id: str | None = None
     revoked_at: str | None = None
     revoked_by: str | None = None
 
@@ -76,7 +82,7 @@ class PublishedReport:
 
 
 class ReportPublishingStore:
-    """Persist revocable public report links under one storage root."""
+    """Persist revocable report publications under one storage root."""
 
     def __init__(self, storage_root: Path) -> None:
         self._storage_root = storage_root
@@ -88,8 +94,18 @@ class ReportPublishingStore:
         source: PublishableReport,
         published_by: str,
         base_url: str | None = None,
+        access_policy: ReportAccessPolicy = ReportAccessPolicy.PUBLIC,
+        origin_room_id: str | None = None,
+        publisher_entity_name: str | None = None,
+        publisher_matrix_user_id: str | None = None,
     ) -> PublishedReport:
-        """Create a public link record for one authorized report artifact."""
+        """Create a publication record for one authorized report artifact."""
+        _validate_publication_metadata(
+            access_policy=access_policy,
+            origin_room_id=origin_room_id,
+            publisher_entity_name=publisher_entity_name,
+            publisher_matrix_user_id=publisher_matrix_user_id,
+        )
         slug = f"pub_{uuid4().hex}"
         artifact_path = self._publish_artifact(source, slug)
         report = PublishedReport(
@@ -102,7 +118,16 @@ class ReportPublishingStore:
             requested_by=source.requested_by,
             published_by=published_by,
             published_at=_utc_now(),
-            public_url=_public_report_url(base_url, slug, artifact_kind=source.artifact_kind),
+            public_url=_report_url(
+                base_url,
+                slug,
+                artifact_kind=source.artifact_kind,
+                access_policy=access_policy,
+            ),
+            access_policy=access_policy,
+            origin_room_id=origin_room_id,
+            publisher_entity_name=publisher_entity_name,
+            publisher_matrix_user_id=publisher_matrix_user_id,
         )
         report_path = self._public_report_path(slug)
         payload = _published_report_to_json(report)
@@ -110,10 +135,17 @@ class ReportPublishingStore:
         return report
 
     def get_public_report(self, slug: str, *, include_revoked: bool = False) -> PublishedReport:
-        """Load one public report record."""
+        """Load one report record through the backwards-compatible store API."""
+        return self.get_report(slug, include_revoked=include_revoked)
+
+    def get_report(self, slug: str, *, include_revoked: bool = False) -> PublishedReport:
+        """Load one report publication."""
         report = _published_report_from_json(_load_json_mapping(self._public_report_path(slug)))
+        if report.slug != slug:
+            msg = "Published report record slug does not match its storage key."
+            raise ReportPublishingError(msg)
         if report.revoked_at is not None and not include_revoked:
-            msg = f"Public report '{slug}' was revoked."
+            msg = f"Published report '{slug}' was revoked."
             raise ReportPublishingError(msg)
         return report
 
@@ -138,8 +170,12 @@ class ReportPublishingStore:
         return report_path
 
     def revoke_public_report(self, slug: str, *, revoked_by: str) -> PublishedReport:
-        """Revoke one public report link without deleting its underlying artifact."""
-        report = self.get_public_report(slug, include_revoked=True)
+        """Revoke one report through the backwards-compatible store API."""
+        return self.revoke_report(slug, revoked_by=revoked_by)
+
+    def revoke_report(self, slug: str, *, revoked_by: str) -> PublishedReport:
+        """Revoke one report without deleting its underlying artifact."""
+        report = self.get_report(slug, include_revoked=True)
         if report.revoked_at is not None:
             return report
         revoked = replace(report, revoked_at=_utc_now(), revoked_by=revoked_by)
@@ -192,6 +228,10 @@ def _published_report_to_json(report: PublishedReport) -> dict[str, object]:
         "published_by": report.published_by,
         "published_at": report.published_at,
         "public_url": report.public_url,
+        "access_policy": report.access_policy.value,
+        "origin_room_id": report.origin_room_id,
+        "publisher_entity_name": report.publisher_entity_name,
+        "publisher_matrix_user_id": report.publisher_matrix_user_id,
         "revoked_at": report.revoked_at,
         "revoked_by": report.revoked_by,
     }
@@ -203,20 +243,42 @@ def _published_report_from_json(data: dict[str, object]) -> PublishedReport:
         msg = f"Published report record is missing field '{missing_fields[0]}'."
         raise ReportPublishingError(msg)
     source = data.get("source", {})
-    return PublishedReport(
-        slug=str(data["slug"]),
-        source_type=str(data["source_type"]),
-        source=_object_mapping(cast("Mapping[object, object]", source)) if isinstance(source, dict) else {},
-        artifact_kind=str(data.get("artifact_kind", _ARTIFACT_KIND_HTML_FILE)),
-        artifact_path=str(data["artifact_path"]),
-        title=str(data["title"]),
-        requested_by=str(data["requested_by"]),
-        published_by=str(data["published_by"]),
-        published_at=str(data["published_at"]),
-        public_url=str(data["public_url"]) if data.get("public_url") is not None else None,
-        revoked_at=str(data["revoked_at"]) if data.get("revoked_at") is not None else None,
-        revoked_by=str(data["revoked_by"]) if data.get("revoked_by") is not None else None,
+    if not isinstance(source, dict):
+        msg = "Published report record field 'source' must be an object."
+        raise ReportPublishingError(msg)
+    raw_access_policy = data.get("access_policy", ReportAccessPolicy.PUBLIC.value)
+    try:
+        access_policy = ReportAccessPolicy(raw_access_policy)
+    except (TypeError, ValueError) as exc:
+        msg = f"Published report record has unsupported access policy '{raw_access_policy}'."
+        raise ReportPublishingError(msg) from exc
+    report = PublishedReport(
+        slug=_required_text(data, "slug"),
+        source_type=_required_text(data, "source_type"),
+        source=_object_mapping(cast("Mapping[object, object]", source)),
+        artifact_kind=_optional_text(data, "artifact_kind") or _ARTIFACT_KIND_HTML_FILE,
+        artifact_path=_required_text(data, "artifact_path"),
+        title=_required_text(data, "title"),
+        requested_by=_required_text(data, "requested_by"),
+        published_by=_required_text(data, "published_by"),
+        published_at=_required_text(data, "published_at"),
+        public_url=_optional_text(data, "public_url"),
+        access_policy=access_policy,
+        origin_room_id=_optional_text(data, "origin_room_id"),
+        publisher_entity_name=_optional_text(data, "publisher_entity_name"),
+        publisher_matrix_user_id=_optional_text(data, "publisher_matrix_user_id"),
+        revoked_at=_optional_text(data, "revoked_at"),
+        revoked_by=_optional_text(data, "revoked_by"),
     )
+    _validate_public_report_slug(report.slug)
+    _validate_publication_metadata(
+        access_policy=report.access_policy,
+        origin_room_id=report.origin_room_id,
+        publisher_entity_name=report.publisher_entity_name,
+        publisher_matrix_user_id=report.publisher_matrix_user_id,
+        allow_public_incidental_metadata=True,
+    )
+    return report
 
 
 def _validate_public_report_slug(value: str) -> None:
@@ -225,11 +287,72 @@ def _validate_public_report_slug(value: str) -> None:
         raise ReportPublishingError(msg)
 
 
-def _public_report_url(base_url: str | None, slug: str, *, artifact_kind: str) -> str | None:
+def _report_url(
+    base_url: str | None,
+    slug: str,
+    *,
+    artifact_kind: str,
+    access_policy: ReportAccessPolicy,
+) -> str | None:
     if base_url is None or not base_url.strip():
         return None
-    suffix = f"/reports/public/{slug}/" if artifact_kind == ARTIFACT_KIND_STATIC_SITE else f"/reports/public/{slug}"
+    route = "public" if access_policy is ReportAccessPolicy.PUBLIC else "room"
+    suffix = f"/reports/{route}/{slug}/" if artifact_kind == ARTIFACT_KIND_STATIC_SITE else f"/reports/{route}/{slug}"
     return f"{base_url.rstrip('/')}{suffix}"
+
+
+def _validate_publication_metadata(
+    *,
+    access_policy: ReportAccessPolicy,
+    origin_room_id: str | None,
+    publisher_entity_name: str | None,
+    publisher_matrix_user_id: str | None,
+    allow_public_incidental_metadata: bool = False,
+) -> None:
+    metadata = (origin_room_id, publisher_entity_name, publisher_matrix_user_id)
+    if access_policy is ReportAccessPolicy.PUBLIC:
+        if not allow_public_incidental_metadata and any(value is not None for value in metadata):
+            msg = "Public report records must not contain origin-room authorization metadata."
+            raise ReportPublishingError(msg)
+        return
+    if any(value is None or not value.strip() for value in metadata):
+        msg = "Origin-room report records require room and publisher identity metadata."
+        raise ReportPublishingError(msg)
+    assert origin_room_id is not None
+    assert publisher_entity_name is not None
+    assert publisher_matrix_user_id is not None
+    if not _valid_matrix_room_id(origin_room_id):
+        msg = "Origin-room report record contains an invalid Matrix room ID."
+        raise ReportPublishingError(msg)
+    if not _valid_matrix_user_id(publisher_matrix_user_id):
+        msg = "Origin-room report record contains an invalid publisher Matrix user ID."
+        raise ReportPublishingError(msg)
+
+
+def _valid_matrix_room_id(value: str) -> bool:
+    return try_parse_matrix_room_id(value) == value
+
+
+def _valid_matrix_user_id(value: str) -> bool:
+    return try_parse_historical_matrix_user_id(value) == value
+
+
+def _required_text(data: dict[str, object], key: str) -> str:
+    value = data.get(key)
+    if not isinstance(value, str) or not value:
+        msg = f"Published report record field '{key}' must be a non-empty string."
+        raise ReportPublishingError(msg)
+    return value
+
+
+def _optional_text(data: dict[str, object], key: str) -> str | None:
+    value = data.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value:
+        msg = f"Published report record field '{key}' must be a non-empty string or null."
+        raise ReportPublishingError(msg)
+    return value
 
 
 def _relative_artifact_path(artifact_path: Path, storage_root: Path) -> str:
