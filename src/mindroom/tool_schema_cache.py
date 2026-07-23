@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True, slots=True)
 class _ProcessedFunctionSchema:
-    """Processed prompt schema snapshot; treat nested containers as immutable."""
+    """Processed prompt schema snapshot for one Function."""
 
     parameters: dict[str, Any]
     description: str | None
@@ -26,11 +26,11 @@ class _ProcessedFunctionSchema:
 
 
 def cached_processed_schema(function: Function, *, strict: bool) -> _ProcessedFunctionSchema | None:
-    """Return the cached processed prompt schema for one Function without mutating it.
+    """Return a private copy of the cached processed prompt schema for one Function.
 
-    Returns ``None`` when the entrypoint or parameters cannot form a stable
-    cache key, in which case callers must fall back to full entrypoint
-    processing on a private copy.
+    Never mutates ``function``. Returns ``None`` when the entrypoint or
+    parameters cannot form a stable cache key, in which case callers must fall
+    back to full entrypoint processing on a private copy.
     """
     if function.entrypoint is None:
         return None
@@ -50,7 +50,7 @@ def cached_processed_schema(function: Function, *, strict: bool) -> _ProcessedFu
     except TypeError:
         return None
 
-    return _cached_processed_function_schema(
+    snapshot = _cached_processed_function_schema(
         source_callable,
         function.name,
         function.description,
@@ -60,6 +60,12 @@ def cached_processed_schema(function: Function, *, strict: bool) -> _ProcessedFu
         tuple(function.user_input_fields) if function.user_input_fields is not None else None,
         function.strict,
         strict,
+    )
+    # Copy at the boundary so callers can never corrupt the shared LRU entry.
+    return _ProcessedFunctionSchema(
+        parameters=deepcopy(snapshot.parameters),
+        description=snapshot.description,
+        user_input_schema=deepcopy(snapshot.user_input_schema) if snapshot.user_input_schema is not None else None,
     )
 
 

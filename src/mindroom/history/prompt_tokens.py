@@ -31,7 +31,7 @@ from agno.team._tools import _determine_tools_for_model
 from agno.tools import Toolkit
 from agno.tools.function import Function
 
-from mindroom.timing import timed, timed_block
+from mindroom.timing import timed_block
 from mindroom.token_budget import estimate_text_tokens, stable_serialize
 from mindroom.tool_schema_cache import cached_processed_schema
 
@@ -195,7 +195,6 @@ def _agent_prompt_tool_surface(agent: Agent) -> _PromptToolSurface:
     return surface
 
 
-@timed("system_prompt_assembly.history_prepare.static_token_estimate.agno_determine_tools")
 def _team_prompt_tool_surface(team: Team) -> _PromptToolSurface:
     """Prepare (or reuse) the prompt-only tool surface for one team instance.
 
@@ -203,7 +202,7 @@ def _team_prompt_tool_surface(team: Team) -> _PromptToolSurface:
     payload and `_tool_instructions` state that feed that prompt are only built by
     the internal `_determine_tools_for_model()` path. Using that single internal
     entrypoint is less brittle than re-implementing several private team helpers in
-    MindRoom. This logic is verified against `agno==2.5.13`; if Agno changes those
+    MindRoom. This logic is verified against `agno==2.6.12`; if Agno changes those
     internals, update this estimator to match the new team prompt builder.
     """
     cached_surface = _cached_tool_surface(team)
@@ -211,33 +210,34 @@ def _team_prompt_tool_surface(team: Team) -> _PromptToolSurface:
         return cached_surface
     previous_tool_instructions = team._tool_instructions
     try:
-        session, run_response, run_context = _team_prompt_estimation_inputs(team)
-        model = team.model
-        assert model is not None
-        prepared_tools = _determine_tools_for_model(
-            team=team,
-            model=model,
-            run_response=run_response,
-            run_context=run_context,
-            team_run_context={},
-            session=session,
-            check_mcp_tools=False,
-        )
-        payloads_by_name: dict[str, _ToolDefinition] = {}
-        for tool in prepared_tools:
-            if isinstance(tool, Function):
-                payload = _live_function_payload(tool)
-            elif _is_tool_definition_dict(tool):
-                payload = _dict_tool_payload(tool)
-            else:
-                continue
-            tool_name = payload["name"]
-            if isinstance(tool_name, str) and tool_name:
-                payloads_by_name[tool_name] = payload
-        surface = _build_prompt_tool_surface(
-            list(payloads_by_name.values()),
-            list(team._tool_instructions or ()),
-        )
+        with timed_block("system_prompt_assembly.history_prepare.static_token_estimate.agno_determine_tools"):
+            session, run_response, run_context = _team_prompt_estimation_inputs(team)
+            model = team.model
+            assert model is not None
+            prepared_tools = _determine_tools_for_model(
+                team=team,
+                model=model,
+                run_response=run_response,
+                run_context=run_context,
+                team_run_context={},
+                session=session,
+                check_mcp_tools=False,
+            )
+            payloads_by_name: dict[str, _ToolDefinition] = {}
+            for tool in prepared_tools:
+                if isinstance(tool, Function):
+                    payload = _live_function_payload(tool)
+                elif _is_tool_definition_dict(tool):
+                    payload = _dict_tool_payload(tool)
+                else:
+                    continue
+                tool_name = payload["name"]
+                if isinstance(tool_name, str) and tool_name:
+                    payloads_by_name[tool_name] = payload
+            surface = _build_prompt_tool_surface(
+                list(payloads_by_name.values()),
+                list(team._tool_instructions or ()),
+            )
     finally:
         team._tool_instructions = previous_tool_instructions
     _store_tool_surface(team, surface)
@@ -320,7 +320,7 @@ def _processed_function_payload(function: Function) -> _ToolDefinition:
     return {
         "name": function.name,
         "description": snapshot.description or "",
-        "parameters": deepcopy(snapshot.parameters) or _default_function_parameters(),
+        "parameters": snapshot.parameters or _default_function_parameters(),
     }
 
 
