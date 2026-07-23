@@ -240,7 +240,6 @@ visibility = [
 path = "mindroom.agent_storage"
 depends_on = [
     "mindroom.constants",
-    "mindroom.prompt_message_tags",
     "mindroom.runtime_resolution",
 ]
 visibility = [
@@ -1505,7 +1504,6 @@ visibility = [
 path = "mindroom.prompt_message_tags"
 depends_on = []
 visibility = [
-    "mindroom.agent_storage",
     "mindroom.coalescing_batch",
     "mindroom.conversation_state_writer",
     "mindroom.execution_preparation",
