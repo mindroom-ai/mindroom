@@ -95,6 +95,100 @@ def build_threaded_edit_content(*args: object, **kwargs: object) -> dict[str, ob
 class TestThreadHistory:
     """Test thread history fetching functionality."""
 
+    @pytest.mark.asyncio
+    async def test_long_cached_sidecar_thread_uses_one_bounded_cache_read(self) -> None:
+        """Hydrate a long sidecar thread without one durable transaction per message."""
+        sidecar_count = 128
+        event_sources = [
+            {
+                "event_id": f"$event-{index}",
+                "origin_server_ts": index,
+                "type": "m.room.message",
+                "sender": "@agent:localhost",
+                "content": {
+                    "msgtype": "m.file",
+                    "body": f"Preview {index}",
+                    "io.mindroom.long_text": {
+                        "version": 2,
+                        "encoding": "matrix_event_content_json",
+                    },
+                    "url": f"mxc://server/sidecar-{index}",
+                    "m.relates_to": {
+                        "rel_type": "m.thread",
+                        "event_id": "$event-0",
+                    },
+                },
+            }
+            for index in range(sidecar_count)
+        ]
+        event_cache = _event_cache()
+        cached_payload = json.dumps(
+            {
+                "msgtype": "m.text",
+                "body": "Hydrated",
+            },
+        )
+        event_cache.get_mxc_texts.return_value = {
+            (f"$event-{index}", f"mxc://server/sidecar-{index}"): cached_payload for index in range(sidecar_count)
+        }
+        client = AsyncMock()
+
+        history, _sidecar_hydration_ms = await _resolve_thread_history_from_event_sources_timed(
+            client,
+            room_id="!room:localhost",
+            thread_id="$event-0",
+            event_sources=event_sources,
+            event_cache=event_cache,
+            expected_membership_epoch=0,
+        )
+
+        assert len(history) == sidecar_count
+        event_cache.get_mxc_texts.assert_awaited_once()
+        event_cache.room_membership_epoch.assert_awaited_once_with("!room:localhost")
+        event_cache.get_event.assert_not_awaited()
+        event_cache.get_mxc_text.assert_not_awaited()
+        event_cache.store_events_batch.assert_not_awaited()
+        client.download.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_long_cached_sidecar_thread_rejects_membership_epoch_change(self) -> None:
+        """Discard a batched plaintext snapshot when room membership changes during hydration."""
+        event_source = {
+            "event_id": "$root",
+            "origin_server_ts": 1,
+            "type": "m.room.message",
+            "sender": "@agent:localhost",
+            "content": {
+                "msgtype": "m.file",
+                "body": "Preview",
+                "io.mindroom.long_text": {
+                    "version": 2,
+                    "encoding": "matrix_event_content_json",
+                },
+                "url": "mxc://server/sidecar",
+            },
+        }
+        event_cache = _event_cache()
+        event_cache.get_mxc_texts.return_value = {
+            ("$root", "mxc://server/sidecar"): json.dumps(
+                {
+                    "msgtype": "m.text",
+                    "body": "Hydrated",
+                },
+            ),
+        }
+        event_cache.room_membership_epoch.return_value = 1
+
+        with pytest.raises(RuntimeError, match="membership changed"):
+            await _resolve_thread_history_from_event_sources_timed(
+                AsyncMock(),
+                room_id="!room:localhost",
+                thread_id="$root",
+                event_sources=[event_source],
+                event_cache=event_cache,
+                expected_membership_epoch=0,
+            )
+
     @staticmethod
     def _make_text_event(
         *,

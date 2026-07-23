@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
+    from collections.abc import Collection
+
     from .agent_message_snapshot import AgentMessageSnapshot
 
 
@@ -116,6 +118,15 @@ class ConversationEventCache(Protocol):
 
     async def get_mxc_text(self, room_id: str, event_id: str, mxc_url: str) -> str | None:
         """Return MXC plaintext only while a visible owning event still references it."""
+
+    async def get_mxc_texts(
+        self,
+        room_id: str,
+        references: Collection[tuple[str, str]],
+        *,
+        expected_membership_epoch: int,
+    ) -> dict[tuple[str, str], str]:
+        """Return scoped MXC plaintext for many surviving event references in one read."""
 
     async def store_event(
         self,
