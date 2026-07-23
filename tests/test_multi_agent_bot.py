@@ -386,6 +386,7 @@ class TestAgentBot(AgentBotTestBase):
             call_order.append("sync")
 
         mock_client.sync_forever = AsyncMock(side_effect=_sync_forever)
+        mock_client.sliding_sync_forever = AsyncMock(side_effect=_sync_forever)
         mock_login.return_value = mock_client
         mock_ensure_user.return_value = None
 
