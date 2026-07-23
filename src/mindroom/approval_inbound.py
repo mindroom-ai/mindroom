@@ -122,7 +122,7 @@ async def maybe_handle_tool_approval_reply(
     orchestrator: OrchestratorRuntime | None,
     logger: structlog.stdlib.BoundLogger,
 ) -> bool:
-    """Consume reply-to-approval messages as denial actions."""
+    """Deny live approvals or expire detached approval cards targeted by replies."""
     reply_to_event_id = EventInfo.from_event(event.source).reply_to_event_id
     if reply_to_event_id is None:
         return False

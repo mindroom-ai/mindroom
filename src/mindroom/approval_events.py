@@ -108,11 +108,11 @@ class PendingApproval:
             return self.initial_status
         content = latest_edit.get("content")
         if not isinstance(content, dict):
-            return "pending"
+            return self.initial_status
         status = visible_content_from_content(cast("dict[str, object]", content)).get("status")
         if status in {"pending", "approved", "denied", "expired"}:
             return cast("PendingApprovalStatus", status)
-        return "pending"
+        return self.initial_status
 
 
 def _approvable(content: dict[str, Any]) -> bool:

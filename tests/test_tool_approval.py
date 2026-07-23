@@ -2043,6 +2043,15 @@ async def test_card_response_for_malformed_original_status_is_untouched(
     editor.assert_not_awaited()
 
 
+def test_pending_approval_ignores_malformed_edit_status() -> None:
+    card = _approval_card()
+    card["content"]["status"] = "approved"
+    pending = PendingApproval.from_card_event(card, room_id="!room:localhost")
+
+    assert pending.latest_status({"content": None}) == "approved"
+    assert pending.latest_status({"content": {"status": "invalid"}}) == "approved"
+
+
 @pytest.mark.asyncio
 async def test_card_response_for_cached_orphan_rejects_non_approver(tmp_path: Path) -> None:
     cache = FakeEventCache()
