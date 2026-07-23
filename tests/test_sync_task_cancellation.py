@@ -22,7 +22,6 @@ from mindroom.cancellation import (
 from mindroom.config.main import Config
 from mindroom.config.matrix import MatrixSyncConfig
 from mindroom.constants import RuntimePaths
-from mindroom.matrix.client_session import PermanentMatrixStartupError
 from mindroom.matrix.sync_loop import _sliding_sync_lists, _sliding_sync_room_subscriptions
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestration import runtime as runtime_helpers
@@ -762,7 +761,7 @@ async def test_full_state_stays_enabled_until_first_sync_response() -> None:
     bot = MagicMock(spec=AgentBot)
     bot._first_sync_done = False
     bot._sync_shutting_down = False
-    bot.config = Config()
+    bot.config = Config(matrix_sync=MatrixSyncConfig(mode="classic"))
     bot.rooms = []
     bot.client = FakeClient()
 
@@ -805,7 +804,7 @@ async def test_full_state_only_after_successful_first_sync() -> None:
     bot._sync_shutting_down = False
     bot._calls_reconcile_pending = False
     bot._room_member_join_hooks_armed = False
-    bot.config = Config()
+    bot.config = Config(matrix_sync=MatrixSyncConfig(mode="classic"))
     bot.rooms = []
     bot._restart_retry_queue = SyncRestartRetryQueue()
     bot.client = FakeClient()
@@ -829,8 +828,8 @@ async def test_full_state_only_after_successful_first_sync() -> None:
 
 
 @pytest.mark.asyncio
-async def test_auto_sync_uses_sliding_sync_forever_when_supported() -> None:
-    """Auto sync mode should call the MSC4186 nio loop when the client supports it."""
+async def test_default_sync_mode_uses_sliding_sync_forever() -> None:
+    """The default sync mode should call the MSC4186 nio loop."""
     sliding_calls: list[dict[str, object]] = []
 
     class FakeClient:
@@ -914,25 +913,6 @@ async def test_auto_sync_uses_sliding_sync_forever_when_supported() -> None:
             },
         },
     ]
-
-
-@pytest.mark.asyncio
-async def test_sliding_sync_mode_without_support_is_permanent_startup_error() -> None:
-    """Explicit sliding mode should fail permanently when the nio client lacks support."""
-
-    class FakeClient:
-        async def sync_forever(self, *, timeout: int, full_state: bool) -> None:  # noqa: ASYNC109, ARG002
-            raise AssertionError
-
-    bot = MagicMock(spec=AgentBot)
-    bot.agent_name = "code"
-    bot._first_sync_done = False
-    bot.rooms = ["!alpha:localhost"]
-    bot.config = Config(matrix_sync=MatrixSyncConfig(mode="sliding"))
-    bot.client = FakeClient()
-
-    with pytest.raises(PermanentMatrixStartupError, match="sliding_sync_forever"):
-        await AgentBot.sync_forever(bot)
 
 
 def test_sliding_sync_required_state_is_not_shared_between_requests() -> None:

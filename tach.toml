@@ -2132,7 +2132,6 @@ visibility = [
     "mindroom.desktop.session",
     "mindroom.matrix.appservice",
     "mindroom.matrix.client",
-    "mindroom.matrix.sync_loop",
     "mindroom.matrix.provisioning",
     "mindroom.matrix.rooms",
     "mindroom.matrix.users",
@@ -2142,7 +2141,7 @@ visibility = [
 
 [[modules]]
 path = "mindroom.matrix.sync_loop"
-depends_on = ["mindroom.matrix.client_session"]
+depends_on = []
 visibility = ["mindroom.bot"]
 
 [[modules]]

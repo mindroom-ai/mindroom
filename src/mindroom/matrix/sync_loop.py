@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Protocol, cast, runtime_checkable
-
-from mindroom.matrix.client_session import PermanentMatrixStartupError
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     import nio
@@ -20,15 +18,6 @@ _SLIDING_SYNC_REQUIRED_STATE: tuple[tuple[str, str], ...] = (
     ("m.room.member", "$LAZY"),
 )
 _SLIDING_SYNC_LIST_ROOM_COUNT = 100
-
-
-@runtime_checkable
-class _SlidingSyncClient(Protocol):
-    """Client API provided by mindroom-nio for MSC4186 sync loops."""
-
-    async def sliding_sync_forever(self, **kwargs: object) -> None:
-        """Run a Simplified Sliding Sync loop."""
-        ...
 
 
 def _sliding_room_config(timeline_limit: int) -> dict[str, object]:
@@ -63,34 +52,6 @@ def _sliding_sync_extensions() -> dict[str, object]:
     }
 
 
-async def _run_classic_sync_forever(
-    client: nio.AsyncClient,
-    *,
-    timeout_ms: int,
-    first_sync_done: bool,
-) -> None:
-    """Run the classic Matrix /v3/sync loop."""
-    await client.sync_forever(timeout=timeout_ms, full_state=not first_sync_done)
-
-
-async def _run_sliding_sync_forever(
-    client: _SlidingSyncClient,
-    *,
-    agent_name: str,
-    room_ids: list[str],
-    timeout_ms: int,
-    timeline_limit: int,
-) -> None:
-    """Run the MSC4186 Simplified Sliding Sync loop."""
-    await client.sliding_sync_forever(
-        timeout=timeout_ms,
-        conn_id=f"mindroom-{agent_name}",
-        lists=_sliding_sync_lists(timeline_limit),
-        room_subscriptions=_sliding_sync_room_subscriptions(room_ids, timeline_limit),
-        extensions=_sliding_sync_extensions(),
-    )
-
-
 async def run_matrix_sync_forever(
     client: nio.AsyncClient,
     *,
@@ -101,24 +62,15 @@ async def run_matrix_sync_forever(
     first_sync_done: bool,
 ) -> None:
     """Run the configured Matrix sync loop for one bot account."""
-    sync_mode = config.matrix_sync.mode
-    if sync_mode == "classic":
-        await _run_classic_sync_forever(client, timeout_ms=timeout_ms, first_sync_done=first_sync_done)
+    if config.matrix_sync.mode == "classic":
+        await client.sync_forever(timeout=timeout_ms, full_state=not first_sync_done)
         return
-
-    if sync_mode == "auto" and not isinstance(client, _SlidingSyncClient):
-        await _run_classic_sync_forever(client, timeout_ms=timeout_ms, first_sync_done=first_sync_done)
-        return
-
-    if not isinstance(client, _SlidingSyncClient):
-        msg = "matrix_sync.mode='sliding' requires mindroom-nio with sliding_sync_forever support"
-        raise PermanentMatrixStartupError(msg)
 
     timeline_limit = config.matrix_sync.sliding_timeline_limit
-    await _run_sliding_sync_forever(
-        cast("_SlidingSyncClient", client),
-        agent_name=agent_name,
-        room_ids=room_ids,
-        timeout_ms=timeout_ms,
-        timeline_limit=timeline_limit,
+    await client.sliding_sync_forever(
+        timeout=timeout_ms,
+        conn_id=f"mindroom-{agent_name}",
+        lists=_sliding_sync_lists(timeline_limit),
+        room_subscriptions=_sliding_sync_room_subscriptions(room_ids, timeline_limit),
+        extensions=_sliding_sync_extensions(),
     )

@@ -1345,7 +1345,7 @@ class TestConsolidatedConfigManager:
         """An uncommented blank matrix_sync section should behave like an empty mapping."""
         config = Config.model_validate({"matrix_sync": None})
 
-        assert config.matrix_sync.mode == "auto"
+        assert config.matrix_sync.mode == "sliding"
         assert config.matrix_sync.sliding_timeline_limit == 20
 
     def test_duplicate_tool_entries_are_rejected_for_agents_and_defaults(self) -> None:
