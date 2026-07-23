@@ -28,6 +28,7 @@ class PendingApproval:
     arguments_preview_truncated: bool
     timeout_seconds: int
     created_at_ms: int
+    initial_status: PendingApprovalStatus
     approvable: bool = True
     full_arguments_available: bool = False
     thread_id: str | None = None
@@ -59,6 +60,10 @@ class PendingApproval:
         if approval_id is None or tool_name is None or approver_user_id is None:
             msg = "Approval card event is missing required approval fields."
             raise ValueError(msg)
+        status = content.get("status")
+        if status not in {"pending", "approved", "denied", "expired"}:
+            msg = "Approval card event has an invalid status."
+            raise ValueError(msg)
 
         arguments = content.get("arguments")
         if not isinstance(arguments, dict):
@@ -86,6 +91,7 @@ class PendingApproval:
             arguments_preview_truncated=bool(content.get("arguments_truncated")),
             timeout_seconds=timeout_seconds,
             created_at_ms=created_at_ms,
+            initial_status=cast("PendingApprovalStatus", status),
             approvable=_approvable(content),
             full_arguments_available=_full_arguments_available(content),
             thread_id=thread_id,
@@ -99,14 +105,14 @@ class PendingApproval:
     def latest_status(self, latest_edit: dict[str, Any] | None) -> PendingApprovalStatus:
         """Return the visible approval status after applying the latest cached edit."""
         if latest_edit is None:
-            return "pending"
+            return self.initial_status
         content = latest_edit.get("content")
         if not isinstance(content, dict):
-            return "pending"
+            return self.initial_status
         status = visible_content_from_content(cast("dict[str, object]", content)).get("status")
         if status in {"pending", "approved", "denied", "expired"}:
             return cast("PendingApprovalStatus", status)
-        return "pending"
+        return self.initial_status
 
 
 def _approvable(content: dict[str, Any]) -> bool:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import suppress
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -47,6 +48,27 @@ if TYPE_CHECKING:
 def mock_agent_user() -> AgentMatrixUser:
     """Mock agent user for testing."""
     return make_mock_agent_user()
+
+
+def _detached_approval_card() -> dict[str, Any]:
+    now = datetime.now(UTC)
+    return {
+        "event_id": "$approval",
+        "room_id": "!test:localhost",
+        "sender": "@mindroom_router:localhost",
+        "type": "io.mindroom.tool_approval",
+        "origin_server_ts": int(now.timestamp() * 1000),
+        "content": {
+            "approval_id": "approval-1",
+            "tool_name": "read_file",
+            "arguments": {"path": "notes.txt"},
+            "status": "pending",
+            "requester_id": "@user:localhost",
+            "approver_user_id": "@user:localhost",
+            "requested_at": now.isoformat(),
+            "expires_at": (now + timedelta(minutes=5)).isoformat(),
+        },
+    }
 
 
 class TestAgentBot(AgentBotTestBase):
@@ -559,19 +581,19 @@ class TestAgentBot(AgentBotTestBase):
             await _shutdown_approval_store()
 
     @pytest.mark.asyncio
-    async def test_plain_rich_reply_does_not_probe_approval_cache(
+    async def test_plain_rich_reply_falls_through_after_approval_card_point_lookup(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Ordinary rich replies should not touch approval cache lookup."""
+        """Ordinary rich replies should fall through when their target is not an approval card."""
         config = self._config_for_storage(tmp_path)
         runtime_paths = runtime_paths_for(config)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
         bot._turn_controller.handle_text_event = AsyncMock()
         room = SimpleNamespace(room_id="!test:localhost", canonical_alias=None)
         event_cache = MagicMock()
-        event_cache.get_event = AsyncMock(side_effect=RuntimeError("cache should not run"))
+        event_cache.get_event = AsyncMock(return_value=None)
         store = initialize_approval_store(
             runtime_paths,
             event_cache=event_cache,
@@ -596,8 +618,102 @@ class TestAgentBot(AgentBotTestBase):
             bot._turn_controller.handle_text_event.assert_awaited_once()
             assert bot._turn_controller.handle_text_event.await_args.args == (room, event)
             assert isinstance(bot._turn_controller.handle_text_event.await_args.kwargs["receipt_time"], float)
-            event_cache.get_event.assert_not_awaited()
+            event_cache.get_event.assert_awaited_once_with("!test:localhost", "$ordinary-message")
             assert store is get_approval_store()
+        finally:
+            await _shutdown_approval_store()
+
+    @pytest.mark.asyncio
+    async def test_reply_to_detached_pending_approval_is_consumed_and_expires_card(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Detached approval replies should expire their card instead of entering conversation input."""
+        config = self._config_for_storage(tmp_path)
+        runtime_paths = runtime_paths_for(config)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        bot._turn_controller.handle_text_event = AsyncMock()
+        room = SimpleNamespace(room_id="!test:localhost", canonical_alias=None)
+        event_cache = MagicMock()
+        event_cache.get_event = AsyncMock(return_value=_detached_approval_card())
+        event_cache.get_latest_edit = AsyncMock(return_value=None)
+        editor = AsyncMock(return_value=True)
+        initialize_approval_store(
+            runtime_paths,
+            editor=editor,
+            event_cache=event_cache,
+            transport_sender=lambda: "@mindroom_router:localhost",
+        )
+        event = MagicMock(spec=nio.RoomMessageText)
+        event.event_id = "$reply"
+        event.sender = "@user:localhost"
+        event.body = "Deny."
+        event.server_timestamp = 1234
+        event.source = {
+            "event_id": "$reply",
+            "sender": "@user:localhost",
+            "origin_server_ts": 1234,
+            "content": {"m.relates_to": {"m.in_reply_to": {"event_id": "$approval"}}},
+        }
+
+        try:
+            await bot._on_message(room, event)
+
+            bot._turn_controller.handle_text_event.assert_not_awaited()
+            assert editor.await_args.args[:2] == ("!test:localhost", "$approval")
+            replacement = editor.await_args.args[2]
+            assert replacement["status"] == "expired"
+            assert replacement["resolution_reason"] == "Original tool request is no longer active."
+        finally:
+            await _shutdown_approval_store()
+
+    @pytest.mark.asyncio
+    async def test_thread_fallback_to_detached_approval_remains_conversation_input(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Thread fallback metadata must not turn ordinary text into an approval response."""
+        config = self._config_for_storage(tmp_path)
+        runtime_paths = runtime_paths_for(config)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        bot._turn_controller.handle_text_event = AsyncMock()
+        room = SimpleNamespace(room_id="!test:localhost", canonical_alias=None)
+        event_cache = MagicMock()
+        event_cache.get_event = AsyncMock(return_value=_detached_approval_card())
+        editor = AsyncMock(return_value=True)
+        initialize_approval_store(
+            runtime_paths,
+            editor=editor,
+            event_cache=event_cache,
+            transport_sender=lambda: "@mindroom_router:localhost",
+        )
+        event = MagicMock(spec=nio.RoomMessageText)
+        event.event_id = "$thread-message"
+        event.sender = "@user:localhost"
+        event.body = "Please continue."
+        event.server_timestamp = 1234
+        event.source = {
+            "event_id": "$thread-message",
+            "sender": "@user:localhost",
+            "origin_server_ts": 1234,
+            "content": {
+                "m.relates_to": {
+                    "rel_type": "m.thread",
+                    "event_id": "$thread-root",
+                    "is_falling_back": True,
+                    "m.in_reply_to": {"event_id": "$approval"},
+                },
+            },
+        }
+
+        try:
+            await bot._on_message(room, event)
+
+            bot._turn_controller.handle_text_event.assert_awaited_once()
+            event_cache.get_event.assert_not_awaited()
+            editor.assert_not_awaited()
         finally:
             await _shutdown_approval_store()
 

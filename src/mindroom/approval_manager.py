@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
-import time
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Iterator
 from concurrent.futures import Future, InvalidStateError
@@ -59,6 +58,7 @@ _DEFAULT_TRUNCATED_APPROVAL_REASON = (
     "body — or auto-approve this tool via a script-based approval rule."
 )
 _STARTUP_DISCARD_REASON = "Bot restarted before approval — original request was cancelled."
+_DETACHED_REQUEST_REASON = "Original tool request is no longer active."
 _MAX_ARGUMENTS_PREVIEW_CHARS = 1200
 _MAX_FULL_ARGUMENTS_JSON_BYTES = 2_000_000
 _MAX_REMEMBERED_TERMINAL_CARD_IDS = 4096
@@ -245,8 +245,8 @@ class _ActiveApprovalSend:
 class _ApprovalManager:
     """Coordinate live approval waiters against Matrix approval cards.
 
-    Cached approval cards are only a startup cleanup index; they never make an
-    approval actionable after the live waiter is gone.
+    Cached approval cards support terminal cleanup only; they never make an
+    approval actionable after its live waiter is gone.
     """
 
     def __init__(
@@ -356,28 +356,25 @@ class _ApprovalManager:
             with self._live_lock:
                 self._pending_by_card_event.pop(waiter.card_event_id, None)
 
-    async def discard_pending_on_startup(self, *, lookback_hours: int = 24) -> int:
+    async def discard_pending_on_startup(self) -> int:
         """Expire cached, router-authored approval cards after startup."""
         transport_sender = self._transport_sender_id()
         if transport_sender is None:
             return 0
 
-        cutoff_ts_ms = _lookback_cutoff_ms(lookback_hours)
         discarded = 0
         for room_id in self._configured_approval_room_ids():
             for card_event in await self._scan_cached_room_cards(
                 room_id,
-                since_ts_ms=cutoff_ts_ms,
+                since_ts_ms=0,
                 limit=_STARTUP_DISCARD_SCAN_LIMIT,
             ):
-                try:
-                    pending = PendingApproval.from_card_event(card_event, room_id=room_id)
-                except (TypeError, ValueError):
-                    continue
-                if pending.card_sender_id != transport_sender:
-                    continue
-                latest_edit = await self._latest_trusted_edit(pending)
-                if pending.latest_status(latest_edit) != "pending":
+                pending = await self._trusted_pending_from_card_event(
+                    card_event,
+                    room_id=room_id,
+                    transport_sender=transport_sender,
+                )
+                if pending is None:
                     continue
                 result = await self._discard_matrix_only_card(
                     pending=pending,
@@ -408,8 +405,20 @@ class _ApprovalManager:
                 reason=reason,
             )
 
-        consumed = self.knows_in_memory_approval_card(card_event_id)
-        return ApprovalActionResult(consumed=consumed, resolved=False, card_event_id=card_event_id)
+        if self.knows_in_memory_approval_card(card_event_id):
+            return ApprovalActionResult(consumed=True, resolved=False, card_event_id=card_event_id)
+
+        pending = await self._cached_trusted_pending_approval_for_card(
+            room_id=room_id,
+            card_event_id=card_event_id,
+        )
+        if pending is None or pending.approver_user_id != sender_id:
+            return ApprovalActionResult(consumed=False, resolved=False, card_event_id=card_event_id)
+        return await self._discard_matrix_only_card(
+            pending=pending,
+            reason=_DETACHED_REQUEST_REASON,
+            resolved_by=sender_id,
+        )
 
     async def handle_live_approval_id_response(
         self,
@@ -835,6 +844,51 @@ class _ApprovalManager:
             return None
         return pending
 
+    async def _cached_trusted_pending_approval_for_card(
+        self,
+        *,
+        room_id: str,
+        card_event_id: str,
+    ) -> PendingApproval | None:
+        if self._event_cache is None:
+            return None
+        card_event = await self._event_cache.get_event(room_id, card_event_id)
+        if card_event is None or not is_original_approval_card(card_event):
+            return None
+        transport_sender = self._transport_sender_id()
+        if transport_sender is None:
+            return None
+        return await self._trusted_pending_from_card_event(
+            card_event,
+            room_id=room_id,
+            transport_sender=transport_sender,
+            expected_card_event_id=card_event_id,
+        )
+
+    async def _trusted_pending_from_card_event(
+        self,
+        card_event: dict[str, Any],
+        *,
+        room_id: str,
+        transport_sender: str,
+        expected_card_event_id: str | None = None,
+    ) -> PendingApproval | None:
+        event_room_id = card_event.get("room_id")
+        if event_room_id is not None and event_room_id != room_id:
+            return None
+        try:
+            pending = PendingApproval.from_card_event(card_event, room_id=room_id)
+        except (TypeError, ValueError):
+            return None
+        if (
+            expected_card_event_id is not None and pending.card_event_id != expected_card_event_id
+        ) or pending.card_sender_id != transport_sender:
+            return None
+        latest_edit = await self._latest_trusted_edit(pending)
+        if pending.latest_status(latest_edit) != "pending":
+            return None
+        return pending
+
     async def _latest_edit(
         self,
         *,
@@ -871,6 +925,12 @@ class _ApprovalManager:
             since_ts_ms=since_ts_ms,
             limit=limit,
         )
+        if len(events) >= limit:
+            logger.warning(
+                "approval_startup_scan_truncated",
+                room_id=room_id,
+                scan_limit=limit,
+            )
         return [event for event in events if is_original_approval_card(event)]
 
     async def shutdown(self, *, reason: str) -> None:
@@ -1238,10 +1298,6 @@ class _ApprovalManager:
             resolved_by=resolved_by,
             resolved_at=_utcnow(),
         )
-
-
-def _lookback_cutoff_ms(lookback_hours: int) -> int:
-    return int((time.time() - max(lookback_hours, 0) * 3600) * 1000)
 
 
 def get_approval_store() -> _ApprovalManager | None:
