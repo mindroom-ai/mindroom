@@ -40,10 +40,6 @@ from mindroom.matrix.conversation_cache import MatrixConversationCache
 from mindroom.matrix.decrypt_failure import handle_decrypt_failure, raise_notice_floor
 from mindroom.matrix.event_info import EventInfo, origin_server_ts_from_event_source
 from mindroom.matrix.health import clear_matrix_sync_state, mark_matrix_sync_loop_started, mark_matrix_sync_success
-from mindroom.matrix.limited_sync_backfill import (
-    DeliveredEventTracker,
-    backfill_limited_sync_gaps,
-)
 from mindroom.matrix.media import MATRIX_MEDIA_EVENT_TYPES
 from mindroom.matrix.presence import build_agent_status_message, set_presence_status
 from mindroom.matrix.room_cleanup import cleanup_all_orphaned_bots
@@ -342,7 +338,6 @@ class AgentBot:
         self._hook_registry_state = HookRegistryState(HookRegistry.empty())
         self._room_member_callback_registered = False
         self._room_member_join_hooks_armed = False
-        self._delivered_event_tracker = DeliveredEventTracker()
         self._runtime_view = BotRuntimeState(
             client=None,
             config=config,
@@ -1207,9 +1202,6 @@ class AgentBot:
                 hooks_were_armed=room_member_join_hooks_were_armed,
                 decision=decision,
             )
-            self._record_delivered_sync_timeline_events(_response)
-            if not first_sync_response:
-                await self._backfill_limited_sync_gaps(_response)
         self._first_sync_done = True
         self._room_member_join_hooks_armed = room_member_join_hook_plan.arm_after_response
 
@@ -1234,50 +1226,6 @@ class AgentBot:
                     name=f"matrix_rtc_reconcile_{self.agent_name}",
                     owner=self._runtime_view,
                 )
-
-    def _record_delivered_sync_timeline_events(self, response: nio.SyncResponse) -> None:
-        """Remember every joined-room timeline event nio delivered this round.
-
-        The delivered set is what backfill walks history back to: a limited
-        room's gap ends at the newest event this agent has already handled.
-        """
-        joined_rooms = response.rooms.join
-        if not isinstance(joined_rooms, dict):
-            return
-        for room_id, room_info in joined_rooms.items():
-            if not isinstance(room_id, str) or room_info is None:
-                continue
-            timeline = getattr(room_info, "timeline", None)
-            events = [] if timeline is None else getattr(timeline, "events", [])
-            event_ids = [event.event_id for event in events if getattr(event, "event_id", None)]
-            if event_ids:
-                self._delivered_event_tracker.record(room_id, event_ids)
-
-    async def _backfill_limited_sync_gaps(self, response: nio.SyncResponse) -> None:
-        """Recover events dropped by limited timelines without crashing the loop."""
-        client = self.client
-        if client is None:
-            return
-        try:
-            await backfill_limited_sync_gaps(
-                response,
-                client=client,
-                tracker=self._delivered_event_tracker,
-                dispatch=self._dispatch_recovered_event,
-                agent_name=self.agent_name,
-            )
-        except Exception:
-            self.logger.exception(
-                "limited_sync_gap_backfill_loop_error",
-                agent_name=self.agent_name,
-            )
-
-    async def _dispatch_recovered_event(self, event: nio.Event, room: nio.MatrixRoom) -> None:
-        """Fan a backfilled event through the same nio callbacks as live sync."""
-        client = self.client
-        if client is None:
-            return
-        await cast("Any", client)._on_event(event, room)
 
     async def _on_sync_error(self, _response: nio.SyncError) -> None:
         """Update the watchdog clock on sync errors without marking cache state fresh."""
@@ -1580,7 +1528,6 @@ class AgentBot:
         """Fence and purge one principal-owned room immediately after departure."""
         self._local_departures_awaiting_sync.add(room_id)
         self._sync_cache_trust.invalidate_for_cache_scope_cleanup()
-        self._delivered_event_tracker.forget_room(room_id)
         await self._conversation_cache.purge_rooms((room_id,))
 
     async def stop(

@@ -125,6 +125,11 @@ def test_matrix_client_config_copies_custom_http_headers() -> None:
     assert config.custom_headers == {"X-Access-Client": "test-secret"}
 
 
+def test_matrix_client_config_enables_limited_timeline_backfill() -> None:
+    """MindRoom clients must recover events omitted by limited sync windows."""
+    assert matrix_client_config().backfill_limited_timelines is True
+
+
 @pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits are unavailable on Windows")
 def test_matrix_store_directory_is_owner_only(tmp_path: Path) -> None:
     """Private Olm identity material is inaccessible to other local users."""
