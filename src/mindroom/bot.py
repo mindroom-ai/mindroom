@@ -51,6 +51,7 @@ from mindroom.matrix.sync_certification import (
     SyncCertificationDecision,
     SyncTrustState,
 )
+from mindroom.matrix.sync_loop import run_matrix_sync_forever, sliding_own_membership_sets
 from mindroom.matrix.users import AgentMatrixUser, login_agent_user
 from mindroom.matrix_rtc.call_manager import CallManager, maybe_build_call_manager
 from mindroom.memory import store_conversation_memory
@@ -306,6 +307,7 @@ class AgentBot:
     _calls_reconcile_pending: bool
     _room_member_callback_registered: bool
     _room_member_join_hooks_armed: bool
+    _sliding_sync_startup_warning_emitted: bool
     _turn_controller: TurnController
     _room_lifecycle: BotRoomLifecycle
     _local_departures_awaiting_sync: set[str]
@@ -338,6 +340,7 @@ class AgentBot:
         self._hook_registry_state = HookRegistryState(HookRegistry.empty())
         self._room_member_callback_registered = False
         self._room_member_join_hooks_armed = False
+        self._sliding_sync_startup_warning_emitted = False
         self._runtime_view = BotRuntimeState(
             client=None,
             config=config,
@@ -1132,18 +1135,20 @@ class AgentBot:
 
     async def _run_sync_response_side_effects(
         self,
-        response: nio.SyncResponse,
+        response: nio.SyncResponse | nio.SlidingSyncResponse,
         *,
         first_sync_response: bool,
         room_member_join_hook_plan: _RoomMemberJoinSyncHookPlan,
     ) -> None:
         """Run sync-response side effects that must poison certification on failure."""
-        if room_member_join_hook_plan.record_state_seen:
-            await self._emit_room_member_joined_sync_state_hooks(response, record_only=True)
-        if room_member_join_hook_plan.emit_timeline:
-            await self._emit_room_member_joined_sync_timeline_hooks(response)
-        if room_member_join_hook_plan.emit_state:
-            await self._emit_room_member_joined_sync_state_hooks(response)
+        # The emit flags are only set by the classic-sync certification path.
+        if isinstance(response, nio.SyncResponse):
+            if room_member_join_hook_plan.record_state_seen:
+                await self._emit_room_member_joined_sync_state_hooks(response, record_only=True)
+            if room_member_join_hook_plan.emit_timeline:
+                await self._emit_room_member_joined_sync_timeline_hooks(response)
+            if room_member_join_hook_plan.emit_state:
+                await self._emit_room_member_joined_sync_state_hooks(response)
 
         if first_sync_response:
             self._register_room_member_callback_after_initial_sync()
@@ -1156,7 +1161,7 @@ class AgentBot:
         if first_sync_response or has_deferred_overdue_tasks():
             self._maybe_start_deferred_overdue_task_drain()
 
-    async def _on_sync_response(self, _response: nio.SyncResponse) -> None:
+    async def _on_sync_response(self, _response: nio.SyncResponse | nio.SlidingSyncResponse) -> None:
         """Track successful sync responses for health checks and watchdogs."""
         first_sync_response = not self._first_sync_done
         room_member_join_hooks_were_armed = self._room_member_join_hooks_armed
@@ -1202,6 +1207,10 @@ class AgentBot:
                 hooks_were_armed=room_member_join_hooks_were_armed,
                 decision=decision,
             )
+        elif isinstance(_response, nio.SlidingSyncResponse):
+            # Sliding sync never certifies the classic checkpoint, but the
+            # account's own kicks and bans still must fence and purge rooms.
+            await self._apply_own_room_membership_from_sliding_sync(_response)
         self._first_sync_done = True
         self._room_member_join_hooks_armed = room_member_join_hook_plan.arm_after_response
 
@@ -1231,6 +1240,12 @@ class AgentBot:
         """Update the watchdog clock on sync errors without marking cache state fresh."""
         logger.debug("SyncError received", agent_name=self.agent_name, error=str(_response))
         self._last_sync_monotonic = time.monotonic()
+        if isinstance(_response, nio.SlidingSyncError):
+            # nio restarts expired sliding connections (M_UNKNOWN_POS)
+            # transparently, and sliding errors say nothing about the classic
+            # sync checkpoint, so classic token rejection must not run here.
+            self._warn_if_sliding_sync_never_succeeded(_response)
+            return
         if _response.status_code == "M_UNKNOWN_POS":
             decision = self._sync_cache_trust.reject_unknown_pos()
             if decision.reset_client_token and self.client is not None:
@@ -1242,6 +1257,21 @@ class AgentBot:
                 error=str(_response),
                 first_sync=not self._first_sync_done,
             )
+
+    def _warn_if_sliding_sync_never_succeeded(self, response: nio.SlidingSyncError) -> None:
+        """Point at the classic transport once when sliding sync fails before ever succeeding."""
+        if self._first_sync_done or self._sliding_sync_startup_warning_emitted:
+            return
+        self._sliding_sync_startup_warning_emitted = True
+        self.logger.warning(
+            "sliding_sync_failing_before_first_sync",
+            status_code=response.status_code,
+            error=str(response),
+            hint=(
+                "If the homeserver does not support MSC4186 Simplified Sliding Sync"
+                " (org.matrix.simplified_msc3575), set matrix_sync.mode: classic."
+            ),
+        )
 
     async def ensure_rooms(self) -> None:
         """Ensure agent is in the correct rooms based on configuration.
@@ -1325,7 +1355,29 @@ class AgentBot:
                 for event in room_info.timeline.events
             )
         }
-        departed_room_ids = left_room_ids | timeline_departure_room_ids
+        await self._apply_own_room_membership(
+            joined_room_ids=joined_room_ids,
+            left_room_ids=left_room_ids,
+            departed_room_ids=left_room_ids | timeline_departure_room_ids,
+        )
+
+    async def _apply_own_room_membership_from_sliding_sync(self, response: nio.SlidingSyncResponse) -> None:
+        """Apply this bot's room memberships reported by one sliding sync response."""
+        joined_room_ids, departed_room_ids = sliding_own_membership_sets(response)
+        await self._apply_own_room_membership(
+            joined_room_ids=joined_room_ids,
+            left_room_ids=departed_room_ids,
+            departed_room_ids=departed_room_ids,
+        )
+
+    async def _apply_own_room_membership(
+        self,
+        *,
+        joined_room_ids: set[str],
+        left_room_ids: set[str],
+        departed_room_ids: set[str],
+    ) -> None:
+        """Fence departed rooms and refresh joined-room cache access for one sync response."""
         if departed_room_ids:
             self._sync_cache_trust.invalidate_for_cache_scope_cleanup()
         for room_id in departed_room_ids:
@@ -1448,7 +1500,7 @@ class AgentBot:
                 ),
             )
             await self._set_presence_with_model_info()
-            client.add_response_callback(self._on_sync_response, nio.SyncResponse)  # ty: ignore[invalid-argument-type]  # matrix-nio callback types are too strict here
+            client.add_response_callback(self._on_sync_response, (nio.SyncResponse, nio.SlidingSyncResponse))  # ty: ignore[invalid-argument-type]  # matrix-nio callback types are too strict here
             client.add_response_callback(self._on_sync_error, nio.SyncError)  # ty: ignore[invalid-argument-type]
 
             self.running = True
@@ -1693,10 +1745,14 @@ class AgentBot:
     async def sync_forever(self) -> None:
         """Run the sync loop for this agent."""
         assert self.client is not None
-        await self.client.sync_forever(
-            timeout=_SYNC_TIMEOUT_MS,
+        await run_matrix_sync_forever(
+            self.client,
+            config=self.config,
+            agent_name=self.agent_name,
+            room_ids=self.rooms,
+            timeout_ms=_SYNC_TIMEOUT_MS,
             sync_filter=_SYNC_FILTER,
-            full_state=not self._first_sync_done,
+            first_sync_done=self._first_sync_done,
         )
 
     async def _on_invite(self, room: nio.MatrixRoom, event: nio.InviteEvent) -> None:

@@ -11,6 +11,7 @@ if TYPE_CHECKING:
     import httpx
 
 _MATRIX_VERSIONS_PATH = "/_matrix/client/versions"
+MSC4186_UNSTABLE_FEATURE = "org.matrix.simplified_msc3575"
 _MATRIX_SYNC_HEALTH_STALE_SECONDS = 180.0
 MATRIX_SYNC_STARTUP_GRACE_SECONDS = 600.0
 MATRIX_SYNC_WATCHDOG_TIMEOUT_SECONDS = 120.0
@@ -64,6 +65,12 @@ def response_has_matrix_versions(response: httpx.Response) -> bool:
     except ValueError:
         return False
     return isinstance(payload, dict) and "versions" in payload
+
+
+def response_advertises_sliding_sync(response: httpx.Response) -> bool:
+    """Return whether a valid `/versions` response advertises MSC4186 Simplified Sliding Sync."""
+    unstable_features = response.json().get("unstable_features")
+    return isinstance(unstable_features, dict) and unstable_features.get(MSC4186_UNSTABLE_FEATURE) is True
 
 
 def mark_matrix_sync_loop_started(entity_name: str) -> None:

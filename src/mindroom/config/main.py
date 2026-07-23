@@ -40,6 +40,7 @@ from mindroom.config.matrix import (
     CacheConfig,
     MatrixRoomAccessConfig,
     MatrixSpaceConfig,
+    MatrixSyncConfig,
     MindRoomUserConfig,
 )
 from mindroom.config.memory import MemoryBackend, MemoryConfig, MemorySearchConfig
@@ -149,7 +150,7 @@ _OPTIONAL_DICT_SECTION_NAMES = (
     "matrix_room_access",
     "matrix_space",
 )
-_OPTIONAL_MODEL_SECTION_NAMES = ("debug", "external_trigger_policy", "tool_approval")
+_OPTIONAL_MODEL_SECTION_NAMES = ("debug", "external_trigger_policy", "matrix_sync", "tool_approval")
 
 
 class ConfigRuntimeValidationError(ValueError):
@@ -425,6 +426,10 @@ class Config(BaseModel):
     voice: VoiceConfig = Field(default_factory=VoiceConfig, description="Voice configuration")
     calls: CallsConfig = Field(default_factory=CallsConfig, description="Voice call (MatrixRTC) configuration")
     cache: CacheConfig = Field(default_factory=CacheConfig, description="Persistent Matrix event cache")
+    matrix_sync: MatrixSyncConfig = Field(
+        default_factory=MatrixSyncConfig,
+        description="Matrix event sync transport configuration",
+    )
     timezone: str = Field(
         default="UTC",
         description="Timezone for interpreting scheduling requests and displaying scheduled tasks (e.g., 'America/New_York')",

@@ -8,6 +8,7 @@ from contextlib import suppress
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import nio
 import pytest
 from structlog.testing import capture_logs
 
@@ -20,10 +21,12 @@ from mindroom.cancellation import (
     cancel_message_for_source,
 )
 from mindroom.config.main import Config
+from mindroom.config.matrix import MatrixSyncConfig
 from mindroom.constants import RuntimePaths
+from mindroom.matrix.sync_loop import _sliding_sync_lists, _sliding_sync_room_subscriptions, sliding_own_membership_sets
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestration import runtime as runtime_helpers
-from mindroom.orchestration.config_updates import ConfigUpdatePlan
+from mindroom.orchestration.config_updates import ConfigUpdatePlan, build_config_update_plan
 from mindroom.orchestration.runtime import (
     EntityStartResults,
     _MatrixSyncStalledError,
@@ -759,6 +762,8 @@ async def test_full_state_stays_enabled_until_first_sync_response() -> None:
     bot = MagicMock(spec=AgentBot)
     bot._first_sync_done = False
     bot._sync_shutting_down = False
+    bot.config = Config(matrix_sync=MatrixSyncConfig(mode="classic"))
+    bot.rooms = []
     bot.client = FakeClient()
 
     first_task = asyncio.create_task(AgentBot.sync_forever(bot))
@@ -800,6 +805,8 @@ async def test_full_state_only_after_successful_first_sync() -> None:
     bot._sync_shutting_down = False
     bot._calls_reconcile_pending = False
     bot._room_member_join_hooks_armed = False
+    bot.config = Config(matrix_sync=MatrixSyncConfig(mode="classic"))
+    bot.rooms = []
     bot._restart_retry_queue = SyncRestartRetryQueue()
     bot.client = FakeClient()
     bot.orchestrator = None
@@ -822,8 +829,96 @@ async def test_full_state_only_after_successful_first_sync() -> None:
 
 
 @pytest.mark.asyncio
-async def test_sync_forever_requests_raised_timeline_limit() -> None:
-    """sync_forever must widen the per-room timeline limit to reduce limited-sync gaps."""
+async def test_sliding_sync_mode_uses_sliding_sync_forever() -> None:
+    """Opting into sliding mode should call the MSC4186 nio loop."""
+    sliding_calls: list[dict[str, object]] = []
+
+    class FakeClient:
+        async def sync_forever(self, *, timeout: int, full_state: bool) -> None:  # noqa: ASYNC109, ARG002
+            raise AssertionError
+
+        async def sliding_sync_forever(
+            self,
+            *,
+            timeout: int,  # noqa: ASYNC109 - mirrors matrix-nio long-poll timeout.
+            conn_id: str,
+            lists: dict[str, object],
+            room_subscriptions: dict[str, object],
+            extensions: dict[str, object],
+        ) -> None:
+            sliding_calls.append(
+                {
+                    "timeout": timeout,
+                    "conn_id": conn_id,
+                    "lists": lists,
+                    "room_subscriptions": room_subscriptions,
+                    "extensions": extensions,
+                },
+            )
+
+    bot = MagicMock(spec=AgentBot)
+    bot.agent_name = "code"
+    bot._first_sync_done = False
+    bot.rooms = ["!alpha:localhost", "#lobby:localhost", "!beta:localhost"]
+    bot.config = Config(matrix_sync=MatrixSyncConfig(mode="sliding", sliding_timeline_limit=7))
+    bot.client = FakeClient()
+
+    await AgentBot.sync_forever(bot)
+
+    assert sliding_calls == [
+        {
+            "timeout": 30000,
+            "conn_id": "mindroom-code",
+            "lists": {
+                "mindroom": {
+                    "ranges": [[0, 99]],
+                    "timeline_limit": 7,
+                    "required_state": [
+                        ["m.room.create", ""],
+                        ["m.room.name", ""],
+                        ["m.room.topic", ""],
+                        ["m.room.avatar", ""],
+                        ["m.room.encryption", ""],
+                        ["m.room.member", "$LAZY"],
+                    ],
+                },
+            },
+            "room_subscriptions": {
+                "!alpha:localhost": {
+                    "timeline_limit": 7,
+                    "required_state": [
+                        ["m.room.create", ""],
+                        ["m.room.name", ""],
+                        ["m.room.topic", ""],
+                        ["m.room.avatar", ""],
+                        ["m.room.encryption", ""],
+                        ["m.room.member", "$LAZY"],
+                    ],
+                },
+                "!beta:localhost": {
+                    "timeline_limit": 7,
+                    "required_state": [
+                        ["m.room.create", ""],
+                        ["m.room.name", ""],
+                        ["m.room.topic", ""],
+                        ["m.room.avatar", ""],
+                        ["m.room.encryption", ""],
+                        ["m.room.member", "$LAZY"],
+                    ],
+                },
+            },
+            "extensions": {
+                "to_device": {"enabled": True},
+                "e2ee": {"enabled": True},
+                "account_data": {"enabled": True},
+            },
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_default_sync_mode_is_classic_with_raised_timeline_limit() -> None:
+    """The default sync mode must use classic /v3/sync with the widened per-room timeline limit."""
     captured: list[object] = []
 
     class FakeClient:
@@ -833,11 +928,172 @@ async def test_sync_forever_requests_raised_timeline_limit() -> None:
     bot = MagicMock(spec=AgentBot)
     bot._first_sync_done = True
     bot._sync_shutting_down = False
+    bot.config = Config()
+    bot.rooms = []
     bot.client = FakeClient()
 
     await AgentBot.sync_forever(bot)
 
     assert captured == [{"room": {"timeline": {"limit": _SYNC_TIMELINE_LIMIT}}}]
+
+
+@pytest.mark.asyncio
+async def test_sliding_sync_response_marks_sync_success() -> None:
+    """A sliding sync response must feed the watchdog clock and first-sync lifecycle."""
+    bot = MagicMock(spec=AgentBot)
+    bot.agent_name = "test_agent"
+    bot.last_sync_time = None
+    bot._first_sync_done = False
+    bot._sync_shutting_down = False
+    bot._calls_reconcile_pending = False
+    bot._room_member_join_hooks_armed = False
+    bot._restart_retry_queue = SyncRestartRetryQueue()
+    bot.orchestrator = None
+
+    await AgentBot._on_sync_response(bot, nio.SlidingSyncResponse("pos"))
+
+    assert bot.last_sync_time is not None
+    assert bot._first_sync_done is True
+    assert bot._room_member_join_hooks_armed is True
+
+
+def test_matrix_sync_change_restarts_existing_entities() -> None:
+    """Changing matrix_sync must restart running bots so sync loops pick up the new transport."""
+    plan = build_config_update_plan(
+        current_config=Config(),
+        new_config=Config(matrix_sync=MatrixSyncConfig(mode="sliding")),
+        configured_entities={"router", "code"},
+        existing_entities={"router", "code"},
+        agent_bots={},
+    )
+
+    assert plan.entities_to_restart == {"router", "code"}
+
+
+def test_sliding_sync_required_state_is_not_shared_between_requests() -> None:
+    """Sliding sync request builders should not reuse mutable required_state lists."""
+    lists = _sliding_sync_lists(timeline_limit=7)
+    room_subscriptions = _sliding_sync_room_subscriptions(["!alpha:localhost", "!beta:localhost"], timeline_limit=7)
+
+    list_required_state = lists["mindroom"]["required_state"]
+    alpha_required_state = room_subscriptions["!alpha:localhost"]["required_state"]
+    beta_required_state = room_subscriptions["!beta:localhost"]["required_state"]
+
+    assert list_required_state == alpha_required_state == beta_required_state
+    assert list_required_state is not alpha_required_state
+    assert alpha_required_state is not beta_required_state
+    alpha_required_state.append(["m.room.power_levels", ""])
+    assert ["m.room.power_levels", ""] not in beta_required_state
+    assert ["m.room.power_levels", ""] not in _sliding_sync_lists(timeline_limit=7)["mindroom"]["required_state"]
+
+
+def test_sliding_own_membership_sets_split_joins_invites_and_departures() -> None:
+    """Sliding memberships must classify joins, skip invites, and surface kicks and bans."""
+    response = nio.SlidingSyncResponse(
+        "pos",
+        rooms={
+            "!joined:localhost": nio.SlidingSyncRoom(membership="join"),
+            "!window:localhost": nio.SlidingSyncRoom(),
+            "!invited:localhost": nio.SlidingSyncRoom(membership="invite"),
+            "!stripped:localhost": nio.SlidingSyncRoom(stripped_state=[MagicMock()]),
+            "!kicked:localhost": nio.SlidingSyncRoom(membership="leave"),
+            "!banned:localhost": nio.SlidingSyncRoom(membership="ban"),
+        },
+    )
+
+    joined_room_ids, departed_room_ids = sliding_own_membership_sets(response)
+
+    assert joined_room_ids == {"!joined:localhost", "!window:localhost"}
+    assert departed_room_ids == {"!kicked:localhost", "!banned:localhost"}
+
+
+@pytest.mark.asyncio
+async def test_sliding_sync_remote_departure_fences_and_purges() -> None:
+    """A sliding response reporting a kick must fence, purge, and notify the call manager."""
+    bot = MagicMock(spec=AgentBot)
+    bot.agent_name = "test_agent"
+    bot.last_sync_time = None
+    bot._first_sync_done = True
+    bot._sync_shutting_down = False
+    bot._calls_reconcile_pending = False
+    bot._room_member_join_hooks_armed = True
+    bot._restart_retry_queue = SyncRestartRetryQueue()
+    bot.orchestrator = None
+    bot._local_departures_awaiting_sync = set()
+    bot._sync_cache_trust = MagicMock()
+    bot._room_lifecycle = MagicMock()
+    bot._conversation_cache = MagicMock(purge_rooms=AsyncMock(), mark_room_joined=AsyncMock())
+    bot._call_manager = MagicMock(on_sync_room_membership=AsyncMock())
+    bot._apply_own_room_membership_from_sliding_sync = AgentBot._apply_own_room_membership_from_sliding_sync.__get__(
+        bot,
+    )
+    bot._apply_own_room_membership = AgentBot._apply_own_room_membership.__get__(bot)
+
+    response = nio.SlidingSyncResponse(
+        "pos",
+        rooms={
+            "!kicked:localhost": nio.SlidingSyncRoom(membership="leave"),
+            "!joined:localhost": nio.SlidingSyncRoom(membership="join"),
+        },
+    )
+
+    await AgentBot._on_sync_response(bot, response)
+
+    bot._sync_cache_trust.invalidate_for_cache_scope_cleanup.assert_called_once_with()
+    bot._room_lifecycle.forget_invited_room.assert_called_once_with("!kicked:localhost")
+    bot._conversation_cache.purge_rooms.assert_awaited_once_with({"!kicked:localhost"})
+    bot._conversation_cache.mark_room_joined.assert_awaited_once_with("!joined:localhost")
+    bot._call_manager.on_sync_room_membership.assert_awaited_once_with(
+        joined_room_ids={"!joined:localhost"},
+        left_room_ids={"!kicked:localhost"},
+    )
+
+
+@pytest.mark.asyncio
+async def test_sliding_sync_error_skips_classic_token_rejection() -> None:
+    """Routine sliding connection expiry must not run classic sync-token rejection."""
+    bot = MagicMock(spec=AgentBot)
+    bot.agent_name = "test_agent"
+    bot._first_sync_done = True
+    bot._room_member_join_hooks_armed = True
+    bot._sync_cache_trust = MagicMock()
+    bot.logger = MagicMock()
+    error = nio.SlidingSyncError("connection expired", "M_UNKNOWN_POS")
+
+    await AgentBot._on_sync_error(bot, error)
+
+    bot._sync_cache_trust.reject_unknown_pos.assert_not_called()
+    assert bot._room_member_join_hooks_armed is True
+    bot.logger.warning.assert_not_called()
+    bot._warn_if_sliding_sync_never_succeeded.assert_called_once_with(error)
+
+
+def test_sliding_sync_startup_failure_warns_once_with_classic_hint() -> None:
+    """Sliding errors before the first successful sync warn once and point at classic mode."""
+    bot = MagicMock(spec=AgentBot)
+    bot._first_sync_done = False
+    bot._sliding_sync_startup_warning_emitted = False
+    bot.logger = MagicMock()
+    error = nio.SlidingSyncError("unknown endpoint", "M_UNRECOGNIZED")
+
+    AgentBot._warn_if_sliding_sync_never_succeeded(bot, error)
+    AgentBot._warn_if_sliding_sync_never_succeeded(bot, error)
+
+    bot.logger.warning.assert_called_once()
+    assert "matrix_sync.mode: classic" in bot.logger.warning.call_args.kwargs["hint"]
+    assert bot._sliding_sync_startup_warning_emitted is True
+
+
+def test_sliding_sync_errors_after_first_sync_do_not_warn() -> None:
+    """Sliding errors after a successful sync are routine and stay at debug level."""
+    bot = MagicMock(spec=AgentBot)
+    bot._first_sync_done = True
+    bot._sliding_sync_startup_warning_emitted = False
+    bot.logger = MagicMock()
+
+    AgentBot._warn_if_sliding_sync_never_succeeded(bot, nio.SlidingSyncError("boom", "M_UNKNOWN"))
+
+    bot.logger.warning.assert_not_called()
 
 
 @pytest.mark.asyncio

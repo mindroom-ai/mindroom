@@ -295,6 +295,17 @@ def build_config_update_plan(
             )
         entities_to_restart |= default_affected_entities
 
+    if current_config.matrix_sync != new_config.matrix_sync:
+        # The sync transport is chosen when a bot's sync loop starts, so every
+        # running entity must restart to pick up the new matrix_sync settings.
+        sync_affected_entities = existing_entities & configured_entities
+        if sync_affected_entities:
+            logger.info(
+                "matrix_sync_changed_restart_required",
+                entities=sorted(sync_affected_entities),
+            )
+        entities_to_restart |= sync_affected_entities
+
     added_entities = configured_entities - existing_entities
     new_entities = added_entities - entities_to_restart
 

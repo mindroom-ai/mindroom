@@ -2140,6 +2140,11 @@ visibility = [
 ]
 
 [[modules]]
+path = "mindroom.matrix.sync_loop"
+depends_on = []
+visibility = ["mindroom.bot"]
+
+[[modules]]
 path = "mindroom.matrix.to_device"
 depends_on = []
 visibility = [
@@ -2688,6 +2693,7 @@ depends_on = [
     "mindroom.matrix.state",
     "mindroom.matrix.sync_cache_trust",
     "mindroom.matrix.sync_certification",
+    "mindroom.matrix.sync_loop",
     "mindroom.matrix.to_device",
     "mindroom.matrix.users",
     "mindroom.matrix.visible_body",

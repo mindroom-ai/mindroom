@@ -22,7 +22,12 @@ from mindroom.embedder_health import probe_embedder, semantic_embedder_configure
 from mindroom.embedding_errors import EMBEDDER_UNREACHABLE_DETAIL
 from mindroom.embeddings import create_sentence_transformers_embedder
 from mindroom.google_adc import load_google_application_credentials
-from mindroom.matrix.health import matrix_versions_url, response_has_matrix_versions
+from mindroom.matrix.health import (
+    MSC4186_UNSTABLE_FEATURE,
+    matrix_versions_url,
+    response_advertises_sliding_sync,
+    response_has_matrix_versions,
+)
 from mindroom.model_defaults import OLLAMA_HOST_DEFAULT
 from mindroom.runtime_env_policy import VERTEXAI_CLAUDE_ENV_BY_KEY
 from mindroom.startup_errors import PermanentStartupError
@@ -71,6 +76,7 @@ def doctor(config_path: Path | None = None, storage_path: Path | None = None) ->
     warnings += w
 
     # 2+. Config validity + provider API key validation (skip if file missing)
+    config: Config | None = None
     if config_path.is_file():
         config, p, f, w = _run_doctor_step(
             "Validating configuration...",
@@ -100,7 +106,7 @@ def doctor(config_path: Path | None = None, storage_path: Path | None = None) ->
     # 5. Matrix homeserver reachable
     p, f, w = _run_doctor_step(
         "Checking Matrix homeserver...",
-        lambda: _check_matrix_homeserver(runtime_paths=runtime_paths),
+        lambda: _check_matrix_homeserver(runtime_paths=runtime_paths, config=config),
     )
     passed += p
     failed += f
@@ -683,7 +689,7 @@ def _validate_sentence_transformers_embedder(runtime_paths: RuntimePaths, model:
     return True, ""
 
 
-def _check_matrix_homeserver(runtime_paths: RuntimePaths) -> tuple[int, int, int]:
+def _check_matrix_homeserver(runtime_paths: RuntimePaths, config: Config | None = None) -> tuple[int, int, int]:
     """Check Matrix homeserver reachability. Returns (passed, failed, warnings)."""
     homeserver = constants.runtime_matrix_homeserver(runtime_paths=runtime_paths)
     url = matrix_versions_url(homeserver)
@@ -693,6 +699,14 @@ def _check_matrix_homeserver(runtime_paths: RuntimePaths) -> tuple[int, int, int
         console.print(f"[red]✗[/red] Matrix homeserver unreachable: {homeserver} ({exc})")
         return 0, 1, 0
     if response_has_matrix_versions(response):
+        sliding_configured = config is not None and config.matrix_sync.mode == "sliding"
+        if sliding_configured and not response_advertises_sliding_sync(response):
+            console.print(
+                f"[red]✗[/red] Matrix homeserver does not advertise MSC4186 Simplified Sliding Sync"
+                f" ({MSC4186_UNSTABLE_FEATURE}): {homeserver}."
+                " Set matrix_sync.mode: classic or upgrade the homeserver.",
+            )
+            return 0, 1, 0
         console.print(f"[green]✓[/green] Matrix homeserver: {homeserver}")
         return 1, 0, 0
     detail = f"HTTP {response.status_code}" if not response.is_success else "returned invalid /versions payload"
