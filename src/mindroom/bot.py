@@ -141,6 +141,13 @@ __all__ = ["AgentBot", "TeamBot", "create_bot_for_entity"]
 
 # Constants
 _SYNC_TIMEOUT_MS = 30000
+# Raise the per-room timeline limit above the homeserver default (~10) so a
+# room has to flood much harder before the server truncates its timeline and
+# forces a limited-sync gap backfill. This only widens the timeline window; it
+# leaves every other section at server defaults so no event type is filtered
+# out.
+_SYNC_TIMELINE_LIMIT = 50
+_SYNC_FILTER: dict[str, object] = {"room": {"timeline": {"limit": _SYNC_TIMELINE_LIMIT}}}
 
 
 @dataclass(frozen=True, slots=True)
@@ -1695,6 +1702,7 @@ class AgentBot:
             agent_name=self.agent_name,
             room_ids=self.rooms,
             timeout_ms=_SYNC_TIMEOUT_MS,
+            sync_filter=_SYNC_FILTER,
             first_sync_done=self._first_sync_done,
         )
 

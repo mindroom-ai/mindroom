@@ -172,8 +172,8 @@ def test_build_interrupted_replay_run_creates_completed_agent_run_with_summary_a
     ]
 
 
-def test_build_interrupted_replay_run_tags_matrix_messages() -> None:
-    """Interrupted history should retain source and response event identity."""
+def test_build_interrupted_replay_run_tags_user_message_and_keeps_assistant_plain() -> None:
+    """Interrupted history should keep transport markup out of assistant turns."""
     snapshot = InterruptedReplaySnapshot(
         user_message="Please continue",
         partial_text="Partial answer",
@@ -192,7 +192,6 @@ def test_build_interrupted_replay_run_tags_matrix_messages() -> None:
         scope_id="test_agent",
         session_id="session-1",
         is_team=False,
-        response_sender_id="@agent:localhost",
     )
 
     assert run.messages is not None
@@ -201,11 +200,9 @@ def test_build_interrupted_replay_run_tags_matrix_messages() -> None:
         body="Please continue",
         event_id="$question",
     )
-    assert run.messages[1].content == render_msg_tag(
-        sender="@agent:localhost",
-        body="Partial answer\n\n(turn stopped before completion)",
-        event_id="$answer",
-    )
+    assert run.messages[1].content == "Partial answer\n\n(turn stopped before completion)"
+    assert run.metadata is not None
+    assert run.metadata["matrix_response_event_id"] == "$answer"
 
 
 def test_interrupted_replay_content_retains_safe_matrix_tool_previews_without_raw_trace() -> None:

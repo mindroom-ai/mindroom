@@ -763,3 +763,62 @@ def test_skill_tools_without_policy_stay_unwrapped(tmp_path: Path) -> None:
     instructions_tool = next(tool for tool in skills.get_tools() if tool.name == "get_skill_instructions")
     assert instructions_tool.entrypoint is not None
     assert json.loads(instructions_tool.entrypoint("demo"))["skill_name"] == "demo"
+
+
+def test_set_plugin_skill_roots_unchanged_keeps_skill_cache(tmp_path: Path) -> None:
+    """Re-applying identical plugin skill roots must not drop cached skill loads."""
+    _write_skill(tmp_path, "alpha", "Alpha v1")
+    original_roots = skills_module.get_plugin_skill_roots()
+    try:
+        skills_module.set_plugin_skill_roots([tmp_path])
+        first_load = skills_module._load_root_skills(tmp_path)
+        assert [skill.name for skill in first_load] == ["alpha"]
+
+        skills_module.set_plugin_skill_roots([tmp_path])
+
+        assert skills_module._load_root_skills(tmp_path) is first_load
+    finally:
+        skills_module.set_plugin_skill_roots(original_roots)
+        skills_module.clear_skill_cache()
+
+
+def test_set_plugin_skill_roots_change_clears_skill_cache(tmp_path: Path) -> None:
+    """Changing plugin skill roots must invalidate cached skill loads."""
+    root_one = tmp_path / "one"
+    root_two = tmp_path / "two"
+    _write_skill(root_one, "alpha", "Alpha v1")
+    _write_skill(root_two, "beta", "Beta v1")
+    original_roots = skills_module.get_plugin_skill_roots()
+    try:
+        skills_module.set_plugin_skill_roots([root_one])
+        first_load = skills_module._load_root_skills(root_one)
+        assert [skill.name for skill in first_load] == ["alpha"]
+
+        skills_module.set_plugin_skill_roots([root_one, root_two])
+
+        assert skills_module._load_root_skills(root_one) is not first_load
+    finally:
+        skills_module.set_plugin_skill_roots(original_roots)
+        skills_module.clear_skill_cache()
+
+
+def test_skill_edits_stay_visible_when_plugin_roots_are_reapplied(tmp_path: Path) -> None:
+    """Snapshot validation must still catch file edits after a no-op root update."""
+    skill_path = _write_skill(tmp_path, "alpha", "Alpha v1")
+    original_roots = skills_module.get_plugin_skill_roots()
+    try:
+        skills_module.set_plugin_skill_roots([tmp_path])
+        first_load = skills_module._load_root_skills(tmp_path)
+        assert first_load[0].description == "Alpha v1"
+
+        old_mtime = skill_path.stat().st_mtime_ns
+        skill_path = _write_skill(tmp_path, "alpha", "Alpha v2")
+        os.utime(skill_path, ns=(old_mtime + 2_000_000_000, old_mtime + 2_000_000_000))
+        skills_module.set_plugin_skill_roots([tmp_path])
+
+        refreshed = skills_module._load_root_skills(tmp_path)
+        assert refreshed is not first_load
+        assert refreshed[0].description == "Alpha v2"
+    finally:
+        skills_module.set_plugin_skill_roots(original_roots)
+        skills_module.clear_skill_cache()

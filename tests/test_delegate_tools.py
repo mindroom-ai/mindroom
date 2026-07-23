@@ -19,7 +19,7 @@ from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.indexing_config import IndexingSettings
 from mindroom.knowledge.utils import _KnowledgeResolution
 from mindroom.message_target import MessageTarget
-from mindroom.tool_schema_cache import process_function_schema_for_prompt
+from mindroom.tool_schema_cache import cached_processed_schema
 from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context, tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -145,10 +145,11 @@ class TestDelegateTools:
         """Test that the model-visible function description includes delegation targets."""
         function = tools.async_functions["delegate_task"].model_copy(deep=True)
 
-        process_function_schema_for_prompt(function, strict=False)
+        snapshot = cached_processed_schema(function, strict=False)
 
-        assert function.description is not None
-        description = function.description
+        assert snapshot is not None
+        assert snapshot.description is not None
+        description = snapshot.description
         assert "Allowed delegate targets for this caller:" in description
         for target in ("code", "research"):
             assert target in description

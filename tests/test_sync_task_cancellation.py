@@ -12,7 +12,7 @@ import nio
 import pytest
 from structlog.testing import capture_logs
 
-from mindroom.bot import AgentBot
+from mindroom.bot import _SYNC_TIMELINE_LIMIT, AgentBot
 from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.cancellation import (
     SYNC_RESTART_CANCEL_MSG,
@@ -755,7 +755,7 @@ async def test_full_state_stays_enabled_until_first_sync_response() -> None:
     full_state_values: list[bool] = []
 
     class FakeClient:
-        async def sync_forever(self, *, timeout: int, full_state: bool) -> None:  # noqa: ASYNC109, ARG002
+        async def sync_forever(self, *, timeout: int, full_state: bool, sync_filter: object = None) -> None:  # noqa: ASYNC109, ARG002
             full_state_values.append(full_state)
             await asyncio.Event().wait()
 
@@ -789,7 +789,7 @@ async def test_full_state_only_after_successful_first_sync() -> None:
     class FakeClient:
         next_batch = "token123"
 
-        async def sync_forever(self, *, timeout: int, full_state: bool) -> None:  # noqa: ASYNC109, ARG002
+        async def sync_forever(self, *, timeout: int, full_state: bool, sync_filter: object = None) -> None:  # noqa: ASYNC109, ARG002
             full_state_values.append(full_state)
 
         def add_response_callback(self, *args: object) -> None:
@@ -914,6 +914,27 @@ async def test_default_sync_mode_uses_sliding_sync_forever() -> None:
             },
         },
     ]
+
+
+@pytest.mark.asyncio
+async def test_sync_forever_requests_raised_timeline_limit() -> None:
+    """Classic sync_forever must widen the per-room timeline limit to reduce limited-sync gaps."""
+    captured: list[object] = []
+
+    class FakeClient:
+        async def sync_forever(self, *, timeout: int, full_state: bool, sync_filter: object = None) -> None:  # noqa: ASYNC109, ARG002
+            captured.append(sync_filter)
+
+    bot = MagicMock(spec=AgentBot)
+    bot._first_sync_done = True
+    bot._sync_shutting_down = False
+    bot.config = Config(matrix_sync=MatrixSyncConfig(mode="classic"))
+    bot.rooms = []
+    bot.client = FakeClient()
+
+    await AgentBot.sync_forever(bot)
+
+    assert captured == [{"room": {"timeline": {"limit": _SYNC_TIMELINE_LIMIT}}}]
 
 
 @pytest.mark.asyncio

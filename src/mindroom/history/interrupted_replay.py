@@ -208,7 +208,6 @@ def _build_interrupted_replay_run(
     scope_id: str,
     session_id: str,
     is_team: bool,
-    response_sender_id: str | None = None,
 ) -> RunOutput | TeamRunOutput:
     """Build one canonical replayable run for an interrupted top-level turn."""
     content = _render_interrupted_replay_content(snapshot)
@@ -226,15 +225,7 @@ def _build_interrupted_replay_run(
         ):
             user_content = render_msg_tag(sender=requester_id, body=user_content, event_id=source_event_id)
         messages.append(Message(role="user", content=user_content))
-    response_event_id = snapshot.run_metadata.get(MATRIX_RESPONSE_EVENT_ID_METADATA_KEY)
-    assistant_content = content
-    if response_sender_id and isinstance(response_event_id, str) and response_event_id:
-        assistant_content = render_msg_tag(
-            sender=response_sender_id,
-            body=content,
-            event_id=response_event_id,
-        )
-    messages.append(Message(role="assistant", content=assistant_content))
+    messages.append(Message(role="assistant", content=content))
     metadata = _interrupted_replay_metadata(snapshot)
     if is_team:
         return TeamRunOutput(
@@ -295,7 +286,6 @@ def persist_interrupted_replay_snapshot(
     run_id: str,
     snapshot: InterruptedReplaySnapshot,
     is_team: bool,
-    response_sender_id: str | None = None,
 ) -> None:
     """Persist one canonical interrupted replay snapshot into session history."""
     persisted_session = _load_persisted_session(
@@ -317,7 +307,6 @@ def persist_interrupted_replay_snapshot(
         scope_id=scope_id,
         session_id=session_id,
         is_team=is_team,
-        response_sender_id=response_sender_id,
     )
     if is_team:
         assert isinstance(persisted_session, TeamSession)

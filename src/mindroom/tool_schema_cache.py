@@ -18,34 +18,37 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True, slots=True)
 class _ProcessedFunctionSchema:
+    """Processed prompt schema snapshot for one Function."""
+
     parameters: dict[str, Any]
     description: str | None
     user_input_schema: tuple[UserInputField, ...] | None
 
 
-def process_function_schema_for_prompt(function: Function, *, strict: bool) -> None:
-    """Process one Function schema using a cache for stable entrypoints."""
+def cached_processed_schema(function: Function, *, strict: bool) -> _ProcessedFunctionSchema | None:
+    """Return a private copy of the cached processed prompt schema for one Function.
+
+    Never mutates ``function``. Returns ``None`` when the entrypoint or
+    parameters cannot form a stable cache key, in which case callers must fall
+    back to full entrypoint processing on a private copy.
+    """
     if function.entrypoint is None:
-        function.process_entrypoint(strict=strict)
-        return
+        return None
 
     processor = function.process_entrypoint
     if isinstance(processor, MethodType) and processor.__func__ is not Function.process_entrypoint:
-        function.process_entrypoint(strict=strict)
-        return
+        return None
 
     source_callable = getattr(function.entrypoint, "__wrapped__", function.entrypoint)
     if isinstance(source_callable, MethodType) or ismethod(source_callable):
         source_callable = source_callable.__func__
     elif not isfunction(source_callable):
-        function.process_entrypoint(strict=strict)
-        return
+        return None
 
     try:
         parameters_json = json.dumps(function.parameters, sort_keys=True, separators=(",", ":"))
     except TypeError:
-        function.process_entrypoint(strict=strict)
-        return
+        return None
 
     snapshot = _cached_processed_function_schema(
         source_callable,
@@ -58,10 +61,11 @@ def process_function_schema_for_prompt(function: Function, *, strict: bool) -> N
         function.strict,
         strict,
     )
-    function.parameters = deepcopy(snapshot.parameters)
-    function.description = snapshot.description
-    function.user_input_schema = (
-        list(deepcopy(snapshot.user_input_schema)) if snapshot.user_input_schema is not None else None
+    # Copy at the boundary so callers can never corrupt the shared LRU entry.
+    return _ProcessedFunctionSchema(
+        parameters=deepcopy(snapshot.parameters),
+        description=snapshot.description,
+        user_input_schema=deepcopy(snapshot.user_input_schema) if snapshot.user_input_schema is not None else None,
     )
 
 

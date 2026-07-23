@@ -3,11 +3,14 @@
 
 from __future__ import annotations
 
+import gc
 import inspect
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from threading import Thread
+from typing import TYPE_CHECKING, Any, cast
 
+from agno.agent import Agent
 from agno.models.message import Message
 from agno.run import RunContext
 from agno.session.agent import AgentSession
@@ -21,9 +24,11 @@ from mindroom.history.compaction import (
     estimate_session_summary_tokens,
 )
 from mindroom.history.prompt_tokens import (
-    _estimate_prepared_tool_definition_tokens,
-    _prepare_tools_for_estimation,
+    _TOOL_SURFACE_CACHE,
+    _prompt_tool_surface_for_tools,
     _StaticTokenEstimator,
+    agent_static_token_estimator,
+    agent_tool_definition_payloads_for_logging,
     estimate_agent_static_tokens,
 )
 from mindroom.history.types import (
@@ -35,6 +40,9 @@ from mindroom.token_budget import estimate_text_tokens, stable_serialize
 from tests.conftest import (
     FakeModel,
 )
+
+if TYPE_CHECKING:
+    import pytest
 from tests.history_helpers import (  # noqa: F401
     _agent,
     _close_test_storages,
@@ -45,8 +53,10 @@ from tests.history_helpers import (  # noqa: F401
 
 def _tool_definition_tokens(tools: object) -> int:
     """Estimate model-visible tool schema and instruction tokens for one tool list."""
-    prepared_tools, tool_instructions = _prepare_tools_for_estimation(tools)
-    return _estimate_prepared_tool_definition_tokens(prepared_tools, tool_instructions=tool_instructions)
+    surface = _prompt_tool_surface_for_tools(tools)
+    return surface.definition_tokens + sum(
+        estimate_text_tokens(instruction) for instruction in surface.tool_instructions
+    )
 
 
 def test_estimate_static_tokens_includes_tool_definitions() -> None:
@@ -363,3 +373,148 @@ def test_estimate_session_summary_tokens_none() -> None:
 def test_estimate_session_summary_tokens_empty() -> None:
     assert estimate_session_summary_tokens("") == 0
     assert estimate_session_summary_tokens("   ") == 0
+
+
+def _docs_toolkit() -> Toolkit:
+    def search_docs(query: str, limit: int = 5) -> str:
+        """Search the engineering docs for a matching answer."""
+        return f"{query}:{limit}"
+
+    return Toolkit(
+        name="docs",
+        tools=[search_docs],
+        instructions="Always cite the relevant document section when using search_docs.",
+        add_instructions=True,
+    )
+
+
+def test_static_budgeting_and_metadata_reuse_one_tool_surface(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Budget estimators and run-metadata payloads must share one prepared surface per agent."""
+    agent = _agent()
+    agent.tools = [_docs_toolkit()]
+
+    get_tools_calls = 0
+    original_get_tools = Agent.get_tools
+
+    def _counting_get_tools(self: Agent, *args: object, **kwargs: object) -> list[object]:
+        nonlocal get_tools_calls
+        get_tools_calls += 1
+        return original_get_tools(self, *args, **kwargs)
+
+    monkeypatch.setattr(Agent, "get_tools", _counting_get_tools)
+
+    estimator = agent_static_token_estimator(agent)
+    first_estimate = estimator.estimate("Current prompt")
+    re_estimate = estimate_agent_static_tokens(agent, "Current prompt")
+    payloads = agent_tool_definition_payloads_for_logging(agent)
+
+    assert get_tools_calls == 1
+    assert first_estimate == re_estimate
+    assert [payload["name"] for payload in payloads] == ["search_docs"]
+
+
+def test_tool_definition_payloads_cached_equal_ordered_and_isolated() -> None:
+    """Cached payloads must deeply equal fresh ones and resist mutation through returns."""
+
+    def export_notes(title: str) -> str:
+        """Export the current working notes."""
+        return title
+
+    def make_agent() -> Agent:
+        agent = _agent()
+        agent.tools = [_docs_toolkit(), Function(name="export_notes", entrypoint=export_notes)]
+        return agent
+
+    warm_agent = make_agent()
+    first = agent_tool_definition_payloads_for_logging(warm_agent)
+    cached = agent_tool_definition_payloads_for_logging(warm_agent)
+    fresh = agent_tool_definition_payloads_for_logging(make_agent())
+
+    assert first == cached == fresh
+    assert [payload["name"] for payload in first] == ["search_docs", "export_notes"]
+
+    first[0]["name"] = "mutated"
+    cast("dict[str, object]", first[1]["parameters"])["injected"] = True
+
+    assert agent_tool_definition_payloads_for_logging(warm_agent) == cached
+
+
+def test_tool_surfaces_are_keyed_per_agent_instance() -> None:
+    """Two live agents with different tools must not share a cached surface."""
+
+    def other_tool(note: str) -> str:
+        """Record one note."""
+        return note
+
+    docs_agent = _agent()
+    docs_agent.tools = [_docs_toolkit()]
+    notes_agent = _agent()
+    notes_agent.tools = [Function(name="record_note", entrypoint=other_tool)]
+
+    docs_payloads = agent_tool_definition_payloads_for_logging(docs_agent)
+    notes_payloads = agent_tool_definition_payloads_for_logging(notes_agent)
+
+    assert [payload["name"] for payload in docs_payloads] == ["search_docs"]
+    assert [payload["name"] for payload in notes_payloads] == ["record_note"]
+
+
+def test_tool_surface_cache_evicts_entries_when_agent_is_collected() -> None:
+    """Surface cache entries must die with their agent instance."""
+    agent = _agent()
+    agent.tools = [_docs_toolkit()]
+    agent_tool_definition_payloads_for_logging(agent)
+    cache_key = id(agent)
+    assert cache_key in _TOOL_SURFACE_CACHE
+
+    del agent
+    gc.collect()
+
+    assert cache_key not in _TOOL_SURFACE_CACHE
+
+
+def test_prompt_payloads_distinguish_strict_functions() -> None:
+    """Function strictness must reach the shared schema cache key and the payload."""
+
+    def sync_event(title: str, include_attendees: bool = False) -> str:
+        """Sync one event."""
+        return f"{title}:{include_attendees}"
+
+    lax_surface = _prompt_tool_surface_for_tools(
+        [Function(name="sync_event", entrypoint=sync_event, strict=False)],
+    )
+    strict_surface = _prompt_tool_surface_for_tools(
+        [Function(name="sync_event", entrypoint=sync_event, strict=True)],
+    )
+
+    lax_parameters = cast("dict[str, object]", lax_surface.payloads[0]["parameters"])
+    strict_parameters = cast("dict[str, object]", strict_surface.payloads[0]["parameters"])
+    assert lax_parameters["required"] == ["title"]
+    assert strict_parameters["required"] == ["title", "include_attendees"]
+
+
+def test_concurrent_surface_preparation_stays_consistent() -> None:
+    """Concurrent estimator and payload calls across agents must not corrupt the cache."""
+    agents = []
+    for _ in range(8):
+        agent = _agent()
+        agent.tools = [_docs_toolkit()]
+        agents.append(agent)
+
+    errors: list[BaseException] = []
+
+    def _exercise(agent: Agent) -> None:
+        try:
+            for _ in range(10):
+                payloads = agent_tool_definition_payloads_for_logging(agent)
+                assert [payload["name"] for payload in payloads] == ["search_docs"]
+                assert estimate_agent_static_tokens(agent, "Current prompt") > 0
+        except BaseException as exc:
+            errors.append(exc)
+
+    threads = [Thread(target=_exercise, args=(agent,)) for agent in agents]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert errors == []
