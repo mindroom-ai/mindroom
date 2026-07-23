@@ -13,8 +13,7 @@ from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
 
-from mindroom.constants import MATRIX_RESPONSE_EVENT_ID_METADATA_KEY, prompt_roles_for_history_storage
-from mindroom.prompt_message_tags import unwrap_legacy_assistant_msg_tag
+from mindroom.constants import prompt_roles_for_history_storage
 from mindroom.runtime_resolution import resolve_agent_runtime
 
 if TYPE_CHECKING:
@@ -129,7 +128,7 @@ def _create_agent_state_db(
 
 
 class _PromptSanitizingSqliteDb(SqliteDb):
-    """SQLite session DB that keeps transport-only content out of model history."""
+    """SQLite session DB that strips prompt messages before durable persistence."""
 
     def __init__(
         self,
@@ -140,23 +139,6 @@ class _PromptSanitizingSqliteDb(SqliteDb):
     ) -> None:
         super().__init__(session_table=session_table, db_file=db_file)
         self._prompt_roles = prompt_roles
-
-    def get_session(
-        self,
-        session_id: str,
-        session_type: SessionType | None = None,
-        user_id: str | None = None,
-        deserialize: bool | None = True,
-    ) -> Session | dict[str, Any] | None:
-        session = super().get_session(
-            session_id=session_id,
-            session_type=session_type,
-            user_id=user_id,
-            deserialize=deserialize,
-        )
-        if isinstance(session, (AgentSession, TeamSession)):
-            _unwrap_legacy_assistant_transport_tags(session)
-        return session
 
     def upsert_session(
         self,
@@ -207,28 +189,6 @@ def _strip_prompt_messages_from_session(session: Session, prompt_roles: frozense
         if not isinstance(run, (RunOutput, TeamRunOutput)) or not run.messages:
             continue
         run.messages = [message for message in run.messages if message.role not in prompt_roles]
-
-
-def _unwrap_legacy_assistant_transport_tags(session: AgentSession | TeamSession) -> None:
-    """Unwrap trusted legacy assistant tags in one deserialized session view."""
-    for run in session.runs or []:
-        if not isinstance(run, (RunOutput, TeamRunOutput)) or not isinstance(run.metadata, dict):
-            continue
-        response_event_id = run.metadata.get(MATRIX_RESPONSE_EVENT_ID_METADATA_KEY)
-        if not isinstance(response_event_id, str) or not response_event_id:
-            continue
-        for message in reversed(run.messages or []):
-            if message.role != "assistant":
-                continue
-            if not isinstance(message.content, str):
-                break
-            unwrapped = unwrap_legacy_assistant_msg_tag(
-                message.content,
-                response_event_id=response_event_id,
-            )
-            if unwrapped is not None:
-                message.content = unwrapped
-            break
 
 
 def create_culture_storage(culture_name: str, storage_path: Path) -> BaseDb:
