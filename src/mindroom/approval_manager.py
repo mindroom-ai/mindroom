@@ -373,14 +373,12 @@ class _ApprovalManager:
                 since_ts_ms=0,
                 limit=_STARTUP_DISCARD_SCAN_LIMIT,
             ):
-                try:
-                    pending = PendingApproval.from_card_event(card_event, room_id=room_id)
-                except (TypeError, ValueError):
-                    continue
-                if pending.card_sender_id != transport_sender:
-                    continue
-                latest_edit = await self._latest_trusted_edit(pending)
-                if pending.latest_status(latest_edit) != "pending":
+                pending = await self._trusted_pending_from_card_event(
+                    card_event,
+                    room_id=room_id,
+                    transport_sender=transport_sender,
+                )
+                if pending is None:
                     continue
                 result = await self._discard_matrix_only_card(
                     pending=pending,
@@ -790,6 +788,20 @@ class _ApprovalManager:
         card_event = await self._event_cache.get_event(room_id, card_event_id)
         if card_event is None or not is_original_approval_card(card_event):
             return None
+        return await self._trusted_pending_from_card_event(
+            card_event,
+            room_id=room_id,
+            transport_sender=transport_sender,
+        )
+
+    async def _trusted_pending_from_card_event(
+        self,
+        card_event: dict[str, Any],
+        *,
+        room_id: str,
+        transport_sender: str,
+    ) -> PendingApproval | None:
+        """Parse one original card and return it only while its trusted state is still pending."""
         try:
             pending = PendingApproval.from_card_event(card_event, room_id=room_id)
         except (TypeError, ValueError):
@@ -938,6 +950,12 @@ class _ApprovalManager:
             since_ts_ms=since_ts_ms,
             limit=limit,
         )
+        if len(events) >= limit:
+            logger.warning(
+                "approval_startup_scan_truncated",
+                room_id=room_id,
+                scan_limit=limit,
+            )
         return [event for event in events if is_original_approval_card(event)]
 
     async def shutdown(self, *, reason: str) -> None:
