@@ -86,8 +86,11 @@ Use `build_message_content()` from `message_builder.py` to construct thread-awar
 ### Sync Loop
 
 Each agent bot runs its own sync loop with a 30-second long-polling timeout.
-The default `matrix_sync.mode: sliding` streams events through MSC4186 Simplified Sliding Sync.
-Set `matrix_sync.mode: classic` to use classic `/v3/sync` instead.
+The default `matrix_sync.mode: classic` streams events through classic `/v3/sync` and backfills limited-timeline gaps from `/messages`.
+Set `matrix_sync.mode: sliding` to opt into MSC4186 Simplified Sliding Sync on homeservers that advertise `org.matrix.simplified_msc3575`.
+`matrix_sync.sliding_timeline_limit` (default 100) bounds the per-room timeline window of each sliding request.
+Sliding positions are connection-scoped, so a restarted backend replays at most that window per room and older undelivered events are not recovered.
+Changing `matrix_sync` restarts running entities on config hot reload.
 Sync loops are wrapped with `sync_forever_with_restart()` for automatic restart on connection failures.
 
 Events are processed in background tasks:

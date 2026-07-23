@@ -607,6 +607,18 @@ matrix_space:
   enabled: true                    # Default: true (create a root Matrix Space for managed rooms)
   name: MindRoom                   # Default: "MindRoom" (display name for the root Space)
 
+# Matrix sync transport (optional)
+# classic uses /v3/sync and backfills limited-timeline gaps from /messages.
+# sliding opts into MSC4186 Simplified Sliding Sync and requires a homeserver
+# advertising org.matrix.simplified_msc3575 (checked by `mindroom doctor`).
+# Sliding positions are connection-scoped, so a restarted backend replays at
+# most sliding_timeline_limit events per room; older undelivered events are
+# not recovered.
+# Changing matrix_sync restarts running agents to pick up the new transport.
+matrix_sync:
+  mode: classic                    # Default: classic
+  sliding_timeline_limit: 100      # Default: 100 (per-room window for sliding requests)
+
 # Timezone for scheduled tasks (optional)
 timezone: America/Los_Angeles      # Default: UTC
 ```
