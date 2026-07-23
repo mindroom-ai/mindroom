@@ -13,7 +13,7 @@ from agno.run.agent import RunOutput
 from agno.session.agent import AgentSession
 
 from mindroom.agent_storage import create_state_storage, get_agent_session
-from mindroom.config.agent import AgentConfig, AgentPrivateConfig
+from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import MATRIX_RESPONSE_EVENT_ID_METADATA_KEY
@@ -31,7 +31,13 @@ def test_only_configured_agents_and_teams_support_run_recovery(tmp_path: Path) -
     """Router has ledger state but no persisted Agno run storage."""
     config = Config(
         agents={"member": AgentConfig(display_name="Member")},
-        teams={"crew": {"display_name": "Crew", "role": "Collaborate", "agents": ["member"]}},
+        teams={
+            "crew": TeamConfig(
+                display_name="Crew",
+                role="Collaborate",
+                agents=["member"],
+            ),
+        },
     )
     runtime = SimpleNamespace(config=config)
 

@@ -6,6 +6,7 @@ import ast
 import threading
 from dataclasses import dataclass, replace
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import ANY, MagicMock, patch
 
 import pytest
@@ -19,6 +20,7 @@ from agno.session.team import TeamSession
 from mindroom import constants
 from mindroom.bot import AgentBot
 from mindroom.config.main import Config
+from mindroom.conversation_state_writer import ConversationStateWriter, ConversationStateWriterDeps
 from mindroom.handled_turns import (
     SourceEventMetadata,
     TurnRecord,
@@ -1422,18 +1424,23 @@ def test_agent_bot_does_not_expose_removed_handled_turn_ledger_shim(tmp_path: Pa
 def test_router_turn_replay_uses_persisted_ledger_across_two_restarts(tmp_path: Path) -> None:
     """Router relay turns have durable ledger state but no Agno run storage."""
 
-    def router_bot() -> AgentBot:
+    def router_store() -> TurnStore:
         config = bind_runtime_paths(Config(), test_runtime_paths(tmp_path))
-        return AgentBot(
-            agent_user=AgentMatrixUser(
+        return TurnStore(
+            TurnStoreDeps(
                 agent_name="router",
-                user_id="@mindroom_router:localhost",
-                display_name="Router",
-                password=TEST_PASSWORD,
+                tracking_base_path=tmp_path / "tracking",
+                state_writer=ConversationStateWriter(
+                    ConversationStateWriterDeps(
+                        runtime=SimpleNamespace(config=config),
+                        logger=MagicMock(),
+                        runtime_paths=runtime_paths_for(config),
+                        agent_name="router",
+                    ),
+                ),
+                resolver=MagicMock(),
+                tool_runtime=MagicMock(),
             ),
-            storage_path=tmp_path,
-            config=config,
-            runtime_paths=runtime_paths_for(config),
         )
 
     target = MessageTarget.resolve("!room:localhost", "$thread", "$source")
@@ -1444,17 +1451,22 @@ def test_router_turn_replay_uses_persisted_ledger_across_two_restarts(tmp_path: 
         requester_id="@user:localhost",
         conversation_target=target,
     )
-    router_bot()._turn_store.record_turn(expected)
+    router_store().record_turn(expected)
 
     for _restart in range(2):
         _reset_handled_turn_ledger_runtime()
-        restarted = router_bot()
-        loaded = restarted._turn_store.load_turn(
-            room=MagicMock(room_id="!room:localhost"),
-            thread_id="$thread",
-            original_event_id="$source",
-            requester_user_id="@user:localhost",
-        )
+        restarted = router_store()
+        with patch.object(
+            restarted,
+            "_load_persisted_turn_record",
+            side_effect=AssertionError("ledger-only entity attempted run recovery"),
+        ):
+            loaded = restarted.load_turn(
+                room=MagicMock(room_id="!room:localhost"),
+                thread_id="$thread",
+                original_event_id="$source",
+                requester_user_id="@user:localhost",
+            )
 
         assert loaded is not None
         assert replace(loaded, timestamp=0.0) == replace(expected, timestamp=0.0)
