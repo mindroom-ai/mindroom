@@ -123,8 +123,13 @@ async def maybe_handle_tool_approval_reply(
     logger: structlog.stdlib.BoundLogger,
 ) -> bool:
     """Deny live approvals or expire detached approval cards targeted by replies."""
-    reply_to_event_id = EventInfo.from_event(event.source).reply_to_event_id
+    event_info = EventInfo.from_event(event.source)
+    reply_to_event_id = event_info.reply_to_event_id
     if reply_to_event_id is None:
+        return False
+    content = event.source.get("content")
+    relates_to = content.get("m.relates_to") if isinstance(content, dict) else None
+    if event_info.is_thread and isinstance(relates_to, dict) and relates_to.get("is_falling_back") is True:
         return False
     if is_process_approval_card(reply_to_event_id) and not is_process_active_approval_card(reply_to_event_id):
         return False

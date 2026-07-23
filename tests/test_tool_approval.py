@@ -420,6 +420,55 @@ async def test_live_card_response_ignores_cached_terminal_edit_from_different_se
 
 
 @pytest.mark.asyncio
+async def test_live_card_response_wins_when_approval_card_is_cached(tmp_path: Path) -> None:
+    cache = FakeEventCache()
+    sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
+    editor = AsyncMock(return_value=True)
+    store = initialize_approval_store(
+        test_runtime_paths(tmp_path),
+        sender=sender,
+        editor=editor,
+        event_cache=cache,
+        transport_sender=lambda: "@mindroom_router:localhost",
+    )
+    task = asyncio.create_task(
+        store.request_approval(
+            tool_name="read_file",
+            arguments={"path": "notes.txt"},
+            room_id="!room:localhost",
+            requester_id="@user:localhost",
+            approver_user_id="@user:localhost",
+            timeout_seconds=30,
+        ),
+    )
+    pending = await _wait_for_pending(store, sender=sender)
+    await cache.store_event(
+        pending.card_event_id,
+        pending.room_id,
+        _approval_card(
+            approval_id=pending.approval_id,
+            event_id=pending.card_event_id,
+            room_id=pending.room_id,
+            sender=pending.card_sender_id,
+            approver=pending.approver_user_id,
+        ),
+    )
+
+    result = await store.handle_card_response(
+        room_id=pending.room_id,
+        sender_id=pending.approver_user_id,
+        card_event_id=pending.card_event_id,
+        status="approved",
+        reason=None,
+    )
+    decision = await task
+
+    assert result.resolved is True
+    assert decision.status == "approved"
+    assert editor.await_args.args[2]["status"] == "approved"
+
+
+@pytest.mark.asyncio
 async def test_handle_card_response_wrong_clicker_noops(tmp_path: Path) -> None:
     runtime_paths = test_runtime_paths(tmp_path)
     sender = AsyncMock(return_value=SentApprovalEvent("$approval"))
@@ -2240,6 +2289,42 @@ async def test_card_response_expires_same_router_cached_pending_with_point_looku
     assert result.resolved is True
     assert editor.await_args.args[2]["status"] == "expired"
     assert editor.await_args.args[2]["resolution_reason"] == "Original tool request is no longer active."
+
+
+@pytest.mark.asyncio
+async def test_detached_card_response_ignores_untrusted_terminal_edit(tmp_path: Path) -> None:
+    cache = FakeEventCache()
+    card = _approval_card()
+    await cache.store_event("$approval", "!room:localhost", card)
+    await cache.store_event(
+        "$fake-edit",
+        "!room:localhost",
+        _approval_edit(
+            card,
+            event_id="$fake-edit",
+            sender="@attacker:localhost",
+            status="approved",
+        ),
+    )
+    editor = AsyncMock(return_value=True)
+    store = _ApprovalManager(
+        test_runtime_paths(tmp_path),
+        editor=editor,
+        event_cache=cache,
+        transport_sender=lambda: "@mindroom_router:localhost",
+    )
+
+    result = await store.handle_card_response(
+        room_id="!room:localhost",
+        sender_id="@user:localhost",
+        card_event_id="$approval",
+        status="denied",
+        reason=None,
+    )
+
+    assert result.consumed is True
+    assert result.resolved is True
+    assert editor.await_args.args[2]["status"] == "expired"
 
 
 @pytest.mark.asyncio
