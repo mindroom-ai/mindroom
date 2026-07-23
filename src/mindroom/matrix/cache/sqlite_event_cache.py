@@ -30,7 +30,7 @@ from .thread_cache_state import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable
+    from collections.abc import AsyncIterator, Awaitable, Callable, Collection
     from pathlib import Path
 
     from .agent_message_snapshot import AgentMessageSnapshot
@@ -707,6 +707,7 @@ class SqliteEventCache:
         operation: str,
         disabled_result: _T,
         reader: Callable[[aiosqlite.Connection], Awaitable[_T]],
+        expected_membership_epoch: int | None = None,
     ) -> _T:
         if (
             self._runtime.is_disabled
@@ -730,12 +731,17 @@ class SqliteEventCache:
                     )
                     result = disabled_result
                 else:
-                    membership_state, _membership_epoch = await sqlite_event_cache_threads.load_room_membership_locked(
+                    membership_state, membership_epoch = await sqlite_event_cache_threads.load_room_membership_locked(
                         db,
                         principal_id=self.principal_id,
                         room_id=room_id,
                     )
-                    result = disabled_result if membership_state != "joined" else await reader(db)
+                    result = (
+                        disabled_result
+                        if membership_state != "joined"
+                        or (expected_membership_epoch is not None and membership_epoch != expected_membership_epoch)
+                        else await reader(db)
+                    )
                 await db.commit()
             except sqlite3.OperationalError as exc:
                 await _rollback_sqlite_connection_best_effort(db, operation=operation)
@@ -974,6 +980,29 @@ class SqliteEventCache:
                 event_id=event_id,
                 mxc_url=mxc_url,
             ),
+        )
+
+    async def get_mxc_texts(
+        self,
+        room_id: str,
+        references: Collection[tuple[str, str]],
+        *,
+        expected_membership_epoch: int,
+    ) -> dict[tuple[str, str], str]:
+        """Return scoped MXC plaintext for many surviving event references in one read."""
+        if not references:
+            return {}
+        return await self._read_operation(
+            room_id,
+            operation="get_mxc_texts",
+            disabled_result={},
+            reader=lambda db: sqlite_event_cache_events.load_mxc_texts(
+                db,
+                principal_id=self.principal_id,
+                room_id=room_id,
+                references=references,
+            ),
+            expected_membership_epoch=expected_membership_epoch,
         )
 
     async def store_event(

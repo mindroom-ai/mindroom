@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import nio
@@ -14,13 +15,22 @@ from mindroom.matrix.sidecar_content import sidecar_mxc_url
 from mindroom.matrix.visible_body import has_trusted_stream_body_metadata, visible_body_from_content
 
 if TYPE_CHECKING:
-    from collections.abc import Collection
+    from collections.abc import Collection, Mapping, Sequence
 
     from mindroom.matrix.cache import ConversationEventCache
 
 logger = get_logger(__name__)
 
 _MXC_TEXT_MAX_BYTES = 2 * 1024 * 1024
+
+
+@dataclass(frozen=True, slots=True)
+class SidecarHydrationBatch:
+    """Request-scoped durable sidecar hits and their visible owner event IDs."""
+
+    cached_texts: Mapping[tuple[str, str], str]
+    references: frozenset[tuple[str, str]]
+    owner_event_ids: frozenset[str]
 
 
 def _extract_large_message_v2_content(payload_json: str) -> dict[str, Any] | None:
@@ -62,6 +72,73 @@ def _sidecar_content_for_resolution(content: dict[str, Any]) -> dict[str, Any] |
     return None
 
 
+def _sidecar_reference(event_source: Mapping[str, Any]) -> tuple[str, str] | None:
+    """Return one visible event's exact durable sidecar reference."""
+    event_id = event_source.get("event_id")
+    content = _normalized_content_dict(event_source.get("content"))
+    sidecar_content = _sidecar_content_for_resolution(content)
+    mxc_url = sidecar_mxc_url(sidecar_content) if sidecar_content is not None else None
+    if not isinstance(event_id, str) or not event_id or mxc_url is None:
+        return None
+    return event_id, mxc_url
+
+
+async def prepare_sidecar_hydration_batch(
+    event_sources: Sequence[dict[str, Any]],
+    *,
+    event_cache: ConversationEventCache,
+    room_id: str,
+    expected_membership_epoch: int | None,
+    register_owners: bool,
+) -> SidecarHydrationBatch | None:
+    """Prepare one bounded durable lookup for all sidecars in a history reconstruction."""
+    if expected_membership_epoch is None or expected_membership_epoch == UNCERTIFIED_MEMBERSHIP_EPOCH:
+        return None
+    sidecars_by_event_id: dict[str, tuple[dict[str, Any], tuple[str, str]]] = {}
+    for event_source in event_sources:
+        reference = _sidecar_reference(event_source)
+        if reference is not None:
+            sidecars_by_event_id[reference[0]] = event_source, reference
+    references = tuple(reference for _event_source, reference in sidecars_by_event_id.values())
+    if not references:
+        return None
+    verified_owner_event_ids: frozenset[str] = frozenset()
+    if register_owners:
+        try:
+            await event_cache.store_events_batch(
+                [(event_id, room_id, sidecars_by_event_id[event_id][0]) for event_id, _mxc_url in references],
+                expected_membership_epoch=expected_membership_epoch,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to batch-register long-text sidecar ownership",
+                room_id=room_id,
+                event_count=len(references),
+            )
+            return None
+        verified_owner_event_ids = frozenset(event_id for event_id, _mxc_url in references)
+    try:
+        cached_texts = await event_cache.get_mxc_texts(
+            room_id,
+            references,
+            expected_membership_epoch=expected_membership_epoch,
+        )
+    except Exception:
+        logger.exception(
+            "Failed to batch-read durable MXC text cache",
+            room_id=room_id,
+            reference_count=len(references),
+        )
+        return None
+    if not register_owners:
+        verified_owner_event_ids = frozenset(event_id for event_id, _mxc_url in cached_texts)
+    return SidecarHydrationBatch(
+        cached_texts=cached_texts,
+        references=frozenset(references),
+        owner_event_ids=verified_owner_event_ids,
+    )
+
+
 async def _register_sidecar_owner(
     event_source: dict[str, Any],
     *,
@@ -69,6 +146,7 @@ async def _register_sidecar_owner(
     room_id: str | None,
     fallback_event_id: str | None = None,
     expected_membership_epoch: int | None = None,
+    hydration_batch: SidecarHydrationBatch | None = None,
 ) -> str | None:
     """Persist the visible event/reference before plaintext hydration begins."""
     content = _normalized_content_dict(event_source.get("content"))
@@ -78,7 +156,7 @@ async def _register_sidecar_owner(
         return event_id if isinstance(event_id, str) else fallback_event_id
     event_id_value = event_source.get("event_id")
     event_id = event_id_value if isinstance(event_id_value, str) and event_id_value else fallback_event_id
-    if event_cache is None:
+    if (hydration_batch is not None and event_id in hydration_batch.owner_event_ids) or event_cache is None:
         return event_id
     if room_id is None or event_id is None:
         return None
@@ -112,6 +190,7 @@ async def _resolve_event_content(
     room_id: str | None,
     fallback_event_id: str | None = None,
     expected_membership_epoch: int | None = None,
+    hydration_batch: SidecarHydrationBatch | None = None,
 ) -> tuple[dict[str, Any], bool]:
     """Register valid sidecar ownership and return canonical content plus whether it changed."""
     preview_content = _normalized_content_dict(event_source.get("content", {}))
@@ -121,6 +200,7 @@ async def _resolve_event_content(
         room_id=room_id,
         fallback_event_id=fallback_event_id,
         expected_membership_epoch=expected_membership_epoch,
+        hydration_batch=hydration_batch,
     )
     resolved_content = await _resolve_canonical_content(
         preview_content,
@@ -129,6 +209,7 @@ async def _resolve_event_content(
         room_id=room_id,
         event_id=event_id,
         expected_membership_epoch=expected_membership_epoch,
+        hydration_batch=hydration_batch,
     )
     return resolved_content, resolved_content is not preview_content
 
@@ -159,6 +240,7 @@ async def _download_mxc_text(  # noqa: PLR0911, PLR0912, PLR0915, C901
     room_id: str | None = None,
     event_id: str | None = None,
     expected_membership_epoch: int | None = None,
+    hydration_batch: SidecarHydrationBatch | None = None,
 ) -> str | None:
     """Download text content from an MXC URL with caching.
 
@@ -170,6 +252,7 @@ async def _download_mxc_text(  # noqa: PLR0911, PLR0912, PLR0915, C901
         room_id: Room scope for event-cache locking when a durable MXC cache is available
         event_id: Visible event that owns the room-scoped MXC reference
         expected_membership_epoch: Durable room transition expected by fetch-derived writes
+        hydration_batch: Request-scoped durable sidecar hits from one bounded cache read
     Returns:
         The downloaded text content, or None if download failed
 
@@ -178,23 +261,26 @@ async def _download_mxc_text(  # noqa: PLR0911, PLR0912, PLR0915, C901
         expected_membership_epoch is not None and expected_membership_epoch != UNCERTIFIED_MEMBERSHIP_EPOCH
     )
     if cache_writes_certified and event_cache is not None and room_id is not None and event_id is not None:
-        try:
-            cached_text = await event_cache.get_mxc_text(room_id, event_id, mxc_url)
-        except Exception:
-            logger.exception("Failed to read durable MXC text cache")
+        if hydration_batch is not None and (event_id, mxc_url) in hydration_batch.references:
+            cached_text = hydration_batch.cached_texts.get((event_id, mxc_url))
         else:
-            if cached_text is not None:
-                if _text_size_bytes(cached_text) > _MXC_TEXT_MAX_BYTES:
-                    logger.warning(
-                        "durable_mxc_text_cache_entry_exceeds_byte_limit",
-                        mxc_url=mxc_url,
-                        room_id=room_id,
-                        size_bytes=_text_size_bytes(cached_text),
-                        limit_bytes=_MXC_TEXT_MAX_BYTES,
-                    )
-                    return None
-                logger.debug("mxc_text_cache_hit", mxc_url=mxc_url, room_id=room_id)
-                return cached_text
+            try:
+                cached_text = await event_cache.get_mxc_text(room_id, event_id, mxc_url)
+            except Exception:
+                logger.exception("Failed to read durable MXC text cache")
+                cached_text = None
+        if cached_text is not None:
+            if _text_size_bytes(cached_text) > _MXC_TEXT_MAX_BYTES:
+                logger.warning(
+                    "durable_mxc_text_cache_entry_exceeds_byte_limit",
+                    mxc_url=mxc_url,
+                    room_id=room_id,
+                    size_bytes=_text_size_bytes(cached_text),
+                    limit_bytes=_MXC_TEXT_MAX_BYTES,
+                )
+                return None
+            logger.debug("mxc_text_cache_hit", mxc_url=mxc_url, room_id=room_id)
+            return cached_text
 
     try:
         # Parse MXC URL
@@ -288,6 +374,7 @@ async def extract_and_resolve_message(
     event_cache: ConversationEventCache | None = None,
     room_id: str | None = None,
     expected_membership_epoch: int | None = None,
+    hydration_batch: SidecarHydrationBatch | None = None,
     trusted_sender_ids: Collection[str] = (),
 ) -> dict[str, Any]:
     """Extract message data and resolve large message content if needed.
@@ -301,6 +388,7 @@ async def extract_and_resolve_message(
         event_cache: Optional durable event cache used for restart-safe sidecar reuse
         room_id: Room scope for durable sidecar cache reads and writes
         expected_membership_epoch: Durable room transition expected by fetch-derived writes
+        hydration_batch: Request-scoped durable sidecar hits from one bounded cache read
         trusted_sender_ids: Exact trusted internal sender IDs allowed to override visible body
 
     Returns:
@@ -316,6 +404,7 @@ async def extract_and_resolve_message(
         room_id=room_id,
         fallback_event_id=event.event_id,
         expected_membership_epoch=expected_membership_epoch,
+        hydration_batch=hydration_batch,
     )
     resolved_body = visible_body_from_content(
         resolved_content,
@@ -353,6 +442,7 @@ async def extract_edit_body(
     event_cache: ConversationEventCache | None = None,
     room_id: str | None = None,
     expected_membership_epoch: int | None = None,
+    hydration_batch: SidecarHydrationBatch | None = None,
     trusted_sender_ids: Collection[str] = (),
 ) -> tuple[str | None, dict[str, Any] | None]:
     """Extract body/content from an edit event's ``m.new_content`` payload."""
@@ -362,6 +452,7 @@ async def extract_edit_body(
         event_cache=event_cache,
         room_id=room_id,
         expected_membership_epoch=expected_membership_epoch,
+        hydration_batch=hydration_batch,
     )
     new_content = _normalized_content_dict(resolved_content.get("m.new_content"))
     body = visible_body_from_content(
@@ -384,6 +475,7 @@ async def resolve_event_source_content(
     event_cache: ConversationEventCache | None = None,
     room_id: str | None = None,
     expected_membership_epoch: int | None = None,
+    hydration_batch: SidecarHydrationBatch | None = None,
 ) -> dict[str, Any]:
     """Return an event source with canonical v2 sidecar content hydrated when available."""
     resolved_content, content_changed = await _resolve_event_content(
@@ -392,6 +484,7 @@ async def resolve_event_source_content(
         event_cache=event_cache,
         room_id=room_id,
         expected_membership_epoch=expected_membership_epoch,
+        hydration_batch=hydration_batch,
     )
     if not content_changed:
         return event_source
@@ -409,6 +502,7 @@ async def _resolve_canonical_content(
     room_id: str | None,
     event_id: str | None,
     expected_membership_epoch: int | None,
+    hydration_batch: SidecarHydrationBatch | None,
 ) -> dict[str, Any]:
     """Hydrate canonical event content from a v2 JSON sidecar when available."""
     sidecar_content = _sidecar_content_for_resolution(content)
@@ -427,6 +521,7 @@ async def _resolve_canonical_content(
         room_id=room_id,
         event_id=event_id,
         expected_membership_epoch=expected_membership_epoch,
+        hydration_batch=hydration_batch,
     )
     if full_text is None:
         return content

@@ -195,6 +195,21 @@ async def test_room_scope_is_part_of_event_and_plaintext_identity(
         assert await cache.get_mxc_text("!a:localhost", "$same", mxc_url) == "plaintext A"
         assert await cache.get_mxc_text("!b:localhost", "$same", mxc_url) == "plaintext B"
         assert await cache.get_mxc_text("!wrong:localhost", "$same", mxc_url) is None
+        room_a_epoch = await cache.room_membership_epoch("!a:localhost")
+        assert room_a_epoch is not None
+        assert await cache.get_mxc_texts(
+            "!a:localhost",
+            {("$same", mxc_url), ("$missing", mxc_url)},
+            expected_membership_epoch=room_a_epoch,
+        ) == {("$same", mxc_url): "plaintext A"}
+        assert (
+            await cache.get_mxc_texts(
+                "!a:localhost",
+                {("$same", mxc_url)},
+                expected_membership_epoch=room_a_epoch + 1,
+            )
+            == {}
+        )
     finally:
         await root.close()
 

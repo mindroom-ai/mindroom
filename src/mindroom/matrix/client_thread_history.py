@@ -74,7 +74,12 @@ from mindroom.matrix.media import (
     parse_matrix_media_event_source,
 )
 from mindroom.matrix.membership_fence import UNCERTIFIED_MEMBERSHIP_EPOCH
-from mindroom.matrix.message_content import extract_and_resolve_message, resolve_event_source_content
+from mindroom.matrix.message_content import (
+    SidecarHydrationBatch,
+    extract_and_resolve_message,
+    prepare_sidecar_hydration_batch,
+    resolve_event_source_content,
+)
 from mindroom.matrix.thread_diagnostics import (
     THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC,
     THREAD_HISTORY_DEGRADED_DIAGNOSTIC,
@@ -345,6 +350,22 @@ def _bundled_replacement_source(event_source: Mapping[str, Any]) -> dict[str, An
     return None
 
 
+def _sidecar_hydration_sources(
+    event_sources: Sequence[dict[str, Any]],
+    *,
+    hydrate_sidecars: bool,
+) -> list[dict[str, Any]]:
+    """Return sources whose sidecars this resolution pass may hydrate."""
+    hydration_sources: list[dict[str, Any]] = []
+    for event_source in event_sources:
+        bundled_replacement = _bundled_replacement_source(event_source)
+        if bundled_replacement is not None:
+            hydration_sources.append(bundled_replacement)
+        if hydrate_sidecars or EventInfo.from_event(event_source).is_edit:
+            hydration_sources.append(event_source)
+    return hydration_sources
+
+
 async def _resolve_thread_history_from_event_sources_timed(
     client: nio.AsyncClient,
     *,
@@ -355,6 +376,7 @@ async def _resolve_thread_history_from_event_sources_timed(
     event_cache: ConversationEventCache,
     expected_membership_epoch: int | None = None,
     trusted_sender_ids: Collection[str] = (),
+    register_sidecar_owners: bool = False,
 ) -> tuple[list[ResolvedVisibleMessage], float]:
     """Resolve visible thread history and return approximate sidecar hydration time."""
     input_order_by_event_id: dict[str, int] = {}
@@ -374,6 +396,13 @@ async def _resolve_thread_history_from_event_sources_timed(
     messages_by_event_id: dict[str, ResolvedVisibleMessage] = {}
     latest_edits_by_original_event_id: dict[str, tuple[nio.RoomMessageText | nio.RoomMessageNotice, str | None]] = {}
     sidecar_hydration_started = time.perf_counter()
+    hydration_batch = await prepare_sidecar_hydration_batch(
+        _sidecar_hydration_sources(event_sources, hydrate_sidecars=hydrate_sidecars),
+        event_cache=event_cache,
+        room_id=room_id,
+        expected_membership_epoch=expected_membership_epoch,
+        register_owners=register_sidecar_owners,
+    )
     for event in parsed_events:
         event_info = EventInfo.from_event(event.source)
         bundled_replacement_source = _bundled_replacement_source(event.source)
@@ -400,6 +429,7 @@ async def _resolve_thread_history_from_event_sources_timed(
                 event_cache=event_cache,
                 room_id=room_id,
                 expected_membership_epoch=expected_membership_epoch,
+                hydration_batch=hydration_batch,
                 trusted_sender_ids=trusted_sender_ids,
             )
             if hydrate_sidecars
@@ -414,6 +444,7 @@ async def _resolve_thread_history_from_event_sources_timed(
         event_cache=event_cache,
         room_id=room_id,
         expected_membership_epoch=expected_membership_epoch,
+        hydration_batch=hydration_batch,
         trusted_sender_ids=trusted_sender_ids,
     )
     messages = list(messages_by_event_id.values())
@@ -877,6 +908,7 @@ async def _resolve_thread_history_message(
     event_cache: ConversationEventCache,
     room_id: str,
     expected_membership_epoch: int | None = None,
+    hydration_batch: SidecarHydrationBatch | None = None,
     trusted_sender_ids: Collection[str] = (),
 ) -> ResolvedVisibleMessage:
     """Resolve one room-message event into the normalized thread-history shape."""
@@ -887,6 +919,7 @@ async def _resolve_thread_history_message(
             event_cache=event_cache,
             room_id=room_id,
             expected_membership_epoch=expected_membership_epoch,
+            hydration_batch=hydration_batch,
             trusted_sender_ids=trusted_sender_ids,
         )
         return ResolvedVisibleMessage.from_message_data(
@@ -901,6 +934,7 @@ async def _resolve_thread_history_message(
         event_cache=event_cache,
         room_id=room_id,
         expected_membership_epoch=expected_membership_epoch,
+        hydration_batch=hydration_batch,
     )
     content = resolved_event_source.get("content", {})
     normalized_content = content if isinstance(content, dict) else {}
@@ -1108,6 +1142,7 @@ async def _fetch_thread_history_via_room_messages_with_events(
         event_cache=event_cache,
         expected_membership_epoch=expected_membership_epoch,
         trusted_sender_ids=trusted_sender_ids,
+        register_sidecar_owners=True,
     )
     return _ThreadHistoryFetchResult(
         history=history,

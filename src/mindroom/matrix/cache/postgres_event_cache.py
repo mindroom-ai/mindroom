@@ -29,7 +29,7 @@ from .thread_cache_state import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable
+    from collections.abc import AsyncIterator, Awaitable, Callable, Collection
 
     from psycopg import AsyncConnection
 
@@ -1374,6 +1374,29 @@ class PostgresEventCache:
                 event_id=event_id,
                 mxc_url=mxc_url,
             ),
+        )
+
+    async def get_mxc_texts(
+        self,
+        room_id: str,
+        references: Collection[tuple[str, str]],
+        *,
+        expected_membership_epoch: int,
+    ) -> dict[tuple[str, str], str]:
+        """Return scoped MXC plaintext for many surviving event references in one read."""
+        if not references:
+            return {}
+        return await self._operation(
+            room_id,
+            operation="get_mxc_texts",
+            disabled_result={},
+            callback=lambda db: postgres_event_cache_events.load_mxc_texts(
+                db,
+                namespace=self._runtime.namespace,
+                room_id=room_id,
+                references=references,
+            ),
+            expected_membership_epoch=expected_membership_epoch,
         )
 
     async def store_event(

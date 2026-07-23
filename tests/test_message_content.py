@@ -23,9 +23,11 @@ from mindroom.matrix.client_visible_messages import (
 )
 from mindroom.matrix.membership_fence import UNCERTIFIED_MEMBERSHIP_EPOCH
 from mindroom.matrix.message_content import (
+    SidecarHydrationBatch,
     _download_mxc_text,
     extract_and_resolve_message,
     extract_edit_body,
+    prepare_sidecar_hydration_batch,
     resolve_event_source_content,
 )
 from mindroom.matrix.sidecar_content import sidecar_mxc_url
@@ -773,6 +775,107 @@ class TestResolvedMessageExtraction:
     def test_message_preview_compacts_whitespace_and_truncates(self) -> None:
         """Shared preview compaction should live in the Matrix visible-message layer."""
         assert message_preview("  alpha   beta  \n gamma  ", max_length=12) == "alpha bet..."
+
+
+class TestSidecarHydrationBatch:
+    """Tests for request-scoped batched sidecar hydration."""
+
+    @pytest.mark.asyncio
+    async def test_batch_reference_miss_skips_redundant_point_read(self) -> None:
+        """A reference covered by the batch may download directly after a proven cache miss."""
+        client = AsyncMock()
+        response = MagicMock(spec=nio.DownloadResponse)
+        response.body = b"fresh"
+        client.download.return_value = response
+        event_cache = AsyncMock()
+        event_cache.get_mxc_text.return_value = "stale"
+        reference = ("$event", "mxc://server/covered")
+        hydration_batch = SidecarHydrationBatch(
+            cached_texts={},
+            references=frozenset({reference}),
+            owner_event_ids=frozenset({"$event"}),
+        )
+
+        assert (
+            await _download_mxc_text(
+                client,
+                reference[1],
+                event_cache=event_cache,
+                room_id="!room:localhost",
+                event_id=reference[0],
+                expected_membership_epoch=1,
+                hydration_batch=hydration_batch,
+            )
+            == "fresh"
+        )
+        event_cache.get_mxc_text.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_reference_outside_batch_keeps_point_read_fallback(self) -> None:
+        """An uncovered bundled event must retain the exact point-cache lookup."""
+        client = AsyncMock()
+        client.download.side_effect = AssertionError("point-cache hit must not download")
+        event_cache = AsyncMock()
+        event_cache.get_mxc_text.return_value = "cached"
+        hydration_batch = SidecarHydrationBatch(
+            cached_texts={},
+            references=frozenset({("$other", "mxc://server/other")}),
+            owner_event_ids=frozenset({"$other"}),
+        )
+
+        assert (
+            await _download_mxc_text(
+                client,
+                "mxc://server/uncovered",
+                event_cache=event_cache,
+                room_id="!room:localhost",
+                event_id="$event",
+                expected_membership_epoch=1,
+                hydration_batch=hydration_batch,
+            )
+            == "cached"
+        )
+        event_cache.get_mxc_text.assert_awaited_once_with(
+            "!room:localhost",
+            "$event",
+            "mxc://server/uncovered",
+        )
+
+
+@pytest.mark.asyncio
+async def test_sidecar_batch_only_skips_registration_for_verified_owners() -> None:
+    """A read-only batch must not claim ownership for plaintext cache misses."""
+    hit_reference = ("$hit", "mxc://server/hit")
+    miss_reference = ("$miss", "mxc://server/miss")
+    sources = [
+        {
+            "event_id": event_id,
+            "content": {
+                "msgtype": "m.file",
+                "body": "preview",
+                "url": mxc_url,
+                "io.mindroom.long_text": {
+                    "version": 2,
+                    "encoding": "matrix_event_content_json",
+                },
+            },
+        }
+        for event_id, mxc_url in (hit_reference, miss_reference)
+    ]
+    event_cache = AsyncMock()
+    event_cache.get_mxc_texts.return_value = {hit_reference: "cached"}
+
+    hydration_batch = await prepare_sidecar_hydration_batch(
+        sources,
+        event_cache=event_cache,
+        room_id="!room:localhost",
+        expected_membership_epoch=1,
+        register_owners=False,
+    )
+
+    assert hydration_batch is not None
+    assert hydration_batch.references == frozenset({hit_reference, miss_reference})
+    assert hydration_batch.owner_event_ids == frozenset({"$hit"})
 
 
 class TestDownloadMxcText:

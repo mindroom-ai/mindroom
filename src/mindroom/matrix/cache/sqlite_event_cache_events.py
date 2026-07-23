@@ -20,8 +20,11 @@ from .event_cache_events import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Collection
+
     import aiosqlite
 
+_MXC_TEXT_REFERENCE_BATCH_SIZE = 400
 _ROOM_CONTENT_TABLES = (
     "thread_events",
     "events",
@@ -231,6 +234,52 @@ async def load_mxc_text(
     row = await cursor.fetchone()
     await cursor.close()
     return None if row is None else str(row[0])
+
+
+async def load_mxc_texts(
+    db: aiosqlite.Connection,
+    *,
+    principal_id: str,
+    room_id: str,
+    references: Collection[tuple[str, str]],
+) -> dict[tuple[str, str], str]:
+    """Return plaintext for exact visible references with bounded SQLite parameter batches."""
+    unique_references = tuple(dict.fromkeys(references))
+    resolved: dict[tuple[str, str], str] = {}
+    for start in range(0, len(unique_references), _MXC_TEXT_REFERENCE_BATCH_SIZE):
+        batch = unique_references[start : start + _MXC_TEXT_REFERENCE_BATCH_SIZE]
+        reference_predicate = " OR ".join("(reference.event_id = ? AND plaintext.mxc_url = ?)" for _reference in batch)
+        parameters = (
+            principal_id,
+            room_id,
+            *(value for reference in batch for value in reference),
+        )
+        cursor = await db.execute(
+            f"""
+            SELECT reference.event_id, plaintext.mxc_url, plaintext.text_content
+            FROM mxc_text_cache AS plaintext
+            JOIN event_mxc_references AS reference
+              ON reference.principal_id = plaintext.principal_id
+             AND reference.room_id = plaintext.room_id
+             AND reference.mxc_url = plaintext.mxc_url
+            JOIN events
+              ON events.principal_id = reference.principal_id
+             AND events.room_id = reference.room_id
+             AND events.event_id = reference.event_id
+            WHERE plaintext.principal_id = ?
+              AND plaintext.room_id = ?
+              AND ({reference_predicate})
+            """,  # noqa: S608
+            parameters,
+        )
+        try:
+            rows = await cursor.fetchall()
+        finally:
+            await cursor.close()
+        resolved.update(
+            {(str(event_id), str(mxc_url)): str(text_content) for event_id, mxc_url, text_content in rows},
+        )
+    return resolved
 
 
 async def _event_owns_mxc_text(
