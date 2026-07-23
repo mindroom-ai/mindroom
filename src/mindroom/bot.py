@@ -51,7 +51,7 @@ from mindroom.matrix.sync_certification import (
     SyncCertificationDecision,
     SyncTrustState,
 )
-from mindroom.matrix.sync_loop import run_matrix_sync_forever
+from mindroom.matrix.sync_loop import run_matrix_sync_forever, sliding_own_membership_sets
 from mindroom.matrix.users import AgentMatrixUser, login_agent_user
 from mindroom.matrix_rtc.call_manager import CallManager, maybe_build_call_manager
 from mindroom.memory import store_conversation_memory
@@ -307,6 +307,7 @@ class AgentBot:
     _calls_reconcile_pending: bool
     _room_member_callback_registered: bool
     _room_member_join_hooks_armed: bool
+    _sliding_sync_startup_warning_emitted: bool
     _turn_controller: TurnController
     _room_lifecycle: BotRoomLifecycle
     _local_departures_awaiting_sync: set[str]
@@ -339,6 +340,7 @@ class AgentBot:
         self._hook_registry_state = HookRegistryState(HookRegistry.empty())
         self._room_member_callback_registered = False
         self._room_member_join_hooks_armed = False
+        self._sliding_sync_startup_warning_emitted = False
         self._runtime_view = BotRuntimeState(
             client=None,
             config=config,
@@ -1205,6 +1207,10 @@ class AgentBot:
                 hooks_were_armed=room_member_join_hooks_were_armed,
                 decision=decision,
             )
+        elif isinstance(_response, nio.SlidingSyncResponse):
+            # Sliding sync never certifies the classic checkpoint, but the
+            # account's own kicks and bans still must fence and purge rooms.
+            await self._apply_own_room_membership_from_sliding_sync(_response)
         self._first_sync_done = True
         self._room_member_join_hooks_armed = room_member_join_hook_plan.arm_after_response
 
@@ -1234,6 +1240,12 @@ class AgentBot:
         """Update the watchdog clock on sync errors without marking cache state fresh."""
         logger.debug("SyncError received", agent_name=self.agent_name, error=str(_response))
         self._last_sync_monotonic = time.monotonic()
+        if isinstance(_response, nio.SlidingSyncError):
+            # nio restarts expired sliding connections (M_UNKNOWN_POS)
+            # transparently, and sliding errors say nothing about the classic
+            # sync checkpoint, so classic token rejection must not run here.
+            self._warn_if_sliding_sync_never_succeeded(_response)
+            return
         if _response.status_code == "M_UNKNOWN_POS":
             decision = self._sync_cache_trust.reject_unknown_pos()
             if decision.reset_client_token and self.client is not None:
@@ -1245,6 +1257,21 @@ class AgentBot:
                 error=str(_response),
                 first_sync=not self._first_sync_done,
             )
+
+    def _warn_if_sliding_sync_never_succeeded(self, response: nio.SlidingSyncError) -> None:
+        """Point at the classic transport once when sliding sync fails before ever succeeding."""
+        if self._first_sync_done or self._sliding_sync_startup_warning_emitted:
+            return
+        self._sliding_sync_startup_warning_emitted = True
+        self.logger.warning(
+            "sliding_sync_failing_before_first_sync",
+            status_code=response.status_code,
+            error=str(response),
+            hint=(
+                "If the homeserver does not support MSC4186 Simplified Sliding Sync"
+                " (org.matrix.simplified_msc3575), set matrix_sync.mode: classic."
+            ),
+        )
 
     async def ensure_rooms(self) -> None:
         """Ensure agent is in the correct rooms based on configuration.
@@ -1328,7 +1355,29 @@ class AgentBot:
                 for event in room_info.timeline.events
             )
         }
-        departed_room_ids = left_room_ids | timeline_departure_room_ids
+        await self._apply_own_room_membership(
+            joined_room_ids=joined_room_ids,
+            left_room_ids=left_room_ids,
+            departed_room_ids=left_room_ids | timeline_departure_room_ids,
+        )
+
+    async def _apply_own_room_membership_from_sliding_sync(self, response: nio.SlidingSyncResponse) -> None:
+        """Apply this bot's room memberships reported by one sliding sync response."""
+        joined_room_ids, departed_room_ids = sliding_own_membership_sets(response)
+        await self._apply_own_room_membership(
+            joined_room_ids=joined_room_ids,
+            left_room_ids=departed_room_ids,
+            departed_room_ids=departed_room_ids,
+        )
+
+    async def _apply_own_room_membership(
+        self,
+        *,
+        joined_room_ids: set[str],
+        left_room_ids: set[str],
+        departed_room_ids: set[str],
+    ) -> None:
+        """Fence departed rooms and refresh joined-room cache access for one sync response."""
         if departed_room_ids:
             self._sync_cache_trust.invalidate_for_cache_scope_cleanup()
         for room_id in departed_room_ids:

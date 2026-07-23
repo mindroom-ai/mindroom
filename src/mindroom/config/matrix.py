@@ -31,15 +31,19 @@ class MatrixSyncConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     mode: _MatrixSyncMode = Field(
-        default="sliding",
+        default="classic",
         description=(
-            "Matrix sync transport. 'sliding' uses MSC4186 Simplified Sliding Sync and 'classic' uses /v3/sync."
+            "Matrix sync transport. 'classic' uses /v3/sync and 'sliding' opts into MSC4186 Simplified Sliding"
+            " Sync, which requires a homeserver advertising org.matrix.simplified_msc3575."
         ),
     )
     sliding_timeline_limit: int = Field(
         default=100,
         ge=1,
-        description="Timeline event limit for each room requested through Simplified Sliding Sync.",
+        description=(
+            "Timeline event limit for each room requested through Simplified Sliding Sync. Sliding positions are"
+            " connection-scoped, so this also bounds how many per-room events a restarted connection can replay."
+        ),
     )
 
 

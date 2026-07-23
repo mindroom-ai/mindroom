@@ -1,4 +1,4 @@
-"""Matrix sync-loop selection helpers."""
+"""Matrix sync-loop selection and Simplified Sliding Sync helpers."""
 
 from __future__ import annotations
 
@@ -50,6 +50,25 @@ def _sliding_sync_extensions() -> dict[str, object]:
         "e2ee": {"enabled": True},
         "account_data": {"enabled": True},
     }
+
+
+def sliding_own_membership_sets(response: nio.SlidingSyncResponse) -> tuple[set[str], set[str]]:
+    """Return this account's (joined, departed) room-id sets from one sliding sync response.
+
+    nio applies sliding rooms to client state but, like classic /v3/sync, never
+    surfaces the account's own departures, so kicks and bans must be read from
+    the per-room membership here.
+    """
+    joined_room_ids: set[str] = set()
+    departed_room_ids: set[str] = set()
+    for room_id, room in response.rooms.items():
+        if room.membership in ("leave", "ban"):
+            departed_room_ids.add(room_id)
+            continue
+        is_invite = room.membership == "invite" or (room.membership is None and bool(room.stripped_state))
+        if not is_invite:
+            joined_room_ids.add(room_id)
+    return joined_room_ids, departed_room_ids
 
 
 async def run_matrix_sync_forever(
