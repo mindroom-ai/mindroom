@@ -126,10 +126,6 @@ class _UnresolvedOpaqueRoomHistoryError(OpaqueEncryptedThreadHistoryError):
     """Raised when opaque room history cannot be assigned to a specific thread."""
 
 
-class _SidecarMembershipChangedError(RuntimeError):
-    """Raised when request-scoped sidecar plaintext crosses a membership transition."""
-
-
 async def _capture_membership_epoch(event_cache: ConversationEventCache, room_id: str) -> int:
     """Return a durable refill generation or a value that rejects every cache write."""
     try:
@@ -354,22 +350,6 @@ def _bundled_replacement_source(event_source: Mapping[str, Any]) -> dict[str, An
     return None
 
 
-async def _assert_sidecar_membership_epoch_unchanged(
-    event_cache: ConversationEventCache,
-    *,
-    room_id: str,
-    expected_membership_epoch: int | None,
-    hydration_batch: SidecarHydrationBatch | None,
-) -> None:
-    """Reject a request-scoped plaintext batch that crossed a membership transition."""
-    if hydration_batch is None:
-        return
-    current_membership_epoch = await event_cache.room_membership_epoch(room_id)
-    if current_membership_epoch != expected_membership_epoch:
-        msg = "Room membership changed during sidecar hydration"
-        raise _SidecarMembershipChangedError(msg)
-
-
 def _sidecar_hydration_sources(
     event_sources: Sequence[dict[str, Any]],
     *,
@@ -466,12 +446,6 @@ async def _resolve_thread_history_from_event_sources_timed(
         expected_membership_epoch=expected_membership_epoch,
         hydration_batch=hydration_batch,
         trusted_sender_ids=trusted_sender_ids,
-    )
-    await _assert_sidecar_membership_epoch_unchanged(
-        event_cache,
-        room_id=room_id,
-        expected_membership_epoch=expected_membership_epoch,
-        hydration_batch=hydration_batch,
     )
     messages = list(messages_by_event_id.values())
     sort_thread_messages_root_first(
@@ -578,17 +552,6 @@ async def _resolve_cached_thread_history(
             thread_id=thread_id,
             event_sources=cached_event_sources,
             hydrate_sidecars=hydrate_sidecars,
-            event_cache=event_cache,
-            expected_membership_epoch=expected_membership_epoch,
-            trusted_sender_ids=trusted_sender_ids,
-        )
-    except _SidecarMembershipChangedError:
-        return await _resolve_thread_history_from_event_sources_timed(
-            client,
-            room_id=room_id,
-            thread_id=thread_id,
-            event_sources=cached_event_sources,
-            hydrate_sidecars=False,
             event_cache=event_cache,
             expected_membership_epoch=expected_membership_epoch,
             trusted_sender_ids=trusted_sender_ids,
