@@ -13,7 +13,7 @@ from agno.run.agent import RunOutput
 from agno.session.agent import AgentSession
 
 from mindroom.agent_storage import create_state_storage, get_agent_session
-from mindroom.config.agent import AgentConfig, AgentPrivateConfig
+from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import MATRIX_RESPONSE_EVENT_ID_METADATA_KEY
@@ -25,6 +25,35 @@ from tests.identity_helpers import entity_ids, persist_entity_accounts
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+
+def test_only_configured_agents_and_teams_support_run_recovery(tmp_path: Path) -> None:
+    """Router has ledger state but no persisted Agno run storage."""
+    config = Config(
+        agents={"member": AgentConfig(display_name="Member")},
+        teams={
+            "crew": TeamConfig(
+                display_name="Crew",
+                role="Collaborate",
+                agents=["member"],
+            ),
+        },
+    )
+    runtime = SimpleNamespace(config=config)
+
+    def writer(entity_name: str) -> ConversationStateWriter:
+        return ConversationStateWriter(
+            ConversationStateWriterDeps(
+                runtime=runtime,
+                logger=MagicMock(),
+                runtime_paths=test_runtime_paths(tmp_path),
+                agent_name=entity_name,
+            ),
+        )
+
+    assert writer("member").supports_run_recovery()
+    assert writer("crew").supports_run_recovery()
+    assert not writer("router").supports_run_recovery()
 
 
 def test_persist_response_event_id_keeps_assistant_history_plain(tmp_path: Path) -> None:

@@ -42,6 +42,11 @@ class ConversationStateWriter:
 
     deps: ConversationStateWriterDeps
 
+    def supports_run_recovery(self) -> bool:
+        """Return whether this entity owns persisted Agno runs."""
+        config = self.deps.runtime.config
+        return self.deps.agent_name in config.agents or self.deps.agent_name in config.teams
+
     def history_scope(self) -> HistoryScope:
         """Return the persisted history scope backing this bot's runs."""
         if self.deps.agent_name in self.deps.runtime.config.teams:
