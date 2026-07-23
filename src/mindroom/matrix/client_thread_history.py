@@ -370,6 +370,22 @@ async def _assert_sidecar_membership_epoch_unchanged(
         raise _SidecarMembershipChangedError(msg)
 
 
+def _sidecar_hydration_sources(
+    event_sources: Sequence[dict[str, Any]],
+    *,
+    hydrate_sidecars: bool,
+) -> list[dict[str, Any]]:
+    """Return sources whose sidecars this resolution pass may hydrate."""
+    hydration_sources: list[dict[str, Any]] = []
+    for event_source in event_sources:
+        bundled_replacement = _bundled_replacement_source(event_source)
+        if bundled_replacement is not None:
+            hydration_sources.append(bundled_replacement)
+        if hydrate_sidecars or EventInfo.from_event(event_source).is_edit:
+            hydration_sources.append(event_source)
+    return hydration_sources
+
+
 async def _resolve_thread_history_from_event_sources_timed(
     client: nio.AsyncClient,
     *,
@@ -400,16 +416,12 @@ async def _resolve_thread_history_from_event_sources_timed(
     messages_by_event_id: dict[str, ResolvedVisibleMessage] = {}
     latest_edits_by_original_event_id: dict[str, tuple[nio.RoomMessageText | nio.RoomMessageNotice, str | None]] = {}
     sidecar_hydration_started = time.perf_counter()
-    hydration_batch = (
-        await prepare_sidecar_hydration_batch(
-            event_sources,
-            event_cache=event_cache,
-            room_id=room_id,
-            expected_membership_epoch=expected_membership_epoch,
-            register_owners=register_sidecar_owners,
-        )
-        if hydrate_sidecars
-        else None
+    hydration_batch = await prepare_sidecar_hydration_batch(
+        _sidecar_hydration_sources(event_sources, hydrate_sidecars=hydrate_sidecars),
+        event_cache=event_cache,
+        room_id=room_id,
+        expected_membership_epoch=expected_membership_epoch,
+        register_owners=register_sidecar_owners,
     )
     for event in parsed_events:
         event_info = EventInfo.from_event(event.source)

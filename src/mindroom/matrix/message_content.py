@@ -29,6 +29,7 @@ class SidecarHydrationBatch:
     """Request-scoped durable sidecar hits and their visible owner event IDs."""
 
     cached_texts: Mapping[tuple[str, str], str]
+    references: frozenset[tuple[str, str]]
     owner_event_ids: frozenset[str]
 
 
@@ -133,6 +134,7 @@ async def prepare_sidecar_hydration_batch(
         return None
     return SidecarHydrationBatch(
         cached_texts=cached_texts,
+        references=frozenset(references),
         owner_event_ids=frozenset(event_id for event_id, _mxc_url in references),
     )
 
@@ -259,7 +261,7 @@ async def _download_mxc_text(  # noqa: PLR0911, PLR0912, PLR0915, C901
         expected_membership_epoch is not None and expected_membership_epoch != UNCERTIFIED_MEMBERSHIP_EPOCH
     )
     if cache_writes_certified and event_cache is not None and room_id is not None and event_id is not None:
-        if hydration_batch is not None:
+        if hydration_batch is not None and (event_id, mxc_url) in hydration_batch.references:
             cached_text = hydration_batch.cached_texts.get((event_id, mxc_url))
         else:
             try:

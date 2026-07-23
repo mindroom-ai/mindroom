@@ -23,6 +23,7 @@ from mindroom.matrix.client_visible_messages import (
 )
 from mindroom.matrix.membership_fence import UNCERTIFIED_MEMBERSHIP_EPOCH
 from mindroom.matrix.message_content import (
+    SidecarHydrationBatch,
     _download_mxc_text,
     extract_and_resolve_message,
     extract_edit_body,
@@ -777,6 +778,67 @@ class TestResolvedMessageExtraction:
 
 class TestDownloadMxcText:
     """Tests for _download_mxc_text function."""
+
+    @pytest.mark.asyncio
+    async def test_batch_reference_miss_skips_redundant_point_read(self) -> None:
+        """A reference covered by the batch may download directly after a proven cache miss."""
+        client = AsyncMock()
+        response = MagicMock(spec=nio.DownloadResponse)
+        response.body = b"fresh"
+        client.download.return_value = response
+        event_cache = AsyncMock()
+        event_cache.get_mxc_text.return_value = "stale"
+        reference = ("$event", "mxc://server/covered")
+        hydration_batch = SidecarHydrationBatch(
+            cached_texts={},
+            references=frozenset({reference}),
+            owner_event_ids=frozenset({"$event"}),
+        )
+
+        assert (
+            await _download_mxc_text(
+                client,
+                reference[1],
+                event_cache=event_cache,
+                room_id="!room:localhost",
+                event_id=reference[0],
+                expected_membership_epoch=1,
+                hydration_batch=hydration_batch,
+            )
+            == "fresh"
+        )
+        event_cache.get_mxc_text.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_reference_outside_batch_keeps_point_read_fallback(self) -> None:
+        """An uncovered bundled event must retain the exact point-cache lookup."""
+        client = AsyncMock()
+        client.download.side_effect = AssertionError("point-cache hit must not download")
+        event_cache = AsyncMock()
+        event_cache.get_mxc_text.return_value = "cached"
+        hydration_batch = SidecarHydrationBatch(
+            cached_texts={},
+            references=frozenset({("$other", "mxc://server/other")}),
+            owner_event_ids=frozenset({"$other"}),
+        )
+
+        assert (
+            await _download_mxc_text(
+                client,
+                "mxc://server/uncovered",
+                event_cache=event_cache,
+                room_id="!room:localhost",
+                event_id="$event",
+                expected_membership_epoch=1,
+                hydration_batch=hydration_batch,
+            )
+            == "cached"
+        )
+        event_cache.get_mxc_text.assert_awaited_once_with(
+            "!room:localhost",
+            "$event",
+            "mxc://server/uncovered",
+        )
 
     @pytest.mark.asyncio
     async def test_invalid_mxc_url(self) -> None:

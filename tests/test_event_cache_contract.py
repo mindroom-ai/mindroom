@@ -10,6 +10,24 @@ from mindroom.matrix.cache import ConversationEventCache
 from tests.event_cache_test_support import replace_thread_unconditionally
 
 
+def _sidecar_message_event(event_id: str, timestamp: int, *, mxc_url: str) -> dict[str, Any]:
+    return {
+        "event_id": event_id,
+        "sender": "@user:localhost",
+        "origin_server_ts": timestamp,
+        "type": "m.room.message",
+        "content": {
+            "msgtype": "m.file",
+            "body": "preview",
+            "url": mxc_url,
+            "io.mindroom.long_text": {
+                "version": 2,
+                "encoding": "matrix_event_content_json",
+            },
+        },
+    }
+
+
 def _message_event(
     event_id: str,
     timestamp: int,
@@ -55,6 +73,14 @@ class TestConversationEventCacheContract:
         assert event_cache.durable_writes_available is False
         assert event_cache.cache_generation is None
         assert await event_cache.get_event("!room:localhost", "$missing") is None
+        assert (
+            await event_cache.get_mxc_texts(
+                "!room:localhost",
+                {("$missing", "mxc://server/missing")},
+                expected_membership_epoch=0,
+            )
+            == {}
+        )
         assert (
             await event_cache.get_recent_room_events(
                 "!room:localhost",
@@ -122,6 +148,80 @@ class TestConversationEventCacheContract:
                 sender="@other:localhost",
             )
             == other_sender_edit
+        )
+
+    @pytest.mark.asyncio
+    async def test_batched_plaintext_read_preserves_cache_security_boundaries(
+        self,
+        event_cache: ConversationEventCache,
+    ) -> None:
+        """Batch reads keep point-read principal, room, owner, redaction, and departure rules."""
+        room_id = "!room:localhost"
+        mxc_url = "mxc://server/owned"
+        owner = _sidecar_message_event("$owner:localhost", 1, mxc_url=mxc_url)
+        await event_cache.store_event("$owner:localhost", room_id, owner)
+        membership_epoch = await event_cache.room_membership_epoch(room_id)
+        assert membership_epoch is not None
+        assert await event_cache.store_mxc_text(
+            room_id,
+            "$owner:localhost",
+            mxc_url,
+            "owned plaintext",
+            expected_membership_epoch=membership_epoch,
+        )
+        references = {
+            ("$owner:localhost", mxc_url),
+            ("$missing:localhost", mxc_url),
+            ("$owner:localhost", "mxc://server/wrong"),
+        }
+
+        assert await event_cache.get_mxc_texts(
+            room_id,
+            references,
+            expected_membership_epoch=membership_epoch,
+        ) == {("$owner:localhost", mxc_url): "owned plaintext"}
+        assert (
+            await event_cache.get_mxc_texts(
+                "!wrong:localhost",
+                references,
+                expected_membership_epoch=membership_epoch,
+            )
+            == {}
+        )
+        assert (
+            await event_cache.for_principal("@other:localhost").get_mxc_texts(
+                room_id,
+                references,
+                expected_membership_epoch=membership_epoch,
+            )
+            == {}
+        )
+        assert (
+            await event_cache.get_mxc_texts(
+                room_id,
+                references,
+                expected_membership_epoch=membership_epoch + 1,
+            )
+            == {}
+        )
+
+        assert await event_cache.redact_event(room_id, "$owner:localhost") is True
+        assert (
+            await event_cache.get_mxc_texts(
+                room_id,
+                references,
+                expected_membership_epoch=membership_epoch,
+            )
+            == {}
+        )
+        event_cache.mark_room_departed(room_id)
+        assert (
+            await event_cache.get_mxc_texts(
+                room_id,
+                references,
+                expected_membership_epoch=membership_epoch,
+            )
+            == {}
         )
 
     @pytest.mark.asyncio
