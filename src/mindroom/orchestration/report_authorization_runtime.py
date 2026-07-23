@@ -56,9 +56,6 @@ class _OriginRoomReportAuthorizer:
             return ReportAuthorizationDecision(ReportAuthorizationReason.MALFORMED_REPORT)
 
         publisher_entity_name = report.publisher_entity_name
-        publisher_bot = self.bots.get(publisher_entity_name)
-        if publisher_bot is None or publisher_bot.client is None or not publisher_bot.running:
-            return ReportAuthorizationDecision(ReportAuthorizationReason.PUBLISHER_NOT_JOINED)
         try:
             expected_publisher_id = (
                 entity_identity_registry(
@@ -74,6 +71,9 @@ class _OriginRoomReportAuthorizer:
             MissingManagedEntityAccountError,
         ):
             return ReportAuthorizationDecision(ReportAuthorizationReason.PUBLISHER_IDENTITY_MISMATCH)
+        publisher_bot = self.bots.get(publisher_entity_name)
+        if publisher_bot is None or publisher_bot.client is None or not publisher_bot.running:
+            return ReportAuthorizationDecision(ReportAuthorizationReason.AUTHORIZATION_BACKEND_UNAVAILABLE)
         if (
             expected_publisher_id != report.publisher_matrix_user_id
             or publisher_bot.matrix_id.full_id != report.publisher_matrix_user_id

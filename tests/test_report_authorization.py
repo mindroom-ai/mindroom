@@ -33,7 +33,7 @@ if TYPE_CHECKING:
 class _FakeBot:
     """Minimal live bot surface used by report authorization."""
 
-    client: AsyncMock
+    client: AsyncMock | None
     running: bool
     matrix_id: object
 
@@ -169,6 +169,55 @@ async def test_origin_room_authorization_rejects_stored_publisher_identity_misma
 
     assert decision.reason is ReportAuthorizationReason.PUBLISHER_IDENTITY_MISMATCH
     client.joined_members.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("runtime_state", ["missing", "stopped", "client_missing"])
+async def test_origin_room_authorization_treats_configured_publisher_outage_as_backend_unavailable(
+    tmp_path: Path,
+    runtime_state: str,
+) -> None:
+    """Configured publisher runtime outages should produce a retryable failure."""
+    config = _config(tmp_path)
+    publisher_matrix_id = entity_identity_registry(
+        config,
+        runtime_paths_for(config),
+    ).current_id("general")
+    publisher_bot = _FakeBot(
+        client=None if runtime_state == "client_missing" else AsyncMock(spec=nio.AsyncClient),
+        running=runtime_state != "stopped",
+        matrix_id=publisher_matrix_id,
+    )
+    bots = {} if runtime_state == "missing" else {"general": publisher_bot}
+    authorizer = _OriginRoomReportAuthorizer(
+        config=config,
+        bots=bots,  # type: ignore[arg-type]
+        runtime_paths=runtime_paths_for(config),
+    )
+
+    decision = await authorizer.authorize(_report(config), "@alice:localhost")
+
+    assert decision.reason is ReportAuthorizationReason.AUTHORIZATION_BACKEND_UNAVAILABLE
+
+
+@pytest.mark.asyncio
+async def test_origin_room_authorization_treats_removed_publisher_as_identity_mismatch(tmp_path: Path) -> None:
+    """A publisher removed from current config should remain a denial, not an outage."""
+    original_config = _config(tmp_path)
+    runtime_paths = runtime_paths_for(original_config)
+    current_config = bind_runtime_paths(
+        Config(models={"default": ModelConfig(provider="openai", id="gpt-5.6")}),
+        runtime_paths,
+    )
+    authorizer = _OriginRoomReportAuthorizer(
+        config=current_config,
+        bots={},
+        runtime_paths=runtime_paths,
+    )
+
+    decision = await authorizer.authorize(_report(original_config), "@alice:localhost")
+
+    assert decision.reason is ReportAuthorizationReason.PUBLISHER_IDENTITY_MISMATCH
 
 
 @pytest.mark.asyncio
