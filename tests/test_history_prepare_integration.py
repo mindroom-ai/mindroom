@@ -532,7 +532,7 @@ async def test_prepare_agent_and_prompt_uses_full_thread_fallback_for_threaded_m
     assert prepared_run.prompt_text == "\n\n".join(
         (
             render_msg_tag(sender="@alice:localhost", body="Original question", event_id="$root"),
-            render_msg_tag(sender="@bot:localhost", body="Prior diagnosis", event_id="$agent-reply"),
+            "Prior diagnosis",
             "Current message:\n"
             + render_msg_tag(sender="@alice:localhost", body="What was that?", event_id="$current"),
         ),

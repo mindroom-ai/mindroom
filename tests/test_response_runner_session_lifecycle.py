@@ -94,7 +94,7 @@ if TYPE_CHECKING:
     from agno.session.team import TeamSession
 
 
-def _assert_tagged_interrupted_messages(
+def _assert_interrupted_messages(
     run: RunOutput,
     *,
     response_event_id: str,
@@ -104,8 +104,9 @@ def _assert_tagged_interrupted_messages(
     assert [message.role for message in run.messages] == ["user", "assistant"]
     assert 'event_id="$user_msg"' in cast("str", run.messages[0].content)
     assert "Hello" in cast("str", run.messages[0].content)
-    assert f'event_id="{response_event_id}"' in cast("str", run.messages[1].content)
-    assert assistant_body in cast("str", run.messages[1].content)
+    assert run.metadata is not None
+    assert run.metadata["matrix_response_event_id"] == response_event_id
+    assert run.messages[1].content == assistant_body
 
 
 def test_persist_interrupted_turn_closes_storage_after_write(tmp_path: Path) -> None:
@@ -902,7 +903,7 @@ async def test_process_and_respond_streaming_persists_interrupted_history_when_d
     assert persisted_session is not None
     assert persisted_session.runs is not None
     persisted_run = cast("RunOutput", persisted_session.runs[0])
-    _assert_tagged_interrupted_messages(
+    _assert_interrupted_messages(
         persisted_run,
         response_event_id="$terminal",
         assistant_body="Partial answer\n\n(turn failed before completion)",
@@ -972,7 +973,7 @@ async def test_process_and_respond_streaming_persists_interrupted_history_when_m
     assert persisted_run.run_id == "run-1"
     assert persisted_run.metadata is not None
     assert persisted_run.metadata["matrix_response_event_id"] == "$streamed"
-    _assert_tagged_interrupted_messages(
+    _assert_interrupted_messages(
         persisted_run,
         response_event_id="$streamed",
         assistant_body=(
@@ -1060,7 +1061,7 @@ async def test_process_and_respond_streaming_delivery_failure_with_visible_tools
     assert persisted_session is not None
     assert persisted_session.runs is not None
     persisted_run = cast("RunOutput", persisted_session.runs[0])
-    _assert_tagged_interrupted_messages(
+    _assert_interrupted_messages(
         persisted_run,
         response_event_id="$terminal",
         assistant_body=(
@@ -1293,7 +1294,7 @@ async def test_generate_response_locked_persists_minimal_interrupted_history_aft
     assert persisted_run.run_id == "run-retry"
     assert persisted_run.metadata is not None
     assert persisted_run.metadata["matrix_response_event_id"] == "$thinking"
-    _assert_tagged_interrupted_messages(
+    _assert_interrupted_messages(
         persisted_run,
         response_event_id="$thinking",
         assistant_body="(turn stopped before completion)",

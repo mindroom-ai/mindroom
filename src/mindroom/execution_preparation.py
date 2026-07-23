@@ -256,7 +256,6 @@ def _context_message_from_visible_message(
     annotation = format_attachment_annotation(list(attachment_records))
     if annotation:
         body = f"{body}\n{annotation}" if body else annotation
-    event_id = message.event_id or None
     if (
         response_sender_id is not None
         and message.sender == response_sender_id
@@ -264,10 +263,8 @@ def _context_message_from_visible_message(
     ):
         # Provider APIs reject media on assistant turns, so agent-sent
         # attachments surface through the annotation text only.
-        return Message(
-            role="assistant",
-            content=render_msg_tag(sender=message.sender, body=body, event_id=event_id),
-        )
+        return Message(role="assistant", content=body)
+    event_id = message.event_id or None
     speaker_label = _message_speaker_label(message)
     if not speaker_label:
         speaker_label = missing_sender_label

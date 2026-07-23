@@ -1256,23 +1256,14 @@ async def test_prepare_bound_team_execution_context_uses_team_renderer_for_trimm
     assert tuple((message.role, message.content) for message in prepared.messages) == (
         (
             "assistant",
-            render_msg_tag(
-                sender="@mindroom_team:example.org",
-                body="Previous team reply",
-                event_id="event-2",
-            ),
+            "Previous team reply",
         ),
         ("user", "Analyze this."),
-    )
-    tagged_reply = render_msg_tag(
-        sender="@mindroom_team:example.org",
-        body="Previous team reply",
-        event_id="event-2",
     )
     assert captured_prompts == [
         ("Analyze this.", None),
         ("Analyze this.", None),
-        (f"assistant: {tagged_reply}\n\nAnalyze this.", None),
+        ("assistant: Previous team reply\n\nAnalyze this.", None),
     ]
 
 
