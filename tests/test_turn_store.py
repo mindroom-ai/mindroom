@@ -1419,6 +1419,48 @@ def test_agent_bot_does_not_expose_removed_handled_turn_ledger_shim(tmp_path: Pa
     assert removed_attr not in vars(bot)
 
 
+def test_router_turn_replay_uses_persisted_ledger_across_two_restarts(tmp_path: Path) -> None:
+    """Router relay turns have durable ledger state but no Agno run storage."""
+
+    def router_bot() -> AgentBot:
+        config = bind_runtime_paths(Config(), test_runtime_paths(tmp_path))
+        return AgentBot(
+            agent_user=AgentMatrixUser(
+                agent_name="router",
+                user_id="@mindroom_router:localhost",
+                display_name="Router",
+                password=TEST_PASSWORD,
+            ),
+            storage_path=tmp_path,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+        )
+
+    target = MessageTarget.resolve("!room:localhost", "$thread", "$source")
+    expected = TurnRecord.create(
+        ["$source"],
+        response_event_id="$relay",
+        response_owner="router",
+        requester_id="@user:localhost",
+        conversation_target=target,
+    )
+    router_bot()._turn_store.record_turn(expected)
+
+    for _restart in range(2):
+        _reset_handled_turn_ledger_runtime()
+        restarted = router_bot()
+        loaded = restarted._turn_store.load_turn(
+            room=MagicMock(room_id="!room:localhost"),
+            thread_id="$thread",
+            original_event_id="$source",
+            requester_user_id="@user:localhost",
+        )
+
+        assert loaded is not None
+        assert replace(loaded, timestamp=0.0) == replace(expected, timestamp=0.0)
+        assert loaded.timestamp > 0
+
+
 def test_no_test_references_removed_bot_handled_turn_ledger_shim() -> None:
     """Tests should route all handled-turn access through TurnStore."""
     tests_root = Path(__file__).resolve().parent

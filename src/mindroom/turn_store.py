@@ -322,6 +322,8 @@ class TurnStore:
     ) -> TurnRecord | None:
         """Load, deterministically merge, and repair one durable turn record."""
         ledger_record_before_recovery = self._ledger.get_turn_record(original_event_id)
+        if not self.deps.state_writer.supports_run_recovery():
+            return ledger_record_before_recovery
         recovery_record = self._load_persisted_turn_record(
             _LoadPersistedTurnRequest(
                 room=room,

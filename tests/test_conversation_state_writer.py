@@ -27,6 +27,29 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
+def test_only_configured_agents_and_teams_support_run_recovery(tmp_path: Path) -> None:
+    """Router has ledger state but no persisted Agno run storage."""
+    config = Config(
+        agents={"member": AgentConfig(display_name="Member")},
+        teams={"crew": {"display_name": "Crew", "role": "Collaborate", "agents": ["member"]}},
+    )
+    runtime = SimpleNamespace(config=config)
+
+    def writer(entity_name: str) -> ConversationStateWriter:
+        return ConversationStateWriter(
+            ConversationStateWriterDeps(
+                runtime=runtime,
+                logger=MagicMock(),
+                runtime_paths=test_runtime_paths(tmp_path),
+                agent_name=entity_name,
+            ),
+        )
+
+    assert writer("member").supports_run_recovery()
+    assert writer("crew").supports_run_recovery()
+    assert not writer("router").supports_run_recovery()
+
+
 def test_persist_response_event_id_keeps_assistant_history_plain(tmp_path: Path) -> None:
     """Response linkage belongs in run metadata, not assistant-role content."""
     run = RunOutput(
