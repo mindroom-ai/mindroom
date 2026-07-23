@@ -27,6 +27,7 @@ from mindroom.matrix.message_content import (
     _download_mxc_text,
     extract_and_resolve_message,
     extract_edit_body,
+    prepare_sidecar_hydration_batch,
     resolve_event_source_content,
 )
 from mindroom.matrix.sidecar_content import sidecar_mxc_url
@@ -776,8 +777,8 @@ class TestResolvedMessageExtraction:
         assert message_preview("  alpha   beta  \n gamma  ", max_length=12) == "alpha bet..."
 
 
-class TestDownloadMxcText:
-    """Tests for _download_mxc_text function."""
+class TestSidecarHydrationBatch:
+    """Tests for request-scoped batched sidecar hydration."""
 
     @pytest.mark.asyncio
     async def test_batch_reference_miss_skips_redundant_point_read(self) -> None:
@@ -839,6 +840,46 @@ class TestDownloadMxcText:
             "$event",
             "mxc://server/uncovered",
         )
+
+
+@pytest.mark.asyncio
+async def test_sidecar_batch_only_skips_registration_for_verified_owners() -> None:
+    """A read-only batch must not claim ownership for plaintext cache misses."""
+    hit_reference = ("$hit", "mxc://server/hit")
+    miss_reference = ("$miss", "mxc://server/miss")
+    sources = [
+        {
+            "event_id": event_id,
+            "content": {
+                "msgtype": "m.file",
+                "body": "preview",
+                "url": mxc_url,
+                "io.mindroom.long_text": {
+                    "version": 2,
+                    "encoding": "matrix_event_content_json",
+                },
+            },
+        }
+        for event_id, mxc_url in (hit_reference, miss_reference)
+    ]
+    event_cache = AsyncMock()
+    event_cache.get_mxc_texts.return_value = {hit_reference: "cached"}
+
+    hydration_batch = await prepare_sidecar_hydration_batch(
+        sources,
+        event_cache=event_cache,
+        room_id="!room:localhost",
+        expected_membership_epoch=1,
+        register_owners=False,
+    )
+
+    assert hydration_batch is not None
+    assert hydration_batch.references == frozenset({hit_reference, miss_reference})
+    assert hydration_batch.owner_event_ids == frozenset({"$hit"})
+
+
+class TestDownloadMxcText:
+    """Tests for _download_mxc_text function."""
 
     @pytest.mark.asyncio
     async def test_invalid_mxc_url(self) -> None:

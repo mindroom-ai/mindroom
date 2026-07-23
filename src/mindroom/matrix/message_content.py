@@ -94,22 +94,19 @@ async def prepare_sidecar_hydration_batch(
     """Prepare one bounded durable lookup for all sidecars in a history reconstruction."""
     if expected_membership_epoch is None or expected_membership_epoch == UNCERTIFIED_MEMBERSHIP_EPOCH:
         return None
-    source_by_event_id = {
-        reference[0]: event_source
-        for event_source in event_sources
-        if (reference := _sidecar_reference(event_source)) is not None
-    }
-    references = tuple(
-        reference
-        for event_source in source_by_event_id.values()
-        if (reference := _sidecar_reference(event_source)) is not None
-    )
+    sidecars_by_event_id: dict[str, tuple[dict[str, Any], tuple[str, str]]] = {}
+    for event_source in event_sources:
+        reference = _sidecar_reference(event_source)
+        if reference is not None:
+            sidecars_by_event_id[reference[0]] = event_source, reference
+    references = tuple(reference for _event_source, reference in sidecars_by_event_id.values())
     if not references:
         return None
+    verified_owner_event_ids: frozenset[str] = frozenset()
     if register_owners:
         try:
             await event_cache.store_events_batch(
-                [(event_id, room_id, source_by_event_id[event_id]) for event_id, _mxc_url in references],
+                [(event_id, room_id, sidecars_by_event_id[event_id][0]) for event_id, _mxc_url in references],
                 expected_membership_epoch=expected_membership_epoch,
             )
         except Exception:
@@ -119,6 +116,7 @@ async def prepare_sidecar_hydration_batch(
                 event_count=len(references),
             )
             return None
+        verified_owner_event_ids = frozenset(event_id for event_id, _mxc_url in references)
     try:
         cached_texts = await event_cache.get_mxc_texts(
             room_id,
@@ -132,10 +130,12 @@ async def prepare_sidecar_hydration_batch(
             reference_count=len(references),
         )
         return None
+    if not register_owners:
+        verified_owner_event_ids = frozenset(event_id for event_id, _mxc_url in cached_texts)
     return SidecarHydrationBatch(
         cached_texts=cached_texts,
         references=frozenset(references),
-        owner_event_ids=frozenset(event_id for event_id, _mxc_url in references),
+        owner_event_ids=verified_owner_event_ids,
     )
 
 
