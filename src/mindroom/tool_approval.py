@@ -300,19 +300,21 @@ def is_process_active_approval_card(card_event_id: str) -> bool:
 
 
 async def handle_matrix_approval_action(action: MatrixApprovalAction) -> ApprovalActionResult:
-    """Resolve one Matrix approval action against live in-process approval state."""
+    """Resolve a live approval or expire a validated detached Matrix card."""
     manager = approval_manager.get_approval_store()
     if manager is None:
         return ApprovalActionResult(consumed=False, resolved=False)
     sanitized_reason = action.reason.strip() if isinstance(action.reason, str) and action.reason.strip() else None
     if action.approval_id is not None:
-        return await manager.handle_live_approval_id_response(
+        result = await manager.handle_live_approval_id_response(
             room_id=action.room_id,
             sender_id=action.sender_id,
             approval_id=action.approval_id,
             status=action.status,
             reason=sanitized_reason,
         )
+        if result.consumed or action.card_event_id is None:
+            return result
     if action.card_event_id is None:
         return ApprovalActionResult(consumed=False, resolved=False)
     return await manager.handle_card_response(
@@ -344,12 +346,12 @@ def initialize_approval_runtime(
     )
 
 
-async def expire_orphaned_approval_cards_on_startup(*, lookback_hours: int) -> int:
+async def expire_orphaned_approval_cards_on_startup() -> int:
     """Expire router-authored approval cards that can no longer have live waiters."""
     manager = approval_manager.get_approval_store()
     if manager is None:
         return 0
-    return await manager.discard_pending_on_startup(lookback_hours=lookback_hours)
+    return await manager.discard_pending_on_startup()
 
 
 async def shutdown_approval_runtime(reason: str = DEFAULT_SHUTDOWN_REASON) -> None:
