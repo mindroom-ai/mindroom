@@ -1177,6 +1177,41 @@ def test_unseen_context_keeps_unpersisted_self_sent_message() -> None:
     assert messages[0].content == "@mindroom_missing_agent Please investigate this"
 
 
+def test_unseen_context_keeps_other_agent_message_tagged() -> None:
+    """Another agent remains an attributed external sender, not this agent's assistant turn."""
+    thread_history = [
+        make_visible_message(
+            sender="@mindroom_research:localhost",
+            body="Research result",
+            event_id="$research",
+        ),
+        make_visible_message(
+            sender="@alice:localhost",
+            body="What did the agents find?",
+            event_id="$question",
+        ),
+    ]
+
+    messages, unseen_event_ids = _build_unseen_context_messages(
+        "What did the agents find?",
+        thread_history,
+        seen_event_ids=set(),
+        current_event_id="$question",
+        active_event_ids=(),
+        response_sender_id="@mindroom_code:localhost",
+        current_sender_id="@alice:localhost",
+        config=_config(),
+    )
+
+    assert unseen_event_ids == ["$research"]
+    assert messages[0].role == "user"
+    assert messages[0].content == render_msg_tag(
+        sender="@mindroom_research:localhost",
+        body="Research result",
+        event_id="$research",
+    )
+
+
 def test_unseen_context_skips_persisted_self_sent_response_event() -> None:
     """A self-sent Matrix event already represented in persisted history should not be duplicated."""
     thread_history = [
