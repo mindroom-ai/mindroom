@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
-import time
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Iterator
 from concurrent.futures import Future, InvalidStateError
@@ -59,6 +58,7 @@ _DEFAULT_TRUNCATED_APPROVAL_REASON = (
     "body — or auto-approve this tool via a script-based approval rule."
 )
 _STARTUP_DISCARD_REASON = "Bot restarted before approval — original request was cancelled."
+_DETACHED_CARD_REASON = "Original tool request is no longer active."
 _MAX_ARGUMENTS_PREVIEW_CHARS = 1200
 _MAX_FULL_ARGUMENTS_JSON_BYTES = 2_000_000
 _MAX_REMEMBERED_TERMINAL_CARD_IDS = 4096
@@ -356,18 +356,21 @@ class _ApprovalManager:
             with self._live_lock:
                 self._pending_by_card_event.pop(waiter.card_event_id, None)
 
-    async def discard_pending_on_startup(self, *, lookback_hours: int = 24) -> int:
-        """Expire cached, router-authored approval cards after startup."""
+    async def discard_pending_on_startup(self) -> int:
+        """Expire cached, router-authored approval cards after startup.
+
+        The scan is bounded by count, not age: an orphaned pending card must
+        stay cleanable no matter how long ago it was sent.
+        """
         transport_sender = self._transport_sender_id()
         if transport_sender is None:
             return 0
 
-        cutoff_ts_ms = _lookback_cutoff_ms(lookback_hours)
         discarded = 0
         for room_id in self._configured_approval_room_ids():
             for card_event in await self._scan_cached_room_cards(
                 room_id,
-                since_ts_ms=cutoff_ts_ms,
+                since_ts_ms=0,
                 limit=_STARTUP_DISCARD_SCAN_LIMIT,
             ):
                 try:
@@ -408,8 +411,11 @@ class _ApprovalManager:
                 reason=reason,
             )
 
-        consumed = self.knows_in_memory_approval_card(card_event_id)
-        return ApprovalActionResult(consumed=consumed, resolved=False, card_event_id=card_event_id)
+        return await self._handle_detached_card_response(
+            room_id=room_id,
+            sender_id=sender_id,
+            card_event_id=card_event_id,
+        )
 
     async def handle_live_approval_id_response(
         self,
@@ -733,6 +739,67 @@ class _ApprovalManager:
         checkpoint = loop.create_future()
         loop.call_soon(checkpoint.set_result, None)
         await checkpoint
+
+    async def _handle_detached_card_response(
+        self,
+        *,
+        room_id: str,
+        sender_id: str,
+        card_event_id: str,
+    ) -> ApprovalActionResult:
+        """Expire one trusted pending card whose live waiter no longer exists.
+
+        The detached tool call is never approved or executed; the card is only
+        terminally edited so it stops looking actionable.
+        """
+        pending = await self._cached_trusted_pending_card(room_id=room_id, card_event_id=card_event_id)
+        if pending is None:
+            consumed = self.knows_in_memory_approval_card(card_event_id)
+            return ApprovalActionResult(consumed=consumed, resolved=False, card_event_id=card_event_id)
+        if pending.approver_user_id != sender_id:
+            return ApprovalActionResult(
+                consumed=False,
+                resolved=False,
+                thread_id=pending.thread_id,
+                card_event_id=pending.card_event_id,
+            )
+        result = await self._discard_matrix_only_card(
+            pending=pending,
+            reason=_DETACHED_CARD_REASON,
+            resolved_by=self._transport_sender_id(),
+        )
+        if result.resolved:
+            logger.info(
+                "approval_detached_card_expired",
+                room_id=room_id,
+                card_event_id=card_event_id,
+                approval_id=pending.approval_id,
+            )
+        return result
+
+    async def _cached_trusted_pending_card(
+        self,
+        *,
+        room_id: str,
+        card_event_id: str,
+    ) -> PendingApproval | None:
+        """Return one cached, router-authored original card whose trusted state is still pending."""
+        transport_sender = self._transport_sender_id()
+        if transport_sender is None or self._event_cache is None:
+            return None
+        card_event = await self._event_cache.get_event(room_id, card_event_id)
+        if card_event is None or not is_original_approval_card(card_event):
+            return None
+        try:
+            pending = PendingApproval.from_card_event(card_event, room_id=room_id)
+        except (TypeError, ValueError):
+            return None
+        if pending.card_sender_id != transport_sender:
+            return None
+        latest_edit = await self._latest_trusted_edit(pending)
+        if pending.latest_status(latest_edit) != "pending":
+            return None
+        return pending
 
     async def _discard_matrix_only_card(
         self,
@@ -1238,10 +1305,6 @@ class _ApprovalManager:
             resolved_by=resolved_by,
             resolved_at=_utcnow(),
         )
-
-
-def _lookback_cutoff_ms(lookback_hours: int) -> int:
-    return int((time.time() - max(lookback_hours, 0) * 3600) * 1000)
 
 
 def get_approval_store() -> _ApprovalManager | None:

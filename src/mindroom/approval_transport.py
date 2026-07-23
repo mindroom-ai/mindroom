@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from math import ceil
 from typing import TYPE_CHECKING, Any, Protocol, TypeVar
 
 import nio
@@ -28,7 +27,6 @@ from mindroom.tool_approval import (
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine
 
-    from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.matrix.cache import ConversationEventCache
 
@@ -52,15 +50,6 @@ class _ApprovalTransportBot(Protocol):
     ) -> str | None:
         """Return the latest event id for one Matrix thread when known."""
         ...
-
-
-def _approval_startup_lookback_hours(config: Config) -> int:
-    """Return the cache lookback window needed to clean up live-only approval cards."""
-    timeout_days = config.tool_approval.timeout_days
-    for rule in config.tool_approval.rules:
-        if rule.timeout_days is not None:
-            timeout_days = max(timeout_days, rule.timeout_days)
-    return max(1, ceil(timeout_days * 24))
 
 
 def _approval_relation_agent_name(content: dict[str, Any], *, fallback: str) -> str:
@@ -108,7 +97,6 @@ class ApprovalMatrixTransport:
 
     runtime_paths: RuntimePaths
     bot_provider: Callable[[str], _ApprovalTransportBot | None]
-    config_provider: Callable[[], Config | None]
     event_cache_provider: Callable[[], ConversationEventCache]
     _runtime_loop: asyncio.AbstractEventLoop | None = field(default=None, init=False, repr=False)
     _cache_write_tasks: set[asyncio.Task[None]] = field(default_factory=set, init=False, repr=False)
@@ -473,13 +461,8 @@ class ApprovalMatrixTransport:
 
     async def _discard_orphaned_approval_cards_on_startup(self) -> None:
         """Discard orphaned approval cards once startup approval gates are ready."""
-        config = self.config_provider()
-        if config is None:
-            return
         try:
-            discarded_count = await expire_orphaned_approval_cards_on_startup(
-                lookback_hours=_approval_startup_lookback_hours(config),
-            )
+            discarded_count = await expire_orphaned_approval_cards_on_startup()
         except Exception as exc:
             logger.warning("tool_approval_startup_discard_failed", error=str(exc))
             return

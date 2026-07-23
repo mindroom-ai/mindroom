@@ -1562,8 +1562,6 @@ class TestMultiAgentOrchestrator:
         """Router readiness should trigger Matrix-backed startup discard after room setup."""
         orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
         orchestrator.config = MagicMock()
-        orchestrator.config.tool_approval.timeout_days = 7.0
-        orchestrator.config.tool_approval.rules = [SimpleNamespace(timeout_days=10.0)]
 
         bot = MagicMock()
         bot.agent_name = "router"
@@ -1595,8 +1593,7 @@ class TestMultiAgentOrchestrator:
         async def _sync_runtime_support_services(*_: object, **__: object) -> None:
             call_order.append("support_services")
 
-        async def _discard_pending_on_startup(*, lookback_hours: int) -> int:
-            assert lookback_hours == 240
+        async def _discard_pending_on_startup() -> int:
             call_order.append("startup_discard")
             startup_discarded.set()
             return 2
@@ -1628,7 +1625,7 @@ class TestMultiAgentOrchestrator:
             "support_services",
             "startup_discard",
         ]
-        expire_orphaned_approval_cards_on_startup.assert_awaited_once_with(lookback_hours=240)
+        expire_orphaned_approval_cards_on_startup.assert_awaited_once_with()
         bot.try_start.assert_awaited_once()
 
     @pytest.mark.asyncio
@@ -1660,8 +1657,6 @@ class TestMultiAgentOrchestrator:
         """Router first sync alone must not discard startup approval cards before runtime support is ready."""
         orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
         orchestrator.config = MagicMock()
-        orchestrator.config.tool_approval.timeout_days = 7.0
-        orchestrator.config.tool_approval.rules = [SimpleNamespace(timeout_days=10.0)]
 
         bot = MagicMock()
         bot.agent_name = "router"
@@ -1679,7 +1674,7 @@ class TestMultiAgentOrchestrator:
 
             await orchestrator._approval_transport.mark_startup_runtime_support_ready()
 
-        expire_orphaned_approval_cards_on_startup.assert_awaited_once_with(lookback_hours=240)
+        expire_orphaned_approval_cards_on_startup.assert_awaited_once_with()
 
     @pytest.mark.asyncio
     async def test_approval_transport_waits_for_router_ready_before_startup_discard(
@@ -1689,8 +1684,6 @@ class TestMultiAgentOrchestrator:
         """Runtime support readiness alone must not discard startup approval cards before router first sync."""
         orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
         orchestrator.config = MagicMock()
-        orchestrator.config.tool_approval.timeout_days = 7.0
-        orchestrator.config.tool_approval.rules = [SimpleNamespace(timeout_days=10.0)]
 
         bot = MagicMock()
         bot.agent_name = "router"
@@ -1708,7 +1701,7 @@ class TestMultiAgentOrchestrator:
 
             await orchestrator.handle_bot_ready(bot)
 
-        expire_orphaned_approval_cards_on_startup.assert_awaited_once_with(lookback_hours=240)
+        expire_orphaned_approval_cards_on_startup.assert_awaited_once_with()
 
     @pytest.mark.asyncio
     async def test_approval_transport_concurrent_startup_gates_discard_once(
@@ -1718,8 +1711,6 @@ class TestMultiAgentOrchestrator:
         """Router-ready and runtime-ready races must still run startup discard once."""
         orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
         orchestrator.config = MagicMock()
-        orchestrator.config.tool_approval.timeout_days = 7.0
-        orchestrator.config.tool_approval.rules = []
 
         bot = MagicMock()
         bot.agent_name = "router"
@@ -1737,7 +1728,7 @@ class TestMultiAgentOrchestrator:
                 orchestrator._approval_transport.mark_startup_runtime_support_ready(),
             )
 
-        expire_orphaned_approval_cards_on_startup.assert_awaited_once_with(lookback_hours=168)
+        expire_orphaned_approval_cards_on_startup.assert_awaited_once_with()
 
     @pytest.mark.asyncio
     async def test_approval_transport_reset_allows_fresh_startup_discard(
@@ -1747,8 +1738,6 @@ class TestMultiAgentOrchestrator:
         """A fresh runtime start must be able to run startup discard after the previous run did."""
         orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
         orchestrator.config = MagicMock()
-        orchestrator.config.tool_approval.timeout_days = 7.0
-        orchestrator.config.tool_approval.rules = []
 
         bot = MagicMock()
         bot.agent_name = "router"
