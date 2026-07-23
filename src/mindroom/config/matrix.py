@@ -37,7 +37,7 @@ class MatrixSyncConfig(BaseModel):
         ),
     )
     sliding_timeline_limit: int = Field(
-        default=20,
+        default=100,
         ge=1,
         description="Timeline event limit for each room requested through Simplified Sliding Sync.",
     )

@@ -26,7 +26,7 @@ from mindroom.constants import RuntimePaths
 from mindroom.matrix.sync_loop import _sliding_sync_lists, _sliding_sync_room_subscriptions
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestration import runtime as runtime_helpers
-from mindroom.orchestration.config_updates import ConfigUpdatePlan
+from mindroom.orchestration.config_updates import ConfigUpdatePlan, build_config_update_plan
 from mindroom.orchestration.runtime import (
     EntityStartResults,
     _MatrixSyncStalledError,
@@ -934,6 +934,19 @@ async def test_sliding_sync_response_marks_sync_success() -> None:
     assert bot.last_sync_time is not None
     assert bot._first_sync_done is True
     assert bot._room_member_join_hooks_armed is True
+
+
+def test_matrix_sync_change_restarts_existing_entities() -> None:
+    """Changing matrix_sync must restart running bots so sync loops pick up the new transport."""
+    plan = build_config_update_plan(
+        current_config=Config(),
+        new_config=Config(matrix_sync=MatrixSyncConfig(mode="classic")),
+        configured_entities={"router", "code"},
+        existing_entities={"router", "code"},
+        agent_bots={},
+    )
+
+    assert plan.entities_to_restart == {"router", "code"}
 
 
 def test_sliding_sync_required_state_is_not_shared_between_requests() -> None:
