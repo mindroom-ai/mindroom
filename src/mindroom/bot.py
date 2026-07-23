@@ -1126,18 +1126,20 @@ class AgentBot:
 
     async def _run_sync_response_side_effects(
         self,
-        response: nio.SyncResponse,
+        response: nio.SyncResponse | nio.SlidingSyncResponse,
         *,
         first_sync_response: bool,
         room_member_join_hook_plan: _RoomMemberJoinSyncHookPlan,
     ) -> None:
         """Run sync-response side effects that must poison certification on failure."""
-        if room_member_join_hook_plan.record_state_seen:
-            await self._emit_room_member_joined_sync_state_hooks(response, record_only=True)
-        if room_member_join_hook_plan.emit_timeline:
-            await self._emit_room_member_joined_sync_timeline_hooks(response)
-        if room_member_join_hook_plan.emit_state:
-            await self._emit_room_member_joined_sync_state_hooks(response)
+        # The emit flags are only set by the classic-sync certification path.
+        if isinstance(response, nio.SyncResponse):
+            if room_member_join_hook_plan.record_state_seen:
+                await self._emit_room_member_joined_sync_state_hooks(response, record_only=True)
+            if room_member_join_hook_plan.emit_timeline:
+                await self._emit_room_member_joined_sync_timeline_hooks(response)
+            if room_member_join_hook_plan.emit_state:
+                await self._emit_room_member_joined_sync_state_hooks(response)
 
         if first_sync_response:
             self._register_room_member_callback_after_initial_sync()
@@ -1150,7 +1152,7 @@ class AgentBot:
         if first_sync_response or has_deferred_overdue_tasks():
             self._maybe_start_deferred_overdue_task_drain()
 
-    async def _on_sync_response(self, _response: nio.SyncResponse) -> None:
+    async def _on_sync_response(self, _response: nio.SyncResponse | nio.SlidingSyncResponse) -> None:
         """Track successful sync responses for health checks and watchdogs."""
         first_sync_response = not self._first_sync_done
         room_member_join_hooks_were_armed = self._room_member_join_hooks_armed
@@ -1442,7 +1444,7 @@ class AgentBot:
                 ),
             )
             await self._set_presence_with_model_info()
-            client.add_response_callback(self._on_sync_response, nio.SyncResponse)  # ty: ignore[invalid-argument-type]  # matrix-nio callback types are too strict here
+            client.add_response_callback(self._on_sync_response, (nio.SyncResponse, nio.SlidingSyncResponse))  # ty: ignore[invalid-argument-type]  # matrix-nio callback types are too strict here
             client.add_response_callback(self._on_sync_error, nio.SyncError)  # ty: ignore[invalid-argument-type]
 
             self.running = True

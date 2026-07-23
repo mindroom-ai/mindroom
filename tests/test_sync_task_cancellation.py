@@ -8,6 +8,7 @@ from contextlib import suppress
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import nio
 import pytest
 from structlog.testing import capture_logs
 
@@ -913,6 +914,26 @@ async def test_default_sync_mode_uses_sliding_sync_forever() -> None:
             },
         },
     ]
+
+
+@pytest.mark.asyncio
+async def test_sliding_sync_response_marks_sync_success() -> None:
+    """A sliding sync response must feed the watchdog clock and first-sync lifecycle."""
+    bot = MagicMock(spec=AgentBot)
+    bot.agent_name = "test_agent"
+    bot.last_sync_time = None
+    bot._first_sync_done = False
+    bot._sync_shutting_down = False
+    bot._calls_reconcile_pending = False
+    bot._room_member_join_hooks_armed = False
+    bot._restart_retry_queue = SyncRestartRetryQueue()
+    bot.orchestrator = None
+
+    await AgentBot._on_sync_response(bot, nio.SlidingSyncResponse("pos"))
+
+    assert bot.last_sync_time is not None
+    assert bot._first_sync_done is True
+    assert bot._room_member_join_hooks_armed is True
 
 
 def test_sliding_sync_required_state_is_not_shared_between_requests() -> None:
