@@ -294,13 +294,10 @@ class _MultiAgentOrchestrator:
             event_cache_provider=self._approval_event_cache,
         )
         self._startup_maintenance = StartupMaintenanceController(
-            recover_stale_streams=lambda bots, config, startup_cutoff_ms, scanned_room_ids: (
-                self._recover_stale_streams_after_restart(
-                    bots,
-                    config,
-                    startup_cutoff_ms,
-                    scanned_room_ids,
-                )
+            recover_stale_streams=lambda bots, config, scanned_room_ids: self._recover_stale_streams_after_restart(
+                bots,
+                config,
+                scanned_room_ids,
             ),
             setup_rooms_and_memberships=self._setup_startup_rooms_and_memberships,
             sync_runtime_support=lambda config: self._sync_runtime_support_services(config, start_watcher=True),
@@ -1072,7 +1069,6 @@ class _MultiAgentOrchestrator:
         self,
         bots: list[AgentBot | TeamBot],
         config: Config,
-        startup_cutoff_ms: int | None,
         scanned_room_ids: set[str],
         *,
         target_room_ids: set[str] | None = None,
@@ -1090,25 +1086,14 @@ class _MultiAgentOrchestrator:
         if not actors:
             return
         router_bot = self._router_bot()
-
-        def is_live_process_stream(event_id: str) -> bool:
-            # Clock-free ownership proof: local startup cutoffs and Matrix
-            # server timestamps are not comparable, so a current-generation
-            # stream can look pre-startup under homeserver clock skew. A
-            # stream tracked by any live bot's stop manager was created by
-            # this process and must never be repaired from history.
-            return any(event_id in bot.stop_manager.tracked_messages for bot in self.agent_bots.values())
-
         result = await recover_stale_streaming_messages(
             actors,
             resume_client=router_bot.client if router_bot is not None else None,
             resume_conversation_cache=router_bot._conversation_cache if router_bot is not None else None,
             config=config,
             runtime_paths=self.runtime_paths,
-            startup_cutoff_ms=startup_cutoff_ms,
             scanned_room_ids=scanned_room_ids,
             target_room_ids=target_room_ids,
-            is_live_process_stream=is_live_process_stream,
         )
         logger.info(
             "Completed stale stream recovery",
@@ -1178,7 +1163,6 @@ class _MultiAgentOrchestrator:
             await self._recover_stale_streams_after_restart(
                 recovery_bots,
                 config,
-                None,
                 scanned_room_ids,
                 target_room_ids=set().union(*claimed_room_ids.values()),
             )
@@ -1238,14 +1222,13 @@ class _MultiAgentOrchestrator:
 
         # Create sync tasks for each bot with automatic restart on failure.
         set_runtime_starting("Starting Matrix sync loops")
-        startup_cutoff_ms = int(time.time() * 1000)
         phase_started = log_startup_phase_started("start_matrix_sync_loops")
         for entity_name, bot in self.agent_bots.items():
             if bot.running:
                 self._start_sync_task(entity_name, bot)
         log_startup_phase_finished("start_matrix_sync_loops", phase_started)
 
-        self._startup_maintenance.start(started_bots, config, startup_cutoff_ms=startup_cutoff_ms)
+        self._startup_maintenance.start(started_bots, config)
 
         for entity_name in start_results.retryable_entities:
             await self._schedule_bot_start_retry(entity_name)
