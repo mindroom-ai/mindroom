@@ -2,18 +2,20 @@
 
 Barrier ordering invariants (PR #716 fixed regressions in each of these):
 
-1. Room-kind updates are exclusive within their room: one starts only when no room or thread update is
-   active, and everything queued after it waits for it.
+All ordering is scoped to one ``(principal, room)`` lane.
 
-2. Thread-kind updates run in parallel across different threads but are serialized within one thread,
-   and never start while a room update queued ahead of them is pending or active.
+1. Room-kind updates are exclusive within their lane: one starts only when no room or thread update is
+   active in that lane, and everything queued after it waits for it.
 
-3. A room update cancelled before it started leaves a fence in the queue: later thread updates still
-   wait for the earlier queue segment to drain, so cancellation cannot reorder writes.
+2. Thread-kind updates run in parallel across different threads and principals but are serialized within
+   one lane and thread, and never start while a room update queued ahead of them is pending or active.
+
+3. A room update cancelled before it started leaves a fence in its lane: later thread updates still wait
+   for the earlier queue segment to drain, so cancellation cannot reorder writes.
    Read-style operations may opt in to ``ignore_cancelled_room_fences`` because they mutate nothing.
 
 4. Readers establish the write-read barrier with ``wait_for_thread_idle``: a thread read started after a
-   mutation was queued never observes cache state older than that mutation.
+   mutation was queued in the same lane never observes cache state older than that mutation.
 """
 
 from __future__ import annotations
@@ -35,10 +37,10 @@ if TYPE_CHECKING:
 _UpdateTask = asyncio.Task[Any]
 _UpdateCoroFactory = typing.Callable[[], typing.Coroutine[Any, Any, object]]
 _CoalesceKey = tuple[str, str]
-_CoordinationRoomKey = tuple[str | None, str]
+_CoordinationRoomKey = tuple[str, str]
 
 
-def _coordination_room_key(room_id: str, coordination_scope: str | None) -> _CoordinationRoomKey:
+def _coordination_room_key(room_id: str, coordination_scope: str) -> _CoordinationRoomKey:
     """Return one structured scheduler key without changing user-facing room ids."""
     return coordination_scope, room_id
 
@@ -120,7 +122,7 @@ class EventCacheWriteCoordinator:
     def _coordination_room_state(
         self,
         room_id: str,
-        coordination_scope: str | None,
+        coordination_scope: str,
     ) -> tuple[_CoordinationRoomKey, _RoomSchedulerState]:
         room_key = _coordination_room_key(room_id, coordination_scope)
         return room_key, self._room_state(room_key)
@@ -412,7 +414,7 @@ class EventCacheWriteCoordinator:
         ignore_cancelled_room_fences: bool = False,
         coalesce_key: _CoalesceKey | None = None,
         coalesce_log_context: dict[str, object] | None = None,
-        coordination_scope: str | None = None,
+        coordination_scope: str,
     ) -> asyncio.Task[object]:
         room_key, room_state = self._coordination_room_state(room_id, coordination_scope)
         coalesced_task = self._coalesce_pending_update(
@@ -592,7 +594,7 @@ class EventCacheWriteCoordinator:
         emit_timing: bool = True,
         coalesce_key: _CoalesceKey | None = None,
         coalesce_log_context: dict[str, object] | None = None,
-        coordination_scope: str | None = None,
+        coordination_scope: str,
     ) -> asyncio.Task[object]:
         """Schedule one room-scoped cache update behind any active predecessor."""
         return self._queue_update(
@@ -619,7 +621,7 @@ class EventCacheWriteCoordinator:
         emit_timing: bool = False,
         coalesce_key: _CoalesceKey | None = None,
         coalesce_log_context: dict[str, object] | None = None,
-        coordination_scope: str | None = None,
+        coordination_scope: str,
     ) -> asyncio.Task[object]:
         """Schedule one thread-scoped cache update behind room-wide and same-thread predecessors."""
         return self._queue_update(
@@ -643,7 +645,7 @@ class EventCacheWriteCoordinator:
         *,
         name: str,
         ignore_cancelled_room_fences: bool = False,
-        coordination_scope: str | None = None,
+        coordination_scope: str,
     ) -> object:
         """Run one thread-scoped operation through the ordered thread barrier and await its result."""
         return await self._queue_update(
@@ -663,7 +665,7 @@ class EventCacheWriteCoordinator:
         thread_id: str,
         *,
         ignore_cancelled_room_fences: bool = False,
-        coordination_scope: str | None = None,
+        coordination_scope: str,
     ) -> None:
         """Wait for room-wide and same-thread queued updates to drain.
 
@@ -711,7 +713,7 @@ class EventCacheWriteCoordinator:
         self,
         room_id: str,
         *,
-        coordination_scope: str | None = None,
+        coordination_scope: str,
     ) -> None:
         """Wait for all writes in this room that were already queued when this read began."""
         room_key = _coordination_room_key(room_id, coordination_scope)

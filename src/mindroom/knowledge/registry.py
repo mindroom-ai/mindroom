@@ -515,19 +515,7 @@ def _indexing_settings_corpus_compatible(
     current_settings: IndexingSettings,
 ) -> bool:
     """Return whether published content is safe for the current corpus config."""
-    return (
-        _normalized_indexing_settings(
-            published_settings,
-        ).corpus_compatibility_key()
-        == _normalized_indexing_settings(current_settings).corpus_compatibility_key()
-    )
-
-
-def _normalized_indexing_settings(settings: IndexingSettings) -> IndexingSettings:
-    """Normalize legacy empty semantic extension metadata."""
-    if settings.mode == "semantic" and settings.extra_extensions == "":
-        return replace(settings, extra_extensions="()")
-    return settings
+    return published_settings.corpus_compatibility_key() == current_settings.corpus_compatibility_key()
 
 
 def indexing_settings_metadata_equal(
@@ -535,7 +523,7 @@ def indexing_settings_metadata_equal(
     current_settings: IndexingSettings,
 ) -> bool:
     """Return whether persisted metadata exactly matches current indexing settings."""
-    return _normalized_indexing_settings(published_settings) == _normalized_indexing_settings(current_settings)
+    return published_settings == current_settings
 
 
 def published_index_settings_compatible(

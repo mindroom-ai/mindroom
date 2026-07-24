@@ -29,7 +29,7 @@ from mindroom.redaction import redact_sensitive_text
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY, SHARED_CREDENTIALS_PATH_ENV
 from mindroom.tool_system.dependencies import ensure_optional_deps
 from mindroom.tool_system.worker_routing import resolved_worker_key_scope, worker_dir_name, worker_key_agent_name
-from mindroom.workers.backend import WorkerBackendError
+from mindroom.workers.backend import WorkerBackend, WorkerBackendError
 from mindroom.workers.backends._dedicated_worker_common import (
     build_dedicated_worker_runtime_paths,
     plan_scoped_visible_state_roots,
@@ -262,7 +262,7 @@ class _DockerWorkerMetadata:
     launch_config_hash: str | None = None
 
 
-class DockerWorkerBackend:
+class DockerWorkerBackend(WorkerBackend):
     """Docker-backed worker provider for dedicated local sandbox-runner containers."""
 
     backend_name = "docker"

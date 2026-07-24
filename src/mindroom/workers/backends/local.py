@@ -159,7 +159,7 @@ def _shared_worker_initialization_lock(paths: LocalWorkerStatePaths) -> threadin
     return worker_lock
 
 
-class _LocalWorkerBackend:
+class _LocalWorkerBackend(WorkerBackend):
     """Persistent local worker backend used by the sandbox runner."""
 
     backend_name = "local_sandbox_runner"

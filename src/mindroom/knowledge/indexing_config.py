@@ -121,6 +121,11 @@ class IndexingSettings:
         mode = settings["mode"]
         if mode not in _INDEXING_MODES:
             return None
+        empty_filter_key = "()" if mode == "semantic" else ""
+
+        def _optional_filter_key(name: str) -> str:
+            return settings.get(name, "") or empty_filter_key
+
         return cls(
             base_id=settings["base_id"],
             storage_root=settings["storage_root"],
@@ -138,11 +143,11 @@ class IndexingSettings:
             git_skip_hidden=settings["git_skip_hidden"],
             git_include_patterns=settings["git_include_patterns"],
             git_exclude_patterns=settings["git_exclude_patterns"],
-            include_patterns=settings.get("include_patterns", ""),
-            exclude_patterns=settings.get("exclude_patterns", ""),
+            include_patterns=_optional_filter_key("include_patterns"),
+            exclude_patterns=_optional_filter_key("exclude_patterns"),
             include_extensions=settings["include_extensions"],
             exclude_extensions=settings["exclude_extensions"],
-            extra_extensions=settings.get("extra_extensions", ""),
+            extra_extensions=_optional_filter_key("extra_extensions"),
             skip_hidden=settings.get("skip_hidden", ""),
         )
 

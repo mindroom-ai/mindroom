@@ -412,6 +412,20 @@ class _FakeApiClient:
         return self._core_api.patch_namespaced_secret(name, namespace, body)
 
 
+def test_kubernetes_deployment_snapshot_rejects_missing_status() -> None:
+    """Malformed apiserver objects must fail instead of becoming silently unready workers."""
+    payload = {
+        "metadata": {
+            "name": "mindroom-worker",
+            "labels": {},
+        },
+        "spec": {"replicas": 1},
+    }
+
+    with pytest.raises(WorkerBackendError, match="object status"):
+        kubernetes_resources_module._deployment_snapshot(payload)
+
+
 def _backend(
     *,
     idle_timeout_seconds: float = 60.0,
@@ -2221,7 +2235,7 @@ def test_kubernetes_backend_reconciles_drifted_idle_worker_template(tmp_path: Pa
     updated_backend, _, _ = _backend(runtime_paths=runtime_paths, resource_limits={"memory": "2Gi", "cpu": "1"})
     _wire_fake_apis(updated_backend, apps_api, core_api)
 
-    reconciled = updated_backend.reconcile_drifted_workers(now=90.0)
+    reconciled = updated_backend.maintain_workers(now=90.0).reconciled
 
     assert [worker.worker_key for worker in reconciled] == [_TEST_SCOPED_WORKER_KEY_A]
     assert reconciled[0].status == "idle"
@@ -2246,12 +2260,12 @@ def test_kubernetes_backend_maintenance_lists_deployments_once(tmp_path: Path) -
     _wire_fake_apis(updated_backend, apps_api, core_api)
     list_count_before = len(apps_api.list_label_selectors)
 
-    cleaned, reconciled = updated_backend.maintain_workers(now=80.0)
+    maintenance = updated_backend.maintain_workers(now=80.0)
 
     assert len(apps_api.list_label_selectors) == list_count_before + 1
     assert apps_api.raw_list_count == 1
-    assert [worker.worker_key for worker in cleaned] == [_TEST_SCOPED_WORKER_KEY_A]
-    assert [worker.worker_key for worker in reconciled] == [_TEST_SCOPED_WORKER_KEY_A]
+    assert [worker.worker_key for worker in maintenance.cleaned] == [_TEST_SCOPED_WORKER_KEY_A]
+    assert [worker.worker_key for worker in maintenance.reconciled] == [_TEST_SCOPED_WORKER_KEY_A]
 
 
 def test_kubernetes_backend_reconcile_defers_running_workers(tmp_path: Path) -> None:
@@ -2266,7 +2280,7 @@ def test_kubernetes_backend_reconcile_defers_running_workers(tmp_path: Path) -> 
     updated_backend, _, _ = _backend(runtime_paths=runtime_paths, resource_limits={"memory": "2Gi", "cpu": "1"})
     _wire_fake_apis(updated_backend, apps_api, core_api)
 
-    reconciled = updated_backend.reconcile_drifted_workers(now=10.0)
+    reconciled = updated_backend.maintain_workers(now=10.0).reconciled
 
     assert reconciled == []
     assert apps_api.deleted_names == []
@@ -2287,7 +2301,7 @@ def test_kubernetes_backend_reconcile_leaves_unchanged_templates_alone(tmp_path:
     unchanged_backend, _, _ = _backend(runtime_paths=runtime_paths)
     _wire_fake_apis(unchanged_backend, apps_api, core_api)
 
-    reconciled = unchanged_backend.reconcile_drifted_workers(now=90.0)
+    reconciled = unchanged_backend.maintain_workers(now=90.0).reconciled
 
     assert reconciled == []
     assert apps_api.deleted_names == []
@@ -2312,7 +2326,7 @@ def test_kubernetes_backend_reconcile_disabled_by_config(tmp_path: Path) -> None
     )
     _wire_fake_apis(updated_backend, apps_api, core_api)
 
-    reconciled = updated_backend.reconcile_drifted_workers(now=90.0)
+    reconciled = updated_backend.maintain_workers(now=90.0).reconciled
 
     assert reconciled == []
     assert apps_api.deleted_names == []
@@ -2345,12 +2359,12 @@ def test_kubernetes_backend_reconcile_uses_persisted_private_visibility(tmp_path
 
     unchanged_backend, _, _ = _backend(runtime_paths=runtime_paths)
     _wire_fake_apis(unchanged_backend, apps_api, core_api)
-    assert unchanged_backend.reconcile_drifted_workers(now=90.0) == []
+    assert unchanged_backend.maintain_workers(now=90.0).reconciled == []
 
     updated_backend, _, _ = _backend(runtime_paths=runtime_paths, resource_limits={"memory": "2Gi", "cpu": "1"})
     _wire_fake_apis(updated_backend, apps_api, core_api)
 
-    reconciled = updated_backend.reconcile_drifted_workers(now=100.0)
+    reconciled = updated_backend.maintain_workers(now=100.0).reconciled
 
     assert [worker.worker_key for worker in reconciled] == [worker_key]
     recreated = apps_api.created_bodies[-1]
@@ -2388,7 +2402,7 @@ def test_kubernetes_backend_reconcile_revalidates_live_state_before_recreating(t
 
     updated_backend._resources.list_deployments = _stale_snapshot
 
-    reconciled = updated_backend.reconcile_drifted_workers(now=90.0)
+    reconciled = updated_backend.maintain_workers(now=90.0).reconciled
 
     assert reconciled == []
     live_deployment = apps_api.deployments[handle.worker_id]
@@ -2432,7 +2446,7 @@ def test_kubernetes_backend_reconcile_defers_user_agent_workers_without_persiste
     _wire_fake_apis(updated_backend, apps_api, core_api)
 
     with caplog.at_level("WARNING", logger=kubernetes_backend_module.__name__):
-        reconciled = updated_backend.reconcile_drifted_workers(now=90.0)
+        reconciled = updated_backend.maintain_workers(now=90.0).reconciled
 
     assert reconciled == []
     assert apps_api.deleted_names == []

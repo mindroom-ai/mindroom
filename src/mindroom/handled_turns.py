@@ -389,16 +389,23 @@ class TurnRecordCodec:
 
 
 @dataclass
+class _PersistRequest:
+    """One ordered ledger persist request and its exact durability waiter."""
+
+    records: tuple[TurnRecord, ...]
+    completion: Future[None] | None
+
+
+@dataclass
 class _LedgerState:
     """In-memory canonical records shared by every ledger bound to one file."""
 
     responses: dict[str, TurnRecord] = field(default_factory=dict)
     lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
     loaded: bool = False
-    pending_persists: list[Future[None]] = field(default_factory=list, repr=False)
     persist_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
-    pending_records: list[TurnRecord] = field(default_factory=list, repr=False)
-    active_persist: Future[None] | None = field(default=None, repr=False)
+    pending_persists: list[_PersistRequest] = field(default_factory=list, repr=False)
+    persist_active: bool = False
 
 
 _LEDGER_STATES: dict[str, _LedgerState] = {}
@@ -418,11 +425,11 @@ def _shared_ledger_state(responses_file: Path) -> _LedgerState:
 
 
 def _persist_executor() -> ThreadPoolExecutor:
-    """Return the shared single-worker executor that orders ledger persists."""
+    """Return a bounded shared executor; each ledger still schedules only one drain."""
     global _PERSIST_EXECUTOR
     with _LEDGER_RUNTIME_LOCK:
         if _PERSIST_EXECUTOR is None:
-            _PERSIST_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="handled-turn-persist")
+            _PERSIST_EXECUTOR = ThreadPoolExecutor(max_workers=8, thread_name_prefix="handled-turn-persist")
         return _PERSIST_EXECUTOR
 
 
@@ -584,52 +591,66 @@ class HandledTurnLedger:
         self._state.loaded = True
 
     def _wait_for_pending_persists_locked(self) -> None:
-        """Wait for queued disk merges while the state lock is held."""
-        pending = list(self._state.pending_persists)
-        self._state.pending_persists.clear()
-        first_error: Exception | None = None
-        for future in pending:
-            try:
-                future.result()
-            except Exception as exc:
-                if first_error is None:
-                    first_error = exc
-        if first_error is not None:
-            raise first_error
+        """Wait for the exact FIFO prefix queued before this barrier."""
+        barrier: Future[None] = Future()
+        with self._state.persist_lock:
+            self._state.pending_persists.append(_PersistRequest(records=(), completion=barrier))
+            self._ensure_persist_drain_locked()
+        barrier.result()
 
     def _schedule_persist_locked(self, turn_record: TurnRecord) -> Future[None]:
         """Queue one write-behind disk merge for records already applied to memory."""
+        completion: Future[None] = Future()
         with self._state.persist_lock:
-            self._state.pending_records.append(turn_record)
-            future = self._state.active_persist
-            if future is None:
-                future = _persist_executor().submit(self._persist_pending_records)
-                self._state.active_persist = future
-        self._state.pending_persists = [
-            pending
-            for pending in self._state.pending_persists
-            if not pending.done() or pending.cancelled() or pending.exception() is not None
-        ]
-        if future not in self._state.pending_persists:
-            self._state.pending_persists.append(future)
-        return future
+            self._state.pending_persists.append(
+                _PersistRequest(records=(turn_record,), completion=completion),
+            )
+            self._ensure_persist_drain_locked()
+        return completion
+
+    def _ensure_persist_drain_locked(self) -> None:
+        """Start this ledger's sole drain while ``persist_lock`` is held."""
+        if self._state.persist_active:
+            return
+        self._state.persist_active = True
+        try:
+            _persist_executor().submit(self._persist_pending_records)
+        except Exception:
+            self._state.persist_active = False
+            raise
 
     def _persist_pending_records(self) -> None:
-        """Drain queued records into the fewest possible durable ledger writes."""
+        """Drain FIFO batches, retrying one failed batch without later traffic."""
+        retry_available = True
         while True:
             with self._state.persist_lock:
-                if not self._state.pending_records:
-                    self._state.active_persist = None
+                if not self._state.pending_persists:
+                    self._state.persist_active = False
                     return
-                records = tuple(self._state.pending_records)
-                self._state.pending_records.clear()
+                requests = tuple(self._state.pending_persists)
+                self._state.pending_persists.clear()
+            records = tuple(record for request in requests for record in request.records)
             try:
-                self._persist_records(records)
-            except Exception:
+                if records:
+                    self._persist_records(records)
+            except Exception as exc:
+                for request in requests:
+                    if request.completion is not None and not request.completion.done():
+                        request.completion.set_exception(exc)
                 with self._state.persist_lock:
-                    self._state.pending_records[0:0] = records
-                    self._state.active_persist = None
-                raise
+                    self._state.pending_persists.insert(
+                        0,
+                        _PersistRequest(records=records, completion=None),
+                    )
+                    if not retry_available:
+                        self._state.persist_active = False
+                        return
+                retry_available = False
+                continue
+            for request in requests:
+                if request.completion is not None and not request.completion.done():
+                    request.completion.set_result(None)
+            retry_available = True
 
     def _persist_records(self, turn_records: tuple[TurnRecord, ...]) -> None:
         """Merge one batch of already-applied records from the persistence worker."""

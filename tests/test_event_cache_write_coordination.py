@@ -406,6 +406,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 "$thread:localhost",
                 blocker,
                 name="matrix_cache_blocker",
+                coordination_scope="test-principal",
             )
             await asyncio.wait_for(blocker_started.wait(), timeout=1.0)
 
@@ -423,7 +424,11 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             release_blocker.set()
             await blocker_task
             await asyncio.wait_for(
-                coordinator.wait_for_thread_idle("!test:localhost", "$thread:localhost"),
+                coordinator.wait_for_thread_idle(
+                    "!test:localhost",
+                    "$thread:localhost",
+                    coordination_scope="test-principal",
+                ),
                 timeout=1.0,
             )
         finally:
@@ -462,12 +467,14 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 "!room:localhost",
                 first_update,
                 name="matrix_cache_first_update",
+                coordination_scope="test-principal",
             )
             await asyncio.wait_for(first_started.wait(), timeout=1.0)
             second_task = coordinator.queue_room_update(
                 "!room:localhost",
                 second_update,
                 name="matrix_cache_second_update",
+                coordination_scope="test-principal",
             )
             await asyncio.sleep(0)
             allow_first_finish.set()
@@ -517,6 +524,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 "!room:localhost",
                 update,
                 name="matrix_cache_single_update",
+                coordination_scope="test-principal",
             )
             assert await task == "ok"
         finally:
@@ -567,17 +575,20 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 "!room:localhost",
                 first_update,
                 name="matrix_cache_first_update",
+                coordination_scope="test-principal",
             )
             await asyncio.wait_for(first_started.wait(), timeout=1.0)
             second_task = coordinator.queue_room_update(
                 "!room:localhost",
                 second_update,
                 name="matrix_cache_second_update",
+                coordination_scope="test-principal",
             )
             third_task = coordinator.queue_room_update(
                 "!room:localhost",
                 third_update,
                 name="matrix_cache_third_update",
+                coordination_scope="test-principal",
             )
             await asyncio.sleep(0)
             allow_first_finish.set()
@@ -621,6 +632,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 "!room:localhost",
                 update,
                 name="matrix_cache_single_update",
+                coordination_scope="test-principal",
             )
             assert await task == "ok"
         finally:
@@ -846,6 +858,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             "!test:localhost",
             lambda: failing_update(),
             name="matrix_cache_first_update",
+            coordination_scope="test-principal",
         )
         await asyncio.wait_for(first_update_started.wait(), timeout=1.0)
 
@@ -853,6 +866,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             "!test:localhost",
             lambda: second_update(),
             name="matrix_cache_second_update",
+            coordination_scope="test-principal",
         )
         await asyncio.sleep(0)
         assert second_update_finished.is_set() is False
@@ -893,6 +907,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             "!test:localhost",
             lambda: first_update(),
             name="matrix_cache_first_update",
+            coordination_scope="test-principal",
         )
         await asyncio.wait_for(first_update_started.wait(), timeout=1.0)
 
@@ -900,6 +915,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             "!test:localhost",
             lambda: second_update(),
             name="matrix_cache_second_update",
+            coordination_scope="test-principal",
         )
         await asyncio.sleep(0)
         assert second_update_started.is_set() is False
@@ -1008,6 +1024,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             "$thread-a:localhost",
             lambda: first_update(),
             name="matrix_cache_first_thread_update",
+            coordination_scope="test-principal",
         )
         await asyncio.wait_for(first_update_started.wait(), timeout=1.0)
 
@@ -1016,6 +1033,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             "$thread-b:localhost",
             lambda: second_update(),
             name="matrix_cache_second_thread_update",
+            coordination_scope="test-principal",
         )
         await asyncio.sleep(0)
         assert second_update_started.is_set()
@@ -1063,6 +1081,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             "$thread-a:localhost",
             first_thread_update,
             name="matrix_cache_first_thread_update",
+            coordination_scope="test-principal",
         )
         await asyncio.wait_for(first_thread_started.wait(), timeout=1.0)
 
@@ -1070,18 +1089,21 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             "!test:localhost",
             room_update,
             name="matrix_cache_room_update",
+            coordination_scope="test-principal",
         )
         second_thread_task = coordinator.queue_thread_update(
             "!test:localhost",
             "$thread-a:localhost",
             second_thread_update,
             name="matrix_cache_second_thread_update",
+            coordination_scope="test-principal",
         )
         sibling_thread_task = coordinator.queue_thread_update(
             "!test:localhost",
             "$thread-b:localhost",
             sibling_thread_update,
             name="matrix_cache_sibling_thread_update",
+            coordination_scope="test-principal",
         )
         try:
             await asyncio.sleep(0.05)
@@ -1163,6 +1185,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             "$thread-b:localhost",
             lambda: blocking_other_thread_update(),
             name="matrix_cache_blocking_other_thread_update",
+            coordination_scope="test-principal",
         )
         await asyncio.wait_for(other_thread_update_started.wait(), timeout=1.0)
 
@@ -1197,16 +1220,21 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             "!test:localhost",
             first_update,
             name="first_room_update",
+            coordination_scope="test-principal",
         )
         await first_started.wait()
         read_barrier = asyncio.create_task(
-            coordinator.wait_for_prior_room_updates("!test:localhost"),
+            coordinator.wait_for_prior_room_updates(
+                "!test:localhost",
+                coordination_scope="test-principal",
+            ),
         )
         await asyncio.sleep(0)
         second_task = coordinator.queue_room_update(
             "!test:localhost",
             second_update,
             name="later_room_update",
+            coordination_scope="test-principal",
         )
 
         try:
@@ -1247,6 +1275,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             "!test:localhost",
             first_update,
             name="first_room_update",
+            coordination_scope="test-principal",
         )
         await first_started.wait()
         queued_predecessor_task = coordinator.queue_thread_update(
@@ -1254,15 +1283,20 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             "$thread:localhost",
             queued_predecessor,
             name="queued_predecessor",
+            coordination_scope="test-principal",
         )
         read_barrier = asyncio.create_task(
-            coordinator.wait_for_prior_room_updates("!test:localhost"),
+            coordinator.wait_for_prior_room_updates(
+                "!test:localhost",
+                coordination_scope="test-principal",
+            ),
         )
         await asyncio.sleep(0)
         later_task = coordinator.queue_room_update(
             "!test:localhost",
             later_update,
             name="later_room_update",
+            coordination_scope="test-principal",
         )
 
         try:
@@ -1313,12 +1347,14 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             "$thread-a:localhost",
             first_thread_update,
             name="matrix_cache_first_thread_update",
+            coordination_scope="test-principal",
         )
         second_thread_task = coordinator.queue_thread_update(
             "!test:localhost",
             "$thread-b:localhost",
             second_thread_update,
             name="matrix_cache_second_thread_update",
+            coordination_scope="test-principal",
         )
         await asyncio.wait_for(first_thread_started.wait(), timeout=1.0)
         await asyncio.wait_for(second_thread_started.wait(), timeout=1.0)
@@ -1327,6 +1363,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             "!test:localhost",
             cancelled_room_update,
             name="matrix_cache_cancelled_room_update",
+            coordination_scope="test-principal",
         )
         try:
             cancelled_room_task.cancel()
@@ -1336,6 +1373,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 coordinator.wait_for_thread_idle(
                     "!test:localhost",
                     "$thread-c:localhost",
+                    coordination_scope="test-principal",
                     ignore_cancelled_room_fences=True,
                 ),
                 timeout=0.1,
@@ -1396,6 +1434,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             "$other-thread:localhost",
             blocking_other_thread,
             name="matrix_cache_blocking_other_thread_update",
+            coordination_scope="test-principal",
         )
         await asyncio.wait_for(blocker_started.wait(), timeout=1.0)
 
@@ -1403,6 +1442,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             "!test:localhost",
             cancelled_room_update,
             name="matrix_cache_cancelled_room_update",
+            coordination_scope="test-principal",
         )
         first_target_task = asyncio.create_task(
             coordinator.run_thread_update(
@@ -1410,6 +1450,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 "$target-thread:localhost",
                 first_target_update,
                 name="matrix_cache_first_target_thread_update",
+                coordination_scope="test-principal",
             ),
         )
         second_target_task = asyncio.create_task(
@@ -1418,6 +1459,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 "$target-thread:localhost",
                 second_target_update,
                 name="matrix_cache_second_target_thread_update",
+                coordination_scope="test-principal",
                 ignore_cancelled_room_fences=True,
             ),
         )
@@ -1497,12 +1539,14 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             "$thread-a:localhost",
             first_thread_update,
             name="matrix_cache_first_thread_update",
+            coordination_scope="test-principal",
         )
         second_thread_task = coordinator.queue_thread_update(
             "!test:localhost",
             "$thread-b:localhost",
             second_thread_update,
             name="matrix_cache_second_thread_update",
+            coordination_scope="test-principal",
         )
         await asyncio.wait_for(first_thread_started.wait(), timeout=1.0)
         await asyncio.wait_for(second_thread_started.wait(), timeout=1.0)
@@ -1511,6 +1555,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             "!test:localhost",
             cancelled_room_update,
             name="matrix_cache_cancelled_room_update",
+            coordination_scope="test-principal",
         )
         try:
             cancelled_room_task.cancel()
@@ -1572,6 +1617,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             "!test:localhost",
             lambda: blocking_update(),
             name="matrix_cache_blocking_update",
+            coordination_scope="test-principal",
         )
         await asyncio.wait_for(blocker_started.wait(), timeout=1.0)
 
@@ -1579,6 +1625,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             "!test:localhost",
             lambda: queued_update(),
             name="matrix_cache_queued_update",
+            coordination_scope="test-principal",
         )
         queued_task.cancel()
         await asyncio.gather(queued_task, return_exceptions=True)
@@ -1619,6 +1666,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             "!test:localhost",
             lambda: first_update(),
             name="matrix_cache_first_update",
+            coordination_scope="test-principal",
         )
         await asyncio.wait_for(first_update_started.wait(), timeout=1.0)
 
@@ -1626,6 +1674,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             "!test:localhost",
             lambda: cancelled_update(),
             name="matrix_cache_cancelled_update",
+            coordination_scope="test-principal",
         )
         cancelled_task.cancel()
         await asyncio.gather(cancelled_task, return_exceptions=True)
@@ -1634,6 +1683,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             "!test:localhost",
             lambda: third_update(),
             name="matrix_cache_third_update",
+            coordination_scope="test-principal",
         )
         await asyncio.sleep(0)
         assert third_update_started.is_set() is False
@@ -1681,12 +1731,14 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             "$thread-a:localhost",
             first_thread_update,
             name="matrix_cache_first_thread_update",
+            coordination_scope="test-principal",
         )
         second_thread_task = coordinator.queue_thread_update(
             "!test:localhost",
             "$thread-b:localhost",
             second_thread_update,
             name="matrix_cache_second_thread_update",
+            coordination_scope="test-principal",
         )
         await asyncio.wait_for(first_thread_started.wait(), timeout=1.0)
         await asyncio.wait_for(second_thread_started.wait(), timeout=1.0)
@@ -1695,12 +1747,14 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             "!test:localhost",
             cancelled_room_update,
             name="matrix_cache_cancelled_room_update",
+            coordination_scope="test-principal",
         )
         follow_up_thread_task = coordinator.queue_thread_update(
             "!test:localhost",
             "$thread-c:localhost",
             follow_up_thread_update,
             name="matrix_cache_follow_up_thread_update",
+            coordination_scope="test-principal",
         )
         try:
             cancelled_room_task.cancel()
@@ -1775,12 +1829,14 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             "$thread-a:localhost",
             first_thread_update,
             name="matrix_cache_first_thread_update",
+            coordination_scope="test-principal",
         )
         second_thread_task = coordinator.queue_thread_update(
             "!test:localhost",
             "$thread-b:localhost",
             second_thread_update,
             name="matrix_cache_second_thread_update",
+            coordination_scope="test-principal",
         )
         await asyncio.wait_for(first_thread_started.wait(), timeout=1.0)
         await asyncio.wait_for(second_thread_started.wait(), timeout=1.0)
@@ -1789,6 +1845,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             "!test:localhost",
             cancelled_room_update,
             name="matrix_cache_cancelled_room_update",
+            coordination_scope="test-principal",
         )
         follow_up_thread_task: asyncio.Task[object] | None = None
         try:
@@ -1800,6 +1857,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 "$thread-c:localhost",
                 follow_up_thread_update,
                 name="matrix_cache_follow_up_thread_update",
+                coordination_scope="test-principal",
             )
 
             await asyncio.sleep(0.05)
@@ -1855,6 +1913,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                     "!test:localhost",
                     lambda: failing_update(),
                     name="matrix_cache_test_failure",
+                    coordination_scope="test-principal",
                     log_exceptions=False,
                 )
             await asyncio.sleep(0)

@@ -12989,6 +12989,8 @@ Set `skip_hidden: false` if your knowledge folder intentionally contains dot-pre
 Use smaller `chunk_size` values when your embedding server has lower token or batch limits.
 `chunk_size` and `chunk_overlap` only affect semantic mode.
 If chunking is too large, semantic indexing retries will fail with embedder 500 errors.
+Semantic refreshes index up to 4 files concurrently by default.
+Set `MINDROOM_KNOWLEDGE_FILE_INDEX_CONCURRENCY` to an integer from 1 through 128 to tune this process-wide limit for large corpora; invalid values fail when knowledge managers start.
 
 ### File Type Filtering
 

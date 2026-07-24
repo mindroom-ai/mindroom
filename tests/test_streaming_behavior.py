@@ -185,8 +185,8 @@ async def _consume_streaming_chunks_for_test(
 
 
 @pytest.mark.asyncio
-async def test_delivery_queue_bounds_nonblocking_progress_hints() -> None:
-    """A stalled delivery owner should retain bounded hints while preserving capture barriers."""
+async def test_delivery_queue_bounds_optional_updates() -> None:
+    """A stalled delivery owner should retain bounded optional updates while preserving barriers."""
     delivery_queue: asyncio.Queue[_DeliveryRequest | None] = asyncio.Queue()
 
     for _ in range(100):
@@ -198,6 +198,47 @@ async def test_delivery_queue_bounds_nonblocking_progress_hints() -> None:
     assert delivery_queue.qsize() == 33
     _queue_delivery_request(delivery_queue, force_refresh=True)
     assert delivery_queue.qsize() == 34
+
+
+@pytest.mark.asyncio
+async def test_dropped_optional_delivery_still_sends_latest_visible_text(tmp_path: Path) -> None:
+    """Queued optional work reads live state, so dropped superseded requests cannot strand text."""
+    mock_client = _make_matrix_client_mock()
+    mock_response = MagicMock()
+    mock_response.__class__ = nio.RoomSendResponse
+    mock_response.event_id = "$latest_visible_text"
+    mock_client.room_send.return_value = mock_response
+    config = bind_runtime_paths(Config(), test_runtime_paths(tmp_path))
+    streaming = StreamingResponse(
+        target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        update_interval=10.0,
+        min_update_interval=10.0,
+        interval_ramp_seconds=0.0,
+        update_char_threshold=1,
+        min_update_char_threshold=1,
+        min_char_update_interval=0.0,
+    )
+    streaming.last_update = float("-inf")
+    streaming.accumulated_text = "stale body"
+    streaming.chars_since_last_update = len(streaming.accumulated_text)
+    delivery_queue: asyncio.Queue[_DeliveryRequest | None] = asyncio.Queue()
+
+    for _ in range(32):
+        _queue_delivery_request(delivery_queue)
+
+    streaming.accumulated_text = "latest body"
+    streaming.chars_since_last_update = len(streaming.accumulated_text)
+    assert _queue_delivery_request(delivery_queue) is None
+    assert delivery_queue.qsize() == 32
+
+    delivery_task = asyncio.create_task(_drive_stream_delivery(mock_client, streaming, delivery_queue))
+    shutdown_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
+
+    assert shutdown_error is None
+    mock_client.room_send.assert_awaited_once()
+    assert mock_client.room_send.await_args.kwargs["content"]["body"] == "latest body"
 
 
 @pytest.fixture

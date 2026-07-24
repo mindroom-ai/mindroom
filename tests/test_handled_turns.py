@@ -9,7 +9,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import replace
 from typing import TYPE_CHECKING
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -503,50 +503,99 @@ def test_flush_propagates_persistence_failure(temp_dir: Path) -> None:
             tracker.flush()
 
 
-def test_flush_waits_for_every_captured_persist_before_raising(temp_dir: Path) -> None:
-    """One failed persist must not drop later captured work from the barrier."""
-    tracker = HandledTurnLedger("test_flush_drains", base_path=temp_dir)
-    first_future = MagicMock()
-    first_future.result.side_effect = OSError("first persist failed")
-    second_future = MagicMock()
-    tracker._state.pending_persists = [first_future, second_future]
-
-    with pytest.raises(OSError, match="first persist failed"):
-        tracker.flush()
-
-    first_future.result.assert_called_once_with()
-    second_future.result.assert_called_once_with()
-
-
-def test_later_record_does_not_prune_unobserved_persistence_failure(temp_dir: Path) -> None:
-    """A later write must not hide an earlier completed persistence failure."""
-    tracker = HandledTurnLedger("test_interleaved_persist_failure", base_path=temp_dir)
+def test_exact_persist_waiter_does_not_wait_for_later_batches(temp_dir: Path) -> None:
+    """A durability waiter should resolve when its own batch lands."""
+    tracker = HandledTurnLedger("test_exact_persist_waiter", base_path=temp_dir)
     tracker.warm()
     real_persist = tracker._persist_records
-    first_failed = threading.Event()
-    second_completed = threading.Event()
-    failed_once = False
+    first_started = threading.Event()
+    release_first = threading.Event()
+    second_started = threading.Event()
+    release_second = threading.Event()
+    first_waiter_done = threading.Event()
 
-    def persist_with_first_failure(turn_records: tuple[TurnRecord, ...]) -> None:
-        nonlocal failed_once
-        if not failed_once and any("$redacted" in record.indexed_event_ids for record in turn_records):
-            failed_once = True
-            first_failed.set()
-            message = "redaction persist failed"
+    def persist_with_barriers(turn_records: tuple[TurnRecord, ...]) -> None:
+        if any("$first" in record.indexed_event_ids for record in turn_records):
+            first_started.set()
+            assert release_first.wait(timeout=5)
+        if any("$later" in record.indexed_event_ids for record in turn_records):
+            second_started.set()
+            assert release_second.wait(timeout=5)
+        real_persist(turn_records)
+
+    def record_first_and_wait() -> None:
+        tracker.update_handled_turn(
+            ("$first",),
+            lambda _existing: TurnRecord.create(["$first"], completed=False),
+            wait_for_persist=True,
+        )
+        first_waiter_done.set()
+
+    with patch.object(tracker, "_persist_records", side_effect=persist_with_barriers):
+        first_thread = threading.Thread(target=record_first_and_wait)
+        first_thread.start()
+        assert first_started.wait(timeout=5)
+        tracker.record_handled_turn(TurnRecord.create(["$later"], completed=False))
+        release_first.set()
+        assert second_started.wait(timeout=5)
+        assert first_waiter_done.wait(timeout=1)
+        release_second.set()
+        first_thread.join(timeout=5)
+        tracker.flush()
+
+    assert not first_thread.is_alive()
+
+
+def test_failed_batch_retries_without_new_record_and_remains_flush_visible(temp_dir: Path) -> None:
+    """A failed batch should retry once and remain pending for a later flush."""
+    tracker = HandledTurnLedger("test_persist_retry", base_path=temp_dir)
+    tracker.warm()
+    real_persist = tracker._persist_records
+    second_failure = threading.Event()
+    attempts = 0
+
+    def fail_twice_then_persist(turn_records: tuple[TurnRecord, ...]) -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts <= 2:
+            if attempts == 2:
+                second_failure.set()
+            message = "transient persist failure"
             raise OSError(message)
         real_persist(turn_records)
-        if any("$later" in record.indexed_event_ids for record in turn_records):
-            second_completed.set()
 
-    with patch.object(tracker, "_persist_records", side_effect=persist_with_first_failure):
-        tracker.record_handled_turn(TurnRecord.create(["$redacted"], completed=False))
-        assert first_failed.wait(timeout=5)
-        failure = tracker._state.pending_persists[0].exception(timeout=5)
-        assert isinstance(failure, OSError)
-        tracker.record_handled_turn(TurnRecord.create(["$later"], completed=False))
-        assert second_completed.wait(timeout=5)
-        with pytest.raises(OSError, match="redaction persist failed"):
-            tracker.flush()
+    with patch.object(tracker, "_persist_records", side_effect=fail_twice_then_persist):
+        tracker.record_handled_turn(TurnRecord.create(["$retry"], completed=False))
+        assert second_failure.wait(timeout=5)
+        tracker.flush()
+
+    assert attempts == 3
+    assert "$retry" in _read_persisted_records(tracker)
+
+
+def test_slow_ledger_does_not_block_other_ledger_persistence(temp_dir: Path) -> None:
+    """The bounded executor should persist independent ledger files concurrently."""
+    slow_tracker = HandledTurnLedger("test_slow_ledger", base_path=temp_dir)
+    fast_tracker = HandledTurnLedger("test_fast_ledger", base_path=temp_dir)
+    slow_tracker.warm()
+    fast_tracker.warm()
+    real_slow_persist = slow_tracker._persist_records
+    slow_started = threading.Event()
+    release_slow = threading.Event()
+
+    def blocked_persist(turn_records: tuple[TurnRecord, ...]) -> None:
+        slow_started.set()
+        assert release_slow.wait(timeout=5)
+        real_slow_persist(turn_records)
+
+    with patch.object(slow_tracker, "_persist_records", side_effect=blocked_persist):
+        slow_tracker.record_handled_turn(TurnRecord.create(["$slow"], completed=False))
+        assert slow_started.wait(timeout=5)
+        fast_tracker.record_handled_turn(TurnRecord.create(["$fast"], completed=False))
+        fast_tracker.flush()
+        assert "$fast" in _read_persisted_records(fast_tracker)
+        release_slow.set()
+        slow_tracker.flush()
 
 
 def test_concurrent_records_coalesce_into_one_follow_up_ledger_write(temp_dir: Path) -> None:

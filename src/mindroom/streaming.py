@@ -1189,7 +1189,7 @@ class _DeliveryRequest:
     capture_completion: asyncio.Future[None] | None = None
 
 
-_STREAM_DELIVERY_PENDING_HINT_LIMIT = 32
+_STREAM_DELIVERY_PENDING_OPTIONAL_REQUEST_LIMIT = 32
 
 
 def _raise_progress_delivery_error(error: Exception) -> NoReturn:
@@ -1210,6 +1210,23 @@ def _queue_delivery_request(
     wait_for_capture: bool = False,
 ) -> asyncio.Future[None] | None:
     """Queue one non-terminal delivery request for the single delivery owner."""
+    required_delivery = (
+        wait_for_capture or force_refresh or boundary_refresh or phase_boundary_flush or allow_empty_progress
+    )
+    queue_size = delivery_queue.qsize()
+    if not required_delivery and queue_size >= _STREAM_DELIVERY_PENDING_OPTIONAL_REQUEST_LIMIT:
+        emit_timing_event(
+            "Dispatch tool delivery timing",
+            phase="dropped_superseded",
+            queue_size=queue_size,
+            progress_hint=progress_hint,
+            force_refresh=force_refresh,
+            boundary_refresh=boundary_refresh,
+            phase_boundary_flush=phase_boundary_flush,
+            allow_empty_progress=allow_empty_progress,
+            wait_for_capture=False,
+        )
+        return None
     capture_completion = asyncio.get_running_loop().create_future() if wait_for_capture else None
     request = _DeliveryRequest(
         progress_hint=progress_hint,
@@ -1225,26 +1242,6 @@ def _queue_delivery_request(
         ),
         capture_completion=capture_completion,
     )
-    required_delivery = (
-        capture_completion is not None
-        or force_refresh
-        or boundary_refresh
-        or phase_boundary_flush
-        or allow_empty_progress
-    )
-    if not required_delivery and delivery_queue.qsize() >= _STREAM_DELIVERY_PENDING_HINT_LIMIT:
-        emit_timing_event(
-            "Dispatch tool delivery timing",
-            phase="coalesced",
-            queue_size=delivery_queue.qsize(),
-            progress_hint=progress_hint,
-            force_refresh=force_refresh,
-            boundary_refresh=boundary_refresh,
-            phase_boundary_flush=phase_boundary_flush,
-            allow_empty_progress=allow_empty_progress,
-            wait_for_capture=False,
-        )
-        return None
     delivery_queue.put_nowait(request)
     emit_timing_event(
         "Dispatch tool delivery timing",

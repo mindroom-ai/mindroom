@@ -142,6 +142,7 @@ class TestThreadMutationHelpers:
                 room_id,
                 block_predecessor,
                 name="matrix_cache_test_departure_predecessor",
+                coordination_scope=cache.principal_id,
             )
             await predecessor_started.wait()
 
@@ -196,6 +197,7 @@ class TestThreadMutationHelpers:
                 first_room_id,
                 block_first_room,
                 name="matrix_cache_test_batch_departure_predecessor",
+                coordination_scope=cache.principal_id,
             )
             await predecessor_started.wait()
 
@@ -259,6 +261,7 @@ class TestThreadMutationHelpers:
                 room_id,
                 block_predecessor,
                 name="matrix_cache_test_rejoin_predecessor",
+                coordination_scope=cache.principal_id,
             )
             await predecessor_started.wait()
             stale_rejoin = asyncio.create_task(access.mark_room_joined(room_id))
@@ -649,6 +652,7 @@ class TestMatrixConversationCacheThreadReads:
             "$sibling-thread:localhost",
             blocking_sibling_thread_update,
             name="matrix_cache_blocking_sibling_thread_update",
+            coordination_scope=event_cache.principal_id,
         )
         await asyncio.wait_for(sibling_thread_update_started.wait(), timeout=1.0)
 
@@ -673,7 +677,11 @@ class TestMatrixConversationCacheThreadReads:
         try:
             await asyncio.wait_for(thread_invalidation_started.wait(), timeout=1.0)
             await asyncio.wait_for(
-                coordinator.wait_for_thread_idle("!room:localhost", "$claimed-thread:localhost"),
+                coordinator.wait_for_thread_idle(
+                    "!room:localhost",
+                    "$claimed-thread:localhost",
+                    coordination_scope=event_cache.principal_id,
+                ),
                 timeout=1.0,
             )
             assert sibling_thread_task.done() is False

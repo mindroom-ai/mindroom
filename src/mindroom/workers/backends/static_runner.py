@@ -8,7 +8,12 @@ from dataclasses import dataclass
 
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.tool_system.worker_routing import worker_dir_name
-from mindroom.workers.backend import WorkerBackendError, effective_idle_status, filter_and_sort_worker_handles
+from mindroom.workers.backend import (
+    WorkerBackend,
+    WorkerBackendError,
+    effective_idle_status,
+    filter_and_sort_worker_handles,
+)
 from mindroom.workers.backends._lifecycle import (
     initial_worker_lifecycle_state,
     mark_worker_failed,
@@ -50,7 +55,7 @@ class _StaticWorkerMetadata:
     failure_reason: str | None = None
 
 
-class StaticSandboxRunnerBackend:
+class StaticSandboxRunnerBackend(WorkerBackend):
     """Worker backend representing the current shared sandbox-runner deployment."""
 
     backend_name = "static_sandbox_runner"

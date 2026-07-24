@@ -36,7 +36,6 @@ __all__ = [
     "append_inline_media_fallback_to_run_input",
     "attach_media_to_run_input",
     "cached_agent_run",
-    "cleanup_queued_notice_state",
     "cleanup_queued_notice_state_async",
     "copy_run_input",
     "discard_empty_completed_run",
@@ -253,33 +252,6 @@ def _strip_queued_notice_from_session_storage(
     if changed:
         storage.upsert_session(session)
     return changed
-
-
-def cleanup_queued_notice_state(
-    *,
-    run_output: RunOutput | TeamRunOutput | None,
-    storage: BaseDb | None,
-    session_id: str | None,
-    session_type: SessionType,
-    entity_name: str,
-) -> None:
-    """Strip queued-message notices from returned and persisted run state."""
-    _cleanup_queued_notice_from_run_output(run_output)
-    if storage is None or not session_id:
-        return
-    try:
-        _strip_queued_notice_from_session_storage(
-            storage,
-            session_id,
-            session_type=session_type,
-        )
-    except Exception:
-        logger.exception(
-            "Failed to strip queued-message notice from session history",
-            entity=entity_name,
-            session_id=session_id,
-            session_type=session_type.value,
-        )
 
 
 async def cleanup_queued_notice_state_async(

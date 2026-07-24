@@ -24,18 +24,15 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.workers.backend import WorkerBackend
-    from mindroom.workers.models import WorkerHandle
 
 __all__ = [
     "PrimaryWorkerManagerLease",
     "clear_worker_validation_snapshot_cache",
     "get_primary_worker_manager",
     "lease_primary_worker_manager",
-    "maintain_worker_pool",
     "primary_worker_backend_available",
     "primary_worker_backend_is_dedicated",
     "primary_worker_backend_name",
-    "reconcile_drifted_worker_templates",
     "serialized_kubernetes_worker_validation_snapshot",
     "shutdown_primary_worker_manager",
 ]
@@ -177,20 +174,6 @@ def primary_worker_backend_name(runtime_paths: RuntimePaths) -> str:
 def primary_worker_backend_is_dedicated(runtime_paths: RuntimePaths) -> bool:
     """Return whether the configured backend provisions dedicated worker runtimes."""
     return primary_worker_backend_name(runtime_paths) in _DEDICATED_WORKER_BACKENDS
-
-
-def reconcile_drifted_worker_templates(worker_manager: WorkerBackend) -> list[WorkerHandle]:
-    """Reconcile drifted worker pod templates for backends that support reconciliation."""
-    if isinstance(worker_manager, KubernetesWorkerBackend):
-        return worker_manager.reconcile_drifted_workers()
-    return []
-
-
-def maintain_worker_pool(worker_manager: WorkerBackend) -> tuple[list[WorkerHandle], list[WorkerHandle]]:
-    """Clean idle workers and reconcile templates with one backend maintenance pass."""
-    if isinstance(worker_manager, KubernetesWorkerBackend):
-        return worker_manager.maintain_workers()
-    return worker_manager.cleanup_idle_workers(), []
 
 
 def primary_worker_backend_available(

@@ -48,7 +48,6 @@ from mindroom.runtime_state import get_runtime_state
 from mindroom.tool_system.sandbox_proxy import sandbox_proxy_config
 from mindroom.workers.runtime import (
     get_primary_worker_manager,
-    maintain_worker_pool,
     primary_worker_backend_available,
     primary_worker_backend_name,
     serialized_kubernetes_worker_validation_snapshot,
@@ -223,20 +222,20 @@ def _cleanup_workers_once(
         kubernetes_tool_validation_snapshot=kubernetes_tool_validation_snapshot,
         worker_grantable_credentials=worker_grantable_credentials,
     )
-    cleaned_workers, reconciled_workers = maintain_worker_pool(worker_manager)
-    if cleaned_workers:
+    maintenance = worker_manager.maintain_workers()
+    if maintenance.cleaned:
         logger.info(
             "Cleaned idle workers",
-            count=len(cleaned_workers),
+            count=len(maintenance.cleaned),
             backend=worker_manager.backend_name,
         )
-    if reconciled_workers:
+    if maintenance.reconciled:
         logger.info(
             "Reconciled drifted worker pod templates",
-            count=len(reconciled_workers),
+            count=len(maintenance.reconciled),
             backend=worker_manager.backend_name,
         )
-    return len(cleaned_workers)
+    return len(maintenance.cleaned)
 
 
 async def _worker_cleanup_loop(

@@ -861,8 +861,7 @@ def test_redaction_barrier_ignores_unrelated_prior_persist_failure(tmp_path: Pat
         marked = store.mark_source_redacted("$redacted")
 
         assert marked is not None
-        with pytest.raises(OSError, match="unrelated persist failed"):
-            store._ledger.flush()
+        store._ledger.flush()
 
     _reset_handled_turn_ledger_runtime()
     durable_record = _store(tmp_path).get_turn_record("$redacted")
