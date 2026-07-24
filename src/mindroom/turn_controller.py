@@ -121,7 +121,7 @@ from mindroom.turn_origin import (
 from mindroom.turn_policy import IngressHookRunner, PreparedDispatch, ResponseAction, TurnPolicy
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Collection, Sequence
 
     import nio
     import structlog
@@ -383,6 +383,7 @@ class TurnController:
         thread_history: Sequence[ResolvedVisibleMessage],
         *,
         may_be_superseded_by_newer_requester_turn: bool,
+        current_turn_event_ids: Collection[str] = (),
     ) -> bool:
         """Return True when a newer unresponded message from the same requester exists."""
         return has_newer_unresponded_in_thread(
@@ -390,6 +391,7 @@ class TurnController:
             requester_user_id,
             thread_history,
             may_be_superseded_by_newer_requester_turn=may_be_superseded_by_newer_requester_turn,
+            current_turn_event_ids=current_turn_event_ids,
             requester_user_id_for_event=lambda sender, source: self.deps.ingress.requester_user_id(
                 sender=sender,
                 source=source,
@@ -408,6 +410,7 @@ class TurnController:
         requester_user_id: str,
         thread_id: str | None,
         may_be_superseded_by_newer_requester_turn: bool,
+        current_turn_event_ids: Collection[str] = (),
     ) -> bool:
         """Return positive replay proof from raw cached room events when thread history degraded."""
         event_cache = self.deps.runtime.event_cache
@@ -417,6 +420,7 @@ class TurnController:
             requester_user_id=requester_user_id,
             thread_id=thread_id,
             may_be_superseded_by_newer_requester_turn=may_be_superseded_by_newer_requester_turn,
+            current_turn_event_ids=current_turn_event_ids,
             get_recent_room_events=event_cache.get_recent_room_events if event_cache is not None else None,
             get_thread_id_for_event=self.deps.conversation_cache.get_thread_id_for_event,
             requester_user_id_for_event=lambda sender, source: self.deps.ingress.requester_user_id(

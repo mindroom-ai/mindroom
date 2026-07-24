@@ -316,6 +316,7 @@ async def _blocked_before_plan(
         return True
 
     may_be_superseded = prepared.dispatch.envelope.origin.may_be_superseded_by_newer_requester_turn
+    current_turn_event_ids = prepared.handled_turn.indexed_event_ids
     if prepared.replay_guard.degraded:
         skips_turn = await controller._has_newer_unresponded_cached_thread_event(
             room_id=room.room_id,
@@ -323,6 +324,7 @@ async def _blocked_before_plan(
             requester_user_id=requester_user_id,
             thread_id=prepared.replay_guard.thread_id,
             may_be_superseded_by_newer_requester_turn=may_be_superseded,
+            current_turn_event_ids=current_turn_event_ids,
         )
         if not skips_turn:
             controller.deps.logger.warning(
@@ -338,6 +340,7 @@ async def _blocked_before_plan(
             requester_user_id,
             prepared.replay_guard.history,
             may_be_superseded_by_newer_requester_turn=may_be_superseded,
+            current_turn_event_ids=current_turn_event_ids,
         )
     if skips_turn:
         controller._mark_source_events_responded(prepared.handled_turn)
