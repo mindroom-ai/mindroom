@@ -2038,6 +2038,7 @@ class TestMultiAgentOrchestrator:
         """Recovered background starts should not retry permanent room setup failures forever."""
         orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
         orchestrator.config = MagicMock()
+        orchestrator.running = True
         orchestrator._router_principal_id = "@mindroom_router:localhost"
 
         bot = MagicMock()
@@ -2070,21 +2071,33 @@ class TestMultiAgentOrchestrator:
         bot.agent_name = "general"
         orchestrator.agent_bots = {"general": bot}
 
+        external_trigger_runtime = MagicMock()
         with (
             patch.object(orchestrator, "_bots_to_setup_after_background_start", return_value=[]),
-            patch.object(orchestrator, "_bind_started_runtime_support_services"),
+            patch.object(orchestrator, "_bind_started_runtime_support_services") as bind_support,
             patch.object(orchestrator, "_resolve_bot_room_aliases"),
-            patch.object(orchestrator, "_start_sync_task"),
-            patch.object(orchestrator, "_recover_pending_replacement_rooms", new=AsyncMock()),
-            patch.object(orchestrator, "_external_trigger_runtime", new=MagicMock()),
+            patch.object(orchestrator, "_start_sync_task") as start_sync,
+            patch.object(orchestrator, "_recover_pending_replacement_rooms", new=AsyncMock()) as recover_rooms,
+            patch.object(orchestrator, "_external_trigger_runtime", new=external_trigger_runtime),
             patch.object(orchestrator._startup_maintenance, "resume_pending_recheck") as resume,
         ):
             orchestrator.running = False
             await orchestrator._finish_recovered_bot_start("general", bot)
+            # The early guard must skip every finish step, not only the
+            # maintenance resume: binding support or starting sync here
+            # would leak work past stop()'s teardown passes.
+            bind_support.assert_not_called()
+            start_sync.assert_not_called()
+            recover_rooms.assert_not_awaited()
+            external_trigger_runtime.bind_if_ready.assert_not_called()
             resume.assert_not_called()
 
             orchestrator.running = True
             await orchestrator._finish_recovered_bot_start("general", bot)
+            bind_support.assert_called_once()
+            start_sync.assert_called_once()
+            recover_rooms.assert_awaited_once()
+            external_trigger_runtime.bind_if_ready.assert_called_once()
             resume.assert_called_once()
 
     @pytest.mark.asyncio

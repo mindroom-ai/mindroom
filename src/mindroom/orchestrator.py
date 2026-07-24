@@ -575,6 +575,11 @@ class _MultiAgentOrchestrator:
 
     async def _finish_recovered_bot_start(self, entity_name: str, bot: AgentBot | TeamBot) -> None:
         """Rebind runtime support, room state, and pending maintenance after a background bot start succeeds."""
+        if not self.running:
+            # Shutdown already began: binding runtime support or starting a
+            # sync task now would leak work past stop()'s teardown passes.
+            logger.info("Skipping recovered bot finalization during shutdown", agent_name=entity_name)
+            return
         logger.info("Bot recovered after startup failure", agent_name=entity_name)
         bots_to_setup = self._bots_to_setup_after_background_start(entity_name)
         self._bind_started_runtime_support_services([bot])
@@ -1847,6 +1852,10 @@ class _MultiAgentOrchestrator:
         if self._runtime_shutdown_event is not None:
             self._runtime_shutdown_event.set()
         self._external_trigger_runtime.unbind()
+        # Cancel bot-start retries before any other awaited teardown: a retry
+        # completing mid-shutdown would otherwise rebind runtime support and
+        # start sync tasks the passes below have already torn down.
+        await self._cancel_bot_start_tasks()
         await shutdown_approval_runtime()
         await self.config_reload.cancel()
         await self._startup_maintenance.cancel()
@@ -1854,7 +1863,6 @@ class _MultiAgentOrchestrator:
         await self._stop_memory_auto_flush_worker()
         await self._knowledge_source_watcher.shutdown()
         await self._knowledge_refresh_scheduler.shutdown()
-        await self._cancel_bot_start_tasks()
         await self._stop_mcp_manager()
 
         # Cancel sync tasks first so shutdown does not race with active sync loops.
