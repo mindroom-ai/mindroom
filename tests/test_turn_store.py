@@ -54,6 +54,31 @@ def _store(tmp_path: Path) -> TurnStore:
     )
 
 
+def test_try_claim_turn_subset_claims_only_unowned_sources(tmp_path: Path) -> None:
+    """Salvage claims exactly the sources no live or finished turn owns."""
+    store = _store(tmp_path)
+    assert store.try_claim_turn(TurnRecord.create(["$live"], completed=False))
+    store.record_turn(TurnRecord.create(["$handled"]))
+
+    claimed = store.try_claim_turn_subset(["$live", "$handled", "$fresh", "$fresh"])
+
+    assert claimed == ("$fresh",)
+    assert store.is_claimed_in_flight("$fresh")
+    # The stale duplicate stays owned by its original live turn.
+    assert store.is_claimed_in_flight("$live")
+    assert not store.is_claimed_in_flight("$handled")
+
+
+def test_try_claim_turn_subset_empty_when_every_source_is_owned(tmp_path: Path) -> None:
+    """A fully-owned batch salvages nothing and leaves existing claims intact."""
+    store = _store(tmp_path)
+    assert store.try_claim_turn(TurnRecord.create(["$a", "$b"], completed=False))
+
+    assert store.try_claim_turn_subset(["$a", "$b"]) == ()
+    assert store.is_claimed_in_flight("$a")
+    assert store.is_claimed_in_flight("$b")
+
+
 def _load_with_recovery(
     store: TurnStore,
     *,

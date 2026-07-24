@@ -103,7 +103,7 @@ from mindroom.thread_utils import (
     is_router_only_agent_mention,
     thread_requires_explicit_agent_targeting,
 )
-from mindroom.timestamp_formatting import normalize_timestamp_ms
+from mindroom.timestamp_formatting import format_timestamp_ms, normalize_timestamp_ms
 from mindroom.timing import (
     DispatchPipelineTiming,
     attach_dispatch_pipeline_timing,
@@ -1868,40 +1868,96 @@ class TurnController:
 
     async def handle_coalesced_batch(self, batch: CoalescedBatch) -> None:
         """Dispatch one flushed batch through the normal text pipeline."""
+        salvaged_batch = self._claim_flushed_batch(batch)
+        if salvaged_batch is None:
+            return
+        batch = salvaged_batch
+        claimed_ids = tuple(batch.source_event_ids)
+        dispatch_owns_claim = False
         try:
-            handoff = build_dispatch_handoff(batch)
+            try:
+                handoff = build_dispatch_handoff(batch)
+            except BaseException:
+                # Close-and-clear so the gate's segment owner cannot close the
+                # same metadata a second time when this exception reaches it.
+                close_pending_event_metadata_once(list(batch.pending_events))
+                raise
+            _consume_queued_notice_reservations_from_metadata(
+                handoff.dispatch_metadata,
+                target_key=self._queued_notice_target_key_for_handoff(handoff),
+            )
+            timing_scope = event_timing_scope(handoff.event.event_id)
+            dispatch_timing = get_dispatch_pipeline_timing(handoff.event.source)
+            if dispatch_timing is not None:
+                dispatch_timing.mark("gate_exit")
+            async with self.deps.resolver.turn_thread_cache_scope():
+                dispatch_start = time.monotonic()
+                handled_turn = TurnRecord.create(
+                    handoff.source_event_ids,
+                    source_event_prompts=dict(handoff.source_event_prompts),
+                    source_event_metadata=dict(handoff.source_event_metadata)
+                    if len(handoff.source_event_ids) > 1
+                    else None,
+                )
+                dispatch_owns_claim = True
+                await self._dispatch_handoff(
+                    handoff,
+                    handled_turn=handled_turn,
+                    turn_claim_held=True,
+                )
+                emit_elapsed_timing(
+                    "coalescing.handle_batch.dispatch_text_message",
+                    dispatch_start,
+                    source_event_count=len(batch.source_event_ids),
+                    timing_scope=timing_scope,
+                )
         except BaseException:
-            # Close-and-clear so the gate's segment owner cannot close the
-            # same metadata a second time when this exception reaches it.
-            close_pending_event_metadata_once(list(batch.pending_events))
+            if not dispatch_owns_claim:
+                self.deps.turn_store.release_pending_turn_claim(
+                    TurnRecord.create(list(claimed_ids), completed=False),
+                )
             raise
-        _consume_queued_notice_reservations_from_metadata(
-            handoff.dispatch_metadata,
-            target_key=self._queued_notice_target_key_for_handoff(handoff),
+
+    def _claim_flushed_batch(self, batch: CoalescedBatch) -> CoalescedBatch | None:
+        """Atomically claim a flushed batch's sources, salvaging around stale duplicates.
+
+        A replayed source can pass the ingress in-flight precheck before its
+        original delivery claims, stall in resolution or its lane, and join a
+        later batch. The previous all-or-nothing claim then collided and
+        silently dropped the whole batch, starving innocent co-batched
+        sources. Claiming the still-unowned subset keeps the rest of the
+        batch's turn; a fully-owned batch drops idempotently.
+        """
+        claimed = self.deps.turn_store.try_claim_turn_subset(batch.source_event_ids)
+        if len(claimed) == len(batch.source_event_ids):
+            return batch
+        claimed_id_set = set(claimed)
+        dropped = [
+            pending_event
+            for pending_event in batch.pending_events
+            if pending_event.event.event_id not in claimed_id_set
+        ]
+        close_pending_event_metadata_once(dropped)
+        self.deps.logger.info(
+            "coalesced_batch_dropped_already_owned_sources",
+            room_id=batch.room.room_id,
+            dropped_event_ids=[pending_event.event.event_id for pending_event in dropped],
+            surviving_event_ids=list(claimed),
         )
-        timing_scope = event_timing_scope(handoff.event.event_id)
-        dispatch_timing = get_dispatch_pipeline_timing(handoff.event.source)
-        if dispatch_timing is not None:
-            dispatch_timing.mark("gate_exit")
-        async with self.deps.resolver.turn_thread_cache_scope():
-            dispatch_start = time.monotonic()
-            handled_turn = TurnRecord.create(
-                handoff.source_event_ids,
-                source_event_prompts=dict(handoff.source_event_prompts),
-                source_event_metadata=dict(handoff.source_event_metadata)
-                if len(handoff.source_event_ids) > 1
-                else None,
-            )
-            await self._dispatch_handoff(
-                handoff,
-                handled_turn=handled_turn,
-            )
-            emit_elapsed_timing(
-                "coalescing.handle_batch.dispatch_text_message",
-                dispatch_start,
-                source_event_count=len(batch.source_event_ids),
-                timing_scope=timing_scope,
-            )
+        if not claimed:
+            return None
+        surviving = [
+            pending_event for pending_event in batch.pending_events if pending_event.event.event_id in claimed_id_set
+        ]
+        return build_coalesced_batch(
+            batch.coalescing_key,
+            surviving,
+            timestamp_formatter=self._coalesced_timestamp_formatter,
+        )
+
+    def _coalesced_timestamp_formatter(self, timestamp_ms: float | None) -> str | None:
+        """Render batch prompt timestamps exactly like the coalescing gate does."""
+        return format_timestamp_ms(timestamp_ms, timezone=self.deps.runtime.config.timezone)
 
     def _queued_notice_target_key_for_handoff(self, handoff: DispatchHandoff) -> tuple[str, str | None]:
         coalescing_key = handoff.ingress.coalescing_key
@@ -1921,6 +1977,7 @@ class TurnController:
         handoff: DispatchHandoff,
         *,
         handled_turn: TurnRecord,
+        turn_claim_held: bool = False,
     ) -> None:
         """Dispatch one coalesced handoff and own opaque metadata cleanup."""
         await self._dispatch_text_message(
@@ -1933,6 +1990,7 @@ class TurnController:
             payload_metadata=handoff.payload,
             trust_hydrated_internal_metadata=handoff.trust_hydrated_internal_metadata,
             current_prompt_is_structured=handoff.current_prompt_is_structured,
+            turn_claim_held=turn_claim_held,
         )
 
     async def handle_text_event(
@@ -2081,6 +2139,7 @@ class TurnController:
         payload_metadata: DispatchPayloadMetadata | None = None,
         trust_hydrated_internal_metadata: bool | None = None,
         current_prompt_is_structured: bool = False,
+        turn_claim_held: bool = False,
     ) -> None:
         """Run the normal text or command dispatch pipeline for a prepared text event."""
         raw_event: TextDispatchEvent
@@ -2104,6 +2163,7 @@ class TurnController:
             payload_metadata=payload_metadata,
             trust_hydrated_internal_metadata=trust_hydrated_internal_metadata,
             current_prompt_is_structured=current_prompt_is_structured,
+            turn_claim_held=turn_claim_held,
         )
 
     async def handle_media_event(

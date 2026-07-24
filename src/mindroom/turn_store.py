@@ -19,7 +19,7 @@ from mindroom.history.storage import invalidate_compacted_replay, read_scope_see
 from mindroom.session_ids import create_session_id
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Mapping, Sequence
 
     import nio
 
@@ -222,6 +222,25 @@ class TurnStore:
         """
         with self._pending_claim_lock:
             return event_id in self._pending_claimed_event_ids
+
+    def try_claim_turn_subset(self, event_ids: Sequence[str]) -> tuple[str, ...]:
+        """Atomically claim whichever of these sources no live or finished turn owns.
+
+        The ingress in-flight precheck is only a fast path: a replayed source
+        can pass it before its original delivery claims, stall, and join a
+        later coalesced batch. The batch's all-or-nothing claim then collided
+        and silently starved innocent co-batched sources. Claiming the exact
+        still-unowned subset in one lock acquisition lets the flush drop only
+        the stale duplicates and keep the rest of the batch's turn.
+        """
+        with self._pending_claim_lock:
+            claimable = tuple(
+                event_id
+                for event_id in dict.fromkeys(event_ids)
+                if event_id not in self._pending_claimed_event_ids and not self.is_handled(event_id)
+            )
+            self._pending_claimed_event_ids.update(claimable)
+        return claimable
 
     def mark_source_redacted(
         self,

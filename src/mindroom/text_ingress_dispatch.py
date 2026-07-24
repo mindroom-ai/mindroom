@@ -91,10 +91,11 @@ async def dispatch_text_message(
     payload_metadata: DispatchPayloadMetadata | None = None,
     trust_hydrated_internal_metadata: bool | None = None,
     current_prompt_is_structured: bool = False,
+    turn_claim_held: bool = False,
 ) -> None:
     """Run the normal text or command dispatch pipeline for a prepared text event."""
     turn_claim = handled_turn or TurnRecord.create([raw_event.event_id], completed=False)
-    if not _try_claim_turn(controller, turn_claim, queued_notice_reservation):
+    if not turn_claim_held and not _try_claim_turn(controller, turn_claim, queued_notice_reservation):
         return
     claim_transferred = False
 
