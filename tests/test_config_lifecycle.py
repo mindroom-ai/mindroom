@@ -31,6 +31,7 @@ def _make_lifecycle(
     current_config: Config | None = None,
     agent_bots: Mapping[str, AgentBot | TeamBot] | None = None,
     in_flight_response_count: Callable[[], int] | None = None,
+    response_admission_lock: asyncio.Lock | None = None,
 ) -> ConfigReloadLifecycle:
     """Return a lifecycle wired to stub dependencies."""
     return ConfigReloadLifecycle(
@@ -41,6 +42,7 @@ def _make_lifecycle(
         in_flight_response_count=in_flight_response_count or (lambda: 0),
         load_initial_config=AsyncMock(return_value=False),
         apply_update_plan=AsyncMock(return_value=True),
+        response_admission_lock=response_admission_lock or asyncio.Lock(),
     )
 
 
@@ -361,34 +363,68 @@ async def test_cancel_clears_queued_reload(
 
 
 @pytest.mark.asyncio
-async def test_force_reload_cancels_drain_and_applies_immediately(
+async def test_response_start_during_config_load_waits_until_apply_finishes(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """An explicit force should bypass response drain without changing watcher policy."""
-    monkeypatch.setattr("mindroom.orchestration.config_lifecycle._CONFIG_RELOAD_DEBOUNCE_SECONDS", 0.01)
-    monkeypatch.setattr("mindroom.orchestration.config_lifecycle._CONFIG_RELOAD_IDLE_POLL_SECONDS", 0.01)
-    logger_mock = MagicMock()
-    monkeypatch.setattr("mindroom.orchestration.config_lifecycle.logger", logger_mock)
-    lifecycle = _make_lifecycle(tmp_path, in_flight_response_count=lambda: 1)
-    lifecycle.update_config = AsyncMock(return_value=True)
+    """A response racing blocked config loading must not enter before apply."""
+    monkeypatch.setattr("mindroom.orchestration.config_lifecycle._CONFIG_RELOAD_DEBOUNCE_SECONDS", 0)
+    load_started = threading.Event()
+    release_load = threading.Event()
+    response_admitted = asyncio.Event()
+    release_response = asyncio.Event()
+    active_responses = [0]
+    admission_lock = asyncio.Lock()
+    current_config = Config()
+    new_config = Config()
+
+    def blocked_load(*_args: object, **_kwargs: object) -> Config:
+        load_started.set()
+        assert release_load.wait(timeout=2)
+        return new_config
+
+    monkeypatch.setattr("mindroom.orchestration.config_lifecycle.load_config", blocked_load)
+    lifecycle = _make_lifecycle(
+        tmp_path,
+        current_config=current_config,
+        in_flight_response_count=lambda: active_responses[0],
+        response_admission_lock=admission_lock,
+    )
+
+    async def apply_plan(*_args: object) -> bool:
+        assert active_responses[0] == 0
+        return True
+
+    lifecycle.apply_update_plan = AsyncMock(side_effect=apply_plan)
+
+    async def start_response() -> None:
+        async with admission_lock:
+            active_responses[0] += 1
+        try:
+            response_admitted.set()
+            await release_response.wait()
+        finally:
+            active_responses[0] -= 1
 
     lifecycle.request_reload()
-    task = lifecycle._reload_task
-    assert task is not None
-    await asyncio.sleep(0.05)
-    lifecycle.update_config.assert_not_awaited()
+    reload_task = lifecycle._reload_task
+    assert reload_task is not None
+    assert await asyncio.to_thread(load_started.wait, 1)
 
-    assert await lifecycle.force_reload() is True
+    response_task = asyncio.create_task(start_response())
+    try:
+        await asyncio.sleep(0)
+        assert not response_admitted.is_set()
 
-    assert lifecycle._reload_task is None
-    assert lifecycle._requested_at is None
-    assert task.done()
-    lifecycle.update_config.assert_awaited_once()
-    logger_mock.warning.assert_any_call(
-        "Forcing configuration reload by explicit request",
-        active_response_count=1,
-    )
+        release_load.set()
+        await asyncio.wait_for(reload_task, timeout=1)
+        await asyncio.wait_for(response_admitted.wait(), timeout=1)
+
+        lifecycle.apply_update_plan.assert_awaited_once()
+    finally:
+        release_load.set()
+        release_response.set()
+        await asyncio.gather(reload_task, response_task, return_exceptions=True)
 
 
 @pytest.mark.asyncio

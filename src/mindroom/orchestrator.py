@@ -244,6 +244,7 @@ class _MultiAgentOrchestrator:
     config_reload: ConfigReloadLifecycle = field(init=False)
     _mcp_manager: MCPServerManager | None = field(default=None, init=False)
     _config_update_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
+    _response_admission_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
     _pending_replacement_recovery_room_ids: dict[str, set[str]] = field(default_factory=dict, init=False)
     _runtime_support: OwnedRuntimeSupport = field(init=False)
     _event_cache_write_task_owner: object = field(default_factory=object, init=False)
@@ -286,6 +287,7 @@ class _MultiAgentOrchestrator:
             in_flight_response_count=self.in_flight_response_count,
             load_initial_config=self._load_initial_config,
             apply_update_plan=self._apply_config_update_plan,
+            response_admission_lock=self._response_admission_lock,
             config_update_lock=self._config_update_lock,
         )
         self._approval_transport = ApprovalMatrixTransport(
@@ -375,6 +377,7 @@ class _MultiAgentOrchestrator:
 
     def _bind_runtime_support_services(self, bot: AgentBot | TeamBot) -> None:
         """Bind the current runtime support services to one managed bot."""
+        bot.response_admission_lock = self._response_admission_lock
         bot.event_cache = self._runtime_support.event_cache.for_principal(bot.matrix_id.full_id)
         bot.event_cache_write_coordinator = self._runtime_support.event_cache_write_coordinator
         bot.startup_thread_prewarm_registry = self._runtime_support.startup_thread_prewarm_registry

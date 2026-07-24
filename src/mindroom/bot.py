@@ -736,6 +736,16 @@ class AgentBot:
         self._response_runner.in_flight_response_count = value
 
     @property
+    def response_admission_lock(self) -> asyncio.Lock:
+        """Return the gate protecting response admission during config apply."""
+        return self._response_runner.response_admission_lock
+
+    @response_admission_lock.setter
+    def response_admission_lock(self, value: asyncio.Lock) -> None:
+        """Bind the orchestrator-owned response-admission gate."""
+        self._response_runner.response_admission_lock = value
+
+    @property
     def pending_sync_restart_retry_room_ids(self) -> frozenset[str]:
         """Return rooms with interrupted turns awaiting same-bot retry."""
         return self._restart_retry_queue.pending_room_ids
