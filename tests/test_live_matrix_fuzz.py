@@ -136,6 +136,8 @@ def test_failure_artifact_includes_loaded_code_provenance(tmp_path: Path) -> Non
         provenance=provenance,
         stack=cast("fuzz_live_matrix.ManagedTuwunelStack", ArtifactStack()),
         runtime_ms=123,
+        reply_timeout=45,
+        settle_seconds=1.25,
     )
 
     assert artifact["mindroom_revision"] == "mindroom-sha"
@@ -145,12 +147,42 @@ def test_failure_artifact_includes_loaded_code_provenance(tmp_path: Path) -> Non
     assert artifact["nio_revision"] == "nio-sha"
     assert artifact["scenario"]["version"] == 1
     assert artifact["mindroom_log"] == "runtime output"
+    assert artifact["reply_timeout"] == 45
+    assert artifact["settle_seconds"] == 1.25
     assert LiveFuzzScenario.from_json(json.dumps(artifact)) == live_scenario_from_seed(
         1,
         steps=1,
         thread_count=1,
         restart_interval=0,
     )
+    failure_log = tmp_path / "failure.json"
+    failure_log.write_text(json.dumps(artifact), encoding="utf-8")
+    loaded_scenario, reply_timeout, settle_seconds = fuzz_live_matrix._load_trace(failure_log)
+    assert loaded_scenario == live_scenario_from_seed(1, steps=1, thread_count=1, restart_interval=0)
+    assert reply_timeout == 45
+    assert settle_seconds == 1.25
+
+
+def test_live_campaign_fails_on_serious_runtime_diagnostics() -> None:
+    """Timeout, degraded-read, and stall counters are correctness gate inputs."""
+    clean = {
+        "cache_coordinator_timeouts": 0,
+        "degraded_thread_reads": 0,
+        "dispatch_read_timeouts": 0,
+        "event_loop_stalls": 0,
+        "limited_sync_backfill_warnings": 3,
+        "limited_sync_certification_events": 4,
+    }
+    fuzz_live_matrix._assert_clean_diagnostics(clean)
+
+    for key in (
+        "cache_coordinator_timeouts",
+        "degraded_thread_reads",
+        "dispatch_read_timeouts",
+        "event_loop_stalls",
+    ):
+        with pytest.raises(AssertionError, match=key):
+            fuzz_live_matrix._assert_clean_diagnostics({**clean, key: 1})
 
 
 def test_runtime_attestation_retains_child_provenance(

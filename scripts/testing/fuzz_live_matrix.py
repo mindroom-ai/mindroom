@@ -59,6 +59,12 @@ RECOVERY_TIMELINE_LIMIT = 50
 REGISTRY_READ_ATTEMPTS = 3
 REGISTRY_READ_RETRY_SECONDS = 0.05
 SOURCE_MARKER_PATTERN = re.compile(r"LIVE-SOURCE\[([A-Za-z0-9_.:-]+)\]")
+_SERIOUS_DIAGNOSTICS = (
+    "cache_coordinator_timeouts",
+    "degraded_thread_reads",
+    "dispatch_read_timeouts",
+    "event_loop_stalls",
+)
 
 
 def _history_fingerprint(source_markers: Collection[str]) -> str:
@@ -3377,11 +3383,34 @@ def _parse_args() -> argparse.Namespace:
         type=float,
         help="per-reply deadline (default: 60s fuzz, 180s saturation)",
     )
-    parser.add_argument("--settle-seconds", type=float, default=0.75)
+    parser.add_argument(
+        "--settle-seconds",
+        type=float,
+        help="quiet-window duration (default: replay artifact value or 0.75s)",
+    )
     parser.add_argument("--trace", type=Path)
     parser.add_argument("--save-trace", type=Path)
     parser.add_argument("--failure-log", type=Path)
     return parser.parse_args()
+
+
+def _load_trace(path: Path) -> tuple[LiveFuzzScenario, float | None, float | None]:
+    """Load a scenario and optional timing knobs from a failure artifact."""
+    text = path.read_text(encoding="utf-8")
+    payload = json.loads(text)
+    reply_timeout = payload.get("reply_timeout") if isinstance(payload, dict) else None
+    settle_seconds = payload.get("settle_seconds") if isinstance(payload, dict) else None
+    if reply_timeout is not None and not isinstance(reply_timeout, int | float):
+        msg = "live Matrix fuzz trace reply_timeout must be numeric"
+        raise TypeError(msg)
+    if settle_seconds is not None and not isinstance(settle_seconds, int | float):
+        msg = "live Matrix fuzz trace settle_seconds must be numeric"
+        raise TypeError(msg)
+    return (
+        LiveFuzzScenario.from_json(text),
+        float(reply_timeout) if reply_timeout is not None else None,
+        float(settle_seconds) if settle_seconds is not None else None,
+    )
 
 
 async def _run_live(
@@ -3425,6 +3454,8 @@ def _failure_artifact(
     provenance: RuntimeProvenance,
     stack: ManagedTuwunelStack,
     runtime_ms: int,
+    reply_timeout: float,
+    settle_seconds: float,
 ) -> dict[str, Any]:
     """Build one replayable failure record with loaded-code provenance."""
     return {
@@ -3434,11 +3465,21 @@ def _failure_artifact(
             stack.log_path.read_text(encoding="utf-8", errors="replace") if stack.log_path.exists() else ""
         ),
         "profile": scenario.profile,
+        "reply_timeout": reply_timeout,
         "runtime_ms": runtime_ms,
         "scenario": json.loads(scenario.to_json()),
         "seed": seed,
+        "settle_seconds": settle_seconds,
         **provenance.as_dict(),
     }
+
+
+def _assert_clean_diagnostics(diagnostics: Mapping[str, int]) -> None:
+    """Fail a campaign that observed timeout, degradation, or stall signals."""
+    serious = {name: diagnostics.get(name, 0) for name in _SERIOUS_DIAGNOSTICS if diagnostics.get(name, 0)}
+    if serious:
+        msg = f"live Matrix fuzz observed serious runtime diagnostics: {serious}"
+        raise AssertionError(msg)
 
 
 def _run_mindroom_runtime_child(attestation_path: Path, arguments: list[str]) -> None:
@@ -3461,40 +3502,46 @@ def _run_mindroom_runtime_child(attestation_path: Path, arguments: list[str]) ->
     app()
 
 
+def _scenario_from_args(
+    args: argparse.Namespace,
+) -> tuple[LiveFuzzScenario, float | None, float | None]:
+    """Load a replay or generate the requested profile."""
+    if args.trace is not None:
+        return _load_trace(args.trace)
+    if args.profile == "saturation":
+        scenario = saturation_scenario()
+    elif args.profile == "recovery":
+        scenario = recovery_scenario_from_seed(
+            args.seed,
+            messages_per_room=args.messages_per_room,
+            room_count=args.rooms,
+            thread_count=args.threads,
+            client_count=args.clients,
+            max_batch_size=args.max_batch_size,
+        )
+    else:
+        scenario = live_scenario_from_seed(
+            args.seed,
+            steps=args.steps,
+            thread_count=args.threads,
+            max_batch_size=args.max_batch_size,
+            restart_interval=args.restart_interval,
+        )
+    return scenario, None, None
+
+
 def main() -> None:
     """Run one trace against a fresh disposable real-server stack."""
     args = _parse_args()
-    scenario = (
-        LiveFuzzScenario.from_json(args.trace.read_text(encoding="utf-8"))
-        if args.trace is not None
-        else (
-            saturation_scenario()
-            if args.profile == "saturation"
-            else (
-                recovery_scenario_from_seed(
-                    args.seed,
-                    messages_per_room=args.messages_per_room,
-                    room_count=args.rooms,
-                    thread_count=args.threads,
-                    client_count=args.clients,
-                    max_batch_size=args.max_batch_size,
-                )
-                if args.profile == "recovery"
-                else live_scenario_from_seed(
-                    args.seed,
-                    steps=args.steps,
-                    thread_count=args.threads,
-                    max_batch_size=args.max_batch_size,
-                    restart_interval=args.restart_interval,
-                )
-            )
-        )
-    )
+    scenario, trace_reply_timeout, trace_settle_seconds = _scenario_from_args(args)
     if args.save_trace is not None:
         args.save_trace.write_text(scenario.to_json() + "\n", encoding="utf-8")
-    reply_timeout = args.reply_timeout
+    reply_timeout = args.reply_timeout if args.reply_timeout is not None else trace_reply_timeout
     if reply_timeout is None:
         reply_timeout = 180 if scenario.profile == "saturation" else 60
+    settle_seconds = args.settle_seconds if args.settle_seconds is not None else trace_settle_seconds
+    if settle_seconds is None:
+        settle_seconds = 0.75
 
     stack = ManagedTuwunelStack(
         room_count=scenario.room_count,
@@ -3514,15 +3561,19 @@ def main() -> None:
                 stack,
                 scenario,
                 reply_timeout=reply_timeout,
-                settle_seconds=args.settle_seconds,
+                settle_seconds=settle_seconds,
             ),
         )
         result["profile"] = scenario.profile
         result["seed"] = seed
         result["preexisting_fuzz_servers"] = stack.preexisting_fuzz_servers
+        result["reply_timeout"] = reply_timeout
         result["runtime_ms"] = round((time.monotonic() - started) * 1000)
+        result["settle_seconds"] = settle_seconds
         result.update(provenance.as_dict())
-        result.update(stack.diagnostic_counts())
+        diagnostics = stack.diagnostic_counts()
+        result.update(diagnostics)
+        _assert_clean_diagnostics(diagnostics)
         print(json.dumps(result, sort_keys=True))
     except Exception as error:
         provenance = stack.runtime_provenance or provenance
@@ -3533,6 +3584,8 @@ def main() -> None:
             provenance=provenance,
             stack=stack,
             runtime_ms=round((time.monotonic() - started) * 1000),
+            reply_timeout=reply_timeout,
+            settle_seconds=settle_seconds,
         )
         print("Live Matrix fuzz failure:", file=sys.stderr)
         print(
