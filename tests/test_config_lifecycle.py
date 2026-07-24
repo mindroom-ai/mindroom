@@ -361,6 +361,37 @@ async def test_cancel_clears_queued_reload(
 
 
 @pytest.mark.asyncio
+async def test_force_reload_cancels_drain_and_applies_immediately(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An explicit force should bypass response drain without changing watcher policy."""
+    monkeypatch.setattr("mindroom.orchestration.config_lifecycle._CONFIG_RELOAD_DEBOUNCE_SECONDS", 0.01)
+    monkeypatch.setattr("mindroom.orchestration.config_lifecycle._CONFIG_RELOAD_IDLE_POLL_SECONDS", 0.01)
+    logger_mock = MagicMock()
+    monkeypatch.setattr("mindroom.orchestration.config_lifecycle.logger", logger_mock)
+    lifecycle = _make_lifecycle(tmp_path, in_flight_response_count=lambda: 1)
+    lifecycle.update_config = AsyncMock(return_value=True)
+
+    lifecycle.request_reload()
+    task = lifecycle._reload_task
+    assert task is not None
+    await asyncio.sleep(0.05)
+    lifecycle.update_config.assert_not_awaited()
+
+    assert await lifecycle.force_reload() is True
+
+    assert lifecycle._reload_task is None
+    assert lifecycle._requested_at is None
+    assert task.done()
+    lifecycle.update_config.assert_awaited_once()
+    logger_mock.warning.assert_any_call(
+        "Forcing configuration reload by explicit request",
+        active_response_count=1,
+    )
+
+
+@pytest.mark.asyncio
 async def test_update_config_delegates_initial_load(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

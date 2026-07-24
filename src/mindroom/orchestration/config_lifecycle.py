@@ -134,6 +134,24 @@ class ConfigReloadLifecycle:
         self._requested_at = None
         await cancel_logged_task(task)
 
+    async def force_reload(self) -> bool:
+        """Apply config immediately after cancelling any safely queued reload.
+
+        This explicit operator escape hatch may interrupt active responses.
+        The file watcher never calls it.
+        """
+        task = self._reload_task
+        self._reload_task = None
+        self._requested_at = None
+        await cancel_logged_task(task)
+
+        active_response_count = self.in_flight_response_count()
+        logger.warning(
+            "Forcing configuration reload by explicit request",
+            active_response_count=active_response_count,
+        )
+        return await self.update_config()
+
     async def update_config(self) -> bool:
         """Reload configuration from disk and dispatch the resulting update plan."""
         async with self.config_update_lock:
@@ -254,7 +272,7 @@ class ConfigReloadLifecycle:
                 ):
                     continue
 
-                if drain_state.waiting_for_idle and active_response_count == 0:
+                if drain_state.waiting_for_idle and active_response_count <= 0:
                     logger.info("Active responses finished; applying queued configuration reload")
                 if drain_state.waiting_for_idle:
                     drain_state.reset()
