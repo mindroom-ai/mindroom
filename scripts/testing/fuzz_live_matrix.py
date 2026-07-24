@@ -1965,6 +1965,7 @@ class ExactReplyOracle:
         self.latest_reply_bodies: dict[str, tuple[int, str, str]] = {}
         self.reply_events_with_edits: set[str] = set()
         self.response_edit_targets: dict[str, str] = {}
+        self.response_edit_bodies: dict[str, str] = {}
         self.seen_event_ids: set[str] = set()
         self.limited_timeline_count = 0
         self.pagination_page_count = 0
@@ -2231,6 +2232,7 @@ class ExactReplyOracle:
             self.malformed_response_ids.add(event_id)
             return
         self.response_edit_targets[event_id] = target_event_id
+        self.response_edit_bodies[event_id] = cast("str", new_content["body"])
         self._track_reply_body(event_id, event, content, relation)
 
     def _track_reply_body(
@@ -2326,11 +2328,34 @@ class ExactReplyOracle:
             for event_id, target_event_id in self.response_edit_targets.items()
             if target_event_id not in canonical_response_ids
         }
-        if duplicates or unexpected or wrong_roots or orphan_edits or self.malformed_response_ids:
+        corrupt_stream_edits: dict[str, str] = {}
+        edits_by_target: dict[str, list[tuple[str, str]]] = defaultdict(list)
+        for event_id, target_event_id in self.response_edit_targets.items():
+            edits_by_target[target_event_id].append((event_id, self.response_edit_bodies[event_id]))
+        for edits in edits_by_target.values():
+            complete_bodies = [body for _event_id, body in edits if self._is_complete_model_body(body)]
+            if not complete_bodies:
+                continue
+            corrupt_stream_edits.update(
+                {
+                    event_id: body
+                    for event_id, body in edits
+                    if not any(complete_body.startswith(body) for complete_body in complete_bodies)
+                },
+            )
+        if (
+            duplicates
+            or unexpected
+            or wrong_roots
+            or orphan_edits
+            or corrupt_stream_edits
+            or self.malformed_response_ids
+        ):
             msg = (
                 "agent reply invariant failed: "
                 f"duplicates={duplicates}, unexpected={unexpected}, wrong_thread_roots={wrong_roots}, "
-                f"orphan_edits={orphan_edits}, malformed={sorted(self.malformed_response_ids)}"
+                f"orphan_edits={orphan_edits}, corrupt_stream_edits={sorted(corrupt_stream_edits)}, "
+                f"malformed={sorted(self.malformed_response_ids)}"
             )
             raise AssertionError(msg)
 

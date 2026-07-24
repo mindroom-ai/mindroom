@@ -880,6 +880,25 @@ def test_exact_reply_oracle_rejects_malformed_or_orphan_agent_edits() -> None:
         oracle._assert_no_wrong_replies()
 
 
+def test_exact_reply_oracle_rejects_corrupt_intermediate_stream_edit() -> None:
+    """A valid final body cannot conceal a corrupt transient replacement."""
+    oracle = ExactReplyOracle(cast("LiveMatrixClient", object()), "@agent:example")
+    oracle.expect("root:0", "$source")
+    oracle._ingest_event(_agent_reply_event("$source", "$response", "Thinking..."))
+    oracle._ingest_event(_agent_edit_event("$response", "not a model prefix", event_id="$corrupt"))
+    oracle._ingest_event(
+        _agent_edit_event(
+            "$response",
+            fuzz_live_matrix._ModelHandler.response_text_for(1),
+            event_id="$final",
+            timestamp=102,
+        ),
+    )
+
+    with pytest.raises(AssertionError, match=r"corrupt_stream_edits=.*\$corrupt"):
+        oracle._assert_no_wrong_replies()
+
+
 @pytest.mark.asyncio
 async def test_exact_reply_oracle_requires_completed_streaming_body() -> None:
     """A placeholder original is not complete until its final edit arrives."""
