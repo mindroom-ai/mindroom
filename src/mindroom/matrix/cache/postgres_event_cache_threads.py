@@ -65,6 +65,37 @@ async def load_thread_events(
     return [json.loads(row[2]) for row in rows]
 
 
+async def load_thread_events_written_between(
+    db: AsyncConnection,
+    *,
+    namespace: str,
+    room_id: str,
+    thread_id: str,
+    after_write_seq: int,
+    through_write_seq: int,
+) -> list[dict[str, Any]]:
+    """Return cached thread events written in one durable sequence interval."""
+    rows = await fetchall(
+        db,
+        """
+        SELECT thread_events.origin_server_ts, thread_events.write_seq, events.event_json
+        FROM mindroom_event_cache_thread_events AS thread_events
+        JOIN mindroom_event_cache_events AS events
+            ON events.namespace = thread_events.namespace
+            AND events.room_id = thread_events.room_id
+            AND events.event_id = thread_events.event_id
+        WHERE thread_events.namespace = %s
+            AND thread_events.room_id = %s
+            AND thread_events.thread_id = %s
+            AND events.write_seq > %s
+            AND events.write_seq <= %s
+        ORDER BY thread_events.origin_server_ts ASC, thread_events.write_seq ASC
+        """,
+        (namespace, room_id, thread_id, after_write_seq, through_write_seq),
+    )
+    return [json.loads(row[2]) for row in rows]
+
+
 async def load_recent_room_thread_ids(
     db: AsyncConnection,
     *,
@@ -104,7 +135,10 @@ async def _load_thread_cache_state_row(
             mindroom_event_cache_thread_state.invalidated_at,
             mindroom_event_cache_thread_state.invalidation_reason,
             mindroom_event_cache_room_state.invalidated_at,
-            mindroom_event_cache_room_state.invalidation_reason
+            mindroom_event_cache_room_state.invalidation_reason,
+            COALESCE(thread_stats.event_count, 0),
+            thread_stats.max_write_seq,
+            thread_stats.max_origin_server_ts
         FROM (SELECT %s AS requested_namespace, %s AS requested_room_id, %s AS requested_thread_id) AS requested
         LEFT JOIN mindroom_event_cache_thread_state
             ON mindroom_event_cache_thread_state.namespace = requested.requested_namespace
@@ -113,8 +147,23 @@ async def _load_thread_cache_state_row(
         LEFT JOIN mindroom_event_cache_room_state
             ON mindroom_event_cache_room_state.namespace = requested.requested_namespace
             AND mindroom_event_cache_room_state.room_id = requested.requested_room_id
+        LEFT JOIN (
+            SELECT
+                COUNT(*) AS event_count,
+                MAX(events.write_seq) AS max_write_seq,
+                MAX(thread_events.origin_server_ts) AS max_origin_server_ts
+            FROM mindroom_event_cache_thread_events AS thread_events
+            JOIN mindroom_event_cache_events AS events
+                ON events.namespace = thread_events.namespace
+                AND events.room_id = thread_events.room_id
+                AND events.event_id = thread_events.event_id
+            WHERE thread_events.namespace = %s
+                AND thread_events.room_id = %s
+                AND thread_events.thread_id = %s
+        ) AS thread_stats
+            ON TRUE
         """,
-        (namespace, room_id, thread_id),
+        (namespace, room_id, thread_id, namespace, room_id, thread_id),
     )
     return thread_cache_state_row(row)
 

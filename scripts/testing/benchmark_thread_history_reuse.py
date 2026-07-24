@@ -14,12 +14,17 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import gc
 import statistics
+import tempfile
 import time
+import tracemalloc
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock
 
-from mindroom.matrix.client_thread_history import _resolve_cached_thread_history
+from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
+from mindroom.matrix.client_thread_history import _load_cached_thread_history_if_usable
 from mindroom.matrix.thread_resolution_reuse import ThreadResolutionReuseCache
 
 ROOM = "!room:localhost"
@@ -85,10 +90,10 @@ def make_streaming_thread(
     return sources
 
 
-def _appended_user_message(rows: list[dict[str, Any]], turn: int) -> dict[str, Any]:
+def _appended_user_message(last_timestamp: int, turn: int) -> dict[str, Any]:
     return {
         "event_id": f"$turn-{turn}",
-        "origin_server_ts": rows[-1]["origin_server_ts"] + 10_000,
+        "origin_server_ts": last_timestamp + 10_000,
         "type": "m.room.message",
         "sender": "@user:localhost",
         "content": {
@@ -99,31 +104,25 @@ def _appended_user_message(rows: list[dict[str, Any]], turn: int) -> dict[str, A
     }
 
 
-def _event_cache() -> AsyncMock:
-    event_cache = AsyncMock()
-    event_cache.get_mxc_texts.return_value = {}
-    return event_cache
-
-
 async def _timed_resolve(
-    rows: list[dict[str, Any]],
+    event_cache: SqliteEventCache,
     *,
     reuse: ThreadResolutionReuseCache | None,
 ) -> tuple[float, int, str]:
     started = time.perf_counter()
-    messages, _sidecar_ms, kind = await _resolve_cached_thread_history(
+    result, rejection = await _load_cached_thread_history_if_usable(
         AsyncMock(),
         room_id=ROOM,
         thread_id=THREAD,
-        event_cache=_event_cache(),
-        cached_event_sources=rows,
-        expected_membership_epoch=0,
+        event_cache=event_cache,
+        hydrate_sidecars=True,
         trusted_sender_ids=TRUSTED_SENDER_IDS,
         resolution_reuse=reuse,
     )
     elapsed_ms = (time.perf_counter() - started) * 1000
-    assert messages is not None
-    return elapsed_ms, len(messages), kind
+    assert rejection is None
+    assert result is not None
+    return elapsed_ms, len(result), str(result.diagnostics["thread_resolution_reuse"])
 
 
 def _report(label: str, timings: list[float], *, raw_rows: int, visible: int, kind: str) -> None:
@@ -135,41 +134,86 @@ def _report(label: str, timings: list[float], *, raw_rows: int, visible: int, ki
 
 async def run_benchmark(*, visible_messages: int, edits_per_agent_message: int, turns: int) -> None:
     """Measure cold full resolution, warm snapshot reuse, and warm incremental merges."""
-    rows = make_streaming_thread(
-        visible_messages=visible_messages,
-        edits_per_agent_message=edits_per_agent_message,
-        final_body_chars=4000,
-    )
+    with tempfile.TemporaryDirectory() as temp_dir:
+        event_cache = SqliteEventCache(Path(temp_dir) / "event_cache.db")
+        await event_cache.initialize()
+        rows = make_streaming_thread(
+            visible_messages=visible_messages,
+            edits_per_agent_message=edits_per_agent_message,
+            final_body_chars=4000,
+        )
+        raw_rows = len(rows)
+        last_timestamp = int(rows[-1]["origin_server_ts"])
+        fetch_started_at = time.time()
+        replaced = await event_cache.replace_thread_if_not_newer(
+            ROOM,
+            THREAD,
+            rows,
+            expected_membership_epoch=0,
+            fetch_started_at=fetch_started_at,
+            validated_at=fetch_started_at,
+        )
+        assert replaced
+        del rows
+        gc.collect()
 
-    cold_timings: list[float] = []
-    for _ in range(turns):
-        elapsed_ms, visible, kind = await _timed_resolve(rows, reuse=None)
-        cold_timings.append(elapsed_ms)
-    _report("cold_full", cold_timings, raw_rows=len(rows), visible=visible, kind=kind)
+        try:
+            cold_timings: list[float] = []
+            for _ in range(turns):
+                elapsed_ms, visible, kind = await _timed_resolve(event_cache, reuse=None)
+                cold_timings.append(elapsed_ms)
+            _report("cold_full", cold_timings, raw_rows=raw_rows, visible=visible, kind=kind)
 
-    reuse = ThreadResolutionReuseCache()
-    await _timed_resolve(rows, reuse=reuse)  # populate the snapshot once
-    warm_timings: list[float] = []
-    for _ in range(turns):
-        elapsed_ms, visible, kind = await _timed_resolve(rows, reuse=reuse)
-        warm_timings.append(elapsed_ms)
-    _report("warm_reuse", warm_timings, raw_rows=len(rows), visible=visible, kind=kind)
+            reuse = ThreadResolutionReuseCache()
+            tracemalloc.start()
+            retained_before, _peak_before = tracemalloc.get_traced_memory()
+            await _timed_resolve(event_cache, reuse=reuse)
+            gc.collect()
+            retained_after, _peak_after = tracemalloc.get_traced_memory()
+            tracemalloc.stop()
+            print(f"snapshot_retained={(retained_after - retained_before) / (1024 * 1024):.1f} MiB")
 
-    incremental_timings: list[float] = []
-    grown = list(rows)
-    for turn in range(turns):
-        grown = [*grown, _appended_user_message(grown, turn)]
-        elapsed_ms, visible, kind = await _timed_resolve(grown, reuse=reuse)
-        incremental_timings.append(elapsed_ms)
-    _report("warm_incremental", incremental_timings, raw_rows=len(grown), visible=visible, kind=kind)
+            warm_timings: list[float] = []
+            for _ in range(turns):
+                elapsed_ms, visible, kind = await _timed_resolve(event_cache, reuse=reuse)
+                warm_timings.append(elapsed_ms)
+            _report("warm_reuse", warm_timings, raw_rows=raw_rows, visible=visible, kind=kind)
+
+            incremental_timings: list[float] = []
+            for turn in range(turns):
+                appended = _appended_user_message(last_timestamp, turn)
+                last_timestamp = int(appended["origin_server_ts"])
+                await event_cache.mark_thread_stale(ROOM, THREAD, reason="live_thread_mutation")
+                assert await event_cache.append_event(ROOM, THREAD, appended)
+                assert await event_cache.revalidate_thread_after_incremental_update(ROOM, THREAD)
+                elapsed_ms, visible, kind = await _timed_resolve(event_cache, reuse=reuse)
+                incremental_timings.append(elapsed_ms)
+            _report(
+                "warm_incremental",
+                incremental_timings,
+                raw_rows=raw_rows + turns,
+                visible=visible,
+                kind=kind,
+            )
+        finally:
+            await event_cache.close()
+
+
+def _positive_int(value: str) -> int:
+    """Parse a strictly positive benchmark size."""
+    parsed = int(value)
+    if parsed < 1:
+        message = "must be at least 1"
+        raise argparse.ArgumentTypeError(message)
+    return parsed
 
 
 def main() -> None:
     """Parse benchmark sizing arguments and run the benchmark."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--visible-messages", type=int, default=400)
-    parser.add_argument("--edits-per-agent-message", type=int, default=40)
-    parser.add_argument("--turns", type=int, default=5)
+    parser.add_argument("--visible-messages", type=_positive_int, default=400)
+    parser.add_argument("--edits-per-agent-message", type=_positive_int, default=40)
+    parser.add_argument("--turns", type=_positive_int, default=5)
     args = parser.parse_args()
     asyncio.run(
         run_benchmark(

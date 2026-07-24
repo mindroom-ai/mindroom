@@ -2,17 +2,16 @@
 
 Long agent threads accumulate one raw ``m.replace`` event per streaming edit, so the durable
 row count grows 10-50x faster than the visible message count. Re-parsing and re-resolving every
-raw row on each turn is the measured post-lock hotspot. This module keeps one bounded per-bot
-snapshot of the last complete resolution per thread and only re-resolves the raw-row suffix that
-was appended since.
+raw row on each turn is the measured post-lock hotspot. This module keeps the last complete
+resolution for one thread per bot and only re-resolves newly written durable rows.
 
 Safety model (any doubt falls back to full resolution by returning ``None``):
 
 1. A snapshot is only comparable when the trusted internal sender set and the durable room
    membership epoch are identical to the ones the snapshot was resolved under.
-2. The fresh durable rows must start with the snapshot's exact raw rows (dict equality), so any
-   in-place row change (redaction pruning, snapshot replacement, reordering) forces full
-   resolution.
+2. The durable event count and monotonic write sequence prove whether the thread is unchanged or
+   whether every changed row is present in a bounded delta read. Any deletion, replacement, or
+   in-place update forces full resolution.
 3. Suffix rows must be plain ``m.room.message`` events with new, unique event IDs that were never
    seen by the snapshot (including edit targets, reply targets, and synthesized originals), and
    every suffix edit - explicit or bundled - must target a suffix-local event, so no suffix row
@@ -23,8 +22,8 @@ Safety model (any doubt falls back to full resolution by returning ``None``):
 
 from __future__ import annotations
 
-from collections import OrderedDict
 from collections.abc import Mapping
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -34,20 +33,21 @@ from mindroom.matrix.event_info import EventInfo
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
 
-_MAX_SNAPSHOTS_PER_CACHE = 8
-
 
 @dataclass(slots=True)
 class ThreadResolutionSnapshot:
-    """One complete thread resolution keyed by the exact durable rows that produced it."""
+    """One complete thread resolution keyed by its durable row revision."""
 
-    event_sources: list[dict[str, Any]]
     messages: list[ResolvedVisibleMessage]
     input_order_by_event_id: dict[str, int]
     related_event_id_by_event_id: dict[str, str]
     known_event_ids: frozenset[str]
     trusted_sender_ids: frozenset[str]
     membership_epoch: int
+    event_count: int
+    max_write_seq: int
+    max_origin_server_ts: int
+    sidecar_texts: dict[tuple[str, str], str]
 
     def cloned_messages(self) -> list[ResolvedVisibleMessage]:
         """Return caller-owned message copies so later turns never see caller mutations."""
@@ -61,7 +61,7 @@ def clone_resolved_visible_message(message: ResolvedVisibleMessage) -> ResolvedV
         body=message.body,
         timestamp=message.timestamp,
         event_id=message.event_id,
-        content=dict(message.content),
+        content=deepcopy(message.content),
         thread_id=message.thread_id,
         latest_event_id=message.latest_event_id,
         stream_status=message.stream_status,
@@ -76,9 +76,14 @@ def build_thread_resolution_snapshot(
     related_event_id_by_event_id: dict[str, str],
     trusted_sender_ids: frozenset[str],
     membership_epoch: int,
+    event_count: int,
+    max_write_seq: int,
+    max_origin_server_ts: int,
+    sidecar_texts: Mapping[tuple[str, str], str],
+    prior_known_event_ids: frozenset[str] = frozenset(),
 ) -> ThreadResolutionSnapshot:
     """Build one reusable snapshot with private message copies and the full known-ID closure."""
-    known_event_ids: set[str] = set()
+    known_event_ids = set(prior_known_event_ids)
     for event_source in event_sources:
         event_id = event_source.get("event_id")
         if isinstance(event_id, str):
@@ -91,66 +96,91 @@ def build_thread_resolution_snapshot(
     # resolution.
     known_event_ids.update(related_event_id_by_event_id.values())
     return ThreadResolutionSnapshot(
-        event_sources=list(event_sources),
         messages=[clone_resolved_visible_message(message) for message in messages],
         input_order_by_event_id=input_order_by_event_id,
         related_event_id_by_event_id=related_event_id_by_event_id,
         known_event_ids=frozenset(known_event_ids),
         trusted_sender_ids=trusted_sender_ids,
         membership_epoch=membership_epoch,
+        event_count=event_count,
+        max_write_seq=max_write_seq,
+        max_origin_server_ts=max_origin_server_ts,
+        sidecar_texts=dict(sidecar_texts),
     )
 
 
 class ThreadResolutionReuseCache:
-    """Bounded per-bot LRU of reusable thread resolutions keyed by (room_id, thread_id)."""
+    """Keep the latest reusable thread resolution for one bot."""
 
-    def __init__(self, max_entries: int = _MAX_SNAPSHOTS_PER_CACHE) -> None:
-        self._max_entries = max_entries
-        self._snapshots: OrderedDict[tuple[str, str], ThreadResolutionSnapshot] = OrderedDict()
+    def __init__(self) -> None:
+        self._key: tuple[str, str] | None = None
+        self._snapshot: ThreadResolutionSnapshot | None = None
 
     def get(self, room_id: str, thread_id: str) -> ThreadResolutionSnapshot | None:
         """Return the stored snapshot for one thread when present."""
         key = (room_id, thread_id)
-        snapshot = self._snapshots.get(key)
-        if snapshot is not None:
-            self._snapshots.move_to_end(key)
-        return snapshot
+        return self._snapshot if key == self._key else None
 
     def store(self, room_id: str, thread_id: str, snapshot: ThreadResolutionSnapshot) -> None:
-        """Store one snapshot, evicting the least recently used entry beyond the cap."""
-        key = (room_id, thread_id)
-        self._snapshots[key] = snapshot
-        self._snapshots.move_to_end(key)
-        while len(self._snapshots) > self._max_entries:
-            self._snapshots.popitem(last=False)
+        """Replace the prior snapshot with the bot's latest resolved thread."""
+        self._key = (room_id, thread_id)
+        self._snapshot = snapshot
 
     def discard(self, room_id: str, thread_id: str) -> None:
         """Drop one snapshot after its durable counterpart was invalidated."""
-        self._snapshots.pop((room_id, thread_id), None)
+        if self._key == (room_id, thread_id):
+            self._key = None
+            self._snapshot = None
 
 
 def reusable_event_source_suffix(
     snapshot: ThreadResolutionSnapshot,
-    event_sources: Sequence[dict[str, Any]],
+    suffix: Sequence[dict[str, Any]],
     *,
     trusted_sender_ids: frozenset[str],
     membership_epoch: int,
+    event_count: int,
+    max_write_seq: int,
+    max_origin_server_ts: int,
 ) -> list[dict[str, Any]] | None:
-    """Return the appended raw rows when the snapshot is a safe exact prefix, else None."""
-    if snapshot.trusted_sender_ids != trusted_sender_ids or snapshot.membership_epoch != membership_epoch:
-        return None
-    prefix_length = len(snapshot.event_sources)
-    if len(event_sources) < prefix_length:
-        return None
-    if any(
-        row != snapshot_row
-        for row, snapshot_row in zip(event_sources[:prefix_length], snapshot.event_sources, strict=True)
+    """Return a complete append-only delta when it is safe to merge, else None."""
+    unsafe_timestamp = any(
+        not isinstance(origin_server_ts := event_source.get("origin_server_ts"), int)
+        or isinstance(origin_server_ts, bool)
+        or origin_server_ts < snapshot.max_origin_server_ts
+        for event_source in suffix
+    )
+    if (
+        snapshot.trusted_sender_ids != trusted_sender_ids
+        or snapshot.membership_epoch != membership_epoch
+        or event_count <= snapshot.event_count
+        or max_write_seq <= snapshot.max_write_seq
+        or len(suffix) != event_count - snapshot.event_count
+        or max_origin_server_ts < snapshot.max_origin_server_ts
+        or unsafe_timestamp
     ):
         return None
-    suffix = list(event_sources[prefix_length:])
-    if not _suffix_is_safely_appendable(snapshot, suffix):
+    resolved_suffix = list(suffix)
+    if not _suffix_is_safely_appendable(snapshot, resolved_suffix):
         return None
-    return suffix
+    return resolved_suffix
+
+
+def snapshot_matches_revision(
+    snapshot: ThreadResolutionSnapshot,
+    *,
+    trusted_sender_ids: frozenset[str],
+    membership_epoch: int,
+    event_count: int,
+    max_write_seq: int,
+) -> bool:
+    """Return whether durable state still names the snapshot's exact raw rows."""
+    return (
+        snapshot.trusted_sender_ids == trusted_sender_ids
+        and snapshot.membership_epoch == membership_epoch
+        and snapshot.event_count == event_count
+        and snapshot.max_write_seq == max_write_seq
+    )
 
 
 def _suffix_is_safely_appendable(
@@ -203,4 +233,5 @@ __all__ = [
     "build_thread_resolution_snapshot",
     "clone_resolved_visible_message",
     "reusable_event_source_suffix",
+    "snapshot_matches_revision",
 ]

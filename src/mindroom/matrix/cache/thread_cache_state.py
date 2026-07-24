@@ -53,6 +53,9 @@ class ThreadCacheStateRow:
     invalidation_reason: str | None
     room_invalidated_at: float | None
     room_invalidation_reason: str | None
+    event_count: int
+    max_write_seq: int | None
+    max_origin_server_ts: int | None
 
     def as_public_state(self) -> ThreadCacheState:
         """Return the public cache-state value."""
@@ -62,6 +65,9 @@ class ThreadCacheStateRow:
             invalidation_reason=self.invalidation_reason,
             room_invalidated_at=self.room_invalidated_at,
             room_invalidation_reason=self.room_invalidation_reason,
+            event_count=self.event_count,
+            max_write_seq=self.max_write_seq,
+            max_origin_server_ts=self.max_origin_server_ts,
         )
 
 
@@ -69,10 +75,10 @@ def thread_cache_state_row(values: Sequence[float | str | None] | None) -> Threa
     """Normalize one backend storage row into backend-neutral cache-state values."""
     if values is None:
         return None
-    if len(values) != 5:
-        msg = f"Thread cache-state row must contain exactly 5 values, got {len(values)}"
+    if len(values) != 8:
+        msg = f"Thread cache-state row must contain exactly 8 values, got {len(values)}"
         raise ValueError(msg)
-    if all(value is None for value in values):
+    if all(value is None for value in values[:5]):
         return None
     return ThreadCacheStateRow(
         validated_at=None if values[0] is None else float(values[0]),
@@ -80,6 +86,9 @@ def thread_cache_state_row(values: Sequence[float | str | None] | None) -> Threa
         invalidation_reason=values[2] if isinstance(values[2], str) else None,
         room_invalidated_at=None if values[3] is None else float(values[3]),
         room_invalidation_reason=values[4] if isinstance(values[4], str) else None,
+        event_count=0 if values[5] is None else int(values[5]),
+        max_write_seq=None if values[6] is None else int(values[6]),
+        max_origin_server_ts=None if values[7] is None else int(values[7]),
     )
 
 

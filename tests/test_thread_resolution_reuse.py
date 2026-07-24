@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 import mindroom.matrix.client_thread_history as matrix_client_module
+from mindroom.matrix.cache import ThreadCacheState
 from mindroom.matrix.client_thread_history import fetch_thread_history
 from mindroom.matrix.thread_resolution_reuse import (
     ThreadResolutionReuseCache,
@@ -103,19 +105,51 @@ async def _resolve(
     event_cache: AsyncMock | None = None,
     thread_id: str = THREAD,
 ) -> tuple[list[ResolvedVisibleMessage], str]:
-    messages, _sidecar_ms, kind = await matrix_client_module._resolve_cached_thread_history(
+    cache = event_cache if event_cache is not None else make_event_cache_mock()
+    previous_rows = getattr(reuse, "_test_rows", None) if reuse is not None else None
+    previous_write_seq = getattr(reuse, "_test_write_seq", 0) if reuse is not None else 0
+    if previous_rows == rows:
+        max_write_seq = previous_write_seq
+        suffix: list[dict[str, Any]] = []
+    elif (
+        isinstance(previous_rows, list)
+        and len(rows) > len(previous_rows)
+        and rows[: len(previous_rows)] == previous_rows
+    ):
+        suffix = rows[len(previous_rows) :]
+        max_write_seq = previous_write_seq + len(suffix)
+    else:
+        suffix = []
+        max_write_seq = previous_write_seq + max(len(rows), 1)
+    if reuse is not None:
+        reuse._test_rows = list(rows)  # type: ignore[attr-defined]
+        reuse._test_write_seq = max_write_seq  # type: ignore[attr-defined]
+
+    cache.room_membership_epoch.return_value = epoch
+    cache.get_thread_cache_state.return_value = ThreadCacheState(
+        validated_at=1.0,
+        invalidated_at=None,
+        invalidation_reason=None,
+        room_invalidated_at=None,
+        room_invalidation_reason=None,
+        event_count=len(rows),
+        max_write_seq=max_write_seq,
+        max_origin_server_ts=max(int(row["origin_server_ts"]) for row in rows),
+    )
+    cache.get_thread_events.return_value = rows
+    cache.get_thread_events_written_between.return_value = suffix
+    result, rejection = await matrix_client_module._load_cached_thread_history_if_usable(
         AsyncMock(),
         room_id=ROOM,
         thread_id=thread_id,
-        event_cache=event_cache if event_cache is not None else make_event_cache_mock(),
-        cached_event_sources=rows,
+        event_cache=cache,
         hydrate_sidecars=hydrate_sidecars,
-        expected_membership_epoch=epoch,
         trusted_sender_ids=trusted,
         resolution_reuse=reuse,
     )
-    assert messages is not None
-    return messages, kind
+    assert rejection is None
+    assert result is not None
+    return list(result), str(result.diagnostics["thread_resolution_reuse"])
 
 
 def _counting_resolver() -> tuple[Any, list[int]]:
@@ -128,6 +162,25 @@ def _counting_resolver() -> tuple[Any, list[int]]:
         return await original(client, **kwargs)
 
     return wrapper, resolved_row_counts
+
+
+def _guard_suffix(
+    snapshot: ThreadResolutionSnapshot,
+    suffix: list[dict[str, Any]],
+) -> list[dict[str, Any]] | None:
+    """Apply the append-only guard with a matching synthetic durable revision."""
+    return reusable_event_source_suffix(
+        snapshot,
+        suffix,
+        trusted_sender_ids=frozenset(),
+        membership_epoch=EPOCH,
+        event_count=snapshot.event_count + len(suffix),
+        max_write_seq=snapshot.max_write_seq + len(suffix),
+        max_origin_server_ts=max(
+            snapshot.max_origin_server_ts,
+            *(int(row["origin_server_ts"]) for row in suffix),
+        ),
+    )
 
 
 class TestSnapshotReuse:
@@ -152,17 +205,19 @@ class TestSnapshotReuse:
     @pytest.mark.asyncio
     async def test_reused_messages_are_caller_owned_copies(self) -> None:
         """Mutating a returned history must not corrupt the stored snapshot."""
-        rows = [_message_row(THREAD, 1000, "root")]
+        rows = [_message_row(THREAD, 1000, "root"), _message_row("$m1", 2000, "reply")]
         reuse = ThreadResolutionReuseCache()
 
         first, _ = await _resolve(rows, reuse=reuse)
         first[0].body = "mutated"
         first[0].content["body"] = "mutated"
+        first[1].content["m.relates_to"]["event_id"] = "$mutated"
 
         second, kind = await _resolve(rows, reuse=reuse)
         assert kind == "reuse"
         assert second[0].body == "root"
         assert second[0].content["body"] == "root"
+        assert second[1].content["m.relates_to"]["event_id"] == THREAD
 
     @pytest.mark.asyncio
     async def test_appended_message_resolves_only_suffix(self) -> None:
@@ -256,7 +311,8 @@ class TestSnapshotReuse:
         reuse = ThreadResolutionReuseCache()
 
         await _resolve(rows, reuse=reuse, thread_id=THREAD)
-        _, kind = await _resolve(rows, reuse=reuse, thread_id="$other_root")
+        other_rows = [{**rows[0], "event_id": "$other_root"}]
+        _, kind = await _resolve(other_rows, reuse=reuse, thread_id="$other_root")
 
         assert kind == "full"
 
@@ -289,6 +345,27 @@ class TestSnapshotReuse:
         assert second_kind == "full"
 
     @pytest.mark.asyncio
+    async def test_changed_sidecar_text_forces_full_resolution(self) -> None:
+        """Exact reuse verifies sidecar plaintext dependencies before serving a snapshot."""
+        rows = [_message_row(THREAD, 1000, "root"), _sidecar_row("$m1", 2000)]
+        reuse = ThreadResolutionReuseCache()
+        event_cache = make_event_cache_mock()
+        reference = ("$m1", "mxc://server/sidecar-m1")
+        event_cache.get_mxc_texts.return_value = {
+            reference: json.dumps({"msgtype": "m.text", "body": "first body"}),
+        }
+
+        first, _first_kind = await _resolve(rows, reuse=reuse, event_cache=event_cache)
+        event_cache.get_mxc_texts.return_value = {
+            reference: json.dumps({"msgtype": "m.text", "body": "second body"}),
+        }
+        second, second_kind = await _resolve(rows, reuse=reuse, event_cache=event_cache)
+
+        assert first[1].body == "first body"
+        assert second[1].body == "second body"
+        assert second_kind == "full"
+
+    @pytest.mark.asyncio
     async def test_resolution_failure_discards_snapshot_and_invalidates(self) -> None:
         """A resolution failure drops the snapshot alongside the durable cache entry."""
         rows = [_message_row(THREAD, 1000, "root")]
@@ -313,6 +390,16 @@ class TestSnapshotReuse:
                 expected_membership_epoch=EPOCH + 1,
                 trusted_sender_ids=(),
                 resolution_reuse=reuse,
+                cache_state=ThreadCacheState(
+                    validated_at=1.0,
+                    invalidated_at=None,
+                    invalidation_reason=None,
+                    room_invalidated_at=None,
+                    room_invalidation_reason=None,
+                    event_count=1,
+                    max_write_seq=2,
+                    max_origin_server_ts=1000,
+                ),
             )
 
         assert messages is None
@@ -394,12 +481,7 @@ class TestSuffixSafetyGuards:
             "content": {},
         }
 
-        suffix = reusable_event_source_suffix(
-            snapshot,
-            [*rows, redaction],
-            trusted_sender_ids=frozenset(),
-            membership_epoch=EPOCH,
-        )
+        suffix = _guard_suffix(snapshot, [redaction])
         assert suffix is None
 
     @pytest.mark.asyncio
@@ -408,17 +490,10 @@ class TestSuffixSafetyGuards:
         rows = [_message_row(THREAD, 1000, "root"), _message_row("$m1", 2000, "reply")]
         snapshot = await self._snapshot(rows)
 
-        replayed_known = reusable_event_source_suffix(
+        replayed_known = _guard_suffix(snapshot, [_message_row("$m1", 3000, "replayed")])
+        duplicated_new = _guard_suffix(
             snapshot,
-            [*rows, _message_row("$m1", 3000, "replayed")],
-            trusted_sender_ids=frozenset(),
-            membership_epoch=EPOCH,
-        )
-        duplicated_new = reusable_event_source_suffix(
-            snapshot,
-            [*rows, _message_row("$m2", 3000, "one"), _message_row("$m2", 3100, "two")],
-            trusted_sender_ids=frozenset(),
-            membership_epoch=EPOCH,
+            [_message_row("$m2", 3000, "one"), _message_row("$m2", 3100, "two")],
         )
         assert replayed_known is None
         assert duplicated_new is None
@@ -432,12 +507,7 @@ class TestSuffixSafetyGuards:
         ]
         snapshot = await self._snapshot(rows)
 
-        suffix = reusable_event_source_suffix(
-            snapshot,
-            [*rows, _message_row("$missing_original", 3000, "late arrival")],
-            trusted_sender_ids=frozenset(),
-            membership_epoch=EPOCH,
-        )
+        suffix = _guard_suffix(snapshot, [_message_row("$missing_original", 3000, "late arrival")])
         assert suffix is None
 
     @pytest.mark.asyncio
@@ -465,12 +535,7 @@ class TestSuffixSafetyGuards:
             },
         }
 
-        suffix = reusable_event_source_suffix(
-            snapshot,
-            [*rows, bundled],
-            trusted_sender_ids=frozenset(),
-            membership_epoch=EPOCH,
-        )
+        suffix = _guard_suffix(snapshot, [bundled])
         assert suffix is None
 
     def test_rejects_rows_without_string_event_id(self) -> None:
@@ -482,20 +547,19 @@ class TestSuffixSafetyGuards:
             related_event_id_by_event_id={},
             trusted_sender_ids=frozenset(),
             membership_epoch=EPOCH,
+            event_count=0,
+            max_write_seq=0,
+            max_origin_server_ts=0,
+            sidecar_texts={},
         )
         missing_id = {"origin_server_ts": 1000, "type": "m.room.message", "content": {}}
 
-        suffix = reusable_event_source_suffix(
-            snapshot,
-            [missing_id],
-            trusted_sender_ids=frozenset(),
-            membership_epoch=EPOCH,
-        )
+        suffix = _guard_suffix(snapshot, [missing_id])
         assert suffix is None
 
 
 class TestReuseCacheBounds:
-    """LRU behavior of the per-bot reuse cache."""
+    """Single-snapshot behavior of the per-bot reuse cache."""
 
     def _snapshot(self) -> ThreadResolutionSnapshot:
         return build_thread_resolution_snapshot(
@@ -505,19 +569,20 @@ class TestReuseCacheBounds:
             related_event_id_by_event_id={},
             trusted_sender_ids=frozenset(),
             membership_epoch=EPOCH,
+            event_count=1,
+            max_write_seq=1,
+            max_origin_server_ts=1,
+            sidecar_texts={},
         )
 
-    def test_evicts_least_recently_used_beyond_cap(self) -> None:
-        """The cache keeps at most ``max_entries`` snapshots, evicting the least recent."""
-        cache = ThreadResolutionReuseCache(max_entries=2)
+    def test_new_thread_replaces_previous_snapshot(self) -> None:
+        """The cache retains only the bot's latest resolved thread."""
+        cache = ThreadResolutionReuseCache()
         cache.store(ROOM, "$t1", self._snapshot())
         cache.store(ROOM, "$t2", self._snapshot())
-        assert cache.get(ROOM, "$t1") is not None  # refresh recency
-        cache.store(ROOM, "$t3", self._snapshot())
 
-        assert cache.get(ROOM, "$t2") is None
-        assert cache.get(ROOM, "$t1") is not None
-        assert cache.get(ROOM, "$t3") is not None
+        assert cache.get(ROOM, "$t1") is None
+        assert cache.get(ROOM, "$t2") is not None
 
     def test_discard_removes_entry(self) -> None:
         """``discard`` removes a stored snapshot."""
@@ -553,3 +618,61 @@ class TestFetchPathIntegration:
         assert list(second) == list(first)
         assert first.diagnostics["thread_resolution_reuse"] == "full"
         assert second.diagnostics["thread_resolution_reuse"] == "reuse"
+
+    @pytest.mark.asyncio
+    async def test_fetch_thread_history_reads_only_new_rows_for_safe_append(self, tmp_path: Path) -> None:
+        """A fresh append is merged from the durable write-sequence delta."""
+        from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache  # noqa: PLC0415
+
+        cache = SqliteEventCache(tmp_path / "event_cache.db")
+        await cache.initialize()
+        rows = [_message_row(THREAD, 1000, "root"), _message_row("$m1", 2000, "reply")]
+        await replace_thread_unconditionally(cache, ROOM, THREAD, rows)
+
+        client = MagicMock()
+        client.user_id = "@mindroom_general:localhost"
+        client.room_messages = AsyncMock(side_effect=AssertionError("should not refetch fresh cache"))
+        reuse = ThreadResolutionReuseCache()
+        try:
+            first = await fetch_thread_history(client, ROOM, THREAD, event_cache=cache, resolution_reuse=reuse)
+            appended = _message_row("$m2", 3000, "new reply")
+            await cache.mark_thread_stale(ROOM, THREAD, reason="live_thread_mutation")
+            assert await cache.append_event(ROOM, THREAD, appended)
+            assert await cache.revalidate_thread_after_incremental_update(ROOM, THREAD)
+            with patch.object(
+                cache,
+                "get_thread_events",
+                AsyncMock(side_effect=AssertionError("incremental reuse should not read the full thread")),
+            ):
+                second = await fetch_thread_history(client, ROOM, THREAD, event_cache=cache, resolution_reuse=reuse)
+        finally:
+            await cache.close()
+
+        assert [message.event_id for message in first] == [THREAD, "$m1"]
+        assert [message.event_id for message in second] == [THREAD, "$m1", "$m2"]
+        assert second.diagnostics["thread_resolution_reuse"] == "incremental"
+
+    @pytest.mark.asyncio
+    async def test_point_payload_upgrade_forces_full_resolution(self, tmp_path: Path) -> None:
+        """A changed lookup payload is detected even when its thread-index row is unchanged."""
+        from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache  # noqa: PLC0415
+
+        cache = SqliteEventCache(tmp_path / "event_cache.db")
+        await cache.initialize()
+        rows = [_message_row(THREAD, 1000, "root"), _message_row("$m1", 2000, "original")]
+        await replace_thread_unconditionally(cache, ROOM, THREAD, rows)
+
+        client = MagicMock()
+        client.user_id = "@mindroom_general:localhost"
+        client.room_messages = AsyncMock(side_effect=AssertionError("should not refetch fresh cache"))
+        reuse = ThreadResolutionReuseCache()
+        try:
+            await fetch_thread_history(client, ROOM, THREAD, event_cache=cache, resolution_reuse=reuse)
+            updated = _message_row("$m1", 2000, "updated")
+            await cache.store_event("$m1", ROOM, updated, expected_membership_epoch=0)
+            second = await fetch_thread_history(client, ROOM, THREAD, event_cache=cache, resolution_reuse=reuse)
+        finally:
+            await cache.close()
+
+        assert [message.body for message in second] == ["root", "updated"]
+        assert second.diagnostics["thread_resolution_reuse"] == "full"

@@ -372,6 +372,7 @@ async def test_conversation_cache_thread_reads_forward_client_fetch_metadata(
                 trusted_sender_ids=conversation_cache._trusted_sender_ids(),
                 caller_label=f"caller-{method_name}",
                 coordinator_queue_wait_ms=queue_wait_ms,
+                resolution_reuse=conversation_cache._thread_resolution_reuse,
             )
     finally:
         await event_cache.close()
@@ -871,6 +872,7 @@ async def test_conversation_cache_startup_prewarm_fetch_preserves_fixed_metadata
             trusted_sender_ids=conversation_cache._trusted_sender_ids(),
             caller_label="startup_thread_prewarm",
             coordinator_queue_wait_ms=0.0,
+            resolution_reuse=conversation_cache._thread_resolution_reuse,
         )
     finally:
         await event_cache.close()
@@ -2999,6 +3001,44 @@ async def test_mxc_text_cache_round_trips_across_event_cache_reopen(
         await reopened_cache.close()
 
     assert cached_text == "Full text sidecar"
+
+
+@pytest.mark.asyncio
+async def test_thread_cache_revision_tracks_point_payload_updates(
+    event_cache_factory: Callable[[], ConversationEventCache],
+) -> None:
+    """Thread revision metadata and delta reads include changed lookup payloads."""
+    cache = event_cache_factory()
+    await cache.initialize()
+    root = {
+        "event_id": "$thread_root",
+        "origin_server_ts": 1000,
+        "type": "m.room.message",
+        "sender": "@user:localhost",
+        "content": {"msgtype": "m.text", "body": "original"},
+    }
+    try:
+        await _replace_thread(cache, "!room:localhost", "$thread_root", [root])
+        before = await cache.get_thread_cache_state("!room:localhost", "$thread_root")
+        updated = {**root, "content": {"msgtype": "m.text", "body": "updated"}}
+        await cache.store_event("$thread_root", "!room:localhost", updated)
+        after = await cache.get_thread_cache_state("!room:localhost", "$thread_root")
+        assert before is not None
+        assert before.max_write_seq is not None
+        assert after is not None
+        assert after.max_write_seq is not None
+        changed_rows = await cache.get_thread_events_written_between(
+            "!room:localhost",
+            "$thread_root",
+            after_write_seq=before.max_write_seq,
+            through_write_seq=after.max_write_seq,
+        )
+    finally:
+        await cache.close()
+
+    assert before.event_count == after.event_count == 1
+    assert after.max_write_seq > before.max_write_seq
+    assert changed_rows == [updated]
 
 
 @pytest.mark.asyncio
