@@ -25,7 +25,7 @@ from agno.run.agent import (
 from agno.run.base import RunStatus
 
 from mindroom import ai_runtime
-from mindroom.agents import create_agent
+from mindroom.agents import agent_build_can_overlap_file_memory, create_agent
 from mindroom.ai_run_metadata import (
     build_ai_run_metadata_content,
     build_model_request_metrics_fallback,
@@ -72,7 +72,7 @@ from mindroom.media_fallback import (
 from mindroom.media_inputs import MediaInputs, MediaKind
 from mindroom.memory import build_memory_prompt_parts, strip_user_turn_time_prefix
 from mindroom.metadata_merge import deep_merge_metadata
-from mindroom.pre_model_preparation import prepare_mem0_prompt_branches
+from mindroom.pre_model_preparation import prepare_prompt_branches
 from mindroom.response_turn import (
     AttemptResolved,
     BlockingAttemptResolution,
@@ -1150,17 +1150,33 @@ async def _prepare_agent_and_prompt(
             )
         return runtime_model, agent
 
-    parallel_branches = config.resolve_entity(agent_name).memory_backend == "mem0"
+    memory_backend = config.resolve_entity(agent_name).memory_backend
+    parallel_branches = memory_backend == "mem0"
+    serial_reason: str | None = None
+    if memory_backend == "file":
+        parallel_branches = reusable_agent is not None or await asyncio.to_thread(
+            agent_build_can_overlap_file_memory,
+            agent_name,
+            config,
+            storage_path,
+        )
+        if not parallel_branches:
+            serial_reason = "default_workspace_scaffold_pending"
     if pipeline_timing is not None:
-        pipeline_timing.note(prompt_branches_parallel=parallel_branches)
+        pipeline_timing.note(
+            prompt_branches_parallel=parallel_branches,
+            prompt_branches_memory_backend=memory_backend,
+            prompt_branches_serial_reason=serial_reason,
+        )
     if parallel_branches:
         _mark_pipeline_timing(pipeline_timing, "prompt_branches_start")
         with timed_block(
             "system_prompt_assembly.memory_agent_join",
             parallel=True,
+            memory_backend=memory_backend,
         ):
             try:
-                prompt_parts, runtime_model, agent = await prepare_mem0_prompt_branches(
+                prompt_parts, runtime_model, agent = await prepare_prompt_branches(
                     prepare_memory=lambda: build_memory_prompt_parts(
                         prompt,
                         agent_name,
@@ -1232,7 +1248,7 @@ async def _prepare_agent_and_prompt(
         thread_history=thread_history,
         runtime_paths=runtime_paths,
         config=config,
-        resolved_runtime_model=runtime_model if parallel_branches else None,
+        resolved_runtime_model=runtime_model,
         compaction_lifecycle=compaction_lifecycle,
         current_sender_id=None if include_openai_compat_guidance else ctx.requester_id,
         current_timestamp_ms=current_timestamp_ms,

@@ -2,24 +2,27 @@
 
 Measures wall time plus call counts for plugin loads, skill scans, skill-cache
 clears, tool-schema preparations, Function deep copies, and payload
-serializations across two phases:
+serializations across three phases:
 
 - ``agent_build``: repeated warm ``create_agent`` calls for one config.
 - ``tool_surface``: one turn's static token budgeting (execution preparation
   plus the history-runtime re-estimate) and run-metadata payload assembly on
   one fresh agent instance.
+- ``prompt_branches``: controlled file-memory and agent-build delays executed
+  sequentially (before) and concurrently (after).
 """
 
 from __future__ import annotations
 
 import argparse
+import asyncio
 import functools
 import json
 import logging
 import tempfile
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import structlog
 from agno.tools.function import Function
@@ -27,7 +30,7 @@ from agno.tools.function import Function
 from mindroom import agents as agents_module
 from mindroom.agent_knowledge_descriptions import KnowledgeToolDescribingAgent
 from mindroom.agents import create_agent
-from mindroom.config.main import load_config
+from mindroom.config.main import ResolvedRuntimeModel, load_config
 from mindroom.constants import resolve_primary_runtime_paths
 from mindroom.history import prompt_tokens as prompt_tokens_module
 from mindroom.history.prompt_tokens import (
@@ -35,16 +38,37 @@ from mindroom.history.prompt_tokens import (
     agent_tool_definition_payloads_for_logging,
     estimate_agent_static_tokens,
 )
+from mindroom.memory import MemoryPromptParts
 from mindroom.model_defaults import CONFIG_INIT_MODEL_PRESETS
+from mindroom.pre_model_preparation import prepare_prompt_branches
 from mindroom.tool_system import skills as skills_module
 from mindroom.tool_system.plugins import load_plugins
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from agno.agent import Agent
     from agno.skills.skill import Skill
 
 _COUNTERS: dict[str, int] = {}
+
+
+def _positive_int(value: str) -> int:
+    """Parse a positive iteration count for benchmark arguments."""
+    parsed = int(value)
+    if parsed < 1:
+        msg = "must be at least 1"
+        raise argparse.ArgumentTypeError(msg)
+    return parsed
+
+
+def _nonnegative_float(value: str) -> float:
+    """Parse a nonnegative synthetic-delay value."""
+    parsed = float(value)
+    if parsed < 0:
+        msg = "must be nonnegative"
+        raise argparse.ArgumentTypeError(msg)
+    return parsed
 
 
 def _count(name: str) -> None:
@@ -179,11 +203,85 @@ def _phase[T](
     }
 
 
+def _sample_summary(samples: list[float]) -> dict[str, float]:
+    ordered = sorted(samples)
+    midpoint = len(ordered) // 2
+    median = ordered[midpoint] if len(ordered) % 2 else (ordered[midpoint - 1] + ordered[midpoint]) / 2
+    return {
+        "total_ms": round(sum(samples), 3),
+        "mean_ms": round(sum(samples) / len(samples), 3),
+        "p50_ms": round(median, 3),
+        "min_ms": round(ordered[0], 3),
+        "max_ms": round(ordered[-1], 3),
+    }
+
+
+async def _benchmark_prompt_branches(
+    *,
+    runs: int,
+    memory_delay_ms: float,
+    agent_delay_ms: float,
+) -> dict[str, object]:
+    """Compare old sequential branch timing with concurrent preparation."""
+    runtime_model = ResolvedRuntimeModel(model_name="benchmark", context_window=None)
+    memory_delay = memory_delay_ms / 1000
+    agent_delay = agent_delay_ms / 1000
+
+    async def prepare_memory() -> MemoryPromptParts:
+        await asyncio.to_thread(time.sleep, memory_delay)
+        return MemoryPromptParts()
+
+    def build_agent() -> tuple[ResolvedRuntimeModel, Agent]:
+        time.sleep(agent_delay)
+        return runtime_model, cast("Agent", object())
+
+    async def run_sequential() -> None:
+        await prepare_memory()
+        await asyncio.to_thread(build_agent)
+
+    async def run_parallel() -> None:
+        await prepare_prompt_branches(
+            prepare_memory=prepare_memory,
+            build_agent=build_agent,
+            agent_name="benchmark",
+            shared_scope_storage=None,
+            pipeline_timing=None,
+        )
+
+    before_samples: list[float] = []
+    after_samples: list[float] = []
+    for _ in range(runs):
+        started_at = time.perf_counter()
+        await run_sequential()
+        before_samples.append((time.perf_counter() - started_at) * 1000)
+
+        started_at = time.perf_counter()
+        await run_parallel()
+        after_samples.append((time.perf_counter() - started_at) * 1000)
+
+    before = _sample_summary(before_samples)
+    after = _sample_summary(after_samples)
+    return {
+        "phase": "prompt_branches",
+        "iterations": runs,
+        "configured_branch_ms": {
+            "file_memory": memory_delay_ms,
+            "agent_build": agent_delay_ms,
+        },
+        "before_sequential": before,
+        "after_parallel": after,
+        "mean_saved_ms": round(before["mean_ms"] - after["mean_ms"], 3),
+    }
+
+
 def main() -> None:
     """Run the prompt-assembly benchmark and print JSON results."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--builds", type=int, default=25)
-    parser.add_argument("--turns", type=int, default=25)
+    parser.add_argument("--builds", type=_positive_int, default=25)
+    parser.add_argument("--turns", type=_positive_int, default=25)
+    parser.add_argument("--branch-runs", type=_positive_int, default=10)
+    parser.add_argument("--branch-memory-ms", type=_nonnegative_float, default=20.0)
+    parser.add_argument("--branch-agent-ms", type=_nonnegative_float, default=40.0)
     args = parser.parse_args()
 
     logging.getLogger().setLevel(logging.ERROR)
@@ -256,6 +354,15 @@ def main() -> None:
                 "misses": cache_info.misses,
                 "size": cache_info.currsize,
             },
+        )
+        results.append(
+            asyncio.run(
+                _benchmark_prompt_branches(
+                    runs=args.branch_runs,
+                    memory_delay_ms=args.branch_memory_ms,
+                    agent_delay_ms=args.branch_agent_ms,
+                ),
+            ),
         )
 
     print(json.dumps(results, indent=2))

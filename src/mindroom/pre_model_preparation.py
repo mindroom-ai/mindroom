@@ -1,4 +1,4 @@
-"""Concurrent pre-model preparation for Mem0-backed agent turns."""
+"""Concurrent pre-model preparation for agent turns."""
 
 from __future__ import annotations
 
@@ -88,7 +88,7 @@ def _discard_unreturned_agent_result(
         _close_unreturned_agent(result[1], shared_scope_storage, caller_owned_agent)
 
 
-async def prepare_mem0_prompt_branches(
+async def prepare_prompt_branches(
     *,
     prepare_memory: Callable[[], Awaitable[MemoryPromptParts]],
     build_agent: Callable[[], tuple[ResolvedRuntimeModel, Agent]],
@@ -97,7 +97,7 @@ async def prepare_mem0_prompt_branches(
     pipeline_timing: DispatchPipelineTiming | None,
     caller_owned_agent: Agent | None = None,
 ) -> tuple[MemoryPromptParts, ResolvedRuntimeModel, Agent]:
-    """Overlap Mem0 preparation with agent construction and join both safely."""
+    """Overlap memory preparation with agent construction and join both safely."""
 
     async def _memory_branch() -> MemoryPromptParts | Exception:
         _mark_pipeline_timing(pipeline_timing, "memory_prepare_start")

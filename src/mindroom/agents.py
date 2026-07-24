@@ -193,6 +193,15 @@ def ensure_default_agent_workspaces(config: Config, storage_path: Path) -> None:
             _ensure_default_mind_workspace(storage_path)
 
 
+def agent_build_can_overlap_file_memory(agent_name: str, config: Config, storage_path: Path) -> bool:
+    """Return True when it is safe to overlap agent construction with file-memory reads."""
+    agent_config = config.get_agent(agent_name)
+    if not _uses_default_mind_workspace_scaffold(agent_name, agent_config):
+        return True
+    memory_path = agent_workspace_root_path(storage_path, agent_name) / "MEMORY.md"
+    return memory_path.is_file()
+
+
 def _get_datetime_context(
     timezone_str: str,
     *,
@@ -1865,6 +1874,7 @@ def create_agent(
 
 
 __all__ = [
+    "agent_build_can_overlap_file_memory",
     "build_agent_toolkit",
     "create_agent",
     "describe_agent",

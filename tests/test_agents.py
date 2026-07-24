@@ -29,6 +29,7 @@ from mindroom.agents import (
     _PRIVATE_CULTURE_MANAGER_CACHE,
     _load_context_files,
     _prune_toolkit_functions,
+    agent_build_can_overlap_file_memory,
     build_agent_toolkit,
     create_agent,
     get_agent_toolkit_names,
@@ -2299,6 +2300,7 @@ def test_create_agent_scaffolds_default_mind_workspace_under_runtime_storage_roo
         models={"default": ModelConfig(provider="openai", id="gpt-4")},
     )
 
+    assert not agent_build_can_overlap_file_memory("mind", config, runtime_storage)
     agent = _create_agent_for_test("mind", config=_bind_runtime_paths(config, _runtime_paths(runtime_storage)))
 
     workspace = runtime_storage / "agents" / "mind" / "workspace"
@@ -2310,6 +2312,7 @@ def test_create_agent_scaffolds_default_mind_workspace_under_runtime_storage_roo
     assert (workspace / "HEARTBEAT.md").exists()
     assert (workspace / "MEMORY.md").exists()
     assert "## Personality Context" in agent.role
+    assert agent_build_can_overlap_file_memory("mind", config, runtime_storage)
 
 
 @patch("mindroom.agents.get_tool_by_name")
