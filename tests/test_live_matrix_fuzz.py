@@ -183,3 +183,39 @@ async def test_exact_reply_oracle_rejects_duplicate_canonical_replies() -> None:
     with pytest.raises(AssertionError, match="duplicates"):
         oracle._assert_no_wrong_replies()
     await client.close()
+
+
+@pytest.mark.asyncio
+async def test_exact_reply_oracle_allows_response_to_internal_restart_relay() -> None:
+    """Restart recovery may validly answer a router-authored resume relay."""
+    client = LiveMatrixClient("http://matrix.invalid", "!room:example")
+    oracle = ExactReplyOracle(
+        client,
+        "@agent:example",
+        internal_relay_senders=("@router:example",),
+    )
+    oracle._ingest_event(
+        {
+            "event_id": "$resume-relay",
+            "sender": "@router:example",
+            "type": "m.room.message",
+            "content": {"body": "resume"},
+        },
+    )
+    oracle._ingest_event(
+        {
+            "event_id": "$response",
+            "sender": "@agent:example",
+            "type": "m.room.message",
+            "content": {
+                "m.relates_to": {
+                    "rel_type": "m.thread",
+                    "event_id": "$root",
+                    "m.in_reply_to": {"event_id": "$resume-relay"},
+                },
+            },
+        },
+    )
+
+    oracle._assert_no_wrong_replies()
+    await client.close()

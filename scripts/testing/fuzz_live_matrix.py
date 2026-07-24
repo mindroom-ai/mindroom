@@ -602,6 +602,7 @@ class ManagedTuwunelStack:
         self.server_name = ""
         self.room_id = ""
         self.agent_id = ""
+        self.router_id = ""
         self._created = False
         self._model_server: ThreadingHTTPServer | None = None
         self._model_thread: threading.Thread | None = None
@@ -622,6 +623,7 @@ class ManagedTuwunelStack:
         self.homeserver = f"http://127.0.0.1:{matrix_port}"
         self.server_name = f"m-{domain}"
         self.agent_id = f"@mindroom_{AGENT_NAME}_{self.namespace}:{self.server_name}"
+        self.router_id = f"@mindroom_router_{self.namespace}:{self.server_name}"
 
         _run_command("just", "local-instances-start-matrix", self.instance_name)
         self._wait_for_url(f"{self.homeserver}/_matrix/client/versions", timeout=30)
@@ -960,9 +962,17 @@ class LiveMatrixClient:
 class ExactReplyOracle:
     """Track canonical agent replies from real incremental `/sync` responses."""
 
-    def __init__(self, client: LiveMatrixClient, agent_id: str) -> None:
+    def __init__(
+        self,
+        client: LiveMatrixClient,
+        agent_id: str,
+        *,
+        internal_relay_senders: Collection[str] = (),
+    ) -> None:
         self.client = client
         self.agent_id = agent_id
+        self.internal_relay_senders = frozenset(internal_relay_senders)
+        self.internal_source_ids: set[str] = set()
         self.next_batch: str | None = None
         self.expected_sources: dict[str, str] = {}
         self.response_ids: dict[str, set[str]] = defaultdict(set)
@@ -1035,6 +1045,9 @@ class ExactReplyOracle:
         if not isinstance(event_id, str) or event_id in self.seen_event_ids:
             return
         self.seen_event_ids.add(event_id)
+        if event.get("sender") in self.internal_relay_senders:
+            self.internal_source_ids.add(event_id)
+            return
         if event.get("sender") != self.agent_id or event.get("type") != "m.room.message":
             return
         content = event.get("content")
@@ -1062,7 +1075,7 @@ class ExactReplyOracle:
         unexpected = {
             source: sorted(event_ids)
             for source, event_ids in self.response_ids.items()
-            if source not in self.expected_sources
+            if source not in self.expected_sources and source not in self.internal_source_ids
         }
         if duplicates or unexpected:
             msg = f"agent reply invariant failed: duplicates={duplicates}, unexpected={unexpected}"
@@ -1087,7 +1100,11 @@ class LiveFuzzRunner:
         self.scenario = scenario
         self.reply_timeout = reply_timeout
         self.settle_seconds = settle_seconds
-        self.oracle = ExactReplyOracle(self.client, stack.agent_id)
+        self.oracle = ExactReplyOracle(
+            self.client,
+            stack.agent_id,
+            internal_relay_senders=(stack.router_id,),
+        )
         self.event_ids: dict[str, str] = {}
         self.sent_payloads: dict[str, _SentPayload] = {}
         self.operation_count = 0
@@ -1510,7 +1527,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--threads", type=_positive_int, default=45)
     parser.add_argument("--max-batch-size", type=_positive_int, default=16)
     parser.add_argument("--restart-interval", type=_non_negative_int, default=100)
-    parser.add_argument("--reply-timeout", type=float, default=60)
+    parser.add_argument(
+        "--reply-timeout",
+        type=float,
+        help="per-reply deadline (default: 60s fuzz, 180s saturation)",
+    )
     parser.add_argument("--settle-seconds", type=float, default=0.75)
     parser.add_argument("--trace", type=Path)
     parser.add_argument("--save-trace", type=Path)
@@ -1559,6 +1580,9 @@ def main() -> None:
     )
     if args.save_trace is not None:
         args.save_trace.write_text(scenario.to_json() + "\n", encoding="utf-8")
+    reply_timeout = args.reply_timeout
+    if reply_timeout is None:
+        reply_timeout = 180 if scenario.profile == "saturation" else 60
 
     stack = ManagedTuwunelStack(
         stream_segments=96 if scenario.profile == "saturation" else 4,
@@ -1570,7 +1594,7 @@ def main() -> None:
             _run_live(
                 stack,
                 scenario,
-                reply_timeout=args.reply_timeout,
+                reply_timeout=reply_timeout,
                 settle_seconds=args.settle_seconds,
             ),
         )

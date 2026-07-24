@@ -51,6 +51,8 @@ uv run python scripts/testing/fuzz_live_matrix.py --seed 42 --steps 200 --thread
 uv run python scripts/testing/fuzz_live_matrix.py --profile saturation
 ```
 
+The saturation profile uses a 180-second per-reply deadline because its slow 12-way stream workload intentionally queues much more work than normal fuzz runs.
+
 ### Generate and sync managed avatars
 Run MindRoom at least once before syncing so the router account exists in Matrix state.
 When you run this from a source checkout, generated files are written under `./avatars/`.

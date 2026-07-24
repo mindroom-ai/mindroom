@@ -239,32 +239,30 @@ async def test_duplicate_delivery_is_claimed_before_dispatch_resolution(tmp_path
     room = _make_room()
     event = _text_event(event_id="$duplicate", body="@test_agent hello")
     resolution_started = asyncio.Event()
-    release_resolution = asyncio.Event()
     duplicate_reservation = MagicMock()
 
-    async def slow_prepare(*_args: object, **_kwargs: object) -> None:
+    async def slow_normalize(*_args: object, **_kwargs: object) -> None:
         resolution_started.set()
-        await release_resolution.wait()
+        await asyncio.Event().wait()
 
-    with patch.object(
-        bot._turn_controller,
-        "_prepare_dispatch",
-        new=AsyncMock(side_effect=slow_prepare),
-    ) as prepare:
-        first = asyncio.create_task(
-            bot._turn_controller._dispatch_text_message(room, event, "@user:localhost"),
-        )
-        await resolution_started.wait()
-        await bot._turn_controller._dispatch_text_message(
-            room,
-            event,
-            "@user:localhost",
-            queued_notice_reservation=duplicate_reservation,
-        )
-        release_resolution.set()
+    normalizer = MagicMock()
+    normalizer.resolve_text_event = AsyncMock(side_effect=slow_normalize)
+    controller = replace_turn_controller_deps(bot, normalizer=normalizer)
+    first = asyncio.create_task(
+        controller._dispatch_text_message(room, event, "@user:localhost"),
+    )
+    await resolution_started.wait()
+    await controller._dispatch_text_message(
+        room,
+        event,
+        "@user:localhost",
+        queued_notice_reservation=duplicate_reservation,
+    )
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
         await first
 
-    prepare.assert_awaited_once()
+    normalizer.resolve_text_event.assert_awaited_once()
     duplicate_reservation.cancel.assert_called_once_with()
 
 
