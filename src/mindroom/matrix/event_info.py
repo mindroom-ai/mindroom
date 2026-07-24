@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from typing import cast
 
 _THREAD_RELATION_EVENT_TYPES = frozenset({"m.room.encrypted", "m.room.message"})
+_MATRIX_MEDIA_MESSAGE_TYPES = frozenset({"m.audio", "m.file", "m.image", "m.video"})
+_APPROVAL_STATUSES = frozenset({"approved", "denied", "expired", "pending"})
 
 
 def event_type_supports_thread_relations(event_type: object) -> bool:
@@ -26,6 +28,63 @@ def event_source_is_state_event(event_source: Mapping[str, object]) -> bool:
 def event_source_matches_room(event_source: Mapping[str, object], room_id: str) -> bool:
     """Return whether explicit room evidence agrees with the authoritative room."""
     return "room_id" not in event_source or event_source.get("room_id") == room_id
+
+
+def approval_status_from_content(content: Mapping[str, object]) -> str | None:
+    """Return one valid approval-card status."""
+    status = content.get("status")
+    return status if isinstance(status, str) and status in _APPROVAL_STATUSES else None
+
+
+def _encrypted_media_file_is_valid(file_info: object) -> bool:
+    """Match nio's required encrypted Matrix media transport fields."""
+    if not isinstance(file_info, Mapping):
+        return False
+    normalized_file_info = cast("Mapping[str, object]", file_info)
+    key = normalized_file_info.get("key")
+    if not isinstance(key, Mapping):
+        return False
+    normalized_key = cast("Mapping[str, object]", key)
+    return (
+        isinstance(normalized_file_info.get("url"), str)
+        and isinstance(normalized_file_info.get("hashes"), Mapping)
+        and isinstance(normalized_file_info.get("iv"), str)
+        and isinstance(normalized_key.get("alg"), str)
+        and isinstance(normalized_key.get("k"), str)
+    )
+
+
+def room_message_content_is_renderable(content: Mapping[str, object]) -> bool:
+    """Return whether nio can render one Matrix room-message content payload."""
+    msgtype = content.get("msgtype")
+    if not isinstance(content.get("body"), str) or not isinstance(msgtype, str):
+        return False
+    if msgtype not in _MATRIX_MEDIA_MESSAGE_TYPES:
+        return True
+    if "file" in content:
+        return _encrypted_media_file_is_valid(content.get("file"))
+    return isinstance(content.get("url"), str)
+
+
+def replacement_content_is_renderable(
+    event_type: object,
+    content: object,
+) -> bool:
+    """Return whether one supported replacement has valid visible content."""
+    if not isinstance(content, Mapping):
+        return False
+    normalized_content = cast("Mapping[str, object]", content)
+    new_content = normalized_content.get("m.new_content")
+    if not isinstance(new_content, Mapping):
+        return False
+    normalized_new_content = cast("Mapping[str, object]", new_content)
+    if event_type == "m.room.message":
+        return room_message_content_is_renderable(normalized_content) and room_message_content_is_renderable(
+            normalized_new_content,
+        )
+    if event_type == "io.mindroom.tool_approval":
+        return approval_status_from_content(normalized_new_content) is not None
+    return False
 
 
 def origin_server_ts_from_event_source(event_source: object) -> int | float | None:

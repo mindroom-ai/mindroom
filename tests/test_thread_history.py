@@ -1692,7 +1692,11 @@ class TestThreadHistory:
         ]
 
     @pytest.mark.asyncio
-    async def test_thread_resolution_falls_back_from_malformed_newest_edit(self) -> None:
+    @pytest.mark.parametrize(
+        "invalidity",
+        ["missing-msgtype", "empty-event-id", "missing-media-transport"],
+    )
+    async def test_thread_resolution_falls_back_from_malformed_newest_edit(self, invalidity: str) -> None:
         """A malformed newest replacement must not mask the newest valid replacement."""
         root_event = self._make_text_event(
             event_id="$thread_root",
@@ -1735,19 +1739,34 @@ class TestThreadHistory:
                 },
             },
         )
+        malformed_content: dict[str, object] = {
+            "body": "* Malformed",
+            "m.new_content": {
+                "body": "Malformed",
+                "msgtype": "m.text",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
+            },
+            "m.relates_to": {
+                "rel_type": "m.replace",
+                "event_id": "$thread_message",
+            },
+        }
+        if invalidity == "missing-msgtype":
+            new_content = malformed_content["m.new_content"]
+            assert isinstance(new_content, dict)
+            new_content.pop("msgtype")
+        elif invalidity == "missing-media-transport":
+            malformed_content["msgtype"] = "m.image"
+            malformed_content["m.new_content"] = {
+                "body": "Malformed",
+                "msgtype": "m.image",
+            }
         malformed_edit = self._make_text_event(
-            event_id="$malformed_edit",
+            event_id="" if invalidity == "empty-event-id" else "$malformed_edit",
             sender="@alice:localhost",
             body="* Malformed",
             server_timestamp=4000,
-            source_content={
-                "body": "* Malformed",
-                "m.new_content": {"body": "Malformed"},
-                "m.relates_to": {
-                    "rel_type": "m.replace",
-                    "event_id": "$thread_message",
-                },
-            },
+            source_content=malformed_content,
         )
 
         resolution = await _resolve_thread_history_from_event_sources_timed(

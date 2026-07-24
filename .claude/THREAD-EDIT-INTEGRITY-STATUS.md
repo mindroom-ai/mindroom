@@ -46,9 +46,10 @@
 
 ## Required next steps
 
-- Add shared event-type-aware replacement-content validation for full, bundled, SQLite, and PostgreSQL selection.
-- Reject malformed approval status replacements during ordered cache candidate selection.
-- Reject empty replacement event IDs before candidate recording.
+- Shared event-type-aware replacement validation is implemented locally for full, bundled, SQLite, and PostgreSQL selection.
+- Malformed standard-media replacements, invalid approval statuses, and empty replacement event IDs now fall back to older valid edits.
+- The focused replacement-validation slice passes 30 deterministic cases, including both cache backends.
+- The three new leaf validation helpers are declared explicitly in the existing `mindroom.matrix.event_info` Tach interface.
 - Make visible activity time the maximum of original and accepted-edit timestamps.
 - Validate cached payload identity and original message content before point or snapshot projection.
 - Remove only verified redundant approval sender and room guards.
@@ -56,5 +57,10 @@
 - Run focused tests before each atomic commit.
 - Re-run relevant backend tests, full pytest, Tach, and all-file pre-commit under resource ownership.
 - Remove this file only when a new exact head is frozen.
-- Launch fresh exact-head Codex and Fable reviews after every code commit sequence.
-- Run real-Tuwunel only after fresh Codex and Fable approval and resource ownership.
+- Launch fresh exact-head Codex and Claude Opus xhigh reviews after every code commit sequence.
+- Run real-Tuwunel only after fresh Codex and Claude Opus approval and resource ownership.
+
+## Gate correction
+
+- The next independent Claude gate must use the current `opus` alias at xhigh and record the exact reported model.
+- Fable is no longer a required fresh gate; its exact-head `5419f282a` approval remains historical and becomes stale on the next code commit.

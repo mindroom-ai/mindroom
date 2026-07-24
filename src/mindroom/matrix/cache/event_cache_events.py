@@ -12,6 +12,7 @@ from mindroom.matrix.event_info import (
     event_source_is_state_event,
     event_source_matches_room,
     event_type_supports_thread_relations,
+    replacement_content_is_renderable,
 )
 from mindroom.matrix.sidecar_content import sidecar_mxc_url
 
@@ -69,18 +70,11 @@ def validated_cached_edit_row(
     ):
         return None
     relates_to = content.get("m.relates_to")
-    new_content = content.get("m.new_content")
     if (
         not isinstance(relates_to, Mapping)
         or relates_to.get("rel_type") != "m.replace"
         or relates_to.get("event_id") != original_event_id
-        or not isinstance(new_content, Mapping)
-    ):
-        return None
-    if event_type == "m.room.message" and not all(
-        isinstance(candidate_content.get(field), str)
-        for candidate_content in (content, new_content)
-        for field in ("body", "msgtype")
+        or not replacement_content_is_renderable(event_type, content)
     ):
         return None
     return CachedEventRow(

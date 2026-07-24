@@ -16,7 +16,9 @@ from mindroom.matrix.event_info import (
     event_source_matches_room,
     origin_server_ts_from_event_source,
     replacement_content_for_original,
+    replacement_content_is_renderable,
     reply_to_event_id_from_content,
+    room_message_content_is_renderable,
 )
 from mindroom.matrix.message_content import extract_and_resolve_message, extract_edit_body, resolve_event_source_content
 from mindroom.matrix.visible_body import bundled_visible_body_preview, visible_body_from_event_source
@@ -263,22 +265,6 @@ def bundled_replacement_candidates(event_source: Mapping[str, Any]) -> list[dict
     return candidates
 
 
-def _room_message_replacement_is_renderable(
-    original_content: Mapping[str, Any],
-    replacement_event_source: Mapping[str, Any],
-) -> bool:
-    """Return whether an ``m.room.message`` replacement has valid visible content."""
-    replacement_content = replacement_event_source.get("content")
-    if not isinstance(replacement_content, Mapping):
-        return False
-    new_content = replacement_content.get("m.new_content")
-    return isinstance(new_content, Mapping) and all(
-        isinstance(candidate_content.get(field), str)
-        for candidate_content in (original_content, replacement_content, new_content)
-        for field in ("body", "msgtype")
-    )
-
-
 def is_valid_bundled_replacement(
     original_event_source: Mapping[str, Any],
     replacement_event_source: dict[str, Any],
@@ -344,9 +330,9 @@ def is_valid_bundled_replacement(
         or not isinstance(content.get("m.new_content"), Mapping)
     ):
         return False
-    return original_type != "m.room.message" or _room_message_replacement_is_renderable(
-        original_content,
-        replacement_event_source,
+    return original_type != "m.room.message" or (
+        room_message_content_is_renderable(original_content)
+        and replacement_content_is_renderable(original_type, content)
     )
 
 
@@ -490,6 +476,8 @@ def record_thread_edit_candidate(
     """Track one edit candidate, returning True if the event is an edit."""
     if not (event_info.is_edit and event_info.original_event_id):
         return False
+    if not event.event_id:
+        return True
 
     edit_candidates_by_original_event_id.setdefault(event_info.original_event_id, []).append(event)
     return True
@@ -522,7 +510,8 @@ async def apply_latest_edits_to_messages(
                 edit_event.sender != existing_message.sender
                 or event_source_is_state_event(edit_event.source)
                 or (room_id is not None and not event_source_matches_room(edit_event.source, room_id))
-                or not _room_message_replacement_is_renderable(existing_message.content, edit_event.source)
+                or not room_message_content_is_renderable(existing_message.content)
+                or not replacement_content_is_renderable("m.room.message", edit_event.source.get("content", {}))
             ):
                 continue
             edited_body, edited_content = await extract_edit_body(

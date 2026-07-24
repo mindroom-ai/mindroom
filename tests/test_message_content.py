@@ -722,6 +722,7 @@ class TestResolvedMessageExtraction:
             "room",
             "caller-room",
             "edit-of-edit",
+            "missing-media-transport",
         ],
     )
     async def test_thread_root_body_preview_ignores_invalid_bundled_replacement(
@@ -765,6 +766,12 @@ class TestResolvedMessageExtraction:
             replacement["sender"] = "@mallory:example.com"
         elif invalidity == "type":
             replacement["type"] = "io.mindroom.tool_approval"
+        elif invalidity == "missing-media-transport":
+            replacement_content["msgtype"] = "m.image"
+            replacement_content["m.new_content"] = {
+                "body": "Forged body",
+                "msgtype": "m.image",
+            }
         elif invalidity.startswith("missing-"):
             field = invalidity.removeprefix("missing-").replace("timestamp", "origin_server_ts")
             replacement.pop(field)

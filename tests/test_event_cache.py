@@ -2324,7 +2324,15 @@ async def test_cached_room_get_event_falls_back_from_malformed_newest_edit(
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "invalidity",
-    ["missing-sender", "wrong-type", "missing-body", "missing-msgtype", "wrong-event-id", "wrong-target"],
+    [
+        "missing-sender",
+        "wrong-type",
+        "missing-body",
+        "missing-msgtype",
+        "missing-media-transport",
+        "wrong-event-id",
+        "wrong-target",
+    ],
 )
 async def test_cached_edit_paths_fall_back_from_invalid_newest_event_envelope(
     event_cache: ConversationEventCache,
@@ -2378,6 +2386,9 @@ async def test_cached_edit_paths_fall_back_from_invalid_newest_event_envelope(
         malformed_content.pop("body")
     elif invalidity == "missing-msgtype":
         malformed_content.pop("msgtype")
+    elif invalidity == "missing-media-transport":
+        malformed_content["msgtype"] = "m.image"
+        malformed_content["m.new_content"]["msgtype"] = "m.image"
     elif invalidity == "wrong-event-id":
         malformed_source["event_id"] = "$different"
     else:
@@ -2721,6 +2732,49 @@ async def test_edit_cache_row_indexes_io_mindroom_tool_approval_edits(
     assert latest_edit is not None
     assert latest_edit["event_id"] == "$approval_edit"
     assert latest_edit["content"]["m.new_content"]["status"] == "approved"
+
+
+@pytest.mark.asyncio
+async def test_approval_edit_lookup_falls_back_from_invalid_newest_status(
+    event_cache: ConversationEventCache,
+) -> None:
+    """Approval lookup must retain an older terminal edit when the newest status is invalid."""
+    valid_edit = {
+        "event_id": "$valid_edit",
+        "sender": "@bot:localhost",
+        "origin_server_ts": 2000,
+        "type": "io.mindroom.tool_approval",
+        "content": {
+            "m.new_content": {"status": "approved"},
+            "m.relates_to": {"rel_type": "m.replace", "event_id": "$approval"},
+        },
+    }
+    malformed_edit = {
+        "event_id": "$malformed_edit",
+        "sender": "@bot:localhost",
+        "origin_server_ts": 3000,
+        "type": "io.mindroom.tool_approval",
+        "content": {
+            "m.new_content": {},
+            "m.relates_to": {"rel_type": "m.replace", "event_id": "$approval"},
+        },
+    }
+    await event_cache.store_events_batch(
+        [
+            ("$valid_edit", "!room:localhost", valid_edit),
+            ("$malformed_edit", "!room:localhost", malformed_edit),
+        ],
+    )
+
+    latest_edit = await event_cache.get_latest_edit(
+        "!room:localhost",
+        "$approval",
+        sender="@bot:localhost",
+        event_type="io.mindroom.tool_approval",
+    )
+
+    assert latest_edit is not None
+    assert latest_edit["event_id"] == "$valid_edit"
 
 
 @pytest.mark.asyncio

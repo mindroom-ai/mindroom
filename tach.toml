@@ -3876,13 +3876,16 @@ from = ["mindroom.matrix.conversation_cache"]
 [[interfaces]]
 expose = [
     "EventInfo",
+    "approval_status_from_content",
     "event_source_is_state_event",
     "event_source_matches_room",
     "event_type_supports_thread_relations",
     "is_thread_affecting_relation",
     "origin_server_ts_from_event_source",
     "replacement_content_for_original",
+    "replacement_content_is_renderable",
     "reply_to_event_id_from_content",
+    "room_message_content_is_renderable",
 ]
 from = ["mindroom.matrix.event_info"]
 

@@ -6,7 +6,12 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal, cast
 
-from mindroom.matrix.event_info import EventInfo, event_source_is_state_event, event_source_matches_room
+from mindroom.matrix.event_info import (
+    EventInfo,
+    approval_status_from_content,
+    event_source_is_state_event,
+    event_source_matches_room,
+)
 from mindroom.matrix.large_messages import sidecar_upload_is_usable
 from mindroom.matrix.visible_body import visible_content_from_content
 
@@ -63,8 +68,8 @@ class PendingApproval:
         if approval_id is None or tool_name is None or approver_user_id is None:
             msg = "Approval card event is missing required approval fields."
             raise ValueError(msg)
-        status = content.get("status")
-        if status not in {"pending", "approved", "denied", "expired"}:
+        status = approval_status_from_content(content)
+        if status is None:
             msg = "Approval card event has an invalid status."
             raise ValueError(msg)
 
@@ -112,8 +117,8 @@ class PendingApproval:
         content = latest_edit.get("content")
         if not isinstance(content, dict):
             return self.initial_status
-        status = visible_content_from_content(cast("dict[str, object]", content)).get("status")
-        if status in {"pending", "approved", "denied", "expired"}:
+        status = approval_status_from_content(visible_content_from_content(cast("dict[str, object]", content)))
+        if status is not None:
             return cast("PendingApprovalStatus", status)
         return self.initial_status
 
