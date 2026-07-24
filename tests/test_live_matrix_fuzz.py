@@ -123,6 +123,22 @@ def test_saturation_scenario_matches_original_two_phase_workload() -> None:
     assert all([operation.thread for operation in batch] == list(range(1, 13)) for batch in scenario.batches[100:])
 
 
+def test_generators_never_edit_one_source_twice_per_batch() -> None:
+    """Codex #6: no seed may place two edits of one source in a concurrent batch.
+
+    The default fuzz generator previously did so at seed=1, batch=3, target op:8,
+    leaving the surviving revision at the mercy of coroutine completion order.
+    Both generators must now be collision-free across seeds.
+    """
+    scenarios = [live_scenario_from_seed(seed, steps=200, restart_interval=100) for seed in range(8)] + [
+        chaos_scenario_from_seed(seed, steps=300) for seed in range(8)
+    ]
+    for scenario in scenarios:
+        for batch in scenario.batches:
+            edited = [operation.target for operation in batch if operation.kind is LiveOperationKind.EDIT]
+            assert len(edited) == len(set(edited))
+
+
 def test_live_scenario_rejects_same_batch_dependency() -> None:
     """Concurrent operations may only target events from completed batches."""
     scenario = LiveFuzzScenario(
@@ -1770,6 +1786,7 @@ def test_failure_bundle_records_realized_completion_order(tmp_path: Path) -> Non
     )
     runner = object.__new__(LiveFuzzRunner)
     runner.operation_count = 0
+    runner._realized_sequence = 0
     runner.event_ids = {}
     runner.sent_payloads = {}
     runner._mindroom_running = True
@@ -1789,6 +1806,46 @@ def test_failure_bundle_records_realized_completion_order(tmp_path: Path) -> Non
     assert [entry["event_id"] for entry in journal] == ["$late-thread", "$early-thread"]
     assert [entry["thread"] for entry in journal] == [2, 0]
     assert [entry["sequence"] for entry in journal] == [1, 2]
+
+
+def test_failure_bundle_interleaves_lifecycle_boundaries(tmp_path: Path) -> None:
+    """Codex #5: restarts and outages appear in the realized sequence.
+
+    A restart between two mutations reorders which of them the running MindRoom
+    ever observed, so the journal must record the boundary with a monotonic
+    sequence spanning mutations and lifecycle alike, without inflating the
+    mutation-only operation count.
+    """
+    bundle = FailureBundle.create(tmp_path / "artifacts", "run-4", scenario=_bundle_scenario(), provenance={})
+    runner = object.__new__(LiveFuzzRunner)
+    runner.operation_count = 0
+    runner._realized_sequence = 0
+    runner.event_ids = {}
+    runner.sent_payloads = {}
+    runner._mindroom_running = True
+    runner._journal = bundle.record_realized
+
+    runner._record_batch_results([(LiveOperation(0, LiveOperationKind.THREAD_MESSAGE, 0, None), "$first", None)])
+    runner._mindroom_running = False
+    runner._record_lifecycle(LiveOperationKind.STOP_MINDROOM)
+    runner._mindroom_running = True
+    runner._record_lifecycle(LiveOperationKind.START_MINDROOM)
+    runner._record_batch_results([(LiveOperation(1, LiveOperationKind.THREAD_MESSAGE, 0, None), "$second", None)])
+
+    journal = [
+        json.loads(line)
+        for line in (bundle.directory / "realized_journal.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert [entry["kind"] for entry in journal] == [
+        "thread_message",
+        "stop_mindroom",
+        "start_mindroom",
+        "thread_message",
+    ]
+    assert [entry["sequence"] for entry in journal] == [1, 2, 3, 4]
+    assert [entry["mindroom_running"] for entry in journal] == [True, False, True, True]
+    # Lifecycle boundaries never inflate the mutation-only operation count.
+    assert runner.operation_count == 2
 
 
 @pytest.mark.asyncio

@@ -2692,6 +2692,10 @@ class LiveFuzzRunner:
         # redaction targeting that edit knows which source's stack to revert.
         self._edit_event_source: dict[str, str] = {}
         self.operation_count = 0
+        # Monotonic sequence for the realized journal, spanning both mutations
+        # and lifecycle boundaries so the durable trace preserves their true
+        # interleaving without inflating the mutation-only ``operation_count``.
+        self._realized_sequence = 0
         self.restart_count = 0
         self.tuwunel_restart_count = 0
         self.outage_count = 0
@@ -2930,6 +2934,7 @@ class LiveFuzzRunner:
             if batch[0].kind is LiveOperationKind.RESTART_MINDROOM:
                 self.stack.restart_mindroom()
                 self.restart_count += 1
+                self._record_lifecycle(LiveOperationKind.RESTART_MINDROOM)
             else:
                 results = await self._apply_batch_in_completion_order(batch)
                 self._record_batch_results(results)
@@ -2989,14 +2994,37 @@ class LiveFuzzRunner:
         """
         if self._journal is None:
             return
+        self._realized_sequence += 1
         self._journal(
             {
-                "sequence": self.operation_count,
+                "sequence": self._realized_sequence,
                 "kind": str(operation.kind),
                 "event_ref": operation.event_ref,
                 "thread": operation.thread,
                 "client": operation.client,
                 "event_id": event_id,
+                "mindroom_running": self._mindroom_running,
+            },
+        )
+
+    def _record_lifecycle(self, kind: LiveOperationKind) -> None:
+        """Append one realized lifecycle boundary to the journal.
+
+        Restarts and outages reorder which mutations the running MindRoom ever
+        observed, so the realized sequence must interleave them with mutations to
+        stay reconstructable.
+        """
+        if self._journal is None:
+            return
+        self._realized_sequence += 1
+        self._journal(
+            {
+                "sequence": self._realized_sequence,
+                "kind": str(kind),
+                "event_ref": None,
+                "thread": None,
+                "client": None,
+                "event_id": None,
                 "mindroom_running": self._mindroom_running,
             },
         )
@@ -3053,8 +3081,11 @@ class LiveFuzzRunner:
     async def _apply_lifecycle(self, kind: LiveOperationKind, batch_index: int) -> None:
         """Run one singleton lifecycle disruption."""
         if kind is LiveOperationKind.CHECKPOINT:
+            # A checkpoint only settles pending replies; it reorders nothing, so
+            # it stays out of the realized sequence.
             await self._checkpoint(batch_index)
-        elif kind is LiveOperationKind.RESTART_MINDROOM:
+            return
+        if kind is LiveOperationKind.RESTART_MINDROOM:
             self.stack.restart_mindroom()
             self.restart_count += 1
             self._last_mindroom_start_at = time.monotonic()
@@ -3080,6 +3111,9 @@ class LiveFuzzRunner:
         else:  # pragma: no cover - validation rejects unknown lifecycle kinds
             msg = f"unsupported lifecycle operation {kind}"
             raise AssertionError(msg)
+        # Journal after the state transition so the recorded running flag matches
+        # the world the next mutations observe.
+        self._record_lifecycle(kind)
 
     async def _wait_for_restart_recovery_window(self) -> None:
         """Give startup maintenance its recency-guard recheck after a late restart.
