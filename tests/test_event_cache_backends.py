@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sqlite3
 import uuid
 from contextlib import asynccontextmanager
@@ -105,6 +106,68 @@ def _edit_event(
             },
         },
     }
+
+
+async def _seed_payload_identity_rows(
+    cache: ConversationEventCache,
+    *,
+    room_id: str,
+    thread_id: str,
+) -> tuple[dict[str, object], dict[str, object]]:
+    """Seed one thread child and one newer recent-room row for raw corruption tests."""
+    root = _message_event(
+        event_id=thread_id,
+        sender="@user:localhost",
+        body="root",
+        origin_server_ts=1000,
+    )
+    reply = _message_event(
+        event_id="$reply",
+        sender="@agent:localhost",
+        body="reply",
+        origin_server_ts=2000,
+        thread_id=thread_id,
+    )
+    valid_recent = _message_event(
+        event_id="$valid-recent",
+        sender="@agent:localhost",
+        body="valid",
+        origin_server_ts=3000,
+    )
+    poisoned_recent = _message_event(
+        event_id="$poisoned-recent",
+        sender="@agent:localhost",
+        body="poisoned",
+        origin_server_ts=4000,
+    )
+    await _replace_thread(cache, room_id, thread_id, [root, reply])
+    await cache.store_events_batch(
+        [
+            ("$valid-recent", room_id, valid_recent),
+            ("$poisoned-recent", room_id, poisoned_recent),
+        ],
+    )
+    return reply, poisoned_recent
+
+
+async def _assert_payload_identity_poison_is_rejected(
+    cache: ConversationEventCache,
+    *,
+    room_id: str,
+    thread_id: str,
+) -> None:
+    """Assert thread reads fail closed while recent reads skip poison before limiting."""
+    with pytest.raises(ValueError, match="does not match its authoritative index"):
+        await cache.get_thread_events(room_id, thread_id)
+
+    recent = await cache.get_recent_room_events(
+        room_id,
+        event_type="m.room.message",
+        since_ts_ms=0,
+        limit=1,
+    )
+
+    assert [event["event_id"] for event in recent] == ["$valid-recent"]
 
 
 def _postgres_schema_url(database_url: str, schema_name: str) -> str:
@@ -1801,6 +1864,93 @@ async def test_postgres_latest_edit_query_uses_bytewise_event_id_collation(
     assert locale_winner == ("$Z",)
     assert latest_edit is not None
     assert latest_edit["event_id"] == "$a"
+
+
+@pytest.mark.asyncio
+async def test_sqlite_cache_rejects_raw_payload_identity_poison(tmp_path: Path) -> None:
+    """SQLite must reject thread poison and filter recent poison before LIMIT."""
+    room_id = "!room:localhost"
+    thread_id = "$thread"
+    cache = SqliteEventCache(tmp_path / "event-cache.db")
+    await cache.initialize()
+    try:
+        reply, poisoned_recent = await _seed_payload_identity_rows(
+            cache,
+            room_id=room_id,
+            thread_id=thread_id,
+        )
+        assert cache._runtime.db is not None
+        await cache._runtime.db.executemany(
+            """
+            UPDATE events
+            SET event_json = ?
+            WHERE principal_id = ? AND room_id = ? AND event_id = ?
+            """,
+            [
+                (
+                    json.dumps({**reply, "event_id": "$forged-reply"}),
+                    cache.principal_id,
+                    room_id,
+                    "$reply",
+                ),
+                (
+                    json.dumps({**poisoned_recent, "event_id": "$forged-recent"}),
+                    cache.principal_id,
+                    room_id,
+                    "$poisoned-recent",
+                ),
+            ],
+        )
+        await cache._runtime.db.commit()
+        await _assert_payload_identity_poison_is_rejected(
+            cache,
+            room_id=room_id,
+            thread_id=thread_id,
+        )
+    finally:
+        await cache.close()
+
+
+@pytest.mark.asyncio
+async def test_postgres_cache_rejects_raw_payload_identity_poison(
+    postgres_event_cache_url: str,
+) -> None:
+    """PostgreSQL must reject thread poison and filter recent poison before LIMIT."""
+    room_id = "!room:localhost"
+    thread_id = "$thread"
+    namespace = f"tenant_{uuid.uuid4().hex}"
+    cache = PostgresEventCache(
+        database_url=postgres_event_cache_url,
+        namespace=namespace,
+    )
+    await cache.initialize()
+    try:
+        reply, poisoned_recent = await _seed_payload_identity_rows(
+            cache,
+            room_id=room_id,
+            thread_id=thread_id,
+        )
+        assert cache._runtime.db is not None
+        for event_id, poisoned_payload in (
+            ("$reply", {**reply, "event_id": "$forged-reply"}),
+            ("$poisoned-recent", {**poisoned_recent, "event_id": "$forged-recent"}),
+        ):
+            await cache._runtime.db.execute(
+                """
+                UPDATE mindroom_event_cache_events
+                SET event_json = %s
+                WHERE namespace = %s AND room_id = %s AND event_id = %s
+                """,
+                (json.dumps(poisoned_payload), namespace, room_id, event_id),
+            )
+        await cache._runtime.db.commit()
+        await _assert_payload_identity_poison_is_rejected(
+            cache,
+            room_id=room_id,
+            thread_id=thread_id,
+        )
+    finally:
+        await cache.close()
 
 
 @pytest.mark.asyncio

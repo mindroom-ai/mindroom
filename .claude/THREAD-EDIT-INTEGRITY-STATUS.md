@@ -6,7 +6,7 @@
 - Pull request: https://github.com/mindroom-ai/mindroom/pull/1641.
 - Base: `origin/main` at `66dd4f4a68bcfd1a5e43b2cac20a1b464f306ab1`.
 - Rejected frozen head: `abb8d4292672c91c4cb551772d214cdca54378e0`.
-- Current pushed head before the active slice: `58ea95d689ca1b1aacf3c54c09635066d925486b`.
+- Current pushed head before the active test-only slice: `474dedd68d377604e160fa2d00c245d2cad26ec0`.
 - Never merge this pull request.
 - Never amend or force-push.
 
@@ -40,7 +40,9 @@
 - The active slice gives cached point and snapshot projections the same bundled-plus-explicit `(origin_server_ts, event_id)` selection as full history.
 - The active slice keeps full replacement validation in shared Python and adds only narrow sender and event-type SQL prefilters.
 - Focused full-history and SQLite cache regressions pass `44` tests, focused file hooks pass, and Tach passes.
-- Current source diff including the active slice is `+899/-391`, net `+508` against `origin/main`.
+- Deterministic raw-storage regressions now cover poisoned thread and recent-room payload identities on both cache backends.
+- The new SQLite poison regression passes, while its PostgreSQL twin remains queued behind the heavy resource owner.
+- Current production source diff is `+898/-388`, net `+510` against the exact merge base.
 - Add deterministic full-resolution, point, snapshot, recent-room, SQLite, and PostgreSQL regressions at the owning seams.
 - Keep full correctness validation in shared Python helpers and use only narrow SQL sender/type prefilters for bounded edit lookup.
 - Re-run exact failed files, owning cache suites, full pytest, Tach, and all-file pre-commit under resource ownership.
