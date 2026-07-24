@@ -109,6 +109,48 @@ class TestResolvedMessageExtraction:
         assert messages["$original"].body == "Original"
         assert messages["$original"].latest_event_id == "$original"
 
+    @pytest.mark.asyncio
+    async def test_visible_message_uses_latest_replacement_from_original_sender(self) -> None:
+        """A newer forged replacement must not suppress an older valid replacement."""
+        original = _make_message_event(
+            body="Original",
+            content={"body": "Original", "msgtype": "m.text"},
+            event_id="$original",
+            sender="@alice:example.com",
+        )
+        valid_edit = _make_message_event(
+            body="* Valid",
+            content={
+                "body": "* Valid",
+                "msgtype": "m.text",
+                "m.new_content": {"body": "Valid", "msgtype": "m.text"},
+                "m.relates_to": {"event_id": "$original", "rel_type": "m.replace"},
+            },
+            event_id="$valid-edit",
+            sender="@alice:example.com",
+            timestamp_ms=1234567891,
+        )
+        forged_edit = _make_message_event(
+            body="* Forged",
+            content={
+                "body": "* Forged",
+                "msgtype": "m.text",
+                "m.new_content": {"body": "Forged", "msgtype": "m.text"},
+                "m.relates_to": {"event_id": "$original", "rel_type": "m.replace"},
+            },
+            event_id="$forged-edit",
+            sender="@mallory:example.com",
+            timestamp_ms=1234567892,
+        )
+
+        messages = await resolve_latest_visible_messages(
+            [original, valid_edit, forged_edit],
+            _make_client(),
+        )
+
+        assert messages["$original"].body == "Valid"
+        assert messages["$original"].latest_event_id == "$valid-edit"
+
     def test_download_and_durable_ownership_share_sidecar_url_validation(self) -> None:
         """Hydration and reference tracking must choose the same valid MXC URL."""
         content = {

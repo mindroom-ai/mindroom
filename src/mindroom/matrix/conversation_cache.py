@@ -252,10 +252,17 @@ async def _apply_cached_latest_edit(
 
     event_info = EventInfo.from_event(event_source)
     event_id = event_source.get("event_id")
-    if event_info.is_edit or not isinstance(event_id, str) or not event_id:
+    original_sender = event_source.get("sender")
+    if (
+        event_info.is_edit
+        or not isinstance(event_id, str)
+        or not event_id
+        or not isinstance(original_sender, str)
+        or not original_sender
+    ):
         return event_source
 
-    latest_edit_source = await event_cache.get_latest_edit(room_id, event_id)
+    latest_edit_source = await event_cache.get_latest_edit(room_id, event_id, sender=original_sender)
     if latest_edit_source is None:
         return event_source
 

@@ -2336,6 +2336,107 @@ async def test_cached_room_get_event_network_fetch_merges_cached_latest_edit(
 
 
 @pytest.mark.asyncio
+async def test_cached_room_get_event_ignores_newer_edit_from_different_sender(
+    event_cache: ConversationEventCache,
+) -> None:
+    """Cached projection should select the latest edit from the original sender."""
+    cache = event_cache
+
+    original_event = _make_text_event(
+        event_id="$reply",
+        sender="@agent:localhost",
+        body="Original reply",
+        server_timestamp=2000,
+        source_content={"body": "Original reply"},
+    )
+    valid_edit = _make_text_event(
+        event_id="$valid_edit",
+        sender="@agent:localhost",
+        body="* Valid reply",
+        server_timestamp=3000,
+        source_content={
+            "body": "* Valid reply",
+            "m.new_content": {"body": "Valid reply", "msgtype": "m.text"},
+            "m.relates_to": {"rel_type": "m.replace", "event_id": "$reply"},
+        },
+    )
+    forged_edit = _make_text_event(
+        event_id="$forged_edit",
+        sender="@attacker:localhost",
+        body="* Forged reply",
+        server_timestamp=4000,
+        source_content={
+            "body": "* Forged reply",
+            "m.new_content": {"body": "Forged reply", "msgtype": "m.text"},
+            "m.relates_to": {"rel_type": "m.replace", "event_id": "$reply"},
+        },
+    )
+    client = MagicMock()
+    client.room_get_event = AsyncMock(return_value=_make_room_get_event_response(original_event))
+
+    try:
+        await cache.store_events_batch(
+            [
+                ("$valid_edit", "!room:localhost", _cache_source(valid_edit)),
+                ("$forged_edit", "!room:localhost", _cache_source(forged_edit)),
+            ],
+        )
+        response, _ = await _cached_room_get_event(client, cache, "!room:localhost", "$reply")
+    finally:
+        await cache.close()
+
+    assert isinstance(response, nio.RoomGetEventResponse)
+    assert response.event.event_id == "$reply"
+    assert response.event.body == "Valid reply"
+
+
+@pytest.mark.asyncio
+async def test_cached_room_get_event_ignores_only_edit_from_different_sender(
+    event_cache: ConversationEventCache,
+) -> None:
+    """Cached projection should leave an original unchanged when only a forged edit exists."""
+    original_event = _make_text_event(
+        event_id="$reply",
+        sender="@agent:localhost",
+        body="Original reply",
+        server_timestamp=2000,
+        source_content={"body": "Original reply"},
+    )
+    forged_edit = _make_text_event(
+        event_id="$forged_edit",
+        sender="@attacker:localhost",
+        body="* Forged reply",
+        server_timestamp=3000,
+        source_content={
+            "body": "* Forged reply",
+            "m.new_content": {"body": "Forged reply", "msgtype": "m.text"},
+            "m.relates_to": {"rel_type": "m.replace", "event_id": "$reply"},
+        },
+    )
+    client = MagicMock()
+    client.room_get_event = AsyncMock(return_value=_make_room_get_event_response(original_event))
+
+    try:
+        await event_cache.store_event(
+            "$forged_edit",
+            "!room:localhost",
+            _cache_source(forged_edit),
+        )
+        response, _ = await _cached_room_get_event(
+            client,
+            event_cache,
+            "!room:localhost",
+            "$reply",
+        )
+    finally:
+        await event_cache.close()
+
+    assert isinstance(response, nio.RoomGetEventResponse)
+    assert response.event.event_id == "$reply"
+    assert response.event.body == "Original reply"
+
+
+@pytest.mark.asyncio
 async def test_redacting_latest_edit_falls_back_to_previous_cached_edit(event_cache: ConversationEventCache) -> None:
     """Removing the newest edit should expose the previous cached visible state."""
     cache = event_cache
