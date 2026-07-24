@@ -120,7 +120,9 @@ class ResolvedVisibleMessage:
     @property
     def visible_timestamp(self) -> int:
         """Return the timestamp of the currently visible event state."""
-        return self.timestamp if self.latest_event_timestamp is None else self.latest_event_timestamp
+        return (
+            self.timestamp if self.latest_event_timestamp is None else max(self.timestamp, self.latest_event_timestamp)
+        )
 
     @property
     def reply_to_event_id(self) -> str | None:

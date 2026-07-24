@@ -6,7 +6,7 @@
 - Pull request: https://github.com/mindroom-ai/mindroom/pull/1641.
 - Base: `origin/main` at `66dd4f4a68bcfd1a5e43b2cac20a1b464f306ab1`.
 - Rejected frozen head: `5419f282ac065e3023b612ba6f8b45b3c64bbf13`.
-- Current pushed head: `ed3e3e05d77127d3fd8adca975ec38065e38e50a`.
+- Current pushed head: `607ba721b21852c8672d8da042ab2ac704e0a53d`.
 - Never merge this pull request.
 - Never amend or force-push.
 
@@ -51,11 +51,12 @@
 - Malformed standard-media replacements, invalid approval statuses, and empty replacement event IDs now fall back to older valid edits.
 - The focused replacement-validation slice passes 30 deterministic cases, including both cache backends.
 - The three new leaf validation helpers are declared explicitly in the existing `mindroom.matrix.event_info` Tach interface.
-- Make visible activity time the maximum of original and accepted-edit timestamps.
+- Visible activity time now uses the maximum of original and accepted-edit timestamps, preventing a clock-skewed edit from aging a fresh stream.
 - Cached point reads now validate payload identity and original message content before projection.
 - Cached snapshots now validate the indexed event ID and original message content before projection, then continue to older valid events.
 - The cached-original regression passes on SQLite; its PostgreSQL parametrization is currently skipped because Docker is unavailable and remains required under heavy-slot ownership.
-- Remove only verified redundant approval sender and room guards.
+- Redundant approval room and edit-sender guards are removed; typed card parsing owns room validity and sender-scoped `get_latest_edit()` owns edit trust.
+- The clock-skew and approval-minimality slice passes five focused regressions.
 - Add deterministic full-resolution plus SQLite and PostgreSQL regressions for every blocker.
 - Run focused tests before each atomic commit.
 - Re-run relevant backend tests, full pytest, Tach, and all-file pre-commit under resource ownership.

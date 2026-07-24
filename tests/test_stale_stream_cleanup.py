@@ -316,6 +316,33 @@ def _assert_preserved_edit_payload(content: dict[str, object], expected_keys: di
         assert new_content[key] == value
 
 
+def test_resolved_state_ignores_clock_skewed_older_edit_timestamp() -> None:
+    """A clock-skewed edit must not make a fresh original eligible for stale cleanup."""
+    original_timestamp = NOW_MS - (STALE_AGE_MS - 1_000)
+    message = _history_message(
+        "$stream",
+        timestamp=original_timestamp,
+        content={"body": "Partial", "io.mindroom.stream_status": "streaming"},
+    )
+    message.apply_edit(
+        body="Updated partial",
+        latest_event_id="$edit",
+        latest_event_timestamp=NOW_MS - (STALE_AGE_MS + 1_000),
+        content={"body": "Updated partial", "io.mindroom.stream_status": "streaming"},
+    )
+    message_states: dict[str, stale_stream_cleanup_module._MessageState] = {}
+
+    stale_stream_cleanup_module._merge_resolved_message_state(
+        message_states,
+        target_event_id="$stream",
+        message=message,
+        bot_user_id=BOT_USER_ID,
+        requester_user_id=USER_ID,
+    )
+
+    assert message_states["$stream"].latest_timestamp == original_timestamp
+
+
 def test_latest_visible_thread_event_id_by_thread_prefers_same_timestamp_descendant() -> None:
     """Same-timestamp descendants should win the cleanup thread tail order."""
     same_timestamp = NOW_MS - 1_000

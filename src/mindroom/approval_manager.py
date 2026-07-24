@@ -19,7 +19,6 @@ from mindroom.approval_events import (
     PendingApprovalStatus,
     is_original_approval_card,
     parse_approval_datetime,
-    terminal_edit_matches_card_sender,
 )
 from mindroom.logging_config import get_logger
 from mindroom.redaction import redact_sensitive_data
@@ -839,7 +838,11 @@ class _ApprovalManager:
             pending = PendingApproval.from_card_event(live_waiter.card_event, room_id=room_id)
         except (TypeError, ValueError):
             return None
-        latest_edit = await self._latest_trusted_edit(pending)
+        latest_edit = await self._latest_edit(
+            room_id=pending.room_id,
+            card_event_id=pending.card_event_id,
+            sender=pending.card_sender_id,
+        )
         if pending.latest_status(latest_edit) != "pending":
             return None
         return pending
@@ -873,9 +876,6 @@ class _ApprovalManager:
         transport_sender: str,
         expected_card_event_id: str | None = None,
     ) -> PendingApproval | None:
-        event_room_id = card_event.get("room_id")
-        if event_room_id is not None and event_room_id != room_id:
-            return None
         try:
             pending = PendingApproval.from_card_event(card_event, room_id=room_id)
         except (TypeError, ValueError):
@@ -884,7 +884,11 @@ class _ApprovalManager:
             expected_card_event_id is not None and pending.card_event_id != expected_card_event_id
         ) or pending.card_sender_id != transport_sender:
             return None
-        latest_edit = await self._latest_trusted_edit(pending)
+        latest_edit = await self._latest_edit(
+            room_id=pending.room_id,
+            card_event_id=pending.card_event_id,
+            sender=pending.card_sender_id,
+        )
         if pending.latest_status(latest_edit) != "pending":
             return None
         return pending
@@ -904,16 +908,6 @@ class _ApprovalManager:
             sender=sender,
             event_type="io.mindroom.tool_approval",
         )
-
-    async def _latest_trusted_edit(self, pending: PendingApproval) -> dict[str, Any] | None:
-        latest_edit = await self._latest_edit(
-            room_id=pending.room_id,
-            card_event_id=pending.card_event_id,
-            sender=pending.card_sender_id,
-        )
-        if terminal_edit_matches_card_sender(latest_edit, pending.card_sender_id):
-            return latest_edit
-        return None
 
     async def _scan_cached_room_cards(
         self,

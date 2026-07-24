@@ -154,13 +154,6 @@ def is_original_approval_card(event: dict[str, Any]) -> bool:
     )
 
 
-def terminal_edit_matches_card_sender(edit: dict[str, Any] | None, card_sender_id: str) -> bool:
-    """Return whether a cached terminal edit is trusted for one approval card."""
-    if edit is None:
-        return True
-    return edit.get("sender") == card_sender_id
-
-
 def _required_str(event: dict[str, Any], key: str) -> str:
     value = event.get(key)
     if isinstance(value, str) and value:
