@@ -186,6 +186,7 @@ class LiveFuzzScenario:
         event_rooms = {event_ref: (_logical_ref_room(event_ref) or 0) for event_ref in known_events | known_responses}
         message_events = set(known_events)
         operation_ids: set[int] = set()
+        recovery_message_lanes: set[tuple[int, int, int]] = set()
 
         for batch in self.batches:
             _validate_live_batch_shape(batch)
@@ -210,6 +211,15 @@ class LiveFuzzScenario:
                     LiveOperationKind.THREAD_MESSAGE,
                     LiveOperationKind.PLAIN_REPLY,
                 }:
+                    if self.profile == "recovery":
+                        lane = (operation.room, operation.client, operation.thread)
+                        if lane in recovery_message_lanes:
+                            msg = (
+                                "recovery messages must use unique room, client, and thread lanes "
+                                "so intentional coalescing does not weaken the exact-reply oracle"
+                            )
+                            raise ValueError(msg)
+                        recovery_message_lanes.add(lane)
                     new_messages.add(operation.event_ref)
                     new_responses.add(f"response:{operation.event_ref}")
                     event_rooms[f"response:{operation.event_ref}"] = operation.room
@@ -477,7 +487,7 @@ def recovery_scenario_from_seed(
     messages_per_room: int = 64,
     room_count: int = 3,
     thread_count: int = 12,
-    client_count: int = 4,
+    client_count: int = 6,
     max_batch_size: int = 12,
 ) -> LiveFuzzScenario:
     """Build a deterministic multi-room outage and limited-sync recovery schedule."""
@@ -487,9 +497,21 @@ def recovery_scenario_from_seed(
     if messages_per_room < 51:
         msg = "recovery profile requires at least 51 messages per room to exceed the sync window"
         raise ValueError(msg)
+    if messages_per_room > client_count * thread_count:
+        msg = (
+            "recovery profile needs at least one unique client/thread lane per message "
+            "to distinguish transport loss from intentional coalescing"
+        )
+        raise ValueError(msg)
 
     randomizer = random.Random(seed)  # noqa: S311 - deterministic test trace generation
     pending = dict.fromkeys(range(room_count), messages_per_room)
+    lanes = {
+        room: [(client, thread) for client in range(client_count) for thread in range(thread_count)]
+        for room in range(room_count)
+    }
+    for room_lanes in lanes.values():
+        randomizer.shuffle(room_lanes)
     batches: list[tuple[LiveOperation, ...]] = []
     sent_messages: list[LiveOperation] = []
     operation_id = 0
@@ -502,10 +524,11 @@ def recovery_scenario_from_seed(
         for room in candidates:
             if len(batch) >= max_batch_size or pending[room] == 0:
                 continue
-            available_threads = [thread for thread in range(thread_count) if (room, thread) not in used_threads]
-            if not available_threads:
+            available_lanes = [lane for lane in lanes[room] if (room, lane[1]) not in used_threads]
+            if not available_lanes:
                 continue
-            thread = randomizer.choice(available_threads)
+            client, thread = randomizer.choice(available_lanes)
+            lanes[room].remove((client, thread))
             used_threads.add((room, thread))
             root_ref = f"root:{room}:{thread}"
             kind = (
@@ -520,7 +543,7 @@ def recovery_scenario_from_seed(
                 thread=thread,
                 target=target,
                 room=room,
-                client=randomizer.randrange(client_count),
+                client=client,
             )
             batch.append(operation)
             sent_messages.append(operation)
@@ -879,12 +902,16 @@ class ManagedTuwunelStack:
         if not self.log_path.exists():
             return {}
         log = self.log_path.read_text(encoding="utf-8", errors="replace")
+        lines = log.splitlines()
         return {
             "cache_coordinator_timeouts": log.count("thread_read_error=cache_coordinator_timeout"),
             "degraded_thread_reads": log.count("matrix_cache_thread_read_degraded"),
             "dispatch_read_timeouts": log.count("thread_read_error=dispatch_read_timeout"),
             "event_loop_stalls": log.count("event_loop_stall_detected"),
             "limited_sync_backfill_warnings": log.count("limited-timeline backfill"),
+            "limited_sync_certification_events": sum(
+                "matrix_sync_certification_uncertain" in line and "limited_sync_timeline" in line for line in lines
+            ),
         }
 
     def _start_model_server(self) -> int:
@@ -944,6 +971,7 @@ class ManagedTuwunelStack:
             [
                 "uv",
                 "run",
+                "--no-sync",
                 "mindroom",
                 "run",
                 "--api-port",
@@ -1152,6 +1180,38 @@ class LiveMatrixClient:
                 self.seen_events[event_id] = event
         self.next_batch = next_batch
 
+    async def messages_before(
+        self,
+        from_token: str,
+        *,
+        to_token: str | None = None,
+        limit: int = 1000,
+    ) -> tuple[list[dict[str, Any]], str | None]:
+        """Read one real backward pagination page for an independent oracle."""
+        room_id = quote(self.room_id, safe="")
+        params: dict[str, str | int] = {
+            "dir": "b",
+            "from": from_token,
+            "limit": limit,
+        }
+        if to_token is not None:
+            params["to"] = to_token
+        data = await self._request(
+            "GET",
+            f"/_matrix/client/v3/rooms/{room_id}/messages",
+            params=params,
+        )
+        raw_chunk = data.get("chunk", [])
+        if not isinstance(raw_chunk, list):
+            msg = "Matrix room messages chunk must be a list"
+            raise TypeError(msg)
+        chunk = [cast("dict[str, Any]", event) for event in raw_chunk if isinstance(event, dict)]
+        end = data.get("end")
+        if end is not None and not isinstance(end, str):
+            msg = "Matrix room messages end token must be a string or null"
+            raise TypeError(msg)
+        return chunk, end
+
     async def _request(
         self,
         method: str,
@@ -1196,6 +1256,11 @@ class ExactReplyOracle:
         self.response_ids: dict[str, set[str]] = defaultdict(set)
         self.response_event_by_ref: dict[str, str] = {}
         self.seen_event_ids: set[str] = set()
+        self.limited_timeline_count = 0
+        self.pagination_page_count = 0
+        self.gap_audit_page_count = 0
+        self.gap_audit_missing_sources: set[str] = set()
+        self._gap_audit_completed = False
         self._last_response_at = time.monotonic()
 
     async def initialize(self) -> None:
@@ -1211,23 +1276,31 @@ class ExactReplyOracle:
         *,
         deadline_seconds: float,
         settle_seconds: float,
+        allow_limited: bool = False,
     ) -> None:
         """Wait until all sources have one reply and the room stays quiet."""
         deadline = time.monotonic() + deadline_seconds
         settled_after = time.monotonic() + settle_seconds
         while time.monotonic() < deadline:
-            await self._sync_once(timeout_ms=250)
+            await self._sync_once(timeout_ms=250, allow_limited=allow_limited)
             self._assert_no_wrong_replies()
             if all(len(self.response_ids[source]) == 1 for source in self.expected_sources):
                 settled_after = max(settled_after, self._last_response_at + settle_seconds)
                 if time.monotonic() >= settled_after:
                     return
         missing = {
-            logical_ref: len(self.response_ids[event_id])
+            logical_ref: {
+                "event_id": event_id,
+                "reply_count": len(self.response_ids[event_id]),
+            }
             for event_id, logical_ref in self.expected_sources.items()
             if len(self.response_ids[event_id]) != 1
         }
-        msg = f"timed out waiting for exact agent replies: {missing}"
+        missing_gap_refs = sorted(self.expected_sources[event_id] for event_id in self.gap_audit_missing_sources)
+        msg = (
+            f"timed out waiting for exact agent replies in room {self.client.room_slot}: "
+            f"{missing}; bounded_gap_missing={missing_gap_refs}"
+        )
         raise AssertionError(msg)
 
     def resolve_response_ref(self, response_ref: str) -> str:
@@ -1239,7 +1312,8 @@ class ExactReplyOracle:
         return event_id
 
     async def _sync_once(self, *, timeout_ms: int, allow_limited: bool = False) -> None:
-        data = await self.client.sync(self.next_batch, timeout_ms=timeout_ms)
+        since = self.next_batch
+        data = await self.client.sync(since, timeout_ms=timeout_ms)
         next_batch = data.get("next_batch")
         if not isinstance(next_batch, str):
             msg = "Matrix sync omitted next_batch"
@@ -1251,12 +1325,76 @@ class ExactReplyOracle:
         if timeline.get("limited") is True and not allow_limited:
             msg = "live fuzz oracle received a limited timeline; reduce batch size"
             raise AssertionError(msg)
+        if timeline.get("limited") is True:
+            self.limited_timeline_count += 1
+            if since is not None and not self._gap_audit_completed:
+                await self._audit_limited_gap(timeline, since)
+            await self._ingest_paginated_history(next_batch)
         events = timeline.get("events", [])
         if not isinstance(events, list):
             return
         for raw_event in events:
             if isinstance(raw_event, dict):
                 self._ingest_event(raw_event)
+
+    async def _audit_limited_gap(
+        self,
+        timeline: Mapping[str, Any],
+        since: str,
+    ) -> None:
+        """Check whether the server-bounded recovery walk exposes every source."""
+        prev_batch = timeline.get("prev_batch")
+        if not isinstance(prev_batch, str):
+            msg = "limited Matrix timeline omitted prev_batch"
+            raise TypeError(msg)
+        timeline_events = timeline.get("events", [])
+        observed_ids = {
+            event_id
+            for event in timeline_events
+            if isinstance(event, dict) and isinstance((event_id := event.get("event_id")), str)
+        }
+        token = prev_batch
+        seen_tokens: set[str] = set()
+        for _ in range(20):
+            if token in seen_tokens:
+                msg = f"bounded Matrix pagination repeated token {token!r}"
+                raise AssertionError(msg)
+            seen_tokens.add(token)
+            events, next_token = await self.client.messages_before(
+                token,
+                to_token=since,
+            )
+            self.gap_audit_page_count += 1
+            observed_ids.update(event_id for event in events if isinstance((event_id := event.get("event_id")), str))
+            if not events or next_token is None:
+                break
+            token = next_token
+        else:
+            msg = "bounded Matrix oracle pagination exceeded 20 pages"
+            raise AssertionError(msg)
+        self.gap_audit_missing_sources.update(
+            self.expected_sources.keys() - observed_ids,
+        )
+        self._gap_audit_completed = True
+
+    async def _ingest_paginated_history(self, from_token: str) -> None:
+        """Hydrate all observable room history when the oracle's own sync is limited."""
+        token = from_token
+        seen_tokens: set[str] = set()
+        for _ in range(20):
+            if token in seen_tokens:
+                msg = f"Matrix pagination repeated token {token!r}"
+                raise AssertionError(msg)
+            seen_tokens.add(token)
+            events, next_token = await self.client.messages_before(token)
+            self.pagination_page_count += 1
+            for event in reversed(events):
+                self._ingest_event(event)
+            if not events or next_token is None:
+                return
+            token = next_token
+        msg = "Matrix oracle pagination exceeded 20 pages"
+        raise AssertionError(msg)
 
     def _ingest_event(self, event: Mapping[str, Any]) -> None:
         event_id = event.get("event_id")
@@ -1386,6 +1524,7 @@ class LiveFuzzRunner:
                 oracle.wait_until_exact(
                     deadline_seconds=self.reply_timeout,
                     settle_seconds=self.settle_seconds,
+                    allow_limited=True,
                 )
                 for oracle in oracles
             ),
@@ -1401,6 +1540,7 @@ class LiveFuzzRunner:
                 oracle.wait_until_exact(
                     deadline_seconds=self.reply_timeout,
                     settle_seconds=max(self.settle_seconds, 1),
+                    allow_limited=True,
                 )
                 for oracle in oracles
             ),
@@ -1416,6 +1556,9 @@ class LiveFuzzRunner:
             "messages": message_count,
             "missing": 0,
             "operations": self.operation_count,
+            "oracle_limited_timelines": sum(oracle.limited_timeline_count for oracle in oracles),
+            "oracle_gap_audit_pages": sum(oracle.gap_audit_page_count for oracle in oracles),
+            "oracle_pagination_pages": sum(oracle.pagination_page_count for oracle in oracles),
             "recovery_runtime_ms": round(recovery_seconds * 1000),
             "restarts": self.restart_count,
             "rooms": self.scenario.room_count,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -16,6 +17,8 @@ from scripts.testing.fuzz_live_matrix import (
     recovery_scenario_from_seed,
     saturation_scenario,
 )
+
+LIMITED_SYNC_REPRODUCER = Path(__file__).parent / "fixtures" / "matrix_fuzz" / "nio_limited_sync_concurrent_branch.json"
 
 
 def test_live_scenario_is_deterministic_and_json_replayable() -> None:
@@ -94,7 +97,7 @@ def test_recovery_scenario_is_replayable_and_forces_every_room_past_sync_limit()
         messages_per_room=51,
         room_count=2,
         thread_count=6,
-        client_count=3,
+        client_count=9,
         max_batch_size=6,
     )
 
@@ -103,7 +106,7 @@ def test_recovery_scenario_is_replayable_and_forces_every_room_past_sync_limit()
         messages_per_room=51,
         room_count=2,
         thread_count=6,
-        client_count=3,
+        client_count=9,
         max_batch_size=6,
     )
     assert LiveFuzzScenario.from_json(scenario.to_json()) == scenario
@@ -130,6 +133,22 @@ def test_recovery_scenario_is_replayable_and_forces_every_room_past_sync_limit()
             }
         ]
         assert len(reply_threads) == len(set(reply_threads))
+
+
+def test_limited_sync_external_reproducer_remains_an_exact_seeded_trace() -> None:
+    """Keep the minimized Tuwunel concurrent-branch reproducer replayable."""
+    saved = LiveFuzzScenario.from_json(LIMITED_SYNC_REPRODUCER.read_text(encoding="utf-8"))
+    generated = recovery_scenario_from_seed(
+        1638,
+        messages_per_room=51,
+        room_count=1,
+        thread_count=12,
+        client_count=6,
+        max_batch_size=12,
+    )
+
+    assert saved == generated
+    assert sum(len(batch) for batch in saved.batches) == 57
 
 
 def test_live_scenario_rejects_same_batch_dependency() -> None:
@@ -188,6 +207,22 @@ def test_live_scenario_rejects_cross_room_dependencies() -> None:
         scenario.validate()
 
 
+def test_recovery_scenario_rejects_reused_coalescing_lane() -> None:
+    """Outage sources sharing a sender and thread cannot have one-reply-per-source semantics."""
+    scenario = LiveFuzzScenario(
+        thread_count=1,
+        client_count=1,
+        profile="recovery",
+        batches=(
+            (LiveOperation(0, LiveOperationKind.THREAD_MESSAGE, 0, "root:0:0"),),
+            (LiveOperation(1, LiveOperationKind.THREAD_MESSAGE, 0, "root:0:0"),),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="intentional coalescing"):
+        scenario.validate()
+
+
 @pytest.mark.asyncio
 async def test_exact_reply_oracle_counts_only_canonical_agent_thread_replies() -> None:
     """Edits and duplicate sync delivery must not inflate canonical counts."""
@@ -226,6 +261,125 @@ async def test_exact_reply_oracle_counts_only_canonical_agent_thread_replies() -
     assert oracle.resolve_response_ref("response:root:0") == "$response"
     oracle._assert_no_wrong_replies()
     await client.close()
+
+
+@pytest.mark.asyncio
+async def test_exact_reply_oracle_hydrates_limited_sync_from_pagination(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A truncated observer sync must hydrate history without weakening exact counts."""
+    client = LiveMatrixClient("http://matrix.invalid", "!room:example")
+    oracle = ExactReplyOracle(client, "@agent:example")
+    oracle.expect("root:0", "$source")
+    canonical: dict[str, Any] = {
+        "event_id": "$response",
+        "sender": "@agent:example",
+        "type": "m.room.message",
+        "content": {
+            "m.relates_to": {
+                "rel_type": "m.thread",
+                "event_id": "$source",
+                "m.in_reply_to": {"event_id": "$source"},
+            },
+        },
+    }
+
+    async def sync(_since: str | None, *, timeout_ms: int) -> dict[str, Any]:
+        assert timeout_ms == 0
+        return {
+            "next_batch": "sync-token",
+            "rooms": {
+                "join": {
+                    "!room:example": {
+                        "timeline": {
+                            "limited": True,
+                            "events": [canonical],
+                        },
+                    },
+                },
+            },
+        }
+
+    async def messages_before(
+        from_position: str,
+        *,
+        to_token: str | None = None,
+        limit: int = 1000,
+    ) -> tuple[list[dict[str, Any]], str | None]:
+        assert from_position == "sync-token"
+        assert to_token is None
+        assert limit == 1000
+        return [canonical], None
+
+    monkeypatch.setattr(client, "sync", sync)
+    monkeypatch.setattr(client, "messages_before", messages_before)
+    try:
+        await oracle._sync_once(timeout_ms=0, allow_limited=True)
+    finally:
+        await client.close()
+
+    assert oracle.response_ids == {"$source": {"$response"}}
+    assert oracle.limited_timeline_count == 1
+    assert oracle.pagination_page_count == 1
+
+
+@pytest.mark.asyncio
+async def test_exact_reply_oracle_audits_bounded_limited_gap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The independent gap audit must expose a server-boundary source omission."""
+    client = LiveMatrixClient("http://matrix.invalid", "!room:example")
+    oracle = ExactReplyOracle(client, "@agent:example")
+    oracle.expect("root:0", "$source")
+    oracle.next_batch = "since-position"
+
+    async def sync(_since: str | None, *, timeout_ms: int) -> dict[str, Any]:
+        assert timeout_ms == 0
+        return {
+            "next_batch": "sync-position",
+            "rooms": {
+                "join": {
+                    "!room:example": {
+                        "timeline": {
+                            "limited": True,
+                            "prev_batch": "gap-position",
+                            "events": [],
+                        },
+                    },
+                },
+            },
+        }
+
+    async def messages_before(
+        from_position: str,
+        *,
+        to_token: str | None = None,
+        limit: int = 1000,
+    ) -> tuple[list[dict[str, Any]], str | None]:
+        assert limit == 1000
+        if to_token is not None:
+            assert (from_position, to_token) == ("gap-position", "since-position")
+            return [], None
+        assert from_position == "sync-position"
+        return [
+            {
+                "event_id": "$source",
+                "sender": "@user:example",
+                "type": "m.room.message",
+                "content": {},
+            },
+        ], None
+
+    monkeypatch.setattr(client, "sync", sync)
+    monkeypatch.setattr(client, "messages_before", messages_before)
+    try:
+        await oracle._sync_once(timeout_ms=0, allow_limited=True)
+    finally:
+        await client.close()
+
+    assert oracle.gap_audit_missing_sources == {"$source"}
+    assert oracle.gap_audit_page_count == 1
+    assert oracle.pagination_page_count == 1
 
 
 @pytest.mark.asyncio
