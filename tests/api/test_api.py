@@ -4290,6 +4290,38 @@ def test_trusted_upstream_headers_populate_auth_user_when_enabled(tmp_path: Path
     }
 
 
+def test_report_viewer_reverifies_prepopulated_trusted_upstream_principal(tmp_path: Path) -> None:
+    """Report auth must not trust a principal merely because another layer prepopulated the request scope."""
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        process_env={
+            "MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED": "true",
+            "MINDROOM_TRUSTED_UPSTREAM_USER_ID_HEADER": "X-Trusted-User",
+        },
+    )
+    api_app = FastAPI()
+    main.initialize_api_app(api_app, runtime_paths)
+
+    async def _verify_seeded_report_viewer(request: Request) -> dict[str, Any]:
+        request.scope["auth_user"] = {
+            "user_id": "spoofed",
+            "auth_source": "trusted_upstream",
+        }
+        return await auth.verify_report_viewer(request)
+
+    @api_app.get("/report-viewer")
+    async def _report_viewer(
+        auth_user: Annotated[dict[str, Any], Depends(_verify_seeded_report_viewer)],
+    ) -> dict[str, Any]:
+        return auth_user
+
+    with TestClient(api_app) as client:
+        response = client.get("/report-viewer")
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Missing trusted upstream identity header: X-Trusted-User"
+
+
 def _trusted_upstream_strict_jwt_env(
     tmp_path: Path,
     *,
@@ -4806,13 +4838,18 @@ def test_trusted_upstream_auth_email_template_requires_email_header_config(tmp_p
 
 @pytest.mark.parametrize(
     "template",
-    ["@alice:example.org", "@{localpart}-{localpart}:example.org"],
+    [
+        "@alice:example.org",
+        "@{localpart}-{localpart}:example.org",
+        "@{localpart}:example.org{",
+        "@{localpart}:{other}",
+    ],
 )
-def test_trusted_upstream_auth_email_template_requires_exactly_one_localpart_placeholder(
+def test_trusted_upstream_auth_email_template_rejects_malformed_syntax(
     tmp_path: Path,
     template: str,
 ) -> None:
-    """Trusted auth should reject constant or ambiguous email-to-Matrix templates."""
+    """Trusted auth should reject ambiguous or malformed email-to-Matrix templates."""
     runtime_paths = _runtime_paths(
         tmp_path,
         process_env={
@@ -4835,7 +4872,7 @@ def test_trusted_upstream_auth_email_template_requires_exactly_one_localpart_pla
 
     assert response.status_code == 500
     assert response.json()["detail"] == (
-        "Trusted upstream email-to-Matrix template must contain exactly one {localpart} placeholder"
+        "Trusted upstream email-to-Matrix template must contain exactly one {localpart} placeholder and no other braces"
     )
 
 

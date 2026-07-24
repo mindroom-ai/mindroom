@@ -62,6 +62,8 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.external_triggers.store import TriggerDeliverySnapshot
+    from mindroom.report_publishing.authorization import ReportAuthorizationDecision
+    from mindroom.report_publishing.store import PublishedReport
 
 logger = get_logger(__name__)
 _WORKER_CLEANUP_INTERVAL_ENV = "MINDROOM_WORKER_CLEANUP_INTERVAL_SECONDS"
@@ -302,6 +304,7 @@ def initialize_api_app(api_app: FastAPI, runtime_paths: constants.RuntimePaths) 
     previous_state = app_state.api_state
     if previous_state is None:
         app_state.external_trigger_runtime = None
+        app_state.report_authorization_runtime = None
         app_state.api_state = ApiState(
             config_lock=threading.Lock(),
             snapshot=ApiSnapshot(
@@ -330,6 +333,7 @@ def initialize_api_app(api_app: FastAPI, runtime_paths: constants.RuntimePaths) 
         source_files = current_snapshot.source_files if current_snapshot.runtime_paths == runtime_paths else None
         if current_snapshot.runtime_paths != runtime_paths:
             app_state.external_trigger_runtime = None
+            app_state.report_authorization_runtime = None
         previous_state.snapshot = config_lifecycle._published_snapshot(
             current_snapshot,
             runtime_paths=runtime_paths,
@@ -544,6 +548,21 @@ def bind_external_trigger_runtime(
 def unbind_external_trigger_runtime(api_app: FastAPI) -> None:
     """Clear router Matrix delivery runtime from one API app."""
     config_lifecycle.app_state(api_app).external_trigger_runtime = None
+
+
+def bind_report_authorization_runtime(
+    api_app: FastAPI,
+    authorize: Callable[[PublishedReport, str], Awaitable[ReportAuthorizationDecision]],
+) -> None:
+    """Attach live Matrix report authorization to one API app."""
+    config_lifecycle.app_state(api_app).report_authorization_runtime = config_lifecycle.ReportAuthorizationRuntime(
+        authorize=authorize,
+    )
+
+
+def unbind_report_authorization_runtime(api_app: FastAPI) -> None:
+    """Clear live Matrix report authorization from one API app."""
+    config_lifecycle.app_state(api_app).report_authorization_runtime = None
 
 
 def _api_docs_kwargs(runtime_paths: constants.RuntimePaths) -> dict[str, str | None]:

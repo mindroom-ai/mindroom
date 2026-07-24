@@ -13,11 +13,14 @@ import mindroom.tools  # noqa: F401
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
+from mindroom.config.report_publishing import ReportPublishingConfig
 from mindroom.custom_tools.dynamic_workflow import DynamicWorkflowTools
 from mindroom.custom_tools.dynamic_workflow_context import dynamic_workflow_store_and_owner
 from mindroom.custom_tools.report_publishing import ReportPublishingTools
 from mindroom.dynamic_workflows.service import DynamicWorkflowService
+from mindroom.entity_resolution import entity_identity_registry
 from mindroom.message_target import MessageTarget
+from mindroom.report_access_policy import ReportAccessPolicy
 from mindroom.report_publishing.store import PublishableReport, ReportPublishingError, ReportPublishingStore
 from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
@@ -76,6 +79,9 @@ def _make_context(
     *,
     public_url: str = "https://acme.mindroom.chat",
     agent_memory_backend: Literal["file"] | None = None,
+    trusted_auth: bool = False,
+    trusted_auth_env: dict[str, str] | None = None,
+    report_publishing: ReportPublishingConfig | None = None,
 ) -> ToolRuntimeContext:
     runtime_paths = test_runtime_paths(tmp_path)
     runtime_paths = runtime_paths.__class__(
@@ -86,6 +92,16 @@ def _make_context(
         process_env={
             **dict(runtime_paths.process_env),
             "MINDROOM_PUBLIC_URL": public_url,
+            **(
+                trusted_auth_env
+                or {
+                    "MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED": "true",
+                    "MINDROOM_TRUSTED_UPSTREAM_USER_ID_HEADER": "X-Trusted-User",
+                    "MINDROOM_TRUSTED_UPSTREAM_MATRIX_USER_ID_HEADER": "X-Trusted-Matrix-User",
+                }
+                if trusted_auth
+                else {}
+            ),
         },
         env_file_values=runtime_paths.env_file_values,
     )
@@ -99,6 +115,7 @@ def _make_context(
                 ),
             },
             models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-4-6")},
+            report_publishing=report_publishing or ReportPublishingConfig(),
         ),
         runtime_paths,
     )
@@ -155,9 +172,9 @@ def test_report_publishing_store_creates_revocable_public_link(tmp_path: Path) -
         published_by="@alice:localhost",
         base_url="https://acme.mindroom.chat",
     )
-    loaded = store.get_public_report(report.slug)
-    html_path = store.report_asset_path(store.get_public_report(report.slug))
-    revoked = store.revoke_public_report(report.slug, revoked_by="@alice:localhost")
+    loaded = store.get_report(report.slug)
+    html_path = store.report_asset_path(store.get_report(report.slug))
+    revoked = store.revoke_report(report.slug, revoked_by="@alice:localhost")
 
     assert report.slug.startswith("pub_")
     assert report.public_url == f"https://acme.mindroom.chat/reports/public/{report.slug}"
@@ -166,7 +183,131 @@ def test_report_publishing_store_creates_revocable_public_link(tmp_path: Path) -
     assert html_path == report_path
     assert revoked.revoked_at is not None
     with pytest.raises(ReportPublishingError, match="revoked"):
-        store.report_asset_path(store.get_public_report(report.slug))
+        store.report_asset_path(store.get_report(report.slug))
+
+
+def test_report_publishing_store_round_trips_origin_room_metadata(tmp_path: Path) -> None:
+    """Protected publication should preserve exact room and publisher identities."""
+    storage_root = tmp_path / "mindroom_data"
+    report_path = storage_root / "reports" / "example.html"
+    report_path.parent.mkdir(parents=True)
+    report_path.write_text("<html>Report</html>", encoding="utf-8")
+    store = ReportPublishingStore(storage_root)
+
+    report = store.publish_report(
+        source=PublishableReport(
+            source_type="test_report",
+            source={"id": "example"},
+            artifact_path=report_path,
+            title="Example Report",
+            requested_by="@alice:localhost",
+        ),
+        published_by="@alice:localhost",
+        base_url="https://acme.mindroom.chat",
+        access_policy=ReportAccessPolicy.ORIGIN_ROOM,
+        origin_room_id="!Nhcu5BS-UMnFX7hBVfVSoXiD7OgH6iRT-xyIuqDnpYQ",
+        publisher_entity_name="general",
+        publisher_matrix_user_id="@mindroom_general:localhost",
+    )
+    loaded = store.get_report(report.slug)
+
+    assert loaded.access_policy is ReportAccessPolicy.ORIGIN_ROOM
+    assert loaded.origin_room_id == "!Nhcu5BS-UMnFX7hBVfVSoXiD7OgH6iRT-xyIuqDnpYQ"
+    assert loaded.publisher_entity_name == "general"
+    assert loaded.publisher_matrix_user_id == "@mindroom_general:localhost"
+    assert loaded.public_url == f"https://acme.mindroom.chat/reports/room/{report.slug}"
+
+
+def test_report_publishing_store_loads_legacy_record_as_public(tmp_path: Path) -> None:
+    """Records predating access_policy must retain public bearer semantics."""
+    storage_root = tmp_path / "mindroom_data"
+    report_path = storage_root / "reports" / "example.html"
+    report_path.parent.mkdir(parents=True)
+    report_path.write_text("<html>Report</html>", encoding="utf-8")
+    store = ReportPublishingStore(storage_root)
+    report = store.publish_report(
+        source=PublishableReport(
+            source_type="test_report",
+            source={},
+            artifact_path=report_path,
+            title="Legacy",
+            requested_by="@alice:localhost",
+        ),
+        published_by="@alice:localhost",
+    )
+    metadata_path = storage_root / "report_publishing" / "public_reports" / f"{report.slug}.json"
+    payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+    for key in (
+        "access_policy",
+        "origin_room_id",
+        "publisher_entity_name",
+        "publisher_matrix_user_id",
+    ):
+        payload.pop(key)
+    metadata_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    loaded = store.get_report(report.slug)
+
+    assert loaded.access_policy is ReportAccessPolicy.PUBLIC
+    assert loaded.origin_room_id is None
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"access_policy": "origin_room"},
+        {"access_policy": "shared_room"},
+        {"publisher_matrix_user_id": 123},
+    ],
+)
+def test_report_publishing_store_rejects_malformed_policy_records(
+    tmp_path: Path,
+    changes: dict[str, object],
+) -> None:
+    """Malformed protected or unknown-policy records must fail closed."""
+    storage_root = tmp_path / "mindroom_data"
+    report_path = storage_root / "reports" / "example.html"
+    report_path.parent.mkdir(parents=True)
+    report_path.write_text("<html>Report</html>", encoding="utf-8")
+    store = ReportPublishingStore(storage_root)
+    report = store.publish_report(
+        source=PublishableReport(
+            source_type="test_report",
+            source={},
+            artifact_path=report_path,
+            title="Example",
+            requested_by="@alice:localhost",
+        ),
+        published_by="@alice:localhost",
+    )
+    metadata_path = storage_root / "report_publishing" / "public_reports" / f"{report.slug}.json"
+    payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+    payload.update(changes)
+    metadata_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ReportPublishingError):
+        store.get_report(report.slug)
+
+
+def test_report_publishing_store_rejects_incidental_public_room_metadata(tmp_path: Path) -> None:
+    """New public records must not carry misleading protected metadata."""
+    storage_root = tmp_path / "mindroom_data"
+    report_path = storage_root / "reports" / "example.html"
+    report_path.parent.mkdir(parents=True)
+    report_path.write_text("<html>Report</html>", encoding="utf-8")
+
+    with pytest.raises(ReportPublishingError, match="must not contain"):
+        ReportPublishingStore(storage_root).publish_report(
+            source=PublishableReport(
+                source_type="test_report",
+                source={},
+                artifact_path=report_path,
+                title="Example",
+                requested_by="@alice:localhost",
+            ),
+            published_by="@alice:localhost",
+            origin_room_id="!origin:localhost",
+        )
 
 
 def test_report_publishing_store_rejects_artifacts_outside_storage_root(tmp_path: Path) -> None:
@@ -214,7 +355,7 @@ def test_report_publishing_store_rejects_serve_time_symlink_escape(tmp_path: Pat
     report_path.symlink_to(outside_path)
 
     with pytest.raises(ReportPublishingError, match="artifact path is invalid"):
-        store.report_asset_path(store.get_public_report(report.slug))
+        store.report_asset_path(store.get_report(report.slug))
 
 
 def test_report_publishing_store_creates_static_site_snapshot(tmp_path: Path) -> None:
@@ -244,8 +385,8 @@ def test_report_publishing_store_creates_static_site_snapshot(tmp_path: Path) ->
     )
     (source_dir / "index.html").write_text("<!doctype html>changed", encoding="utf-8")
 
-    index_path = store.report_asset_path(store.get_public_report(report.slug))
-    script_path = store.report_asset_path(store.get_public_report(report.slug), "app.js")
+    index_path = store.report_asset_path(store.get_report(report.slug))
+    script_path = store.report_asset_path(store.get_report(report.slug), "app.js")
 
     assert report.artifact_kind == "static_site"
     assert report.public_url == f"https://mindroom.lab.mindroom.chat/reports/public/{report.slug}/"
@@ -275,7 +416,7 @@ def test_report_publishing_store_creates_single_page_snapshot(tmp_path: Path) ->
         base_url="https://mindroom.lab.mindroom.chat",
     )
 
-    index_path = store.report_asset_path(store.get_public_report(report.slug))
+    index_path = store.report_asset_path(store.get_report(report.slug))
     assert index_path.name == "index.html"
     assert index_path.read_text(encoding="utf-8") == "<!doctype html><h1>Single Page</h1>"
 
@@ -431,7 +572,7 @@ def test_report_publishing_store_rejects_static_site_asset_traversal(tmp_path: P
     )
 
     with pytest.raises(ReportPublishingError, match="asset path is invalid"):
-        store.report_asset_path(store.get_public_report(report.slug), "../index.html")
+        store.report_asset_path(store.get_report(report.slug), "../index.html")
 
 
 def test_report_publishing_tool_publishes_dynamic_workflow_run_report(tmp_path: Path) -> None:
@@ -470,8 +611,10 @@ def test_report_publishing_tool_publishes_dynamic_workflow_run_report(tmp_path: 
         "run_id": run["run_id"],
         "scope": "agent",
     }
-    assert published["public_url"] == f"https://acme.mindroom.chat/mindroom/reports/public/{published['slug']}"
-    assert published["public_path"] == f"/mindroom/reports/public/{published['slug']}"
+    assert published["report_url"] == f"https://acme.mindroom.chat/mindroom/reports/public/{published['slug']}"
+    assert published["report_path"] == f"/mindroom/reports/public/{published['slug']}"
+    assert published["public_url"] == published["report_url"]
+    assert published["public_path"] == published["report_path"]
     assert revoked["status"] == "ok"
     assert revoked["revoked_at"] is not None
 
@@ -502,8 +645,256 @@ def test_report_publishing_tool_publishes_workspace_static_site(tmp_path: Path) 
     assert published["status"] == "ok"
     assert published["source_type"] == "static_site"
     assert published["source"] == {"path": "public-demo"}
-    assert published["public_url"] == f"https://mindroom.lab.mindroom.chat/reports/public/{published['slug']}/"
-    assert published["public_path"] == f"/reports/public/{published['slug']}/"
+    assert published["report_url"] == f"https://mindroom.lab.mindroom.chat/reports/public/{published['slug']}/"
+    assert published["report_path"] == f"/reports/public/{published['slug']}/"
+
+
+def test_report_publishing_tool_publishes_origin_room_from_trusted_context(tmp_path: Path) -> None:
+    """Protected publication should derive room and publisher identity from runtime context."""
+    report_tool = ReportPublishingTools()
+    context = _make_context(
+        tmp_path,
+        public_url="https://mindroom.example",
+        agent_memory_backend="file",
+        trusted_auth=True,
+    )
+    workspace_root = context.runtime_paths.storage_root / "agents" / "general" / "workspace"
+    workspace_root.mkdir(parents=True)
+    (workspace_root / "report.html").write_text("<!doctype html><h1>Protected</h1>", encoding="utf-8")
+
+    with tool_runtime_context(context):
+        published = _tool_payload(
+            report_tool.publish_report(
+                source_type="static_site",
+                source={"path": "report.html", "title": "Protected"},
+                confirm_public=False,
+                access_policy="origin_room",
+            ),
+        )
+
+    report = ReportPublishingStore(context.runtime_paths.storage_root).get_report(published["slug"])
+    expected_publisher_id = (
+        entity_identity_registry(
+            context.config,
+            context.runtime_paths,
+        )
+        .current_id("general")
+        .full_id
+    )
+    assert published["status"] == "ok"
+    assert published["access_policy"] == "origin_room"
+    assert published["report_url"] == f"https://mindroom.example/reports/room/{published['slug']}/"
+    assert published["report_path"] == f"/reports/room/{published['slug']}/"
+    assert "public_url" not in published
+    assert "public_path" not in published
+    assert "current" in published["message"]
+    assert report.origin_room_id == "!room:localhost"
+    assert report.publisher_entity_name == "general"
+    assert report.publisher_matrix_user_id == expected_publisher_id
+    assert report.requested_by == "@user:localhost"
+
+
+def test_report_publishing_tool_uses_configured_origin_room_default(tmp_path: Path) -> None:
+    """Omitted policy should use configured protected default without public confirmation."""
+    report_tool = ReportPublishingTools()
+    context = _make_context(
+        tmp_path,
+        agent_memory_backend="file",
+        trusted_auth=True,
+        report_publishing=ReportPublishingConfig(
+            default_access_policy=ReportAccessPolicy.ORIGIN_ROOM,
+        ),
+    )
+    workspace_root = context.runtime_paths.storage_root / "agents" / "general" / "workspace"
+    workspace_root.mkdir(parents=True)
+    (workspace_root / "report.html").write_text("<!doctype html>Protected", encoding="utf-8")
+
+    with tool_runtime_context(context):
+        published = _tool_payload(
+            report_tool.publish_report(
+                source_type="static_site",
+                source={"path": "report.html", "title": "Protected"},
+                confirm_public=False,
+            ),
+        )
+
+    assert published["status"] == "ok"
+    assert published["access_policy"] == "origin_room"
+
+
+def test_report_publishing_tool_rejects_new_public_links_when_disabled(tmp_path: Path) -> None:
+    """allow_public=false should reject explicit and default public creation only."""
+    report_tool = ReportPublishingTools()
+    context = _make_context(
+        tmp_path,
+        report_publishing=ReportPublishingConfig(allow_public=False),
+    )
+
+    with tool_runtime_context(context):
+        rejected = _tool_payload(
+            report_tool.publish_report(
+                source_type="static_site",
+                source={"path": "missing.html", "title": "Public"},
+                confirm_public=True,
+                access_policy="public",
+            ),
+        )
+
+    assert rejected["status"] == "error"
+    assert "allow_public" in rejected["message"]
+
+
+def test_public_disable_does_not_block_existing_report_revocation(tmp_path: Path) -> None:
+    """Creation policy must not strand already-published public records."""
+    report_tool = ReportPublishingTools()
+    context = _make_context(tmp_path, agent_memory_backend="file")
+    workspace_root = context.runtime_paths.storage_root / "agents" / "general" / "workspace"
+    workspace_root.mkdir(parents=True)
+    (workspace_root / "report.html").write_text("<!doctype html>Public", encoding="utf-8")
+
+    with tool_runtime_context(context):
+        published = _tool_payload(
+            report_tool.publish_report(
+                source_type="static_site",
+                source={"path": "report.html", "title": "Public"},
+                confirm_public=True,
+            ),
+        )
+    disabled_context = replace(
+        context,
+        config=context.config.model_copy(
+            update={"report_publishing": ReportPublishingConfig(allow_public=False)},
+        ),
+    )
+    with tool_runtime_context(disabled_context):
+        revoked = _tool_payload(report_tool.revoke_public_report(published["slug"]))
+
+    assert published["status"] == "ok"
+    assert "possesses" in published["message"]
+    assert revoked["status"] == "ok"
+    assert revoked["access_policy"] == "public"
+
+
+def test_report_publishing_tool_rejects_origin_room_without_browser_auth(tmp_path: Path) -> None:
+    """Protected creation should fail before copying when viewer auth is unavailable."""
+    report_tool = ReportPublishingTools()
+    context = _make_context(tmp_path)
+
+    with tool_runtime_context(context):
+        rejected = _tool_payload(
+            report_tool.publish_report(
+                source_type="static_site",
+                source={"path": "missing.html", "title": "Protected"},
+                confirm_public=False,
+                access_policy="origin_room",
+            ),
+        )
+
+    assert rejected["status"] == "error"
+    assert "trusted browser authentication" in rejected["message"]
+
+
+def test_report_publishing_tool_rejects_origin_room_with_malformed_email_mapping(tmp_path: Path) -> None:
+    """Protected creation should fail before copying when its Matrix mapping is invalid."""
+    report_tool = ReportPublishingTools()
+    context = _make_context(
+        tmp_path,
+        trusted_auth=True,
+        trusted_auth_env={
+            "MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED": "true",
+            "MINDROOM_TRUSTED_UPSTREAM_USER_ID_HEADER": "X-Trusted-User",
+            "MINDROOM_TRUSTED_UPSTREAM_EMAIL_HEADER": "X-Trusted-Email",
+            "MINDROOM_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE": "@static:example.org",
+        },
+    )
+
+    with tool_runtime_context(context):
+        rejected = _tool_payload(
+            report_tool.publish_report(
+                source_type="static_site",
+                source={"path": "missing.html", "title": "Protected"},
+                confirm_public=False,
+                access_policy="origin_room",
+            ),
+        )
+
+    assert rejected["status"] == "error"
+    assert "exactly one {localpart} placeholder" in rejected["message"]
+
+
+def test_report_publishing_tool_rejects_unknown_policy_and_publisher(tmp_path: Path) -> None:
+    """Unsupported policy or missing configured publisher identity should fail closed."""
+    report_tool = ReportPublishingTools()
+    context = _make_context(tmp_path, trusted_auth=True)
+
+    with tool_runtime_context(context):
+        unsupported = _tool_payload(
+            report_tool.publish_report(
+                source_type="static_site",
+                source={"path": "missing.html", "title": "Protected"},
+                confirm_public=False,
+                access_policy="shared_room",
+            ),
+        )
+    with tool_runtime_context(replace(context, agent_name="missing")):
+        missing_publisher = _tool_payload(
+            report_tool.publish_report(
+                source_type="static_site",
+                source={"path": "missing.html", "title": "Protected"},
+                confirm_public=False,
+                access_policy="origin_room",
+            ),
+        )
+
+    assert unsupported["status"] == "error"
+    assert "Unsupported report access_policy" in unsupported["message"]
+    assert missing_publisher["status"] == "error"
+    assert "configured publisher identity" in missing_publisher["message"]
+
+
+@pytest.mark.parametrize(
+    ("missing_field", "expected_message"),
+    [
+        ("room_id", "canonical Matrix room ID"),
+        ("agent_name", "publisher identity"),
+    ],
+)
+def test_report_publishing_tool_rejects_missing_protected_context(
+    tmp_path: Path,
+    missing_field: str,
+    expected_message: str,
+) -> None:
+    """Non-room or unidentified invocations must not create protected reports."""
+    report_tool = ReportPublishingTools()
+    context = _make_context(tmp_path, trusted_auth=True)
+    if missing_field == "room_id":
+        object.__setattr__(context.target, "room_id", "")
+    else:
+        context = replace(context, agent_name="")
+
+    with tool_runtime_context(context):
+        rejected = _tool_payload(
+            report_tool.publish_report(
+                source_type="static_site",
+                source={"path": "missing.html", "title": "Protected"},
+                confirm_public=False,
+                access_policy="origin_room",
+            ),
+        )
+
+    assert rejected["status"] == "error"
+    assert expected_message in rejected["message"]
+
+
+def test_report_publishing_tool_schema_has_no_model_controlled_identity_fields() -> None:
+    """Model arguments may choose policy but never room or publisher identities."""
+    parameters = ReportPublishingTools().functions["publish_report"].parameters
+    properties = parameters["properties"]
+
+    assert "access_policy" in properties
+    assert "origin_room_id" not in properties
+    assert "publisher_entity_name" not in properties
+    assert "publisher_matrix_user_id" not in properties
 
 
 def test_report_publishing_tool_publishes_workspace_single_html_page(tmp_path: Path) -> None:
@@ -529,7 +920,7 @@ def test_report_publishing_tool_publishes_workspace_single_html_page(tmp_path: P
 
     assert published["status"] == "ok"
     assert published["source"] == {"path": "report.html"}
-    assert published["public_url"] == f"https://mindroom.lab.mindroom.chat/reports/public/{published['slug']}/"
+    assert published["report_url"] == f"https://mindroom.lab.mindroom.chat/reports/public/{published['slug']}/"
 
 
 def test_report_publishing_tool_requires_workspace_for_static_site(tmp_path: Path) -> None:
@@ -668,4 +1059,4 @@ def test_report_publishing_tool_denies_revoke_for_different_requester(tmp_path: 
         revoked = _tool_payload(report_tool.revoke_public_report(published["slug"]))
 
     assert revoked["status"] == "error"
-    assert "not available to the current requester" in revoked["message"]
+    assert revoked["message"] == "Report is not available to the current requester."

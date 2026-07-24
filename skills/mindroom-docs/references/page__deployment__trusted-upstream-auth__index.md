@@ -1,6 +1,6 @@
 # Trusted Upstream Browser Auth
 
-Use trusted upstream auth when MindRoom API and browser routes sit behind a deployment-owned access layer that has already authenticated the human.
+Use trusted upstream auth when MindRoom API and browser routes, including origin-room report links, sit behind a deployment-owned access layer that has already authenticated the human.
 This mode is disabled by default.
 Do not enable it unless the reverse proxy or identity gateway strips client-supplied copies of the trusted headers and injects verified values itself.
 Header-only mode is a compatibility option for deployments where MindRoom is only reachable through that trusted gateway.
@@ -13,6 +13,13 @@ The connect token records the Matrix requester that triggered the missing-creden
 In a hosted multi-user private-agent deployment, the browser opening that link must authenticate as the same requester.
 The standalone `MINDROOM_OWNER_USER_ID` setting maps every dashboard request to one Matrix user, so it is only appropriate for single-owner deployments.
 It is not a hosted multi-user identity solution.
+Origin-room report routes use this authentication only to obtain a verified Matrix user ID for live room authorization.
+Report viewers do not need dashboard access, API keys, or general API permission.
+Protected static reports keep their active content inside a CSP sandbox without `allow-same-origin`.
+If an upstream gateway authorizes nested report assets with a browser cookie, that cookie must use `SameSite=None; Secure` so the sandbox's opaque origin can send it on each asset request.
+Do not add `allow-same-origin` to work around a cookie setting because that would weaken isolation between untrusted report code and the MindRoom origin.
+[Cloudflare Access checks every protected request and defaults its application `CF_Authorization` cookie to `SameSite=None`.](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/authorization-cookie/)
+Private-browsing tracking protection may still block these cookies, so validate a protected report containing external CSS, JavaScript, and images in the browsers your deployment supports.
 
 ## Environment
 
