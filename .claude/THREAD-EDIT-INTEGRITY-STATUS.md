@@ -5,7 +5,7 @@
 - Branch: `fix/thread-edit-integrity`.
 - Pull request: https://github.com/mindroom-ai/mindroom/pull/1641.
 - Base: `origin/main` at `66dd4f4a68bcfd1a5e43b2cac20a1b464f306ab1`.
-- Latest production and test commit: `43b626592cd9513221d0207b65926b3e7afcb708`.
+- Latest production and test commit: `e728373f7136c0e5deb2a3ceda6fac179cf869cb`.
 - Never merge this pull request.
 - Never amend or force-push.
 
@@ -13,8 +13,8 @@
 
 - Exact head `be6ee9f9a807e5c88b07db3e1c3a8a5b7d8aa49b` was rejected by two fresh native Codex reviewers.
 - Follow-up commits through `fa5b0ed377259f7124baaa8b8fd7f0e8c612175f` address every verified finding from those reviews.
-- The isolated Fable review of rejected head `be6ee9f9a807e5c88b07db3e1c3a8a5b7d8aa49b` remains evidence-only.
-- Current GitHub CI is running on `43b626592cd9513221d0207b65926b3e7afcb708`.
+- The isolated Fable review of rejected head `be6ee9f9a807e5c88b07db3e1c3a8a5b7d8aa49b` returned `CHANGES REQUIRED` and is evidence-only.
+- Current GitHub CI is queued on `e728373f7136c0e5deb2a3ceda6fac179cf869cb`.
 - Every prior exact-head review is invalid.
 - The real-Tuwunel gate has not run on this implementation.
 - `RESOURCE-GATE.md` currently assigns heavy work to reconstructed nio, with exact-head real-Tuwunel next.
@@ -38,10 +38,17 @@
 - Both backends scan the ordered cursor only until the first valid candidate, so malformed newest edits still fall back without loading a candidate list.
 - PostgreSQL retains explicit bytewise `COLLATE "C"` event-ID ordering.
 - SQLite uses explicit `COLLATE BINARY` event-ID ordering.
+- Visible-message ordering retains the original timestamp while stale-stream recovery separately tracks the accepted edit timestamp as activity time.
+- The rejected-head Fable review's no-op schema and loop-invariant findings are removed.
+- Its bundled-candidate export finding is obsolete because incremental reuse consumes that API.
+- The completed stale Fable process is stopped while its report remains preserved.
 
 ## Current validation
 
 - Focused backend-neutral semantics and SQLite latest-edit regressions pass with `24 passed`.
+- Stale-stream activity-window regressions pass with `4 passed`.
+- Thread-resolution reuse and neighboring activity consumers pass with `34 passed`.
+- Room-scan minimality regressions pass with `3 passed`.
 - Ruff passes on the three changed production files.
 - The prior focused all-message replacement tests pass with `5 passed`.
 - Incremental reuse passes with `30 passed`.
