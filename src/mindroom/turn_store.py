@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import math
 import threading
 from dataclasses import dataclass, field, replace
@@ -67,7 +68,7 @@ class TurnStore:
     deps: TurnStoreDeps
     _ledger: HandledTurnLedger = field(init=False, repr=False)
     _pending_claim_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
-    _pending_claim_changed: threading.Condition = field(init=False, repr=False)
+    _pending_claim_changed: asyncio.Event = field(default_factory=asyncio.Event, init=False, repr=False)
     _pending_claimed_event_ids: set[str] = field(default_factory=set, init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -76,7 +77,6 @@ class TurnStore:
             self.deps.agent_name,
             base_path=Path(self.deps.tracking_base_path),
         )
-        self._pending_claim_changed = threading.Condition(self._pending_claim_lock)
 
     def warm(self) -> None:
         """Load the ledger before asynchronous startup recovery begins."""
@@ -204,7 +204,7 @@ class TurnStore:
         event_ids = turn_record.indexed_event_ids
         if not turn_record.source_event_ids:
             return False
-        with self._pending_claim_changed:
+        with self._pending_claim_lock:
             if self._pending_claimed_event_ids.intersection(event_ids):
                 return False
             self._pending_claimed_event_ids.update(event_ids)
@@ -212,16 +212,19 @@ class TurnStore:
 
     def release_pending_turn_claim(self, turn_record: TurnRecord) -> None:
         """Release a response claim after terminal settlement or failure."""
-        with self._pending_claim_changed:
+        with self._pending_claim_lock:
             self._pending_claimed_event_ids.difference_update(turn_record.indexed_event_ids)
-            self._pending_claim_changed.notify_all()
+            claim_changed, self._pending_claim_changed = self._pending_claim_changed, asyncio.Event()
+        claim_changed.set()
 
-    def wait_for_turn_settled(self, source_event_ids: tuple[str, ...]) -> None:
-        """Wait until dispatch releases ownership after recording its outcome."""
-        with self._pending_claim_changed:
-            self._pending_claim_changed.wait_for(
-                lambda: not self._pending_claimed_event_ids.intersection(source_event_ids),
-            )
+    async def wait_for_turn_settled(self, event_ids: tuple[str, ...]) -> None:
+        """Wait asynchronously until dispatch releases ownership after settlement."""
+        while True:
+            with self._pending_claim_lock:
+                if not self._pending_claimed_event_ids.intersection(event_ids):
+                    return
+                claim_changed = self._pending_claim_changed
+            await claim_changed.wait()
 
     def mark_source_redacted(
         self,
@@ -688,11 +691,7 @@ def _backfill_missing_turn_facts(authority: TurnRecord, recovery: TurnRecord) ->
             if authority.source_event_prompts is not None
             else recovery.source_event_prompts
         ),
-        source_event_revisions=(
-            authority.source_event_revisions
-            if authority.source_event_revisions is not None
-            else recovery.source_event_revisions
-        ),
+        source_event_revisions=authority.source_event_revisions or recovery.source_event_revisions,
         source_event_metadata=(
             authority.source_event_metadata
             if authority.source_event_metadata is not None

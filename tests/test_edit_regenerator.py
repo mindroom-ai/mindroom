@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import threading
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -63,7 +62,7 @@ class _Harness:
     turn_store: MagicMock
     ingress_hook_runner: MagicMock
     generate_response: AsyncMock
-    wait_for_turn_settled: MagicMock
+    wait_for_turn_settled: AsyncMock
     logger: MagicMock
     config: Config
     runtime_paths: RuntimePaths
@@ -183,7 +182,7 @@ def _harness(tmp_path: Path, *, turn_record: TurnRecord | None) -> _Harness:
             assert isinstance(request, ResponseRequest)
             return await generate_response(request)
 
-    wait_for_turn_settled = MagicMock()
+    wait_for_turn_settled = AsyncMock()
     logger = MagicMock()
     regenerator = EditRegenerator(
         EditRegeneratorDeps(
@@ -641,6 +640,42 @@ async def test_persisted_revision_rejects_stale_edit_after_regenerator_restart(t
 
 
 @pytest.mark.asyncio
+async def test_edit_waits_when_original_claim_precedes_pending_record(tmp_path: Path) -> None:
+    """An edit must survive the gap between the original claim and pending record."""
+    completed_record = _turn_record()
+    harness = _harness(tmp_path, turn_record=None)
+    original_settled = False
+    wait_started = asyncio.Event()
+    release_wait = asyncio.Event()
+
+    def load_turn(**_kwargs: object) -> TurnRecord | None:
+        return completed_record if original_settled else None
+
+    async def wait_for_turn_settled(_source_event_ids: tuple[str, ...]) -> None:
+        nonlocal original_settled
+        wait_started.set()
+        await release_wait.wait()
+        original_settled = True
+
+    harness.turn_store.load_turn.side_effect = load_turn
+    harness.turn_store.get_turn_record.side_effect = lambda _event_id: completed_record if original_settled else None
+    harness.wait_for_turn_settled.side_effect = wait_for_turn_settled
+    event, event_info = _edit_event(new_body="edit during pending registration")
+
+    task = asyncio.create_task(_handle_edit(harness, event, event_info))
+    await wait_started.wait()
+    assert not task.done()
+    release_wait.set()
+    await task
+
+    harness.wait_for_turn_settled.assert_awaited_once_with((ORIGINAL_EVENT_ID,))
+    request = harness.generate_response.await_args.args[0]
+    assert request.prompt == "edit during pending registration"
+    assert request.existing_event_id == RESPONSE_EVENT_ID
+    assert harness.regenerator._mailboxes == {}
+
+
+@pytest.mark.asyncio
 async def test_edit_waits_for_pending_original_response_then_reloads(tmp_path: Path) -> None:
     """An edit of a pending turn should wait, reload its response ID, and regenerate."""
     pending_record = _turn_record(response_event_id=None)
@@ -651,7 +686,7 @@ async def test_edit_waits_for_pending_original_response_then_reloads(tmp_path: P
     def load_turn(**_kwargs: object) -> TurnRecord:
         return completed_record if original_settled else pending_record
 
-    def wait_for_turn_settled(_source_event_ids: tuple[str, ...]) -> None:
+    async def wait_for_turn_settled(_source_event_ids: tuple[str, ...]) -> None:
         nonlocal original_settled
         original_settled = True
 
@@ -664,7 +699,7 @@ async def test_edit_waits_for_pending_original_response_then_reloads(tmp_path: P
 
     await _handle_edit(harness, event, event_info)
 
-    harness.wait_for_turn_settled.assert_called_once_with((ORIGINAL_EVENT_ID,))
+    harness.wait_for_turn_settled.assert_awaited_once_with((ORIGINAL_EVENT_ID,))
     request = harness.generate_response.await_args.args[0]
     assert request.prompt == "edit after pending"
     assert request.existing_event_id == RESPONSE_EVENT_ID
@@ -680,8 +715,12 @@ async def test_pending_original_failure_releases_wait_without_regeneration(tmp_p
 
     await _handle_edit(harness, event, event_info)
 
-    harness.wait_for_turn_settled.assert_called_once_with((ORIGINAL_EVENT_ID,))
+    harness.wait_for_turn_settled.assert_awaited_once_with((ORIGINAL_EVENT_ID,))
     harness.generate_response.assert_not_awaited()
+    harness.logger.debug.assert_any_call(
+        "Skipping edit regeneration after durable turn reload",
+        original_event_id=ORIGINAL_EVENT_ID,
+    )
     assert harness.regenerator._mailboxes == {}
 
 
@@ -689,17 +728,17 @@ async def test_pending_original_failure_releases_wait_without_regeneration(tmp_p
 async def test_cancellation_while_waiting_for_original_cleans_mailbox(tmp_path: Path) -> None:
     """Cancelling the edit waiter must not leave an event-loop task or mailbox behind."""
     harness = _harness(tmp_path, turn_record=_turn_record(response_event_id=None))
-    wait_started = threading.Event()
-    release_wait = threading.Event()
+    wait_started = asyncio.Event()
+    release_wait = asyncio.Event()
 
-    def wait_for_turn_settled(_source_event_ids: tuple[str, ...]) -> None:
+    async def wait_for_turn_settled(_source_event_ids: tuple[str, ...]) -> None:
         wait_started.set()
-        release_wait.wait()
+        await release_wait.wait()
 
     harness.wait_for_turn_settled.side_effect = wait_for_turn_settled
     event, event_info = _edit_event()
     task = asyncio.create_task(_handle_edit(harness, event, event_info))
-    await asyncio.to_thread(wait_started.wait)
+    await wait_started.wait()
     task.cancel()
 
     try:

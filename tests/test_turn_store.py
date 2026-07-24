@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -162,18 +163,55 @@ async def test_turn_settlement_waits_for_pending_claim_release(tmp_path: Path) -
     turn = TurnRecord.create(["$source"], completed=False)
     assert store.try_claim_turn(turn) is True
     wait_started = asyncio.Event()
-    loop = asyncio.get_running_loop()
 
-    def wait_for_settlement() -> None:
-        loop.call_soon_threadsafe(wait_started.set)
-        store.wait_for_turn_settled(turn.indexed_event_ids)
+    async def wait_for_settlement() -> None:
+        wait_started.set()
+        await store.wait_for_turn_settled(turn.indexed_event_ids)
 
-    waiter = asyncio.create_task(asyncio.to_thread(wait_for_settlement))
+    waiter = asyncio.create_task(wait_for_settlement())
     await wait_started.wait()
     assert not waiter.done()
 
     store.release_pending_turn_claim(turn)
     await waiter
+
+
+def test_turn_settlement_wait_does_not_consume_default_executor(tmp_path: Path) -> None:
+    """Claim settlement must progress while every default-executor worker is occupied."""
+    store = _store(tmp_path)
+    turn = TurnRecord.create(["$source"], completed=False)
+
+    async def probe() -> None:
+        loop = asyncio.get_running_loop()
+        loop.set_default_executor(ThreadPoolExecutor(max_workers=1))
+        worker_started = asyncio.Event()
+        release_worker = threading.Event()
+
+        def occupy_worker() -> None:
+            loop.call_soon_threadsafe(worker_started.set)
+            release_worker.wait()
+
+        blocker = asyncio.create_task(asyncio.to_thread(occupy_worker))
+        await worker_started.wait()
+        try:
+            assert store.try_claim_turn(turn) is True
+            wait_started = asyncio.Event()
+
+            async def wait_for_settlement() -> None:
+                wait_started.set()
+                await store.wait_for_turn_settled(turn.indexed_event_ids)
+
+            waiter = asyncio.create_task(wait_for_settlement())
+            await wait_started.wait()
+            assert not waiter.done()
+            store.release_pending_turn_claim(turn)
+            async with asyncio.timeout(1):
+                await waiter
+        finally:
+            release_worker.set()
+            await blocker
+
+    asyncio.run(probe())
 
 
 @pytest.mark.asyncio

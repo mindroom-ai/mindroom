@@ -17,7 +17,7 @@ from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
 from mindroom.timestamp_formatting import normalize_timestamp_ms
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Awaitable, Callable
 
     import nio
     import structlog
@@ -51,7 +51,7 @@ class EditRegeneratorDeps:
     turn_store: TurnStore
     ingress_hook_runner: IngressHookRunner
     generate_response: _GenerateResponse
-    wait_for_turn_settled: Callable[[tuple[str, ...]], None]
+    wait_for_turn_settled: Callable[[tuple[str, ...]], Awaitable[None]]
     timestamp_formatter: Callable[[float | None], str | None]
 
 
@@ -149,6 +149,14 @@ class EditRegenerator:
             original_event_id=original_event_id,
             requester_user_id=requester_user_id,
         )
+        if turn_record is None:
+            await self.deps.wait_for_turn_settled((original_event_id,))
+            turn_record = self.deps.turn_store.load_turn(
+                room=room,
+                thread_id=context.thread_id or event_info.thread_id or event_info.thread_id_from_edit,
+                original_event_id=original_event_id,
+                requester_user_id=requester_user_id,
+            )
         if turn_record is None:
             self._logger().debug(
                 "No handled turn record found for edited message",
@@ -356,13 +364,17 @@ class EditRegenerator:
     async def _drain(self, room: nio.MatrixRoom, initial_record: TurnRecord, mailbox: _Mailbox) -> None:
         assert initial_record.conversation_target is not None
         if initial_record.response_event_id is None:
-            await asyncio.to_thread(self.deps.wait_for_turn_settled, initial_record.indexed_event_ids)
+            await self.deps.wait_for_turn_settled(initial_record.indexed_event_ids)
         while mailbox.pending:
             latest = max(mailbox.pending.values(), key=lambda edit: edit.revision)
             request, record, applied = self._build_request(room, mailbox)
             if request is None or record is None:
                 self._discard(mailbox, applied)
                 if not applied:
+                    self._logger().debug(
+                        "Skipping edit regeneration after durable turn reload",
+                        original_event_id=latest.original_event_id,
+                    )
                     return
                 continue
             regenerated_event_id = await self.deps.generate_response(request)

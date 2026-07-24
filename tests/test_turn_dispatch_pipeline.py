@@ -167,7 +167,6 @@ class TestAgentBot(AgentBotTestBase):
         send_started = asyncio.Event()
         release_send = asyncio.Event()
         wait_started = asyncio.Event()
-        loop = asyncio.get_running_loop()
 
         bot.client = AsyncMock(spec=nio.AsyncClient)
 
@@ -176,9 +175,9 @@ class TestAgentBot(AgentBotTestBase):
             await release_send.wait()
             return "$reply"
 
-        def wait_for_settlement() -> None:
-            loop.call_soon_threadsafe(wait_started.set)
-            turn_store.wait_for_turn_settled(handled_turn.indexed_event_ids)
+        async def wait_for_settlement() -> None:
+            wait_started.set()
+            await turn_store.wait_for_turn_settled(handled_turn.indexed_event_ids)
 
         with patch.object(DeliveryGateway, "send_text", new=AsyncMock(side_effect=send_rejection)) as send_text:
             response_task = asyncio.create_task(
@@ -197,7 +196,7 @@ class TestAgentBot(AgentBotTestBase):
                     ),
                 ),
             )
-            waiter = asyncio.create_task(asyncio.to_thread(wait_for_settlement))
+            waiter = asyncio.create_task(wait_for_settlement())
             await send_started.wait()
             await wait_started.wait()
             assert not waiter.done()
