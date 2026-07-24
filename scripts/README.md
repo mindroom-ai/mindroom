@@ -50,13 +50,18 @@ uv run python scripts/testing/fuzz_matrix_event_cache.py --seed 42 --steps 500
 uv run python scripts/testing/fuzz_matrix_event_cache.py --seed 42 --steps 500 --verify-reference-model --save-trace cache-trace.json
 uv run python scripts/testing/fuzz_matrix_event_cache.py --trace cache-trace.json
 uv run python scripts/testing/fuzz_live_matrix.py --seed 42 --steps 200 --threads 45
-MINDROOM_NIO_FUZZ_COMMIT=REPLACE_WITH_FULL_SHA uv run python scripts/testing/fuzz_live_matrix.py --profile recovery --seed 42 --failure-log live-recovery-failure.json
-MINDROOM_NIO_FUZZ_COMMIT=REPLACE_WITH_FULL_SHA uv run python scripts/testing/fuzz_live_matrix.py --trace live-recovery-failure.json --failure-log live-recovery-replay-failure.json
+git -C ../mindroom-nio fetch origin pull/20/head:refs/remotes/origin/pr-20
+git -C ../mindroom-nio worktree add --detach ../mindroom-nio-pr20 origin/pr-20
+uv pip install --python .venv/bin/python --editable ../mindroom-nio-pr20
+MINDROOM_NIO_FUZZ_COMMIT="$(git -C ../mindroom-nio-pr20 rev-parse HEAD)" uv run --no-sync python scripts/testing/fuzz_live_matrix.py --profile recovery --seed 42 --failure-log live-recovery-failure.json
+MINDROOM_NIO_FUZZ_COMMIT="$(git -C ../mindroom-nio-pr20 rev-parse HEAD)" uv run --no-sync python scripts/testing/fuzz_live_matrix.py --trace live-recovery-failure.json --failure-log live-recovery-replay-failure.json
 uv run python scripts/testing/fuzz_live_matrix.py --profile saturation
 ```
 
 Cache traces preserve workload operations and concurrent batch boundaries, while reference-model mode uses sequential batches so every semantic transition has a deterministic independent oracle.
-Live failure artifacts embed the replayable scenario, seed, loaded MindRoom and mindroom-nio paths and revisions, nio version and source hash, diagnostics, and runtime output.
+The editable install changes only the local virtual environment and leaves MindRoom dependency metadata untouched.
+Keep the nio worktree clean because exact campaigns reject dirty, unverifiable, or different loaded source.
+Live failure artifacts embed the replayable scenario, seed, effective reply and settle deadlines, loaded MindRoom and mindroom-nio paths and revisions, nio version and source hash, diagnostics, and runtime output.
 Setting `MINDROOM_NIO_FUZZ_COMMIT` enables the merge-gate mode, which rejects dirty, unverifiable, or different loaded nio source.
 The saturation profile uses a 180-second per-reply deadline because its slow 12-way stream workload intentionally queues much more work than normal fuzz runs.
 
