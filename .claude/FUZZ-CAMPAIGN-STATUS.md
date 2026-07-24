@@ -4,7 +4,26 @@
 > Update it after every material finding, fix, campaign result, review result, push, or PR state change.
 > Do not include it in a product PR unless the user explicitly requests that.
 
-Last updated: 2026-07-24 (fresh Fable session, supervisor authorized continuation; Items A and B RESOLVED).
+Last updated: 2026-07-24 (STABLE HEAD REPORT — all known product and harness blockers fixed; merge gates pending).
+
+## STABLE HEAD REPORT (read this first)
+
+- STABLE CODE HEAD: `5646c1173` (`Type-narrow model payload parsing in the live fuzz harness`). Every commit after it is documentation-only; per MERGE-GATES.md, reviewers may confirm the tip diff is doc-only and review code at this head.
+- Definitive full suite AT `5646c1173`: `11573 passed, 54 skipped, 69 warnings in 113.38s (0:01:53)`. Zero failures. (One earlier xdist run flaked on `test_toolkit_routes_through_supervisor_across_instances` — zero branch diff in shell-supervisor files, passes solo; same pre-existing flake class as the plugin-install one.)
+- Pre-commit all-files at this head: every hook passes except `prettier` reformatting 7 `frontend/src` files that are byte-identical to `origin/main` (main-side drift, out of scope, never committed).
+- MERGE GATES (per `/Users/bas.nijholt/.codex/campaigns/mindroom-fuzz-2026-07-24/MERGE-GATES.md`): CLOSED until, on this same head: (1) fresh independent Codex review APPROVE; (2) fresh independent Fable review APPROVE (the implementer session does not count); (3) real-Tuwunel live validation PASS with exact provenance and retained evidence. Any later code commit invalidates all three. The live campaign should include at least one seed with coalescing, an edit regeneration, a restart interruption, and a slow-stream collision (oracle design doc final gate), run against the NEW strict oracle.
+- Also owed before merge: remove this living doc from the branch (supervisor order only). Do not merge.
+
+## Session batch ledger (2026-07-24, chronological)
+
+1. Item A cached-path regression (`13da9895d`), Item B recheck-only replay (`64ca7c360`) + Qodo thread answered.
+2. Startup batch S1/S2/S3 (`4a7558675`, `c8f0f4f5a`, `ab983381d`, `2aeec501a`, `3eb1f597d`, `6118cd6aa`) + reviewer blocker B1 (`f4b4b3930`).
+3. Retracted-approval batch R1/R2/R3 (`dcf58daf8`, `a6608ef7d`, `dbad0e692`) + test precondition (`ce3232ed2`).
+4. Dispatch batch D1 (`fab13b168`), D3 (`88ba76287`); D2 classified pre-existing-on-main (follow-up PR item, not a #1639 gate).
+5. ce323 batch N1+N2 (`e8e47fc17`).
+6. Oracle batch O1/O4/O6/O3/O5 by subagent (`80f395c10`, `85cad87cf`, `37e6f8f9e`, `7a32ba71e`, `e8b792eb4`); O2 refuted (Matrix v1.19 tie-break; regression added, behavior unchanged); ty cleanup (`5646c1173`).
+
+Known deferred follow-ups (NOT #1639 gates): D2 in-flight-edit discard (pre-existing, own PR); harness_resources_v2.md full lifecycle hardening (O5 deviation 1, flagged by the oracle subagent); cache-SQL `write_seq` ordering fuzz (fuzz_reactions_edits_design.md); plugin-install and shell-supervisor test-robustness flakes.
 
 ## Fresh-session TL;DR (read this first)
 
@@ -344,7 +363,11 @@ Affected suites at `dbad0e692`: 332 passed, 5 skipped (startup_maintenance 13, s
 - Reviewer also re-verified clean at ce323: generation rotation + live gateway read, stamping without caller-dict mutation, clock-skew/TOCTOU closures, recovered-start early guard, completed-task resume fix.
 - FULL SUITE CLEAN after the dispatch + ce323 batch (`e8e47fc17`): `11551 passed, 54 skipped, 67 warnings in 101.97s (0:01:41)`. Zero failures.
 
-## Swarm blocker batch 3: oracle/harness (OPEN — review_pr1639_oracle.md, 6 issues, verified pending)
+## Swarm blocker batch 3: oracle/harness (RESOLVED 2026-07-24 by subagent per oracle_fix_design_v2.md)
+
+Implemented by fresh-context subagent `oraclefix1639` in the mandated five-commit sequence; independently verified (scope: only the two harness files; no oracle weakening; the one removed test was the O4 false-pass encoder replaced by the five causal-chain tests): O1 durable per-source terminal proof (`80f395c10`); O4 causal restart-resume relation chains (`85cad87cf`); O6 edit-aware settlement activity clock (`37e6f8f9e`); O3 source-revision marker binding parsed from the final user message only, slow-profile keyed by stable marker fingerprint (`7a32ba71e`); O5 realized failure bundle persisted before teardown, sanitized (no tokens, no raw sync state), artifact errors never masking the primary assertion (`e8b792eb4`); ty narrowing cleanup (`5646c1173`). All required design-doc tests added, none skipped. Focused suites: `tests/test_live_matrix_fuzz.py` 51 passed; `tests/test_matrix_event_cache_fuzz.py` 6 passed. Deviations (both recorded and justified by the subagent): harness_resources_v2.md full lifecycle hardening deferred as follow-up; journal records sanitized lifecycle boundaries instead of raw sync tokens, resolving the design doc's internal tension.
+
+## Original oracle finding list (historical — see resolution above)
 
 O1 ledger attribution accepts chronology instead of completed-record proof; O2 equal-ms `m.replace` tie-break claim is REFUTED by supervisor: Matrix v1.19 defines the latest `m.replace` as max(origin_server_ts, then event_id lexicographically) on ties — exactly what `_latest_agent_body()` implements — so do NOT change the harness tie-break to timeline order (separate note: the cache SQL layer may use `write_seq` for its own ordering and may need later fuzzing; evidence arriving in `fuzz_reactions_edits_design.md`); O3 replies not semantically bound to sources (stub returns global counter); O4 interrupted-recovery acceptance lacks causal proof (any completed relay reply in thread masks later unrecovered interruptions); O5 failure artifacts incomplete for nondeterministic races (realized order not recorded; logs deleted on stack close unless `--failure-log` preselected); O6 settle quiet window ignores stream edits (`_last_response_at` only moves on canonical originals). See also `oracle_fix_design_v2.md` in the swarm dir.
 
