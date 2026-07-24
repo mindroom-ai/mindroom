@@ -44,8 +44,8 @@ def _make_lifecycle(
     )
 
 
-def test_drain_state_tracks_wait_warning_force_and_reset() -> None:
-    """Drain-state helpers should model wait, warning, force, and reset transitions."""
+def test_drain_state_tracks_wait_warning_and_reset() -> None:
+    """Drain-state helpers should model wait, warning, and reset transitions."""
     state = _ConfigReloadDrainState()
 
     assert state.waiting_for_idle is False
@@ -91,9 +91,6 @@ def test_drain_state_tracks_wait_warning_force_and_reset() -> None:
         )
         is True
     )
-    assert state.should_force_reload(now=11.9, force_after_seconds=2.0) is False
-    assert state.should_force_reload(now=12.0, force_after_seconds=2.0) is True
-
     state.reset()
 
     assert state.waiting_for_idle is False
@@ -168,13 +165,12 @@ async def test_reload_drains_active_responses_before_applying(
 
 
 @pytest.mark.asyncio
-async def test_stuck_drain_warns_then_forces_reload(
+async def test_stuck_drain_warns_and_keeps_waiting(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """A wedged drain should warn and then stop deferring the reload."""
+    """A long-running response should warn without forcing the reload."""
     warning_after_seconds = 0.5
-    force_after_seconds = 1.0
     requested_at = 1.0
     wait_started_at = 10.0
     monkeypatch.setattr("mindroom.orchestration.config_lifecycle._CONFIG_RELOAD_IDLE_POLL_SECONDS", 0)
@@ -183,16 +179,12 @@ async def test_stuck_drain_warns_then_forces_reload(
         warning_after_seconds,
     )
     monkeypatch.setattr("mindroom.orchestration.config_lifecycle._CONFIG_RELOAD_DRAIN_WARNING_INTERVAL_SECONDS", 1.0)
-    monkeypatch.setattr(
-        "mindroom.orchestration.config_lifecycle._CONFIG_RELOAD_DRAIN_FORCE_AFTER_SECONDS",
-        force_after_seconds,
-    )
     logger_mock = MagicMock()
     monkeypatch.setattr("mindroom.orchestration.config_lifecycle.logger", logger_mock)
     lifecycle = _make_lifecycle(tmp_path)
     drain_state = _ConfigReloadDrainState()
     loop = MagicMock(spec=asyncio.AbstractEventLoop)
-    loop.time.side_effect = [wait_started_at, wait_started_at + force_after_seconds]
+    loop.time.side_effect = [wait_started_at, wait_started_at + 10_000]
 
     should_defer = await lifecycle._should_defer_reload_for_active_responses(
         drain_state=drain_state,
@@ -208,73 +200,40 @@ async def test_stuck_drain_warns_then_forces_reload(
         active_response_count=1,
         loop=loop,
     )
-    assert should_defer is False
+    assert should_defer is True
 
     assert any(
         call.args and call.args[0] == "Configuration reload still waiting for active responses to finish"
         for call in logger_mock.warning.call_args_list
     )
-    assert any(
-        call.args and call.args[0] == "Forcing configuration reload while responses are still active"
-        for call in logger_mock.error.call_args_list
-    )
+    logger_mock.error.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_forced_drain_decision_applies_queued_reload(
+async def test_new_request_during_drain_keeps_waiting_for_idle(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """The reload loop should apply a queued reload after its drain timeout."""
-    monkeypatch.setattr("mindroom.orchestration.config_lifecycle._CONFIG_RELOAD_DEBOUNCE_SECONDS", 0)
-    lifecycle = _make_lifecycle(tmp_path, in_flight_response_count=lambda: 1)
-    lifecycle.update_config = AsyncMock(return_value=True)
-    lifecycle._should_defer_reload_for_active_responses = AsyncMock(side_effect=[True, False])
-
-    lifecycle.request_reload()
-    task = lifecycle._reload_task
-    assert task is not None
-
-    await task
-
-    assert lifecycle._should_defer_reload_for_active_responses.await_count == 2
-    lifecycle.update_config.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_new_request_during_drain_restarts_drain_window(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """A newer config change should get a fresh drain timeout window."""
+    """A newer config change should not make an active response reload early."""
     monkeypatch.setattr("mindroom.orchestration.config_lifecycle._CONFIG_RELOAD_DEBOUNCE_SECONDS", 0.01)
     monkeypatch.setattr("mindroom.orchestration.config_lifecycle._CONFIG_RELOAD_IDLE_POLL_SECONDS", 0.005)
-    monkeypatch.setattr("mindroom.orchestration.config_lifecycle._CONFIG_RELOAD_DRAIN_WARNING_AFTER_SECONDS", 1.0)
-    monkeypatch.setattr("mindroom.orchestration.config_lifecycle._CONFIG_RELOAD_DRAIN_WARNING_INTERVAL_SECONDS", 1.0)
-    monkeypatch.setattr("mindroom.orchestration.config_lifecycle._CONFIG_RELOAD_DRAIN_FORCE_AFTER_SECONDS", 0.12)
-    lifecycle = _make_lifecycle(tmp_path, in_flight_response_count=lambda: 1)
+    active_responses = [1]
+    lifecycle = _make_lifecycle(tmp_path, in_flight_response_count=lambda: active_responses[0])
 
-    loop = asyncio.get_running_loop()
-    started_at = loop.time()
-    update_called_at: float | None = None
-
-    async def fake_update_config() -> bool:
-        nonlocal update_called_at
-        update_called_at = loop.time()
-        return True
-
-    lifecycle.update_config = AsyncMock(side_effect=fake_update_config)
+    lifecycle.update_config = AsyncMock(return_value=True)
 
     lifecycle.request_reload()
     await asyncio.sleep(0.06)
     lifecycle.request_reload()
+    await asyncio.sleep(0.06)
 
     task = lifecycle._reload_task
     assert task is not None
+    lifecycle.update_config.assert_not_awaited()
+
+    active_responses[0] = 0
     await asyncio.wait_for(task, timeout=1)
 
-    assert update_called_at is not None
-    assert update_called_at - started_at >= 0.16
     lifecycle.update_config.assert_awaited_once()
 
 
