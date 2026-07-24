@@ -32,7 +32,6 @@ from mindroom.hooks import (
 from mindroom.matrix.client_delivery import build_threaded_edit_content, edit_message_result, send_message_result
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import build_message_content
-from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
 from mindroom.streaming import (
     StreamingResponse,
     build_cancelled_response_update,
@@ -48,6 +47,7 @@ if TYPE_CHECKING:
     import nio
     import structlog
 
+    from mindroom.bot_runtime_view import BotRuntimeView
     from mindroom.constants import RuntimePaths
     from mindroom.conversation_resolver import ConversationResolver
     from mindroom.history.types import (
@@ -302,18 +302,13 @@ class StreamingDeliveryRequest:
 class DeliveryGatewayDeps:
     """Explicit dependencies needed for Matrix delivery."""
 
-    runtime: SupportsClientConfig
+    runtime: BotRuntimeView
     runtime_paths: RuntimePaths
     agent_name: str
     logger: structlog.stdlib.BoundLogger
     redact_message_event: Callable[..., Awaitable[bool]]
     resolver: ConversationResolver
     response_hooks: ResponseHookService
-    # Live provider of the bot's runtime-generation ownership stamp. Read at
-    # delivery time, never snapshotted here: the generation rotates on every
-    # runtime start (BotRuntimeState.mark_runtime_started), so a frozen copy
-    # would falsely protect streams from a previous run of the same bot.
-    runtime_generation: Callable[[], str] | None = None
 
 
 @dataclass(frozen=True)
@@ -469,22 +464,16 @@ class DeliveryGateway:
             extra_content=failure_extra_content,
         )
 
-    def _current_runtime_generation(self) -> str | None:
-        """Return the live runtime-generation stamp for this delivery."""
-        provider = self.deps.runtime_generation
-        return provider() if provider is not None else None
-
     def _stamp_runtime_generation(self, extra_content: dict[str, Any] | None) -> dict[str, Any] | None:
         """Stamp nonterminal stream content with this bot generation's ownership mark."""
-        generation = self._current_runtime_generation()
-        if generation is None or extra_content is None:
+        if extra_content is None:
             return extra_content
         if extra_content.get(constants.STREAM_STATUS_KEY) not in {
             constants.STREAM_STATUS_PENDING,
             constants.STREAM_STATUS_STREAMING,
         }:
             return extra_content
-        return {**extra_content, constants.STREAM_GENERATION_KEY: generation}
+        return {**extra_content, constants.STREAM_GENERATION_KEY: self.deps.runtime.runtime_generation}
 
     async def send_text(self, request: SendTextRequest) -> str | None:
         """Send one response message to a room."""
@@ -1022,7 +1011,7 @@ class DeliveryGateway:
             existing_event_id=request.existing_event_id,
             adopt_existing_placeholder=request.adopt_existing_placeholder,
             extra_content=request.extra_content,
-            runtime_generation=self._current_runtime_generation(),
+            runtime_generation=self.deps.runtime.runtime_generation,
             tool_trace_collector=request.tool_trace_collector,
             pipeline_timing=request.pipeline_timing,
             visible_event_id_callback=request.visible_event_id_callback,

@@ -465,7 +465,6 @@ class AgentBot:
                 response_hooks=ResponseHookService(
                     hook_context=self._hook_context_support,
                 ),
-                runtime_generation=lambda: self._runtime_view.runtime_generation,
             ),
         )
         self._tool_runtime_support = ToolRuntimeSupport(

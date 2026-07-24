@@ -577,7 +577,9 @@ async def _process_stale_room_candidate(
         return False, None
     if scan_policy.terminal_interrupted_only and not _has_resumable_interrupted_note(state):
         return False, None
-    if _is_cleanup_candidate(state) and not _is_current_generation_stream(state, actor=actor):
+    if _is_current_generation_stream(state, actor=actor):
+        return False, None
+    if _is_cleanup_candidate(state):
         return await _cleanup_candidate_message(
             actor.client,
             room_id=room_id,
@@ -590,8 +592,6 @@ async def _process_stale_room_candidate(
             agent_name=agent_name,
             prior_edit_succeeded=prior_edit_succeeded,
         )
-    if _is_current_generation_stream(state, actor=actor):
-        return False, None
     if not (_has_restart_interrupted_note(state.latest_body) or _has_resumable_interrupted_note(state)):
         return False, None
     return await _handle_interrupted_message(
