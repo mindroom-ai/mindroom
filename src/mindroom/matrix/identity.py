@@ -14,6 +14,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
 _CURRENT_USER_LOCALPART_PATTERN = re.compile(r"^[a-z0-9._=/+-]+$")
+_DOMAINLESS_ROOM_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{43}$")
 _SERVER_DNS_LABEL_PATTERN = re.compile(r"^[A-Za-z0-9-]{1,63}$")
 _SERVER_IPV6_LITERAL_PATTERN = re.compile(r"^[0-9A-Fa-f:.]{2,45}$")
 
@@ -138,15 +139,8 @@ def try_parse_historical_matrix_user_id(value: str | None) -> str | None:
 
 def parse_matrix_room_id(room_id: str) -> str:
     """Return a canonical Matrix room ID, or raise ValueError."""
-    if not room_id.startswith("!") or ":" not in room_id:
+    if not room_id.startswith("!"):
         msg = f"Invalid Matrix room ID: {room_id}"
-        raise ValueError(msg)
-    localpart, server_name = room_id[1:].split(":", 1)
-    if not localpart or any(char.isspace() or char == "\x00" for char in localpart):
-        msg = f"Invalid Matrix room ID localpart: {room_id}"
-        raise ValueError(msg)
-    if _contains_surrogate(localpart) or not _valid_current_server_name(server_name):
-        msg = f"Invalid Matrix room ID server name: {room_id}"
         raise ValueError(msg)
     try:
         encoded_room_id = room_id.encode("utf-8")
@@ -155,6 +149,20 @@ def parse_matrix_room_id(room_id: str) -> str:
         raise ValueError(msg) from exc
     if len(encoded_room_id) > 255:
         msg = f"Invalid Matrix room ID length: {room_id}"
+        raise ValueError(msg)
+
+    if ":" not in room_id:
+        if _DOMAINLESS_ROOM_ID_PATTERN.fullmatch(room_id[1:]) is None:
+            msg = f"Invalid Matrix room ID: {room_id}"
+            raise ValueError(msg)
+        return room_id
+
+    localpart, server_name = room_id[1:].split(":", 1)
+    if not localpart or "\x00" in localpart or _contains_surrogate(localpart):
+        msg = f"Invalid Matrix room ID localpart: {room_id}"
+        raise ValueError(msg)
+    if not _valid_current_server_name(server_name):
+        msg = f"Invalid Matrix room ID server name: {room_id}"
         raise ValueError(msg)
     return room_id
 

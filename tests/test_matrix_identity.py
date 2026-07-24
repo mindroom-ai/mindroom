@@ -195,6 +195,8 @@ class TestMatrixID:
             "!opaque:example.org",
             "!opaque:example.org:8448",
             "!opaque:[1234:5678::abcd]",
+            "!opaque room:example.org",
+            "!Nhcu5BS-UMnFX7hBVfVSoXiD7OgH6iRT-xyIuqDnpYQ",
         ],
     )
     def test_parse_matrix_room_id(self, room_id: str) -> None:
@@ -207,11 +209,13 @@ class TestMatrixID:
         [
             "#alias:example.org",
             "!opaque",
+            "!" + ("a" * 42),
+            "!" + ("a" * 44),
+            "!" + ("a" * 42) + "=",
             "!:example.org",
             "!opaque:",
             "!opaque:example.org.",
             "!opaque:[::::]",
-            "!opaque room:example.org",
         ],
     )
     def test_parse_matrix_room_id_rejects_aliases_and_malformed_ids(self, room_id: str) -> None:

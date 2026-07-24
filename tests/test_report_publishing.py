@@ -203,14 +203,14 @@ def test_report_publishing_store_round_trips_origin_room_metadata(tmp_path: Path
         published_by="@alice:localhost",
         base_url="https://acme.mindroom.chat",
         access_policy=ReportAccessPolicy.ORIGIN_ROOM,
-        origin_room_id="!origin:localhost",
+        origin_room_id="!Nhcu5BS-UMnFX7hBVfVSoXiD7OgH6iRT-xyIuqDnpYQ",
         publisher_entity_name="general",
         publisher_matrix_user_id="@mindroom_general:localhost",
     )
     loaded = store.get_report(report.slug)
 
     assert loaded.access_policy is ReportAccessPolicy.ORIGIN_ROOM
-    assert loaded.origin_room_id == "!origin:localhost"
+    assert loaded.origin_room_id == "!Nhcu5BS-UMnFX7hBVfVSoXiD7OgH6iRT-xyIuqDnpYQ"
     assert loaded.publisher_entity_name == "general"
     assert loaded.publisher_matrix_user_id == "@mindroom_general:localhost"
     assert loaded.public_url == f"https://acme.mindroom.chat/reports/room/{report.slug}"
