@@ -2440,6 +2440,10 @@ def test_child_provenance_uses_loaded_overlay(
 
     monkeypatch.setattr("scripts.testing.fuzz_live_matrix._git_state_for_file", git_state)
     monkeypatch.setattr(
+        "scripts.testing.fuzz_live_matrix._git_root_for_path",
+        lambda path: tmp_path / "overlay" if "overlay" in str(path) else project_root,
+    )
+    monkeypatch.setattr(
         "scripts.testing.fuzz_live_matrix._git_revision",
         lambda path: "nio-head" if "overlay" in str(path) else "mindroom-head",
     )
@@ -2452,6 +2456,30 @@ def test_child_provenance_uses_loaded_overlay(
     assert provenance["nio_module_path"] == str((tmp_path / "overlay" / "nio" / "__init__.py").resolve())
     assert provenance["nio_revision"] == "nio-head"
     assert provenance["nio_expected_revision"] == "nio-head"
+
+
+def test_child_provenance_rejects_nested_mindroom_checkout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A path below the runner root must still belong to the runner's Git checkout."""
+    project_root = tmp_path / "mindroom"
+    nested_root = project_root / "nested"
+    monkeypatch.setattr(live_fuzz, "PROJECT_ROOT", project_root)
+    attestation = tmp_path / "runtime-attestation.json"
+    attestation.write_text(
+        json.dumps(
+            {
+                "mindroom_module_path": str(nested_root / "src" / "mindroom" / "__init__.py"),
+                "nio_module_path": str(tmp_path / "nio" / "__init__.py"),
+            },
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("scripts.testing.fuzz_live_matrix._git_root_for_path", lambda _path: nested_root)
+
+    with pytest.raises(RuntimeError, match="nested or different Git checkout"):
+        _validated_child_provenance(attestation, overlay=None)
 
 
 def test_child_provenance_rejects_same_head_from_other_mindroom_checkout(
@@ -2503,6 +2531,10 @@ def test_child_provenance_rejects_same_head_from_other_checkout(
     monkeypatch.setattr(
         "scripts.testing.fuzz_live_matrix._git_revision",
         lambda _path: "same-head",
+    )
+    monkeypatch.setattr(
+        "scripts.testing.fuzz_live_matrix._git_root_for_path",
+        lambda path: project_root if "mindroom" in str(path) else other,
     )
 
     with pytest.raises(RuntimeError, match="outside requested editable overlay"):
@@ -3174,6 +3206,74 @@ def test_main_bad_failure_log_preserves_primary_and_closes_stack(
         live_fuzz.main()
 
     assert stack_events == ["start", "close"]
+
+
+def test_main_bundle_capture_failure_preserves_primary_and_closes_stack(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Any evidence-capture failure still preserves the run error and teardown."""
+    args = SimpleNamespace(
+        artifact_root=tmp_path / "artifacts",
+        failure_log=None,
+        pending_grace=0.0,
+        reply_timeout=1.0,
+        save_trace=None,
+        seed=1,
+        settle_seconds=0.0,
+        trace=None,
+    )
+    stack_events: list[str] = []
+
+    class InterruptedStack:
+        log_path = tmp_path / "mindroom.log"
+
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def start(self) -> None:
+            stack_events.append("start")
+
+        def close(self) -> None:
+            stack_events.append("close")
+
+    async def fail_run(*_args: object, **_kwargs: object) -> dict[str, object]:
+        message = "primary invariant"
+        raise AssertionError(message)
+
+    def fail_capture(*_args: object, **_kwargs: object) -> None:
+        message = "diagnostic read failed"
+        raise OSError(message)
+
+    monkeypatch.setattr(live_fuzz, "_parse_args", lambda: args)
+    monkeypatch.setattr(live_fuzz, "_scenario_from_args", lambda _args: _bundle_scenario())
+    monkeypatch.setattr(live_fuzz, "_run_provenance", dict)
+    monkeypatch.setattr(live_fuzz, "ManagedTuwunelStack", InterruptedStack)
+    monkeypatch.setattr(live_fuzz, "_run_live", fail_run)
+    monkeypatch.setattr(live_fuzz, "_persist_failure_bundle", fail_capture)
+
+    with pytest.raises(AssertionError, match="primary invariant"):
+        live_fuzz.main()
+
+    assert stack_events == ["start", "close"]
+
+
+def test_failure_bundle_appends_every_cleanup_error(tmp_path: Path) -> None:
+    """Multiple teardown failures remain visible in occurrence order."""
+    bundle = FailureBundle.create(
+        tmp_path / "artifacts",
+        "run-cleanup-errors",
+        scenario=_bundle_scenario(),
+        provenance={},
+    )
+
+    bundle.record_cleanup_error(OSError("failure-log failed"))
+    bundle.record_cleanup_error(RuntimeError("close failed"))
+
+    cleanup_errors = (bundle.directory / "cleanup_error.txt").read_text(encoding="utf-8")
+    assert "OSError: failure-log failed" in cleanup_errors
+    assert "RuntimeError: close failed" in cleanup_errors
+    assert cleanup_errors.index("failure-log failed") < cleanup_errors.index("close failed")
 
 
 @pytest.mark.asyncio

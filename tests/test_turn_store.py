@@ -176,11 +176,16 @@ async def test_dispatch_leaves_alias_owned_by_another_live_turn(tmp_path: Path) 
         server_timestamp=1_000,
     )
     prepared = SimpleNamespace(handled_turn=TurnRecord.create(["$relay"], completed=False), event=raw_event)
+    prepared_claims: list[TurnRecord] = []
+
+    async def capture_prepared(*_args: object, handled_turn: TurnRecord, **_kwargs: object) -> object:
+        prepared_claims.append(handled_turn)
+        return prepared
 
     with (
         patch(
             "mindroom.text_ingress_dispatch._prepare_text_dispatch",
-            new=AsyncMock(return_value=prepared),
+            new=capture_prepared,
         ),
         patch(
             "mindroom.text_ingress_dispatch._blocked_before_plan",
@@ -195,6 +200,7 @@ async def test_dispatch_leaves_alias_owned_by_another_live_turn(tmp_path: Path) 
         )
 
     # The relay released only $relay; the routed original still owns $routed.
+    assert prepared_claims[0].indexed_event_ids == ("$relay",)
     assert store.is_claimed_in_flight("$routed") is True
     assert store.is_claimed_in_flight("$relay") is False
 

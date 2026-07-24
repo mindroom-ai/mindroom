@@ -118,7 +118,7 @@ async def dispatch_text_message(
             raw_event,
             requester_user_id,
             media_events=media_events,
-            handled_turn=handled_turn,
+            handled_turn=turn_claim,
             ingress_metadata=ingress_metadata,
             payload_metadata=payload_metadata,
             trust_hydrated_internal_metadata=trust_hydrated_internal_metadata,
@@ -266,19 +266,6 @@ async def _prepare_text_dispatch(
         refreshed_prompts = dict(handled_turn.source_event_prompts or {})
         refreshed_prompts[event.event_id] = event.body
         handled_turn = replace(handled_turn, source_event_prompts=refreshed_prompts)
-    routed_original_event_id = (
-        ingress_metadata.router_relay_original_event_id
-        if ingress_metadata is not None
-        else controller.deps.ingress.router_relay_original_event_id(event)
-    )
-    if routed_original_event_id is not None:
-        # Keep the routed turn discoverable by the human message the router
-        # relayed, so edits and redactions of that message reach this
-        # responder's persisted runs.
-        handled_turn = replace(
-            handled_turn,
-            discovery_event_ids=(*handled_turn.discovery_event_ids, routed_original_event_id),
-        )
 
     command = _parsed_command_for_event(
         controller,

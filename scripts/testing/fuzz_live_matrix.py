@@ -4142,22 +4142,27 @@ def _room_keys_for(scenario: LiveFuzzScenario) -> tuple[str, ...]:
 DEFAULT_ARTIFACT_ROOT = PROJECT_ROOT / "tmp" / "live-fuzz-artifacts"
 
 
-def _git_state_for_file(
-    path: Path,
-    *,
-    scopes: Collection[Path] = (),
-) -> tuple[str | None, bool]:
-    """Return the containing Git revision and whether its checkout is dirty."""
-    root_result = subprocess.run(
+def _git_root_for_path(path: Path) -> Path | None:
+    """Return the exact Git checkout containing one loaded module."""
+    result = subprocess.run(
         ("git", "-C", str(path.parent), "rev-parse", "--show-toplevel"),
         check=False,
         capture_output=True,
         text=True,
         timeout=10,
     )
-    if root_result.returncode:
+    return Path(result.stdout.strip()).resolve() if result.returncode == 0 else None
+
+
+def _git_state_for_file(
+    path: Path,
+    *,
+    scopes: Collection[Path] = (),
+) -> tuple[str | None, bool]:
+    """Return the containing Git revision and whether its checkout is dirty."""
+    root = _git_root_for_path(path)
+    if root is None:
         return None, False
-    root = Path(root_result.stdout.strip()).resolve()
     resolved = path.resolve()
     if not resolved.is_relative_to(root):
         return None, False
@@ -4212,6 +4217,13 @@ def _require_path_within(path: Path, root: Path, message: str) -> None:
         raise RuntimeError(error)
 
 
+def _require_git_root(path: Path, expected_root: Path, module_name: str) -> None:
+    """Fail closed when a contained path belongs to a nested Git checkout."""
+    if _git_root_for_path(path) != expected_root.resolve():
+        msg = f"loaded {module_name} module belongs to a nested or different Git checkout"
+        raise RuntimeError(msg)
+
+
 def _validated_child_provenance(
     attestation_path: Path,
     *,
@@ -4234,6 +4246,7 @@ def _validated_child_provenance(
         PROJECT_ROOT,
         "loaded MindRoom path is outside the live runner checkout",
     )
+    _require_git_root(mindroom_path, PROJECT_ROOT, "MindRoom")
     mindroom_revision, mindroom_dirty = _git_state_for_file(
         mindroom_path,
         scopes=(
@@ -4263,6 +4276,7 @@ def _validated_child_provenance(
         if not nio_path.is_relative_to(overlay_path):
             msg = f"loaded mindroom-nio path is outside requested editable overlay: {nio_path}"
             raise RuntimeError(msg)
+        _require_git_root(nio_path, overlay_path, "mindroom-nio")
         nio_revision, nio_dirty = _git_state_for_file(
             nio_path,
             scopes=(
@@ -4447,12 +4461,14 @@ class FailureBundle:
 
     def record_cleanup_error(self, error: BaseException) -> None:
         """Retain teardown failure details without replacing a primary failure."""
+
+        def append_error(destination: Path) -> None:
+            with destination.open("a", encoding="utf-8") as handle:
+                handle.write(f"{type(error).__name__}: {error}\n")
+
         self._write_isolated(
             "cleanup_error.txt",
-            lambda destination: destination.write_text(
-                f"{type(error).__name__}: {error}\n",
-                encoding="utf-8",
-            ),
+            append_error,
         )
 
     def _write_isolated(self, name: str, writer: Callable[[Path], None]) -> None:
@@ -4517,6 +4533,47 @@ class FailureBundle:
         return self.directory
 
 
+def _record_secondary_failure(
+    bundle: FailureBundle,
+    error: BaseException,
+    *,
+    label: str,
+) -> None:
+    """Persist and report one secondary failure without replacing the primary."""
+    with suppress(BaseException):
+        bundle.record_cleanup_error(error)
+    with suppress(BaseException):
+        print(f"{label} (ignored): {error}", file=sys.stderr)
+
+
+def _capture_failed_run(
+    args: argparse.Namespace,
+    bundle: FailureBundle,
+    stack: ManagedTuwunelStack,
+    runner: LiveFuzzRunner | None,
+    error: BaseException,
+) -> None:
+    """Capture best-effort evidence and always close the failed stack."""
+    try:
+        try:
+            _persist_failure_bundle(bundle, stack, runner, error)
+        except BaseException as bundle_error:
+            _record_secondary_failure(bundle, bundle_error, label="Failure bundle capture error")
+        try:
+            if args.failure_log is not None and stack.log_path.exists():
+                args.failure_log.write_text(
+                    stack.log_path.read_text(encoding="utf-8", errors="replace"),
+                    encoding="utf-8",
+                )
+        except BaseException as failure_log_error:
+            _record_secondary_failure(bundle, failure_log_error, label="Failure-log copy error")
+    finally:
+        try:
+            stack.close()
+        except BaseException as cleanup_error:
+            _record_secondary_failure(bundle, cleanup_error, label="Live Matrix fuzz cleanup error")
+
+
 def main() -> None:
     """Run one trace against a fresh disposable real-server stack."""
     if len(sys.argv) >= 4 and sys.argv[1] == "__mindroom_runtime_child__":
@@ -4562,23 +4619,7 @@ def main() -> None:
         result["wall_seconds"] = round(time.monotonic() - started_at, 1)
         result.update(stack.diagnostic_counts())
     except BaseException as exc:
-        _persist_failure_bundle(bundle, stack, runner_holder.get("runner"), exc)
-        try:
-            if args.failure_log is not None and stack.log_path.exists():
-                args.failure_log.write_text(
-                    stack.log_path.read_text(encoding="utf-8", errors="replace"),
-                    encoding="utf-8",
-                )
-        except BaseException as failure_log_exc:
-            with suppress(BaseException):
-                bundle.record_cleanup_error(failure_log_exc)
-            print(f"Failure-log copy error (ignored): {failure_log_exc}", file=sys.stderr)
-        try:
-            stack.close()
-        except BaseException as cleanup_exc:
-            with suppress(BaseException):
-                bundle.record_cleanup_error(cleanup_exc)
-            print(f"Live Matrix fuzz cleanup error: {cleanup_exc}", file=sys.stderr)
+        _capture_failed_run(args, bundle, stack, runner_holder.get("runner"), exc)
         raise
     stack.close()
     provenance = stack.runtime_provenance
@@ -4605,15 +4646,16 @@ def _persist_failure_bundle(
     captured while the container still exists. Any error assembling the bundle
     is reported but does not replace the fuzz assertion, which ``main`` re-raises.
     """
-    print("MindRoom log tail:", file=sys.stderr)
-    print(stack.log_tail(), file=sys.stderr)
+    with suppress(BaseException):
+        print("MindRoom log tail:", file=sys.stderr)
+        print(stack.log_tail(), file=sys.stderr)
     # The exact logical-workload JSON is too large to dump to stderr; it is
     # persisted as scenario.json inside the failure bundle below, and its path
     # is printed so the same operation batches and inputs can be replayed.
     print(f"Replay trace: {bundle.directory / 'scenario.json'}", file=sys.stderr)
     try:
         stack.stop_mindroom()
-    except Exception as stop_exc:
+    except BaseException as stop_exc:
         bundle.record_cleanup_error(stop_exc)
         print(f"MindRoom stop before failure capture failed: {stop_exc}", file=sys.stderr)
     try:
@@ -4629,7 +4671,7 @@ def _persist_failure_bundle(
             tuwunel_log=stack.tuwunel_log(),
         )
         print(f"Live Matrix fuzz failure bundle: {path}", file=sys.stderr)
-    except Exception as bundle_exc:
+    except BaseException as bundle_exc:
         # Evidence-capture errors must never replace the primary fuzz failure.
         print(f"Failure bundle capture error (ignored): {bundle_exc}", file=sys.stderr)
 
