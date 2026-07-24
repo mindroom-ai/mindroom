@@ -373,13 +373,10 @@ def _prepare_delivery_from_snapshot(snapshot: _StreamingDeliverySnapshot) -> _Pr
     extra_content[STREAM_STATUS_KEY] = snapshot.stream_status
     # Ownership stamp lands in the per-delivery copy, never in the caller's
     # shared extra-content dict (it doubles as the run-metadata collector).
-    # Only nonterminal snapshots are stamped: a terminal interrupted note must
-    # stay eligible for current-generation auto-resume, which cleanup would
-    # otherwise skip once it read the stamp.
-    if snapshot.runtime_generation is not None and snapshot.stream_status in {
-        STREAM_STATUS_PENDING,
-        STREAM_STATUS_STREAMING,
-    }:
+    # Terminal interruption notes stay owned by this generation too: the live
+    # sync-restart retry owns their immediate recovery, while startup cleanup
+    # may resume only a note left by an older generation.
+    if snapshot.runtime_generation is not None:
         extra_content[STREAM_GENERATION_KEY] = snapshot.runtime_generation
     tool_trace = list(snapshot.tool_trace)
 

@@ -1878,7 +1878,7 @@ class TestStreamingBehavior:
 
     @pytest.mark.asyncio
     async def test_send_streaming_response_stamps_runtime_generation_per_delivery(self) -> None:
-        """Nonterminal payloads carry the ownership stamp; terminal ones stay unstamped."""
+        """Every payload carries the generation that owns its recovery."""
         mock_client = _make_matrix_client_mock()
         delivered_contents: list[dict[str, object]] = []
 
@@ -1919,17 +1919,16 @@ class TestStreamingBehavior:
             )
 
         assert delivered_contents
-        nonterminal_statuses = {STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING}
-        # Nonterminal deliveries carry the stamp so cleanup can prove ownership;
-        # the terminal delivery must stay unstamped so a terminal interrupted
-        # note remains eligible for current-generation auto-resume.
         for content in delivered_contents:
-            if content[STREAM_STATUS_KEY] in nonterminal_statuses:
-                assert content[STREAM_GENERATION_KEY] == "gen-1"
-            else:
-                assert STREAM_GENERATION_KEY not in content
-        assert any(content[STREAM_STATUS_KEY] in nonterminal_statuses for content in delivered_contents)
-        assert any(content[STREAM_STATUS_KEY] not in nonterminal_statuses for content in delivered_contents)
+            assert content[STREAM_GENERATION_KEY] == "gen-1"
+        assert any(
+            content[STREAM_STATUS_KEY] in {STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING}
+            for content in delivered_contents
+        )
+        assert any(
+            content[STREAM_STATUS_KEY] not in {STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING}
+            for content in delivered_contents
+        )
         assert shared_collector == {}
 
     @pytest.mark.asyncio

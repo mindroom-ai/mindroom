@@ -23,7 +23,7 @@ from mindroom import constants
 from mindroom.bot import AgentBot
 from mindroom.config.main import Config
 from mindroom.conversation_state_writer import ConversationStateWriter, ConversationStateWriterDeps
-from mindroom.dispatch_handoff import PreparedTextEvent
+from mindroom.dispatch_handoff import DispatchIngressMetadata, PreparedTextEvent
 from mindroom.handled_turns import (
     SourceEventMetadata,
     TurnRecord,
@@ -108,7 +108,7 @@ async def test_dispatch_claims_router_relay_alias_up_front(tmp_path: Path) -> No
     relay response was live.
     """
     store = _store(tmp_path)
-    ingress = SimpleNamespace(router_relay_original_event_id=lambda _event: "$routed")
+    ingress = SimpleNamespace(router_relay_original_event_id=lambda _event: None)
     controller = cast(
         "TurnController",
         SimpleNamespace(deps=SimpleNamespace(turn_store=store, ingress=ingress)),
@@ -142,6 +142,10 @@ async def test_dispatch_claims_router_relay_alias_up_front(tmp_path: Path) -> No
             MagicMock(room_id="!room:example.org"),
             raw_event,
             "@user:example.org",
+            ingress_metadata=DispatchIngressMetadata(
+                source_kind="trusted_internal_relay",
+                router_relay_original_event_id="$routed",
+            ),
         )
 
     assert observed["routed_in_flight"] is True

@@ -1502,7 +1502,7 @@ class _MultiAgentOrchestrator:
         """Apply one computed config update plan: restart entities and reconcile state."""
         new_config = plan.new_config
         await self._prepare_accounts_for_config_update(new_config, plan)
-        replay_startup_maintenance = await self._startup_maintenance.cancel()
+        replay_startup_maintenance = await self._startup_maintenance.suspend_for_config_reload()
 
         try:
             if plugin_changes:
@@ -1581,10 +1581,11 @@ class _MultiAgentOrchestrator:
             )
             return True
         finally:
-            if replay_startup_maintenance and self.running and self.config is not None:
+            if self.running and self.config is not None:
                 self._startup_maintenance.restart_after_config_reload(
                     config=self.config,
                     running_bots=self._running_startup_maintenance_bots,
+                    replay=replay_startup_maintenance,
                 )
 
     def _router_bot(self) -> AgentBot | TeamBot | None:

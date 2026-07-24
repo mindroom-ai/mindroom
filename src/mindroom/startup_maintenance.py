@@ -43,6 +43,7 @@ class StartupMaintenanceController:
     # finish with zero running bots; this records that the full sequence is
     # still owed so a later reload or bot-recovery replay reruns it.
     replay_pending: bool = field(default=False, init=False)
+    _config_reload_suspended: bool = field(default=False, init=False)
 
     def start(self, bots: list[_StartupBot], config: Config) -> None:
         """Schedule detached startup maintenance for one startup generation."""
@@ -67,6 +68,11 @@ class StartupMaintenanceController:
         await cancel_logged_task(task)
         return should_replay
 
+    async def suspend_for_config_reload(self) -> bool:
+        """Cancel maintenance and fence background recovery until reload finalization."""
+        self._config_reload_suspended = True
+        return await self.cancel()
+
     def _task_running(self) -> bool:
         """Return whether a live maintenance task is currently scheduled."""
         return self.task is not None and not self.task.done()
@@ -76,9 +82,11 @@ class StartupMaintenanceController:
         *,
         config: Config,
         running_bots: _RunningBots,
+        replay: bool = True,
     ) -> None:
         """Replay canceled startup maintenance after config reload completes."""
-        if not self._started or self._task_running():
+        self._config_reload_suspended = False
+        if not replay or not self._started or self._task_running():
             return
         # The cancel interrupted the full sequence, so it is owed. Record the
         # debt before attempting resume: a reload that finishes with zero
@@ -94,7 +102,7 @@ class StartupMaintenanceController:
         a live task blocks resume; parked debt must stay resumable without an
         intervening cancel().
         """
-        if self._task_running() or not self.replay_pending:
+        if self._config_reload_suspended or self._task_running() or not self.replay_pending:
             return
         bots = running_bots()
         if not bots:

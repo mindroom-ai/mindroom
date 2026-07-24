@@ -97,7 +97,12 @@ async def dispatch_text_message(
     turn_claim = handled_turn or TurnRecord.create([raw_event.event_id], completed=False)
     if not turn_claim_held and not _try_claim_turn(controller, turn_claim, queued_notice_reservation):
         return
-    turn_claim = _claim_router_relay_alias(controller, raw_event, turn_claim)
+    turn_claim = _claim_router_relay_alias(
+        controller,
+        raw_event,
+        turn_claim,
+        ingress_metadata=ingress_metadata,
+    )
     claim_transferred = False
 
     def mark_claim_transferred() -> None:
@@ -172,6 +177,8 @@ def _claim_router_relay_alias(
     controller: TurnController,
     raw_event: TextDispatchEvent,
     turn_claim: TurnRecord,
+    *,
+    ingress_metadata: DispatchIngressMetadata | None,
 ) -> TurnRecord:
     """Claim the routed-human alias a trusted router relay replies to, up front.
 
@@ -186,7 +193,11 @@ def _claim_router_relay_alias(
     acquired, so the transfer and finally releases never strip another turn's
     claim.
     """
-    alias_event_id = controller.deps.ingress.router_relay_original_event_id(raw_event)
+    alias_event_id = (
+        ingress_metadata.router_relay_original_event_id
+        if ingress_metadata is not None
+        else controller.deps.ingress.router_relay_original_event_id(raw_event)
+    )
     if alias_event_id is None or alias_event_id in turn_claim.indexed_event_ids:
         return turn_claim
     if not controller.deps.turn_store.try_claim_turn_alias(alias_event_id):
@@ -255,7 +266,11 @@ async def _prepare_text_dispatch(
         refreshed_prompts = dict(handled_turn.source_event_prompts or {})
         refreshed_prompts[event.event_id] = event.body
         handled_turn = replace(handled_turn, source_event_prompts=refreshed_prompts)
-    routed_original_event_id = controller.deps.ingress.router_relay_original_event_id(event)
+    routed_original_event_id = (
+        ingress_metadata.router_relay_original_event_id
+        if ingress_metadata is not None
+        else controller.deps.ingress.router_relay_original_event_id(event)
+    )
     if routed_original_event_id is not None:
         # Keep the routed turn discoverable by the human message the router
         # relayed, so edits and redactions of that message reach this

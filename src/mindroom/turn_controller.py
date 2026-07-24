@@ -873,7 +873,10 @@ class TurnController:
             CoalescingKey(room.room_id, coalescing_thread_id, requester_user_id),
             [pending_event],
         )
-        handoff = build_dispatch_handoff(batch)
+        handoff = build_dispatch_handoff(
+            batch,
+            router_relay_original_event_id=self.deps.ingress.router_relay_original_event_id(dispatch_event),
+        )
         handled_turn = TurnRecord.create(
             handoff.source_event_ids,
             source_event_prompts=dict(handoff.source_event_prompts),
@@ -1876,7 +1879,12 @@ class TurnController:
         dispatch_owns_claim = False
         try:
             try:
-                handoff = build_dispatch_handoff(batch)
+                handoff = build_dispatch_handoff(
+                    batch,
+                    router_relay_original_event_id=self.deps.ingress.router_relay_original_event_id(
+                        batch.primary_event,
+                    ),
+                )
             except BaseException:
                 # Close-and-clear so the gate's segment owner cannot close the
                 # same metadata a second time when this exception reaches it.
@@ -1929,31 +1937,39 @@ class TurnController:
         batch's turn; a fully-owned batch drops idempotently.
         """
         claimed = self.deps.turn_store.try_claim_turn_subset(batch.source_event_ids)
-        if len(claimed) == len(batch.source_event_ids):
-            return batch
-        claimed_id_set = set(claimed)
-        dropped = [
-            pending_event
-            for pending_event in batch.pending_events
-            if pending_event.event.event_id not in claimed_id_set
-        ]
-        close_pending_event_metadata_once(dropped)
-        self.deps.logger.info(
-            "coalesced_batch_dropped_already_owned_sources",
-            room_id=batch.room.room_id,
-            dropped_event_ids=[pending_event.event.event_id for pending_event in dropped],
-            surviving_event_ids=list(claimed),
-        )
-        if not claimed:
-            return None
-        surviving = [
-            pending_event for pending_event in batch.pending_events if pending_event.event.event_id in claimed_id_set
-        ]
-        return build_coalesced_batch(
-            batch.coalescing_key,
-            surviving,
-            timestamp_formatter=self._coalesced_timestamp_formatter,
-        )
+        try:
+            if len(claimed) == len(batch.source_event_ids):
+                return batch
+            claimed_id_set = set(claimed)
+            surviving = []
+            dropped = []
+            seen_survivor_ids: set[str] = set()
+            for pending_event in batch.pending_events:
+                event_id = pending_event.event.event_id
+                if event_id not in claimed_id_set or event_id in seen_survivor_ids:
+                    dropped.append(pending_event)
+                    continue
+                seen_survivor_ids.add(event_id)
+                surviving.append(pending_event)
+            close_pending_event_metadata_once(dropped)
+            self.deps.logger.info(
+                "coalesced_batch_dropped_already_owned_sources",
+                room_id=batch.room.room_id,
+                dropped_event_ids=[pending_event.event.event_id for pending_event in dropped],
+                surviving_event_ids=list(claimed),
+            )
+            if not claimed:
+                return None
+            return build_coalesced_batch(
+                batch.coalescing_key,
+                surviving,
+                timestamp_formatter=self._coalesced_timestamp_formatter,
+            )
+        except BaseException:
+            self.deps.turn_store.release_pending_turn_claim(
+                TurnRecord.create(list(claimed), completed=False),
+            )
+            raise
 
     def _coalesced_timestamp_formatter(self, timestamp_ms: float | None) -> str | None:
         """Render batch prompt timestamps exactly like the coalescing gate does."""

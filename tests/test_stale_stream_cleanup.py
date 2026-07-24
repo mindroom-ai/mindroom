@@ -2251,6 +2251,44 @@ async def test_cleanup_returns_old_terminal_interrupted_thread_for_auto_resume(t
 
 
 @pytest.mark.asyncio
+async def test_cleanup_skips_same_generation_terminal_interruption(tmp_path: Path) -> None:
+    """In-memory sync-restart retry owns a terminal note from the current generation."""
+    config = _make_config(tmp_path)
+    config.defaults.auto_resume_after_restart = True
+    client = _make_client()
+    client.rooms = _joined_room_cache()
+    client.room_messages.return_value = _room_messages_response(
+        _make_message_event(
+            event_id="$thread-root",
+            body="Question",
+            sender=USER_ID,
+            timestamp_ms=NOW_MS - (STALE_AGE_MS + 20_000),
+        ),
+        _make_message_event(
+            event_id="$current-interrupted",
+            body="Partial answer\n\n**[Response interrupted]**",
+            timestamp_ms=NOW_MS - STALE_AGE_MS,
+            relates_to=_thread_reply_relation("$thread-root", "$thread-root"),
+            extra_content={
+                STREAM_STATUS_KEY: STREAM_STATUS_INTERRUPTED,
+                stale_stream_cleanup_module.STREAM_GENERATION_KEY: "gen-current",
+            },
+        ),
+    )
+    client.room_get_event_relations = MagicMock(return_value=_aiter())
+
+    cleaned, interrupted = await _run_cleanup(
+        client,
+        config,
+        joined_rooms=[ROOM_ID],
+        runtime_generation="gen-current",
+    )
+
+    assert cleaned == 0
+    assert interrupted == []
+
+
+@pytest.mark.asyncio
 async def test_cleanup_scans_past_lookback_page_for_old_terminal_interruption(tmp_path: Path) -> None:
     """A busy room may push old terminal interrupted notes behind a lookback-crossing page."""
     config = _make_config(tmp_path)

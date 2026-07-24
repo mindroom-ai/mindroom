@@ -167,6 +167,47 @@ async def test_startup_maintenance_cancel_completed_task_returns_false() -> None
     start.assert_not_called()
 
 
+@pytest.mark.asyncio
+async def test_config_reload_suspension_blocks_background_resume_until_finalization() -> None:
+    """A recovered bot cannot resurrect parked maintenance in the middle of reload."""
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def setup_rooms(_: list[object]) -> None:
+        started.set()
+        await release.wait()
+
+    controller = StartupMaintenanceController(
+        recover_stale_streams=AsyncMock(),
+        setup_rooms_and_memberships=setup_rooms,
+        sync_runtime_support=AsyncMock(),
+        mark_runtime_support_ready=AsyncMock(),
+    )
+    controller.start([MagicMock()], MagicMock())
+    await asyncio.wait_for(started.wait(), timeout=1.0)
+
+    should_replay = await controller.suspend_for_config_reload()
+    assert should_replay is True
+    controller.replay_pending = True
+    with patch.object(controller, "start") as start:
+        controller.resume_pending_maintenance(
+            config=MagicMock(),
+            running_bots=lambda: [MagicMock()],
+        )
+        start.assert_not_called()
+
+        replay_config = MagicMock()
+        running_bot = MagicMock()
+        controller.restart_after_config_reload(
+            config=replay_config,
+            running_bots=lambda: [running_bot],
+            replay=should_replay,
+        )
+        start.assert_called_once_with([running_bot], replay_config)
+
+    release.set()
+
+
 def _counting_controller() -> tuple[StartupMaintenanceController, dict[str, int]]:
     counts = {"recover": 0, "setup": 0, "support": 0, "ready": 0}
 
