@@ -553,23 +553,7 @@ class _MultiAgentOrchestrator:
                 if start_status is None:
                     return
                 if start_status:
-                    logger.info("Bot recovered after startup failure", agent_name=entity_name)
-                    bots_to_setup = self._bots_to_setup_after_background_start(entity_name)
-                    self._bind_started_runtime_support_services([bot])
-                    config = self.config
-                    if config is not None:
-                        self._resolve_bot_room_aliases(bots_to_setup, config)
-                    self._start_sync_task(entity_name, bot)
-                    if bots_to_setup:
-                        await run_with_retry(
-                            f"Updating Matrix room memberships for {entity_name}",
-                            partial(self._setup_rooms_and_memberships, bots_to_setup),
-                            permanent_error_check=is_permanent_startup_error,
-                            update_runtime_state=False,
-                        )
-                    if config is not None:
-                        await self._recover_pending_replacement_rooms(config)
-                    self._external_trigger_runtime.bind_if_ready(self.config, self.agent_bots)
+                    await self._finish_recovered_bot_start(entity_name, bot)
                     return
 
                 attempt += 1
@@ -588,6 +572,31 @@ class _MultiAgentOrchestrator:
         finally:
             if self._bot_start_tasks.get(entity_name) is current_task:
                 del self._bot_start_tasks[entity_name]
+
+    async def _finish_recovered_bot_start(self, entity_name: str, bot: AgentBot | TeamBot) -> None:
+        """Rebind runtime support, room state, and pending maintenance after a background bot start succeeds."""
+        logger.info("Bot recovered after startup failure", agent_name=entity_name)
+        bots_to_setup = self._bots_to_setup_after_background_start(entity_name)
+        self._bind_started_runtime_support_services([bot])
+        config = self.config
+        if config is not None:
+            self._resolve_bot_room_aliases(bots_to_setup, config)
+        self._start_sync_task(entity_name, bot)
+        if bots_to_setup:
+            await run_with_retry(
+                f"Updating Matrix room memberships for {entity_name}",
+                partial(self._setup_rooms_and_memberships, bots_to_setup),
+                permanent_error_check=is_permanent_startup_error,
+                update_runtime_state=False,
+            )
+        if config is not None:
+            await self._recover_pending_replacement_rooms(config)
+        self._external_trigger_runtime.bind_if_ready(self.config, self.agent_bots)
+        if config is not None:
+            self._startup_maintenance.resume_pending_recheck(
+                config=config,
+                running_bots=self._running_startup_maintenance_bots,
+            )
 
     async def _schedule_bot_start_retry(self, entity_name: str) -> None:
         """Schedule background retries for one failed bot startup."""

@@ -59,10 +59,15 @@ class StartupMaintenanceController:
         )
 
     async def cancel(self) -> bool:
-        """Cancel detached startup maintenance and report whether unfinished work was interrupted."""
+        """Cancel detached startup maintenance and report whether unfinished work was interrupted.
+
+        A pending recency recheck counts as unfinished even when no task is
+        alive: a prior replay may have found zero running bots or a failed
+        recheck phase, and the pending flag is the only record of that debt.
+        """
         task = self.task
         self.task = None
-        should_replay = task is not None and not task.done()
+        should_replay = (task is not None and not task.done()) or self.recheck_pending
         await cancel_logged_task(task)
         return should_replay
 
@@ -76,20 +81,34 @@ class StartupMaintenanceController:
         startup_cutoff_ms = self.startup_cutoff_ms
         if startup_cutoff_ms is None or self.task is not None:
             return
-        bots = running_bots()
-        if not bots:
-            return
         if self.recheck_pending:
             # Every earlier phase already completed before the cancel, and the
             # reload itself re-syncs runtime support, so only the outstanding
             # recency-guard recheck replays.
-            self.task = create_logged_task(
-                self._recheck_after_recency_guard(bots, config, startup_cutoff_ms),
-                name="startup_maintenance_recheck",
-                failure_message="Startup maintenance recheck task failed",
-            )
+            self.resume_pending_recheck(config=config, running_bots=running_bots)
+            return
+        bots = running_bots()
+        if not bots:
             return
         self.start(bots, config, startup_cutoff_ms=startup_cutoff_ms)
+
+    def resume_pending_recheck(self, *, config: Config, running_bots: _RunningBots) -> None:
+        """Schedule the outstanding recency recheck once running bots exist.
+
+        Called from reload replay and from background bot-start recovery, so a
+        reload that completes with zero running bots cannot strand the recheck.
+        """
+        startup_cutoff_ms = self.startup_cutoff_ms
+        if not self.recheck_pending or self.task is not None or startup_cutoff_ms is None:
+            return
+        bots = running_bots()
+        if not bots:
+            return
+        self.task = create_logged_task(
+            self._recheck_after_recency_guard(bots, config, startup_cutoff_ms),
+            name="startup_maintenance_recheck",
+            failure_message="Startup maintenance recheck task failed",
+        )
 
     async def _run(self, bots: list[_StartupBot], config: Config, startup_cutoff_ms: int) -> None:
         scanned_room_ids: set[str] = set()
@@ -147,12 +166,15 @@ class StartupMaintenanceController:
         # cleanup recency guard on the first scans; rescan every room once the
         # guard window has elapsed so a fast restart cannot freeze them forever.
         await asyncio.sleep(self.recency_recheck_delay_seconds)
-        await self._run_phase(
+        completed = await self._run_phase(
             "startup_maintenance.stale_stream_recovery.recency_guard_recheck",
             lambda: self.recover_stale_streams(bots, config, startup_cutoff_ms, set()),
             failure_message="Recency-guard stale stream recovery recheck failed",
         )
-        self.recheck_pending = False
+        # A failed recheck keeps the debt on record: this pass is the only one
+        # that can see streams the recency guard hid, so a transient failure
+        # must stay replayable instead of silently recreating frozen streams.
+        self.recheck_pending = not completed
 
     async def _run_phase(
         self,
