@@ -75,6 +75,8 @@ class OperationKind(StrEnum):
     MARK_THREAD_STALE = "mark_thread_stale"
     MARK_ROOM_STALE = "mark_room_stale"
     LIMITED_SYNC = "limited_sync"
+    REOPEN_CACHE = "reopen_cache"
+    REJOIN_ROOM = "rejoin_room"
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,6 +121,19 @@ class FuzzScenario:
         }
         return json.dumps(payload, indent=2, sort_keys=True)
 
+    def validate(self) -> None:
+        """Reject lifecycle operations that cannot safely race storage users."""
+        for batch in self.batches:
+            if not batch:
+                msg = "Matrix cache fuzz batches must not be empty"
+                raise ValueError(msg)
+            if (
+                any(operation.kind in {OperationKind.REOPEN_CACHE, OperationKind.REJOIN_ROOM} for operation in batch)
+                and len(batch) != 1
+            ):
+                msg = "Matrix cache lifecycle operations must be singleton batches"
+                raise ValueError(msg)
+
     @classmethod
     def from_json(cls, value: str) -> FuzzScenario:
         """Load a trace emitted by :meth:`to_json`."""
@@ -130,12 +145,14 @@ class FuzzScenario:
         if not isinstance(raw_batches, list):
             msg = "Matrix cache fuzz trace is missing batches"
             raise TypeError(msg)
-        return cls(
+        scenario = cls(
             batches=tuple(
                 tuple(FuzzOperation.from_dict(cast("dict[str, object]", operation)) for operation in batch)
                 for batch in raw_batches
             ),
         )
+        scenario.validate()
+        return scenario
 
 
 @dataclass(slots=True)
@@ -195,6 +212,24 @@ class ObservableCacheState:
     revisions: tuple[tuple[str, str, ThreadRevision | None], ...]
     invalidation_reasons: tuple[tuple[str, str, str | None, str | None], ...]
 
+    def backend_parity_projection(self) -> tuple[object, ...]:
+        """Return behavior excluding backend-owned write-sequence values."""
+        comparable_revisions = tuple(
+            (
+                current_room_id,
+                current_thread_id,
+                None if revision is None else (revision.event_count, revision.max_origin_server_ts),
+            )
+            for current_room_id, current_thread_id, revision in self.revisions
+        )
+        return (
+            self.events,
+            self.mappings,
+            self.threads,
+            comparable_revisions,
+            self.invalidation_reasons,
+        )
+
 
 def room_id(room: int) -> str:
     """Return one deterministic Matrix room ID."""
@@ -239,6 +274,35 @@ def _timestamp(room: int, thread: int, slot: int, offset: int = 0) -> int:
     return _BASE_TIMESTAMP + room * 1_000_000 + thread * 100_000 + slot * 100 + offset
 
 
+def _operation_timestamp(operation: FuzzOperation, offset: int) -> int:
+    """Return normal or deliberately tied timestamps from one compact variant."""
+    timestamp_slot = operation.target if operation.variant >= 4 else operation.slot
+    return _timestamp(operation.room, operation.thread, timestamp_slot, offset)
+
+
+def _related_target_id(operation: FuzzOperation) -> str:
+    """Select roots, replies, messages, or prior edits with one variant field."""
+    target_kind = operation.variant % 4
+    if target_kind == 0:
+        return message_id(operation.room, operation.thread, operation.target)
+    if target_kind == 1:
+        return thread_id(operation.room, operation.thread)
+    if target_kind == 2:
+        return reply_id(operation.room, operation.thread, operation.target)
+    return edit_id(
+        operation.room,
+        operation.thread,
+        operation.target,
+        operation.target,
+        0,
+    )
+
+
+def _related_target_sender_slot(operation: FuzzOperation) -> int:
+    target_kind = operation.variant % 4
+    return operation.thread if target_kind == 1 else operation.target
+
+
 def _event_source(
     *,
     event_id: str,
@@ -279,7 +343,7 @@ def threaded_message_source(operation: FuzzOperation) -> dict[str, Any]:
         event_type="m.room.message",
         room=operation.room,
         sender=_sender(operation.slot),
-        timestamp=_timestamp(operation.room, operation.thread, operation.slot, 10),
+        timestamp=_operation_timestamp(operation, 10),
         content={
             "body": event_id,
             "msgtype": "m.text",
@@ -294,17 +358,13 @@ def threaded_message_source(operation: FuzzOperation) -> dict[str, Any]:
 def plain_reply_source(operation: FuzzOperation) -> dict[str, Any]:
     """Build a reply whose thread must be inferred through its target."""
     event_id = reply_id(operation.room, operation.thread, operation.slot)
-    target_id = (
-        thread_id(operation.room, operation.thread)
-        if operation.variant % 3 == 0
-        else message_id(operation.room, operation.thread, operation.target)
-    )
+    target_id = _related_target_id(operation)
     return _event_source(
         event_id=event_id,
         event_type="m.room.message",
         room=operation.room,
         sender=_sender(operation.slot),
-        timestamp=_timestamp(operation.room, operation.thread, operation.slot, 20),
+        timestamp=_operation_timestamp(operation, 20),
         content={
             "body": event_id,
             "msgtype": "m.text",
@@ -315,7 +375,7 @@ def plain_reply_source(operation: FuzzOperation) -> dict[str, Any]:
 
 def edit_source(operation: FuzzOperation) -> dict[str, Any]:
     """Build a valid or wrong-sender edit of a deterministic message slot."""
-    target_id = message_id(operation.room, operation.thread, operation.target)
+    target_id = _related_target_id(operation)
     event_id = edit_id(
         operation.room,
         operation.thread,
@@ -329,13 +389,15 @@ def edit_source(operation: FuzzOperation) -> dict[str, Any]:
             "event_id": thread_id(operation.room, operation.thread),
             "rel_type": "m.thread",
         }
-    sender_slot = operation.target if operation.variant % 4 != 3 else operation.target + 1
+    sender_slot = _related_target_sender_slot(operation)
+    if operation.variant == 7:
+        sender_slot += 1
     return _event_source(
         event_id=event_id,
         event_type="m.room.message",
         room=operation.room,
         sender=_sender(sender_slot),
-        timestamp=_timestamp(operation.room, operation.thread, operation.slot, 30 + operation.variant % 2),
+        timestamp=_operation_timestamp(operation, 30 + operation.variant % 2),
         content={
             "body": f"* edited {target_id}",
             "msgtype": "m.text",
@@ -347,13 +409,13 @@ def edit_source(operation: FuzzOperation) -> dict[str, Any]:
 
 def reaction_source(operation: FuzzOperation) -> dict[str, Any]:
     """Build one annotation that must remain point-only."""
-    target_id = message_id(operation.room, operation.thread, operation.target)
+    target_id = _related_target_id(operation)
     return _event_source(
         event_id=reaction_id(operation.room, operation.thread, operation.target, operation.slot),
         event_type="m.reaction",
         room=operation.room,
         sender=_sender(operation.slot),
-        timestamp=_timestamp(operation.room, operation.thread, operation.slot, 40),
+        timestamp=_operation_timestamp(operation, 40),
         content={
             "m.relates_to": {
                 "event_id": target_id,
@@ -366,14 +428,14 @@ def reaction_source(operation: FuzzOperation) -> dict[str, Any]:
 
 def reference_source(operation: FuzzOperation) -> dict[str, Any]:
     """Build one visible message related by reference."""
-    target_id = message_id(operation.room, operation.thread, operation.target)
+    target_id = _related_target_id(operation)
     event_id = reference_id(operation.room, operation.thread, operation.target, operation.slot)
     return _event_source(
         event_id=event_id,
         event_type="m.room.message",
         room=operation.room,
         sender=_sender(operation.slot),
-        timestamp=_timestamp(operation.room, operation.thread, operation.slot, 50),
+        timestamp=_operation_timestamp(operation, 50),
         content={
             "body": event_id,
             "msgtype": "m.text",
@@ -401,7 +463,7 @@ def ciphertext_source(operation: FuzzOperation) -> dict[str, Any]:
         event_type="m.room.encrypted",
         room=operation.room,
         sender=_sender(operation.slot),
-        timestamp=_timestamp(operation.room, operation.thread, operation.slot, 10),
+        timestamp=_operation_timestamp(operation, 10),
         content=content,
     )
 
@@ -413,7 +475,7 @@ def _raw_event(source: dict[str, Any]) -> nio.Event:
 
 
 def _redaction_target(operation: FuzzOperation) -> str:
-    target_kind = operation.variant % 4
+    target_kind = operation.variant % 6
     if target_kind == 0:
         return thread_id(operation.room, operation.thread)
     if target_kind == 1:
@@ -426,7 +488,11 @@ def _redaction_target(operation: FuzzOperation) -> str:
             operation.slot,
             operation.variant,
         )
-    return reaction_id(operation.room, operation.thread, operation.target, operation.slot)
+    if target_kind == 3:
+        return reaction_id(operation.room, operation.thread, operation.target, operation.slot)
+    if target_kind == 4:
+        return reply_id(operation.room, operation.thread, operation.target)
+    return reference_id(operation.room, operation.thread, operation.target, operation.slot)
 
 
 def _redaction_event(operation: FuzzOperation) -> nio.RedactionEvent:
@@ -436,7 +502,7 @@ def _redaction_event(operation: FuzzOperation) -> nio.RedactionEvent:
         event_type="m.room.redaction",
         room=operation.room,
         sender=_sender(operation.slot),
-        timestamp=_timestamp(operation.room, operation.thread, operation.slot, 60),
+        timestamp=_operation_timestamp(operation, 60),
         content={"reason": "cache fuzz"},
     )
     return nio.RedactionEvent(source, target_id)
@@ -509,45 +575,66 @@ class CacheFuzzRunner:
         *,
         room_count: int,
         thread_count: int,
+        max_batch_seconds: float | None = None,
     ) -> None:
+        self.root_cache = cache
         self.cache = cache.for_principal(FUZZ_PRINCIPAL)
         self.other_cache = cache.for_principal(OTHER_PRINCIPAL)
         self.policy = _build_sync_policy(self.cache)
         self.scenario = scenario
         self.room_count = room_count
         self.thread_count = thread_count
+        self.max_batch_seconds = max_batch_seconds
         self.known_ids: set[tuple[str, str]] = set()
         self.redacted_ids: set[tuple[str, str]] = set()
         self.reaction_ids: set[tuple[str, str]] = set()
+        self.clear_event_ids: set[tuple[str, str]] = set()
+        self.cache_generation: str | None = None
+        self.reopen_count = 0
+        self.rejoin_count = 0
+        self.max_batch_latency_ms = 0.0
 
     async def seed(self) -> None:
         """Create authoritative roots so later operations can race realistically."""
         for room in range(self.room_count):
-            current_room_id = room_id(room)
-            membership_epoch = await self.cache.room_membership_epoch(current_room_id)
-            assert membership_epoch is not None
-            for thread in range(self.thread_count):
-                root = root_source(room, thread)
-                root_event_id = cast("str", root["event_id"])
-                replaced = await self.cache.replace_thread_if_not_newer(
-                    current_room_id,
-                    thread_id(room, thread),
-                    [root],
-                    expected_membership_epoch=membership_epoch,
-                    fetch_started_at=float("inf"),
-                    validated_at=time.time(),
-                )
-                assert replaced
-                self.known_ids.add((current_room_id, root_event_id))
+            await self._seed_room(room)
+
+    async def _seed_room(self, room: int) -> None:
+        """Seed one room after initial startup or a membership-generation reset."""
+        current_room_id = room_id(room)
+        membership_epoch = await self.cache.room_membership_epoch(current_room_id)
+        assert membership_epoch is not None
+        for thread in range(self.thread_count):
+            root = root_source(room, thread)
+            replaced = await self.cache.replace_thread_if_not_newer(
+                current_room_id,
+                thread_id(room, thread),
+                [root],
+                expected_membership_epoch=membership_epoch,
+                fetch_started_at=float("inf"),
+                validated_at=time.time(),
+            )
+            assert replaced
+            self._remember_source(root)
 
     async def run(self) -> ObservableCacheState:
         """Execute all batches and return stable observable state."""
+        self.scenario.validate()
+        self.cache_generation = self.root_cache.cache_generation
+        assert self.cache_generation is not None
         await self.seed()
         await self.assert_invariants()
         for batch in self.scenario.batches:
+            started = time.perf_counter()
             await asyncio.gather(
                 *(self._apply_operation(operation) for operation in batch),
             )
+            batch_seconds = time.perf_counter() - started
+            self.max_batch_latency_ms = max(self.max_batch_latency_ms, batch_seconds * 1000)
+            if self.max_batch_seconds is not None:
+                assert batch_seconds <= self.max_batch_seconds, (
+                    f"cache fuzz batch exceeded latency bound: {batch_seconds:.3f}s > {self.max_batch_seconds:.3f}s"
+                )
             await self.assert_invariants()
         return await self.observe()
 
@@ -565,6 +652,8 @@ class CacheFuzzRunner:
         self.known_ids.add((source_room_id, source_event_id))
         if source["type"] == "m.reaction":
             self.reaction_ids.add((source_room_id, source_event_id))
+        if source["type"] != "m.room.encrypted":
+            self.clear_event_ids.add((source_room_id, source_event_id))
 
     async def _apply_operation(self, operation: FuzzOperation) -> None:
         handlers: dict[OperationKind, Callable[[FuzzOperation], Awaitable[None]]] = {
@@ -580,6 +669,8 @@ class CacheFuzzRunner:
             OperationKind.MARK_THREAD_STALE: self._apply_thread_stale_marker,
             OperationKind.MARK_ROOM_STALE: self._apply_room_stale_marker,
             OperationKind.LIMITED_SYNC: self._apply_limited_sync,
+            OperationKind.REOPEN_CACHE: self._apply_cache_reopen,
+            OperationKind.REJOIN_ROOM: self._apply_room_rejoin,
         }
         handler = handlers.get(operation.kind)
         if handler is None:
@@ -631,12 +722,10 @@ class CacheFuzzRunner:
                 for slot in range(upper_slot)
             ],
         ]
-        for source in sources:
-            self._remember_source(source)
         membership_epoch = await self.cache.room_membership_epoch(current_room_id)
         if membership_epoch is None:
             return
-        await self.cache.replace_thread_if_not_newer(
+        replaced = await self.cache.replace_thread_if_not_newer(
             current_room_id,
             current_thread_id,
             sources,
@@ -644,6 +733,9 @@ class CacheFuzzRunner:
             fetch_started_at=time.time(),
             validated_at=time.time(),
         )
+        if replaced:
+            for source in sources:
+                self._remember_source(source)
 
     async def _apply_thread_invalidation(self, operation: FuzzOperation) -> None:
         await self.cache.invalidate_thread(
@@ -675,6 +767,36 @@ class CacheFuzzRunner:
     async def _apply_limited_sync(self, operation: FuzzOperation) -> None:
         await self._apply_sync(operation.room, [], limited=True)
 
+    async def _apply_cache_reopen(self, _operation: FuzzOperation) -> None:
+        """Close and reopen storage while preserving durable state and generation."""
+        await self.root_cache.close()
+        await self.root_cache.initialize()
+        self.cache = self.root_cache.for_principal(FUZZ_PRINCIPAL)
+        self.other_cache = self.root_cache.for_principal(OTHER_PRINCIPAL)
+        self.policy = _build_sync_policy(self.cache)
+        self.reopen_count += 1
+
+    async def _apply_room_rejoin(self, operation: FuzzOperation) -> None:
+        """Cross a durable departure epoch, purge, rejoin, and incrementally refill."""
+        current_room_id = room_id(operation.room)
+        departure_epoch = self.cache.mark_room_departed(current_room_id)
+        await self.cache.purge_room(current_room_id)
+        await self.cache.mark_room_joined(
+            current_room_id,
+            expected_departure_epoch=departure_epoch,
+        )
+        for known_room_id, event_id in tuple(self.redacted_ids):
+            if known_room_id == current_room_id:
+                self.redacted_ids.discard((known_room_id, event_id))
+        for known_room_id, event_id in tuple(self.reaction_ids):
+            if known_room_id == current_room_id:
+                self.reaction_ids.discard((known_room_id, event_id))
+        for known_room_id, event_id in tuple(self.clear_event_ids):
+            if known_room_id == current_room_id:
+                self.clear_event_ids.discard((known_room_id, event_id))
+        await self._seed_room(operation.room)
+        self.rejoin_count += 1
+
     async def _assert_tombstone_invariants(self) -> None:
         for current_room_id, event_id in sorted(self.redacted_ids):
             assert await self.cache.get_event(current_room_id, event_id) is None, (
@@ -697,6 +819,13 @@ class CacheFuzzRunner:
 
         for current_room_id, event_id in sorted(self.reaction_ids):
             assert await self.cache.get_thread_id_for_event(current_room_id, event_id) is None
+
+        for current_room_id, event_id in sorted(self.clear_event_ids):
+            event = await self.cache.get_event(current_room_id, event_id)
+            if event is not None:
+                assert event.get("type") != "m.room.encrypted", (
+                    f"opaque replay downgraded clear payload: {current_room_id} {event_id}"
+                )
 
     async def _assert_thread_invariants(self) -> None:
         for room in range(self.room_count):
@@ -747,6 +876,7 @@ class CacheFuzzRunner:
 
     async def assert_invariants(self) -> None:
         """Assert cache consistency through only the public storage contract."""
+        assert self.root_cache.cache_generation == self.cache_generation
         await self._assert_tombstone_invariants()
         await self._assert_isolation_and_reaction_invariants()
         await self._assert_thread_invariants()
@@ -821,6 +951,7 @@ async def run_scenario(
     room_count: int = 2,
     thread_count: int = 4,
     verify_restart: bool = True,
+    max_batch_seconds: float | None = None,
 ) -> ObservableCacheState:
     """Run one scenario, emitting its exact trace on failure."""
     root_cache = cache_factory()
@@ -830,6 +961,7 @@ async def run_scenario(
         scenario,
         room_count=room_count,
         thread_count=thread_count,
+        max_batch_seconds=max_batch_seconds,
     )
     try:
         result = await runner.run()
@@ -856,6 +988,8 @@ async def run_scenario(
     reopened.known_ids = known_ids
     reopened.redacted_ids = redacted_ids
     reopened.reaction_ids = reaction_ids
+    reopened.clear_event_ids = set(runner.clear_event_ids)
+    reopened.cache_generation = reopened_root.cache_generation
     try:
         await reopened.assert_invariants()
         restarted_result = await reopened.observe()
@@ -886,6 +1020,8 @@ _WEIGHTED_KINDS = (
     OperationKind.MARK_THREAD_STALE,
     OperationKind.MARK_ROOM_STALE,
     OperationKind.LIMITED_SYNC,
+    OperationKind.REOPEN_CACHE,
+    OperationKind.REJOIN_ROOM,
 )
 
 
@@ -902,21 +1038,74 @@ def scenario_from_seed(
     batches: list[tuple[FuzzOperation, ...]] = []
     remaining = steps
     while remaining:
-        batch_size = min(remaining, randomizer.randint(1, max_batch_size))
-        batch = tuple(
-            FuzzOperation(
-                kind=randomizer.choice(_WEIGHTED_KINDS),
-                room=randomizer.randrange(room_count),
-                thread=randomizer.randrange(thread_count),
-                slot=randomizer.randrange(16),
-                target=randomizer.randrange(16),
-                variant=randomizer.randrange(8),
+        kind = randomizer.choice(_WEIGHTED_KINDS)
+        if kind in {OperationKind.REOPEN_CACHE, OperationKind.REJOIN_ROOM}:
+            batches.append(
+                (
+                    FuzzOperation(
+                        kind=kind,
+                        room=randomizer.randrange(room_count),
+                        thread=randomizer.randrange(thread_count),
+                        slot=randomizer.randrange(16),
+                        target=randomizer.randrange(16),
+                        variant=randomizer.randrange(8),
+                    ),
+                ),
             )
-            for _ in range(batch_size)
-        )
-        batches.append(batch)
+            remaining -= 1
+            continue
+        batch_size = min(remaining, randomizer.randint(1, max_batch_size))
+        batch_operations: list[FuzzOperation] = []
+        for _ in range(batch_size):
+            operation_kind = randomizer.choice(_WEIGHTED_KINDS)
+            while operation_kind in {OperationKind.REOPEN_CACHE, OperationKind.REJOIN_ROOM}:
+                operation_kind = randomizer.choice(_WEIGHTED_KINDS)
+            batch_operations.append(
+                FuzzOperation(
+                    kind=operation_kind,
+                    room=randomizer.randrange(room_count),
+                    thread=randomizer.randrange(thread_count),
+                    slot=randomizer.randrange(16),
+                    target=randomizer.randrange(16),
+                    variant=randomizer.randrange(8),
+                ),
+            )
+        batches.append(tuple(batch_operations))
         remaining -= batch_size
-    return FuzzScenario(batches=tuple(batches))
+    scenario = FuzzScenario(batches=tuple(batches))
+    scenario.validate()
+    return scenario
+
+
+def model_based_scenario() -> FuzzScenario:
+    """Exercise one explicit cache state machine across relation and lifecycle states."""
+    operation = FuzzOperation
+    scenario = FuzzScenario(
+        batches=(
+            (operation(OperationKind.PLAIN_REPLY, 0, 0, 7, 6, 0),),
+            (operation(OperationKind.THREADED_MESSAGE, 0, 0, 6, 5, 4),),
+            (operation(OperationKind.THREADED_MESSAGE, 0, 0, 5, 5, 4),),
+            (operation(OperationKind.THREADED_MESSAGE, 0, 0, 3, 0, 0),),
+            (operation(OperationKind.PLAIN_REPLY, 0, 0, 7, 6, 0),),
+            (operation(OperationKind.EDIT, 0, 0, 8, 6, 0),),
+            (operation(OperationKind.EDIT, 0, 0, 9, 0, 1),),
+            (operation(OperationKind.REACTION, 0, 0, 10, 6, 0),),
+            (operation(OperationKind.REDACTION, 0, 0, 10, 6, 3),),
+            (operation(OperationKind.THREADED_MESSAGE, 0, 0, 4, 0, 0),),
+            (operation(OperationKind.CIPHERTEXT_REPLAY, 0, 0, 4, 0, 0),),
+            (operation(OperationKind.REOPEN_CACHE, 0, 0, 0, 0, 0),),
+            (
+                operation(OperationKind.THREADED_MESSAGE, 0, 1, 1, 0, 0),
+                operation(OperationKind.THREADED_MESSAGE, 1, 1, 1, 0, 0),
+                operation(OperationKind.REFERENCE, 1, 2, 2, 0, 1),
+            ),
+            (operation(OperationKind.LIMITED_SYNC, 1, 0, 0, 0, 0),),
+            (operation(OperationKind.REJOIN_ROOM, 1, 0, 0, 0, 0),),
+            (operation(OperationKind.THREADED_MESSAGE, 1, 2, 3, 0, 0),),
+        ),
+    )
+    scenario.validate()
+    return scenario
 
 
 def concurrent_fanout_scenario(thread_count: int = 45) -> FuzzScenario:

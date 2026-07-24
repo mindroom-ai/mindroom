@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import tempfile
+import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -11,14 +12,20 @@ import pytest
 from hypothesis import HealthCheck, example, given, settings
 from hypothesis import strategies as st
 
+from mindroom.matrix.cache.postgres_event_cache import PostgresEventCache
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from scripts.testing.fuzz_matrix_event_cache import (
     FuzzOperation,
     FuzzScenario,
     OperationKind,
     concurrent_fanout_scenario,
+    message_id,
+    model_based_scenario,
+    reply_id,
+    room_id,
     run_scenario,
     scenario_from_seed,
+    thread_id,
 )
 
 if TYPE_CHECKING:
@@ -27,13 +34,16 @@ if TYPE_CHECKING:
     from mindroom.matrix.cache import ConversationEventCache
 
 
-_OPERATION_KINDS = tuple(OperationKind)
+_LIFECYCLE_KINDS = (OperationKind.REOPEN_CACHE, OperationKind.REJOIN_ROOM)
+_EVENT_KINDS = tuple(kind for kind in OperationKind if kind not in _LIFECYCLE_KINDS)
 
 
-def _operation_strategy() -> st.SearchStrategy[FuzzOperation]:
+def _operation_strategy(
+    kinds: tuple[OperationKind, ...] = _EVENT_KINDS,
+) -> st.SearchStrategy[FuzzOperation]:
     return st.builds(
         FuzzOperation,
-        kind=st.sampled_from(_OPERATION_KINDS),
+        kind=st.sampled_from(kinds),
         room=st.integers(min_value=0, max_value=1),
         thread=st.integers(min_value=0, max_value=2),
         slot=st.integers(min_value=0, max_value=7),
@@ -43,13 +53,14 @@ def _operation_strategy() -> st.SearchStrategy[FuzzOperation]:
 
 
 def _scenario_strategy() -> st.SearchStrategy[FuzzScenario]:
-    batch = st.lists(
+    concurrent_batch = st.lists(
         _operation_strategy(),
         min_size=1,
         max_size=4,
     ).map(tuple)
+    lifecycle_batch = _operation_strategy(_LIFECYCLE_KINDS).map(lambda operation: (operation,))
     return st.lists(
-        batch,
+        st.one_of(concurrent_batch, lifecycle_batch),
         min_size=1,
         max_size=4,
     ).map(lambda batches: FuzzScenario(batches=tuple(batches)))
@@ -119,6 +130,46 @@ async def test_seeded_concurrent_trace_matches_every_cache_backend(
         room_count=2,
         thread_count=4,
     )
+
+
+@pytest.mark.asyncio
+async def test_model_trace_has_exact_semantics_and_backend_parity(
+    tmp_path: Path,
+    postgres_event_cache_url: str,
+) -> None:
+    """The explicit state model agrees across both durable implementations."""
+    sqlite_path = tmp_path / "model-event-cache.db"
+    postgres_namespace = f"model_fuzz_{uuid.uuid4().hex}"
+    scenario = model_based_scenario()
+
+    sqlite_state = await run_scenario(
+        lambda: SqliteEventCache(sqlite_path),
+        scenario,
+        room_count=2,
+        thread_count=3,
+        max_batch_seconds=5,
+    )
+    postgres_state = await run_scenario(
+        lambda: PostgresEventCache(
+            database_url=postgres_event_cache_url,
+            namespace=postgres_namespace,
+        ),
+        scenario,
+        room_count=2,
+        thread_count=3,
+        max_batch_seconds=5,
+    )
+
+    assert sqlite_state.backend_parity_projection() == postgres_state.backend_parity_projection()
+    thread_events = {
+        (current_room_id, current_thread_id): event_ids
+        for current_room_id, current_thread_id, event_ids in sqlite_state.threads
+    }
+    hot_thread = thread_events[(room_id(0), thread_id(0, 0))]
+    assert hot_thread.index(message_id(0, 0, 6)) < hot_thread.index(message_id(0, 0, 5))
+    assert reply_id(0, 0, 7) in hot_thread
+    assert thread_events[(room_id(1), thread_id(1, 0))] == (thread_id(1, 0),)
+    assert message_id(1, 2, 3) in thread_events[(room_id(1), thread_id(1, 2))]
 
 
 @pytest.mark.asyncio
