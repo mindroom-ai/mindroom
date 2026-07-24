@@ -73,6 +73,7 @@ def validated_cached_edit_row(
     if (
         event.get("event_id") != indexed_event_id
         or not indexed_event_id
+        or indexed_event_id == original_event_id
         or not isinstance(timestamp, int)
         or isinstance(timestamp, bool)
         or timestamp != indexed_origin_server_ts

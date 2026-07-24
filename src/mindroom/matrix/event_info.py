@@ -6,6 +6,8 @@ including threads (MSC3440), edits, replies, reactions, and more.
 
 from __future__ import annotations
 
+import base64
+import binascii
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import cast
@@ -53,21 +55,56 @@ def approval_status_from_content(content: Mapping[str, object]) -> str | None:
 
 
 def _encrypted_media_file_is_valid(file_info: object) -> bool:
-    """Match nio's required encrypted Matrix media transport fields."""
+    """Return whether one Matrix encrypted-file transport is usable v2 data."""
     if not isinstance(file_info, Mapping):
         return False
     normalized_file_info = cast("Mapping[str, object]", file_info)
     key = normalized_file_info.get("key")
+    hashes = normalized_file_info.get("hashes")
     if not isinstance(key, Mapping):
         return False
+    if not isinstance(hashes, Mapping):
+        return False
     normalized_key = cast("Mapping[str, object]", key)
+    normalized_hashes = cast("Mapping[str, object]", hashes)
+    url = normalized_file_info.get("url")
+    key_ops = normalized_key.get("key_ops")
     return (
-        isinstance(normalized_file_info.get("url"), str)
-        and isinstance(normalized_file_info.get("hashes"), Mapping)
-        and isinstance(normalized_file_info.get("iv"), str)
-        and isinstance(normalized_key.get("alg"), str)
-        and isinstance(normalized_key.get("k"), str)
+        isinstance(url, str)
+        and url.startswith("mxc://")
+        and all(url[len("mxc://") :].partition("/"))
+        and normalized_file_info.get("v") == "v2"
+        and normalized_key.get("kty") == "oct"
+        and normalized_key.get("alg") == "A256CTR"
+        and normalized_key.get("ext") is True
+        and isinstance(key_ops, list)
+        and all(isinstance(operation, str) for operation in key_ops)
+        and {"encrypt", "decrypt"}.issubset(key_ops)
+        and _unpadded_base64_has_decoded_size(normalized_key.get("k"), 32, urlsafe=True)
+        and _unpadded_base64_has_decoded_size(normalized_file_info.get("iv"), 16)
+        and _unpadded_base64_has_decoded_size(normalized_hashes.get("sha256"), 32)
     )
+
+
+def _unpadded_base64_has_decoded_size(
+    value: object,
+    expected_size: int,
+    *,
+    urlsafe: bool = False,
+) -> bool:
+    """Return whether one unpadded base64 value decodes to the expected byte size."""
+    if not isinstance(value, str) or not value or "=" in value:
+        return False
+    padded_value = value + "=" * (-len(value) % 4)
+    try:
+        decoded = base64.b64decode(
+            padded_value,
+            altchars=b"-_" if urlsafe else None,
+            validate=True,
+        )
+    except (binascii.Error, ValueError):
+        return False
+    return len(decoded) == expected_size
 
 
 def room_message_content_is_renderable(content: Mapping[str, object]) -> bool:

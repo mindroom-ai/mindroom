@@ -13,9 +13,9 @@ from mindroom.matrix.cache import ConversationEventCache
 from mindroom.matrix.client_thread_history import _parse_room_message_event
 from mindroom.matrix.conversation_cache import _cached_room_get_event_response
 
-_SYNTHETIC_FILE_KEY = "SYNTHETIC_FILE_JWK_KEY_DO_NOT_USE"
-_SYNTHETIC_FILE_IV = "SYNTHETIC_FILE_IV_DO_NOT_USE"
-_SYNTHETIC_FILE_HASH = "SYNTHETIC_FILE_HASH_DO_NOT_USE"
+_SYNTHETIC_FILE_KEY = "a2tra2tra2tra2tra2tra2tra2tra2tra2tra2tra2s"
+_SYNTHETIC_FILE_IV = "aWlpaWlpaWlpaWlpaWlpaQ"
+_SYNTHETIC_FILE_HASH = "aGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGg"
 _SYNTHETIC_FILE_MXC = "mxc://example.test/synthetic-encrypted-media"
 _SYNTHETIC_THUMBNAIL_KEY = "SYNTHETIC_THUMBNAIL_JWK_KEY_DO_NOT_USE"
 _SYNTHETIC_THUMBNAIL_IV = "SYNTHETIC_THUMBNAIL_IV_DO_NOT_USE"

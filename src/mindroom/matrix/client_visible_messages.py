@@ -287,6 +287,7 @@ def is_valid_bundled_replacement(
         and bool(original_event_id)
         and isinstance(replacement_event_id, str)
         and bool(replacement_event_id)
+        and replacement_event_id != original_event_id
         and isinstance(original_sender, str)
         and bool(original_sender)
         and replacement_event_source.get("sender") == original_sender

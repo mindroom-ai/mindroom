@@ -28,6 +28,8 @@
 
 ## Required next steps
 
+- Strict Matrix encrypted-file v2/JWK validation now rejects malformed newest replacements across shared selection, with focused full, SQLite, and pure-validator tests passing.
+- Bundled and cached self-replacements are now rejected.
 - Add deterministic full-resolution, point, snapshot, recent-room, SQLite, and PostgreSQL regressions at the owning seams.
 - Keep full correctness validation in shared Python helpers and use only narrow SQL sender/type prefilters for bounded edit lookup.
 - Re-run exact failed files, owning cache suites, full pytest, Tach, and all-file pre-commit under resource ownership.

@@ -10,6 +10,7 @@ import pytest
 from mindroom.matrix.cache import ThreadRevision
 from mindroom.matrix.cache.event_cache_events import validated_cached_edit_row
 from mindroom.matrix.cache.thread_cache_state import thread_cache_state_row, thread_revision_row
+from mindroom.matrix.event_info import room_message_content_is_renderable
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -87,6 +88,97 @@ def test_validated_cached_edit_row_rejects_index_timestamp_mismatch() -> None:
             3000,
             room_id="!room:localhost",
             original_event_id="$original",
+            sender="@alice:localhost",
+            event_type="m.room.message",
+        )
+        is None
+    )
+
+
+_VALID_ENCRYPTED_FILE = {
+    "url": "mxc://localhost/media",
+    "v": "v2",
+    "key": {
+        "alg": "A256CTR",
+        "ext": True,
+        "key_ops": ["encrypt", "decrypt"],
+        "kty": "oct",
+        "k": "a2tra2tra2tra2tra2tra2tra2tra2tra2tra2tra2s",
+    },
+    "iv": "aWlpaWlpaWlpaWlpaWlpaQ",
+    "hashes": {"sha256": "aGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGg"},
+}
+
+
+def test_encrypted_media_file_v2_is_renderable() -> None:
+    """A complete Matrix encrypted-file v2 envelope remains visible."""
+    assert room_message_content_is_renderable(
+        {
+            "body": "image.png",
+            "msgtype": "m.image",
+            "file": _VALID_ENCRYPTED_FILE,
+        },
+    )
+
+
+@pytest.mark.parametrize(
+    ("path", "invalid_value"),
+    [
+        (("url",), "https://localhost/media"),
+        (("v",), "v1"),
+        (("key", "alg"), "wrong"),
+        (("key", "ext"), False),
+        (("key", "key_ops"), ["decrypt"]),
+        (("key", "kty"), "RSA"),
+        (("key", "k"), "not-base64"),
+        (("iv",), "not-base64"),
+        (("hashes",), {}),
+        (("hashes", "sha256"), "not-base64"),
+    ],
+)
+def test_encrypted_media_file_rejects_invalid_v2_fields(
+    path: tuple[str, ...],
+    invalid_value: object,
+) -> None:
+    """Every Matrix encrypted-file v2 and JWK requirement is enforced."""
+    encrypted_file = json.loads(json.dumps(_VALID_ENCRYPTED_FILE))
+    target = encrypted_file
+    for key in path[:-1]:
+        target = target[key]
+    target[path[-1]] = invalid_value
+
+    assert not room_message_content_is_renderable(
+        {
+            "body": "image.png",
+            "msgtype": "m.image",
+            "file": encrypted_file,
+        },
+    )
+
+
+def test_validated_cached_edit_row_rejects_self_replacement() -> None:
+    """A replacement event cannot target its own event ID."""
+    event = {
+        "event_id": "$self",
+        "origin_server_ts": 2000,
+        "sender": "@alice:localhost",
+        "type": "m.room.message",
+        "content": {
+            "body": "* Edited",
+            "msgtype": "m.text",
+            "m.new_content": {"body": "Edited", "msgtype": "m.text"},
+            "m.relates_to": {"rel_type": "m.replace", "event_id": "$self"},
+        },
+    }
+
+    assert (
+        validated_cached_edit_row(
+            json.dumps(event),
+            None,
+            "$self",
+            2000,
+            room_id="!room:localhost",
+            original_event_id="$self",
             sender="@alice:localhost",
             event_type="m.room.message",
         )

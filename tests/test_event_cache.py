@@ -2407,6 +2407,7 @@ async def test_cached_room_get_event_falls_back_from_malformed_newest_edit(
         "missing-body",
         "missing-msgtype",
         "missing-media-transport",
+        "malformed-encrypted-file",
         "wrong-event-id",
         "wrong-target",
     ],
@@ -2466,6 +2467,20 @@ async def test_cached_edit_paths_fall_back_from_invalid_newest_event_envelope(
     elif invalidity == "missing-media-transport":
         malformed_content["msgtype"] = "m.image"
         malformed_content["m.new_content"]["msgtype"] = "m.image"
+    elif invalidity == "malformed-encrypted-file":
+        malformed_content["msgtype"] = "m.image"
+        malformed_content["file"] = {
+            "url": "not-an-mxc-uri",
+            "v": "v2",
+            "key": {"alg": "wrong", "k": "not-base64"},
+            "iv": "not-base64",
+            "hashes": {},
+        }
+        malformed_content["m.new_content"] = {
+            "body": "Invalid newest",
+            "msgtype": "m.image",
+            "file": malformed_content["file"],
+        }
     elif invalidity == "wrong-event-id":
         malformed_source["event_id"] = "$different"
     else:

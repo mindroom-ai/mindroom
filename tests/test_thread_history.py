@@ -1526,6 +1526,45 @@ class TestThreadHistory:
         ]
 
     @pytest.mark.asyncio
+    async def test_thread_resolution_rejects_bundled_self_replacement(self) -> None:
+        """A bundled replacement cannot reuse the original event ID."""
+        replacement = {
+            "event_id": "$thread_root",
+            "sender": "@alice:localhost",
+            "origin_server_ts": 2000,
+            "type": "m.room.message",
+            "content": {
+                "body": "* Forged",
+                "msgtype": "m.text",
+                "m.new_content": {"body": "Forged", "msgtype": "m.text"},
+                "m.relates_to": {
+                    "rel_type": "m.replace",
+                    "event_id": "$thread_root",
+                },
+            },
+        }
+        root = {
+            "event_id": "$thread_root",
+            "sender": "@alice:localhost",
+            "origin_server_ts": 1000,
+            "type": "m.room.message",
+            "content": {"body": "Root", "msgtype": "m.text"},
+            "unsigned": {"m.relations": {"m.replace": replacement}},
+        }
+
+        resolution = await _resolve_thread_history_from_event_sources_timed(
+            AsyncMock(),
+            room_id="!room:localhost",
+            thread_id="$thread_root",
+            event_sources=[root],
+            event_cache=_event_cache(),
+        )
+
+        assert [(message.event_id, message.body, message.latest_event_id) for message in resolution.messages] == [
+            ("$thread_root", "Root", "$thread_root"),
+        ]
+
+    @pytest.mark.asyncio
     async def test_thread_resolution_ignores_wrong_sender_edit_of_edit(self) -> None:
         """A wrong-sender replacement of an edit must not create or change visible content."""
         root_event = self._make_text_event(
@@ -1694,7 +1733,7 @@ class TestThreadHistory:
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
         "invalidity",
-        ["missing-msgtype", "empty-event-id", "missing-media-transport"],
+        ["missing-msgtype", "empty-event-id", "missing-media-transport", "malformed-encrypted-file"],
     )
     async def test_thread_resolution_falls_back_from_malformed_newest_edit(self, invalidity: str) -> None:
         """A malformed newest replacement must not mask the newest valid replacement."""
@@ -1760,6 +1799,20 @@ class TestThreadHistory:
             malformed_content["m.new_content"] = {
                 "body": "Malformed",
                 "msgtype": "m.image",
+            }
+        elif invalidity == "malformed-encrypted-file":
+            malformed_content["msgtype"] = "m.image"
+            malformed_content["file"] = {
+                "url": "not-an-mxc-uri",
+                "v": "v2",
+                "key": {"alg": "wrong", "k": "not-base64"},
+                "iv": "not-base64",
+                "hashes": {},
+            }
+            malformed_content["m.new_content"] = {
+                "body": "Malformed",
+                "msgtype": "m.image",
+                "file": malformed_content["file"],
             }
         malformed_edit = self._make_text_event(
             event_id="" if invalidity == "empty-event-id" else "$malformed_edit",
