@@ -1018,14 +1018,17 @@ class _ModelHandler(BaseHTTPRequestHandler):
         messages = payload.get("messages")
         if not isinstance(messages, list):
             return frozenset()
-        for message in reversed(messages):
-            if not isinstance(message, dict) or message.get("role") != "user":
+        for raw_message in reversed(messages):
+            if not isinstance(raw_message, dict):
+                continue
+            message = cast("dict[str, object]", raw_message)
+            if message.get("role") != "user":
                 continue
             content = message.get("content")
             if isinstance(content, str):
                 return _parse_markers(content)
             if isinstance(content, list):
-                parts = [part.get("text", "") for part in content if isinstance(part, dict)]
+                parts = [cast("dict[str, object]", part).get("text", "") for part in content if isinstance(part, dict)]
                 return _parse_markers(" ".join(text for text in parts if isinstance(text, str)))
             return frozenset()
         return frozenset()
