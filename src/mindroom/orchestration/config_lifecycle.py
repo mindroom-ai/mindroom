@@ -32,7 +32,6 @@ _CONFIG_RELOAD_DEBOUNCE_SECONDS = 2.0
 _CONFIG_RELOAD_IDLE_POLL_SECONDS = 0.5
 _CONFIG_RELOAD_DRAIN_WARNING_AFTER_SECONDS = 30.0
 _CONFIG_RELOAD_DRAIN_WARNING_INTERVAL_SECONDS = 30.0
-_CONFIG_RELOAD_DRAIN_FORCE_AFTER_SECONDS = 120.0
 
 
 @dataclass
@@ -85,10 +84,6 @@ class _ConfigReloadDrainState:
     def mark_warning(self, now: float) -> None:
         """Record the time a drain warning was logged."""
         self.last_warning_at = now
-
-    def should_force_reload(self, *, now: float, force_after_seconds: float) -> bool:
-        """Return whether the drain timeout has expired."""
-        return self.wait_started_at is not None and self.wait_seconds(now) >= force_after_seconds
 
 
 @dataclass
@@ -203,18 +198,6 @@ class ConfigReloadLifecycle:
                 drain_wait_seconds=round(drain_state.wait_seconds(now), 1),
             )
             drain_state.mark_warning(now)
-
-        if drain_state.should_force_reload(
-            now=now,
-            force_after_seconds=_CONFIG_RELOAD_DRAIN_FORCE_AFTER_SECONDS,
-        ):
-            logger.error(
-                "Forcing configuration reload while responses are still active",
-                active_response_count=active_response_count,
-                drain_wait_seconds=round(drain_state.wait_seconds(now), 1),
-                timeout_seconds=_CONFIG_RELOAD_DRAIN_FORCE_AFTER_SECONDS,
-            )
-            return False
 
         await asyncio.sleep(_CONFIG_RELOAD_IDLE_POLL_SECONDS)
         return True
