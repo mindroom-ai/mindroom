@@ -1146,10 +1146,15 @@ class ManagedTuwunelStack:
 
     def _start_mindroom(self) -> None:
         assert self._log_handle is not None
+        # MINDROOM_LIVE_FUZZ_UV_WITH overlays one dependency (for example a
+        # pinned mindroom-nio checkout) without touching pyproject or uv.lock.
+        overlay = os.environ.get("MINDROOM_LIVE_FUZZ_UV_WITH")
+        overlay_args = ("--with", overlay) if overlay else ()
         self._mindroom_process = subprocess.Popen(
             [
                 "uv",
                 "run",
+                *overlay_args,
                 "mindroom",
                 "run",
                 "--api-port",
@@ -1442,6 +1447,7 @@ class ExactReplyOracle:
         self.response_ids: dict[str, set[str]] = defaultdict(set)
         self.response_event_by_ref: dict[str, str] = {}
         self.seen_event_ids: set[str] = set()
+        self.event_summaries: dict[str, dict[str, Any]] = {}
         self.sent_at: dict[str, float] = {}
         self.reply_latencies: dict[str, float] = {}
         self._last_response_at = time.monotonic()
@@ -1533,6 +1539,14 @@ class ExactReplyOracle:
         if not isinstance(event_id, str) or event_id in self.seen_event_ids:
             return
         self.seen_event_ids.add(event_id)
+        self.event_summaries[event_id] = {
+            "sender": event.get("sender"),
+            "type": event.get("type"),
+            "body": (event.get("content") or {}).get("body") if isinstance(event.get("content"), dict) else None,
+            "relates_to": (event.get("content") or {}).get("m.relates_to")
+            if isinstance(event.get("content"), dict)
+            else None,
+        }
         if event.get("sender") in self.internal_relay_senders:
             self.internal_source_ids.add(event_id)
             return
@@ -1569,7 +1583,14 @@ class ExactReplyOracle:
             if event_ids and source not in self.expected_sources and source not in self.internal_source_ids
         }
         if duplicates or unexpected:
-            msg = f"agent reply invariant failed: duplicates={duplicates}, unexpected={unexpected}"
+            details = {
+                event_id: self.event_summaries.get(event_id)
+                for event_id in (
+                    *unexpected,
+                    *(reply for replies in (*duplicates.values(), *unexpected.values()) for reply in replies),
+                )
+            }
+            msg = f"agent reply invariant failed: duplicates={duplicates}, unexpected={unexpected}, details={details}"
             raise AssertionError(msg)
 
 
@@ -2092,18 +2113,15 @@ class LiveFuzzRunner:
 
     def _record_batch_results(
         self,
-        results: Collection[tuple[LiveOperation, str | None, _SentPayload | None, float]],
+        results: Collection[tuple[LiveOperation, str | None, _SentPayload | None]],
     ) -> None:
-        """Register sent events, payloads, and reply expectations for one batch."""
-        for operation, event_id, payload, sent_at in results:
+        """Register sent events and payloads for one completed batch."""
+        for operation, event_id, payload in results:
             self.operation_count += 1
             if event_id is not None and operation.kind is not LiveOperationKind.IDEMPOTENT_RETRY:
                 self.event_ids[operation.event_ref] = event_id
             if payload is not None:
                 self.sent_payloads[operation.event_ref] = payload
-            if operation.kind in MESSAGE_KINDS:
-                assert event_id is not None
-                self.oracle.expect(operation.event_ref, event_id, sent_at=sent_at)
 
     async def _run_chaos(self) -> dict[str, object]:
         """Run sustained overlapping load, settling only at explicit checkpoints."""
@@ -2273,7 +2291,7 @@ class LiveFuzzRunner:
     async def _apply(
         self,
         operation: LiveOperation,
-    ) -> tuple[LiveOperation, str | None, _SentPayload | None, float]:
+    ) -> tuple[LiveOperation, str | None, _SentPayload | None]:
         assert operation.target is not None
         target_event_id = await self._resolve_target(operation.target)
         txn_id = f"live-fuzz-op-{operation.operation_id}"
@@ -2292,9 +2310,8 @@ class LiveFuzzRunner:
                 },
             )
             payload = _SentPayload("m.room.message", txn_id, content)
-            event_id = await client.send_event(payload.event_type, txn_id, content, room_id=room_id)
-            self.sent_records.append(_SentRecord(event_id, room_id, payload.event_type))
-            return operation, event_id, payload, time.monotonic()
+            event_id = await self._send_expected_message(operation, client, payload, room_id)
+            return operation, event_id, payload
 
         if operation.kind is LiveOperationKind.PLAIN_REPLY:
             content = self._message_content(
@@ -2302,9 +2319,8 @@ class LiveFuzzRunner:
                 relation={"m.in_reply_to": {"event_id": target_event_id}},
             )
             payload = _SentPayload("m.room.message", txn_id, content)
-            event_id = await client.send_event(payload.event_type, txn_id, content, room_id=room_id)
-            self.sent_records.append(_SentRecord(event_id, room_id, payload.event_type))
-            return operation, event_id, payload, time.monotonic()
+            event_id = await self._send_expected_message(operation, client, payload, room_id)
+            return operation, event_id, payload
 
         if operation.kind is LiveOperationKind.EDIT:
             new_content = self._message_content(f"Live fuzz edited message {operation.operation_id}")
@@ -2315,7 +2331,7 @@ class LiveFuzzRunner:
             }
             event_id = await client.send_event("m.room.message", txn_id, content, room_id=room_id)
             self.sent_records.append(_SentRecord(event_id, room_id, "m.room.message"))
-            return operation, event_id, None, time.monotonic()
+            return operation, event_id, None
 
         if operation.kind is LiveOperationKind.REACTION:
             reaction_key = f"fuzz-{operation.operation_id}"
@@ -2328,7 +2344,7 @@ class LiveFuzzRunner:
             }
             event_id = await client.send_event("m.reaction", txn_id, content, room_id=room_id)
             self.sent_records.append(_SentRecord(event_id, room_id, "m.reaction", reaction_key=reaction_key))
-            return operation, event_id, None, time.monotonic()
+            return operation, event_id, None
 
         if operation.kind is LiveOperationKind.REDACTION:
             # A source redacted before its reply settles legitimately races the
@@ -2337,14 +2353,31 @@ class LiveFuzzRunner:
                 self.oracle.mark_source_optional(target_event_id)
             self.redacted_targets.add(target_event_id)
             event_id = await client.redact(target_event_id, txn_id, room_id=room_id)
-            return operation, event_id, None, time.monotonic()
+            return operation, event_id, None
 
         payload = self.sent_payloads[operation.target]
         event_id = await client.send_event(payload.event_type, payload.txn_id, payload.content, room_id=room_id)
         if event_id != target_event_id:
             msg = f"idempotent retry changed event ID for {operation.target}: {target_event_id} -> {event_id}"
             raise AssertionError(msg)
-        return operation, event_id, None, time.monotonic()
+        return operation, event_id, None
+
+    async def _send_expected_message(
+        self,
+        operation: LiveOperation,
+        client: LiveMatrixClient,
+        payload: _SentPayload,
+        room_id: str,
+    ) -> str:
+        """Send one reply-expecting message and register it before any sync pump.
+
+        Concurrent target-resolution waiters pump the oracle mid-batch, so a
+        fast agent reply must never be observable before its expectation exists.
+        """
+        event_id = await client.send_event(payload.event_type, payload.txn_id, payload.content, room_id=room_id)
+        self.sent_records.append(_SentRecord(event_id, room_id, payload.event_type))
+        self.oracle.expect(operation.event_ref, event_id, sent_at=time.monotonic())
+        return event_id
 
     def _resolve_event_ref(self, logical_ref: str) -> str:
         if logical_ref.startswith("response:"):
