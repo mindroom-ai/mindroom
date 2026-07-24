@@ -34,7 +34,9 @@
 - Point, recent-room, full-thread, suffix-thread, and snapshot reads now validate payload ID and timestamp against authoritative event rows.
 - Thread reads and snapshots order by the authoritative event-row timestamp instead of stale duplicated membership timestamps.
 - Focused cache contracts, SQLite snapshots, recent reads, edit lookups, and durable thread-cache reuse pass; PostgreSQL execution remains resource-gated.
-- Current source diff is `+806/-372`, net `+434` against `origin/main`.
+- Certified thread snapshots now reject malformed, duplicate, and canonically cross-thread child rows before resolution.
+- Focused malformed-child and wrong-membership cases refetch authoritative history instead of silently omitting poisoned rows.
+- Current source diff is `+840/-377`, net `+463` against `origin/main`.
 - Add deterministic full-resolution, point, snapshot, recent-room, SQLite, and PostgreSQL regressions at the owning seams.
 - Keep full correctness validation in shared Python helpers and use only narrow SQL sender/type prefilters for bounded edit lookup.
 - Re-run exact failed files, owning cache suites, full pytest, Tach, and all-file pre-commit under resource ownership.

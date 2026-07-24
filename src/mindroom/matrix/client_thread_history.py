@@ -133,6 +133,8 @@ _OPAQUE_ENCRYPTED_THREAD_HISTORY_REASON = "thread_history_opaque_encrypted_event
 _OPAQUE_ENCRYPTED_EVENT_REJECTION = "opaque_encrypted_event"
 _MISSING_THREAD_ROOT_REJECTION = "missing_thread_root"
 _INVALID_EVENT_SCOPE_REJECTION = "invalid_event_scope"
+_INVALID_THREAD_EVENT_REJECTION = "invalid_thread_event"
+_INVALID_THREAD_MEMBERSHIP_REJECTION = "invalid_thread_membership"
 type _ThreadHistoryDiagnosticValue = str | int | float | bool | None
 
 
@@ -505,7 +507,7 @@ async def _load_stale_cached_thread_history(
         return None
     if cached_event_sources is None:
         return None
-    cached_rejection_reason = _thread_history_cache_rejection_reason(
+    cached_rejection_reason = await _thread_history_cache_rejection_reason(
         cached_event_sources,
         room_id=room_id,
         thread_id=thread_id,
@@ -928,7 +930,7 @@ async def _load_cached_thread_history_if_usable(
                 THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC: "cache_rows_missing",
             }
             return None, cache_reject_diagnostics
-        cached_rejection_reason = _thread_history_cache_rejection_reason(
+        cached_rejection_reason = await _thread_history_cache_rejection_reason(
             cached_event_sources,
             room_id=room_id,
             thread_id=thread_id,
@@ -1068,7 +1070,7 @@ async def refresh_thread_history_from_source(
                 )
                 return stale_history
         raise
-    fetch_rejection_reason = _thread_history_cache_rejection_reason(
+    fetch_rejection_reason = await _thread_history_cache_rejection_reason(
         fetch_result.event_sources,
         room_id=room_id,
         thread_id=thread_id,
@@ -1169,7 +1171,7 @@ async def _store_thread_history_cache(
         return False
 
 
-def _thread_history_cache_rejection_reason(
+async def _thread_history_cache_rejection_reason(
     event_sources: Sequence[dict[str, Any]],
     *,
     room_id: str,
@@ -1180,16 +1182,28 @@ def _thread_history_cache_rejection_reason(
         return _INVALID_EVENT_SCOPE_REJECTION
     if any(is_opaque_encrypted_event_source(event_source) for event_source in event_sources):
         return _OPAQUE_ENCRYPTED_EVENT_REJECTION
-    root_source = next(
-        (event_source for event_source in event_sources if _event_id_from_source(event_source) == thread_id),
-        None,
-    )
-    if (
-        root_source is None
-        or EventInfo.from_event(root_source).is_edit
-        or _parse_room_message_event(root_source) is None
-    ):
+    sources_by_event_id: dict[str, dict[str, Any]] = {}
+    for event_source in event_sources:
+        event_id = _event_id_from_source(event_source)
+        if not event_id or event_id in sources_by_event_id or _parse_room_message_event(event_source) is None:
+            return _INVALID_THREAD_EVENT_REJECTION
+        sources_by_event_id[event_id] = event_source
+    root_source = sources_by_event_id.get(thread_id)
+    if root_source is None or EventInfo.from_event(root_source).is_edit:
         return _MISSING_THREAD_ROOT_REJECTION
+    event_infos = {
+        event_id: EventInfo.from_event(event_source) for event_id, event_source in sources_by_event_id.items()
+    }
+    resolved_thread_ids = await resolve_thread_ids_for_event_infos(
+        room_id,
+        event_infos=event_infos,
+        ordered_event_ids=ordered_event_ids_from_scanned_event_sources(event_sources),
+        resolved_thread_ids={thread_id: thread_id},
+    )
+    if any(
+        event_id != thread_id and resolved_thread_ids.get(event_id) != thread_id for event_id in sources_by_event_id
+    ):
+        return _INVALID_THREAD_MEMBERSHIP_REJECTION
     return None
 
 
@@ -1759,7 +1773,7 @@ async def bulk_refresh_room_thread_histories(
         opaque_stale_threads = len(set(thread_root_ids))
     else:
         for thread_id, event_sources in scan_result.thread_event_sources.items():
-            rejection_reason = _thread_history_cache_rejection_reason(
+            rejection_reason = await _thread_history_cache_rejection_reason(
                 event_sources,
                 room_id=room_id,
                 thread_id=thread_id,
