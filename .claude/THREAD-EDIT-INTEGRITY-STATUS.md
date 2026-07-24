@@ -50,7 +50,11 @@ That assertion and the current-version maintenance probe now expect retained sch
 
 The full storage-maintenance file and Tach pass after the correction.
 
-A clean broad rerun and final gates remain pending.
+A clean broad rerun of the twelve owning, cache-backend, approval, tool-preview, and stale-cleanup files passes at 100%.
+
+Current pushed implementation head is `b241f9874a7e001028fee6006d1895641390bd9c`.
+
+Full pytest, a final Tach rerun, all-file pre-commit, fresh exact-head reviews, CI, and real-Tuwunel remain pending.
 
 ## Verified blockers
 
