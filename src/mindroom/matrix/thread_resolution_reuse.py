@@ -64,6 +64,7 @@ def clone_resolved_visible_message(message: ResolvedVisibleMessage) -> ResolvedV
         thread_id=message.thread_id,
         latest_event_id=message.latest_event_id,
         stream_status=message.stream_status,
+        latest_event_timestamp=message.latest_event_timestamp,
     )
 
 

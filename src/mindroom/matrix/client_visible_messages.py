@@ -43,6 +43,7 @@ class ResolvedVisibleMessage:
     thread_id: str | None
     latest_event_id: str
     stream_status: str | None = None
+    latest_event_timestamp: int | None = None
 
     @classmethod
     def from_message_data(
@@ -98,11 +99,13 @@ class ResolvedVisibleMessage:
         *,
         body: str,
         latest_event_id: str,
+        latest_event_timestamp: int,
         content: dict[str, Any] | None,
     ) -> None:
         """Apply the newest visible edit state to this message."""
         self.body = body
         self.latest_event_id = latest_event_id
+        self.latest_event_timestamp = latest_event_timestamp
         if content is not None:
             self.content = replacement_content_for_original(self.content, content)
         self.refresh_stream_status()
@@ -111,6 +114,11 @@ class ResolvedVisibleMessage:
     def visible_event_id(self) -> str:
         """Return the event ID for the currently visible event state."""
         return self.latest_event_id
+
+    @property
+    def visible_timestamp(self) -> int:
+        """Return the timestamp of the currently visible event state."""
+        return self.timestamp if self.latest_event_timestamp is None else self.latest_event_timestamp
 
     @property
     def reply_to_event_id(self) -> str | None:
@@ -531,6 +539,7 @@ async def apply_latest_edits_to_messages(
             existing_message.apply_edit(
                 body=edited_body,
                 latest_event_id=edit_event.event_id,
+                latest_event_timestamp=edit_event.server_timestamp,
                 content=edited_content,
             )
             break
