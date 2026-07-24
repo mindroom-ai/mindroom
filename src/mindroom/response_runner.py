@@ -123,7 +123,6 @@ type _MatrixEventId = str
 _ToolContextResult = TypeVar("_ToolContextResult")
 _ToolStreamChunk = TypeVar("_ToolStreamChunk")
 _StateMutationResult = TypeVar("_StateMutationResult")
-_ResponseAdmissionResult = TypeVar("_ResponseAdmissionResult")
 
 
 async def _run_locked_source_preparation(
@@ -579,18 +578,6 @@ class ResponseRunner:
         """Bind the orchestrator-owned response-admission gate."""
         self._response_admission_lock = value
 
-    async def _run_with_response_admission(
-        self,
-        operation: Callable[[], Awaitable[_ResponseAdmissionResult]],
-    ) -> _ResponseAdmissionResult:
-        """Count one response from admission through its full lifecycle."""
-        async with self.response_admission_lock:
-            self.in_flight_response_count += 1
-        try:
-            return await operation()
-        finally:
-            self.in_flight_response_count -= 1
-
     def _show_tool_calls(self, agent_name: str | None = None) -> bool:
         """Return tool-call visibility for the current or target agent."""
         return show_tool_calls_for_agent(
@@ -812,55 +799,48 @@ class ResponseRunner:
         locked_operation: Callable[[MessageTarget, _EarlyPlaceholderState], Awaitable[str | None]],
     ) -> str | None:
         """Admit one response before lifecycle locking or visible placeholder work."""
-        return await self._run_with_response_admission(
-            lambda: self._run_admitted_locked_response_lifecycle(
-                request,
-                response_kind=response_kind,
-                locked_operation=locked_operation,
-            ),
-        )
-
-    async def _run_admitted_locked_response_lifecycle(
-        self,
-        request: ResponseRequest,
-        *,
-        response_kind: str,
-        locked_operation: Callable[[MessageTarget, _EarlyPlaceholderState], Awaitable[str | None]],
-    ) -> str | None:
-        """Run one admitted response with shared queued-message bookkeeping."""
-        resolved_target = request.response_envelope.target
-        early_placeholder = _EarlyPlaceholderState()
+        async with self.response_admission_lock:
+            self.in_flight_response_count += 1
         try:
-            return await self._lifecycle_coordinator.run_locked_response(
-                target=resolved_target,
-                response_envelope=request.response_envelope,
-                queued_notice_reservation=request.queued_notice_reservation,
-                pipeline_timing=request.pipeline_timing,
-                locked_operation=lambda target: locked_operation(target, early_placeholder),
-                signal_queued_message=request.sync_restart_retry_source_event_id is None,
-            )
-        except asyncio.CancelledError as error:
-            if early_placeholder.placeholder_event_id is not None and not early_placeholder.settlement_started:
-                await self._finalize_early_placeholder_cancellation(
-                    early_placeholder,
-                    error,
-                    response_kind=response_kind,
+            resolved_target = request.response_envelope.target
+            early_placeholder = _EarlyPlaceholderState()
+            try:
+                return await self._lifecycle_coordinator.run_locked_response(
+                    target=resolved_target,
+                    response_envelope=request.response_envelope,
+                    queued_notice_reservation=request.queued_notice_reservation,
+                    pipeline_timing=request.pipeline_timing,
+                    locked_operation=lambda target: locked_operation(target, early_placeholder),
+                    signal_queued_message=request.sync_restart_retry_source_event_id is None,
                 )
-            raise
-        except Exception as error:
-            already_linked = (
-                isinstance(error, PostLockRequestPreparationError) and error.placeholder_event_id is not None
-            )
-            if early_placeholder.placeholder_event_id is None or early_placeholder.settlement_started or already_linked:
+            except asyncio.CancelledError as error:
+                if early_placeholder.placeholder_event_id is not None and not early_placeholder.settlement_started:
+                    await self._finalize_early_placeholder_cancellation(
+                        early_placeholder,
+                        error,
+                        response_kind=response_kind,
+                    )
                 raise
-            cause = (
-                error.__cause__
-                if isinstance(error, PostLockRequestPreparationError) and isinstance(error.__cause__, Exception)
-                else error
-            )
-            raise PostLockRequestPreparationError(
-                placeholder_event_id=early_placeholder.placeholder_event_id,
-            ) from cause
+            except Exception as error:
+                already_linked = (
+                    isinstance(error, PostLockRequestPreparationError) and error.placeholder_event_id is not None
+                )
+                if (
+                    early_placeholder.placeholder_event_id is None
+                    or early_placeholder.settlement_started
+                    or already_linked
+                ):
+                    raise
+                cause = (
+                    error.__cause__
+                    if isinstance(error, PostLockRequestPreparationError) and isinstance(error.__cause__, Exception)
+                    else error
+                )
+                raise PostLockRequestPreparationError(
+                    placeholder_event_id=early_placeholder.placeholder_event_id,
+                ) from cause
+        finally:
+            self.in_flight_response_count -= 1
 
     async def _finalize_early_placeholder_cancellation(
         self,
@@ -1407,7 +1387,6 @@ class ResponseRunner:
                 run_id=run_id,
                 pipeline_timing=request.pipeline_timing,
                 on_cancelled=progress.note_task_cancelled,
-                _admission_already_counted=True,
             )
             if progress.tracked_event_id is None:
                 progress.track_event(run_message_id)
@@ -2102,46 +2081,8 @@ class ResponseRunner:
         run_id: str | None = None,
         pipeline_timing: DispatchPipelineTiming | None = None,
         on_cancelled: Callable[[str], None] | None = None,
-        _admission_already_counted: bool = False,
     ) -> _MatrixEventId | None:
-        """Admit a direct lower-level response attempt for compatibility."""
-        if _admission_already_counted:
-            return await self._run_admitted_cancellable_response(
-                target=target,
-                response_function=response_function,
-                thinking_message=thinking_message,
-                existing_event_id=existing_event_id,
-                user_id=user_id,
-                run_id=run_id,
-                pipeline_timing=pipeline_timing,
-                on_cancelled=on_cancelled,
-            )
-        return await self._run_with_response_admission(
-            lambda: self._run_admitted_cancellable_response(
-                target=target,
-                response_function=response_function,
-                thinking_message=thinking_message,
-                existing_event_id=existing_event_id,
-                user_id=user_id,
-                run_id=run_id,
-                pipeline_timing=pipeline_timing,
-                on_cancelled=on_cancelled,
-            ),
-        )
-
-    async def _run_admitted_cancellable_response(
-        self,
-        *,
-        target: MessageTarget,
-        response_function: Callable[[str | None], Coroutine[Any, Any, None]],
-        thinking_message: str | None = None,
-        existing_event_id: str | None = None,
-        user_id: str | None = None,
-        run_id: str | None = None,
-        pipeline_timing: DispatchPipelineTiming | None = None,
-        on_cancelled: Callable[[str], None] | None = None,
-    ) -> _MatrixEventId | None:
-        """Run one already-admitted response attempt with cancellation support."""
+        """Run one response-generation attempt with cancellation support."""
         return await ResponseAttemptRunner(
             ResponseAttemptDeps(
                 client=self._client(),

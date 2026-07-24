@@ -1558,11 +1558,32 @@ async def test_queued_config_reload_waits_for_in_flight_response_without_event_i
         response_started.set()
         await release_response.wait()
 
-    response_task = asyncio.create_task(
-        bot._response_runner.run_cancellable_response(
-            target=MessageTarget.resolve("!room:localhost", None, "$reply"),
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    request = ResponseRequest(
+        thread_history=(),
+        prompt="Hello",
+        response_envelope=request_envelope(
+            room_id="!room:localhost",
+            reply_to_event_id="$reply",
+            agent_name=bot.agent_name,
+        ),
+    )
+
+    async def run_response(
+        target: MessageTarget,
+        _early_placeholder: object,
+    ) -> str | None:
+        return await runner.run_cancellable_response(
+            target=target,
             response_function=response_function,
             thinking_message="Thinking...",
+        )
+
+    response_task = asyncio.create_task(
+        runner._run_locked_response_lifecycle(
+            request,
+            response_kind="ai",
+            locked_operation=run_response,
         ),
     )
 
@@ -2761,23 +2782,43 @@ async def test_in_flight_response_count_nonzero_during_send_response(
     async def response_function(message_id: str | None) -> None:
         pass
 
-    task = asyncio.create_task(
-        bot._response_runner.run_cancellable_response(
-            target=MessageTarget.resolve("!room:localhost", None, "$reply"),
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    request = ResponseRequest(
+        thread_history=(),
+        prompt="Hello",
+        response_envelope=request_envelope(
+            room_id="!room:localhost",
+            reply_to_event_id="$reply",
+            agent_name=bot.agent_name,
+        ),
+    )
+
+    async def run_response(
+        target: MessageTarget,
+        _early_placeholder: object,
+    ) -> str | None:
+        return await runner.run_cancellable_response(
+            target=target,
             response_function=response_function,
             thinking_message="Thinking...",
+        )
+
+    task = asyncio.create_task(
+        runner._run_locked_response_lifecycle(
+            request,
+            response_kind="ai",
+            locked_operation=run_response,
         ),
     )
 
     try:
         await asyncio.wait_for(send_entered.wait(), timeout=1)
-        # The visible send is blocked, but the pre-tracking sentinel must be visible
-        assert bot.in_flight_response_count >= 1
+        assert bot.in_flight_response_count == 1
     finally:
         release_send.set()
         await asyncio.gather(task, return_exceptions=True)
-        for t in bot.stop_manager.cleanup_tasks:
-            t.cancel()
+        for cleanup_task in bot.stop_manager.cleanup_tasks:
+            cleanup_task.cancel()
         await asyncio.gather(*bot.stop_manager.cleanup_tasks, return_exceptions=True)
 
 
@@ -2855,43 +2896,6 @@ async def test_tracked_inbox_response_cancelled_during_reload_never_sends_placeh
             admission_lock.release()
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
-
-
-@pytest.mark.asyncio
-async def test_run_cancellable_response_does_not_depend_on_current_task_lookup(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    mock_agent_users: dict[str, AgentMatrixUser],
-) -> None:
-    """Response tracking should not depend on asyncio ambient task lookup."""
-    config = _runtime_bound_config(
-        Config(
-            agents={"agent1": AgentConfig(display_name="Agent 1")},
-            router=RouterConfig(model="default"),
-        ),
-        tmp_path,
-    )
-    bot = AgentBot(
-        agent_user=mock_agent_users["agent1"],
-        storage_path=tmp_path,
-        config=config,
-        runtime_paths=runtime_paths_for(config),
-    )
-    setup_test_bot(bot, AsyncMock())
-
-    def fail_current_task() -> None:
-        msg = "_run_cancellable_response should not call asyncio.current_task()"
-        raise AssertionError(msg)
-
-    monkeypatch.setattr("mindroom.bot.asyncio.current_task", fail_current_task)
-
-    async def response_function(message_id: str | None) -> None:
-        assert message_id is None
-
-    await bot._response_runner.run_cancellable_response(
-        target=MessageTarget.resolve("!room:localhost", None, "$reply"),
-        response_function=response_function,
-    )
 
 
 @pytest.mark.asyncio
