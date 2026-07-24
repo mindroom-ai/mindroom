@@ -2349,6 +2349,16 @@ class FinalStateAuditor:
         marker of every one of those sources. A wrong-source body, a pre-edit
         body, or a coalesced body missing one source's current marker fails
         here. A completed no-response supersession record requires no marker.
+
+        Only *replayable* sources carry a required marker. A source that was
+        durably redacted is tombstoned: production deliberately refuses to
+        regenerate an edit against it (``edit_regenerator.py`` ignores edits to
+        redacted sources), so a record may keep its already-visible response
+        while one covered source no longer feeds model replay. Requiring the
+        redacted source's post-redaction edit marker would demand behavior
+        production correctly declines, so the required set is derived from
+        ``record.replay_source_event_ids`` (``source_event_ids`` minus
+        ``redacted_source_event_ids``) — the same contract production uses.
         """
         assert self.ledger_path is not None
         records = read_ledger_records(self.ledger_path)
@@ -2359,7 +2369,7 @@ class FinalStateAuditor:
                 continue
             required = {
                 self.source_current_markers[covered]
-                for covered in record.source_event_ids
+                for covered in record.replay_source_event_ids
                 if covered in expected_sources and covered in self.source_current_markers
             }
             if not required:

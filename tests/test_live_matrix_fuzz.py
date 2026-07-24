@@ -1336,6 +1336,77 @@ async def test_model_source_audit_ignores_no_response_supersession(tmp_path: Pat
         await auditor.client.close()
 
 
+@pytest.mark.asyncio
+async def test_model_source_audit_ignores_redacted_source_marker(tmp_path: Path) -> None:
+    """A response-backed record whose only source was redacted requires no marker.
+
+    Production tombstones a durably redacted source and refuses to regenerate an
+    edit against it, so the still-visible response legitimately reflects the
+    pre-redaction body. Requiring the source's post-redaction edit marker would
+    demand behavior production correctly declines. This is the root:41 live-gate
+    false positive.
+    """
+    ledger_path = tmp_path / "general_responded.json"
+    orig = _source_marker("op:1", ORIGINAL_REVISION)
+    edited = _source_marker("op:1", "edit:5")
+    auditor = _model_source_auditor(
+        ledger_path=ledger_path,
+        expected_sources={"$a": "op:1"},
+        # An edit landed after the redaction, so the current marker is the edit,
+        # yet the source is tombstoned and no longer feeds model replay.
+        source_current_markers={"$a": edited},
+        # The model only ever saw the original body before the redaction.
+        observed={4: frozenset({orig})},
+    )
+    try:
+        redacted = TurnRecord(
+            source_event_ids=("$a",),
+            redacted_source_event_ids=("$a",),
+            response_event_id="$reply-a",
+            completed=True,
+        )
+        _write_ledger(ledger_path, {"$a": redacted})
+        events = {"$reply-a": _agent_reply_event("$a", "$reply-a", _short_body_for(4))}
+        # No marker is required for the tombstoned source, so the audit passes.
+        auditor._assert_model_saw_current_sources(events)
+    finally:
+        await auditor.client.close()
+
+
+@pytest.mark.asyncio
+async def test_model_source_audit_requires_live_sibling_not_redacted_sibling(tmp_path: Path) -> None:
+    """A coalesced record still requires the live sibling's marker but not the redacted one."""
+    ledger_path = tmp_path / "general_responded.json"
+    marker_a = _source_marker("op:1", ORIGINAL_REVISION)
+    marker_b_edit = _source_marker("op:2", "edit:9")
+    auditor = _model_source_auditor(
+        ledger_path=ledger_path,
+        expected_sources={"$a": "op:1", "$b": "op:2"},
+        # $b was edited after redaction; its marker must NOT be required, while
+        # $a stays a live source whose current marker is mandatory.
+        source_current_markers={"$a": marker_a, "$b": marker_b_edit},
+        observed={9: frozenset({marker_a})},
+    )
+    try:
+        coalesced = TurnRecord(
+            source_event_ids=("$a", "$b"),
+            redacted_source_event_ids=("$b",),
+            response_event_id="$combined",
+            completed=True,
+        )
+        _write_ledger(ledger_path, {"$a": coalesced, "$b": coalesced})
+        events = {"$combined": _agent_reply_event("$a", "$combined", _short_body_for(9))}
+        # Live sibling $a satisfied, redacted sibling $b excluded -> passes.
+        auditor._assert_model_saw_current_sources(events)
+
+        # Dropping the live sibling's marker still fails: only the redacted one is excused.
+        auditor.observed_markers_for = lambda _call_id: frozenset()
+        with pytest.raises(AssertionError, match="without current source markers"):
+            auditor._assert_model_saw_current_sources(events)
+    finally:
+        await auditor.client.close()
+
+
 class _FakeStack:
     """Minimal stand-in exposing the fields the failure-bundle path reads.
 
