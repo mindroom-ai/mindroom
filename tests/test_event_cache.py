@@ -2219,6 +2219,51 @@ async def test_edit_cache_row_indexes_io_mindroom_tool_approval_edits(
 
 
 @pytest.mark.asyncio
+async def test_latest_edit_equal_timestamp_uses_greatest_event_id(
+    event_cache: ConversationEventCache,
+) -> None:
+    """Equal-timestamp replacements must use Matrix event-ID ordering, not cache write order."""
+    room_id = "!room:localhost"
+    original_event_id = "$original"
+    z_edit = _make_text_event(
+        event_id="$z-edit",
+        sender="@alice:localhost",
+        body="* Z",
+        server_timestamp=2000,
+        source_content={
+            "body": "* Z",
+            "m.new_content": {"body": "Z", "msgtype": "m.text"},
+            "m.relates_to": {
+                "rel_type": "m.replace",
+                "event_id": original_event_id,
+            },
+        },
+    )
+    a_edit = _make_text_event(
+        event_id="$a-edit",
+        sender="@alice:localhost",
+        body="* A",
+        server_timestamp=2000,
+        source_content={
+            "body": "* A",
+            "m.new_content": {"body": "A", "msgtype": "m.text"},
+            "m.relates_to": {
+                "rel_type": "m.replace",
+                "event_id": original_event_id,
+            },
+        },
+    )
+
+    await event_cache.store_event(z_edit.event_id, room_id, _cache_source(z_edit))
+    await event_cache.store_event(a_edit.event_id, room_id, _cache_source(a_edit))
+
+    latest_edit = await event_cache.get_latest_edit(room_id, original_event_id)
+
+    assert latest_edit is not None
+    assert latest_edit["event_id"] == "$z-edit"
+
+
+@pytest.mark.asyncio
 async def test_latest_edit_can_be_scoped_to_sender_when_newer_edit_is_untrusted(
     event_cache: ConversationEventCache,
 ) -> None:

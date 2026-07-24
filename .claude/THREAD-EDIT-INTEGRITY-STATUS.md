@@ -1,6 +1,6 @@
 # Thread edit integrity follow-up status
 
-Updated: 2026-07-24 08:38 America/Los_Angeles.
+Updated: 2026-07-24 08:41 America/Los_Angeles.
 
 ## Goal
 
@@ -67,7 +67,7 @@ A backend-parametrized regression stores `$z-edit` before `$a-edit` at equal tim
 - Equal-timestamp backend regression after implementation: 2 passed, including SQLite and PostgreSQL.
 - Ruff on touched source and test files: passed.
 - Pyright spot check: unavailable because the executable is not installed by the project environment.
-- Targeted tests: pending.
+- Targeted tests: passed for currently implemented seams.
 - Relevant backend tests: pending.
 - Full pytest: pending.
 - Tach: pending boundary check.
@@ -75,9 +75,13 @@ A backend-parametrized regression stores `$z-edit` before `$a-edit` at equal tim
 
 ## Git and PR ledger
 
-First atomic sender-integrity commit is being prepared.
+Sender-integrity commit `543f08094` was pushed to `origin/fix/thread-edit-integrity`.
 
-No remote branch or PR yet.
+The cache tie-break commit is being prepared.
+
+Remote branch exists.
+
+No PR yet.
 
 Before every commit, verify `git var GIT_AUTHOR_IDENT` resolves to `Bas Nijholt <bas@nijho.lt>`.
 
