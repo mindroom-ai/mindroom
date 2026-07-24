@@ -1134,6 +1134,28 @@ class TestThreadHistory:
         ]
 
     @pytest.mark.asyncio
+    async def test_thread_resolution_ignores_original_from_explicit_other_room(self) -> None:
+        """The authoritative room must reject an original carrying another room ID."""
+        original = {
+            "event_id": "$thread_root",
+            "room_id": "!other:localhost",
+            "sender": "@alice:localhost",
+            "origin_server_ts": 1000,
+            "type": "m.room.message",
+            "content": {"msgtype": "m.text", "body": "Other room"},
+        }
+
+        resolution = await _resolve_thread_history_from_event_sources_timed(
+            AsyncMock(),
+            room_id="!room:localhost",
+            thread_id="$thread_root",
+            event_sources=[original],
+            event_cache=_event_cache(),
+        )
+
+        assert resolution.messages == []
+
+    @pytest.mark.asyncio
     async def test_thread_resolution_ignores_state_message_original_and_edit(self) -> None:
         """State events must not become editable visible thread messages."""
         state_original = {

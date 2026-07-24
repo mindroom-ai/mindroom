@@ -71,7 +71,12 @@ from mindroom.matrix.client_visible_messages import (
     is_valid_bundled_replacement,
     record_thread_edit_candidate,
 )
-from mindroom.matrix.event_info import EventInfo, event_source_is_state_event, is_thread_affecting_relation
+from mindroom.matrix.event_info import (
+    EventInfo,
+    event_source_is_state_event,
+    event_source_matches_room,
+    is_thread_affecting_relation,
+)
 from mindroom.matrix.media import (
     is_encrypted_media_event_source,
     parse_matrix_media_event_source,
@@ -409,7 +414,8 @@ async def _resolve_thread_history_from_event_sources_timed(
     parsed_events = [
         parsed_event
         for event_source in event_sources
-        if (parsed_event := _parse_room_message_event(event_source)) is not None
+        if event_source_matches_room(event_source, room_id)
+        and (parsed_event := _parse_room_message_event(event_source)) is not None
     ]
     messages_by_event_id: dict[str, ResolvedVisibleMessage] = {}
     edit_candidates_by_original_event_id: ThreadEditCandidatesByOriginalEventId = {}

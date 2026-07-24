@@ -35,6 +35,7 @@
 - Cached point projection refuses state originals and explicit room mismatches.
 - Snapshot scope refuses state originals and explicit room mismatches.
 - Full-history parsing excludes state originals.
+- Full-history parsing also excludes originals carrying an explicit other room.
 - Full history and preview now share bundled candidate enumeration and validation.
 - Full history retains all valid bundled candidates for deterministic latest selection and fallback.
 - Deterministic full-history tests cover state originals and dual bundled `event`/`latest_event` ordering.
@@ -49,6 +50,7 @@
 ## Current validation
 
 - Exact reproduced probes now return no state original, the newer bundled `latest_event`, and the older valid in-room cached edit.
+- The explicit other-room original regression passes.
 - New focused regressions pass on both cache backends: `8 passed`.
 - Broad full/cache/backend/reuse focus passes: `471 passed`.
 - Explicit Tach dependency/interface validation passes.
