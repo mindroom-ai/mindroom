@@ -1663,6 +1663,7 @@ class ManagedTuwunelStack:
                     mindroom_module_path=mindroom_path,
                     nio_module_path=nio_path,
                 )
+                _validate_nio_provenance(self.runtime_provenance)
                 return
             if self._mindroom_process is not None and self._mindroom_process.poll() is not None:
                 msg = f"MindRoom exited before runtime attestation:\n{self.log_tail()}"
@@ -3821,11 +3822,18 @@ def _failure_artifact(
     }
 
 
-def _assert_clean_diagnostics(diagnostics: Mapping[str, int]) -> None:
+def _assert_clean_diagnostics(
+    diagnostics: Mapping[str, int],
+    *,
+    require_limited_sync: bool = False,
+) -> None:
     """Fail a campaign that observed timeout, degradation, or stall signals."""
     serious = {name: diagnostics.get(name, 0) for name in _SERIOUS_DIAGNOSTICS if diagnostics.get(name, 0)}
     if serious:
         msg = f"live Matrix fuzz observed serious runtime diagnostics: {serious}"
+        raise AssertionError(msg)
+    if require_limited_sync and diagnostics.get("limited_sync_certification_events", 0) < 1:
+        msg = "recovery campaign did not exercise MindRoom limited-sync certification"
         raise AssertionError(msg)
 
 
@@ -3911,6 +3919,9 @@ def main() -> None:
                 settle_seconds=settle_seconds,
             ),
         )
+        assert stack.runtime_provenance is not None
+        provenance = stack.runtime_provenance
+        _validate_nio_provenance(provenance)
         result["profile"] = scenario.profile
         result["seed"] = seed
         result["preexisting_fuzz_servers"] = stack.preexisting_fuzz_servers
@@ -3920,7 +3931,10 @@ def main() -> None:
         result.update(provenance.as_dict())
         diagnostics = stack.diagnostic_counts()
         result.update(diagnostics)
-        _assert_clean_diagnostics(diagnostics)
+        _assert_clean_diagnostics(
+            diagnostics,
+            require_limited_sync=scenario.profile == "recovery",
+        )
         print(json.dumps(result, sort_keys=True))
     except Exception as error:
         provenance = stack.runtime_provenance or provenance

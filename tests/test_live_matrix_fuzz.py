@@ -205,6 +205,12 @@ def test_live_campaign_fails_on_serious_runtime_diagnostics() -> None:
         "limited_sync_certification_events": 4,
     }
     fuzz_live_matrix._assert_clean_diagnostics(clean)
+    fuzz_live_matrix._assert_clean_diagnostics(clean, require_limited_sync=True)
+    with pytest.raises(AssertionError, match="did not exercise MindRoom limited-sync"):
+        fuzz_live_matrix._assert_clean_diagnostics(
+            {**clean, "limited_sync_certification_events": 0},
+            require_limited_sync=True,
+        )
 
     for key in (
         "cache_coordinator_timeouts",
@@ -254,10 +260,13 @@ def test_runtime_attestation_retains_child_provenance(
         return expected
 
     monkeypatch.setattr(fuzz_live_matrix, "_runtime_provenance", provenance)
+    validated: list[fuzz_live_matrix.RuntimeProvenance] = []
+    monkeypatch.setattr(fuzz_live_matrix, "_validate_nio_provenance", validated.append)
 
     stack._wait_for_runtime_attestation()
 
     assert stack.runtime_provenance is expected
+    assert validated == [expected]
 
 
 @pytest.mark.asyncio
