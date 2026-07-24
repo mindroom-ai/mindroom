@@ -396,6 +396,9 @@ class _LedgerState:
     lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
     loaded: bool = False
     pending_persists: list[Future[None]] = field(default_factory=list, repr=False)
+    persist_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    pending_records: list[TurnRecord] = field(default_factory=list, repr=False)
+    active_persist: Future[None] | None = field(default=None, repr=False)
 
 
 _LEDGER_STATES: dict[str, _LedgerState] = {}
@@ -596,28 +599,53 @@ class HandledTurnLedger:
 
     def _schedule_persist_locked(self, turn_record: TurnRecord) -> Future[None]:
         """Queue one write-behind disk merge for records already applied to memory."""
-        future = _persist_executor().submit(self._persist_record, turn_record)
+        with self._state.persist_lock:
+            self._state.pending_records.append(turn_record)
+            future = self._state.active_persist
+            if future is None:
+                future = _persist_executor().submit(self._persist_pending_records)
+                self._state.active_persist = future
         self._state.pending_persists = [
             pending
             for pending in self._state.pending_persists
             if not pending.done() or pending.cancelled() or pending.exception() is not None
         ]
-        self._state.pending_persists.append(future)
+        if future not in self._state.pending_persists:
+            self._state.pending_persists.append(future)
         return future
 
-    def _persist_record(self, turn_record: TurnRecord) -> None:
-        """Merge already-applied records into the persisted ledger from a worker thread."""
+    def _persist_pending_records(self) -> None:
+        """Drain queued records into the fewest possible durable ledger writes."""
+        while True:
+            with self._state.persist_lock:
+                if not self._state.pending_records:
+                    self._state.active_persist = None
+                    return
+                records = tuple(self._state.pending_records)
+                self._state.pending_records.clear()
+            try:
+                self._persist_records(records)
+            except Exception:
+                with self._state.persist_lock:
+                    self._state.pending_records[0:0] = records
+                    self._state.active_persist = None
+                raise
+
+    def _persist_records(self, turn_records: tuple[TurnRecord, ...]) -> None:
+        """Merge one batch of already-applied records from the persistence worker."""
         try:
             with advisory_file_lock(self._responses_lock_file, exclusive=True):
                 persisted_responses = self._read_responses_file_locked()
-                for event_id in turn_record.indexed_event_ids:
-                    persisted_responses[event_id] = turn_record
+                for turn_record in turn_records:
+                    for event_id in turn_record.indexed_event_ids:
+                        persisted_responses[event_id] = turn_record
                 self._write_responses_file_locked(persisted_responses)
         except Exception:
             logger.exception(
                 "handled_turn_persist_failed",
                 agent=self.agent_name,
                 responses_file=str(self._responses_file),
+                batch_size=len(turn_records),
             )
             raise
 

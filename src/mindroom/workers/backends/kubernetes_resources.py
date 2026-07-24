@@ -21,6 +21,7 @@ import json
 import os
 import posixpath
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
@@ -214,6 +215,33 @@ class KubernetesDeployment(Protocol):
     status: _KubernetesDeploymentStatus
 
 
+@dataclass(slots=True)
+class _DeploymentMetadataSnapshot:
+    name: str
+    annotations: dict[str, str] | None
+    labels: dict[str, str]
+    generation: int | None
+    uid: str | None
+
+
+@dataclass(slots=True)
+class _DeploymentSpecSnapshot:
+    replicas: int | None
+
+
+@dataclass(slots=True)
+class _DeploymentStatusSnapshot:
+    ready_replicas: int | None
+    observed_generation: int | None
+
+
+@dataclass(slots=True)
+class _DeploymentSnapshot:
+    metadata: _DeploymentMetadataSnapshot
+    spec: _DeploymentSpecSnapshot
+    status: _DeploymentStatusSnapshot
+
+
 class _KubernetesPodSpec(Protocol):
     node_name: str | None
 
@@ -224,6 +252,12 @@ class _KubernetesPod(Protocol):
 
 class _KubernetesDeploymentList(Protocol):
     items: list[KubernetesDeployment] | None
+
+
+class _KubernetesRawResponse(Protocol):
+    data: bytes
+
+    def release_conn(self) -> None: ...
 
 
 class _AppsApiProtocol(Protocol):
@@ -240,7 +274,13 @@ class _AppsApiProtocol(Protocol):
 
     def delete_namespaced_deployment(self, name: str, namespace: str) -> None: ...
 
-    def list_namespaced_deployment(self, namespace: str, label_selector: str) -> _KubernetesDeploymentList: ...
+    def list_namespaced_deployment(
+        self,
+        namespace: str,
+        *,
+        label_selector: str,
+        _preload_content: bool = True,
+    ) -> _KubernetesDeploymentList | _KubernetesRawResponse: ...
 
 
 class _KubernetesApiClientProtocol(Protocol):
@@ -444,6 +484,62 @@ def _list_selector(*, extra_labels: dict[str, str]) -> str:
     return ",".join(f"{key}={value}" for key, value in sorted(selector.items()))
 
 
+def _optional_int(value: object) -> int | None:
+    """Normalize one optional integer from a Kubernetes JSON response."""
+    if value is None:
+        return None
+    if not isinstance(value, (str, int, float)):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _string_mapping(value: object) -> dict[str, str]:
+    """Keep string pairs from one Kubernetes metadata mapping."""
+    if not isinstance(value, dict):
+        return {}
+    return {str(key): item for key, item in value.items() if isinstance(key, str) and isinstance(item, str)}
+
+
+def _deployment_snapshot(payload: object) -> KubernetesDeployment:
+    """Project one raw Deployment payload onto fields used by maintenance."""
+    if not isinstance(payload, dict):
+        msg = "Kubernetes Deployment list returned a non-object item."
+        raise WorkerBackendError(msg)
+    payload_mapping = cast("dict[str, object]", payload)
+    metadata_payload = payload_mapping.get("metadata")
+    spec_payload = payload_mapping.get("spec")
+    status_payload = payload_mapping.get("status")
+    metadata = cast("Mapping[str, object]", metadata_payload) if isinstance(metadata_payload, Mapping) else {}
+    spec = cast("Mapping[str, object]", spec_payload) if isinstance(spec_payload, Mapping) else {}
+    status = cast("Mapping[str, object]", status_payload) if isinstance(status_payload, Mapping) else {}
+    name = metadata.get("name")
+    if not isinstance(name, str) or not name:
+        msg = "Kubernetes Deployment list returned an item without metadata.name."
+        raise WorkerBackendError(msg)
+    uid = metadata.get("uid")
+    annotations = _string_mapping(metadata.get("annotations"))
+    return cast(
+        "KubernetesDeployment",
+        _DeploymentSnapshot(
+            metadata=_DeploymentMetadataSnapshot(
+                name=name,
+                annotations=annotations or None,
+                labels=_string_mapping(metadata.get("labels")),
+                generation=_optional_int(metadata.get("generation")),
+                uid=uid if isinstance(uid, str) else None,
+            ),
+            spec=_DeploymentSpecSnapshot(replicas=_optional_int(spec.get("replicas"))),
+            status=_DeploymentStatusSnapshot(
+                ready_replicas=_optional_int(status.get("readyReplicas")),
+                observed_generation=_optional_int(status.get("observedGeneration")),
+            ),
+        ),
+    )
+
+
 def _resolved_agent_policies_for_runtime_paths(runtime_paths: RuntimePaths) -> dict[str, ResolvedAgentPolicy]:
     try:
         config_data, _source_files = load_yaml_config_source(runtime_paths.config_path)
@@ -506,11 +602,36 @@ class KubernetesResourceManager:
 
     def list_deployments(self) -> list[KubernetesDeployment]:
         """List managed worker Deployments in this namespace."""
-        response = self._apps.list_namespaced_deployment(
-            self.config.namespace,
-            label_selector=_list_selector(extra_labels=self.config.extra_labels),
+        response = cast(
+            "_KubernetesDeploymentList",
+            self._apps.list_namespaced_deployment(
+                self.config.namespace,
+                label_selector=_list_selector(extra_labels=self.config.extra_labels),
+            ),
         )
         return list(response.items or [])
+
+    def list_deployment_snapshots(self) -> list[KubernetesDeployment]:
+        """List lightweight worker snapshots without Kubernetes model deserialization."""
+        response = cast(
+            "_KubernetesRawResponse",
+            self._apps.list_namespaced_deployment(
+                self.config.namespace,
+                label_selector=_list_selector(extra_labels=self.config.extra_labels),
+                _preload_content=False,
+            ),
+        )
+        try:
+            payload = json.loads(response.data)
+        except (json.JSONDecodeError, TypeError, UnicodeDecodeError) as exc:
+            msg = "Kubernetes Deployment list returned invalid JSON."
+            raise WorkerBackendError(msg) from exc
+        finally:
+            response.release_conn()
+        if not isinstance(payload, Mapping) or not isinstance(payload.get("items"), list):
+            msg = "Kubernetes Deployment list returned an invalid items payload."
+            raise WorkerBackendError(msg)
+        return [_deployment_snapshot(item) for item in payload["items"]]
 
     def read_deployment(self, deployment_name: str) -> KubernetesDeployment | None:
         """Read one Deployment, returning ``None`` for 404s."""

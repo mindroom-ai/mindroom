@@ -436,9 +436,13 @@ async def test_dispatch_thread_read_timeout_does_not_cancel_pending_cache_write(
         write_started.set()
         await release_write.wait()
 
-    pending_write_task = asyncio.create_task(pending_cache_write())
-    coordinator._thread_update_tasks[("!room:localhost", "$thread:localhost")] = pending_write_task
-    coordinator._thread_update_tasks_by_room["!room:localhost"] = {"$thread:localhost": pending_write_task}
+    pending_write_task = coordinator.queue_thread_update(
+        "!room:localhost",
+        "$thread:localhost",
+        pending_cache_write,
+        name="matrix_cache_pending_test_write",
+        coordination_scope=event_cache.principal_id,
+    )
     conversation_cache.runtime.event_cache_write_coordinator = coordinator
     _set_dispatch_thread_read_timeout(conversation_cache, 0.01)
     baseline_wait_tasks = _pending_thread_cache_update_wait_tasks()

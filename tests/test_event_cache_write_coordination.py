@@ -122,7 +122,10 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         assert first is response
         assert second is response
         get_event.assert_awaited_once()
-        wait_for_prior_room_updates.assert_awaited_once_with("!test:localhost")
+        wait_for_prior_room_updates.assert_awaited_once_with(
+            "!test:localhost",
+            coordination_scope=event_cache.principal_id,
+        )
 
     @pytest.mark.asyncio
     async def test_local_bot_redaction_ignores_cache_failure_after_successful_redact(self, bot: AgentBot) -> None:
@@ -170,8 +173,9 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 emit_timing: bool = True,
                 coalesce_key: tuple[str, str] | None = None,
                 coalesce_log_context: dict[str, object] | None = None,
+                coordination_scope: str | None = None,
             ) -> asyncio.Task[object]:
-                del room_id, name, log_exceptions, coalesce_key, coalesce_log_context
+                del room_id, name, log_exceptions, coalesce_key, coalesce_log_context, coordination_scope
                 observed_emit_timing.append(emit_timing)
                 return asyncio.create_task(update_coro_factory())
 
@@ -187,8 +191,8 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
     @pytest.mark.asyncio
     async def test_queue_thread_cache_update_forwards_default_coordinator_options(self) -> None:
         """Thread cache facade should always forward the expanded coordinator options."""
-        cache_ops, _logger, _event_cache = _thread_mutation_cache_ops()
-        observed_options: list[tuple[object, object, object]] = []
+        cache_ops, _logger, event_cache = _thread_mutation_cache_ops()
+        observed_options: list[tuple[object, object, object, object]] = []
 
         class _RecordingCoordinator:
             def queue_thread_update(
@@ -202,9 +206,10 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 emit_timing: object = "missing",
                 coalesce_key: object = "missing",
                 coalesce_log_context: object = "missing",
+                coordination_scope: object = "missing",
             ) -> asyncio.Task[object]:
                 del room_id, thread_id, name, log_exceptions
-                observed_options.append((emit_timing, coalesce_key, coalesce_log_context))
+                observed_options.append((emit_timing, coalesce_key, coalesce_log_context, coordination_scope))
                 return asyncio.create_task(update_coro_factory())
 
         async def update() -> None:
@@ -219,7 +224,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         )
         await task
 
-        assert observed_options == [(False, None, None)]
+        assert observed_options == [(False, None, None, event_cache.principal_id)]
 
     @pytest.mark.asyncio
     async def test_outbound_nonterminal_streaming_edits_coalesce_pending_cache_updates(
@@ -257,6 +262,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 "$thread:localhost",
                 blocker,
                 name="matrix_cache_blocker",
+                coordination_scope=event_cache.principal_id,
             )
             await asyncio.wait_for(blocker_started.wait(), timeout=1.0)
 
@@ -270,7 +276,11 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             release_blocker.set()
             await blocker_task
             await asyncio.wait_for(
-                coordinator.wait_for_thread_idle("!test:localhost", "$thread:localhost"),
+                coordinator.wait_for_thread_idle(
+                    "!test:localhost",
+                    "$thread:localhost",
+                    coordination_scope=event_cache.principal_id,
+                ),
                 timeout=1.0,
             )
         finally:
@@ -325,6 +335,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 "$thread:localhost",
                 blocker,
                 name="matrix_cache_blocker",
+                coordination_scope=event_cache.principal_id,
             )
             await asyncio.wait_for(blocker_started.wait(), timeout=1.0)
 
@@ -350,7 +361,11 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             release_blocker.set()
             await blocker_task
             await asyncio.wait_for(
-                coordinator.wait_for_thread_idle("!test:localhost", "$thread:localhost"),
+                coordinator.wait_for_thread_idle(
+                    "!test:localhost",
+                    "$thread:localhost",
+                    coordination_scope=event_cache.principal_id,
+                ),
                 timeout=1.0,
             )
         finally:
@@ -735,8 +750,9 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 emit_timing: bool = False,
                 coalesce_key: tuple[str, str] | None = None,
                 coalesce_log_context: dict[str, object] | None = None,
+                coordination_scope: str | None = None,
             ) -> asyncio.Task[object]:
-                del room_id, name, log_exceptions, emit_timing, coalesce_key, coalesce_log_context
+                del room_id, name, log_exceptions, emit_timing, coalesce_key, coalesce_log_context, coordination_scope
                 return asyncio.create_task(update_coro_factory())
 
             def queue_thread_update(
@@ -750,6 +766,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 emit_timing: bool = False,
                 coalesce_key: tuple[str, str] | None = None,
                 coalesce_log_context: dict[str, object] | None = None,
+                coordination_scope: str | None = None,
             ) -> asyncio.Task[object]:
                 del thread_id
                 return self.queue_room_update(
@@ -760,6 +777,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                     emit_timing=emit_timing,
                     coalesce_key=coalesce_key,
                     coalesce_log_context=coalesce_log_context,
+                    coordination_scope=coordination_scope,
                 )
 
         cache_ops.runtime.event_cache_write_coordinator = _InlineCoordinator()
@@ -890,6 +908,42 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         await wait_for_background_tasks(timeout=1.0, owner=owner)
 
         assert second_update_started.is_set()
+
+    @pytest.mark.parametrize("principal_count", [10, 100])
+    @pytest.mark.asyncio
+    async def test_shared_event_cache_write_coordinator_parallelizes_distinct_principals(
+        self,
+        principal_count: int,
+    ) -> None:
+        """Principal-isolated caches should not share a same-room serialization lane."""
+        started = [asyncio.Event() for _ in range(principal_count)]
+        release_updates = asyncio.Event()
+        coordinator = EventCacheWriteCoordinator(
+            logger=MagicMock(),
+            background_task_owner=object(),
+        )
+
+        async def update(index: int) -> None:
+            started[index].set()
+            await release_updates.wait()
+
+        tasks = [
+            coordinator.queue_room_update(
+                "!test:localhost",
+                lambda index=index: update(index),
+                name=f"matrix_cache_principal_update_{index}",
+                coordination_scope=f"@agent-{index}:localhost",
+            )
+            for index in range(principal_count)
+        ]
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*(event.wait() for event in started)),
+                timeout=1.0,
+            )
+        finally:
+            release_updates.set()
+            await asyncio.gather(*tasks)
 
     @pytest.mark.asyncio
     async def test_shared_event_cache_write_coordinator_allows_other_thread_updates_while_one_thread_runs(

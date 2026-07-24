@@ -250,6 +250,7 @@ def _thread_mutation_cache_ops() -> tuple[ThreadMutationCacheOps, MagicMock, Mag
     """Return concrete thread cache ops backed by one async-mock event cache."""
     logger = MagicMock()
     event_cache = MagicMock()
+    event_cache.principal_id = "@mindroom_test:localhost"
     event_cache.append_event = AsyncMock(return_value=True)
     event_cache.disable = Mock()
     event_cache.invalidate_room_threads = AsyncMock()

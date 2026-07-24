@@ -341,6 +341,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             "!test:localhost",
             slow_prior_room_update,
             name="matrix_cache_prior_update",
+            coordination_scope=event_cache.principal_id,
         )
         await asyncio.wait_for(prior_write_started.wait(), timeout=1.0)
 
@@ -411,6 +412,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             thread_b_id,
             blocking_sibling_thread_update,
             name="matrix_cache_blocking_sibling_thread_update",
+            coordination_scope=event_cache.principal_id,
         )
         redaction_event = MagicMock(spec=nio.RedactionEvent)
         redaction_event.event_id = "$redaction:localhost"
@@ -481,6 +483,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             thread_a_id,
             blocking_same_thread_update,
             name="matrix_cache_blocking_same_thread_update",
+            coordination_scope=event_cache.principal_id,
         )
         redaction_event = MagicMock(spec=nio.RedactionEvent)
         redaction_event.event_id = "$redaction:localhost"
@@ -574,6 +577,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             thread_b_id,
             blocking_sibling_thread_update,
             name="matrix_cache_blocking_other_thread_update",
+            coordination_scope=event_cache.principal_id,
         )
         try:
             await asyncio.wait_for(sibling_update_started.wait(), timeout=1.0)
@@ -1111,6 +1115,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             "$thread:localhost",
             lambda: queued_update(),
             name="matrix_cache_follow_up_update",
+            coordination_scope=access.runtime.event_cache.principal_id,
         )
         await asyncio.sleep(0)
         assert queued_update_started.is_set() is False

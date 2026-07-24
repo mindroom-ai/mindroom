@@ -842,17 +842,20 @@ def test_redaction_tombstone_persists_across_ledger_reload(tmp_path: Path) -> No
 def test_redaction_barrier_ignores_unrelated_prior_persist_failure(tmp_path: Path) -> None:
     """An older failed write must not prevent the redaction tombstone from becoming durable."""
     store = _store(tmp_path)
-    real_persist = store._ledger._persist_record
+    real_persist = store._ledger._persist_records
     unrelated_failed = threading.Event()
+    failed_once = False
 
-    def persist_with_unrelated_failure(turn_record: TurnRecord) -> None:
-        if "$unrelated" in turn_record.indexed_event_ids:
+    def persist_with_unrelated_failure(turn_records: tuple[TurnRecord, ...]) -> None:
+        nonlocal failed_once
+        if not failed_once and any("$unrelated" in record.indexed_event_ids for record in turn_records):
+            failed_once = True
             unrelated_failed.set()
             message = "unrelated persist failed"
             raise OSError(message)
-        real_persist(turn_record)
+        real_persist(turn_records)
 
-    with patch.object(store._ledger, "_persist_record", side_effect=persist_with_unrelated_failure):
+    with patch.object(store._ledger, "_persist_records", side_effect=persist_with_unrelated_failure):
         store.record_visible_echo("$unrelated", "$echo")
         assert unrelated_failed.wait(timeout=5)
         marked = store.mark_source_redacted("$redacted")

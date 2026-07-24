@@ -526,7 +526,10 @@ class MatrixConversationCache(ConversationCacheProtocol):
 
         coordinator = self.runtime.event_cache_write_coordinator
         if coordinator is not None:
-            await coordinator.wait_for_prior_room_updates(room_id)
+            await coordinator.wait_for_prior_room_updates(
+                room_id,
+                coordination_scope=self.runtime.event_cache.principal_id,
+            )
 
         membership_epoch = await self._capture_membership_epoch(room_id)
         response, fetched_event_source = await _cached_room_get_event(
@@ -587,6 +590,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
                     room_id,
                     persist_lookup_event,
                     name="matrix_cache_store_room_get_event",
+                    coordination_scope=self.runtime.event_cache.principal_id,
                 )
             else:
                 await persist_lookup_event()

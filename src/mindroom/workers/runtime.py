@@ -31,6 +31,7 @@ __all__ = [
     "clear_worker_validation_snapshot_cache",
     "get_primary_worker_manager",
     "lease_primary_worker_manager",
+    "maintain_worker_pool",
     "primary_worker_backend_available",
     "primary_worker_backend_is_dedicated",
     "primary_worker_backend_name",
@@ -183,6 +184,13 @@ def reconcile_drifted_worker_templates(worker_manager: WorkerBackend) -> list[Wo
     if isinstance(worker_manager, KubernetesWorkerBackend):
         return worker_manager.reconcile_drifted_workers()
     return []
+
+
+def maintain_worker_pool(worker_manager: WorkerBackend) -> tuple[list[WorkerHandle], list[WorkerHandle]]:
+    """Clean idle workers and reconcile templates with one backend maintenance pass."""
+    if isinstance(worker_manager, KubernetesWorkerBackend):
+        return worker_manager.maintain_workers()
+    return worker_manager.cleanup_idle_workers(), []
 
 
 def primary_worker_backend_available(

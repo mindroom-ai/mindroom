@@ -1201,11 +1201,11 @@ def test_worker_cleanup_once_reconciles_drifted_worker_templates(monkeypatch: py
     monkeypatch.setattr(main, "get_primary_worker_manager", lambda *_args, **_kwargs: worker_manager)
     reconciled_managers: list[object] = []
 
-    def _fake_reconcile(manager: object) -> list[WorkerHandle]:
+    def _fake_maintain(manager: object) -> tuple[list[WorkerHandle], list[WorkerHandle]]:
         reconciled_managers.append(manager)
-        return []
+        return [], []
 
-    monkeypatch.setattr(main, "reconcile_drifted_worker_templates", _fake_reconcile)
+    monkeypatch.setattr(main, "maintain_worker_pool", _fake_maintain)
 
     runtime_paths = main._app_runtime_paths(main.app)
     runtime_config = Config.validate_with_runtime({}, runtime_paths)

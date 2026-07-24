@@ -529,15 +529,24 @@ class KubernetesWorkerBackend:
     def cleanup_idle_workers(self, *, now: float | None = None) -> list[WorkerHandle]:
         """Scale idle workers to zero while retaining their state."""
         timestamp = time.time() if now is None else now
+        return self._cleanup_idle_deployments(self._resources.list_deployments(), now=timestamp)
+
+    def _cleanup_idle_deployments(
+        self,
+        deployments: list[resources.KubernetesDeployment],
+        *,
+        now: float,
+    ) -> list[WorkerHandle]:
+        """Scale idle workers from one already-loaded Deployment snapshot."""
         cleaned: list[WorkerHandle] = []
-        for deployment in self._resources.list_deployments():
-            handle = self._handle_from_deployment(deployment, now=timestamp)
+        for deployment in deployments:
+            handle = self._handle_from_deployment(deployment, now=now)
             if handle.status != "idle" or int(deployment.spec.replicas or 0) == 0:
                 continue
             annotations = dict(deployment.metadata.annotations or {})
             resources.apply_lifecycle_annotations(
                 annotations,
-                mark_worker_idle(resources.lifecycle_from_annotations(annotations, now=timestamp)),
+                mark_worker_idle(resources.lifecycle_from_annotations(annotations, now=now)),
             )
             self._resources.patch_deployment(handle.worker_id, replicas=0, annotations=annotations)
             self._resources.delete_service(handle.worker_id)
@@ -545,7 +554,7 @@ class KubernetesWorkerBackend:
             self._invalidate_ready_worker(handle.worker_key)
             deployment.spec.replicas = 0
             deployment.metadata.annotations = annotations
-            cleaned.append(self._handle_from_deployment(deployment, now=timestamp))
+            cleaned.append(self._handle_from_deployment(deployment, now=now))
         return cleaned
 
     def reconcile_drifted_workers(self, *, now: float | None = None) -> list[WorkerHandle]:
@@ -559,21 +568,42 @@ class KubernetesWorkerBackend:
         if not self.config.reconcile_pod_templates:
             return []
         timestamp = time.time() if now is None else now
+        return self._reconcile_drifted_deployments(self._resources.list_deployments(), now=timestamp)
+
+    def _reconcile_drifted_deployments(
+        self,
+        deployments: list[resources.KubernetesDeployment],
+        *,
+        now: float,
+    ) -> list[WorkerHandle]:
+        """Reconcile drifted workers from one already-loaded Deployment snapshot."""
         reconciled: list[WorkerHandle] = []
-        for deployment in self._resources.list_deployments():
-            handle = self._handle_from_deployment(deployment, now=timestamp)
+        for deployment in deployments:
+            handle = self._handle_from_deployment(deployment, now=now)
             if not self._is_reconcile_candidate(deployment, handle=handle):
                 continue
             worker_lock = self._worker_lock(handle.worker_key)
             if not worker_lock.acquire(blocking=False):
                 continue
             try:
-                refreshed = self._reconcile_worker_deployment(handle, now=timestamp)
+                refreshed = self._reconcile_worker_deployment(handle, now=now)
             finally:
                 worker_lock.release()
             if refreshed is not None:
                 reconciled.append(refreshed)
         return reconciled
+
+    def maintain_workers(self, *, now: float | None = None) -> tuple[list[WorkerHandle], list[WorkerHandle]]:
+        """Clean and reconcile workers using one lightweight Deployment list."""
+        timestamp = time.time() if now is None else now
+        deployments = self._resources.list_deployment_snapshots()
+        cleaned = self._cleanup_idle_deployments(deployments, now=timestamp)
+        reconciled = (
+            self._reconcile_drifted_deployments(deployments, now=timestamp)
+            if self.config.reconcile_pod_templates
+            else []
+        )
+        return cleaned, reconciled
 
     def _is_reconcile_candidate(self, deployment: resources.KubernetesDeployment, *, handle: WorkerHandle) -> bool:
         """Return whether one Deployment is a scaled-down worker with a drifted pod template."""

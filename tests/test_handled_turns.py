@@ -522,19 +522,23 @@ def test_later_record_does_not_prune_unobserved_persistence_failure(temp_dir: Pa
     """A later write must not hide an earlier completed persistence failure."""
     tracker = HandledTurnLedger("test_interleaved_persist_failure", base_path=temp_dir)
     tracker.warm()
-    real_persist = tracker._persist_record
+    real_persist = tracker._persist_records
     first_failed = threading.Event()
     second_completed = threading.Event()
+    failed_once = False
 
-    def persist_with_first_failure(turn_record: TurnRecord) -> None:
-        if "$redacted" in turn_record.indexed_event_ids:
+    def persist_with_first_failure(turn_records: tuple[TurnRecord, ...]) -> None:
+        nonlocal failed_once
+        if not failed_once and any("$redacted" in record.indexed_event_ids for record in turn_records):
+            failed_once = True
             first_failed.set()
             message = "redaction persist failed"
             raise OSError(message)
-        real_persist(turn_record)
-        second_completed.set()
+        real_persist(turn_records)
+        if any("$later" in record.indexed_event_ids for record in turn_records):
+            second_completed.set()
 
-    with patch.object(tracker, "_persist_record", side_effect=persist_with_first_failure):
+    with patch.object(tracker, "_persist_records", side_effect=persist_with_first_failure):
         tracker.record_handled_turn(TurnRecord.create(["$redacted"], completed=False))
         assert first_failed.wait(timeout=5)
         failure = tracker._state.pending_persists[0].exception(timeout=5)
@@ -543,6 +547,35 @@ def test_later_record_does_not_prune_unobserved_persistence_failure(temp_dir: Pa
         assert second_completed.wait(timeout=5)
         with pytest.raises(OSError, match="redaction persist failed"):
             tracker.flush()
+
+
+def test_concurrent_records_coalesce_into_one_follow_up_ledger_write(temp_dir: Path) -> None:
+    """A burst arriving during one write should persist as one follow-up batch."""
+    tracker = HandledTurnLedger("test_persist_batch", base_path=temp_dir)
+    tracker.warm()
+    real_persist = tracker._persist_records
+    first_started = threading.Event()
+    release_first = threading.Event()
+    batch_sizes: list[int] = []
+
+    def persist_with_barrier(turn_records: tuple[TurnRecord, ...]) -> None:
+        batch_sizes.append(len(turn_records))
+        if len(batch_sizes) == 1:
+            first_started.set()
+            assert release_first.wait(timeout=5)
+        real_persist(turn_records)
+
+    with patch.object(tracker, "_persist_records", side_effect=persist_with_barrier):
+        tracker.record_handled_turn(TurnRecord.create(["$event-0"], completed=False))
+        assert first_started.wait(timeout=5)
+        for index in range(1, 100):
+            tracker.record_handled_turn(TurnRecord.create([f"$event-{index}"], completed=False))
+        release_first.set()
+        tracker.flush()
+
+    assert batch_sizes == [1, 99]
+    reloaded = _reload_ledger("test_persist_batch", temp_dir)
+    assert all(reloaded.get_turn_record(f"$event-{index}") is not None for index in range(100))
 
 
 def test_persistence_round_trip_preserves_response_context(temp_dir: Path) -> None:

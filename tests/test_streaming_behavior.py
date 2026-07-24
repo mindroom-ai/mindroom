@@ -64,6 +64,7 @@ from mindroom.streaming import (
     _DeliveryRequest,
     _drive_stream_delivery,
     _flush_phase_boundary_if_needed,
+    _queue_delivery_request,
     _shutdown_stream_delivery,
     _StreamDeliveryShutdownTimeoutError,
     build_restart_interrupted_body,
@@ -181,6 +182,22 @@ async def _consume_streaming_chunks_for_test(
             cleanup_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
             if cleanup_error is not None:
                 raise cleanup_error
+
+
+@pytest.mark.asyncio
+async def test_delivery_queue_bounds_nonblocking_progress_hints() -> None:
+    """A stalled delivery owner should retain bounded hints while preserving capture barriers."""
+    delivery_queue: asyncio.Queue[_DeliveryRequest | None] = asyncio.Queue()
+
+    for _ in range(100):
+        _queue_delivery_request(delivery_queue, progress_hint=True)
+
+    assert delivery_queue.qsize() == 32
+    capture = _queue_delivery_request(delivery_queue, phase_boundary_flush=True, wait_for_capture=True)
+    assert capture is not None
+    assert delivery_queue.qsize() == 33
+    _queue_delivery_request(delivery_queue, force_refresh=True)
+    assert delivery_queue.qsize() == 34
 
 
 @pytest.fixture

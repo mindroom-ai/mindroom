@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager, suppress
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import nio
@@ -14,6 +15,18 @@ if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
 
 logger = get_logger(__name__)
+
+
+@dataclass
+class _TypingState:
+    """One shared typing lease for a Matrix user in one room."""
+
+    references: int
+    started: asyncio.Future[None]
+    refresh_task: asyncio.Task[None]
+
+
+_ACTIVE_TYPING: dict[tuple[nio.AsyncClient, str], _TypingState] = {}
 
 
 async def _set_typing(
@@ -44,6 +57,74 @@ async def _set_typing(
         logger.debug("Set typing status", room_id=room_id, typing=typing)
 
 
+async def _refresh_typing(
+    client: nio.AsyncClient,
+    room_id: str,
+    *,
+    timeout_seconds: int,
+    started: asyncio.Future[None],
+) -> None:
+    """Start and refresh one shared Matrix typing indicator."""
+    try:
+        await _set_typing(client, room_id, True, timeout_seconds)
+    except BaseException as exc:
+        if not started.done():
+            started.set_exception(exc)
+        raise
+    if not started.done():
+        started.set_result(None)
+    refresh_interval = min(timeout_seconds / 2, 15)
+    while True:
+        await asyncio.sleep(refresh_interval)
+        await _set_typing(client, room_id, True, timeout_seconds)
+
+
+def _acquire_typing_state(
+    client: nio.AsyncClient,
+    room_id: str,
+    *,
+    timeout_seconds: int,
+) -> tuple[tuple[nio.AsyncClient, str], _TypingState]:
+    """Acquire one process-local typing lease without yielding the event loop."""
+    key = (client, room_id)
+    state = _ACTIVE_TYPING.get(key)
+    if state is not None:
+        state.references += 1
+        return key, state
+
+    started = asyncio.get_running_loop().create_future()
+    refresh_task = asyncio.create_task(
+        _refresh_typing(
+            client,
+            room_id,
+            timeout_seconds=timeout_seconds,
+            started=started,
+        ),
+    )
+    state = _TypingState(references=1, started=started, refresh_task=refresh_task)
+    _ACTIVE_TYPING[key] = state
+    return key, state
+
+
+async def _release_typing_state(
+    key: tuple[nio.AsyncClient, str],
+    state: _TypingState,
+) -> None:
+    """Release a typing lease and stop Matrix typing after the final user."""
+    active_state = _ACTIVE_TYPING.get(key)
+    if active_state is not state:
+        return
+    state.references -= 1
+    if state.references > 0:
+        return
+    del _ACTIVE_TYPING[key]
+    state.refresh_task.cancel()
+    with suppress(asyncio.CancelledError, Exception):
+        await state.refresh_task
+    client, room_id = key
+    await _set_typing(client, room_id, False)
+
+
 @asynccontextmanager
 async def typing_indicator(
     client: nio.AsyncClient,
@@ -64,28 +145,9 @@ async def typing_indicator(
         timeout_seconds: How long each typing notification lasts
 
     """
-    # Start typing
-    await _set_typing(client, room_id, True, timeout_seconds)
-
-    # Create a task to periodically refresh the typing indicator
-    # Matrix typing indicators expire, so we need to refresh them
-    refresh_interval = min(timeout_seconds / 2, 15)  # Refresh at half timeout or 15s
-
-    async def refresh_typing() -> None:
-        """Refresh typing indicator periodically."""
-        while True:
-            await asyncio.sleep(refresh_interval)
-            await _set_typing(client, room_id, True, timeout_seconds)
-
-    refresh_task = asyncio.create_task(refresh_typing())
-
+    key, state = _acquire_typing_state(client, room_id, timeout_seconds=timeout_seconds)
     try:
+        await asyncio.shield(state.started)
         yield
     finally:
-        # Cancel refresh task
-        refresh_task.cancel()
-        with suppress(asyncio.CancelledError):
-            await refresh_task
-
-        # Stop typing
-        await _set_typing(client, room_id, False)
+        await _release_typing_state(key, state)

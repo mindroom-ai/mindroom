@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from contextlib import contextmanager
 from dataclasses import replace
 from types import SimpleNamespace
@@ -25,6 +26,7 @@ from mindroom import turn_controller
 from mindroom.ai import _PreparedAgentRun, ai_response, stream_agent_response
 from mindroom.ai_runtime import (
     cleanup_queued_notice_state,
+    cleanup_queued_notice_state_async,
     install_queued_message_notice_hook,
     queued_message_signal_context,
 )
@@ -3325,3 +3327,49 @@ def test_cleanup_queued_notice_state_strips_nested_team_member_responses() -> No
     stored_member_run = stored_team_run.member_responses[0]
     assert isinstance(stored_member_run, RunOutput)
     assert _notice_count(stored_member_run.messages or []) == 0
+
+
+@pytest.mark.asyncio
+async def test_async_cleanup_keeps_session_storage_io_off_event_loop() -> None:
+    """Slow synchronous session storage must not stall concurrent asyncio work."""
+
+    class _BlockingStorage(_FakeStorage):
+        def __init__(self) -> None:
+            super().__init__()
+            self.started = threading.Event()
+            self.release = threading.Event()
+
+        def get_session(self, session_id: str, _session_type: object) -> AgentSession | TeamSession | None:
+            self.started.set()
+            self.release.wait(timeout=1)
+            return super().get_session(session_id, _session_type)
+
+    storage = _BlockingStorage()
+    storage.session = AgentSession(
+        session_id="session-1",
+        runs=[
+            RunOutput(
+                run_id="run-1",
+                session_id="session-1",
+                messages=[_queued_notice_message()],
+            ),
+        ],
+    )
+    cleanup_task = asyncio.create_task(
+        cleanup_queued_notice_state_async(
+            run_output=None,
+            storage=storage,
+            session_id="session-1",
+            session_type=SessionType.AGENT,
+            entity_name="queued-notice-agent",
+        ),
+    )
+    try:
+        assert await asyncio.to_thread(storage.started.wait, 1)
+        await asyncio.wait_for(asyncio.sleep(0), timeout=0.1)
+        assert not cleanup_task.done()
+    finally:
+        storage.release.set()
+
+    await asyncio.wait_for(cleanup_task, timeout=1)
+    assert storage.upserted is True

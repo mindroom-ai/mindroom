@@ -178,6 +178,7 @@ class _FakeAppsApi:
         self.patched_bodies: list[tuple[str, dict[str, object]]] = []
         self.deleted_names: list[str] = []
         self.list_label_selectors: list[str] = []
+        self.raw_list_count = 0
         self.delete_read_lag_by_name: dict[str, int] = {}
         self._active_delete_read_lag_by_name: dict[str, int] = {}
 
@@ -237,7 +238,13 @@ class _FakeAppsApi:
             return
         self.deployments.pop(name, None)
 
-    def list_namespaced_deployment(self, namespace: str, label_selector: str) -> object:
+    def list_namespaced_deployment(
+        self,
+        namespace: str,
+        *,
+        label_selector: str,
+        _preload_content: bool = True,
+    ) -> object:
         _ = namespace
         self.list_label_selectors.append(label_selector)
         selectors = {}
@@ -251,9 +258,39 @@ class _FakeAppsApi:
             labels = deployment.metadata.labels
             return all(labels.get(key) == value for key, value in selectors.items())
 
-        return SimpleNamespace(
-            items=[deployment for deployment in self.deployments.values() if matches_selector(deployment)],
-        )
+        deployments = [deployment for deployment in self.deployments.values() if matches_selector(deployment)]
+        if _preload_content:
+            return SimpleNamespace(items=deployments)
+        self.raw_list_count += 1
+        payload = {
+            "items": [
+                {
+                    "metadata": {
+                        "name": deployment.metadata.name,
+                        "annotations": deployment.metadata.annotations,
+                        "labels": deployment.metadata.labels,
+                        "generation": deployment.metadata.generation,
+                        "uid": deployment.metadata.uid,
+                    },
+                    "spec": {"replicas": deployment.spec.replicas},
+                    "status": {
+                        "readyReplicas": deployment.status.ready_replicas,
+                        "observedGeneration": deployment.status.observed_generation,
+                    },
+                }
+                for deployment in deployments
+            ],
+        }
+        return _FakeRawResponse(json.dumps(payload).encode())
+
+
+class _FakeRawResponse:
+    def __init__(self, data: bytes) -> None:
+        self.data = data
+        self.released = False
+
+    def release_conn(self) -> None:
+        self.released = True
 
 
 class _FakeCoreApi:
@@ -2195,6 +2232,26 @@ def test_kubernetes_backend_reconciles_drifted_idle_worker_template(tmp_path: Pa
     container = recreated["spec"]["template"]["spec"]["containers"][0]
     assert container["resources"]["limits"] == {"memory": "2Gi", "cpu": "1"}
     assert recreated["metadata"]["annotations"]["mindroom.ai/created-at"] == "0.0"
+
+
+def test_kubernetes_backend_maintenance_lists_deployments_once(tmp_path: Path) -> None:
+    """Cleanup and reconciliation should share one lightweight Kubernetes list response."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=Path("config.yaml"),
+        storage_path=tmp_path / "mindroom-test-storage",
+    )
+    backend, apps_api, core_api = _backend(runtime_paths=runtime_paths)
+    backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=0.0)
+    updated_backend, _, _ = _backend(runtime_paths=runtime_paths, resource_limits={"memory": "2Gi", "cpu": "1"})
+    _wire_fake_apis(updated_backend, apps_api, core_api)
+    list_count_before = len(apps_api.list_label_selectors)
+
+    cleaned, reconciled = updated_backend.maintain_workers(now=80.0)
+
+    assert len(apps_api.list_label_selectors) == list_count_before + 1
+    assert apps_api.raw_list_count == 1
+    assert [worker.worker_key for worker in cleaned] == [_TEST_SCOPED_WORKER_KEY_A]
+    assert [worker.worker_key for worker in reconciled] == [_TEST_SCOPED_WORKER_KEY_A]
 
 
 def test_kubernetes_backend_reconcile_defers_running_workers(tmp_path: Path) -> None:

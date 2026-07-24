@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable, Generator, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -36,6 +37,7 @@ __all__ = [
     "attach_media_to_run_input",
     "cached_agent_run",
     "cleanup_queued_notice_state",
+    "cleanup_queued_notice_state_async",
     "copy_run_input",
     "discard_empty_completed_run",
     "install_queued_message_notice_hook",
@@ -267,6 +269,34 @@ def cleanup_queued_notice_state(
         return
     try:
         _strip_queued_notice_from_session_storage(
+            storage,
+            session_id,
+            session_type=session_type,
+        )
+    except Exception:
+        logger.exception(
+            "Failed to strip queued-message notice from session history",
+            entity=entity_name,
+            session_id=session_id,
+            session_type=session_type.value,
+        )
+
+
+async def cleanup_queued_notice_state_async(
+    *,
+    run_output: RunOutput | TeamRunOutput | None,
+    storage: BaseDb | None,
+    session_id: str | None,
+    session_type: SessionType,
+    entity_name: str,
+) -> None:
+    """Strip queued notices without running synchronous session I/O on the event loop."""
+    _cleanup_queued_notice_from_run_output(run_output)
+    if storage is None or not session_id:
+        return
+    try:
+        await asyncio.to_thread(
+            _strip_queued_notice_from_session_storage,
             storage,
             session_id,
             session_type=session_type,
