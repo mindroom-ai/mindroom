@@ -62,6 +62,7 @@ async def _snapshot_from_event(
         room_id=room_id,
         original_event_id=event_id,
         sender=sender,
+        event_type="m.room.message",
     )
     return snapshot_lookup_result(
         event,

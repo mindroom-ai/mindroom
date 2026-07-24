@@ -139,6 +139,7 @@ async def load_latest_edit(
     room_id: str,
     original_event_id: str,
     sender: str | None = None,
+    event_type: str | None = None,
 ) -> dict[str, Any] | None:
     """Return the latest principal- and room-scoped edit."""
     row = await _load_latest_edit_row(
@@ -147,6 +148,7 @@ async def load_latest_edit(
         room_id=room_id,
         original_event_id=original_event_id,
         sender=sender,
+        event_type=event_type,
     )
     return None if row is None else row.event
 
@@ -158,6 +160,7 @@ async def load_latest_edit_row(
     room_id: str,
     original_event_id: str,
     sender: str,
+    event_type: str,
 ) -> CachedEventRow | None:
     """Return the latest edit and its write time within one ownership scope."""
     return await _load_latest_edit_row(
@@ -166,6 +169,7 @@ async def load_latest_edit_row(
         room_id=room_id,
         original_event_id=original_event_id,
         sender=sender,
+        event_type=event_type,
     )
 
 
@@ -176,9 +180,17 @@ async def _load_latest_edit_row(
     room_id: str,
     original_event_id: str,
     sender: str | None,
+    event_type: str | None,
 ) -> CachedEventRow | None:
     sender_predicate = "" if sender is None else "AND json_extract(events.event_json, '$.sender') = ?"
-    parameters = (principal_id, room_id, original_event_id, *((sender,) if sender is not None else ()))
+    event_type_predicate = "" if event_type is None else "AND json_extract(events.event_json, '$.type') = ?"
+    parameters = (
+        principal_id,
+        room_id,
+        original_event_id,
+        *((sender,) if sender is not None else ()),
+        *((event_type,) if event_type is not None else ()),
+    )
     cursor = await db.execute(
         f"""
         SELECT events.event_json, events.cached_at
@@ -191,6 +203,9 @@ async def _load_latest_edit_row(
           AND event_edits.room_id = ?
           AND event_edits.original_event_id = ?
           {sender_predicate}
+          {event_type_predicate}
+          AND json_type(events.event_json, '$.state_key') IS NULL
+          AND json_type(events.event_json, '$.content."m.new_content"') = 'object'
         ORDER BY event_edits.origin_server_ts DESC, event_edits.edit_event_id DESC
         LIMIT 1
         """,  # noqa: S608

@@ -138,6 +138,7 @@ async def load_latest_edit(
     room_id: str,
     original_event_id: str,
     sender: str | None = None,
+    event_type: str | None = None,
 ) -> dict[str, Any] | None:
     """Return the latest cached edit event for one original event."""
     row = await _load_latest_edit_row(
@@ -146,6 +147,7 @@ async def load_latest_edit(
         room_id=room_id,
         original_event_id=original_event_id,
         sender=sender,
+        event_type=event_type,
     )
     return None if row is None else row.event
 
@@ -157,6 +159,7 @@ async def load_latest_edit_row(
     room_id: str,
     original_event_id: str,
     sender: str,
+    event_type: str,
 ) -> CachedEventRow | None:
     """Return the latest cached edit event plus its lookup-row write time."""
     return await _load_latest_edit_row(
@@ -165,6 +168,7 @@ async def load_latest_edit_row(
         room_id=room_id,
         original_event_id=original_event_id,
         sender=sender,
+        event_type=event_type,
     )
 
 
@@ -175,9 +179,17 @@ async def _load_latest_edit_row(
     room_id: str,
     original_event_id: str,
     sender: str | None,
+    event_type: str | None,
 ) -> CachedEventRow | None:
     sender_predicate = "" if sender is None else "AND events.event_json::jsonb ->> 'sender' = %s"
-    parameters = (namespace, room_id, original_event_id, *((sender,) if sender is not None else ()))
+    event_type_predicate = "" if event_type is None else "AND events.event_json::jsonb ->> 'type' = %s"
+    parameters = (
+        namespace,
+        room_id,
+        original_event_id,
+        *((sender,) if sender is not None else ()),
+        *((event_type,) if event_type is not None else ()),
+    )
     row = await fetchone(
         db,
         f"""
@@ -191,7 +203,10 @@ async def _load_latest_edit_row(
             AND edits.room_id = %s
             AND edits.original_event_id = %s
             {sender_predicate}
-        ORDER BY edits.origin_server_ts DESC, edits.edit_event_id DESC
+            {event_type_predicate}
+            AND NOT (events.event_json::jsonb ? 'state_key')
+            AND jsonb_typeof(events.event_json::jsonb -> 'content' -> 'm.new_content') = 'object'
+        ORDER BY edits.origin_server_ts DESC, edits.edit_event_id COLLATE "C" DESC
         LIMIT 1
         """,  # noqa: S608
         parameters,

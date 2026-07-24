@@ -70,10 +70,15 @@ class FakeEventCache:
         original_event_id: str,
         *,
         sender: str | None = None,
+        event_type: str | None = None,
     ) -> dict[str, Any] | None:
         edits: list[dict[str, Any]] = []
         for (event_room_id, _), event in self.events.items():
-            if event_room_id != room_id or (sender is not None and event.get("sender") != sender):
+            if (
+                event_room_id != room_id
+                or (sender is not None and event.get("sender") != sender)
+                or (event_type is not None and event.get("type") != event_type)
+            ):
                 continue
             content = event.get("content")
             if not isinstance(content, dict):

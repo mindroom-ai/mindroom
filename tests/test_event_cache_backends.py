@@ -1642,6 +1642,33 @@ async def test_postgres_event_cache_round_trips_core_conversation_cache_behavior
 
 
 @pytest.mark.asyncio
+async def test_postgres_latest_edit_index_uses_bytewise_event_id_collation(
+    postgres_event_cache_url: str,
+) -> None:
+    """The Postgres latest-edit index must match Matrix's bytewise event-ID ordering."""
+    cache = PostgresEventCache(
+        database_url=postgres_event_cache_url,
+        namespace=f"tenant_{uuid.uuid4().hex}",
+    )
+    await cache.initialize()
+    try:
+        assert cache._runtime.db is not None
+        cursor = await cache._runtime.db.execute(
+            """
+            SELECT indexdef
+            FROM pg_indexes
+            WHERE indexname = 'idx_mindroom_event_cache_event_edits_room_original_ts_c'
+            """,
+        )
+        row = await cursor.fetchone()
+    finally:
+        await cache.close()
+
+    assert row is not None
+    assert 'edit_event_id COLLATE "C" DESC' in str(row[0])
+
+
+@pytest.mark.asyncio
 async def test_postgres_event_cache_recovers_after_backend_connection_termination(
     postgres_event_cache_url: str,
 ) -> None:

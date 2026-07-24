@@ -315,13 +315,18 @@ async def _create_postgres_event_cache_schema(db: AsyncConnection) -> None:
     )
     await db.execute(
         """
-        CREATE INDEX IF NOT EXISTS idx_mindroom_event_cache_event_edits_room_original_ts
+        DROP INDEX IF EXISTS idx_mindroom_event_cache_event_edits_room_original_ts
+        """,
+    )
+    await db.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_mindroom_event_cache_event_edits_room_original_ts_c
         ON mindroom_event_cache_event_edits(
             namespace,
             room_id,
             original_event_id,
             origin_server_ts DESC,
-            edit_event_id DESC
+            edit_event_id COLLATE "C" DESC
         )
         """,
     )
@@ -1364,6 +1369,7 @@ class PostgresEventCache:
         original_event_id: str,
         *,
         sender: str | None = None,
+        event_type: str | None = None,
     ) -> dict[str, Any] | None:
         """Return the latest cached edit event for one original event."""
         return await self._operation(
@@ -1376,6 +1382,7 @@ class PostgresEventCache:
                 room_id=room_id,
                 original_event_id=original_event_id,
                 sender=sender,
+                event_type=event_type,
             ),
         )
 

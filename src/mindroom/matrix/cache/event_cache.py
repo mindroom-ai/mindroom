@@ -128,6 +128,7 @@ class ConversationEventCache(Protocol):
         original_event_id: str,
         *,
         sender: str | None = None,
+        event_type: str | None = None,
     ) -> dict[str, Any] | None:
         """Return the latest cached edit event for one original event."""
 

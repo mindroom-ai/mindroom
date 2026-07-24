@@ -898,7 +898,12 @@ class _ApprovalManager:
     ) -> dict[str, Any] | None:
         if self._event_cache is None:
             return None
-        return await self._event_cache.get_latest_edit(room_id, card_event_id, sender=sender)
+        return await self._event_cache.get_latest_edit(
+            room_id,
+            card_event_id,
+            sender=sender,
+            event_type="io.mindroom.tool_approval",
+        )
 
     async def _latest_trusted_edit(self, pending: PendingApproval) -> dict[str, Any] | None:
         latest_edit = await self._latest_edit(
