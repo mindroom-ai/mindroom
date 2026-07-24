@@ -93,6 +93,35 @@ def test_lifecycle_timeout_kills_descendant_after_leader_exits() -> None:
         )
 
 
+def test_lifecycle_command_interrupt_kills_and_drains_process_group(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An interrupt must not leave the lifecycle command or descendants alive."""
+    killpg_calls: list[tuple[int, signal.Signals]] = []
+
+    class InterruptedProcess:
+        pid = 4242
+        returncode = None
+        communicate_calls = 0
+
+        def communicate(self, *, timeout: float) -> tuple[str, str]:
+            self.communicate_calls += 1
+            if self.communicate_calls == 1:
+                raise KeyboardInterrupt
+            assert timeout == 10
+            return "", ""
+
+    process = InterruptedProcess()
+    monkeypatch.setattr(live_fuzz.subprocess, "Popen", lambda *_args, **_kwargs: process)
+    monkeypatch.setattr(live_fuzz.os, "killpg", lambda pid, sig: killpg_calls.append((pid, sig)))
+
+    with pytest.raises(KeyboardInterrupt):
+        _run_command("lifecycle-command")
+
+    assert killpg_calls == [(process.pid, signal.SIGKILL)]
+    assert process.communicate_calls == 2
+
+
 @pytest.mark.parametrize(
     ("hard_kill", "expected_signal"),
     [(False, signal.SIGINT), (True, signal.SIGKILL)],
@@ -2391,6 +2420,8 @@ def test_child_provenance_uses_loaded_overlay(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Exact provenance must describe the child overlay, not the parent install."""
+    project_root = tmp_path / "mindroom"
+    monkeypatch.setattr(live_fuzz, "PROJECT_ROOT", project_root)
     attestation = tmp_path / "runtime-attestation.json"
     attestation.write_text(
         json.dumps(
@@ -2423,18 +2454,43 @@ def test_child_provenance_uses_loaded_overlay(
     assert provenance["nio_expected_revision"] == "nio-head"
 
 
+def test_child_provenance_rejects_same_head_from_other_mindroom_checkout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Commit equality cannot substitute for the live runner's MindRoom checkout."""
+    requested = tmp_path / "requested-mindroom"
+    other = tmp_path / "other-mindroom"
+    monkeypatch.setattr(live_fuzz, "PROJECT_ROOT", requested)
+    attestation = tmp_path / "runtime-attestation.json"
+    attestation.write_text(
+        json.dumps(
+            {
+                "mindroom_module_path": str(other / "src" / "mindroom" / "__init__.py"),
+                "nio_module_path": str(tmp_path / "nio" / "__init__.py"),
+            },
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RuntimeError, match="outside the live runner checkout"):
+        _validated_child_provenance(attestation, overlay=None)
+
+
 def test_child_provenance_rejects_same_head_from_other_checkout(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Commit equality cannot substitute for the requested editable checkout."""
+    project_root = tmp_path / "mindroom"
+    monkeypatch.setattr(live_fuzz, "PROJECT_ROOT", project_root)
     overlay = tmp_path / "requested-overlay"
     other = tmp_path / "other-checkout"
     attestation = tmp_path / "runtime-attestation.json"
     attestation.write_text(
         json.dumps(
             {
-                "mindroom_module_path": str(tmp_path / "mindroom" / "__init__.py"),
+                "mindroom_module_path": str(project_root / "__init__.py"),
                 "nio_module_path": str(other / "src" / "nio" / "__init__.py"),
             },
         ),
@@ -3069,6 +3125,55 @@ def test_main_preserves_base_exception_evidence_and_closes_stack(
     assert stack_events == ["start", "close"]
     assert len(captured) == 1
     assert isinstance(captured[0], KeyboardInterrupt)
+
+
+def test_main_bad_failure_log_preserves_primary_and_closes_stack(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A failure-log copy error cannot replace the run failure or skip teardown."""
+    failure_log = tmp_path / "failure-log"
+    failure_log.mkdir()
+    mindroom_log = tmp_path / "mindroom.log"
+    mindroom_log.write_text("mindroom output\n", encoding="utf-8")
+    args = SimpleNamespace(
+        artifact_root=tmp_path / "artifacts",
+        failure_log=failure_log,
+        pending_grace=0.0,
+        reply_timeout=1.0,
+        save_trace=None,
+        seed=1,
+        settle_seconds=0.0,
+        trace=None,
+    )
+    stack_events: list[str] = []
+
+    class InterruptedStack:
+        log_path = mindroom_log
+
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def start(self) -> None:
+            stack_events.append("start")
+
+        def close(self) -> None:
+            stack_events.append("close")
+
+    async def interrupt_run(*_args: object, **_kwargs: object) -> dict[str, object]:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(live_fuzz, "_parse_args", lambda: args)
+    monkeypatch.setattr(live_fuzz, "_scenario_from_args", lambda _args: _bundle_scenario())
+    monkeypatch.setattr(live_fuzz, "_run_provenance", dict)
+    monkeypatch.setattr(live_fuzz, "ManagedTuwunelStack", InterruptedStack)
+    monkeypatch.setattr(live_fuzz, "_run_live", interrupt_run)
+    monkeypatch.setattr(live_fuzz, "_persist_failure_bundle", lambda *_args, **_kwargs: None)
+
+    with pytest.raises(KeyboardInterrupt):
+        live_fuzz.main()
+
+    assert stack_events == ["start", "close"]
 
 
 @pytest.mark.asyncio

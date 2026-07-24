@@ -1219,6 +1219,15 @@ def _run_command(
             stdout, stderr = process.communicate(timeout=5)
         msg = f"command timed out ({' '.join(command)}):\n{stdout}\n{stderr}"
         raise TimeoutError(msg) from exc
+    except BaseException:
+        with suppress(ProcessLookupError):
+            os.killpg(process.pid, signal.SIGKILL)
+        try:
+            process.communicate(timeout=10)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.communicate(timeout=5)
+        raise
     if process.returncode:
         msg = f"command failed ({' '.join(command)}):\n{stdout}\n{stderr}"
         raise RuntimeError(msg)
@@ -4196,6 +4205,13 @@ def _git_revision(path: Path) -> str | None:
     return result.stdout.strip() if result.returncode == 0 else None
 
 
+def _require_path_within(path: Path, root: Path, message: str) -> None:
+    """Fail closed unless an attested module belongs to its required checkout."""
+    if not path.is_relative_to(root):
+        error = f"{message}: {path}"
+        raise RuntimeError(error)
+
+
 def _validated_child_provenance(
     attestation_path: Path,
     *,
@@ -4213,9 +4229,19 @@ def _validated_child_provenance(
         raise TypeError(msg)
     mindroom_path = Path(mindroom_value).resolve()
     nio_path = Path(nio_value).resolve()
+    _require_path_within(
+        mindroom_path,
+        PROJECT_ROOT,
+        "loaded MindRoom path is outside the live runner checkout",
+    )
     mindroom_revision, mindroom_dirty = _git_state_for_file(
         mindroom_path,
-        scopes=(PROJECT_ROOT / "src" / "mindroom", Path(__file__)),
+        scopes=(
+            PROJECT_ROOT / "src" / "mindroom",
+            Path(__file__),
+            PROJECT_ROOT / "pyproject.toml",
+            PROJECT_ROOT / "uv.lock",
+        ),
     )
     nio_revision, nio_dirty = _git_state_for_file(nio_path, scopes=(nio_path.parent,))
     expected_mindroom_revision = _git_revision(PROJECT_ROOT)
@@ -4537,15 +4563,21 @@ def main() -> None:
         result.update(stack.diagnostic_counts())
     except BaseException as exc:
         _persist_failure_bundle(bundle, stack, runner_holder.get("runner"), exc)
-        if args.failure_log is not None and stack.log_path.exists():
-            args.failure_log.write_text(
-                stack.log_path.read_text(encoding="utf-8", errors="replace"),
-                encoding="utf-8",
-            )
+        try:
+            if args.failure_log is not None and stack.log_path.exists():
+                args.failure_log.write_text(
+                    stack.log_path.read_text(encoding="utf-8", errors="replace"),
+                    encoding="utf-8",
+                )
+        except BaseException as failure_log_exc:
+            with suppress(BaseException):
+                bundle.record_cleanup_error(failure_log_exc)
+            print(f"Failure-log copy error (ignored): {failure_log_exc}", file=sys.stderr)
         try:
             stack.close()
-        except Exception as cleanup_exc:
-            bundle.record_cleanup_error(cleanup_exc)
+        except BaseException as cleanup_exc:
+            with suppress(BaseException):
+                bundle.record_cleanup_error(cleanup_exc)
             print(f"Live Matrix fuzz cleanup error: {cleanup_exc}", file=sys.stderr)
         raise
     stack.close()
