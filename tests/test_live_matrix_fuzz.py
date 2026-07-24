@@ -587,18 +587,44 @@ def test_chaos_validation_blocks_targets_of_redacted_unsettled_responses() -> No
 
 
 @pytest.mark.asyncio
-async def test_coalescing_oracle_settles_on_thread_tails_and_resolves_covering_replies() -> None:
-    """Sources swallowed into a combined follow-up turn settle via the newest source."""
+async def test_coalescing_oracle_settles_via_ledger_attribution(tmp_path: Path) -> None:
+    """Sources swallowed into a combined follow-up turn settle via the durable ledger."""
     client = LiveMatrixClient("http://matrix.invalid", "!room:example")
-    oracle = ExactReplyOracle(client, "@agent:example", coalescing_threads=True)
+    ledger_path = tmp_path / "general_responded.json"
+    oracle = ExactReplyOracle(
+        client,
+        "@agent:example",
+        coalescing_threads=True,
+        ledger_path=ledger_path,
+    )
     try:
         oracle.expect("op:1", "$first", thread=3)
         oracle.expect("op:2", "$second", thread=3)
         for source in ("$first", "$second"):
             oracle._ingest_event({"event_id": source, "sender": "@user:example", "type": "m.room.message"})
-        assert oracle.unsettled_required_sources() == ["$second"]
-
         oracle._ingest_event(_agent_reply_event("$second", "$combined-reply", "LIVE-FUZZ call=2 END call=2"))
+        assert oracle.unsettled_required_sources() == ["$first"]
+        with pytest.raises(KeyError):
+            oracle.resolve_response_ref("response:op:1")
+
+        record = TurnRecord(
+            source_event_ids=("$first", "$second"),
+            response_event_id="$combined-reply",
+            completed=True,
+        )
+        ledger_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": TurnRecordCodec.schema_version(),
+                    "records": {
+                        "$first": TurnRecordCodec.to_ledger_record(record),
+                        "$second": TurnRecordCodec.to_ledger_record(record),
+                    },
+                },
+            ),
+            encoding="utf-8",
+        )
+        oracle.refresh_ledger_attributions(min_interval=0.0)
         assert oracle.unsettled_required_sources() == []
         assert oracle.resolve_response_ref("response:op:2") == "$combined-reply"
         assert oracle.resolve_response_ref("response:op:1") == "$combined-reply"

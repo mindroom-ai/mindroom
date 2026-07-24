@@ -1532,6 +1532,29 @@ class LiveMatrixClient:
         return data
 
 
+def read_ledger_attributions(ledger_path: Path) -> dict[str, str]:
+    """Read completed source-to-response attributions from a handled-turn ledger."""
+    if not ledger_path.exists():
+        return {}
+    try:
+        payload = json.loads(ledger_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+    if not isinstance(payload, dict) or payload.get("schema_version") != TurnRecordCodec.schema_version():
+        return {}
+    raw_records = payload.get("records")
+    if not isinstance(raw_records, dict):
+        return {}
+    attributions: dict[str, str] = {}
+    for event_id, raw_record in raw_records.items():
+        if not isinstance(event_id, str):
+            continue
+        record = TurnRecordCodec.from_ledger_record(event_id, raw_record)
+        if record is not None and record.completed and record.response_event_id is not None:
+            attributions[event_id] = record.response_event_id
+    return attributions
+
+
 class ExactReplyOracle:
     """Track canonical agent replies from real incremental `/sync` responses.
 
@@ -1553,17 +1576,20 @@ class ExactReplyOracle:
         *,
         internal_relay_senders: Collection[str] = (),
         coalescing_threads: bool = False,
+        ledger_path: Path | None = None,
     ) -> None:
         self.client = client
         self.agent_id = agent_id
         self.internal_relay_senders = frozenset(internal_relay_senders)
         self.coalescing_threads = coalescing_threads
+        self.ledger_path = ledger_path
+        self._ledger_attributions: dict[str, str] = {}
+        self._ledger_read_at = 0.0
         self.internal_source_ids: set[str] = set()
         self.next_batch: str | None = None
         self.expected_sources: dict[str, str] = {}
         self.optional_sources: set[str] = set()
         self.source_threads: dict[str, int] = {}
-        self.thread_observed: dict[int, list[str]] = defaultdict(list)
         self.observed_sources: set[str] = set()
         self.response_ids: dict[str, set[str]] = defaultdict(set)
         self.response_event_by_ref: dict[str, str] = {}
@@ -1591,36 +1617,48 @@ class ExactReplyOracle:
         self.source_threads[event_id] = thread
         if sent_at is not None:
             self.sent_at[event_id] = sent_at
+        # A concurrent pump may have synced the source before this
+        # registration ran; the dedup set would otherwise hide it forever.
+        if event_id in self.seen_event_ids:
+            self.observed_sources.add(event_id)
 
     def mark_source_optional(self, event_id: str) -> None:
         """Allow zero replies for a source redacted before its reply settled."""
         if event_id in self.expected_sources:
             self.optional_sources.add(event_id)
 
-    def required_thread_tails(self) -> dict[int, str]:
-        """Return each thread's newest observed source still requiring a reply."""
-        tails: dict[int, str] = {}
-        for thread, ordered in self.thread_observed.items():
-            required = [event_id for event_id in ordered if event_id not in self.optional_sources]
-            if required:
-                tails[thread] = required[-1]
-        return tails
+    def refresh_ledger_attributions(self, *, min_interval: float = 0.5) -> None:
+        """Re-read MindRoom's durable per-source reply attributions."""
+        if self.ledger_path is None:
+            return
+        now = time.monotonic()
+        if now - self._ledger_read_at < min_interval:
+            return
+        self._ledger_read_at = now
+        self._ledger_attributions = read_ledger_attributions(self.ledger_path)
 
     def unsettled_required_sources(self) -> list[str]:
-        """Return sources blocking settlement under the active reply model."""
+        """Return sources blocking settlement under the active reply model.
+
+        Under coalescing, a source is settled once it was observed on `/sync`
+        and either collected its direct canonical reply or was durably
+        attributed to a completed combined turn in the handled-turn ledger.
+        """
         if not self.coalescing_threads:
             return [
                 event_id
                 for event_id in self.expected_sources
                 if event_id not in self.optional_sources and len(self.response_ids.get(event_id, ())) != 1
             ]
-        unsettled = [event_id for event_id in self.expected_sources if event_id not in self.observed_sources]
-        unsettled.extend(
-            tail
-            for tail in self.required_thread_tails().values()
-            if len(self.response_ids.get(tail, ())) != 1 and tail not in unsettled
-        )
-        return unsettled
+        return [
+            event_id
+            for event_id in self.expected_sources
+            if event_id not in self.optional_sources
+            and not (
+                event_id in self.observed_sources
+                and (len(self.response_ids.get(event_id, ())) == 1 or event_id in self._ledger_attributions)
+            )
+        ]
 
     async def pump(self, *, timeout_ms: int = 0) -> None:
         """Ingest one sync window and enforce duplicate/unexpected invariants."""
@@ -1639,12 +1677,17 @@ class ExactReplyOracle:
         while time.monotonic() < deadline:
             await self._sync_once(timeout_ms=250)
             self._assert_no_wrong_replies()
+            self.refresh_ledger_attributions()
             if not self.unsettled_required_sources():
                 settled_after = max(settled_after, self._last_response_at + settle_seconds)
                 if time.monotonic() >= settled_after:
                     return
         missing = {
-            f"{self.expected_sources[event_id]} ({event_id})": len(self.response_ids.get(event_id, ()))
+            f"{self.expected_sources[event_id]} ({event_id})": {
+                "direct_replies": len(self.response_ids.get(event_id, ())),
+                "ledger_attributed": event_id in self._ledger_attributions,
+                "observed": event_id in self.observed_sources,
+            }
             for event_id in self.unsettled_required_sources()
         }
         msg = f"timed out waiting for exact agent replies: {missing}"
@@ -1654,38 +1697,27 @@ class ExactReplyOracle:
         """Resolve a logical agent-response reference to its real event ID.
 
         In chaos mode a coalesced source has no direct reply of its own; the
-        agent's answer covering it is the reply to a newer source in the same
-        thread, which is what a real user would react or reply to.
+        agent's answer covering it is the combined reply that MindRoom's
+        durable ledger attributes the source to.
         """
         event_id = self.response_event_by_ref.get(response_ref)
         if event_id is not None:
             return event_id
         if self.coalescing_threads:
-            covering = self._covering_response(response_ref.removeprefix("response:"))
-            if covering is not None:
-                return covering
+            source_event_id = next(
+                (
+                    candidate_id
+                    for candidate_id, ref in self.expected_sources.items()
+                    if ref == response_ref.removeprefix("response:")
+                ),
+                None,
+            )
+            if source_event_id is not None:
+                covering = self._ledger_attributions.get(source_event_id)
+                if covering is not None:
+                    return covering
         msg = f"response event not observed for {response_ref!r}"
         raise KeyError(msg)
-
-    def _covering_response(self, source_ref: str) -> str | None:
-        """Return the newest-source reply covering one coalesced source."""
-        source_event_id = next(
-            (event_id for event_id, ref in self.expected_sources.items() if ref == source_ref),
-            None,
-        )
-        if source_event_id is None:
-            return None
-        thread = self.source_threads.get(source_event_id)
-        if thread is None:
-            return None
-        ordered = self.thread_observed.get(thread, [])
-        if source_event_id not in ordered:
-            return None
-        for later_source in ordered[ordered.index(source_event_id) + 1 :]:
-            replies = self.response_ids.get(later_source, set())
-            if len(replies) == 1:
-                return next(iter(replies))
-        return None
 
     async def _sync_once(self, *, timeout_ms: int, allow_limited: bool = False) -> None:
         async with self._sync_lock:
@@ -1722,9 +1754,8 @@ class ExactReplyOracle:
             if isinstance(event.get("content"), dict)
             else None,
         }
-        if event_id in self.expected_sources and event_id not in self.observed_sources:
+        if event_id in self.expected_sources:
             self.observed_sources.add(event_id)
-            self.thread_observed[self.source_threads[event_id]].append(event_id)
         if event.get("sender") in self.internal_relay_senders:
             self.internal_source_ids.add(event_id)
             return
@@ -1922,13 +1953,6 @@ class FinalStateAuditor:
                 problems.append(f"source {logical_ref} has {count} direct replies in /messages")
             elif not oracle.coalescing_threads and source_event_id not in oracle.optional_sources and count != 1:
                 problems.append(f"source {logical_ref} has {count} canonical replies in /messages")
-        if oracle.coalescing_threads:
-            for thread, tail in oracle.required_thread_tails().items():
-                if len(replies.get(tail, ())) != 1:
-                    problems.append(
-                        f"thread {thread} newest required source {oracle.expected_sources[tail]} "
-                        f"has {len(replies.get(tail, ()))} replies in /messages",
-                    )
         for source_event_id, reply_ids in replies.items():
             if source_event_id in oracle.expected_sources or source_event_id in oracle.internal_source_ids:
                 continue
@@ -2101,6 +2125,11 @@ class LiveFuzzRunner:
             stack.agent_id,
             internal_relay_senders=(stack.router_id,),
             coalescing_threads=scenario.profile == "chaos",
+            ledger_path=(
+                stack.storage_path / "tracking" / f"{AGENT_NAME}_responded.json"
+                if scenario.profile == "chaos"
+                else None
+            ),
         )
         self.event_ids: dict[str, str] = {}
         self.sent_payloads: dict[str, _SentPayload] = {}
@@ -2506,6 +2535,7 @@ class LiveFuzzRunner:
         deadline = time.monotonic() + self.reply_timeout
         while time.monotonic() < deadline:
             await self.oracle.pump(timeout_ms=300)
+            self.oracle.refresh_ledger_attributions()
             try:
                 return self.oracle.resolve_response_ref(logical_ref)
             except KeyError:
