@@ -714,3 +714,36 @@ async def test_ledger_attribution_flags_missing_and_orphaned_turns(tmp_path: Pat
             auditor._assert_ledger_attribution(orphan)
     finally:
         await client.close()
+
+
+@pytest.mark.asyncio
+async def test_final_body_audit_accepts_only_recovered_interruptions() -> None:
+    """An interrupted note passes only with a completed same-thread resume answer."""
+    client = LiveMatrixClient("http://matrix.invalid", "!room:example")
+    oracle = ExactReplyOracle(client, "@agent:example", coalescing_threads=True)
+    auditor = FinalStateAuditor(
+        client,
+        oracle,
+        agent_id="@agent:example",
+        expected_body_for=lambda call_id: f"LIVE-FUZZ call={call_id} END call={call_id}",
+    )
+    try:
+        oracle.expect("op:1", "$source", thread=0)
+        oracle.internal_source_ids.add("$resume-relay")
+        interrupted = _agent_reply_event(
+            "$source",
+            "$reply",
+            "LIVE-FUZZ call=9 **[Response interrupted by service restart]**",
+        )
+        interrupted["content"]["m.relates_to"]["event_id"] = "$root"
+        events: dict[str, Any] = {"$reply": interrupted}
+        replies = {"$source": {"$reply"}}
+        with pytest.raises(AssertionError, match="non-canonical body"):
+            auditor._assert_final_bodies_complete(events, replies)
+
+        resumed = _agent_reply_event("$resume-relay", "$resumed", "LIVE-FUZZ call=11 END call=11")
+        resumed["content"]["m.relates_to"]["event_id"] = "$root"
+        events["$resumed"] = resumed
+        assert auditor._assert_final_bodies_complete(events, replies) == 1
+    finally:
+        await client.close()

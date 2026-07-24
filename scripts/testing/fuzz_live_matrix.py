@@ -40,6 +40,7 @@ import httpx
 import yaml
 
 from mindroom.handled_turns import TurnRecordCodec
+from mindroom.streaming import INTERRUPTED_RESPONSE_NOTE, RESTART_INTERRUPTED_RESPONSE_NOTE
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Mapping
@@ -2076,25 +2077,81 @@ class FinalStateAuditor:
         events: Mapping[str, Mapping[str, Any]],
         replies: Mapping[str, set[str]],
     ) -> int:
-        """The latest edit of every required reply is one exact completed stream."""
+        """Every required reply ends as one exact completed stream or a recovered interruption.
+
+        A restart may terminate a stream into a visible interrupted note by
+        design, but only when a completed auto-resume answer exists in the
+        same thread; an interrupted or partial final body without recovery is
+        a failure.
+        """
         problems: list[str] = []
         checked = 0
-        for source_event_id, logical_ref in self.oracle.expected_sources.items():
-            if source_event_id in self.oracle.optional_sources:
-                continue
+        audited_sources = [
+            (source_event_id, logical_ref)
+            for source_event_id, logical_ref in self.oracle.expected_sources.items()
+            if source_event_id not in self.oracle.optional_sources
+        ]
+        audited_sources.extend((relay_id, f"relay:{relay_id}") for relay_id in self.oracle.internal_source_ids)
+        for source_event_id, logical_ref in audited_sources:
             for reply_event_id in replies.get(source_event_id, ()):
                 body = self._latest_agent_body(events, reply_event_id)
                 call_id = _body_call_id(body)
-                if call_id is None or body != self.expected_body_for(call_id):
-                    problems.append(
-                        f"reply to {logical_ref} ended with a non-canonical body: {body[:120]!r}",
-                    )
-                else:
+                if call_id is not None and body == self.expected_body_for(call_id):
                     checked += 1
+                    continue
+                if self._is_recovered_interruption(events, reply_event_id, body):
+                    checked += 1
+                    continue
+                problems.append(
+                    f"reply to {logical_ref} ended with a non-canonical body: {body[:120]!r}",
+                )
         if problems:
             msg = f"final response body audit failed: {problems}"
             raise AssertionError(msg)
         return checked
+
+    def _is_recovered_interruption(
+        self,
+        events: Mapping[str, Mapping[str, Any]],
+        reply_event_id: str,
+        body: str,
+    ) -> bool:
+        """Return whether an interrupted terminal note was covered by auto-resume."""
+        if not body.endswith((INTERRUPTED_RESPONSE_NOTE, RESTART_INTERRUPTED_RESPONSE_NOTE)):
+            return False
+        thread_root = self._thread_root(events.get(reply_event_id, {}))
+        if thread_root is None:
+            return False
+        for event_id, event in events.items():
+            if event.get("sender") != self.agent_id or event.get("type") != "m.room.message":
+                continue
+            content = event.get("content")
+            if not isinstance(content, dict):
+                continue
+            relation = content.get("m.relates_to")
+            if not isinstance(relation, dict) or relation.get("event_id") != thread_root:
+                continue
+            in_reply_to = relation.get("m.in_reply_to")
+            resumed_source = in_reply_to.get("event_id") if isinstance(in_reply_to, dict) else None
+            if resumed_source not in self.oracle.internal_source_ids:
+                continue
+            resumed_body = self._latest_agent_body(events, event_id)
+            call_id = _body_call_id(resumed_body)
+            if call_id is not None and resumed_body == self.expected_body_for(call_id):
+                return True
+        return False
+
+    @staticmethod
+    def _thread_root(event: Mapping[str, Any]) -> str | None:
+        """Return the thread root of one event, if any."""
+        content = event.get("content")
+        if not isinstance(content, dict):
+            return None
+        relation = content.get("m.relates_to")
+        if not isinstance(relation, dict) or relation.get("rel_type") != "m.thread":
+            return None
+        root = relation.get("event_id")
+        return root if isinstance(root, str) else None
 
     def _latest_agent_body(self, events: Mapping[str, Mapping[str, Any]], reply_event_id: str) -> str:
         """Return the newest visible body for one agent reply."""
@@ -2186,6 +2243,7 @@ class LiveFuzzRunner:
         self.executed_batches = 0
         self.max_unsettled = 0
         self._mindroom_running = True
+        self._last_mindroom_start_at: float | None = None
 
     async def run(self) -> dict[str, object]:
         """Execute every batch and enforce the reply invariant after each."""
@@ -2469,6 +2527,7 @@ class LiveFuzzRunner:
             self.max_unsettled = max(self.max_unsettled, len(self.oracle.unsettled_required_sources()))
 
         await self._checkpoint(len(self.scenario.batches))
+        await self._wait_for_restart_recovery_window()
         auditor = FinalStateAuditor(
             self.client,
             self.oracle,
@@ -2505,12 +2564,15 @@ class LiveFuzzRunner:
         elif kind is LiveOperationKind.RESTART_MINDROOM:
             self.stack.restart_mindroom()
             self.restart_count += 1
+            self._last_mindroom_start_at = time.monotonic()
         elif kind is LiveOperationKind.KILL_RESTART_MINDROOM:
             self.stack.kill_restart_mindroom()
             self.restart_count += 1
+            self._last_mindroom_start_at = time.monotonic()
         elif kind is LiveOperationKind.COLD_RESTART_MINDROOM:
             self.stack.cold_restart_mindroom()
             self.restart_count += 1
+            self._last_mindroom_start_at = time.monotonic()
         elif kind is LiveOperationKind.RESTART_TUWUNEL:
             self.stack.restart_tuwunel()
             self.tuwunel_restart_count += 1
@@ -2521,9 +2583,28 @@ class LiveFuzzRunner:
         elif kind is LiveOperationKind.START_MINDROOM:
             self.stack.start_mindroom()
             self._mindroom_running = True
+            self._last_mindroom_start_at = time.monotonic()
         else:  # pragma: no cover - validation rejects unknown lifecycle kinds
             msg = f"unsupported lifecycle operation {kind}"
             raise AssertionError(msg)
+
+    async def _wait_for_restart_recovery_window(self) -> None:
+        """Give startup maintenance its recency-guard recheck after a late restart.
+
+        Streams interrupted by a restart are cleaned and auto-resumed by a
+        delayed startup pass, so the final audit must not run before that
+        designed recovery latency has elapsed.
+        """
+        if self._last_mindroom_start_at is None:
+            return
+        recovery_wait = 16.0 - (time.monotonic() - self._last_mindroom_start_at)
+        if recovery_wait <= 0:
+            return
+        await asyncio.sleep(recovery_wait)
+        await self.oracle.wait_until_exact(
+            deadline_seconds=self.reply_timeout,
+            settle_seconds=self.settle_seconds,
+        )
 
     async def _checkpoint(self, batch_index: int) -> None:
         """Require full exact settlement, scaling the deadline with backlog."""
