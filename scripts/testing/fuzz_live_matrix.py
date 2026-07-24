@@ -2452,19 +2452,17 @@ class LiveFuzzRunner:
 
         checkpoint_before = self.stack.sync_checkpoint_token(AGENT_NAME)
         lane_states = ((0, self.clients[0], hot_root, hot_response), *parallel_lanes)
-        await asyncio.gather(
-            *(
-                self._saturation_turn(
-                    client,
-                    thread=thread,
-                    label=f"saturation-barrier:{thread}",
-                    thread_root=root,
-                    reply_to=response,
-                    expected_sources=expected_sources,
-                )
-                for thread, client, root, response in lane_states
-            ),
-        )
+        # Hot thread 0 and parallel thread 1 intentionally share client 0.
+        # Serialize fences so they cannot race that client's private sync cursor.
+        for thread, client, root, response in lane_states:
+            await self._saturation_turn(
+                client,
+                thread=thread,
+                label=f"saturation-barrier:{thread}",
+                thread_root=root,
+                reply_to=response,
+                expected_sources=expected_sources,
+            )
         await self.stack.wait_for_sync_checkpoint_advance(
             AGENT_NAME,
             checkpoint_before,
