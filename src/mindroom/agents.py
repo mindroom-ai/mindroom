@@ -194,7 +194,7 @@ def ensure_default_agent_workspaces(config: Config, storage_path: Path) -> None:
 
 
 def agent_build_can_overlap_file_memory(agent_name: str, config: Config, storage_path: Path) -> bool:
-    """Return whether agent construction cannot create file-memory content mid-read."""
+    """Return True when it is safe to overlap agent construction with file-memory reads."""
     agent_config = config.get_agent(agent_name)
     if not _uses_default_mind_workspace_scaffold(agent_name, agent_config):
         return True
