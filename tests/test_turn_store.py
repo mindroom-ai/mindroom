@@ -66,12 +66,60 @@ def test_expand_pending_turn_claim_adds_only_new_aliases(tmp_path: Path) -> None
     assert store.try_claim_turn(claimed_turn)
     expanded_turn = replace(claimed_turn, discovery_event_ids=("$routed",))
 
-    store.expand_pending_turn_claim(claimed_turn, expanded_turn)
+    accepted = store.expand_pending_turn_claim(claimed_turn, expanded_turn)
 
+    assert accepted == ("$routed",)
     assert store.is_claimed_in_flight("$routed") is True
     store.release_pending_turn_claim(expanded_turn)
     assert store.is_claimed_in_flight("$routed") is False
     assert store.is_claimed_in_flight("$relay") is False
+
+
+def test_expand_pending_turn_claim_never_steals_another_live_turns_alias(tmp_path: Path) -> None:
+    """An alias already owned by another live turn is not folded in or released.
+
+    If turn B expanded to include turn A's live source and then finished, its
+    release would strip A's claim while A is still running, letting a replay of
+    A's source re-enter. Expansion must leave the collided alias with A.
+    """
+    store = _store(tmp_path)
+    turn_a = TurnRecord.create(["$shared"], completed=False)
+    turn_b = TurnRecord.create(["$relay"], completed=False)
+    assert store.try_claim_turn(turn_a)
+    assert store.try_claim_turn(turn_b)
+
+    # B discovers $shared during preparation, but A already owns it.
+    b_expanded = replace(turn_b, discovery_event_ids=("$shared",))
+    accepted = store.expand_pending_turn_claim(turn_b, b_expanded)
+
+    # The collided alias is rejected: B never claims it.
+    assert accepted == ()
+
+    # B finishes and releases only what it actually owns.
+    store.release_pending_turn_claim(turn_b)
+
+    # A's claim on the shared source survives B's release.
+    assert store.is_claimed_in_flight("$shared") is True
+    assert store.is_claimed_in_flight("$relay") is False
+
+
+def test_expand_pending_turn_claim_partially_accepts_only_free_aliases(tmp_path: Path) -> None:
+    """Expansion claims the free aliases while leaving an owned one with its holder."""
+    store = _store(tmp_path)
+    turn_a = TurnRecord.create(["$owned"], completed=False)
+    turn_b = TurnRecord.create(["$relay"], completed=False)
+    assert store.try_claim_turn(turn_a)
+    assert store.try_claim_turn(turn_b)
+
+    b_expanded = replace(turn_b, discovery_event_ids=("$owned", "$free"))
+    accepted = store.expand_pending_turn_claim(turn_b, b_expanded)
+
+    assert accepted == ("$free",)
+    assert store.is_claimed_in_flight("$free") is True
+    # $owned still belongs to A, not B.
+    store.release_pending_turn_claim(replace(turn_b, discovery_event_ids=("$free",)))
+    assert store.is_claimed_in_flight("$owned") is True
+    assert store.is_claimed_in_flight("$free") is False
 
 
 @pytest.mark.asyncio

@@ -177,13 +177,22 @@ def _expand_turn_claim_with_prepared_aliases(
 
     A trusted router relay learns the routed human event id only while
     preparing its prompt; expanding here keeps alias-addressed replays
-    dropped for exactly as long as this turn owns the response, and rebinding
-    the claim record makes the transfer and finally releases cover the alias.
+    dropped for exactly as long as this turn owns the response.
+
+    Expansion is collision-aware: an alias already owned by another live turn
+    is left with its original owner. The rebound claim record covers only the
+    aliases this turn actually claimed, so the transfer and finally releases
+    never strip another turn's claim.
     """
     if prepared_turn.indexed_event_ids == turn_claim.indexed_event_ids:
         return turn_claim
-    controller.deps.turn_store.expand_pending_turn_claim(turn_claim, prepared_turn)
-    return prepared_turn
+    accepted_aliases = controller.deps.turn_store.expand_pending_turn_claim(turn_claim, prepared_turn)
+    if not accepted_aliases:
+        return turn_claim
+    return replace(
+        turn_claim,
+        discovery_event_ids=(*turn_claim.discovery_event_ids, *accepted_aliases),
+    )
 
 
 def _try_claim_turn(

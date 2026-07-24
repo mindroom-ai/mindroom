@@ -223,19 +223,39 @@ class TurnStore:
         with self._pending_claim_lock:
             return event_id in self._pending_claimed_event_ids
 
-    def expand_pending_turn_claim(self, claimed_turn: TurnRecord, expanded_turn: TurnRecord) -> None:
-        """Fold identity aliases discovered during preparation into a live claim.
+    def expand_pending_turn_claim(
+        self,
+        claimed_turn: TurnRecord,
+        expanded_turn: TurnRecord,
+    ) -> tuple[str, ...]:
+        """Atomically fold collision-free identity aliases into a live claim.
 
         A trusted router relay learns the routed human event id only while
         preparing its prompt. Without expansion, a replay addressed through
         that alias passes is_claimed_in_flight while the canonical relay
         response is still live.
+
+        The expansion is collision-aware: an alias already owned by another
+        live turn is NOT folded in, because doing so would let this turn's
+        later release strip a claim the other turn still holds, exposing the
+        other turn's source to a duplicate replay. Only aliases owned by no
+        one are claimed; the accepted subset is returned so the caller rebinds
+        its claim record to exactly what it owns and never releases another
+        turn's alias.
         """
-        new_event_ids = set(expanded_turn.indexed_event_ids) - set(claimed_turn.indexed_event_ids)
+        new_event_ids = [
+            event_id
+            for event_id in expanded_turn.indexed_event_ids
+            if event_id not in set(claimed_turn.indexed_event_ids)
+        ]
         if not new_event_ids:
-            return
+            return ()
         with self._pending_claim_lock:
-            self._pending_claimed_event_ids.update(new_event_ids)
+            accepted = tuple(
+                event_id for event_id in dict.fromkeys(new_event_ids) if event_id not in self._pending_claimed_event_ids
+            )
+            self._pending_claimed_event_ids.update(accepted)
+        return accepted
 
     def try_claim_turn_subset(self, event_ids: Sequence[str]) -> tuple[str, ...]:
         """Atomically claim whichever of these sources no live or finished turn owns.
