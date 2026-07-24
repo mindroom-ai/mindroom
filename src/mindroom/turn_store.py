@@ -213,6 +213,16 @@ class TurnStore:
         with self._pending_claim_lock:
             self._pending_claimed_event_ids.difference_update(turn_record.indexed_event_ids)
 
+    def is_claimed_in_flight(self, event_id: str) -> bool:
+        """Return whether one source event is already claimed by a live turn.
+
+        A replayed sync delivery of an event whose first delivery is still
+        being answered would otherwise re-enter coalescing and, once folded
+        into a follow-up batch, poison the whole batch's all-or-nothing claim.
+        """
+        with self._pending_claim_lock:
+            return event_id in self._pending_claimed_event_ids
+
     def mark_source_redacted(
         self,
         source_event_id: str,

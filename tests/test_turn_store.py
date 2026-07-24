@@ -155,6 +155,30 @@ def test_pending_turn_claim_allows_only_one_concurrent_owner(tmp_path: Path) -> 
     assert store.try_claim_turn(turn) is True
 
 
+def test_is_claimed_in_flight_tracks_live_claims(tmp_path: Path) -> None:
+    """A replayed delivery must be detectable while its first delivery is answered."""
+    store = _store(tmp_path)
+    turn = TurnRecord.create(["$source"], completed=False)
+
+    assert store.is_claimed_in_flight("$source") is False
+    assert store.try_claim_turn(turn) is True
+    assert store.is_claimed_in_flight("$source") is True
+    store.release_pending_turn_claim(turn)
+    assert store.is_claimed_in_flight("$source") is False
+
+
+def test_is_claimed_in_flight_sees_absorbed_discovery_alias(tmp_path: Path) -> None:
+    """Discovery aliases folded into a claim also count as in flight."""
+    store = _store(tmp_path)
+    turn = replace(
+        TurnRecord.create(["$source"], completed=False),
+        discovery_event_ids=("$alias",),
+    )
+
+    assert store.try_claim_turn(turn) is True
+    assert store.is_claimed_in_flight("$alias") is True
+
+
 @pytest.mark.asyncio
 async def test_failed_claimed_response_releases_turn_for_replay(tmp_path: Path) -> None:
     """A failed owner must not permanently suppress a later delivery."""
