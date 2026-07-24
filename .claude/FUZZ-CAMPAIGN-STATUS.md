@@ -15,7 +15,9 @@ Last updated: 2026-07-24 (fresh Fable session, supervisor authorized continuatio
 - Item A (reviewer blocker, cached-path regression for Fix 1): DONE in `13da9895d` (test-only, 4 passed in `tests/test_dispatch_replay_guard.py`).
 - Item B (Qodo, full-maintenance replay during recheck sleep): DONE in `64ca7c360` (`recheck_pending` resumable phase; 8 passed in `tests/test_startup_maintenance.py`); Qodo inline thread answered (reply id 3646283901).
 - Postgres 45-thread fanout ISOLATED RERUN: 2 passed solo (postgres call 10.29 s, sqlite 1.72 s, 60 s timeout untouched) — prior pressure was xdist contention, not a product slowdown.
-- Remaining gates: full-suite summary line, pre-commit all-files, fresh-context pr-review loop against `origin/main`.
+- Full suite CLEAN at this head: `11526 passed, 54 skipped, 68 warnings in 84.04s`. Pre-commit all-files: every hook passes except main-owned prettier drift (see gate section).
+- Fresh-context pr-review #2 (agent `prreview1639b`, base `origin/main`, HEAD `e60601ff4`): verdict MERGE-READY after living-doc removal, ZERO code blockers. All three product fixes plus Items A/B re-verified independently. Review loop is clean.
+- Swarm notes directory (crash-safe, shared): `/Users/bas.nijholt/.codex/campaigns/mindroom-fuzz-2026-07-24/` — fourteen read-only agents each own one file there; treat every claim as provisional until verified against the exact current head.
 - Living-doc rule: this file must be REMOVED from the branch before PR #1639 is merge-ready (only when the supervisor says so). Do not merge anything.
 
 ## Merge recommendation for PR #1638
@@ -293,6 +295,23 @@ Source: GitHub Qodo inline comment on PR #1639, relayed by supervisor. VERIFIED 
 - Review diffs for follow-up PR #1639 are taken against `origin/main` (PR #1638 is merged; base is `main`).
 - Local HEAD equals pushed `origin/test/fuzz-live-chaos-expansion` at `aba3c9067` (plus the handoff commit added by this update).
 - Campaign details and minimized traces live in the Claude worktree's `.claude/REPORT.md` (gitignored working artifact — never commit or force-add it).
+
+## Fresh-context review #2 (2026-07-24, post Items A/B)
+
+- Reviewer: fresh-context subagent `prreview1639b`, base `origin/main` (`66dd4f4a6`), HEAD `e60601ff4`.
+- Verdict: MERGE-READY after living-doc removal. Zero code blockers.
+- Independently re-verified: Fix 1 exclusion threaded through both guard paths with both `text_ingress_dispatch` call sites wired; Fix 2 lifecycle (shutdown-cancel keeps `recheck_pending`, reload-during-sleep replays recheck-only with no double main phases, repeated reloads stay recheck-only, fresh `start()` runs all phases, completed recheck makes `cancel()` return False); Fix 3 claim check reads the pending set under the mutation lock, placed after `is_handled`, edit-guarded, event-id-keyed.
+- Harness (~1875 lines) scanned clean: public-only imports, no swallowed exceptions that could hide failures, sound oracle, temp-dir-only writes.
+- Only pre-merge item: remove `.claude/FUZZ-CAMPAIGN-STATUS.md` (intentional, awaiting supervisor order).
+
+## Swarm notes directory (added 2026-07-24)
+
+- Path: `/Users/bas.nijholt/.codex/campaigns/mindroom-fuzz-2026-07-24/` (crash-safe shared notebook, outside any repo).
+- Fourteen read-only agents each own exactly one Markdown file; they must not touch product repos, branches, PRs, or each other's files.
+- Every swarm claim is provisional until the primary session verifies it against the exact current head; this file remains the aggregate document.
+- Inventory at this update (16 files): README plus dispatch_races, fuzz_gap_design, harness_cleanup_perf, matrix_semantics, nio_event_cap, nio_full_review, nio_token_complete, op2_forensics, pr_overlap, review_pr1639_oracle, review_pr1639_prod, review_pr1640_cache, review_pr1640_live, startup_lifecycle, test_determinism.
+- Early signal: `review_pr1639_prod` (pinned at `e60601ff4`) reports no blockers in the dispatch replay guard or in-flight ingress claims; still inspecting stale-stream cleanup and startup lifecycle at the time of its last write.
+- Swarm agents are still writing; do NOT block on full swarm completion for session progress (supervisor instruction).
 
 ## Postgres 45-thread fanout note (supervisor-flagged) — RESOLVED 2026-07-24
 
