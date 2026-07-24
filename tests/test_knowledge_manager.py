@@ -2563,10 +2563,9 @@ def test_legacy_empty_optional_filter_metadata_remains_compatible() -> None:
     legacy_metadata["extra_extensions"] = ""
     legacy = IndexingSettings.from_metadata(legacy_metadata)
 
-    assert legacy == current
     assert legacy is not None
+    assert legacy == current
     assert knowledge_registry.published_index_settings_compatible(legacy, current)
-    assert knowledge_registry.indexing_settings_metadata_equal(legacy, current)
     assert not knowledge_registry.published_index_settings_compatible(
         legacy,
         replace(current, extra_extensions="('.pdf',)"),

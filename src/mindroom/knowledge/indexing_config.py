@@ -121,10 +121,9 @@ class IndexingSettings:
         mode = settings["mode"]
         if mode not in _INDEXING_MODES:
             return None
-        empty_filter_key = "()" if mode == "semantic" else ""
 
-        def _optional_filter_key(name: str) -> str:
-            return settings.get(name, "") or empty_filter_key
+        def _optional_filter_key(name: str, *, empty_value: str = "()") -> str:
+            return settings.get(name, "") or empty_value
 
         return cls(
             base_id=settings["base_id"],
@@ -147,7 +146,10 @@ class IndexingSettings:
             exclude_patterns=_optional_filter_key("exclude_patterns"),
             include_extensions=settings["include_extensions"],
             exclude_extensions=settings["exclude_extensions"],
-            extra_extensions=_optional_filter_key("extra_extensions"),
+            extra_extensions=_optional_filter_key(
+                "extra_extensions",
+                empty_value="()" if mode == "semantic" else "",
+            ),
             skip_hidden=settings.get("skip_hidden", ""),
         )
 

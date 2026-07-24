@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import suppress
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
 
 import pytest
@@ -12,9 +13,12 @@ import pytest_asyncio
 from mindroom.matrix import typing as typing_module
 from mindroom.matrix.typing import typing_indicator
 
+if TYPE_CHECKING:
+    from collections.abc import AsyncGenerator
+
 
 @pytest_asyncio.fixture(autouse=True)
-async def _clean_typing_states() -> None:
+async def _clean_typing_states() -> AsyncGenerator[None, None]:
     """Keep failed tests from leaking refresh tasks and client references."""
     assert not typing_module._ACTIVE_TYPING
     yield
@@ -23,7 +27,7 @@ async def _clean_typing_states() -> None:
     for state in states:
         if state.refresh_task is not None:
             state.refresh_task.cancel()
-            with suppress(asyncio.CancelledError, Exception):
+            with suppress(asyncio.CancelledError):
                 await state.refresh_task
 
 

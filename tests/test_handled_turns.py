@@ -26,6 +26,7 @@ from mindroom.history.types import HistoryScope
 from mindroom.message_target import MessageTarget
 
 if TYPE_CHECKING:
+    from concurrent.futures import Future
     from pathlib import Path
 
 
@@ -571,6 +572,68 @@ def test_failed_batch_retries_without_new_record_and_remains_flush_visible(temp_
 
     assert attempts == 3
     assert "$retry" in _read_persisted_records(tracker)
+
+
+def test_second_persist_failure_releases_waiter_queued_during_retry(temp_dir: Path) -> None:
+    """Giving up after a retry must fail, not strand, waiters queued during that attempt."""
+    tracker = HandledTurnLedger("test_persist_retry_waiter", base_path=temp_dir)
+    tracker.warm()
+    real_persist = tracker._persist_records
+    real_schedule = tracker._schedule_persist_locked
+    second_attempt_started = threading.Event()
+    release_second_attempt = threading.Event()
+    later_scheduled = threading.Event()
+    waiter_errors: list[str] = []
+    attempts = 0
+    first_failure = "first persist failure"
+    second_failure = "second persist failure"
+
+    def fail_twice_then_persist(turn_records: tuple[TurnRecord, ...]) -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise OSError(first_failure)
+        if attempts == 2:
+            second_attempt_started.set()
+            assert release_second_attempt.wait(timeout=5)
+            raise OSError(second_failure)
+        real_persist(turn_records)
+
+    def schedule_and_signal(turn_record: TurnRecord) -> Future[None]:
+        completion = real_schedule(turn_record)
+        if "$later" in turn_record.indexed_event_ids:
+            later_scheduled.set()
+        return completion
+
+    def record_later_and_wait() -> None:
+        try:
+            tracker.update_handled_turn(
+                ("$later",),
+                lambda _existing: TurnRecord.create(["$later"], completed=False),
+                wait_for_persist=True,
+            )
+        except OSError as exc:
+            waiter_errors.append(str(exc))
+
+    with (
+        patch.object(tracker, "_persist_records", side_effect=fail_twice_then_persist),
+        patch.object(tracker, "_schedule_persist_locked", side_effect=schedule_and_signal),
+    ):
+        tracker.record_handled_turn(TurnRecord.create(["$retry"], completed=False))
+        assert second_attempt_started.wait(timeout=5)
+        waiter = threading.Thread(target=record_later_and_wait)
+        waiter.start()
+        assert later_scheduled.wait(timeout=5)
+        release_second_attempt.set()
+        waiter.join(timeout=1)
+        assert not waiter.is_alive()
+        tracker.flush()
+
+    assert waiter_errors == [second_failure]
+    assert attempts == 3
+    persisted_records = _read_persisted_records(tracker)
+    assert "$retry" in persisted_records
+    assert "$later" in persisted_records
 
 
 def test_slow_ledger_does_not_block_other_ledger_persistence(temp_dir: Path) -> None:

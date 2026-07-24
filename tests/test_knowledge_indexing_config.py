@@ -100,6 +100,21 @@ def test_indexing_settings_from_metadata_normalizes_legacy_empty_filter_keys() -
     assert parsed.skip_hidden == ""
 
 
+def test_files_mode_legacy_empty_patterns_normalize_without_semantic_extensions() -> None:
+    """File-mode patterns remain tuple keys while semantic-only extensions stay empty."""
+    metadata = replace(_settings(), mode="files", extra_extensions="").to_metadata()
+    metadata["include_patterns"] = ""
+    del metadata["exclude_patterns"]
+    metadata["extra_extensions"] = ""
+
+    parsed = IndexingSettings.from_metadata(metadata)
+
+    assert parsed is not None
+    assert parsed.include_patterns == "()"
+    assert parsed.exclude_patterns == "()"
+    assert parsed.extra_extensions == ""
+
+
 def test_skip_hidden_changes_corpus_key_but_not_query_key() -> None:
     """Indexes published before hidden-path filtering ('' from old metadata) must rebuild, not stay queryable."""
     legacy = _settings()

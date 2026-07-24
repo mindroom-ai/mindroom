@@ -550,7 +550,7 @@ def _deployment_snapshot(payload: object) -> KubernetesDeployment:
     return _DeploymentSnapshot(
         metadata=_DeploymentMetadataSnapshot(
             name=name,
-            annotations=annotations or None,
+            annotations=annotations,
             labels=_string_mapping(metadata.get("labels"), field_name="metadata.labels", required=True),
             generation=_optional_int(metadata.get("generation"), field_name="metadata.generation"),
             uid=uid,
