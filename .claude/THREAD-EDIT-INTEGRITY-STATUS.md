@@ -5,7 +5,7 @@
 - Branch: `fix/thread-edit-integrity`.
 - Pull request: https://github.com/mindroom-ai/mindroom/pull/1641.
 - Base: `origin/main` at `66dd4f4a68bcfd1a5e43b2cac20a1b464f306ab1`.
-- Current committed local, remote, and PR head: `fa5b0ed377259f7124baaa8b8fd7f0e8c612175f`.
+- Latest production and test commit: `43b626592cd9513221d0207b65926b3e7afcb708`.
 - Never merge this pull request.
 - Never amend or force-push.
 
@@ -14,8 +14,8 @@
 - Exact head `be6ee9f9a807e5c88b07db3e1c3a8a5b7d8aa49b` was rejected by two fresh native Codex reviewers.
 - Follow-up commits through `fa5b0ed377259f7124baaa8b8fd7f0e8c612175f` address every verified finding from those reviews.
 - The isolated Fable review of rejected head `be6ee9f9a807e5c88b07db3e1c3a8a5b7d8aa49b` remains evidence-only.
-- Current GitHub CI is running on `fa5b0ed377259f7124baaa8b8fd7f0e8c612175f`.
-- Pending cache-query simplification will invalidate that CI and every prior review.
+- Current GitHub CI is running on `43b626592cd9513221d0207b65926b3e7afcb708`.
+- Every prior exact-head review is invalid.
 - The real-Tuwunel gate has not run on this implementation.
 - `RESOURCE-GATE.md` currently assigns heavy work to reconstructed nio, with exact-head real-Tuwunel next.
 - Do not run full pytest, PostgreSQL fanout, all-file hooks, Docker Matrix, or real-Tuwunel until the resource gate grants the slot.
@@ -30,7 +30,7 @@
 - The no-op PostgreSQL schema-v3 compatibility diff was removed.
 - Deterministic regressions cover direct, bundled, incremental, SQLite, and PostgreSQL behavior.
 
-## Current change
+## Latest change
 
 - The SQLite and PostgreSQL latest-edit queries previously duplicated a long Matrix validity predicate in two JSON dialects.
 - SQL now owns only cache scope, joins, and canonical timestamp plus event-ID ordering.
@@ -50,8 +50,7 @@
 
 ## Required next steps
 
-- Finish focused static checks and commit the cache-query simplification.
-- Push and update the external campaign notes.
+- Monitor current CI while waiting for the heavy resource slot.
 - When heavy ownership returns, run relevant SQLite and PostgreSQL backend tests, the exact thirteen prior CI failures, full pytest, Tach, and all-file pre-commit.
 - Update the stale PR body.
 - Remove this file only when a new final head is frozen.
