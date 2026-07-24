@@ -54,9 +54,12 @@
 - Visible activity time now uses the maximum of original and accepted-edit timestamps, preventing a clock-skewed edit from aging a fresh stream.
 - Cached point reads now validate payload identity and original message content before projection.
 - Cached snapshots now validate the indexed event ID and original message content before projection, then continue to older valid events.
-- The cached-original regression passes on SQLite; its PostgreSQL parametrization is currently skipped because Docker is unavailable and remains required under heavy-slot ownership.
+- The cached-original regression passes on SQLite and PostgreSQL.
 - Redundant approval room and edit-sender guards are removed; typed card parsing owns room validity and sender-scoped `get_latest_edit()` owns edit trust.
 - The clock-skew and approval-minimality slice passes five focused regressions.
+- The exact prior CI failure files pass `47/47`, including the PostgreSQL 45-thread fanout.
+- The new full/bundled/cache/approval/clock-skew regression selection passes `35/35`, including both cache backends.
+- One stale malformed-encrypted-media assertion now matches its existing fail-closed name and docstring by expecting `None`, not a `RoomGetEventResponse` carrying `BadEvent`.
 - Add deterministic full-resolution plus SQLite and PostgreSQL regressions for every blocker.
 - Run focused tests before each atomic commit.
 - Re-run relevant backend tests, full pytest, Tach, and all-file pre-commit under resource ownership.

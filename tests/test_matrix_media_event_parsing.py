@@ -287,8 +287,7 @@ async def test_malformed_encrypted_media_is_rejected_with_diagnostic(
 
     captured_logs = "\n".join(record.getMessage() for record in caplog.records)
     assert parsed_event is None
-    assert isinstance(response, nio.RoomGetEventResponse)
-    assert isinstance(response.event, nio.BadEvent)
+    assert response is None
     assert "'url' is a required property" in captured_logs
     assert "instance['content']['file']" in captured_logs
 
