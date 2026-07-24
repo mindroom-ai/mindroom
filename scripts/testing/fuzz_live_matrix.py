@@ -15,10 +15,12 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import itertools
 import json
 import os
 import random
+import re
 import secrets
 import signal
 import socket
@@ -33,7 +35,7 @@ from enum import StrEnum
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 from urllib.parse import quote
 
 import httpx
@@ -880,6 +882,37 @@ def saturation_scenario(
     return scenario
 
 
+ORIGINAL_REVISION = "orig"
+_MARKER_PATTERN = re.compile(r"MRK\[src=[^;\]]+;rev=[^\]]+\]")
+
+
+def _source_marker(source: str, revision: str) -> str:
+    """Return a stable token binding one source body to a logical source and revision.
+
+    The token is embedded verbatim in a fuzz USER body so it survives the round
+    trip through Matrix and reaches the model stub. It intentionally does not
+    start with ``LIVE-FUZZ call=`` so it can never be mistaken for a model
+    response body by ``_body_call_id``.
+    """
+    return f"MRK[src={source};rev={revision}]"
+
+
+def _parse_markers(text: str) -> frozenset[str]:
+    """Extract every ``MRK[...]`` token from a string as full token strings."""
+    return frozenset(_MARKER_PATTERN.findall(text))
+
+
+def _marker_fingerprint(markers: frozenset[str]) -> int:
+    """Return a stable non-negative fingerprint of one marker set.
+
+    Uses a content hash of the sorted tokens so the slow/fast profile a source
+    receives is a pure function of its markers, identical regardless of the
+    order concurrent model requests arrive and stable across processes.
+    """
+    digest = hashlib.blake2b("\n".join(sorted(markers)).encode(), digest_size=8).digest()
+    return int.from_bytes(digest, "big")
+
+
 class _ModelHandler(BaseHTTPRequestHandler):
     """Small deterministic OpenAI-compatible endpoint for live transport tests.
 
@@ -898,9 +931,46 @@ class _ModelHandler(BaseHTTPRequestHandler):
     slow_stream_delay = 0.02
     first_token_delay = 0.0
 
+    # Class-level observation map guarded by a lock because the stub runs under a
+    # ThreadingHTTPServer: concurrent MindRoom requests each land in their own
+    # handler thread. Each entry records the source-revision markers seen on the
+    # FINAL user message of one model call, keyed by that call's assigned id.
+    _observation_lock = threading.Lock()
+    _observed_markers: ClassVar[dict[int, frozenset[str]]] = {}
+
+    @classmethod
+    def reset_observations(cls) -> None:
+        """Clear observed markers and restart call-id numbering for a fresh stack."""
+        with cls._observation_lock:
+            cls._observed_markers = {}
+        cls.call_ids = itertools.count(1)
+
+    @classmethod
+    def _record_observation(cls, call_id: int, markers: frozenset[str]) -> None:
+        with cls._observation_lock:
+            cls._observed_markers[call_id] = markers
+
+    @classmethod
+    def observed_markers_for(cls, call_id: int) -> frozenset[str]:
+        """Return the markers observed on one model call's final user message."""
+        with cls._observation_lock:
+            return cls._observed_markers.get(call_id, frozenset())
+
     @classmethod
     def _is_slow_call(cls, call_id: int) -> bool:
-        return cls.slow_call_modulus > 0 and call_id % cls.slow_call_modulus == 0
+        """Decide slow vs fast purely from the call's observed marker fingerprint.
+
+        Deriving the profile from a stable hash of the parsed marker set (not
+        the HTTP arrival order) means reversing the order concurrent requests
+        reach the stub never changes which source streams slowly. A call with no
+        markers (an internal relay or system call) is always fast.
+        """
+        if cls.slow_call_modulus <= 0:
+            return False
+        markers = cls.observed_markers_for(call_id)
+        if not markers:
+            return False
+        return _marker_fingerprint(markers) % cls.slow_call_modulus == 0
 
     @classmethod
     def segments_for(cls, call_id: int) -> int:
@@ -931,6 +1001,29 @@ class _ModelHandler(BaseHTTPRequestHandler):
             return
         self.send_error(HTTPStatus.NOT_FOUND)
 
+    @staticmethod
+    def _final_user_markers(payload: Mapping[str, object]) -> frozenset[str]:
+        """Return the markers on the final user message only.
+
+        MindRoom sends conversation history as earlier messages and the current
+        turn as the last ``role == "user"`` entry, so scanning only that entry
+        prevents a stale history marker from masking a wrong current turn.
+        """
+        messages = payload.get("messages")
+        if not isinstance(messages, list):
+            return frozenset()
+        for message in reversed(messages):
+            if not isinstance(message, dict) or message.get("role") != "user":
+                continue
+            content = message.get("content")
+            if isinstance(content, str):
+                return _parse_markers(content)
+            if isinstance(content, list):
+                parts = [part.get("text", "") for part in content if isinstance(part, dict)]
+                return _parse_markers(" ".join(text for text in parts if isinstance(text, str)))
+            return frozenset()
+        return frozenset()
+
     def do_POST(self) -> None:
         if self.path.rstrip("/") != "/v1/chat/completions":
             self.send_error(HTTPStatus.NOT_FOUND)
@@ -938,6 +1031,7 @@ class _ModelHandler(BaseHTTPRequestHandler):
         content_length = int(self.headers.get("Content-Length", "0"))
         payload = json.loads(self.rfile.read(content_length))
         call_id = next(self.call_ids)
+        self._record_observation(call_id, self._final_user_markers(payload))
         content = self._response_text(call_id)
         if self._is_slow_call(call_id) and self.first_token_delay > 0:
             time.sleep(self.first_token_delay)
@@ -1196,6 +1290,7 @@ class ManagedTuwunelStack:
 
     def _start_model_server(self) -> int:
         profile = self._stream_profile
+        _ModelHandler.reset_observations()
         _ModelHandler.stream_segments = profile.stream_segments
         _ModelHandler.stream_delay = profile.stream_delay
         _ModelHandler.slow_call_modulus = profile.slow_call_modulus
@@ -2027,12 +2122,18 @@ class FinalStateAuditor:
         agent_id: str,
         expected_body_for: Callable[[int], str],
         ledger_path: Path | None = None,
+        source_current_markers: Mapping[str, str] | None = None,
+        observed_markers_for: Callable[[int], frozenset[str]] = _ModelHandler.observed_markers_for,
     ) -> None:
         self.client = client
         self.oracle = oracle
         self.agent_id = agent_id
         self.expected_body_for = expected_body_for
         self.ledger_path = ledger_path
+        # Per source event id, the marker of the latest valid revision the runner
+        # sent to Matrix. Empty when the run does not track revisions.
+        self.source_current_markers = dict(source_current_markers or {})
+        self.observed_markers_for = observed_markers_for
 
     async def audit(
         self,
@@ -2054,7 +2155,10 @@ class FinalStateAuditor:
         self._assert_reply_cardinality(replies)
         completed = self._assert_final_bodies_complete(events, replies)
         self._assert_sync_view_parity(events, sent_records, replies)
-        ledger_metrics = self._assert_ledger_attribution(replies) if self.ledger_path is not None else {}
+        ledger_metrics: dict[str, int] = {}
+        if self.ledger_path is not None:
+            ledger_metrics = self._assert_ledger_attribution(replies)
+            self._assert_model_saw_current_sources(events)
         return {
             "audited_events": len(events),
             "audited_rooms": len(set(room_ids)),
@@ -2204,6 +2308,45 @@ class FinalStateAuditor:
             msg = f"durable turn attribution audit failed: {problems}"
             raise AssertionError(msg)
         return {"ledger_attributed_sources": attributed, "ledger_superseded_sources": superseded}
+
+    def _assert_model_saw_current_sources(self, events: Mapping[str, Mapping[str, Any]]) -> None:
+        """Every response-backed turn must be generated from its sources' current bodies.
+
+        A right-shaped body proves the model was called, but not that it was
+        called with the correct sources at their latest revision. Each
+        response-backed ledger record names the sources it covers; the model
+        call that produced its visible reply must have observed the current
+        marker of every one of those sources. A wrong-source body, a pre-edit
+        body, or a coalesced body missing one source's current marker fails
+        here. A completed no-response supersession record requires no marker.
+        """
+        assert self.ledger_path is not None
+        records = read_ledger_records(self.ledger_path)
+        expected_sources = self.oracle.expected_sources
+        problems: list[str] = []
+        for source_event_id, record in records.items():
+            if record.response_event_id is None:
+                continue
+            required = {
+                self.source_current_markers[covered]
+                for covered in record.source_event_ids
+                if covered in expected_sources and covered in self.source_current_markers
+            }
+            if not required:
+                continue
+            body = self._latest_agent_body(events, record.response_event_id)
+            call_id = _body_call_id(body)
+            observed = self.observed_markers_for(call_id) if call_id is not None else frozenset()
+            missing = required - observed
+            if missing:
+                problems.append(
+                    f"turn for {expected_sources.get(source_event_id, source_event_id)} "
+                    f"({source_event_id}) generated without current source markers "
+                    f"{sorted(missing)}; model saw {sorted(observed)}",
+                )
+        if problems:
+            msg = f"model source-revision audit failed: {problems}"
+            raise AssertionError(msg)
 
     def _assert_final_bodies_complete(
         self,
@@ -2417,6 +2560,10 @@ class LiveFuzzRunner:
         self.sent_payloads: dict[str, _SentPayload] = {}
         self.sent_records: list[_SentRecord] = []
         self.redacted_targets: set[str] = set()
+        # Per source event id, the marker of the latest valid revision that
+        # reached Matrix (``orig`` on send, the edit marker after an edit
+        # revises it). The final audit binds each turn's model call to these.
+        self.source_current_markers: dict[str, str] = {}
         self.operation_count = 0
         self.restart_count = 0
         self.tuwunel_restart_count = 0
@@ -2715,6 +2862,7 @@ class LiveFuzzRunner:
             agent_id=self.stack.agent_id,
             expected_body_for=_ModelHandler.response_text_for,
             ledger_path=self.stack.storage_path / "tracking" / f"{AGENT_NAME}_responded.json",
+            source_current_markers=self.source_current_markers,
         )
         audit = await auditor.audit(
             room_ids=tuple(self.stack.room_ids.values()),
@@ -2852,7 +3000,10 @@ class LiveFuzzRunner:
     async def _send_roots(self, threads: Collection[int]) -> None:
         async def send_root(thread: int) -> tuple[int, str, _SentPayload, float]:
             logical_ref = f"root:{thread}"
-            content = self._message_content(f"Live fuzz root {thread}")
+            content = self._message_content(
+                f"Live fuzz root {thread}",
+                marker=_source_marker(logical_ref, ORIGINAL_REVISION),
+            )
             payload = _SentPayload("m.room.message", f"live-fuzz-{logical_ref}", content)
             root_client = (
                 self._client_for_thread(thread)
@@ -2874,6 +3025,7 @@ class LiveFuzzRunner:
             logical_ref = f"root:{thread}"
             self.event_ids[logical_ref] = event_id
             self.sent_payloads[logical_ref] = payload
+            self.source_current_markers[event_id] = _source_marker(logical_ref, ORIGINAL_REVISION)
             self.oracle.expect(
                 logical_ref,
                 event_id,
@@ -2906,22 +3058,30 @@ class LiveFuzzRunner:
                     "is_falling_back": True,
                     "m.in_reply_to": {"event_id": target_event_id},
                 },
+                marker=_source_marker(operation.event_ref, ORIGINAL_REVISION),
             )
             payload = _SentPayload("m.room.message", txn_id, content)
             event_id = await self._send_expected_message(operation, client, payload, room_id)
+            self.source_current_markers[event_id] = _source_marker(operation.event_ref, ORIGINAL_REVISION)
             return operation, event_id, payload
 
         if operation.kind is LiveOperationKind.PLAIN_REPLY:
             content = self._message_content(
                 f"Live fuzz plain reply {operation.operation_id}",
                 relation={"m.in_reply_to": {"event_id": target_event_id}},
+                marker=_source_marker(operation.event_ref, ORIGINAL_REVISION),
             )
             payload = _SentPayload("m.room.message", txn_id, content)
             event_id = await self._send_expected_message(operation, client, payload, room_id)
+            self.source_current_markers[event_id] = _source_marker(operation.event_ref, ORIGINAL_REVISION)
             return operation, event_id, payload
 
         if operation.kind is LiveOperationKind.EDIT:
-            new_content = self._message_content(f"Live fuzz edited message {operation.operation_id}")
+            edit_marker = _source_marker(operation.target, f"edit:{operation.operation_id}")
+            new_content = self._message_content(
+                f"Live fuzz edited message {operation.operation_id}",
+                marker=edit_marker,
+            )
             content = {
                 **new_content,
                 "m.new_content": new_content,
@@ -2929,6 +3089,9 @@ class LiveFuzzRunner:
             }
             event_id = await client.send_event("m.room.message", txn_id, content, room_id=room_id)
             self.sent_records.append(_SentRecord(event_id, room_id, "m.room.message"))
+            # The edit revises the target source in place, so its current marker
+            # becomes the edit revision the model must now observe.
+            self.source_current_markers[target_event_id] = edit_marker
             return operation, event_id, None
 
         if operation.kind is LiveOperationKind.REACTION:
@@ -2997,10 +3160,15 @@ class LiveFuzzRunner:
         body: str,
         *,
         relation: Mapping[str, Any] | None = None,
+        marker: str | None = None,
     ) -> dict[str, Any]:
+        # The source-revision marker is appended after the mention so it reaches
+        # the model unchanged; the mention and body prefix other code depends on
+        # stay untouched.
+        marked_body = f"{body} {self.stack.agent_id}" + (f" {marker}" if marker is not None else "")
         content: dict[str, Any] = {
             "msgtype": "m.text",
-            "body": f"{body} {self.stack.agent_id}",
+            "body": marked_body,
             "m.mentions": {"user_ids": [self.stack.agent_id]},
         }
         if relation is not None:

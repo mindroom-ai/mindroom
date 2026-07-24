@@ -14,6 +14,7 @@ if TYPE_CHECKING:
 import pytest
 
 from scripts.testing.fuzz_live_matrix import (
+    ORIGINAL_REVISION,
     ChaosTuning,
     ExactReplyOracle,
     FinalStateAuditor,
@@ -22,7 +23,10 @@ from scripts.testing.fuzz_live_matrix import (
     LiveOperation,
     LiveOperationKind,
     _body_call_id,
+    _ModelHandler,
+    _parse_markers,
     _SentRecord,
+    _source_marker,
     chaos_scenario_from_seed,
     live_scenario_from_seed,
     saturation_scenario,
@@ -1161,3 +1165,168 @@ async def test_duplicate_canonical_reply_inside_edit_window_is_detected() -> Non
             oracle._assert_no_wrong_replies()
     finally:
         await oracle.client.close()
+
+
+def _marker_payload(*bodies: str) -> dict[str, Any]:
+    """Build a chat-completions payload whose messages carry the given bodies in order."""
+    return {"messages": [{"role": "user", "content": body} for body in bodies]}
+
+
+def test_do_post_records_only_final_user_message_markers() -> None:
+    """The observation map reflects only the final user message, never prior history."""
+    correct = _source_marker("op:1", ORIGINAL_REVISION)
+    stale = _source_marker("op:0", ORIGINAL_REVISION)
+    # The correct marker sits in an earlier history turn; the final user turn
+    # carries an unrelated marker, so only the final turn's markers are recorded.
+    assert _ModelHandler._final_user_markers(_marker_payload(f"history {correct}", f"current {stale}")) == frozenset(
+        {stale},
+    )
+    # A final user turn with no marker records nothing even if history had one.
+    assert _ModelHandler._final_user_markers(_marker_payload(f"history {correct}", "current turn")) == frozenset()
+    # A single final user turn with the correct marker records it.
+    assert _ModelHandler._final_user_markers(_marker_payload(f"only {correct}")) == frozenset({correct})
+
+
+def test_reversed_model_arrival_preserves_slow_fast_profile() -> None:
+    """Slow/fast selection follows the marker fingerprint, not HTTP arrival order."""
+    _ModelHandler.reset_observations()
+    marker_a = _source_marker("op:1", ORIGINAL_REVISION)
+    marker_b = _source_marker("op:2", ORIGINAL_REVISION)
+    try:
+        _ModelHandler.slow_call_modulus = 3
+        # Forward arrival: A is call 1, B is call 2.
+        _ModelHandler._record_observation(1, frozenset({marker_a}))
+        _ModelHandler._record_observation(2, frozenset({marker_b}))
+        forward = {marker_a: _ModelHandler._is_slow_call(1), marker_b: _ModelHandler._is_slow_call(2)}
+
+        # Reversed arrival: the same two markers land under swapped call ids.
+        _ModelHandler.reset_observations()
+        _ModelHandler._record_observation(1, frozenset({marker_b}))
+        _ModelHandler._record_observation(2, frozenset({marker_a}))
+        reversed_ = {marker_b: _ModelHandler._is_slow_call(1), marker_a: _ModelHandler._is_slow_call(2)}
+
+        assert forward == reversed_
+        assert _parse_markers(f"prefix {marker_a} suffix {marker_b}") == frozenset({marker_a, marker_b})
+    finally:
+        _ModelHandler.slow_call_modulus = 0
+        _ModelHandler.reset_observations()
+
+
+def _model_source_auditor(
+    *,
+    ledger_path: Path,
+    expected_sources: dict[str, str],
+    source_current_markers: dict[str, str],
+    observed: dict[int, frozenset[str]],
+) -> FinalStateAuditor:
+    """Build an auditor wired to explicit markers and an in-memory observation map."""
+    client = LiveMatrixClient("http://matrix.invalid", "!room:example")
+    oracle = ExactReplyOracle(client, "@agent:example", coalescing_threads=True, ledger_path=ledger_path)
+    oracle.expected_sources.update(expected_sources)
+    return FinalStateAuditor(
+        client,
+        oracle,
+        agent_id="@agent:example",
+        expected_body_for=_short_body_for,
+        ledger_path=ledger_path,
+        source_current_markers=source_current_markers,
+        observed_markers_for=lambda call_id: observed.get(call_id, frozenset()),
+    )
+
+
+@pytest.mark.asyncio
+async def test_model_source_audit_rejects_response_from_wrong_source(tmp_path: Path) -> None:
+    """A reply attached to source A but generated from source B's marker fails."""
+    ledger_path = tmp_path / "general_responded.json"
+    marker_a = _source_marker("op:1", ORIGINAL_REVISION)
+    marker_b = _source_marker("op:2", ORIGINAL_REVISION)
+    auditor = _model_source_auditor(
+        ledger_path=ledger_path,
+        expected_sources={"$a": "op:1", "$b": "op:2"},
+        source_current_markers={"$a": marker_a, "$b": marker_b},
+        observed={7: frozenset({marker_b})},
+    )
+    try:
+        record = TurnRecord(source_event_ids=("$a",), response_event_id="$reply-a", completed=True)
+        _write_ledger(ledger_path, {"$a": record})
+        events = {"$reply-a": _agent_reply_event("$a", "$reply-a", _short_body_for(7))}
+        with pytest.raises(AssertionError, match="without current source markers"):
+            auditor._assert_model_saw_current_sources(events)
+    finally:
+        await auditor.client.close()
+
+
+@pytest.mark.asyncio
+async def test_model_source_audit_rejects_pre_edit_revision(tmp_path: Path) -> None:
+    """A response generated from a source's OLD revision fails after a later valid edit."""
+    ledger_path = tmp_path / "general_responded.json"
+    orig = _source_marker("op:1", ORIGINAL_REVISION)
+    edited = _source_marker("op:1", "edit:5")
+    auditor = _model_source_auditor(
+        ledger_path=ledger_path,
+        expected_sources={"$a": "op:1"},
+        # The edit revised the source, so its current marker is the edit revision.
+        source_current_markers={"$a": edited},
+        # The model call only ever observed the pre-edit body.
+        observed={4: frozenset({orig})},
+    )
+    try:
+        record = TurnRecord(source_event_ids=("$a",), response_event_id="$reply-a", completed=True)
+        _write_ledger(ledger_path, {"$a": record})
+        events = {"$reply-a": _agent_reply_event("$a", "$reply-a", _short_body_for(4))}
+        with pytest.raises(AssertionError, match="without current source markers"):
+            auditor._assert_model_saw_current_sources(events)
+
+        # Observing the edited revision instead passes.
+        auditor.observed_markers_for = lambda call_id: {4: frozenset({edited})}.get(call_id, frozenset())
+        auditor._assert_model_saw_current_sources(events)
+    finally:
+        await auditor.client.close()
+
+
+@pytest.mark.asyncio
+async def test_model_source_audit_rejects_coalesced_missing_one_source(tmp_path: Path) -> None:
+    """A coalesced response missing ONE current source marker fails."""
+    ledger_path = tmp_path / "general_responded.json"
+    marker_a = _source_marker("op:1", ORIGINAL_REVISION)
+    marker_b = _source_marker("op:2", ORIGINAL_REVISION)
+    auditor = _model_source_auditor(
+        ledger_path=ledger_path,
+        expected_sources={"$a": "op:1", "$b": "op:2"},
+        source_current_markers={"$a": marker_a, "$b": marker_b},
+        # The coalesced call only observed source A's marker.
+        observed={9: frozenset({marker_a})},
+    )
+    try:
+        coalesced = TurnRecord(source_event_ids=("$a", "$b"), response_event_id="$combined", completed=True)
+        _write_ledger(ledger_path, {"$a": coalesced, "$b": coalesced})
+        events = {"$combined": _agent_reply_event("$b", "$combined", _short_body_for(9))}
+        with pytest.raises(AssertionError, match="without current source markers"):
+            auditor._assert_model_saw_current_sources(events)
+
+        # Observing both current markers satisfies the coalesced turn.
+        auditor.observed_markers_for = lambda call_id: {9: frozenset({marker_a, marker_b})}.get(call_id, frozenset())
+        auditor._assert_model_saw_current_sources(events)
+    finally:
+        await auditor.client.close()
+
+
+@pytest.mark.asyncio
+async def test_model_source_audit_ignores_no_response_supersession(tmp_path: Path) -> None:
+    """A completed no-response supersession record requires no marker."""
+    ledger_path = tmp_path / "general_responded.json"
+    marker_a = _source_marker("op:1", ORIGINAL_REVISION)
+    auditor = _model_source_auditor(
+        ledger_path=ledger_path,
+        expected_sources={"$a": "op:1"},
+        source_current_markers={"$a": marker_a},
+        # No call ever observed this source; the empty map would fail a
+        # response-backed record, but a no-response record must not require one.
+        observed={},
+    )
+    try:
+        superseded = TurnRecord(source_event_ids=("$a",), response_event_id=None, completed=True)
+        _write_ledger(ledger_path, {"$a": superseded})
+        auditor._assert_model_saw_current_sources({})
+    finally:
+        await auditor.client.close()
