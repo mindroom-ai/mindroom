@@ -21,6 +21,10 @@ if TYPE_CHECKING:
     from mindroom.matrix.message_content import SidecarHydrationBatch
 
 _VISIBLE_ROOM_MESSAGE_EVENT_TYPES = (nio.RoomMessageText, nio.RoomMessageNotice)
+type _LatestThreadEditsByOriginalEventId = dict[
+    str,
+    dict[str, tuple[nio.RoomMessageText | nio.RoomMessageNotice, str | None]],
+]
 
 
 @dataclass(slots=True)
@@ -368,20 +372,21 @@ def record_latest_thread_edit(
     event: nio.RoomMessageText | nio.RoomMessageNotice,
     *,
     event_info: EventInfo,
-    latest_edits_by_original_event_id: dict[str, tuple[nio.RoomMessageText | nio.RoomMessageNotice, str | None]],
+    latest_edits_by_original_event_id: _LatestThreadEditsByOriginalEventId,
 ) -> bool:
-    """Track latest edit candidate, returning True if event is an edit."""
+    """Track each sender's latest edit candidate, returning True if event is an edit."""
     if not (event_info.is_edit and event_info.original_event_id):
         return False
 
     original_event_id = event_info.original_event_id
-    current_latest_edit_data = latest_edits_by_original_event_id.get(original_event_id)
+    latest_edits_by_sender = latest_edits_by_original_event_id.setdefault(original_event_id, {})
+    current_latest_edit_data = latest_edits_by_sender.get(event.sender)
     current_latest_edit = current_latest_edit_data[0] if current_latest_edit_data else None
     if current_latest_edit is None or (event.server_timestamp, event.event_id) > (
         current_latest_edit.server_timestamp,
         current_latest_edit.event_id,
     ):
-        latest_edits_by_original_event_id[original_event_id] = (event, event_info.thread_id_from_edit)
+        latest_edits_by_sender[event.sender] = (event, event_info.thread_id_from_edit)
     return True
 
 
@@ -389,7 +394,8 @@ async def apply_latest_edits_to_messages(
     client: nio.AsyncClient,
     *,
     messages_by_event_id: dict[str, ResolvedVisibleMessage],
-    latest_edits_by_original_event_id: dict[str, tuple[nio.RoomMessageText | nio.RoomMessageNotice, str | None]],
+    latest_edits_by_original_event_id: _LatestThreadEditsByOriginalEventId,
+    known_event_senders_by_event_id: Mapping[str, str] | None = None,
     required_thread_id: str | None = None,
     event_cache: ConversationEventCache | None = None,
     room_id: str | None = None,
@@ -398,8 +404,24 @@ async def apply_latest_edits_to_messages(
     trusted_sender_ids: Collection[str] = (),
 ) -> None:
     """Apply latest edits to message records and synthesize missing originals when allowed."""
-    for original_event_id, (edit_event, edit_thread_id) in latest_edits_by_original_event_id.items():
+    for original_event_id, latest_edits_by_sender in latest_edits_by_original_event_id.items():
         existing_message = messages_by_event_id.get(original_event_id)
+        if existing_message is not None:
+            original_sender = existing_message.sender
+        elif known_event_senders_by_event_id is not None:
+            original_sender = known_event_senders_by_event_id.get(original_event_id)
+        else:
+            original_sender = None
+        if original_sender is None:
+            edit_event, edit_thread_id = max(
+                latest_edits_by_sender.values(),
+                key=lambda edit_data: (edit_data[0].server_timestamp, edit_data[0].event_id),
+            )
+        else:
+            latest_edit_data = latest_edits_by_sender.get(original_sender)
+            if latest_edit_data is None:
+                continue
+            edit_event, edit_thread_id = latest_edit_data
 
         # Ignore missing originals unrelated to this thread before resolving
         # potentially large edit payloads from sidecar storage.
@@ -450,7 +472,10 @@ async def resolve_latest_visible_messages(
 ) -> dict[str, ResolvedVisibleMessage]:
     """Resolve the latest visible message state by original event ID for a set of message events."""
     messages_by_event_id: dict[str, ResolvedVisibleMessage] = {}
-    latest_edits_by_original_event_id: dict[str, tuple[nio.RoomMessageText | nio.RoomMessageNotice, str | None]] = {}
+    latest_edits_by_original_event_id: _LatestThreadEditsByOriginalEventId = {}
+    known_event_senders_by_event_id = {
+        event.event_id: event.sender for event in events if sender is None or event.sender == sender
+    }
 
     for event in events:
         if sender is not None and event.sender != sender:
@@ -482,6 +507,7 @@ async def resolve_latest_visible_messages(
         client,
         messages_by_event_id=messages_by_event_id,
         latest_edits_by_original_event_id=latest_edits_by_original_event_id,
+        known_event_senders_by_event_id=known_event_senders_by_event_id,
         trusted_sender_ids=trusted_sender_ids,
     )
     return messages_by_event_id
