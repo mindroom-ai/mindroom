@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from typing import TYPE_CHECKING, Any
 
 from .event_cache_events import (
@@ -19,6 +18,7 @@ from .event_cache_events import (
     serialize_cacheable_events,
     validated_cached_edit_row,
     validated_cached_event_payload,
+    validated_cached_event_payloads,
 )
 from .postgres_cursor import fetchall, fetchone, rowcount
 
@@ -95,7 +95,7 @@ async def load_event(
     row = await fetchone(
         db,
         """
-        SELECT event_json
+        SELECT event_json, origin_server_ts
         FROM mindroom_event_cache_events
         WHERE namespace = %s AND room_id = %s AND event_id = %s
         """,
@@ -107,6 +107,7 @@ async def load_event(
         else validated_cached_event_payload(
             row[0],
             event_id,
+            int(row[1]),
             room_id=room_id,
         )
     )
@@ -127,18 +128,24 @@ async def load_recent_room_events(
     rows = await fetchall(
         db,
         """
-        SELECT event_json
+        SELECT event_json, event_id, origin_server_ts
         FROM mindroom_event_cache_events
         WHERE namespace = %s
             AND room_id = %s
             AND origin_server_ts >= %s
+            AND event_json::jsonb ->> 'event_id' = event_id
+            AND event_json::jsonb -> 'origin_server_ts' = to_jsonb(origin_server_ts)
             AND event_json::jsonb ->> 'type' = %s
+            AND (
+                NOT (event_json::jsonb ? 'room_id')
+                OR event_json::jsonb ->> 'room_id' = room_id
+            )
         ORDER BY origin_server_ts DESC, write_seq DESC
         LIMIT %s
         """,
         (namespace, room_id, since_ts_ms, event_type, limit),
     )
-    return [json.loads(row[0]) for row in rows]
+    return validated_cached_event_payloads(rows, room_id=room_id)
 
 
 async def load_latest_edit(

@@ -708,6 +708,73 @@ async def test_room_scope_returns_latest_by_origin_server_ts_not_cached_at(
 
 
 @pytest.mark.asyncio
+async def test_thread_scope_uses_authoritative_event_timestamp_after_point_update(
+    event_cache_factory: Callable[[], ConversationEventCache],
+) -> None:
+    """A stale thread-index timestamp cannot keep an older event first."""
+    cache = event_cache_factory()
+    await cache.initialize()
+    try:
+        newest = _message_event(
+            event_id="$newest",
+            sender="@agent:localhost",
+            body="Initially newest",
+            origin_server_ts=4000,
+            relates_to={"rel_type": "m.thread", "event_id": "$thread-root"},
+        )
+        older = _message_event(
+            event_id="$older",
+            sender="@agent:localhost",
+            body="Actually newest",
+            origin_server_ts=3000,
+            relates_to={"rel_type": "m.thread", "event_id": "$thread-root"},
+        )
+        await _replace_thread(
+            cache,
+            "!room:localhost",
+            "$thread-root",
+            [
+                _message_event(
+                    event_id="$thread-root",
+                    sender="@user:localhost",
+                    body="Question",
+                    origin_server_ts=500,
+                ),
+                newest,
+                older,
+            ],
+            validated_at=1000.0,
+        )
+        await cache.store_event(
+            "$newest",
+            "!room:localhost",
+            {
+                **newest,
+                "origin_server_ts": 1000,
+            },
+        )
+    finally:
+        await cache.close()
+
+    snapshot = await _read_snapshot(
+        event_cache_factory,
+        room_id="!room:localhost",
+        thread_id="$thread-root",
+        sender="@agent:localhost",
+        runtime_started_at=0.0,
+    )
+
+    assert snapshot == AgentMessageSnapshot(
+        content={
+            "body": "Actually newest",
+            "msgtype": "m.text",
+            "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread-root"},
+        },
+        origin_server_ts=3000,
+    )
+
+
+@pytest.mark.asyncio
 async def test_room_scope_preserves_cache_insert_order_for_same_timestamp_messages(
     event_cache_factory: Callable[[], ConversationEventCache],
 ) -> None:

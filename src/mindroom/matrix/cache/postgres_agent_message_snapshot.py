@@ -75,11 +75,11 @@ async def _iter_scope_events(
     namespace: str,
     room_id: str,
     thread_id: str | None,
-) -> AsyncCursor[tuple[str, float | None, str]]:
+) -> AsyncCursor[tuple[str, float | None, str, int]]:
     if thread_id is not None:
         return await db.execute(
             """
-            SELECT events.event_json, events.cached_at, events.event_id
+            SELECT events.event_json, events.cached_at, events.event_id, events.origin_server_ts
             FROM mindroom_event_cache_thread_events AS thread_events
             JOIN mindroom_event_cache_events AS events
                 ON events.namespace = thread_events.namespace
@@ -88,13 +88,13 @@ async def _iter_scope_events(
             WHERE thread_events.namespace = %s
                 AND thread_events.room_id = %s
                 AND thread_events.thread_id = %s
-            ORDER BY thread_events.origin_server_ts DESC, thread_events.write_seq DESC
+            ORDER BY events.origin_server_ts DESC, thread_events.write_seq DESC
             """,
             (namespace, room_id, thread_id),
         )
     return await db.execute(
         """
-        SELECT event_json, cached_at, event_id
+        SELECT event_json, cached_at, event_id, origin_server_ts
         FROM mindroom_event_cache_events
         WHERE namespace = %s AND room_id = %s
         ORDER BY origin_server_ts DESC, write_seq DESC
@@ -127,6 +127,7 @@ async def _load_scope_snapshot(
             if not event_matches_snapshot_scope(
                 event,
                 indexed_event_id=row[2],
+                indexed_origin_server_ts=int(row[3]),
                 room_id=room_id,
                 thread_id=thread_id,
                 sender=sender,

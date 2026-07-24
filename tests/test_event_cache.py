@@ -3426,6 +3426,53 @@ async def test_store_events_batch_records_thread_root_self_mapping_from_explicit
 
 
 @pytest.mark.asyncio
+async def test_store_event_prevents_payload_id_from_retargeting_existing_indexes(
+    event_cache: ConversationEventCache,
+) -> None:
+    """A contradictory payload ID cannot overwrite another event's edit index."""
+    legitimate_edit = {
+        "event_id": "$legitimate",
+        "sender": "@agent:localhost",
+        "origin_server_ts": 2000,
+        "type": "m.room.message",
+        "content": {
+            "body": "* Legitimate",
+            "msgtype": "m.text",
+            "m.new_content": {"body": "Legitimate", "msgtype": "m.text"},
+            "m.relates_to": {"rel_type": "m.replace", "event_id": "$original"},
+        },
+    }
+    contradictory_payload = {
+        **legitimate_edit,
+        "content": {
+            **legitimate_edit["content"],
+            "m.relates_to": {"rel_type": "m.replace", "event_id": "$other"},
+        },
+    }
+
+    await event_cache.store_event("$legitimate", "!room:localhost", legitimate_edit)
+    await event_cache.store_event("$poison", "!room:localhost", contradictory_payload)
+
+    original_edit = await event_cache.get_latest_edit(
+        "!room:localhost",
+        "$original",
+        sender="@agent:localhost",
+        event_type="m.room.message",
+    )
+    other_edit = await event_cache.get_latest_edit(
+        "!room:localhost",
+        "$other",
+        sender="@agent:localhost",
+        event_type="m.room.message",
+    )
+
+    assert original_edit is not None
+    assert original_edit["event_id"] == "$legitimate"
+    assert other_edit is not None
+    assert other_edit["event_id"] == "$poison"
+
+
+@pytest.mark.asyncio
 async def test_store_events_batch_rolls_back_on_index_derivation_failure(
     event_cache: ConversationEventCache,
 ) -> None:

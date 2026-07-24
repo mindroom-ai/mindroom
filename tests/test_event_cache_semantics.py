@@ -9,6 +9,7 @@ import pytest
 
 from mindroom.matrix.cache import ThreadRevision
 from mindroom.matrix.cache.event_cache_events import validated_cached_edit_row
+from mindroom.matrix.cache.event_normalization import normalize_event_source_for_cache
 from mindroom.matrix.cache.thread_cache_state import thread_cache_state_row, thread_revision_row
 from mindroom.matrix.event_info import room_message_content_is_renderable
 
@@ -92,6 +93,17 @@ def test_validated_cached_edit_row_rejects_index_timestamp_mismatch() -> None:
             event_type="m.room.message",
         )
         is None
+    )
+
+
+def test_cache_normalization_uses_authoritative_event_id() -> None:
+    """A cache lookup key must override contradictory payload identity."""
+    assert (
+        normalize_event_source_for_cache(
+            {"event_id": "$payload"},
+            event_id="$indexed",
+        )["event_id"]
+        == "$indexed"
     )
 
 

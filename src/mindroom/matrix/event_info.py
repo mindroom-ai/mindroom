@@ -35,12 +35,17 @@ def event_source_matches_room(event_source: Mapping[str, object], room_id: str) 
 def event_source_matches_index(
     event_source: Mapping[str, object],
     indexed_event_id: str,
+    indexed_origin_server_ts: int,
     room_id: str,
 ) -> bool:
     """Return whether one cached payload matches its authoritative index scope."""
+    timestamp = event_source.get("origin_server_ts")
     return (
         bool(indexed_event_id)
         and event_source.get("event_id") == indexed_event_id
+        and isinstance(timestamp, int)
+        and not isinstance(timestamp, bool)
+        and timestamp == indexed_origin_server_ts
         and event_source_matches_room(
             event_source,
             room_id,

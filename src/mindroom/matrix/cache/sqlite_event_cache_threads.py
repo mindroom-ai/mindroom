@@ -32,6 +32,7 @@ from .event_cache_events import (
     event_id_for_cache,
     serialize_cacheable_events,
     serialize_cached_event,
+    validated_cached_event_payloads,
 )
 from .event_normalization import normalize_event_source_for_cache
 from .sqlite_event_cache_events import (
@@ -69,7 +70,7 @@ async def load_thread_events(
     """Return cached events for one thread sorted by timestamp."""
     cursor = await db.execute(
         """
-        SELECT thread_events.origin_server_ts, thread_events.write_seq, events.event_json
+        SELECT events.event_json, events.event_id, events.origin_server_ts
         FROM thread_events
         JOIN events
             ON events.principal_id = thread_events.principal_id
@@ -78,7 +79,7 @@ async def load_thread_events(
         WHERE thread_events.principal_id = ?
             AND thread_events.room_id = ?
             AND thread_events.thread_id = ?
-        ORDER BY thread_events.origin_server_ts ASC, thread_events.write_seq ASC
+        ORDER BY events.origin_server_ts ASC, thread_events.write_seq ASC
         """,
         (principal_id, room_id, thread_id),
     )
@@ -86,7 +87,7 @@ async def load_thread_events(
     await cursor.close()
     if not rows:
         return None
-    return [json.loads(row[2]) for row in rows]
+    return validated_cached_event_payloads(rows, room_id=room_id)
 
 
 async def load_thread_events_written_between(
@@ -103,7 +104,7 @@ async def load_thread_events_written_between(
     """Return cached thread events changed in bounded durable revision intervals."""
     cursor = await db.execute(
         """
-        SELECT thread_events.origin_server_ts, thread_events.write_seq, events.event_json
+        SELECT events.event_json, events.event_id, events.origin_server_ts
         FROM thread_events
         JOIN events
             ON events.principal_id = thread_events.principal_id
@@ -116,7 +117,7 @@ async def load_thread_events_written_between(
                 (events.write_seq > ? AND events.write_seq <= ?)
                 OR (thread_events.write_seq > ? AND thread_events.write_seq <= ?)
             )
-        ORDER BY thread_events.origin_server_ts ASC, thread_events.write_seq ASC
+        ORDER BY events.origin_server_ts ASC, thread_events.write_seq ASC
         """,
         (
             principal_id,
@@ -130,7 +131,7 @@ async def load_thread_events_written_between(
     )
     rows = await cursor.fetchall()
     await cursor.close()
-    return [json.loads(row[2]) for row in rows]
+    return validated_cached_event_payloads(rows, room_id=room_id)
 
 
 async def load_thread_revision(
@@ -147,7 +148,7 @@ async def load_thread_revision(
             COUNT(*),
             MAX(events.write_seq),
             MAX(thread_events.write_seq),
-            MAX(thread_events.origin_server_ts)
+            MAX(events.origin_server_ts)
         FROM thread_events
         JOIN events
             ON events.principal_id = thread_events.principal_id

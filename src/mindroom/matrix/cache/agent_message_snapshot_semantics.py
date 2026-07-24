@@ -47,6 +47,7 @@ def event_matches_snapshot_scope(
     event: dict[str, Any],
     *,
     indexed_event_id: str,
+    indexed_origin_server_ts: int,
     room_id: str,
     thread_id: str | None,
     sender: str,
@@ -57,7 +58,12 @@ def event_matches_snapshot_scope(
         event.get("type") != "m.room.message"
         or event.get("sender") != sender
         or event_source_is_state_event(event)
-        or not event_source_matches_index(event, indexed_event_id, room_id)
+        or not event_source_matches_index(
+            event,
+            indexed_event_id,
+            indexed_origin_server_ts,
+            room_id,
+        )
         or not isinstance(content, Mapping)
         or not room_message_content_is_renderable(content)
     ):

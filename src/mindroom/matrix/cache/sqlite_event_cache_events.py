@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from typing import TYPE_CHECKING, Any
 
 from .event_cache_events import (
@@ -19,6 +18,7 @@ from .event_cache_events import (
     serialize_cacheable_events,
     validated_cached_edit_row,
     validated_cached_event_payload,
+    validated_cached_event_payloads,
 )
 
 if TYPE_CHECKING:
@@ -93,7 +93,7 @@ async def load_event(
     """Return one event only from its principal and room."""
     cursor = await db.execute(
         """
-        SELECT event_json
+        SELECT event_json, origin_server_ts
         FROM events
         WHERE principal_id = ? AND room_id = ? AND event_id = ?
         """,
@@ -107,6 +107,7 @@ async def load_event(
         else validated_cached_event_payload(
             row[0],
             event_id,
+            int(row[1]),
             room_id=room_id,
         )
     )
@@ -126,12 +127,20 @@ async def load_recent_room_events(
         return []
     cursor = await db.execute(
         """
-        SELECT event_json
+        SELECT event_json, event_id, origin_server_ts
         FROM events
         WHERE principal_id = ?
             AND room_id = ?
             AND origin_server_ts >= ?
+            AND json_type(event_json, '$.event_id') = 'text'
+            AND json_extract(event_json, '$.event_id') = event_id
+            AND json_type(event_json, '$.origin_server_ts') = 'integer'
+            AND json_extract(event_json, '$.origin_server_ts') = origin_server_ts
             AND json_extract(event_json, '$.type') = ?
+            AND (
+                json_type(event_json, '$.room_id') IS NULL
+                OR json_extract(event_json, '$.room_id') = room_id
+            )
         ORDER BY origin_server_ts DESC, write_seq DESC
         LIMIT ?
         """,
@@ -139,7 +148,7 @@ async def load_recent_room_events(
     )
     rows = await cursor.fetchall()
     await cursor.close()
-    return [json.loads(row[0]) for row in rows]
+    return validated_cached_event_payloads(rows, room_id=room_id)
 
 
 async def load_latest_edit(

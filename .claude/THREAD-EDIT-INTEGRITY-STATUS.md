@@ -30,6 +30,11 @@
 
 - Strict Matrix encrypted-file v2/JWK validation now rejects malformed newest replacements across shared selection, with focused full, SQLite, and pure-validator tests passing.
 - Bundled and cached self-replacements are now rejected.
+- Cache storage now makes the API event ID authoritative, and derived edit/thread indexes use the serialized index identity.
+- Point, recent-room, full-thread, suffix-thread, and snapshot reads now validate payload ID and timestamp against authoritative event rows.
+- Thread reads and snapshots order by the authoritative event-row timestamp instead of stale duplicated membership timestamps.
+- Focused cache contracts, SQLite snapshots, recent reads, edit lookups, and durable thread-cache reuse pass; PostgreSQL execution remains resource-gated.
+- Current source diff is `+806/-372`, net `+434` against `origin/main`.
 - Add deterministic full-resolution, point, snapshot, recent-room, SQLite, and PostgreSQL regressions at the owning seams.
 - Keep full correctness validation in shared Python helpers and use only narrow SQL sender/type prefilters for bounded edit lookup.
 - Re-run exact failed files, owning cache suites, full pytest, Tach, and all-file pre-commit under resource ownership.
