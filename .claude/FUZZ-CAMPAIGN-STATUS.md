@@ -9,7 +9,7 @@ Last updated: 2026-07-24 (campaign-wide exact-head refresh; no active PR is merg
 ## CAMPAIGN-WIDE CURRENT STATE
 
 - Canonical gate ledger: `/Users/bas.nijholt/.codex/campaigns/mindroom-fuzz-2026-07-24/MERGE-GATES.md`.
-- MindRoom #1639: stable code head `5646c1173`; later branch commits only update this living document; exact PR tip is recorded externally in `MERGE-GATES.md`; implementation frozen; all three gates pending.
+- MindRoom #1639: real-Tuwunel live gate at `eb1c181c2` (code head `5646c1173`) was executed — ❌ FAIL (4/4 runs). Post-gate triage: 2 of 3 O3 audit failures are HARNESS false positives (now fixed), 1 (`root:3`) is a REAL pre-existing-on-main EditRegenerator newest-wins race (fix in progress, task #16), plus a saturation sync-delivery timeout (Bug C). Implementation is NO LONGER frozen: this session is fixing accepted Codex + live-gate root causes, which invalidates all prior gates. New head advancing (`4b0e5c1f5` O3 edit-redaction fix, `66ddeab77` alias-collision fix); all three gates must restart on the final head once fixes land.
 - MindRoom #1640: head `6427d9288`; paused with nine exact-head review blockers and dependency on corrected mindroom-nio recovery.
 - MindRoom #1641: head `bf7a963dc` rejected by fresh Codex review because cache SQL lets newer `m.new_content={}` mask an older valid edit; Fable review still running; live gate stopped; root fix active.
 - mindroom-nio #20: head `af585b42`; CI green but rejected by fresh Codex reviews for recovery/multi-room/store/migration/fanout/journal blockers; Fable review still running; live gate pending.
@@ -33,7 +33,9 @@ Last updated: 2026-07-24 (campaign-wide exact-head refresh; no active PR is merg
 5. ce323 batch N1+N2 (`e8e47fc17`).
 6. Oracle batch O1/O4/O6/O3/O5 by subagent (`80f395c10`, `85cad87cf`, `37e6f8f9e`, `7a32ba71e`, `e8b792eb4`); O2 refuted (Matrix v1.19 tie-break; regression added, behavior unchanged); ty cleanup (`5646c1173`).
 
-Known deferred follow-ups (NOT #1639 gates): D2 in-flight-edit discard (pre-existing, own PR); harness_resources_v2.md full lifecycle hardening (O5 deviation 1, flagged by the oracle subagent); cache-SQL `write_seq` ordering fuzz (fuzz_reactions_edits_design.md); plugin-install and shell-supervisor test-robustness flakes.
+Known deferred follow-ups (NOT #1639 gates): harness_resources_v2.md full lifecycle hardening (O5 deviation 1, flagged by the oracle subagent); cache-SQL `write_seq` ordering fuzz (fuzz_reactions_edits_design.md); plugin-install and shell-supervisor test-robustness flakes.
+
+7. Live-gate triage + Codex-eb1 fix batch (2026-07-24, this session). Executed the real-Tuwunel live gate at `eb1c181c2` → ❌ FAIL. Corrected classification (verified against retained bundles under `pr1639_eb1_evidence/`): `root:41` (seed 4) and `root:44` (seed 7) are BOTH harness O3 false positives of two distinct shapes — redacted **source** vs redacted **edit event**; `root:3` (seed 4) is a REAL pre-existing EditRegenerator newest-wins race. Commits: `a492d2946` (provenance nio dist name + module-scope import, Codex #10), `4b0e5c1f5` (O3 oracle: replay_source_event_ids + per-source revision stack for edit-event redaction, closes both false positives), `66ddeab77` (alias-claim collision, Codex #1). Remaining accepted work: EditRegenerator newest-wins race (root:3, own product fix), Codex #2-#5/#7/#8. Then restart all three gates on the final head.
 
 ## Historical fresh-session TL;DR (superseded by campaign-wide current state)
 
