@@ -172,7 +172,7 @@ def test_public_static_site_returns_404_after_revocation(test_client: TestClient
     """Revoking a static site should disable the index and every asset."""
     slug, storage_root = _publish_static_site(test_client)
     runtime_paths = main._app_runtime_paths(test_client.app)
-    ReportPublishingStore(runtime_paths.storage_root).revoke_public_report(slug, revoked_by="@alice:example.org")
+    ReportPublishingStore(runtime_paths.storage_root).revoke_report(slug, revoked_by="@alice:example.org")
 
     index_response = test_client.get(f"/reports/public/{slug}/")
     script_response = test_client.get(f"/reports/public/{slug}/app.js")
@@ -212,7 +212,7 @@ def test_public_report_returns_404_after_revocation(test_client: TestClient) -> 
     """Revoked public report URLs should stop serving the underlying artifact."""
     slug, storage_root = _publish_public_report(test_client)
     runtime_paths = main._app_runtime_paths(test_client.app)
-    ReportPublishingStore(runtime_paths.storage_root).revoke_public_report(slug, revoked_by="@alice:example.org")
+    ReportPublishingStore(runtime_paths.storage_root).revoke_report(slug, revoked_by="@alice:example.org")
 
     response = test_client.get(f"/reports/public/{slug}")
 

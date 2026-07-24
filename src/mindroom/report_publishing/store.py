@@ -134,10 +134,6 @@ class ReportPublishingStore:
         write_json_file_durable(report_path, payload, indent=2, sort_keys=True, trailing_newline=True)
         return report
 
-    def get_public_report(self, slug: str, *, include_revoked: bool = False) -> PublishedReport:
-        """Load one report record through the backwards-compatible store API."""
-        return self.get_report(slug, include_revoked=include_revoked)
-
     def get_report(self, slug: str, *, include_revoked: bool = False) -> PublishedReport:
         """Load one report publication."""
         report = _published_report_from_json(_load_json_mapping(self._public_report_path(slug)))
@@ -168,10 +164,6 @@ class ReportPublishingStore:
             msg = f"Public report '{report.slug}' artifact was not found."
             raise ReportPublishingError(msg)
         return report_path
-
-    def revoke_public_report(self, slug: str, *, revoked_by: str) -> PublishedReport:
-        """Revoke one report through the backwards-compatible store API."""
-        return self.revoke_report(slug, revoked_by=revoked_by)
 
     def revoke_report(self, slug: str, *, revoked_by: str) -> PublishedReport:
         """Revoke one report without deleting its underlying artifact."""
@@ -296,9 +288,24 @@ def _report_url(
 ) -> str | None:
     if base_url is None or not base_url.strip():
         return None
+    route_path = report_route_path(
+        slug,
+        access_policy=access_policy,
+        trailing_slash=artifact_kind == ARTIFACT_KIND_STATIC_SITE,
+    )
+    return f"{base_url.rstrip('/')}{route_path}"
+
+
+def report_route_path(
+    slug: str,
+    *,
+    access_policy: ReportAccessPolicy,
+    trailing_slash: bool,
+) -> str:
+    """Return the browser route for one published report."""
     route = "public" if access_policy is ReportAccessPolicy.PUBLIC else "room"
-    suffix = f"/reports/{route}/{slug}/" if artifact_kind == ARTIFACT_KIND_STATIC_SITE else f"/reports/{route}/{slug}"
-    return f"{base_url.rstrip('/')}{suffix}"
+    suffix = "/" if trailing_slash else ""
+    return f"/reports/{route}/{slug}{suffix}"
 
 
 def _validate_publication_metadata(

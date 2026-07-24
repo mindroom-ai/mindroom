@@ -862,10 +862,6 @@ async def verify_user(
 
 async def verify_report_viewer(request: Request) -> dict[str, Any]:
     """Authenticate a browser report viewer without dashboard or API-key policy."""
-    existing = request.scope.get("auth_user")
-    if isinstance(existing, dict) and existing.get("auth_source") == "trusted_upstream":
-        return cast("dict[str, Any]", existing)
-
     snapshot = _bind_authenticated_request_snapshot(request)
     auth_state = cast("ApiAuthState", snapshot.auth_state)
     trusted_auth_user = await _trusted_upstream_auth_user(

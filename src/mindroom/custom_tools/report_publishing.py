@@ -26,6 +26,7 @@ from mindroom.report_publishing.store import (
     PublishedReport,
     ReportPublishingError,
     ReportPublishingStore,
+    report_route_path,
 )
 from mindroom.report_viewer_auth import report_viewer_auth_configuration_error
 from mindroom.runtime_resolution import resolve_agent_runtime
@@ -148,18 +149,26 @@ class ReportPublishingTools(Toolkit):
             if report.access_policy is ReportAccessPolicy.PUBLIC
             else "Access is limited to authenticated Matrix users currently joined to the origin room."
         )
+        report_path = _report_path_for_report(report)
+        legacy_public_fields = (
+            {
+                "public_url": report.public_url,
+                "public_path": report_path,
+            }
+            if report.access_policy is ReportAccessPolicy.PUBLIC
+            else {}
+        )
         return self._payload(
             "ok",
             source_type=report.source_type,
             source=report.source,
             slug=report.slug,
             access_policy=report.access_policy.value,
-            public_url=report.public_url,
-            public_path=_report_path_for_report(report),
             report_url=report.public_url,
-            report_path=_report_path_for_report(report),
+            report_path=report_path,
             message=access_message,
             published_at=report.published_at,
+            **legacy_public_fields,
         )
 
     def revoke_public_report(self, slug: str) -> str:
@@ -361,9 +370,11 @@ def _report_path_for_report(report: PublishedReport) -> str:
         public_path = urlsplit(report.public_url).path
         if public_path:
             return public_path
-    suffix = "/" if report.is_static_site else ""
-    route = "public" if report.access_policy is ReportAccessPolicy.PUBLIC else "room"
-    return f"/reports/{route}/{report.slug}{suffix}"
+    return report_route_path(
+        report.slug,
+        access_policy=report.access_policy,
+        trailing_slash=report.is_static_site,
+    )
 
 
 def _reject_unsupported_source_fields(

@@ -55,7 +55,9 @@ class _OriginRoomReportAuthorizer:
         ):
             return ReportAuthorizationDecision(ReportAuthorizationReason.MALFORMED_REPORT)
 
+        origin_room_id = report.origin_room_id
         publisher_entity_name = report.publisher_entity_name
+        publisher_matrix_user_id = report.publisher_matrix_user_id
         try:
             expected_publisher_id = (
                 entity_identity_registry(
@@ -75,24 +77,24 @@ class _OriginRoomReportAuthorizer:
         if publisher_bot is None or publisher_bot.client is None or not publisher_bot.running:
             return ReportAuthorizationDecision(ReportAuthorizationReason.AUTHORIZATION_BACKEND_UNAVAILABLE)
         if (
-            expected_publisher_id != report.publisher_matrix_user_id
-            or publisher_bot.matrix_id.full_id != report.publisher_matrix_user_id
+            expected_publisher_id != publisher_matrix_user_id
+            or publisher_bot.matrix_id.full_id != publisher_matrix_user_id
         ):
             return ReportAuthorizationDecision(ReportAuthorizationReason.PUBLISHER_IDENTITY_MISMATCH)
 
         key = OriginRoomAuthorizationKey(
-            origin_room_id=report.origin_room_id,
+            origin_room_id=origin_room_id,
             viewer_matrix_user_id=viewer_matrix_user_id,
             publisher_entity_name=publisher_entity_name,
-            publisher_matrix_user_id=report.publisher_matrix_user_id,
+            publisher_matrix_user_id=publisher_matrix_user_id,
         )
         return await self.cache.authorize(
             key,
             lambda: self._authorize_membership(
                 publisher_bot,
-                origin_room_id=report.origin_room_id or "",
+                origin_room_id=origin_room_id,
                 viewer_matrix_user_id=viewer_matrix_user_id,
-                publisher_matrix_user_id=report.publisher_matrix_user_id or "",
+                publisher_matrix_user_id=publisher_matrix_user_id,
             ),
         )
 

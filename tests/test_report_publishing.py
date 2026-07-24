@@ -170,9 +170,9 @@ def test_report_publishing_store_creates_revocable_public_link(tmp_path: Path) -
         published_by="@alice:localhost",
         base_url="https://acme.mindroom.chat",
     )
-    loaded = store.get_public_report(report.slug)
-    html_path = store.report_asset_path(store.get_public_report(report.slug))
-    revoked = store.revoke_public_report(report.slug, revoked_by="@alice:localhost")
+    loaded = store.get_report(report.slug)
+    html_path = store.report_asset_path(store.get_report(report.slug))
+    revoked = store.revoke_report(report.slug, revoked_by="@alice:localhost")
 
     assert report.slug.startswith("pub_")
     assert report.public_url == f"https://acme.mindroom.chat/reports/public/{report.slug}"
@@ -181,7 +181,7 @@ def test_report_publishing_store_creates_revocable_public_link(tmp_path: Path) -
     assert html_path == report_path
     assert revoked.revoked_at is not None
     with pytest.raises(ReportPublishingError, match="revoked"):
-        store.report_asset_path(store.get_public_report(report.slug))
+        store.report_asset_path(store.get_report(report.slug))
 
 
 def test_report_publishing_store_round_trips_origin_room_metadata(tmp_path: Path) -> None:
@@ -353,7 +353,7 @@ def test_report_publishing_store_rejects_serve_time_symlink_escape(tmp_path: Pat
     report_path.symlink_to(outside_path)
 
     with pytest.raises(ReportPublishingError, match="artifact path is invalid"):
-        store.report_asset_path(store.get_public_report(report.slug))
+        store.report_asset_path(store.get_report(report.slug))
 
 
 def test_report_publishing_store_creates_static_site_snapshot(tmp_path: Path) -> None:
@@ -383,8 +383,8 @@ def test_report_publishing_store_creates_static_site_snapshot(tmp_path: Path) ->
     )
     (source_dir / "index.html").write_text("<!doctype html>changed", encoding="utf-8")
 
-    index_path = store.report_asset_path(store.get_public_report(report.slug))
-    script_path = store.report_asset_path(store.get_public_report(report.slug), "app.js")
+    index_path = store.report_asset_path(store.get_report(report.slug))
+    script_path = store.report_asset_path(store.get_report(report.slug), "app.js")
 
     assert report.artifact_kind == "static_site"
     assert report.public_url == f"https://mindroom.lab.mindroom.chat/reports/public/{report.slug}/"
@@ -414,7 +414,7 @@ def test_report_publishing_store_creates_single_page_snapshot(tmp_path: Path) ->
         base_url="https://mindroom.lab.mindroom.chat",
     )
 
-    index_path = store.report_asset_path(store.get_public_report(report.slug))
+    index_path = store.report_asset_path(store.get_report(report.slug))
     assert index_path.name == "index.html"
     assert index_path.read_text(encoding="utf-8") == "<!doctype html><h1>Single Page</h1>"
 
@@ -570,7 +570,7 @@ def test_report_publishing_store_rejects_static_site_asset_traversal(tmp_path: P
     )
 
     with pytest.raises(ReportPublishingError, match="asset path is invalid"):
-        store.report_asset_path(store.get_public_report(report.slug), "../index.html")
+        store.report_asset_path(store.get_report(report.slug), "../index.html")
 
 
 def test_report_publishing_tool_publishes_dynamic_workflow_run_report(tmp_path: Path) -> None:
@@ -609,8 +609,10 @@ def test_report_publishing_tool_publishes_dynamic_workflow_run_report(tmp_path: 
         "run_id": run["run_id"],
         "scope": "agent",
     }
-    assert published["public_url"] == f"https://acme.mindroom.chat/mindroom/reports/public/{published['slug']}"
-    assert published["public_path"] == f"/mindroom/reports/public/{published['slug']}"
+    assert published["report_url"] == f"https://acme.mindroom.chat/mindroom/reports/public/{published['slug']}"
+    assert published["report_path"] == f"/mindroom/reports/public/{published['slug']}"
+    assert published["public_url"] == published["report_url"]
+    assert published["public_path"] == published["report_path"]
     assert revoked["status"] == "ok"
     assert revoked["revoked_at"] is not None
 
@@ -641,8 +643,8 @@ def test_report_publishing_tool_publishes_workspace_static_site(tmp_path: Path) 
     assert published["status"] == "ok"
     assert published["source_type"] == "static_site"
     assert published["source"] == {"path": "public-demo"}
-    assert published["public_url"] == f"https://mindroom.lab.mindroom.chat/reports/public/{published['slug']}/"
-    assert published["public_path"] == f"/reports/public/{published['slug']}/"
+    assert published["report_url"] == f"https://mindroom.lab.mindroom.chat/reports/public/{published['slug']}/"
+    assert published["report_path"] == f"/reports/public/{published['slug']}/"
 
 
 def test_report_publishing_tool_publishes_origin_room_from_trusted_context(tmp_path: Path) -> None:
@@ -679,8 +681,10 @@ def test_report_publishing_tool_publishes_origin_room_from_trusted_context(tmp_p
     )
     assert published["status"] == "ok"
     assert published["access_policy"] == "origin_room"
-    assert published["public_url"] == f"https://mindroom.example/reports/room/{published['slug']}/"
-    assert published["public_path"] == f"/reports/room/{published['slug']}/"
+    assert published["report_url"] == f"https://mindroom.example/reports/room/{published['slug']}/"
+    assert published["report_path"] == f"/reports/room/{published['slug']}/"
+    assert "public_url" not in published
+    assert "public_path" not in published
     assert "current" in published["message"]
     assert report.origin_room_id == "!room:localhost"
     assert report.publisher_entity_name == "general"
@@ -886,7 +890,7 @@ def test_report_publishing_tool_publishes_workspace_single_html_page(tmp_path: P
 
     assert published["status"] == "ok"
     assert published["source"] == {"path": "report.html"}
-    assert published["public_url"] == f"https://mindroom.lab.mindroom.chat/reports/public/{published['slug']}/"
+    assert published["report_url"] == f"https://mindroom.lab.mindroom.chat/reports/public/{published['slug']}/"
 
 
 def test_report_publishing_tool_requires_workspace_for_static_site(tmp_path: Path) -> None:

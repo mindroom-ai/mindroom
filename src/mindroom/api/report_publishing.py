@@ -84,7 +84,7 @@ def _public_report_asset_response(
     runtime_paths = api_runtime_paths(request)
     store = ReportPublishingStore(runtime_paths.storage_root)
     try:
-        report = store.get_public_report(slug)
+        report = store.get_report(slug)
     except ReportPublishingError as exc:
         raise HTTPException(status_code=404, detail=_PUBLIC_NOT_FOUND_DETAIL) from exc
     if report.access_policy is not ReportAccessPolicy.PUBLIC:
@@ -164,9 +164,11 @@ async def _origin_room_report_asset_response(
     if not decision.authorized:
         raise HTTPException(status_code=404, detail=_NOT_FOUND_DETAIL)
 
+    if report.is_static_site and redirect_static_site_to_slash:
+        # Relative-URL assets only resolve under the trailing-slash form,
+        # and a relative Location keeps any subpath proxy prefix intact.
+        return RedirectResponse(url=f"{slug}/", status_code=301)
     try:
-        if report.is_static_site and redirect_static_site_to_slash:
-            return RedirectResponse(url=f"{slug}/", status_code=301)
         report_path = store.report_asset_path(report, asset_path)
     except ReportPublishingError as exc:
         raise HTTPException(status_code=404, detail=_NOT_FOUND_DETAIL) from exc
