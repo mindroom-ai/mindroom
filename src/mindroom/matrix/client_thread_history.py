@@ -1647,12 +1647,10 @@ async def _group_scanned_sources_by_thread(
 
     edits_by_root: dict[str, list[dict[str, Any]]] = {}
     for original_event_id, edit_candidates in edit_candidates_by_original_event_id.items():
+        target_roots = {
+            root_id for root_id in (original_event_id, resolved_thread_ids.get(original_event_id)) if root_id in grouped
+        }
         for edit_event in edit_candidates:
-            target_roots = {
-                root_id
-                for root_id in (original_event_id, resolved_thread_ids.get(original_event_id))
-                if root_id in grouped
-            }
             for root_id in target_roots:
                 edits_by_root.setdefault(root_id, []).append(_event_source_for_cache(edit_event))
 

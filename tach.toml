@@ -3994,7 +3994,6 @@ expose = [
     "extract_visible_edit_body",
     "extract_visible_message",
     "message_preview",
-    "is_valid_bundled_replacement",
     "ordered_valid_bundled_replacements",
     "record_thread_edit_candidate",
     "replace_visible_message",
