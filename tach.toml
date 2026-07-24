@@ -3984,6 +3984,7 @@ from = ["mindroom.matrix.voice_message"]
 
 [[interfaces]]
 expose = [
+    "LatestThreadEditsByOriginalEventId",
     "ResolvedVisibleMessage",
     "apply_latest_edits_to_messages",
     "extract_visible_edit_body",

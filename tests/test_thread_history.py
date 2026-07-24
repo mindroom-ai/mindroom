@@ -32,6 +32,7 @@ from mindroom.matrix.client_thread_history import (
     _group_scanned_sources_by_thread,
     _resolve_thread_history_from_event_sources_timed,
 )
+from mindroom.matrix.client_visible_messages import resolve_latest_visible_messages
 from mindroom.matrix.conversation_cache import MatrixConversationCache
 from mindroom.matrix.membership_fence import UNCERTIFIED_MEMBERSHIP_EPOCH
 from mindroom.matrix.thread_diagnostics import (
@@ -1171,6 +1172,107 @@ class TestThreadHistory:
             ("$thread_root", "Root", "$thread_root"),
             ("$thread_message", "Alice update", "$alice_edit"),
         ]
+
+    @pytest.mark.asyncio
+    async def test_thread_resolution_selects_matching_thread_before_latest_unknown_sender_edit(self) -> None:
+        """Missing originals should recover from the latest edit belonging to the requested thread."""
+        root_event = self._make_text_event(
+            event_id="$thread_root",
+            sender="@alice:localhost",
+            body="Root",
+            server_timestamp=1000,
+            source_content={"body": "Root"},
+        )
+        matching_edit = self._make_text_event(
+            event_id="$matching_edit",
+            sender="@alice:localhost",
+            body="* Matching",
+            server_timestamp=3000,
+            source_content={
+                "body": "* Matching",
+                "m.new_content": {
+                    "body": "Matching",
+                    "m.relates_to": {
+                        "rel_type": "m.thread",
+                        "event_id": "$thread_root",
+                    },
+                },
+                "m.relates_to": {
+                    "rel_type": "m.replace",
+                    "event_id": "$missing_original",
+                },
+            },
+        )
+        newer_other_thread_edit = self._make_text_event(
+            event_id="$other_thread_edit",
+            sender="@mallory:localhost",
+            body="* Other",
+            server_timestamp=4000,
+            source_content={
+                "body": "* Other",
+                "m.new_content": {
+                    "body": "Other",
+                    "m.relates_to": {
+                        "rel_type": "m.thread",
+                        "event_id": "$other_thread",
+                    },
+                },
+                "m.relates_to": {
+                    "rel_type": "m.replace",
+                    "event_id": "$missing_original",
+                },
+            },
+        )
+
+        resolution = await _resolve_thread_history_from_event_sources_timed(
+            AsyncMock(),
+            room_id="!room:localhost",
+            thread_id="$thread_root",
+            event_sources=[
+                _event_source_for_cache(root_event),
+                _event_source_for_cache(matching_edit),
+                _event_source_for_cache(newer_other_thread_edit),
+            ],
+            event_cache=_event_cache(),
+        )
+
+        assert [(message.event_id, message.body, message.latest_event_id) for message in resolution.messages] == [
+            ("$thread_root", "Root", "$thread_root"),
+            ("$missing_original", "Matching", "$matching_edit"),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_sender_filtered_resolution_keeps_target_sender_evidence(self) -> None:
+        """Sender filtering must still reject edits targeting another sender's event."""
+        original_event = self._make_text_event(
+            event_id="$bob_original",
+            sender="@bob:localhost",
+            body="Bob",
+            server_timestamp=1000,
+            source_content={"body": "Bob"},
+        )
+        forged_edit = self._make_text_event(
+            event_id="$alice_forged_edit",
+            sender="@alice:localhost",
+            body="* Forged",
+            server_timestamp=2000,
+            source_content={
+                "body": "* Forged",
+                "m.new_content": {"body": "Forged"},
+                "m.relates_to": {
+                    "rel_type": "m.replace",
+                    "event_id": "$bob_original",
+                },
+            },
+        )
+
+        resolved = await resolve_latest_visible_messages(
+            [original_event, forged_edit],
+            AsyncMock(),
+            sender="@alice:localhost",
+        )
+
+        assert resolved == {}
 
     @pytest.mark.asyncio
     async def test_fetch_thread_history_applies_v2_sidecar_edits(self) -> None:

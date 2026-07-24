@@ -65,6 +65,7 @@ from mindroom.matrix.cache.thread_cache_invalidation import (
     mark_thread_stale_fail_closed,
 )
 from mindroom.matrix.client_visible_messages import (
+    LatestThreadEditsByOriginalEventId,
     ResolvedVisibleMessage,
     apply_latest_edits_to_messages,
     record_latest_thread_edit,
@@ -124,10 +125,6 @@ _MAX_THREAD_ENUMERATION_PAGES = 100
 _OPAQUE_ENCRYPTED_THREAD_HISTORY_REASON = "thread_history_opaque_encrypted_event"
 _OPAQUE_ENCRYPTED_EVENT_REJECTION = "opaque_encrypted_event"
 _MISSING_THREAD_ROOT_REJECTION = "missing_thread_root"
-type _LatestThreadEditsByOriginalEventId = dict[
-    str,
-    dict[str, tuple[nio.RoomMessageText | nio.RoomMessageNotice, str | None]],
-]
 type _ThreadHistoryDiagnosticValue = str | int | float | bool | None
 
 
@@ -420,7 +417,7 @@ async def _resolve_thread_history_from_event_sources_timed(
     ]
     known_event_senders_by_event_id = {event.event_id: event.sender for event in parsed_events}
     messages_by_event_id: dict[str, ResolvedVisibleMessage] = {}
-    latest_edits_by_original_event_id: _LatestThreadEditsByOriginalEventId = {}
+    latest_edits_by_original_event_id: LatestThreadEditsByOriginalEventId = {}
     sidecar_hydration_started = time.perf_counter()
     hydration_sources = _sidecar_hydration_sources(event_sources, hydrate_sidecars=hydrate_sidecars)
     hydration_batch = await prepare_sidecar_hydration_batch(
@@ -1491,7 +1488,7 @@ def _is_opaque_thread_affecting_event_source(event_source: Mapping[str, Any]) ->
 def _record_scanned_room_message_source(
     event: nio.Event,
     *,
-    latest_edits_by_original_event_id: _LatestThreadEditsByOriginalEventId,
+    latest_edits_by_original_event_id: LatestThreadEditsByOriginalEventId,
     scanned_message_sources: dict[str, dict[str, Any]],
 ) -> str | None:
     """Record one scanned room-message source and return the recorded event ID."""
@@ -1604,7 +1601,7 @@ async def _group_scanned_sources_by_thread(
     room_id: str,
     thread_root_ids: Collection[str],
     scanned_message_sources: dict[str, dict[str, Any]],
-    latest_edits_by_original_event_id: _LatestThreadEditsByOriginalEventId,
+    latest_edits_by_original_event_id: LatestThreadEditsByOriginalEventId,
 ) -> tuple[dict[str, list[dict[str, Any]]], frozenset[str]]:
     """Bucket room-scan sources per requested thread and report unresolved opaque relations."""
     grouped: dict[str, dict[str, dict[str, Any]]] = {
@@ -1667,7 +1664,7 @@ async def _bulk_scan_thread_event_sources(
     thread_root_ids: Collection[str],
 ) -> _BulkThreadScanResult:
     """Walk room history backward once and recover every requested thread's event sources."""
-    latest_edits_by_original_event_id: _LatestThreadEditsByOriginalEventId = {}
+    latest_edits_by_original_event_id: LatestThreadEditsByOriginalEventId = {}
     scanned_message_sources: dict[str, dict[str, Any]] = {}
     remaining_root_ids = set(thread_root_ids)
     from_token: str | None = None
