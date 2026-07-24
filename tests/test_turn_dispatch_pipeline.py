@@ -61,6 +61,7 @@ from mindroom.response_runner import (
     _ResponseGenerationOutcome,
 )
 from mindroom.teams import TeamIntent, TeamMode, TeamResolution
+from mindroom.text_ingress_dispatch import _run_claimed_response
 from mindroom.turn_controller import _IngressAdmissionOutcome, _PrecheckedEvent
 from mindroom.turn_policy import PreparedDispatch, ResponseAction, _DispatchPlan
 from tests.bot_helpers import (
@@ -94,6 +95,7 @@ from tests.conftest import (
     replace_delivery_gateway_deps,
     replace_turn_controller_deps,
     runtime_paths_for,
+    unwrap_extracted_collaborator,
     wrap_extracted_collaborators,
 )
 from tests.identity_helpers import entity_ids
@@ -158,20 +160,50 @@ class TestAgentBot(AgentBotTestBase):
             kind="reject",
             rejection_message="Team request includes private agent 'mind'; private agents are only supported in explicit Matrix ad hoc teams with requester identity",
         )
+        handled_turn = TurnRecord.create([event.event_id], completed=False)
+        turn_store = unwrap_extracted_collaborator(bot._turn_store)
+        controller = unwrap_extracted_collaborator(bot._turn_controller)
+        assert turn_store.try_claim_turn(handled_turn)
+        send_started = asyncio.Event()
+        release_send = asyncio.Event()
+        wait_started = asyncio.Event()
+        loop = asyncio.get_running_loop()
 
         bot.client = AsyncMock(spec=nio.AsyncClient)
 
-        with patch.object(DeliveryGateway, "send_text", new=AsyncMock(return_value="$reply")) as send_text:
-            await bot._turn_controller._execute_response_action(
-                room,
-                event,
-                dispatch,
-                action,
-                DispatchPayloadInputs((), (), ()),
-                processing_log="processing",
-                dispatch_started_at=0.0,
-                handled_turn=TurnRecord.create([event.event_id]),
+        async def send_rejection(_request: SendTextRequest) -> str:
+            send_started.set()
+            await release_send.wait()
+            return "$reply"
+
+        def wait_for_settlement() -> None:
+            loop.call_soon_threadsafe(wait_started.set)
+            turn_store.wait_for_turn_settled(handled_turn.indexed_event_ids)
+
+        with patch.object(DeliveryGateway, "send_text", new=AsyncMock(side_effect=send_rejection)) as send_text:
+            response_task = asyncio.create_task(
+                _run_claimed_response(
+                    controller,
+                    handled_turn,
+                    controller._execute_response_action(
+                        room,
+                        event,
+                        dispatch,
+                        action,
+                        DispatchPayloadInputs((), (), ()),
+                        processing_log="processing",
+                        dispatch_started_at=0.0,
+                        handled_turn=handled_turn,
+                    ),
+                ),
             )
+            waiter = asyncio.create_task(asyncio.to_thread(wait_for_settlement))
+            await send_started.wait()
+            await wait_started.wait()
+            assert not waiter.done()
+            release_send.set()
+            await response_task
+            await waiter
 
         send_text.assert_awaited_once()
         delivered_request = send_text.await_args.args[0]

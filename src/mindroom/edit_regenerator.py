@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+import asyncio
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Protocol
 
 from mindroom.coalescing_batch import coalesced_prompt, tagged_coalesced_prompt
@@ -23,6 +24,8 @@ if TYPE_CHECKING:
 
     from mindroom.constants import RuntimePaths
     from mindroom.conversation_resolver import ConversationResolver
+    from mindroom.handled_turns import SourceEventRevision, TurnRecord
+    from mindroom.hooks import MessageEnvelope
     from mindroom.matrix.event_info import EventInfo
     from mindroom.message_target import MessageTarget
     from mindroom.turn_policy import IngressHookRunner
@@ -48,7 +51,28 @@ class EditRegeneratorDeps:
     turn_store: TurnStore
     ingress_hook_runner: IngressHookRunner
     generate_response: _GenerateResponse
+    wait_for_turn_settled: Callable[[tuple[str, ...]], None]
     timestamp_formatter: Callable[[float | None], str | None]
+
+
+@dataclass(frozen=True)
+class _Edit:
+    original_event_id: str
+    body: str
+    context: MessageContext
+    envelope: MessageEnvelope
+    requester_user_id: str
+    correlation_id: str
+    timestamp_ms: int
+    revision: SourceEventRevision
+    suppressed: bool
+
+
+@dataclass
+class _Mailbox:
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    pending: dict[str, _Edit] = field(default_factory=dict)
+    participants: int = 0
 
 
 @dataclass
@@ -56,6 +80,7 @@ class EditRegenerator:
     """Re-run the owned response for one edited user turn."""
 
     deps: EditRegeneratorDeps
+    _mailboxes: dict[tuple[str, str, str], _Mailbox] = field(default_factory=dict, init=False, repr=False)
 
     def _logger(self) -> structlog.stdlib.BoundLogger:
         return self.deps.get_logger()
@@ -95,7 +120,7 @@ class EditRegenerator:
             requires_model_history_refresh=context.requires_model_history_refresh,
         )
 
-    async def handle_message_edit(  # noqa: C901, PLR0911, PLR0912, PLR0915
+    async def handle_message_edit(  # noqa: C901, PLR0911
         self,
         room: nio.MatrixRoom,
         event: nio.RoomMessageText,
@@ -107,7 +132,6 @@ class EditRegenerator:
             self._logger().debug("Edit event has no original event ID")
             return
         original_event_id = event_info.original_event_id
-
         registry = entity_identity_registry(self.deps.runtime.config, self.deps.runtime_paths)
         sender_agent_name = registry.current_entity_name_for_user_id(event.sender)
         if sender_agent_name:
@@ -119,19 +143,18 @@ class EditRegenerator:
             event,
             caller_label="edit_regeneration_context",
         )
-        loaded_turn = self.deps.turn_store.load_turn(
+        turn_record = self.deps.turn_store.load_turn(
             room=room,
             thread_id=context.thread_id or event_info.thread_id or event_info.thread_id_from_edit,
             original_event_id=original_event_id,
             requester_user_id=requester_user_id,
         )
-        if loaded_turn is None:
+        if turn_record is None:
             self._logger().debug(
                 "No handled turn record found for edited message",
                 original_event_id=original_event_id,
             )
             return
-        turn_record = loaded_turn
         if (
             turn_record.conversation_target is None
             or turn_record.history_scope is None
@@ -150,33 +173,20 @@ class EditRegenerator:
             room,
             conversation_target=turn_record.conversation_target,
         )
-        response_event_id = turn_record.response_event_id
-        if response_event_id is None:
-            self._logger().debug("missing_previous_response_for_edit", event_id=original_event_id)
-            return
-        regeneration_target = turn_record.conversation_target
-        regeneration_history_scope = turn_record.history_scope
-        regeneration_response_owner = turn_record.response_owner
-        if regeneration_response_owner != self.deps.agent_name:
+        if turn_record.response_owner != self.deps.agent_name:
             self._logger().debug(
                 "Ignoring edited message for turn owned by another entity",
                 original_event_id=original_event_id,
-                response_owner=regeneration_response_owner,
+                response_owner=turn_record.response_owner,
             )
             return
         if original_event_id in turn_record.redacted_source_event_ids:
-            self._logger().debug(
-                "Ignoring edit for redacted source message",
-                original_event_id=original_event_id,
-            )
+            self._logger().debug("Ignoring edit for redacted source message", original_event_id=original_event_id)
             return
-        coalesced_source_event_prompts = turn_record.source_event_prompts
-
-        self._logger().info(
-            "Regenerating response for edited message",
-            original_event_id=original_event_id,
-            response_event_id=response_event_id,
-        )
+        revision = (event.server_timestamp, event.event_id)
+        committed = (turn_record.source_event_revisions or {}).get(original_event_id)
+        if committed is not None and revision <= committed:
+            return
 
         edited_content, _ = await extract_visible_edit_body(
             event.source,
@@ -187,112 +197,196 @@ class EditRegenerator:
         if edited_content is None:
             self._logger().debug("Edited message missing resolved body", event_id=event.event_id)
             return
-        regeneration_turn_record = replace(
-            turn_record,
-            response_event_id=response_event_id,
-            response_owner=regeneration_response_owner,
-            history_scope=regeneration_history_scope,
-            conversation_target=regeneration_target,
-        )
-        if regeneration_turn_record.is_coalesced:
-            if coalesced_source_event_prompts is None:
-                self._logger().warning(
-                    "Skipping edited coalesced turn regeneration without persisted source prompts",
-                    original_event_id=original_event_id,
-                    anchor_event_id=regeneration_turn_record.anchor_event_id,
-                )
-                return
-            updated_prompt_map = dict(coalesced_source_event_prompts)
-            updated_prompt_map[original_event_id] = edited_content
-            rebuilt_prompt_parts: list[str] = []
-            for source_event_id in regeneration_turn_record.replay_source_event_ids:
-                prompt_part = updated_prompt_map.get(source_event_id)
-                if prompt_part is None:
-                    self._logger().warning(
-                        "Skipping edited coalesced turn regeneration with incomplete prompt map",
-                        original_event_id=original_event_id,
-                        missing_source_event_id=source_event_id,
-                        anchor_event_id=regeneration_turn_record.anchor_event_id,
-                    )
-                    return
-                rebuilt_prompt_parts.append(prompt_part)
-            regeneration_prompt = coalesced_prompt(rebuilt_prompt_parts)
-            current_prompt_is_structured = False
-            if regeneration_turn_record.source_event_metadata is not None:
-                tagged_prompt = tagged_coalesced_prompt(
-                    list(regeneration_turn_record.replay_source_event_ids),
-                    updated_prompt_map,
-                    dict(regeneration_turn_record.source_event_metadata),
-                    timestamp_formatter=self.deps.timestamp_formatter,
-                )
-                if tagged_prompt is not None:
-                    regeneration_prompt = tagged_prompt
-                    current_prompt_is_structured = True
-            regeneration_turn_record = replace(regeneration_turn_record, source_event_prompts=updated_prompt_map)
-        else:
-            regeneration_prompt = edited_content
-            current_prompt_is_structured = False
-        regeneration_matrix_run_metadata = self.deps.turn_store.build_run_metadata(
-            regeneration_turn_record,
-            additional_discovery_event_ids=(
-                (original_event_id,)
-                if not regeneration_turn_record.is_coalesced
-                and original_event_id != regeneration_turn_record.anchor_event_id
-                else ()
-            ),
-        )
         envelope = self.deps.resolver.build_message_envelope(
             event=event,
             requester_user_id=requester_user_id,
             context=context,
-            target=regeneration_target,
+            target=turn_record.conversation_target,
             body=edited_content,
             source_kind=EDIT_SOURCE_KIND,
         )
-        ingress_policy = hook_ingress_policy(envelope)
-        if await self.deps.ingress_hook_runner.emit_message_received_hooks(
+        edit = _Edit(
+            original_event_id=original_event_id,
+            body=edited_content,
+            context=context,
             envelope=envelope,
+            requester_user_id=requester_user_id,
             correlation_id=event.event_id,
-            policy=ingress_policy,
-        ):
-            self.deps.turn_store.record_turn(regeneration_turn_record)
-            return
-
-        regenerated_event_id = await self.deps.generate_response(
-            ResponseRequest(
-                thread_history=context.thread_history,
-                prompt=regeneration_prompt,
-                response_envelope=envelope,
-                existing_event_id=response_event_id,
-                user_id=requester_user_id,
+            timestamp_ms=event.server_timestamp,
+            revision=revision,
+            suppressed=await self.deps.ingress_hook_runner.emit_message_received_hooks(
+                envelope=envelope,
                 correlation_id=event.event_id,
-                matrix_run_metadata=regeneration_matrix_run_metadata,
-                current_timestamp_ms=normalize_timestamp_ms(event.server_timestamp),
-                current_prompt_is_structured=current_prompt_is_structured,
-                on_lifecycle_lock_acquired=lambda: self.deps.turn_store.remove_stale_runs_for_edit(
-                    turn_record=regeneration_turn_record,
-                    requester_user_id=requester_user_id,
-                ),
-                prepare_source_turn=lambda: self.deps.turn_store.prepare_response_for_redactions(
-                    target=regeneration_target,
-                    source_event_ids=tuple(
-                        dict.fromkeys((*regeneration_turn_record.replay_source_event_ids, original_event_id)),
-                    ),
-                ),
+                policy=hook_ingress_policy(envelope),
             ),
         )
+        assert turn_record.anchor_event_id is not None
+        key = (turn_record.conversation_target.room_id, turn_record.anchor_event_id, requester_user_id)
+        mailbox = self._mailboxes.setdefault(key, _Mailbox())
+        queued = mailbox.pending.get(original_event_id)
+        if queued is not None and revision <= queued.revision:
+            return
+        mailbox.pending[original_event_id] = edit
+        mailbox.participants += 1
+        try:
+            async with mailbox.lock:
+                await self._drain(room, turn_record, mailbox)
+        finally:
+            mailbox.participants -= 1
+            if mailbox.participants == 0 and self._mailboxes.get(key) is mailbox:
+                self._mailboxes.pop(key)
 
-        if regenerated_event_id is not None:
-            self.deps.turn_store.record_turn(
-                replace(
-                    regeneration_turn_record,
-                    response_event_id=regenerated_event_id,
-                ),
-            )
-            self._logger().info("Successfully regenerated response for edited message")
+    def _build_request(  # noqa: C901
+        self,
+        room: nio.MatrixRoom,
+        mailbox: _Mailbox,
+    ) -> tuple[ResponseRequest | None, TurnRecord | None, dict[str, SourceEventRevision]]:
+        latest = max(mailbox.pending.values(), key=lambda edit: edit.revision)
+        record = self.deps.turn_store.load_turn(
+            room=room,
+            thread_id=latest.context.thread_id,
+            original_event_id=latest.original_event_id,
+            requester_user_id=latest.requester_user_id,
+        )
+        if (
+            record is None
+            or record.conversation_target is None
+            or record.history_scope is None
+            or record.response_owner != self.deps.agent_name
+            or record.response_event_id is None
+        ):
+            return None, None, {}
+        revisions = dict(record.source_event_revisions or {})
+        applied: dict[str, SourceEventRevision] = {}
+        eligible: dict[str, _Edit] = {}
+        active: dict[str, _Edit] = {}
+        for source_event_id, edit in mailbox.pending.items():
+            committed = revisions.get(source_event_id)
+            if source_event_id in record.redacted_source_event_ids or (
+                committed is not None and edit.revision <= committed
+            ):
+                applied[source_event_id] = edit.revision
+                continue
+            revisions[source_event_id] = edit.revision
+            applied[source_event_id] = edit.revision
+            eligible[source_event_id] = edit
+            if not edit.suppressed:
+                active[source_event_id] = edit
+        prompt_map = dict(record.source_event_prompts or {})
+        prompt_map.update({source_event_id: edit.body for source_event_id, edit in eligible.items()})
+        if not active:
+            if revisions != dict(record.source_event_revisions or {}):
+                record = replace(record, source_event_revisions=revisions)
+                if record.is_coalesced:
+                    record = replace(record, source_event_prompts=prompt_map)
+                self.deps.turn_store.record_turn(record)
+            return None, None, applied
+
+        driving_edit = max(active.values(), key=lambda edit: edit.revision)
+        if record.is_coalesced:
+            prompt_parts = [prompt_map.get(source_event_id) for source_event_id in record.replay_source_event_ids]
+            if record.source_event_prompts is None or any(part is None for part in prompt_parts):
+                self._logger().warning(
+                    "Skipping edited coalesced turn regeneration with incomplete prompt map",
+                    original_event_id=driving_edit.original_event_id,
+                    anchor_event_id=record.anchor_event_id,
+                )
+                return None, None, applied
+            prompt = coalesced_prompt([part for part in prompt_parts if part is not None])
+            structured = False
+            if record.source_event_metadata is not None:
+                tagged_prompt = tagged_coalesced_prompt(
+                    list(record.replay_source_event_ids),
+                    prompt_map,
+                    dict(record.source_event_metadata),
+                    timestamp_formatter=self.deps.timestamp_formatter,
+                )
+                if tagged_prompt is not None:
+                    prompt, structured = tagged_prompt, True
+            record = replace(record, source_event_prompts=prompt_map)
         else:
+            prompt, structured = driving_edit.body, False
+        record = replace(record, source_event_revisions=revisions)
+        assert record.conversation_target is not None
+        target = record.conversation_target
+        metadata = self.deps.turn_store.build_run_metadata(
+            record,
+            additional_discovery_event_ids=(
+                (driving_edit.original_event_id,)
+                if not record.is_coalesced and driving_edit.original_event_id != record.anchor_event_id
+                else ()
+            ),
+        )
+        return (
+            ResponseRequest(
+                thread_history=driving_edit.context.thread_history,
+                prompt=prompt,
+                response_envelope=driving_edit.envelope,
+                existing_event_id=record.response_event_id,
+                user_id=driving_edit.requester_user_id,
+                correlation_id=driving_edit.correlation_id,
+                matrix_run_metadata=metadata,
+                current_timestamp_ms=normalize_timestamp_ms(driving_edit.timestamp_ms),
+                current_prompt_is_structured=structured,
+                on_lifecycle_lock_acquired=lambda: self.deps.turn_store.remove_stale_runs_for_edit(
+                    turn_record=record,
+                    requester_user_id=driving_edit.requester_user_id,
+                ),
+                prepare_source_turn=lambda: self.deps.turn_store.prepare_response_for_redactions(
+                    target=target,
+                    source_event_ids=tuple(
+                        dict.fromkeys((*record.replay_source_event_ids, driving_edit.original_event_id)),
+                    ),
+                ),
+                on_deferred_outcome_handled=lambda response_event_id: self.deps.turn_store.record_turn(
+                    replace(record, response_event_id=response_event_id),
+                ),
+            ),
+            record,
+            applied,
+        )
+
+    @staticmethod
+    def _discard(mailbox: _Mailbox, revisions: dict[str, SourceEventRevision]) -> None:
+        for source_event_id, revision in revisions.items():
+            pending = mailbox.pending.get(source_event_id)
+            if pending is not None and pending.revision <= revision:
+                mailbox.pending.pop(source_event_id)
+
+    async def _drain(self, room: nio.MatrixRoom, initial_record: TurnRecord, mailbox: _Mailbox) -> None:
+        assert initial_record.conversation_target is not None
+        if initial_record.response_event_id is None:
+            await asyncio.to_thread(self.deps.wait_for_turn_settled, initial_record.indexed_event_ids)
+        while mailbox.pending:
+            latest = max(mailbox.pending.values(), key=lambda edit: edit.revision)
+            request, record, applied = self._build_request(room, mailbox)
+            if request is None or record is None:
+                self._discard(mailbox, applied)
+                if not applied:
+                    return
+                continue
+            regenerated_event_id = await self.deps.generate_response(request)
+            if regenerated_event_id is not None:
+                self.deps.turn_store.record_turn(
+                    replace(record, response_event_id=regenerated_event_id),
+                )
+                self._discard(mailbox, applied)
+                self._logger().info("Successfully regenerated response for edited message")
+                continue
+            fresh_record = self.deps.turn_store.get_turn_record(latest.original_event_id)
+            if fresh_record is not None and fresh_record.redacted_source_event_ids != record.redacted_source_event_ids:
+                self._discard(
+                    mailbox,
+                    {
+                        source_event_id: revision
+                        for source_event_id, revision in applied.items()
+                        if source_event_id in fresh_record.redacted_source_event_ids
+                    },
+                )
+                continue
+            self._discard(mailbox, applied)
             self._logger().info(
                 "Suppressed regeneration left existing response unchanged",
-                original_event_id=original_event_id,
-                response_event_id=response_event_id,
+                original_event_id=latest.original_event_id,
+                response_event_id=record.response_event_id,
             )

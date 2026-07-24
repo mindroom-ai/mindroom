@@ -156,6 +156,27 @@ def test_pending_turn_claim_allows_only_one_concurrent_owner(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
+async def test_turn_settlement_waits_for_pending_claim_release(tmp_path: Path) -> None:
+    """A waiter should remain blocked until response ownership reaches its existing release seam."""
+    store = _store(tmp_path)
+    turn = TurnRecord.create(["$source"], completed=False)
+    assert store.try_claim_turn(turn) is True
+    wait_started = asyncio.Event()
+    loop = asyncio.get_running_loop()
+
+    def wait_for_settlement() -> None:
+        loop.call_soon_threadsafe(wait_started.set)
+        store.wait_for_turn_settled(turn.indexed_event_ids)
+
+    waiter = asyncio.create_task(asyncio.to_thread(wait_for_settlement))
+    await wait_started.wait()
+    assert not waiter.done()
+
+    store.release_pending_turn_claim(turn)
+    await waiter
+
+
+@pytest.mark.asyncio
 async def test_failed_claimed_response_releases_turn_for_replay(tmp_path: Path) -> None:
     """A failed owner must not permanently suppress a later delivery."""
     store = _store(tmp_path)
@@ -1062,6 +1083,9 @@ def test_newer_delivered_run_recovers_mutable_facts_after_crash(tmp_path: Path) 
         ["$first", "$anchor"],
         response_event_id="$old-response",
         source_event_prompts={"$first": "old first", "$anchor": "old anchor"},
+        source_event_revisions={
+            "$first": (10, "$old-edit"),
+        },
         visible_echo_event_id="$echo",
         timestamp=10,
     )
@@ -1070,6 +1094,9 @@ def test_newer_delivered_run_recovers_mutable_facts_after_crash(tmp_path: Path) 
         ["$first", "$anchor"],
         response_event_id="$new-response",
         source_event_prompts={"$first": "edited first", "$anchor": "old anchor"},
+        source_event_revisions={
+            "$first": (20, "$new-edit"),
+        },
         response_owner="agent",
         timestamp=20,
     )
@@ -1085,6 +1112,9 @@ def test_newer_delivered_run_recovers_mutable_facts_after_crash(tmp_path: Path) 
     assert loaded.anchor_event_id == ledger_record.anchor_event_id
     assert loaded.response_event_id == "$new-response"
     assert loaded.source_event_prompts == {"$first": "edited first", "$anchor": "old anchor"}
+    assert loaded.source_event_revisions == {
+        "$first": (20, "$new-edit"),
+    }
     assert loaded.visible_echo_event_id == "$echo"
     assert loaded.response_owner == "agent"
     assert loaded.timestamp == 20

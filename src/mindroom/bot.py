@@ -530,6 +530,7 @@ class AgentBot:
                 turn_store=self._turn_store,
                 ingress_hook_runner=self._ingress_hook_runner,
                 generate_response=lambda request: self._run_regenerated_response(request),
+                wait_for_turn_settled=self._turn_store.wait_for_turn_settled,
                 timestamp_formatter=lambda timestamp_ms: format_timestamp_ms(
                     timestamp_ms,
                     timezone=self.config.timezone,

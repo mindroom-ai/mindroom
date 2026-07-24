@@ -276,6 +276,8 @@ def _generate_response_with_locked_callback(
     async def _generate_response(request: ResponseRequest) -> str | None:
         if request.on_lifecycle_lock_acquired is not None:
             request.on_lifecycle_lock_acquired()
+        if request.prepare_source_turn is not None and request.prepare_source_turn():
+            return None
         return response_event_id
 
     return _generate_response
@@ -1473,6 +1475,9 @@ async def test_handle_message_edit_rebuilds_coalesced_prompt_for_non_primary_edi
                 "$first:example.com": "updated first",
                 "$primary:example.com": "primary",
             },
+            "matrix_source_event_revisions": {
+                "$first:example.com": [1000001, "$edit:example.com"],
+            },
             **_run_response_context_metadata(
                 response_owner="test_agent",
                 history_scope=_agent_history_scope("test_agent"),
@@ -1990,6 +1995,9 @@ async def test_handle_message_edit_rebuilds_coalesced_prompt_from_persisted_run_
                 "$first:example.com": "updated first",
                 "$primary:example.com": "primary",
             },
+            "matrix_source_event_revisions": {
+                "$first:example.com": [1000001, "$edit:example.com"],
+            },
             **_run_response_context_metadata(
                 response_owner="test_agent",
                 history_scope=_agent_history_scope("test_agent"),
@@ -2432,6 +2440,9 @@ async def test_handle_message_edit_uses_persisted_interrupted_response_event_id_
             "$first:example.com": "updated first",
             "$anchor:example.com": "anchor",
         },
+        "matrix_source_event_revisions": {
+            "$first:example.com": [1000001, "$edit:example.com"],
+        },
         **_run_response_context_metadata(
             response_owner="test_agent",
             history_scope=_agent_history_scope("test_agent"),
@@ -2709,6 +2720,9 @@ async def test_edit_regenerator_preserves_interactive_selection_run_metadata(tmp
     assert request.response_envelope.target.reply_to_event_id == "$selection:example.com"
     assert request.matrix_run_metadata == {
         MATRIX_SOURCE_EVENT_IDS_METADATA_KEY: ["$selection:example.com"],
+        "matrix_source_event_revisions": {
+            "$selection:example.com": [1000000, "$edit:example.com"],
+        },
         **_run_response_context_metadata(
             response_owner="test_agent",
             history_scope=_agent_history_scope("test_agent"),
@@ -3233,6 +3247,9 @@ async def test_handle_message_edit_recovers_missing_ledger_row_from_persisted_ru
                 "$first:example.com": "updated first",
                 "$primary:example.com": "primary",
             },
+            "matrix_source_event_revisions": {
+                "$first:example.com": [1000001, "$edit:example.com"],
+            },
             **_run_response_context_metadata(
                 response_owner=bot.agent_name,
                 history_scope=history_scope,
@@ -3371,7 +3388,9 @@ async def test_handle_message_edit_recovers_threaded_turn_using_resolved_context
         patch.object(
             bot._conversation_state_writer,
             "create_storage",
-            side_effect=[threaded_storage, room_storage],
+            side_effect=lambda execution_identity, **_kwargs: (
+                threaded_storage if execution_identity.session_id == threaded_session_id else room_storage
+            ),
         ),
         patch("mindroom.turn_store.remove_run_by_event_id", return_value=True),
     ):

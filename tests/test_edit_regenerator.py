@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import asyncio
+import threading
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
@@ -21,6 +23,7 @@ from mindroom.history.types import HistoryScope
 from mindroom.hooks.ingress import HookIngressPolicy
 from mindroom.matrix.event_info import EventInfo
 from mindroom.message_target import MessageTarget
+from mindroom.response_runner import ResponseRequest
 from mindroom.timestamp_formatting import format_timestamp_ms
 from mindroom.turn_policy import IngressHookRunner
 from mindroom.turn_store import TurnStore
@@ -60,6 +63,7 @@ class _Harness:
     turn_store: MagicMock
     ingress_hook_runner: MagicMock
     generate_response: AsyncMock
+    wait_for_turn_settled: MagicMock
     logger: MagicMock
     config: Config
     runtime_paths: RuntimePaths
@@ -109,6 +113,8 @@ def _edit_event(
     new_body: str = "what is 3+3?",
     sender: str = USER_ID,
     include_new_content: bool = True,
+    event_id: str = EDIT_EVENT_ID,
+    server_timestamp: int = 1_000_001,
 ) -> tuple[nio.RoomMessageText, EventInfo]:
     content: dict[str, object] = {
         "body": f"* {new_body}",
@@ -120,9 +126,9 @@ def _edit_event(
         content["m.new_content"] = {"body": new_body, "msgtype": "m.text"}
     source = {
         "content": content,
-        "event_id": EDIT_EVENT_ID,
+        "event_id": event_id,
         "sender": sender,
-        "origin_server_ts": 1_000_001,
+        "origin_server_ts": server_timestamp,
         "type": "m.room.message",
         "room_id": ROOM_ID,
     }
@@ -153,9 +159,26 @@ def _harness(tmp_path: Path, *, turn_record: TurnRecord | None) -> _Harness:
             source_kind=EDIT_SOURCE_KIND,
         ),
     )
+    resolver.build_ingress_envelope = MagicMock(
+        return_value=request_envelope(
+            room_id=ROOM_ID,
+            reply_to_event_id=ORIGINAL_EVENT_ID,
+            thread_id=THREAD_ID,
+            user_id=USER_ID,
+            agent_name=AGENT_NAME,
+            source_kind=EDIT_SOURCE_KIND,
+        ),
+    )
 
     turn_store = MagicMock(spec=TurnStore)
-    turn_store.load_turn.return_value = turn_record
+    current_turn_record = [turn_record]
+    turn_store.load_turn.side_effect = lambda **_kwargs: current_turn_record[0]
+    turn_store.get_turn_record.side_effect = lambda _event_id: current_turn_record[0]
+
+    def record_turn(record: TurnRecord) -> None:
+        current_turn_record[0] = record
+
+    turn_store.record_turn.side_effect = record_turn
     turn_store.build_run_metadata.return_value = dict(RUN_METADATA)
     turn_store.prepare_response_for_redactions.return_value = False
 
@@ -163,6 +186,14 @@ def _harness(tmp_path: Path, *, turn_record: TurnRecord | None) -> _Harness:
     ingress_hook_runner.emit_message_received_hooks.return_value = False
 
     generate_response = AsyncMock(return_value=NEW_RESPONSE_EVENT_ID)
+    response_lock = asyncio.Lock()
+
+    async def run_locked_response(request: object) -> str | None:
+        async with response_lock:
+            assert isinstance(request, ResponseRequest)
+            return await generate_response(request)
+
+    wait_for_turn_settled = MagicMock()
     logger = MagicMock()
     regenerator = EditRegenerator(
         EditRegeneratorDeps(
@@ -173,7 +204,8 @@ def _harness(tmp_path: Path, *, turn_record: TurnRecord | None) -> _Harness:
             resolver=resolver,
             turn_store=turn_store,
             ingress_hook_runner=ingress_hook_runner,
-            generate_response=generate_response,
+            generate_response=run_locked_response,
+            wait_for_turn_settled=wait_for_turn_settled,
             timestamp_formatter=lambda timestamp_ms: format_timestamp_ms(timestamp_ms, timezone=config.timezone),
         ),
     )
@@ -183,6 +215,7 @@ def _harness(tmp_path: Path, *, turn_record: TurnRecord | None) -> _Harness:
         turn_store=turn_store,
         ingress_hook_runner=ingress_hook_runner,
         generate_response=generate_response,
+        wait_for_turn_settled=wait_for_turn_settled,
         logger=logger,
         config=config,
         runtime_paths=runtime_paths,
@@ -254,7 +287,436 @@ async def test_lifecycle_lock_callback_removes_stale_runs(tmp_path: Path) -> Non
     harness.turn_store.remove_stale_runs_for_edit.assert_called_once()
     removal_kwargs = harness.turn_store.remove_stale_runs_for_edit.call_args.kwargs
     assert removal_kwargs["requester_user_id"] == USER_ID
-    assert removal_kwargs["turn_record"] == record
+    assert removal_kwargs["turn_record"] == replace(
+        record,
+        source_event_revisions={
+            ORIGINAL_EVENT_ID: (event.server_timestamp, event.event_id),
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_newer_same_source_edit_rejects_older_callback_during_generation(tmp_path: Path) -> None:
+    """An older callback arriving during newer generation must never run or overwrite it."""
+    harness = _harness(tmp_path, turn_record=_turn_record())
+    generation_started = asyncio.Event()
+    release_generation = asyncio.Event()
+
+    async def block_newer_generation(_request: ResponseRequest) -> str:
+        generation_started.set()
+        await release_generation.wait()
+        return NEW_RESPONSE_EVENT_ID
+
+    harness.generate_response.side_effect = block_newer_generation
+    newer, newer_info = _edit_event(
+        new_body="newest body",
+        event_id="$edit-z:example.org",
+        server_timestamp=1_000_010,
+    )
+    older, older_info = _edit_event(
+        new_body="older body",
+        event_id="$edit-a:example.org",
+        server_timestamp=1_000_010,
+    )
+
+    newer_task = asyncio.create_task(_handle_edit(harness, newer, newer_info))
+    await generation_started.wait()
+    await _handle_edit(harness, older, older_info)
+    release_generation.set()
+    await newer_task
+
+    harness.generate_response.assert_awaited_once()
+    assert harness.generate_response.await_args.args[0].prompt == "newest body"
+    recorded = harness.turn_store.record_turn.call_args.args[0]
+    assert recorded.source_event_revisions == {
+        ORIGINAL_EVENT_ID: (1_000_010, "$edit-z:example.org"),
+    }
+    assert harness.regenerator._mailboxes == {}
+
+
+@pytest.mark.asyncio
+async def test_older_same_source_preparation_finishing_last_is_rejected(tmp_path: Path) -> None:
+    """A stale callback resolving after the newer revision commits must not regenerate."""
+    harness = _harness(tmp_path, turn_record=_turn_record())
+    older_started = asyncio.Event()
+    release_older = asyncio.Event()
+    older, older_info = _edit_event(
+        new_body="older body",
+        event_id="$edit-old:example.org",
+        server_timestamp=1_000_010,
+    )
+    newer, newer_info = _edit_event(
+        new_body="newest body",
+        event_id="$edit-new:example.org",
+        server_timestamp=1_000_020,
+    )
+
+    async def resolve_body(source: dict[str, object], *_args: object, **_kwargs: object) -> tuple[str, None]:
+        if source["event_id"] == older.event_id:
+            older_started.set()
+            await release_older.wait()
+        content = source["content"]
+        assert isinstance(content, dict)
+        new_content = content["m.new_content"]
+        assert isinstance(new_content, dict)
+        body = new_content["body"]
+        assert isinstance(body, str)
+        return body, None
+
+    with patch(
+        "mindroom.edit_regenerator.extract_visible_edit_body",
+        new=AsyncMock(side_effect=resolve_body),
+    ):
+        older_task = asyncio.create_task(_handle_edit(harness, older, older_info))
+        await older_started.wait()
+        await _handle_edit(harness, newer, newer_info)
+        release_older.set()
+        await older_task
+
+    harness.generate_response.assert_awaited_once()
+    assert harness.generate_response.await_args.args[0].prompt == "newest body"
+    assert harness.regenerator._mailboxes == {}
+
+
+@pytest.mark.asyncio
+async def test_concurrent_coalesced_sibling_edits_are_both_retained(tmp_path: Path) -> None:
+    """Edits to two sources during one generation must converge to one combined durable prompt."""
+    first_event_id = "$m1:example.org"
+    second_event_id = "$m2:example.org"
+    harness = _harness(
+        tmp_path,
+        turn_record=_turn_record(
+            source_event_ids=(first_event_id, second_event_id),
+            source_event_prompts={
+                first_event_id: "first base",
+                second_event_id: "second base",
+            },
+        ),
+    )
+    first_generation_started = asyncio.Event()
+    release_first_generation = asyncio.Event()
+    second_callback_loaded = asyncio.Event()
+    generation_count = 0
+
+    async def generate(_request: ResponseRequest) -> str:
+        nonlocal generation_count
+        generation_count += 1
+        if generation_count == 1:
+            first_generation_started.set()
+            await release_first_generation.wait()
+        return NEW_RESPONSE_EVENT_ID
+
+    original_load_turn = harness.turn_store.load_turn.side_effect
+
+    def load_turn(**kwargs: object) -> TurnRecord | None:
+        if kwargs["original_event_id"] == second_event_id:
+            second_callback_loaded.set()
+        return original_load_turn(**kwargs)
+
+    harness.turn_store.load_turn.side_effect = load_turn
+    harness.generate_response.side_effect = generate
+    first, first_info = _edit_event(
+        original_event_id=first_event_id,
+        new_body="first edited",
+        event_id="$edit-first:example.org",
+        server_timestamp=1_000_010,
+    )
+    second, second_info = _edit_event(
+        original_event_id=second_event_id,
+        new_body="second edited",
+        event_id="$edit-second:example.org",
+        server_timestamp=1_000_020,
+    )
+
+    first_task = asyncio.create_task(_handle_edit(harness, first, first_info))
+    await first_generation_started.wait()
+    second_task = asyncio.create_task(_handle_edit(harness, second, second_info))
+    await second_callback_loaded.wait()
+    release_first_generation.set()
+    await asyncio.gather(first_task, second_task)
+
+    assert [call.args[0].prompt for call in harness.generate_response.await_args_list] == [
+        coalesced_prompt(["first edited", "second base"]),
+        coalesced_prompt(["first edited", "second edited"]),
+    ]
+    recorded = harness.turn_store.record_turn.call_args.args[0]
+    assert recorded.source_event_prompts == {
+        first_event_id: "first edited",
+        second_event_id: "second edited",
+    }
+    assert recorded.source_event_revisions == {
+        first_event_id: (1_000_010, "$edit-first:example.org"),
+        second_event_id: (1_000_020, "$edit-second:example.org"),
+    }
+    assert harness.regenerator._mailboxes == {}
+
+
+@pytest.mark.asyncio
+async def test_suppressed_coalesced_edit_body_is_retained_for_later_sibling(tmp_path: Path) -> None:
+    """Hook suppression skips its generation but not its durable body update."""
+    first_event_id = "$m1:example.org"
+    second_event_id = "$m2:example.org"
+    harness = _harness(
+        tmp_path,
+        turn_record=_turn_record(
+            source_event_ids=(first_event_id, second_event_id),
+            source_event_prompts={
+                first_event_id: "first base",
+                second_event_id: "second base",
+            },
+        ),
+    )
+    harness.ingress_hook_runner.emit_message_received_hooks.side_effect = [True, False]
+    first, first_info = _edit_event(
+        original_event_id=first_event_id,
+        new_body="first suppressed edit",
+        event_id="$edit-first:example.org",
+        server_timestamp=1_000_010,
+    )
+    second, second_info = _edit_event(
+        original_event_id=second_event_id,
+        new_body="second edit",
+        event_id="$edit-second:example.org",
+        server_timestamp=1_000_020,
+    )
+
+    await _handle_edit(harness, first, first_info)
+    harness.generate_response.assert_not_awaited()
+    suppressed_record = harness.turn_store.record_turn.call_args.args[0]
+    assert suppressed_record.source_event_prompts == {
+        first_event_id: "first suppressed edit",
+        second_event_id: "second base",
+    }
+
+    await _handle_edit(harness, second, second_info)
+
+    assert harness.generate_response.await_args.args[0].prompt == coalesced_prompt(
+        ["first suppressed edit", "second edit"],
+    )
+    assert harness.regenerator._mailboxes == {}
+
+
+@pytest.mark.asyncio
+async def test_newer_edit_arriving_under_response_lock_is_drained(tmp_path: Path) -> None:
+    """A newer edit queued while its older regeneration runs must trigger a final drain."""
+    harness = _harness(tmp_path, turn_record=_turn_record())
+    first_generation_started = asyncio.Event()
+    release_first_generation = asyncio.Event()
+    newer_callback_loaded = asyncio.Event()
+    generation_count = 0
+
+    async def generate(_request: ResponseRequest) -> str:
+        nonlocal generation_count
+        generation_count += 1
+        if generation_count == 1:
+            first_generation_started.set()
+            await release_first_generation.wait()
+        return NEW_RESPONSE_EVENT_ID
+
+    original_load_turn = harness.turn_store.load_turn.side_effect
+
+    def load_turn(**kwargs: object) -> TurnRecord | None:
+        if kwargs["original_event_id"] == ORIGINAL_EVENT_ID and generation_count == 1:
+            newer_callback_loaded.set()
+        return original_load_turn(**kwargs)
+
+    harness.turn_store.load_turn.side_effect = load_turn
+    harness.generate_response.side_effect = generate
+    older, older_info = _edit_event(
+        new_body="older body",
+        event_id="$edit-old:example.org",
+        server_timestamp=1_000_010,
+    )
+    newer, newer_info = _edit_event(
+        new_body="newest body",
+        event_id="$edit-new:example.org",
+        server_timestamp=1_000_020,
+    )
+
+    older_task = asyncio.create_task(_handle_edit(harness, older, older_info))
+    await first_generation_started.wait()
+    newer_task = asyncio.create_task(_handle_edit(harness, newer, newer_info))
+    await newer_callback_loaded.wait()
+    release_first_generation.set()
+    await asyncio.gather(older_task, newer_task)
+
+    assert [call.args[0].prompt for call in harness.generate_response.await_args_list] == [
+        "older body",
+        "newest body",
+    ]
+    recorded = harness.turn_store.record_turn.call_args.args[0]
+    assert recorded.source_event_revisions == {
+        ORIGINAL_EVENT_ID: (1_000_020, "$edit-new:example.org"),
+    }
+    assert harness.regenerator._mailboxes == {}
+
+
+@pytest.mark.asyncio
+async def test_cancelled_drain_is_retried_by_waiting_newer_edit(tmp_path: Path) -> None:
+    """Cancellation must leave pending state for a waiting callback to retry safely."""
+    harness = _harness(tmp_path, turn_record=_turn_record())
+    first_generation_started = asyncio.Event()
+    release_cancellation = asyncio.Event()
+    retry_callback_loaded = asyncio.Event()
+    generation_count = 0
+
+    async def generate(_request: ResponseRequest) -> str:
+        nonlocal generation_count
+        generation_count += 1
+        if generation_count == 1:
+            first_generation_started.set()
+            await release_cancellation.wait()
+            raise asyncio.CancelledError
+        return NEW_RESPONSE_EVENT_ID
+
+    original_load_turn = harness.turn_store.load_turn.side_effect
+
+    def load_turn(**kwargs: object) -> TurnRecord | None:
+        if generation_count == 1:
+            retry_callback_loaded.set()
+        return original_load_turn(**kwargs)
+
+    harness.turn_store.load_turn.side_effect = load_turn
+    harness.generate_response.side_effect = generate
+    first, first_info = _edit_event(
+        new_body="first body",
+        event_id="$edit-first:example.org",
+        server_timestamp=1_000_010,
+    )
+    retry, retry_info = _edit_event(
+        new_body="retry body",
+        event_id="$edit-retry:example.org",
+        server_timestamp=1_000_020,
+    )
+
+    first_task = asyncio.create_task(_handle_edit(harness, first, first_info))
+    await first_generation_started.wait()
+    retry_task = asyncio.create_task(_handle_edit(harness, retry, retry_info))
+    await retry_callback_loaded.wait()
+    release_cancellation.set()
+    with pytest.raises(asyncio.CancelledError):
+        await first_task
+    await retry_task
+
+    assert generation_count == 2
+    recorded = harness.turn_store.record_turn.call_args.args[0]
+    assert recorded.source_event_revisions == {
+        ORIGINAL_EVENT_ID: (1_000_020, "$edit-retry:example.org"),
+    }
+    assert harness.regenerator._mailboxes == {}
+
+
+@pytest.mark.asyncio
+async def test_failed_generation_cleans_mailbox_and_allows_retry(tmp_path: Path) -> None:
+    """A failed drain leaves durable revision state unchanged and a later retry succeeds."""
+    harness = _harness(tmp_path, turn_record=_turn_record())
+    event, event_info = _edit_event(new_body="retry body")
+    harness.generate_response.side_effect = RuntimeError("generation failed")
+
+    with pytest.raises(RuntimeError, match="generation failed"):
+        await _handle_edit(harness, event, event_info)
+
+    assert harness.regenerator._mailboxes == {}
+    harness.generate_response.reset_mock(side_effect=True)
+    harness.generate_response.return_value = NEW_RESPONSE_EVENT_ID
+
+    await _handle_edit(harness, event, event_info)
+
+    assert harness.generate_response.await_args.args[0].prompt == "retry body"
+    assert harness.regenerator._mailboxes == {}
+
+
+@pytest.mark.asyncio
+async def test_persisted_revision_rejects_stale_edit_after_regenerator_restart(tmp_path: Path) -> None:
+    """A new regenerator instance must not replay an older revision over durable state."""
+    first_harness = _harness(tmp_path, turn_record=_turn_record())
+    newer, newer_info = _edit_event(
+        new_body="newest body",
+        event_id="$edit-new:example.org",
+        server_timestamp=1_000_020,
+    )
+    await _handle_edit(first_harness, newer, newer_info)
+    persisted_record = first_harness.turn_store.record_turn.call_args.args[0]
+
+    restarted_harness = _harness(tmp_path, turn_record=persisted_record)
+    older, older_info = _edit_event(
+        new_body="older body",
+        event_id="$edit-old:example.org",
+        server_timestamp=1_000_010,
+    )
+    await _handle_edit(restarted_harness, older, older_info)
+
+    _assert_no_regeneration(restarted_harness)
+    assert restarted_harness.regenerator._mailboxes == {}
+
+
+@pytest.mark.asyncio
+async def test_edit_waits_for_pending_original_response_then_reloads(tmp_path: Path) -> None:
+    """An edit of a pending turn should wait, reload its response ID, and regenerate."""
+    pending_record = _turn_record(response_event_id=None)
+    completed_record = replace(pending_record, response_event_id=RESPONSE_EVENT_ID)
+    harness = _harness(tmp_path, turn_record=pending_record)
+    original_settled = False
+
+    def load_turn(**_kwargs: object) -> TurnRecord:
+        return completed_record if original_settled else pending_record
+
+    def wait_for_turn_settled(_source_event_ids: tuple[str, ...]) -> None:
+        nonlocal original_settled
+        original_settled = True
+
+    harness.turn_store.load_turn.side_effect = load_turn
+    harness.turn_store.get_turn_record.side_effect = lambda _event_id: (
+        completed_record if original_settled else pending_record
+    )
+    harness.wait_for_turn_settled.side_effect = wait_for_turn_settled
+    event, event_info = _edit_event(new_body="edit after pending")
+
+    await _handle_edit(harness, event, event_info)
+
+    harness.wait_for_turn_settled.assert_called_once_with((ORIGINAL_EVENT_ID,))
+    request = harness.generate_response.await_args.args[0]
+    assert request.prompt == "edit after pending"
+    assert request.existing_event_id == RESPONSE_EVENT_ID
+    assert harness.regenerator._mailboxes == {}
+
+
+@pytest.mark.asyncio
+async def test_pending_original_failure_releases_wait_without_regeneration(tmp_path: Path) -> None:
+    """A settled original with no response ID should end the drain without hanging."""
+    pending_record = _turn_record(response_event_id=None)
+    harness = _harness(tmp_path, turn_record=pending_record)
+    event, event_info = _edit_event()
+
+    await _handle_edit(harness, event, event_info)
+
+    harness.wait_for_turn_settled.assert_called_once_with((ORIGINAL_EVENT_ID,))
+    harness.generate_response.assert_not_awaited()
+    assert harness.regenerator._mailboxes == {}
+
+
+@pytest.mark.asyncio
+async def test_cancellation_while_waiting_for_original_cleans_mailbox(tmp_path: Path) -> None:
+    """Cancelling the edit waiter must not leave an event-loop task or mailbox behind."""
+    harness = _harness(tmp_path, turn_record=_turn_record(response_event_id=None))
+    wait_started = threading.Event()
+    release_wait = threading.Event()
+
+    def wait_for_turn_settled(_source_event_ids: tuple[str, ...]) -> None:
+        wait_started.set()
+        release_wait.wait()
+
+    harness.wait_for_turn_settled.side_effect = wait_for_turn_settled
+    event, event_info = _edit_event()
+    task = asyncio.create_task(_handle_edit(harness, event, event_info))
+    await asyncio.to_thread(wait_started.wait)
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert harness.regenerator._mailboxes == {}
+    release_wait.set()
 
 
 @pytest.mark.asyncio
@@ -330,18 +792,34 @@ async def test_coalesced_edit_rechecks_every_snapshotted_source_under_lock(tmp_p
         source_event_prompts={first_event_id: "first message", second_event_id: "second message"},
     )
     harness = _harness(tmp_path, turn_record=record)
-    harness.turn_store.prepare_response_for_redactions.return_value = True
+    redaction_checks = 0
+
+    def prepare_response_for_redactions(**_kwargs: object) -> bool:
+        nonlocal redaction_checks
+        redaction_checks += 1
+        if redaction_checks == 1:
+            harness.turn_store.record_turn(
+                replace(record, redacted_source_event_ids=(first_event_id,)),
+            )
+            return True
+        return False
+
+    async def generate(request: ResponseRequest) -> str | None:
+        assert request.prepare_source_turn is not None
+        return None if request.prepare_source_turn() else NEW_RESPONSE_EVENT_ID
+
+    harness.turn_store.prepare_response_for_redactions.side_effect = prepare_response_for_redactions
+    harness.generate_response.side_effect = generate
     event, event_info = _edit_event(original_event_id=second_event_id, new_body="edited second message")
 
     await _handle_edit(harness, event, event_info)
 
-    request = harness.generate_response.await_args.args[0]
-    assert request.prepare_source_turn is not None
-    assert request.prepare_source_turn() is True
-    harness.turn_store.prepare_response_for_redactions.assert_called_once_with(
-        target=record.conversation_target,
-        source_event_ids=(first_event_id, second_event_id),
-    )
+    assert [call.args[0].prompt for call in harness.generate_response.await_args_list] == [
+        coalesced_prompt(["first message", "edited second message"]),
+        coalesced_prompt(["edited second message"]),
+    ]
+    assert harness.turn_store.prepare_response_for_redactions.call_count == 2
+    assert harness.turn_store.record_turn.call_args.args[0].redacted_source_event_ids == (first_event_id,)
 
 
 @pytest.mark.asyncio
