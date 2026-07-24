@@ -674,7 +674,8 @@ async def test_edit_waits_when_original_claim_precedes_pending_record(tmp_path: 
     release_wait.set()
     await task
 
-    harness.wait_for_turn_settled.assert_awaited_once_with((ORIGINAL_EVENT_ID,))
+    assert harness.wait_for_turn_settled.await_count == 2
+    harness.wait_for_turn_settled.assert_awaited_with((ORIGINAL_EVENT_ID,))
     request = harness.generate_response.await_args.args[0]
     assert request.prompt == "edit during pending registration"
     assert request.existing_event_id == RESPONSE_EVENT_ID
@@ -709,6 +710,44 @@ async def test_edit_waits_for_pending_original_response_then_reloads(tmp_path: P
     request = harness.generate_response.await_args.args[0]
     assert request.prompt == "edit after pending"
     assert request.existing_event_id == RESPONSE_EVENT_ID
+    assert harness.regenerator._mailboxes == {}
+
+
+@pytest.mark.asyncio
+async def test_edit_waits_for_active_retry_then_uses_retried_response(tmp_path: Path) -> None:
+    """An edit queued during normal retry must target the retry's new response."""
+    interrupted_record = _turn_record(response_event_id="$interrupted:example.org")
+    retried_record = replace(interrupted_record, response_event_id="$retried:example.org")
+    harness = _harness(tmp_path, turn_record=interrupted_record)
+    retry_settled = False
+    wait_started = asyncio.Event()
+    release_retry = asyncio.Event()
+
+    def load_turn(**_kwargs: object) -> TurnRecord:
+        return retried_record if retry_settled else interrupted_record
+
+    async def wait_for_turn_settled(_source_event_ids: tuple[str, ...]) -> None:
+        nonlocal retry_settled
+        wait_started.set()
+        await release_retry.wait()
+        retry_settled = True
+
+    harness.turn_store.load_turn.side_effect = load_turn
+    harness.turn_store.get_turn_record.side_effect = lambda _event_id: (
+        retried_record if retry_settled else interrupted_record
+    )
+    harness.wait_for_turn_settled.side_effect = wait_for_turn_settled
+    event, event_info = _edit_event(new_body="edit during normal retry")
+
+    task = asyncio.create_task(_handle_edit(harness, event, event_info))
+    await asyncio.wait_for(wait_started.wait(), timeout=1)
+    harness.generate_response.assert_not_awaited()
+    release_retry.set()
+    await task
+
+    request = harness.generate_response.await_args.args[0]
+    assert request.prompt == "edit during normal retry"
+    assert request.existing_event_id == retried_record.response_event_id
     assert harness.regenerator._mailboxes == {}
 
 

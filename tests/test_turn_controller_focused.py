@@ -40,8 +40,13 @@ from mindroom.dispatch_source import (
     ScheduledHistoryBudget,
 )
 from mindroom.entity_resolution import entity_identity_registry
+from mindroom.handled_turns import TurnRecord
 from mindroom.hooks import HookContextSupport, HookRegistry, HookRegistryState
-from mindroom.inbound_turn_normalizer import InboundTurnNormalizer, InboundTurnNormalizerDeps
+from mindroom.inbound_turn_normalizer import (
+    InboundTurnNormalizer,
+    InboundTurnNormalizerDeps,
+    TextNormalizationRequest,
+)
 from mindroom.ingress_validation import IngressValidator, IngressValidatorDeps
 from mindroom.logging_config import get_logger
 from mindroom.matrix.cache.thread_history_result import thread_history_result
@@ -69,7 +74,7 @@ if TYPE_CHECKING:
 
     from mindroom.coalescing_batch import CoalescedBatch
     from mindroom.delivery_gateway import DeliveryGateway, EditTextRequest, SendTextRequest
-    from mindroom.handled_turns import TurnRecord
+    from mindroom.dispatch_handoff import PreparedTextEvent
     from mindroom.hooks import MessageEnvelope
     from mindroom.matrix.cache import ThreadHistoryResult
     from mindroom.matrix.event_info import EventInfo
@@ -713,6 +718,62 @@ async def test_scheduled_router_handoff_history_limit_reaches_response_request(
 
 
 @pytest.mark.asyncio
+async def test_router_relay_keeps_original_alias_claim_through_gate_handoff(
+    config: Config,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The routed source alias stays claimed while dispatch normalizes the relay."""
+    harness = _build_harness(config, tmp_path)
+    room = _room_with_members(config, "general", ROUTER_AGENT_NAME)
+    original_event_id = "$routed-original:localhost"
+    event = nio.RoomMessageText.from_dict(
+        {
+            "content": {
+                "body": "@general could you help with this?",
+                "msgtype": "m.text",
+                constants.ORIGINAL_SENDER_KEY: _SENDER,
+                constants.SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+                "m.relates_to": {
+                    "rel_type": "m.thread",
+                    "event_id": _THREAD_ROOT,
+                    "m.in_reply_to": {"event_id": original_event_id},
+                },
+            },
+            "event_id": "$router-relay:localhost",
+            "sender": _entity_user_id(config, ROUTER_AGENT_NAME),
+            "origin_server_ts": 1_000_000,
+            "room_id": _ROOM_ID,
+            "type": "m.room.message",
+        },
+    )
+    normalization_started = asyncio.Event()
+    release_normalization = asyncio.Event()
+    resolve_text_event = InboundTurnNormalizer.resolve_text_event
+
+    async def normalize_with_barrier(
+        normalizer: InboundTurnNormalizer,
+        request: TextNormalizationRequest,
+    ) -> PreparedTextEvent:
+        normalization_started.set()
+        await release_normalization.wait()
+        return await resolve_text_event(normalizer, request)
+
+    monkeypatch.setattr(InboundTurnNormalizer, "resolve_text_event", normalize_with_barrier)
+    delivery = asyncio.create_task(harness.deliver(room, event))
+    await normalization_started.wait()
+
+    competing_claim = TurnRecord.create([original_event_id], completed=False)
+    try:
+        assert harness.turn_store.try_claim_turn(competing_claim) is False
+    finally:
+        release_normalization.set()
+        await delivery
+    assert harness.turn_store.try_claim_turn(competing_claim) is True
+    harness.turn_store.release_pending_turn_claim(competing_claim)
+
+
+@pytest.mark.asyncio
 async def test_scheduled_new_thread_survives_router_handoff_in_room_mode(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1010,7 +1071,11 @@ async def test_user_message_cannot_spoof_scheduled_thread_promotion(tmp_path: Pa
 
 
 @pytest.mark.asyncio
-async def test_deferred_sync_restart_records_handled_outcome_before_rethrow(config: Config, tmp_path: Path) -> None:
+async def test_deferred_sync_restart_records_handled_outcome_before_rethrow(
+    config: Config,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A queued retry must not race normal replay of the same visibly settled source turn."""
     harness = _build_harness(config, tmp_path)
     harness.runner.deferred_sync_restart_error = asyncio.CancelledError("sync_restart")
@@ -1028,8 +1093,39 @@ async def test_deferred_sync_restart_records_handled_outcome_before_rethrow(conf
     assert record.response_event_id == "$response:localhost"
 
     harness.runner.deferred_sync_restart_error = None
-    await harness.restart_retry.flush()
+    retry_started = asyncio.Event()
+    release_retry = asyncio.Event()
+    generate_response = harness.runner.generate_response
+
+    async def generate_retry_with_barrier(request: ResponseRequest) -> str | None:
+        if request.sync_restart_retry_source_event_id is not None:
+            harness.runner.response_event_id = "$retried-response:localhost"
+            retry_started.set()
+            await release_retry.wait()
+        return await generate_response(request)
+
+    monkeypatch.setattr(harness.runner, "generate_response", generate_retry_with_barrier)
+    retry = asyncio.create_task(harness.restart_retry.flush())
+    await retry_started.wait()
+    settlement_started = asyncio.Event()
+
+    async def wait_for_settlement() -> None:
+        settlement_started.set()
+        await harness.turn_store.wait_for_turn_settled((event.event_id,))
+
+    waiter = asyncio.create_task(wait_for_settlement())
+    await settlement_started.wait()
+    try:
+        assert not waiter.done()
+    finally:
+        release_retry.set()
+        await retry
+        await waiter
+
     assert harness.runner.requests[1].sync_restart_retry_source_event_id == event.event_id
+    retried_record = harness.turn_store.get_turn_record(event.event_id)
+    assert retried_record is not None
+    assert retried_record.response_event_id == "$retried-response:localhost"
 
 
 @pytest.mark.asyncio

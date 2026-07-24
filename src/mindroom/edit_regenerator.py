@@ -185,7 +185,6 @@ class EditRegenerator:
             self._logger().debug("Ignoring edit for turn owned by another entity", original_event_id=original_event_id)
             return
         if original_event_id in turn_record.redacted_source_event_ids:
-            self._logger().debug("Ignoring edit for redacted source message", original_event_id=original_event_id)
             return
         revision = (event.server_timestamp, event.event_id)
         committed = (turn_record.source_event_revisions or {}).get(original_event_id)
@@ -367,8 +366,7 @@ class EditRegenerator:
 
     async def _drain(self, room: nio.MatrixRoom, initial_record: TurnRecord, mailbox: _Mailbox) -> None:
         assert initial_record.conversation_target is not None
-        if initial_record.response_event_id is None:
-            await self.deps.wait_for_turn_settled(initial_record.indexed_event_ids)
+        await self.deps.wait_for_turn_settled(initial_record.indexed_event_ids)
         while mailbox.pending:
             latest = max(mailbox.pending.values(), key=lambda edit: edit.revision)
             request, record, applied = self._build_request(room, mailbox)
@@ -387,7 +385,6 @@ class EditRegenerator:
                     replace(record, response_event_id=regenerated_event_id),
                 )
                 self._discard(mailbox, applied)
-                self._logger().info("Successfully regenerated response for edited message")
                 continue
             fresh_record = self.deps.turn_store.get_turn_record(latest.original_event_id)
             if fresh_record is not None and fresh_record.redacted_source_event_ids != record.redacted_source_event_ids:
@@ -401,8 +398,3 @@ class EditRegenerator:
                 )
                 continue
             self._discard(mailbox, applied)
-            self._logger().info(
-                "Suppressed regeneration left existing response unchanged",
-                original_event_id=latest.original_event_id,
-                response_event_id=record.response_event_id,
-            )

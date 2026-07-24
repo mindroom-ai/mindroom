@@ -61,7 +61,7 @@ from mindroom.response_runner import (
     _ResponseGenerationOutcome,
 )
 from mindroom.teams import TeamIntent, TeamMode, TeamResolution
-from mindroom.text_ingress_dispatch import _run_claimed_response
+from mindroom.text_ingress_dispatch import run_claimed_response
 from mindroom.turn_controller import _IngressAdmissionOutcome, _PrecheckedEvent
 from mindroom.turn_policy import PreparedDispatch, ResponseAction, _DispatchPlan
 from tests.bot_helpers import (
@@ -181,7 +181,7 @@ class TestAgentBot(AgentBotTestBase):
 
         with patch.object(DeliveryGateway, "send_text", new=AsyncMock(side_effect=send_rejection)) as send_text:
             response_task = asyncio.create_task(
-                _run_claimed_response(
+                run_claimed_response(
                     controller,
                     handled_turn,
                     controller._execute_response_action(

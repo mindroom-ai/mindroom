@@ -97,7 +97,7 @@ from mindroom.response_payload_preparation import (
 from mindroom.response_runner import PostLockRequestPreparationError, ResponseRequest
 from mindroom.routing import suggest_responder_for_message
 from mindroom.teams import TeamIntent, TeamMode, select_ad_hoc_team_mode
-from mindroom.text_ingress_dispatch import dispatch_text_message
+from mindroom.text_ingress_dispatch import dispatch_text_message, run_claimed_response
 from mindroom.thread_utils import (
     check_agent_mentioned,
     is_router_only_agent_mention,
@@ -1681,18 +1681,24 @@ class TurnController:
 
         def register_sync_restart_retry() -> None:
             async def retry() -> None:
-                await self._execute_response_action(
-                    room,
-                    event,
-                    dispatch,
-                    action,
-                    payload_inputs,
-                    processing_log="Retrying response interrupted by sync restart",
-                    dispatch_started_at=time.monotonic(),
-                    handled_turn=handled_turn,
-                    matrix_run_metadata=matrix_run_metadata,
-                    retry_team_mode=retry_team_mode,
-                    sync_restart_retry_source_event_id=event.event_id,
+                while not self.deps.turn_store.try_claim_turn(handled_turn):
+                    await self.deps.turn_store.wait_for_turn_settled(handled_turn.indexed_event_ids)
+                await run_claimed_response(
+                    self,
+                    handled_turn,
+                    self._execute_response_action(
+                        room,
+                        event,
+                        dispatch,
+                        action,
+                        payload_inputs,
+                        processing_log="Retrying response interrupted by sync restart",
+                        dispatch_started_at=time.monotonic(),
+                        handled_turn=handled_turn,
+                        matrix_run_metadata=matrix_run_metadata,
+                        retry_team_mode=retry_team_mode,
+                        sync_restart_retry_source_event_id=event.event_id,
+                    ),
                 )
 
             self.deps.restart_retry.register(event.event_id, retry, room_id=room.room_id)
@@ -1894,8 +1900,10 @@ class TurnController:
             dispatch_timing.mark("gate_exit")
         async with self.deps.resolver.turn_thread_cache_scope():
             dispatch_start = time.monotonic()
+            routed_alias = self.deps.ingress.router_relay_original_event_id(handoff.event)
             handled_turn = TurnRecord.create(
                 handoff.source_event_ids,
+                discovery_event_ids=(routed_alias,) if routed_alias else (),
                 source_event_prompts=dict(handoff.source_event_prompts),
                 source_event_metadata=dict(handoff.source_event_metadata)
                 if len(handoff.source_event_ids) > 1

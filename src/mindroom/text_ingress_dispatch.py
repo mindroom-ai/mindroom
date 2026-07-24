@@ -438,7 +438,7 @@ async def _apply_turn_plan(
     # response lock; the response itself keeps running on a runner-owned task.
     response_started = asyncio.Event()
     response_task = controller.deps.response_runner.track_inbox_response(
-        _run_claimed_response(
+        run_claimed_response(
             controller,
             turn_claim,
             controller._execute_response_action(
@@ -477,7 +477,7 @@ async def _apply_turn_plan(
         response_task.result()
 
 
-async def _run_claimed_response(
+async def run_claimed_response(
     controller: TurnController,
     turn_claim: TurnRecord,
     response: Awaitable[None],
