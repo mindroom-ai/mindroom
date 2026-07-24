@@ -4535,7 +4535,7 @@ def main() -> None:
         result["seed"] = args.seed if args.trace is None else "trace"
         result["wall_seconds"] = round(time.monotonic() - started_at, 1)
         result.update(stack.diagnostic_counts())
-    except Exception as exc:
+    except BaseException as exc:
         _persist_failure_bundle(bundle, stack, runner_holder.get("runner"), exc)
         if args.failure_log is not None and stack.log_path.exists():
             args.failure_log.write_text(

@@ -3019,6 +3019,58 @@ async def test_failure_bundle_finalizes_when_stop_mindroom_fails(tmp_path: Path)
     assert "stop failed" in (bundle.directory / "cleanup_error.txt").read_text(encoding="utf-8")
 
 
+def test_main_preserves_base_exception_evidence_and_closes_stack(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An interrupted campaign preserves evidence and tears down its stack."""
+    args = SimpleNamespace(
+        artifact_root=tmp_path / "artifacts",
+        failure_log=None,
+        pending_grace=0.0,
+        reply_timeout=1.0,
+        save_trace=None,
+        seed=1,
+        settle_seconds=0.0,
+        trace=None,
+    )
+    stack_events: list[str] = []
+    captured: list[BaseException] = []
+
+    class InterruptedStack:
+        log_path = tmp_path / "mindroom.log"
+
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def start(self) -> None:
+            stack_events.append("start")
+
+        def close(self) -> None:
+            stack_events.append("close")
+
+    async def interrupt_run(*_args: object, **_kwargs: object) -> dict[str, object]:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(live_fuzz, "_parse_args", lambda: args)
+    monkeypatch.setattr(live_fuzz, "_scenario_from_args", lambda _args: _bundle_scenario())
+    monkeypatch.setattr(live_fuzz, "_run_provenance", dict)
+    monkeypatch.setattr(live_fuzz, "ManagedTuwunelStack", InterruptedStack)
+    monkeypatch.setattr(live_fuzz, "_run_live", interrupt_run)
+    monkeypatch.setattr(
+        live_fuzz,
+        "_persist_failure_bundle",
+        lambda _bundle, _stack, _runner, exc: captured.append(exc),
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        live_fuzz.main()
+
+    assert stack_events == ["start", "close"]
+    assert len(captured) == 1
+    assert isinstance(captured[0], KeyboardInterrupt)
+
+
 @pytest.mark.asyncio
 async def test_sanitized_oracle_snapshot_excludes_tokens_and_sync_state() -> None:
     """The snapshot keeps opaque IDs but never sync tokens or access tokens."""
