@@ -30,6 +30,22 @@ def event_source_matches_room(event_source: Mapping[str, object], room_id: str) 
     return "room_id" not in event_source or event_source.get("room_id") == room_id
 
 
+def event_source_matches_index(
+    event_source: Mapping[str, object],
+    indexed_event_id: str,
+    room_id: str,
+) -> bool:
+    """Return whether one cached payload matches its authoritative index scope."""
+    return (
+        bool(indexed_event_id)
+        and event_source.get("event_id") == indexed_event_id
+        and event_source_matches_room(
+            event_source,
+            room_id,
+        )
+    )
+
+
 def approval_status_from_content(content: Mapping[str, object]) -> str | None:
     """Return one valid approval-card status."""
     status = content.get("status")

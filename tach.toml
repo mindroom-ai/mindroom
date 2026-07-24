@@ -3878,6 +3878,7 @@ expose = [
     "EventInfo",
     "approval_status_from_content",
     "event_source_is_state_event",
+    "event_source_matches_index",
     "event_source_matches_room",
     "event_type_supports_thread_relations",
     "is_thread_affecting_relation",

@@ -45,6 +45,7 @@ from mindroom.matrix.event_info import (
     event_source_is_state_event,
     event_source_matches_room,
     replacement_content_for_original,
+    room_message_content_is_renderable,
 )
 from mindroom.matrix.media import (
     is_encrypted_media_event_source,
@@ -310,6 +311,11 @@ async def _cached_room_get_event_response(
 ) -> nio.RoomGetEventResponse | None:
     """Reconstruct one cached room-get-event response, applying visible edits when present."""
     if not event_source_matches_room(event_source, room_id):
+        return None
+    original_content = event_source.get("content")
+    if event_source.get("type") == "m.room.message" and (
+        not isinstance(original_content, dict) or not room_message_content_is_renderable(original_content)
+    ):
         return None
     visible_event_source = await _apply_cached_latest_edit(
         event_source,

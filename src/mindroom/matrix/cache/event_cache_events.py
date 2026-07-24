@@ -10,6 +10,7 @@ from typing import Any
 from mindroom.matrix.event_info import (
     EventInfo,
     event_source_is_state_event,
+    event_source_matches_index,
     event_source_matches_room,
     event_type_supports_thread_relations,
     replacement_content_is_renderable,
@@ -37,6 +38,19 @@ class CachedEventRow:
 
     event: dict[str, Any]
     cached_at: float | None
+
+
+def validated_cached_event_payload(
+    event_json: str,
+    indexed_event_id: str,
+    *,
+    room_id: str,
+) -> dict[str, Any] | None:
+    """Return one cached payload only when it matches its authoritative index."""
+    event = json.loads(event_json)
+    if not isinstance(event, dict) or not event_source_matches_index(event, indexed_event_id, room_id):
+        return None
+    return event
 
 
 def validated_cached_edit_row(

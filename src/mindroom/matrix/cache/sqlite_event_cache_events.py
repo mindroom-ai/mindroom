@@ -18,6 +18,7 @@ from .event_cache_events import (
     redaction_removal_event_ids,
     serialize_cacheable_events,
     validated_cached_edit_row,
+    validated_cached_event_payload,
 )
 
 if TYPE_CHECKING:
@@ -100,7 +101,15 @@ async def load_event(
     )
     row = await cursor.fetchone()
     await cursor.close()
-    return None if row is None else json.loads(row[0])
+    return (
+        None
+        if row is None
+        else validated_cached_event_payload(
+            row[0],
+            event_id,
+            room_id=room_id,
+        )
+    )
 
 
 async def load_recent_room_events(

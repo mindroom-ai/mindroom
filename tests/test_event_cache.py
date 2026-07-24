@@ -2062,6 +2062,83 @@ async def test_cached_room_get_event_cache_hit_avoids_network_call(event_cache: 
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("invalidity", ["wrong-event-id", "missing-msgtype"])
+async def test_cached_original_validation_precedes_edit_projection(
+    event_cache: ConversationEventCache,
+    invalidity: str,
+) -> None:
+    """Point reads and snapshots must reject invalid originals before applying edits."""
+    older_event = _make_text_event(
+        event_id="$older",
+        sender="@agent:localhost",
+        body="Older",
+        server_timestamp=1000,
+        source_content={"body": "Older"},
+    )
+    cached_original = _make_text_event(
+        event_id="$target",
+        sender="@agent:localhost",
+        body="Cached original",
+        server_timestamp=2000,
+        source_content={"body": "Cached original"},
+    )
+    cached_source = _cache_source(cached_original)
+    if invalidity == "wrong-event-id":
+        cached_source["event_id"] = "$other"
+    else:
+        cached_source["content"].pop("msgtype")
+    edit = _make_text_event(
+        event_id="$edit",
+        sender="@agent:localhost",
+        body="* Edited",
+        server_timestamp=3000,
+        source_content={
+            "body": "* Edited",
+            "m.new_content": {"body": "Edited", "msgtype": "m.text"},
+            "m.relates_to": {"rel_type": "m.replace", "event_id": "$target"},
+        },
+    )
+    fetched_original = _make_text_event(
+        event_id="$target",
+        sender="@agent:localhost",
+        body="Fetched original",
+        server_timestamp=2000,
+        source_content={"body": "Fetched original"},
+    )
+    client = MagicMock()
+    client.room_get_event = AsyncMock(return_value=_make_room_get_event_response(fetched_original))
+    await event_cache.store_events_batch(
+        [
+            ("$older", "!room:localhost", _cache_source(older_event)),
+            ("$target", "!room:localhost", cached_source),
+            ("$edit", "!room:localhost", _cache_source(edit)),
+        ],
+    )
+
+    response, fetched_source = await _cached_room_get_event(
+        client,
+        event_cache,
+        "!room:localhost",
+        "$target",
+    )
+    snapshot = await event_cache.get_latest_agent_message_snapshot(
+        "!room:localhost",
+        None,
+        "@agent:localhost",
+        runtime_started_at=None,
+    )
+
+    assert isinstance(response, nio.RoomGetEventResponse)
+    assert response.event.event_id == "$target"
+    assert response.event.body == "Edited"
+    assert fetched_source is not None
+    assert fetched_source["event_id"] == "$target"
+    client.room_get_event.assert_awaited_once_with("!room:localhost", "$target")
+    assert snapshot is not None
+    assert snapshot.content["body"] == "Older"
+
+
+@pytest.mark.asyncio
 async def test_matrix_conversation_lookup_fill_cannot_cross_leave_and_rejoin(tmp_path: Path) -> None:
     """A point fetch begun before departure must not repopulate the rejoined cache."""
     db_path = tmp_path / "event_cache.db"

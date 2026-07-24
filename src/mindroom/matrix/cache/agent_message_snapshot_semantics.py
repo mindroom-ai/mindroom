@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from mindroom.matrix.event_info import (
     EventInfo,
     event_source_is_state_event,
-    event_source_matches_room,
+    event_source_matches_index,
     replacement_content_for_original,
+    room_message_content_is_renderable,
 )
 
 from .agent_message_snapshot import AgentMessageSnapshot, AgentMessageSnapshotUnavailable
@@ -44,28 +46,26 @@ def thread_cache_has_no_snapshot(cache_state: ThreadCacheState | None) -> bool:
 def event_matches_snapshot_scope(
     event: dict[str, Any],
     *,
+    indexed_event_id: str,
     room_id: str,
     thread_id: str | None,
     sender: str,
 ) -> bool:
     """Return whether one event is a visible message candidate for a snapshot scope."""
+    content = event.get("content")
     if (
         event.get("type") != "m.room.message"
         or event.get("sender") != sender
         or event_source_is_state_event(event)
-        or not event_source_matches_room(event, room_id)
+        or not event_source_matches_index(event, indexed_event_id, room_id)
+        or not isinstance(content, Mapping)
+        or not room_message_content_is_renderable(content)
     ):
         return False
     relation_type = EventInfo.from_event(event).relation_type
     if relation_type == "m.replace":
         return False
     return not (thread_id is None and relation_type == "m.thread")
-
-
-def snapshot_event_id(event: dict[str, Any]) -> str | None:
-    """Return one event's usable ID for snapshot edit lookup."""
-    event_id = event.get("event_id")
-    return event_id if isinstance(event_id, str) and event_id else None
 
 
 def snapshot_lookup_result(
