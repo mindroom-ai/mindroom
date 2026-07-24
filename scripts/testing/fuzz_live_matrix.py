@@ -66,6 +66,14 @@ def _required_string(value: Mapping[str, object], key: str) -> str:
     return field
 
 
+def _optional_int(value: Mapping[str, object], key: str, default: int) -> int:
+    field = value.get(key, default)
+    if not isinstance(field, int) or isinstance(field, bool):
+        msg = f"Live Matrix fuzz operation field {key!r} must be an integer"
+        raise TypeError(msg)
+    return field
+
+
 class LiveOperationKind(StrEnum):
     """User-visible Matrix mutation families."""
 
@@ -86,6 +94,8 @@ class LiveOperation:
     kind: LiveOperationKind
     thread: int
     target: str | None
+    room: int = 0
+    client: int = 0
 
     @property
     def event_ref(self) -> str:
@@ -104,6 +114,8 @@ class LiveOperation:
             kind=LiveOperationKind(_required_string(value, "kind")),
             thread=_required_int(value, "thread"),
             target=raw_target,
+            room=_optional_int(value, "room", 0),
+            client=_optional_int(value, "client", 0),
         )
 
 
@@ -114,6 +126,8 @@ class LiveFuzzScenario:
     thread_count: int
     batches: tuple[tuple[LiveOperation, ...], ...]
     profile: str = "fuzz"
+    room_count: int = 1
+    client_count: int = 1
 
     def to_json(self) -> str:
         """Serialize the complete trace for exact replay on a fresh server."""
@@ -121,6 +135,8 @@ class LiveFuzzScenario:
             {
                 "version": 1,
                 "profile": self.profile,
+                "room_count": self.room_count,
+                "client_count": self.client_count,
                 "thread_count": self.thread_count,
                 "batches": [[asdict(operation) for operation in batch] for batch in self.batches],
             },
@@ -146,46 +162,33 @@ class LiveFuzzScenario:
                 for batch in raw_batches
             ),
             profile=_required_string(payload, "profile"),
+            room_count=_optional_int(payload, "room_count", 1),
+            client_count=_optional_int(payload, "client_count", 1),
         )
         scenario.validate()
         return scenario
 
     def validate(self) -> None:
         """Reject traces with impossible same-batch or forward dependencies."""
-        if self.thread_count < 1:
-            msg = "live Matrix fuzz trace must contain at least one thread"
+        if self.thread_count < 1 or self.room_count < 1 or self.client_count < 1:
+            msg = "live Matrix fuzz trace must contain at least one room, client, and thread"
             raise ValueError(msg)
-        if self.profile not in {"fuzz", "saturation"}:
+        if self.profile not in {"fuzz", "recovery", "saturation"}:
             msg = f"unsupported live Matrix fuzz profile {self.profile!r}"
             raise ValueError(msg)
-        known_events = {f"root:{thread}" for thread in range(self.thread_count)}
-        known_responses = {f"response:root:{thread}" for thread in range(self.thread_count)}
+        if self.profile == "recovery":
+            known_events = {
+                f"root:{room}:{thread}" for room in range(self.room_count) for thread in range(self.thread_count)
+            }
+        else:
+            known_events = {f"root:{thread}" for thread in range(self.thread_count)}
+        known_responses = {f"response:{event_ref}" for event_ref in known_events}
+        event_rooms = {event_ref: (_logical_ref_room(event_ref) or 0) for event_ref in known_events | known_responses}
         message_events = set(known_events)
         operation_ids: set[int] = set()
 
         for batch in self.batches:
-            if not batch:
-                msg = "live Matrix fuzz batches must not be empty"
-                raise ValueError(msg)
-            restart_operations = [
-                operation for operation in batch if operation.kind is LiveOperationKind.RESTART_MINDROOM
-            ]
-            if restart_operations and len(batch) != 1:
-                msg = "MindRoom restart must be a singleton batch"
-                raise ValueError(msg)
-            reply_threads = [
-                operation.thread
-                for operation in batch
-                if operation.kind
-                in {
-                    LiveOperationKind.THREAD_MESSAGE,
-                    LiveOperationKind.PLAIN_REPLY,
-                }
-            ]
-            if len(reply_threads) != len(set(reply_threads)):
-                msg = "same-thread messages requiring replies must use separate batches"
-                raise ValueError(msg)
-
+            _validate_live_batch_shape(batch)
             new_events: set[str] = set()
             new_responses: set[str] = set()
             new_messages: set[str] = set()
@@ -195,20 +198,47 @@ class LiveFuzzScenario:
                     thread_count=self.thread_count,
                     operation_ids=operation_ids,
                     allowed_targets=known_events | known_responses,
+                    event_rooms=event_rooms,
                     message_events=message_events,
+                    room_count=self.room_count,
+                    client_count=self.client_count,
                 )
                 if operation.kind is not LiveOperationKind.IDEMPOTENT_RETRY:
                     new_events.add(operation.event_ref)
+                    event_rooms[operation.event_ref] = operation.room
                 if operation.kind in {
                     LiveOperationKind.THREAD_MESSAGE,
                     LiveOperationKind.PLAIN_REPLY,
                 }:
                     new_messages.add(operation.event_ref)
                     new_responses.add(f"response:{operation.event_ref}")
+                    event_rooms[f"response:{operation.event_ref}"] = operation.room
 
             known_events.update(new_events)
             known_responses.update(new_responses)
             message_events.update(new_messages)
+
+
+def _validate_live_batch_shape(batch: tuple[LiveOperation, ...]) -> None:
+    if not batch:
+        msg = "live Matrix fuzz batches must not be empty"
+        raise ValueError(msg)
+    restart_operations = [operation for operation in batch if operation.kind is LiveOperationKind.RESTART_MINDROOM]
+    if restart_operations and len(batch) != 1:
+        msg = "MindRoom restart must be a singleton batch"
+        raise ValueError(msg)
+    reply_threads = [
+        (operation.room, operation.thread)
+        for operation in batch
+        if operation.kind
+        in {
+            LiveOperationKind.THREAD_MESSAGE,
+            LiveOperationKind.PLAIN_REPLY,
+        }
+    ]
+    if len(reply_threads) != len(set(reply_threads)):
+        msg = "same-thread messages requiring replies must use separate batches"
+        raise ValueError(msg)
 
 
 def _validate_live_operation(
@@ -217,15 +247,21 @@ def _validate_live_operation(
     thread_count: int,
     operation_ids: set[int],
     allowed_targets: set[str],
+    event_rooms: Mapping[str, int],
     message_events: set[str],
+    room_count: int,
+    client_count: int,
 ) -> None:
     if operation.operation_id in operation_ids:
         msg = f"duplicate live Matrix fuzz operation ID {operation.operation_id}"
         raise ValueError(msg)
     operation_ids.add(operation.operation_id)
-    if not 0 <= operation.thread < thread_count:
-        msg = f"invalid thread {operation.thread}"
-        raise ValueError(msg)
+    _validate_operation_location(
+        operation,
+        thread_count=thread_count,
+        room_count=room_count,
+        client_count=client_count,
+    )
     if operation.kind is LiveOperationKind.RESTART_MINDROOM:
         if operation.target is not None:
             msg = "MindRoom restart must not have a target"
@@ -237,9 +273,39 @@ def _validate_live_operation(
     if operation.target not in allowed_targets:
         msg = f"unknown or same-batch target {operation.target!r}"
         raise ValueError(msg)
+    if event_rooms[operation.target] != operation.room:
+        msg = f"cross-room target {operation.target!r} from room {operation.room}"
+        raise ValueError(msg)
     if operation.kind is LiveOperationKind.IDEMPOTENT_RETRY and operation.target not in message_events:
         msg = "idempotent retries may only target messages"
         raise ValueError(msg)
+
+
+def _validate_operation_location(
+    operation: LiveOperation,
+    *,
+    thread_count: int,
+    room_count: int,
+    client_count: int,
+) -> None:
+    if not 0 <= operation.thread < thread_count:
+        msg = f"invalid thread {operation.thread}"
+        raise ValueError(msg)
+    if not 0 <= operation.room < room_count:
+        msg = f"invalid room {operation.room}"
+        raise ValueError(msg)
+    if not 0 <= operation.client < client_count:
+        msg = f"invalid client {operation.client}"
+        raise ValueError(msg)
+
+
+def _logical_ref_room(logical_ref: str) -> int | None:
+    """Extract the room slot encoded by recovery root references."""
+    root_ref = logical_ref.removeprefix("response:")
+    parts = root_ref.split(":")
+    if len(parts) == 3 and parts[0] == "root":
+        return int(parts[1])
+    return None
 
 
 _WEIGHTED_KINDS = (
@@ -401,6 +467,92 @@ def live_scenario_from_seed(
         _update_generation_state(state, operations)
 
     scenario = LiveFuzzScenario(thread_count=thread_count, batches=tuple(batches))
+    scenario.validate()
+    return scenario
+
+
+def recovery_scenario_from_seed(
+    seed: int,
+    *,
+    messages_per_room: int = 64,
+    room_count: int = 3,
+    thread_count: int = 12,
+    client_count: int = 4,
+    max_batch_size: int = 12,
+) -> LiveFuzzScenario:
+    """Build a deterministic multi-room outage and limited-sync recovery schedule."""
+    if min(messages_per_room, room_count, thread_count, client_count, max_batch_size) < 1:
+        msg = "recovery profile dimensions must be positive"
+        raise ValueError(msg)
+    if messages_per_room < 51:
+        msg = "recovery profile requires at least 51 messages per room to exceed the sync window"
+        raise ValueError(msg)
+
+    randomizer = random.Random(seed)  # noqa: S311 - deterministic test trace generation
+    pending = dict.fromkeys(range(room_count), messages_per_room)
+    batches: list[tuple[LiveOperation, ...]] = []
+    sent_messages: list[LiveOperation] = []
+    operation_id = 0
+    round_index = 0
+    while any(pending.values()):
+        batch: list[LiveOperation] = []
+        used_threads: set[tuple[int, int]] = set()
+        candidates = [room for room in range(room_count) for _ in range(min(pending[room], max_batch_size))]
+        randomizer.shuffle(candidates)
+        for room in candidates:
+            if len(batch) >= max_batch_size or pending[room] == 0:
+                continue
+            available_threads = [thread for thread in range(thread_count) if (room, thread) not in used_threads]
+            if not available_threads:
+                continue
+            thread = randomizer.choice(available_threads)
+            used_threads.add((room, thread))
+            root_ref = f"root:{room}:{thread}"
+            kind = (
+                LiveOperationKind.PLAIN_REPLY
+                if (operation_id + round_index) % 3 == 0
+                else LiveOperationKind.THREAD_MESSAGE
+            )
+            target = f"response:{root_ref}" if kind is LiveOperationKind.PLAIN_REPLY else root_ref
+            operation = LiveOperation(
+                operation_id=operation_id,
+                kind=kind,
+                thread=thread,
+                target=target,
+                room=room,
+                client=randomizer.randrange(client_count),
+            )
+            batch.append(operation)
+            sent_messages.append(operation)
+            pending[room] -= 1
+            operation_id += 1
+        batches.append(tuple(batch))
+
+        retry_candidates = [operation for operation in sent_messages[-len(batch) :] if operation.operation_id % 11 == 0]
+        if retry_candidates:
+            batches.append(
+                tuple(
+                    LiveOperation(
+                        operation_id=operation_id + offset,
+                        kind=LiveOperationKind.IDEMPOTENT_RETRY,
+                        thread=source.thread,
+                        target=source.event_ref,
+                        room=source.room,
+                        client=source.client,
+                    )
+                    for offset, source in enumerate(retry_candidates)
+                ),
+            )
+            operation_id += len(retry_candidates)
+        round_index += 1
+
+    scenario = LiveFuzzScenario(
+        thread_count=thread_count,
+        batches=tuple(batches),
+        profile="recovery",
+        room_count=room_count,
+        client_count=client_count,
+    )
     scenario.validate()
     return scenario
 
@@ -585,10 +737,43 @@ def _run_command(*command: str) -> str:
     return result.stdout
 
 
+def _active_fuzz_instances() -> tuple[str, ...]:
+    """Probe the registry and return fuzz stacks whose real homeserver is alive."""
+    if not INSTANCE_REGISTRY.exists():
+        return ()
+    registry = json.loads(INSTANCE_REGISTRY.read_text(encoding="utf-8"))
+    instances = registry.get("instances", {})
+    if not isinstance(instances, dict):
+        return ()
+    active: list[str] = []
+    for name, value in instances.items():
+        if not isinstance(name, str) or not name.startswith("fuzz") or not isinstance(value, dict):
+            continue
+        matrix_port = value.get("matrix_port")
+        if not isinstance(matrix_port, int):
+            continue
+        try:
+            response = httpx.get(
+                f"http://127.0.0.1:{matrix_port}/_matrix/client/versions",
+                timeout=0.5,
+            )
+        except httpx.HTTPError:
+            continue
+        if response.is_success:
+            active.append(name)
+    return tuple(sorted(active))
+
+
 class ManagedTuwunelStack:
     """Disposable Tuwunel plus the current worktree's MindRoom runtime."""
 
-    def __init__(self, *, stream_segments: int = 4, stream_delay: float = 0.001) -> None:
+    def __init__(
+        self,
+        *,
+        room_count: int = 1,
+        stream_segments: int = 4,
+        stream_delay: float = 0.001,
+    ) -> None:
         token = secrets.token_hex(4)
         self.instance_name = f"fuzz{token}"
         self.namespace = self.instance_name
@@ -601,8 +786,11 @@ class ManagedTuwunelStack:
         self.homeserver = ""
         self.server_name = ""
         self.room_id = ""
+        self.room_ids: tuple[str, ...] = ()
+        self.room_keys = tuple(ROOM_KEY if room == 0 else f"fuzz_room_{room}" for room in range(room_count))
         self.agent_id = ""
         self.router_id = ""
+        self.preexisting_fuzz_servers = 0
         self._created = False
         self._model_server: ThreadingHTTPServer | None = None
         self._model_thread: threading.Thread | None = None
@@ -614,6 +802,11 @@ class ManagedTuwunelStack:
 
     def start(self) -> None:
         """Create every live dependency and wait for the managed room."""
+        active_instances = _active_fuzz_instances()
+        self.preexisting_fuzz_servers = len(active_instances)
+        if active_instances:
+            msg = f"live fuzz server already active: {', '.join(active_instances)}"
+            raise RuntimeError(msg)
         _run_command("just", "local-instances-create", self.instance_name, "tuwunel")
         self._created = True
         registry = json.loads(INSTANCE_REGISTRY.read_text(encoding="utf-8"))
@@ -647,6 +840,14 @@ class ManagedTuwunelStack:
     def restart_mindroom(self) -> None:
         """Restart only MindRoom while preserving its cache and Matrix account."""
         self._stop_mindroom()
+        self._start_mindroom()
+
+    def stop_mindroom(self) -> None:
+        """Stop MindRoom while leaving the isolated homeserver writable."""
+        self._stop_mindroom()
+
+    def resume_mindroom(self) -> None:
+        """Resume MindRoom against its durable cache and saved sync token."""
         self._start_mindroom()
 
     def close(self) -> None:
@@ -683,6 +884,7 @@ class ManagedTuwunelStack:
             "degraded_thread_reads": log.count("matrix_cache_thread_read_degraded"),
             "dispatch_read_timeouts": log.count("thread_read_error=dispatch_read_timeout"),
             "event_loop_stalls": log.count("event_loop_stall_detected"),
+            "limited_sync_backfill_warnings": log.count("limited-timeline backfill"),
         }
 
     def _start_model_server(self) -> int:
@@ -713,7 +915,7 @@ class ManagedTuwunelStack:
                     "role": "Return a deterministic acknowledgement.",
                     "model": "default",
                     "tools": [],
-                    "rooms": [ROOM_KEY],
+                    "rooms": list(self.room_keys),
                     "learning": False,
                 },
             },
@@ -764,13 +966,20 @@ class ManagedTuwunelStack:
                 raise RuntimeError(msg)
             if state_path.exists():
                 state = yaml.safe_load(state_path.read_text(encoding="utf-8"))
-                room = state.get("rooms", {}).get(ROOM_KEY, {}) if isinstance(state, dict) else {}
-                room_id = room.get("room_id") if isinstance(room, dict) else None
-                if isinstance(room_id, str):
-                    self.room_id = room_id
+                state_rooms = state.get("rooms", {}) if isinstance(state, dict) else {}
+                room_ids = [
+                    room.get("room_id")
+                    for room_key in self.room_keys
+                    if isinstance(state_rooms, dict)
+                    and isinstance((room := state_rooms.get(room_key)), dict)
+                    and isinstance(room.get("room_id"), str)
+                ]
+                if len(room_ids) == len(self.room_keys):
+                    self.room_ids = tuple(cast("list[str]", room_ids))
+                    self.room_id = self.room_ids[0]
                     return
             time.sleep(0.2)
-        msg = f"MindRoom did not create {ROOM_KEY!r}:\n{self.log_tail()}"
+        msg = f"MindRoom did not create rooms {self.room_keys!r}:\n{self.log_tail()}"
         raise TimeoutError(msg)
 
     def _stop_mindroom(self) -> None:
@@ -811,9 +1020,18 @@ class _SentPayload:
 class LiveMatrixClient:
     """Minimal real Matrix client used by the live fuzzer."""
 
-    def __init__(self, homeserver: str, room_id: str) -> None:
+    def __init__(
+        self,
+        homeserver: str,
+        room_id: str,
+        *,
+        room_slot: int = 0,
+        client_slot: int = 0,
+    ) -> None:
         self.homeserver = homeserver.rstrip("/")
         self.room_id = room_id
+        self.room_slot = room_slot
+        self.client_slot = client_slot
         self.http = httpx.AsyncClient(timeout=30)
         self.access_token = ""
         self.next_batch: str | None = None
@@ -1106,6 +1324,7 @@ class LiveFuzzRunner:
             internal_relay_senders=(stack.router_id,),
         )
         self.event_ids: dict[str, str] = {}
+        self.response_event_ids: dict[str, str] = {}
         self.sent_payloads: dict[str, _SentPayload] = {}
         self.operation_count = 0
         self.restart_count = 0
@@ -1115,6 +1334,8 @@ class LiveFuzzRunner:
         """Execute every batch and enforce the reply invariant after each."""
         await asyncio.gather(*(client.register() for client in self.clients))
         await asyncio.gather(*(client.join_room() for client in self.clients))
+        if self.scenario.profile == "recovery":
+            return await self._run_recovery()
         if self.scenario.profile == "saturation":
             await asyncio.gather(
                 *(client.sync_incremental(timeout_ms=0, allow_limited=True) for client in self.clients),
@@ -1126,6 +1347,166 @@ class LiveFuzzRunner:
         return await self._run_batches(
             self.scenario.batches,
         )
+
+    async def _run_recovery(self) -> dict[str, int | str]:
+        """Replay a bounded outage, limited sync, reconnect, and duplicate audit."""
+        observers = tuple(self._recovery_client(room, 0) for room in range(self.scenario.room_count))
+        oracles = tuple(
+            ExactReplyOracle(
+                client,
+                self.stack.agent_id,
+                internal_relay_senders=(self.stack.router_id,),
+            )
+            for client in observers
+        )
+        await asyncio.gather(*(oracle.initialize() for oracle in oracles))
+        await self._send_recovery_roots(oracles)
+
+        self.stack.stop_mindroom()
+        offline_started = time.monotonic()
+        message_count = 0
+        retry_count = 0
+        for batch in self.scenario.batches:
+            results = await asyncio.gather(*(self._apply_recovery_operation(operation) for operation in batch))
+            for operation, event_id, payload in results:
+                self.operation_count += 1
+                if operation.kind is LiveOperationKind.IDEMPOTENT_RETRY:
+                    retry_count += 1
+                    continue
+                message_count += 1
+                self.event_ids[operation.event_ref] = event_id
+                self.sent_payloads[operation.event_ref] = payload
+                oracles[operation.room].expect(operation.event_ref, event_id)
+            self.executed_batches += 1
+
+        self.stack.resume_mindroom()
+        self.restart_count += 1
+        await asyncio.gather(
+            *(
+                oracle.wait_until_exact(
+                    deadline_seconds=self.reply_timeout,
+                    settle_seconds=self.settle_seconds,
+                )
+                for oracle in oracles
+            ),
+        )
+        for oracle in oracles:
+            self.response_event_ids.update(oracle.response_event_by_ref)
+        recovery_seconds = time.monotonic() - offline_started
+
+        self.stack.restart_mindroom()
+        self.restart_count += 1
+        await asyncio.gather(
+            *(
+                oracle.wait_until_exact(
+                    deadline_seconds=self.reply_timeout,
+                    settle_seconds=max(self.settle_seconds, 1),
+                )
+                for oracle in oracles
+            ),
+        )
+        for oracle in oracles:
+            oracle._assert_no_wrong_replies()
+
+        return {
+            "batches": self.executed_batches,
+            "canonical_agent_replies": sum(len(oracle.expected_sources) for oracle in oracles),
+            "clients": self.scenario.client_count * self.scenario.room_count,
+            "duplicates": 0,
+            "messages": message_count,
+            "missing": 0,
+            "operations": self.operation_count,
+            "recovery_runtime_ms": round(recovery_seconds * 1000),
+            "restarts": self.restart_count,
+            "rooms": self.scenario.room_count,
+            "roots": self.scenario.thread_count * self.scenario.room_count,
+            "status": "PASS",
+            "threads": self.scenario.thread_count * self.scenario.room_count,
+            "transaction_retries": retry_count,
+        }
+
+    async def _send_recovery_roots(self, oracles: tuple[ExactReplyOracle, ...]) -> None:
+        """Create hot and cold thread roots in every room before the outage."""
+
+        async def send_root(room: int, thread: int) -> tuple[int, str, str, _SentPayload]:
+            logical_ref = f"root:{room}:{thread}"
+            content = self._message_content(f"Live recovery root {room}:{thread}")
+            payload = _SentPayload("m.room.message", f"live-recovery-{logical_ref}", content)
+            event_id = await self._recovery_client(room, 0).send_event(
+                payload.event_type,
+                payload.txn_id,
+                payload.content,
+            )
+            return room, logical_ref, event_id, payload
+
+        roots = await asyncio.gather(
+            *(
+                send_root(room, thread)
+                for room in range(self.scenario.room_count)
+                for thread in range(self.scenario.thread_count)
+            ),
+        )
+        for room, logical_ref, event_id, payload in roots:
+            self.event_ids[logical_ref] = event_id
+            self.sent_payloads[logical_ref] = payload
+            oracles[room].expect(logical_ref, event_id)
+        await asyncio.gather(
+            *(
+                oracle.wait_until_exact(
+                    deadline_seconds=self.reply_timeout,
+                    settle_seconds=self.settle_seconds,
+                )
+                for oracle in oracles
+            ),
+        )
+        for oracle in oracles:
+            self.response_event_ids.update(oracle.response_event_by_ref)
+
+    async def _apply_recovery_operation(
+        self,
+        operation: LiveOperation,
+    ) -> tuple[LiveOperation, str, _SentPayload]:
+        """Send one scheduled offline mutation or exact transaction retry."""
+        assert operation.target is not None
+        client = self._recovery_client(operation.room, operation.client)
+        if operation.kind is LiveOperationKind.IDEMPOTENT_RETRY:
+            payload = self.sent_payloads[operation.target]
+            event_id = await client.send_event(payload.event_type, payload.txn_id, payload.content)
+            expected_event_id = self.event_ids[operation.target]
+            if event_id != expected_event_id:
+                msg = f"recovery retry changed event ID for {operation.target}: {expected_event_id} -> {event_id}"
+                raise AssertionError(msg)
+            return operation, event_id, payload
+
+        target_event_id = self._resolve_event_ref(operation.target)
+        if operation.kind is LiveOperationKind.THREAD_MESSAGE:
+            root_event_id = self.event_ids[f"root:{operation.room}:{operation.thread}"]
+            relation = {
+                "rel_type": "m.thread",
+                "event_id": root_event_id,
+                "is_falling_back": True,
+                "m.in_reply_to": {"event_id": target_event_id},
+            }
+        elif operation.kind is LiveOperationKind.PLAIN_REPLY:
+            relation = {"m.in_reply_to": {"event_id": target_event_id}}
+        else:
+            msg = f"unsupported recovery operation: {operation.kind}"
+            raise AssertionError(msg)
+        content = self._message_content(
+            f"Live recovery message {operation.operation_id}",
+            relation=relation,
+        )
+        payload = _SentPayload(
+            "m.room.message",
+            f"live-recovery-op-{operation.operation_id}",
+            content,
+        )
+        event_id = await client.send_event(payload.event_type, payload.txn_id, payload.content)
+        return operation, event_id, payload
+
+    def _recovery_client(self, room: int, client: int) -> LiveMatrixClient:
+        """Return the uniquely scheduled sender in one recovery room."""
+        return next(item for item in self.clients if item.room_slot == room and item.client_slot == client)
 
     async def _run_saturation(self) -> dict[str, int | str]:
         """Run hot and parallel turns without cross-thread barriers."""
@@ -1480,6 +1861,9 @@ class LiveFuzzRunner:
 
     def _resolve_event_ref(self, logical_ref: str) -> str:
         if logical_ref.startswith("response:"):
+            recovery_event_id = self.response_event_ids.get(logical_ref)
+            if recovery_event_id is not None:
+                return recovery_event_id
             return self.oracle.resolve_response_ref(logical_ref)
         event_id = self.event_ids.get(logical_ref)
         if event_id is None:
@@ -1521,9 +1905,12 @@ def _non_negative_int(value: str) -> int:
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--profile", choices=("fuzz", "saturation"), default="fuzz")
+    parser.add_argument("--profile", choices=("fuzz", "recovery", "saturation"), default="fuzz")
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--steps", type=_positive_int, default=200)
+    parser.add_argument("--rooms", type=_positive_int, default=3)
+    parser.add_argument("--clients", type=_positive_int, default=4)
+    parser.add_argument("--messages-per-room", type=_positive_int, default=64)
     parser.add_argument("--threads", type=_positive_int, default=45)
     parser.add_argument("--max-batch-size", type=_positive_int, default=16)
     parser.add_argument("--restart-interval", type=_non_negative_int, default=100)
@@ -1546,8 +1933,20 @@ async def _run_live(
     reply_timeout: float,
     settle_seconds: float,
 ) -> dict[str, int | str]:
-    client_count = scenario.thread_count - 1 if scenario.profile == "saturation" else 1
-    clients = tuple(LiveMatrixClient(stack.homeserver, stack.room_id) for _ in range(client_count))
+    if scenario.profile == "recovery":
+        clients = tuple(
+            LiveMatrixClient(
+                stack.homeserver,
+                stack.room_ids[room],
+                room_slot=room,
+                client_slot=client,
+            )
+            for room in range(scenario.room_count)
+            for client in range(scenario.client_count)
+        )
+    else:
+        client_count = scenario.thread_count - 1 if scenario.profile == "saturation" else 1
+        clients = tuple(LiveMatrixClient(stack.homeserver, stack.room_id) for _ in range(client_count))
     try:
         return await LiveFuzzRunner(
             stack,
@@ -1569,12 +1968,23 @@ def main() -> None:
         else (
             saturation_scenario()
             if args.profile == "saturation"
-            else live_scenario_from_seed(
-                args.seed,
-                steps=args.steps,
-                thread_count=args.threads,
-                max_batch_size=args.max_batch_size,
-                restart_interval=args.restart_interval,
+            else (
+                recovery_scenario_from_seed(
+                    args.seed,
+                    messages_per_room=args.messages_per_room,
+                    room_count=args.rooms,
+                    thread_count=args.threads,
+                    client_count=args.clients,
+                    max_batch_size=args.max_batch_size,
+                )
+                if args.profile == "recovery"
+                else live_scenario_from_seed(
+                    args.seed,
+                    steps=args.steps,
+                    thread_count=args.threads,
+                    max_batch_size=args.max_batch_size,
+                    restart_interval=args.restart_interval,
+                )
             )
         )
     )
@@ -1585,9 +1995,11 @@ def main() -> None:
         reply_timeout = 180 if scenario.profile == "saturation" else 60
 
     stack = ManagedTuwunelStack(
+        room_count=scenario.room_count,
         stream_segments=96 if scenario.profile == "saturation" else 4,
         stream_delay=0.012 if scenario.profile == "saturation" else 0.001,
     )
+    started = time.monotonic()
     try:
         stack.start()
         result = asyncio.run(
@@ -1598,7 +2010,11 @@ def main() -> None:
                 settle_seconds=args.settle_seconds,
             ),
         )
+        result["profile"] = scenario.profile
         result["seed"] = args.seed if args.trace is None else "trace"
+        result["nio_revision"] = os.getenv("MINDROOM_NIO_FUZZ_COMMIT", "installed")
+        result["preexisting_fuzz_servers"] = stack.preexisting_fuzz_servers
+        result["runtime_ms"] = round((time.monotonic() - started) * 1000)
         result.update(stack.diagnostic_counts())
         print(json.dumps(result, sort_keys=True))
     except Exception:

@@ -13,6 +13,7 @@ from scripts.testing.fuzz_live_matrix import (
     LiveOperation,
     LiveOperationKind,
     live_scenario_from_seed,
+    recovery_scenario_from_seed,
     saturation_scenario,
 )
 
@@ -86,6 +87,51 @@ def test_saturation_scenario_matches_original_two_phase_workload() -> None:
     assert all([operation.thread for operation in batch] == list(range(1, 13)) for batch in scenario.batches[100:])
 
 
+def test_recovery_scenario_is_replayable_and_forces_every_room_past_sync_limit() -> None:
+    """The outage trace fixes room, sender, thread, transaction, and retry scheduling."""
+    scenario = recovery_scenario_from_seed(
+        1638,
+        messages_per_room=51,
+        room_count=2,
+        thread_count=6,
+        client_count=3,
+        max_batch_size=6,
+    )
+
+    assert scenario == recovery_scenario_from_seed(
+        1638,
+        messages_per_room=51,
+        room_count=2,
+        thread_count=6,
+        client_count=3,
+        max_batch_size=6,
+    )
+    assert LiveFuzzScenario.from_json(scenario.to_json()) == scenario
+    messages_by_room = {
+        room: sum(
+            operation.kind is not LiveOperationKind.IDEMPOTENT_RETRY and operation.room == room
+            for batch in scenario.batches
+            for operation in batch
+        )
+        for room in range(scenario.room_count)
+    }
+    assert messages_by_room == {0: 51, 1: 51}
+    assert any(
+        operation.kind is LiveOperationKind.IDEMPOTENT_RETRY for batch in scenario.batches for operation in batch
+    )
+    for batch in scenario.batches:
+        reply_threads = [
+            (operation.room, operation.thread)
+            for operation in batch
+            if operation.kind
+            in {
+                LiveOperationKind.THREAD_MESSAGE,
+                LiveOperationKind.PLAIN_REPLY,
+            }
+        ]
+        assert len(reply_threads) == len(set(reply_threads))
+
+
 def test_live_scenario_rejects_same_batch_dependency() -> None:
     """Concurrent operations may only target events from completed batches."""
     scenario = LiveFuzzScenario(
@@ -115,6 +161,30 @@ def test_live_scenario_rejects_ambiguous_same_thread_reply_batch() -> None:
     )
 
     with pytest.raises(ValueError, match="same-thread messages"):
+        scenario.validate()
+
+
+def test_live_scenario_rejects_cross_room_dependencies() -> None:
+    """A room-local relation may not point at another recovery room's event."""
+    scenario = LiveFuzzScenario(
+        thread_count=1,
+        room_count=2,
+        client_count=1,
+        profile="recovery",
+        batches=(
+            (
+                LiveOperation(
+                    0,
+                    LiveOperationKind.THREAD_MESSAGE,
+                    0,
+                    "root:0:0",
+                    room=1,
+                ),
+            ),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="cross-room target"):
         scenario.validate()
 
 
