@@ -380,7 +380,7 @@ async def test_postgres_version_1_migration_is_namespace_safe_and_repairs_orphan
             cursor = await db.execute(
                 "SELECT value FROM mindroom_event_cache_metadata WHERE key = 'schema_version'",
             )
-            assert await cursor.fetchone() == ("3",)
+            assert await cursor.fetchone() == ("4",)
             await cursor.close()
         finally:
             await cache.close()
@@ -428,8 +428,8 @@ async def test_postgres_current_version_maintenance_avoids_exclusive_schema_lock
             migration_result = await migrate_postgres_schema(
                 maintainer,
                 namespace=namespace,
-                current_schema_version=3,
-                target_schema_version=3,
+                current_schema_version=4,
+                target_schema_version=4,
             )
             assert migration_result.migrated_from_schema_version is None
             assert migration_result.normalized_legacy_thread_payload_rows == 0

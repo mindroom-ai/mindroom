@@ -25,7 +25,7 @@
 - Bundled replacements are now validated at the shared thread-root preview seam for sender, type, target, state, room, and edit-of-edit rules.
 - Corrected bundled-preview fixtures now use same-sender originals and replacements.
 - The production PostgreSQL query now has an exact regression against an isolated ICU `und-x-icu` edit-event-ID column.
-- Run targeted tests, backend suites, full pytest, Tach, and all-file pre-commit.
+- Run targeted tests, backend suites, full pytest, Tach, and all-file pre-commit after the final code commit.
 - Commit and push small follow-ups with `Bas Nijholt <bas@nijho.lt>` verified before each commit.
 - Update the PR body and both external campaign notes.
 - Remove this handoff before declaring a new stable candidate.
@@ -36,6 +36,11 @@
 - Cache malformed-fallback and approval-card focus: `8 passed` across SQLite and PostgreSQL.
 - Shared preview and both Matrix tool owning files: all `188` tests passed.
 - PostgreSQL C-collated index and ICU-discriminating production lookup: `2 passed`.
+- Broad owning/backend matrix passed before the schema-version follow-up.
+- First broad full-pytest attempt had one 60-second PostgreSQL fanout timeout under four-worker contention; the branch changed afterward, so every full-suite result must be rerun.
+- Schema v4 now creates the C-collated index and drops the locale-dependent legacy index only while upgrading v1-v3.
+- The v3 migration regression proves the final schema contains only the C-collated latest-edit index.
+- PostgreSQL v1/v2/v3 migrations, ICU ordering, current-version lock behavior, and all thread-resolution reuse tests pass (`33 passed`).
 
 ## Completed invalid-head reviews
 

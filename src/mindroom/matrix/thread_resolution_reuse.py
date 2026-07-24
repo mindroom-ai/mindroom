@@ -13,9 +13,9 @@ Safety model (any doubt falls back to full resolution by returning ``None``):
    the thread is unchanged or whether every changed row is present in a bounded delta read. Any
    deletion, replacement, or in-place update forces full resolution.
 3. Suffix rows must be plain ``m.room.message`` events with new, unique event IDs that were never
-   seen by the snapshot (including edit targets, reply targets, and synthesized originals), and
-   every suffix edit - explicit or bundled - must target a suffix-local event, so no suffix row
-   can mutate or duplicate an already-resolved message.
+   seen by the snapshot, including every previously observed relation target, and every suffix
+   edit - explicit or bundled - must target a suffix-local event, so no suffix row can mutate or
+   duplicate an already-resolved message.
 4. Snapshots are only stored by the caller when sidecar hydration was fully served from the
    durable cache, so degraded preview bodies are never frozen into future turns.
 """

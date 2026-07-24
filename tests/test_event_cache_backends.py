@@ -341,6 +341,47 @@ async def _seed_postgres_v2_schema(database_url: str, schema_name: str) -> str:
     return isolated_url
 
 
+async def _seed_postgres_v3_schema(database_url: str, schema_name: str) -> str:
+    """Create the prior schema with its locale-dependent latest-edit index."""
+    admin = await psycopg.AsyncConnection.connect(database_url)
+    await admin.execute(f'CREATE SCHEMA "{schema_name}"')
+    await admin.commit()
+    await admin.close()
+    isolated_url = _postgres_schema_url(database_url, schema_name)
+    db = await psycopg.AsyncConnection.connect(isolated_url)
+    await db.execute(
+        """
+        CREATE TABLE mindroom_event_cache_metadata (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )
+        """,
+    )
+    await _create_postgres_event_cache_schema(db)
+    await db.execute("DROP INDEX idx_mindroom_event_cache_event_edits_room_original_ts_c")
+    await db.execute(
+        """
+        CREATE INDEX idx_mindroom_event_cache_event_edits_room_original_ts
+        ON mindroom_event_cache_event_edits(
+            namespace,
+            room_id,
+            original_event_id,
+            origin_server_ts DESC,
+            edit_event_id DESC
+        )
+        """,
+    )
+    await db.execute(
+        """
+        INSERT INTO mindroom_event_cache_metadata(key, value)
+        VALUES ('schema_version', '3')
+        """,
+    )
+    await db.commit()
+    await db.close()
+    return isolated_url
+
+
 def _runtime_paths(tmp_path: Path, *, env: dict[str, str] | None = None) -> RuntimePaths:
     config_path = tmp_path / "config.yaml"
     config_path.write_text("router:\n  model: default\n", encoding="utf-8")
@@ -953,7 +994,7 @@ async def test_postgres_v1_migration_is_concurrent_and_namespace_preserving(
             )
         ).fetchall()
         await db.close()
-        assert version == ("3",)
+        assert version == ("4",)
         assert namespaces == [("legacy_a",), ("legacy_b",)]
         assert legacy_plaintext == []
         assert membership_columns == [("membership_epoch",), ("membership_state",)]
@@ -1102,7 +1143,7 @@ async def test_postgres_v2_migration_is_namespace_preserving(
         await db.rollback()
         await db.close()
 
-        assert version == ("3",)
+        assert version == ("4",)
         assert namespaces == [("legacy_a",), ("legacy_b",)]
         assert plaintext == []
         assert generations == [
@@ -1666,6 +1707,39 @@ async def test_postgres_latest_edit_index_uses_bytewise_event_id_collation(
 
     assert row is not None
     assert 'edit_event_id COLLATE "C" DESC' in str(row[0])
+
+
+@pytest.mark.asyncio
+async def test_postgres_v3_migration_replaces_locale_dependent_edit_index(
+    postgres_event_cache_url: str,
+) -> None:
+    """Schema v4 must replace the legacy latest-edit index exactly once."""
+    schema_name = f"cache_migration_v3_{uuid.uuid4().hex}"
+    isolated_url = await _seed_postgres_v3_schema(postgres_event_cache_url, schema_name)
+    cache = PostgresEventCache(database_url=isolated_url, namespace="runtime")
+    await cache.initialize()
+    try:
+        assert cache.runtime_diagnostics()["cache_schema_migrated_from"] == 3
+        assert cache._runtime.db is not None
+        version_cursor = await cache._runtime.db.execute(
+            "SELECT value FROM mindroom_event_cache_metadata WHERE key = 'schema_version'",
+        )
+        version = await version_cursor.fetchone()
+        indexes_cursor = await cache._runtime.db.execute(
+            """
+            SELECT indexname
+            FROM pg_indexes
+            WHERE schemaname = current_schema()
+              AND indexname LIKE 'idx_mindroom_event_cache_event_edits_room_original_ts%'
+            ORDER BY indexname
+            """,
+        )
+        indexes = await indexes_cursor.fetchall()
+    finally:
+        await cache.close()
+
+    assert version == ("4",)
+    assert indexes == [("idx_mindroom_event_cache_event_edits_room_original_ts_c",)]
 
 
 @pytest.mark.asyncio

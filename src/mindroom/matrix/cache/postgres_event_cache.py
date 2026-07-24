@@ -38,7 +38,7 @@ if TYPE_CHECKING:
     from .event_cache import ThreadCacheState, ThreadRevision
 
 
-_POSTGRES_EVENT_CACHE_SCHEMA_VERSION = 3
+_POSTGRES_EVENT_CACHE_SCHEMA_VERSION = 4
 _DEFAULT_PRINCIPAL_ID = "__mindroom_default_principal__"
 _POSTGRES_SCHEMA_LOCK_NAME = "mindroom_event_cache_schema"
 _MAX_TRANSIENT_OPERATION_ATTEMPTS = 2
@@ -188,7 +188,7 @@ async def _initialize_postgres_event_cache_db(
             """,
         )
         current_schema_version = await _postgres_schema_version(db)
-        if current_schema_version not in (None, 1, 2, _POSTGRES_EVENT_CACHE_SCHEMA_VERSION):
+        if current_schema_version not in (None, 1, 2, 3, _POSTGRES_EVENT_CACHE_SCHEMA_VERSION):
             msg = (
                 "PostgreSQL Matrix event cache schema version "
                 f"{current_schema_version} is not compatible with expected version "
