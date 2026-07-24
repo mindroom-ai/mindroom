@@ -1,10 +1,20 @@
 # Matrix fuzz campaign living status
 
-> This file is an uncommitted operational handoff document.
+> This file is a temporary operational handoff document committed at the user's request.
 > Update it after every material finding, fix, campaign result, review result, push, or PR state change.
-> Do not include it in a product PR unless the user explicitly requests that.
+> Remove it before merge, then revalidate the final documentation-only head.
 
-Last updated: 2026-07-24 (STABLE HEAD REPORT — all known product and harness blockers fixed; merge gates pending).
+Last updated: 2026-07-24 (campaign-wide exact-head refresh; no active PR is merge-ready).
+
+## CAMPAIGN-WIDE CURRENT STATE
+
+- Canonical gate ledger: `/Users/bas.nijholt/.codex/campaigns/mindroom-fuzz-2026-07-24/MERGE-GATES.md`.
+- MindRoom #1639: PR tip `07e9aa343`; stable code head `5646c1173`; implementation frozen; fresh independent Codex, fresh independent Fable, and real-Tuwunel gates all pending.
+- MindRoom #1640: head `6427d9288`; paused with nine exact-head review blockers and dependency on corrected mindroom-nio recovery.
+- MindRoom #1641: head `bf7a963dc` rejected by fresh Codex review because cache SQL lets newer `m.new_content={}` mask an older valid edit; Fable review still running; live gate stopped; root fix active.
+- mindroom-nio #20: head `af585b42`; CI green but rejected by fresh Codex reviews for recovery/multi-room/store/migration/fanout/journal blockers; Fable review still running; live gate pending.
+- Any code commit invalidates all three approval/live gates for that PR.
+- Sections below preserve chronological evidence and may describe older heads; current merge status comes only from this section and `MERGE-GATES.md`.
 
 ## STABLE HEAD REPORT (read this first)
 
@@ -25,7 +35,7 @@ Last updated: 2026-07-24 (STABLE HEAD REPORT — all known product and harness b
 
 Known deferred follow-ups (NOT #1639 gates): D2 in-flight-edit discard (pre-existing, own PR); harness_resources_v2.md full lifecycle hardening (O5 deviation 1, flagged by the oracle subagent); cache-SQL `write_seq` ordering fuzz (fuzz_reactions_edits_design.md); plugin-install and shell-supervisor test-robustness flakes.
 
-## Fresh-session TL;DR (read this first)
+## Historical fresh-session TL;DR (superseded by campaign-wide current state)
 
 - Branch: `test/fuzz-live-chaos-expansion`. Worktree: `/Users/bas.nijholt/.codex/worktrees/fd26/mindroom-worktrees/test-fuzz-live-chaos-expansion`.
 - Local HEAD == remote `origin/test/fuzz-live-chaos-expansion` == PR #1639 head == `64ca7c360` (handoff `bc241598c` + Item A `13da9895d` + Item B `64ca7c360`).
@@ -109,7 +119,7 @@ Keep all work unmerged until review, CI, and user approval are complete.
 - Merge status: active investigation and not merge-ready. Fresh-context review verdict: CHANGES REQUIRED (one blocker, see below).
 - This living handoff must be removed before PR #1639 is merge-ready.
 
-## Exact heads (2026-07-24, after Items A and B)
+## Historical exact heads (2026-07-24, after Items A and B)
 
 - Local HEAD == remote == PR #1639 head: `64ca7c360` (verify with `git rev-parse HEAD` vs `git ls-remote`).
 - `origin/main` (pinned review base): `66dd4f4a68bcfd1a5e43b2cac20a1b464f306ab1`.
