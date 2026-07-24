@@ -14,7 +14,7 @@ import pytest
 from pydantic import ValidationError
 
 import mindroom.tool_approval as approval_module
-from mindroom.approval_events import parse_approval_datetime
+from mindroom.approval_events import is_original_approval_card, parse_approval_datetime
 from mindroom.approval_inbound import handle_tool_approval_action
 from mindroom.approval_manager import (
     _MAX_REMEMBERED_TERMINAL_CARD_IDS,
@@ -34,6 +34,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.entity_resolution import entity_identity_registry, mindroom_user_id
 from mindroom.logging_config import get_logger
+from mindroom.matrix.event_info import event_source_is_state_event, event_source_matches_room
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.tool_approval import (
     MatrixApprovalAction,
@@ -69,11 +70,18 @@ class FakeEventCache:
         room_id: str,
         original_event_id: str,
         *,
-        sender: str | None = None,
+        sender: str,
+        event_type: str,
     ) -> dict[str, Any] | None:
         edits: list[dict[str, Any]] = []
         for (event_room_id, _), event in self.events.items():
-            if event_room_id != room_id or (sender is not None and event.get("sender") != sender):
+            if (
+                event_room_id != room_id
+                or event.get("sender") != sender
+                or event.get("type") != event_type
+                or event_source_is_state_event(event)
+                or not event_source_matches_room(event, room_id)
+            ):
                 continue
             content = event.get("content")
             if not isinstance(content, dict):
@@ -85,7 +93,13 @@ class FakeEventCache:
                 edits.append(event)
         if not edits:
             return None
-        return max(edits, key=lambda event: int(event.get("origin_server_ts", 0)))
+        return max(
+            edits,
+            key=lambda event: (
+                int(event.get("origin_server_ts", 0)),
+                str(event.get("event_id", "")),
+            ),
+        )
 
     async def get_recent_room_events(
         self,
@@ -2162,6 +2176,35 @@ async def test_startup_discard_ignores_cached_terminal_edit_from_different_sende
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("invalid_scope", ["state", "wrong-room"])
+async def test_startup_discard_ignores_cached_terminal_edit_with_invalid_scope(
+    tmp_path: Path,
+    invalid_scope: str,
+) -> None:
+    """The approval-cache fake must match production room and timeline scope."""
+    cache = FakeEventCache()
+    card = _approval_card(sender="@mindroom_router:localhost")
+    invalid_edit = _approval_edit(card, status="approved")
+    if invalid_scope == "state":
+        invalid_edit["state_key"] = ""
+    else:
+        invalid_edit["room_id"] = "!other:localhost"
+    await cache.store_event("$approval", "!room:localhost", card)
+    await cache.store_event("$invalid-edit", "!room:localhost", invalid_edit)
+    editor = AsyncMock(return_value=True)
+    store = _ApprovalManager(
+        test_runtime_paths(tmp_path),
+        editor=editor,
+        event_cache=cache,
+        approval_room_ids=lambda: {"!room:localhost"},
+        transport_sender=lambda: "@mindroom_router:localhost",
+    )
+
+    assert await store.discard_pending_on_startup() == 1
+    assert editor.await_args.args[:2] == ("!room:localhost", "$approval")
+
+
+@pytest.mark.asyncio
 async def test_startup_discard_uses_trusted_cached_terminal_edit_despite_newer_untrusted_edit(
     tmp_path: Path,
 ) -> None:
@@ -2561,7 +2604,12 @@ async def test_discard_pending_on_startup_emits_replace_for_each_unresolved_card
 
     assert await store.discard_pending_on_startup() == 1
     assert await store.discard_pending_on_startup() == 0
-    latest_edit = await cache.get_latest_edit("!room:localhost", "$approval")
+    latest_edit = await cache.get_latest_edit(
+        "!room:localhost",
+        "$approval",
+        sender="@mindroom_router:localhost",
+        event_type="io.mindroom.tool_approval",
+    )
     assert latest_edit is not None
     assert latest_edit["content"]["m.new_content"]["status"] == "expired"
     assert latest_edit["content"]["m.new_content"]["resolution_reason"] == (
@@ -2740,6 +2788,16 @@ def test_pending_approval_from_card_event_requires_approver_user_id() -> None:
     card["content"].pop("approver_user_id")
 
     with pytest.raises(ValueError, match="missing required approval fields"):
+        PendingApproval.from_card_event(card, room_id="!room:localhost")
+
+
+def test_state_approval_card_is_not_an_original_timeline_card() -> None:
+    """Approval parsing must reject state events before any cached edit is applied."""
+    card = _approval_card()
+    card["state_key"] = ""
+
+    assert is_original_approval_card(card) is False
+    with pytest.raises(ValueError, match="timeline event"):
         PendingApproval.from_card_event(card, room_id="!room:localhost")
 
 

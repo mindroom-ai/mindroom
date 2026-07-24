@@ -350,6 +350,7 @@ class MatrixRoomTools(Toolkit):
                 client=context.client,
                 config=context.config,
                 runtime_paths=context.runtime_paths,
+                room_id=room_id,
                 trusted_sender_ids=trusted_sender_ids,
             )
             thread_info["reply_count"] = self._thread_reply_count(event)

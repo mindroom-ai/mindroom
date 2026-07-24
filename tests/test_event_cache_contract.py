@@ -140,12 +140,21 @@ class TestConversationEventCacheContract:
         assert cached_original is not None
         assert "com.mindroom.dispatch_pipeline_timing" not in cached_original
         assert [event["event_id"] for event in recent] == ["$latest-edit:localhost", "$other-edit:localhost"]
-        assert await event_cache.get_latest_edit("!room:localhost", "$original:localhost") == latest_edit
+        assert (
+            await event_cache.get_latest_edit(
+                "!room:localhost",
+                "$original:localhost",
+                sender="@user:localhost",
+                event_type="m.room.message",
+            )
+            == latest_edit
+        )
         assert (
             await event_cache.get_latest_edit(
                 "!room:localhost",
                 "$original:localhost",
                 sender="@other:localhost",
+                event_type="m.room.message",
             )
             == other_sender_edit
         )
@@ -299,7 +308,15 @@ class TestConversationEventCacheContract:
         assert await event_cache.redact_event(room_id, original_id) is True
         assert await event_cache.get_event(room_id, original_id) is None
         assert await event_cache.get_event(room_id, edit_id) is None
-        assert await event_cache.get_latest_edit(room_id, original_id) is None
+        assert (
+            await event_cache.get_latest_edit(
+                room_id,
+                original_id,
+                sender="@user:localhost",
+                event_type="m.room.message",
+            )
+            is None
+        )
 
         await event_cache.store_events_batch(
             [

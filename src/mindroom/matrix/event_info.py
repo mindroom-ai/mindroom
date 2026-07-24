@@ -6,16 +6,143 @@ including threads (MSC3440), edits, replies, reactions, and more.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+import base64
+import binascii
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from typing import cast
+from typing import Any, cast
 
 _THREAD_RELATION_EVENT_TYPES = frozenset({"m.room.encrypted", "m.room.message"})
+_MATRIX_MEDIA_MESSAGE_TYPES = frozenset({"m.audio", "m.file", "m.image", "m.video"})
+_APPROVAL_STATUSES = frozenset({"approved", "denied", "expired", "pending"})
 
 
 def event_type_supports_thread_relations(event_type: object) -> bool:
     """Return whether this Matrix event family can affect conversation thread state."""
     return isinstance(event_type, str) and event_type in _THREAD_RELATION_EVENT_TYPES
+
+
+def event_source_is_state_event(event_source: Mapping[str, object]) -> bool:
+    """Return whether one raw Matrix event source carries a state key."""
+    return "state_key" in event_source
+
+
+def event_source_matches_room(event_source: Mapping[str, object], room_id: str) -> bool:
+    """Return whether explicit room evidence agrees with the authoritative room."""
+    return "room_id" not in event_source or event_source.get("room_id") == room_id
+
+
+def event_source_matches_index(
+    event_source: Mapping[str, object],
+    indexed_event_id: str,
+    indexed_origin_server_ts: int,
+    room_id: str,
+) -> bool:
+    """Return whether one cached payload matches its authoritative index scope."""
+    timestamp = event_source.get("origin_server_ts")
+    return (
+        bool(indexed_event_id)
+        and event_source.get("event_id") == indexed_event_id
+        and isinstance(timestamp, int)
+        and not isinstance(timestamp, bool)
+        and timestamp == indexed_origin_server_ts
+        and event_source_matches_room(
+            event_source,
+            room_id,
+        )
+    )
+
+
+def approval_status_from_content(content: Mapping[str, object]) -> str | None:
+    """Return one valid approval-card status."""
+    status = content.get("status")
+    return status if isinstance(status, str) and status in _APPROVAL_STATUSES else None
+
+
+def _encrypted_media_file_is_valid(file_info: object) -> bool:
+    """Return whether one Matrix encrypted-file transport is usable v2 data."""
+    if not isinstance(file_info, Mapping):
+        return False
+    normalized_file_info = cast("Mapping[str, object]", file_info)
+    key = normalized_file_info.get("key")
+    hashes = normalized_file_info.get("hashes")
+    if not isinstance(key, Mapping):
+        return False
+    if not isinstance(hashes, Mapping):
+        return False
+    normalized_key = cast("Mapping[str, object]", key)
+    normalized_hashes = cast("Mapping[str, object]", hashes)
+    url = normalized_file_info.get("url")
+    key_ops = normalized_key.get("key_ops")
+    return (
+        isinstance(url, str)
+        and url.startswith("mxc://")
+        and all(url[len("mxc://") :].partition("/"))
+        and normalized_file_info.get("v") == "v2"
+        and normalized_key.get("kty") == "oct"
+        and normalized_key.get("alg") == "A256CTR"
+        and normalized_key.get("ext") is True
+        and isinstance(key_ops, list)
+        and all(isinstance(operation, str) for operation in key_ops)
+        and {"encrypt", "decrypt"}.issubset(key_ops)
+        and _unpadded_base64_has_decoded_size(normalized_key.get("k"), 32, urlsafe=True)
+        and _unpadded_base64_has_decoded_size(normalized_file_info.get("iv"), 16)
+        and _unpadded_base64_has_decoded_size(normalized_hashes.get("sha256"), 32)
+    )
+
+
+def _unpadded_base64_has_decoded_size(
+    value: object,
+    expected_size: int,
+    *,
+    urlsafe: bool = False,
+) -> bool:
+    """Return whether one unpadded base64 value decodes to the expected byte size."""
+    if not isinstance(value, str) or not value or "=" in value or (urlsafe and ("+" in value or "/" in value)):
+        return False
+    padded_value = value + "=" * (-len(value) % 4)
+    try:
+        decoded = base64.b64decode(
+            padded_value,
+            altchars=b"-_" if urlsafe else None,
+            validate=True,
+        )
+    except (binascii.Error, ValueError):
+        return False
+    return len(decoded) == expected_size
+
+
+def room_message_content_is_renderable(content: Mapping[str, object]) -> bool:
+    """Return whether nio can render one Matrix room-message content payload."""
+    msgtype = content.get("msgtype")
+    if not isinstance(content.get("body"), str) or not isinstance(msgtype, str):
+        return False
+    if msgtype not in _MATRIX_MEDIA_MESSAGE_TYPES:
+        return True
+    if "file" in content:
+        return _encrypted_media_file_is_valid(content.get("file"))
+    return isinstance(content.get("url"), str)
+
+
+def replacement_content_is_renderable(
+    event_type: object,
+    content: object,
+) -> bool:
+    """Return whether one supported replacement has valid visible content."""
+    if not isinstance(content, Mapping):
+        return False
+    normalized_content = cast("Mapping[str, object]", content)
+    new_content = normalized_content.get("m.new_content")
+    if not isinstance(new_content, Mapping):
+        return False
+    normalized_new_content = cast("Mapping[str, object]", new_content)
+    if event_type == "m.room.message":
+        return room_message_content_is_renderable(normalized_content) and room_message_content_is_renderable(
+            normalized_new_content,
+        )
+    if event_type == "io.mindroom.tool_approval":
+        return approval_status_from_content(normalized_new_content) is not None
+    return False
 
 
 def origin_server_ts_from_event_source(event_source: object) -> int | float | None:
@@ -26,6 +153,161 @@ def origin_server_ts_from_event_source(event_source: object) -> int | float | No
     if isinstance(raw_timestamp, int | float) and not isinstance(raw_timestamp, bool):
         return raw_timestamp
     return None
+
+
+def replacement_content_for_original(
+    original_content: Mapping[str, object],
+    new_content: Mapping[str, object],
+) -> dict[str, object]:
+    """Apply Matrix replacement content while preserving the original relation."""
+    replacement_content = {
+        key: value for key, value in new_content.items() if isinstance(key, str) and key != "m.relates_to"
+    }
+    if "m.relates_to" in original_content:
+        replacement_content["m.relates_to"] = original_content["m.relates_to"]
+    return replacement_content
+
+
+def bundled_replacement_candidates(event_source: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Return bundled replacement candidates without trusting structural preference."""
+    unsigned = event_source.get("unsigned")
+    if not isinstance(unsigned, Mapping):
+        return []
+    relations = unsigned.get("m.relations")
+    if not isinstance(relations, Mapping):
+        return []
+    replacement = relations.get("m.replace")
+    if not isinstance(replacement, Mapping):
+        return []
+    return [
+        {key: value for key, value in candidate.items() if isinstance(key, str)}
+        for candidate in (
+            replacement.get("latest_event"),
+            replacement.get("event"),
+            replacement,
+        )
+        if isinstance(candidate, Mapping)
+    ]
+
+
+def is_valid_bundled_replacement(
+    original_event_source: Mapping[str, Any],
+    replacement_event_source: dict[str, Any],
+    *,
+    room_id: str | None = None,
+) -> bool:
+    """Return whether one candidate satisfies Matrix replacement validity."""
+    original = {key: value for key, value in original_event_source.items() if isinstance(key, str)}
+    original_event_id = original.get("event_id")
+    replacement_event_id = replacement_event_source.get("event_id")
+    original_sender = original.get("sender")
+    original_type = original.get("type")
+    original_timestamp = origin_server_ts_from_event_source(original)
+    replacement_timestamp = origin_server_ts_from_event_source(replacement_event_source)
+    original_content = original.get("content")
+    identities_are_valid = (
+        isinstance(original_event_id, str)
+        and bool(original_event_id)
+        and isinstance(replacement_event_id, str)
+        and bool(replacement_event_id)
+        and replacement_event_id != original_event_id
+        and isinstance(original_sender, str)
+        and bool(original_sender)
+        and replacement_event_source.get("sender") == original_sender
+        and isinstance(original_type, str)
+        and bool(original_type)
+        and replacement_event_source.get("type") == original_type
+        and isinstance(original_timestamp, int)
+        and not isinstance(original_timestamp, bool)
+    )
+    if not identities_are_valid or (
+        not isinstance(replacement_timestamp, int)
+        or isinstance(replacement_timestamp, bool)
+        or event_source_is_state_event(original)
+        or event_source_is_state_event(replacement_event_source)
+        or EventInfo.from_event(original).is_edit
+    ):
+        return False
+    if not isinstance(original_content, Mapping):
+        return False
+
+    original_room_id = original.get("room_id")
+    replacement_room_id = replacement_event_source.get("room_id")
+    rooms_are_valid = not (
+        room_id is not None
+        and (
+            not event_source_matches_room(original, room_id)
+            or not event_source_matches_room(replacement_event_source, room_id)
+        )
+    ) and not (
+        isinstance(original_room_id, str)
+        and isinstance(replacement_room_id, str)
+        and original_room_id != replacement_room_id
+    )
+    if not rooms_are_valid:
+        return False
+
+    replacement_info = EventInfo.from_event(replacement_event_source)
+    content = replacement_event_source.get("content")
+    if (
+        not replacement_info.is_edit
+        or replacement_info.original_event_id != original_event_id
+        or not isinstance(content, Mapping)
+        or not isinstance(content.get("m.new_content"), Mapping)
+    ):
+        return False
+    return original_type != "m.room.message" or (
+        room_message_content_is_renderable(original_content)
+        and replacement_content_is_renderable(original_type, content)
+    )
+
+
+def ordered_valid_bundled_replacements(
+    original_event_source: Mapping[str, Any],
+    *,
+    room_id: str | None = None,
+) -> list[dict[str, Any]]:
+    """Return valid bundled replacements in canonical Matrix latest-first order."""
+    return sorted(
+        (
+            candidate
+            for candidate in bundled_replacement_candidates(original_event_source)
+            if is_valid_bundled_replacement(original_event_source, candidate, room_id=room_id)
+        ),
+        key=lambda candidate: (
+            origin_server_ts_from_event_source(candidate),
+            candidate["event_id"],
+        ),
+        reverse=True,
+    )
+
+
+def latest_valid_replacement(
+    original_event_source: Mapping[str, Any],
+    replacement_event_sources: Iterable[Mapping[str, Any]] = (),
+    *,
+    room_id: str | None = None,
+) -> dict[str, Any] | None:
+    """Return the Matrix-latest valid bundled or explicit replacement."""
+    candidates = [
+        *(
+            {key: value for key, value in candidate.items() if isinstance(key, str)}
+            for candidate in replacement_event_sources
+        ),
+        *bundled_replacement_candidates(original_event_source),
+    ]
+    return max(
+        (
+            candidate
+            for candidate in candidates
+            if is_valid_bundled_replacement(original_event_source, candidate, room_id=room_id)
+        ),
+        key=lambda candidate: (
+            origin_server_ts_from_event_source(candidate),
+            candidate["event_id"],
+        ),
+        default=None,
+    )
 
 
 def reply_to_event_id_from_content(content: Mapping[str, object] | None) -> str | None:

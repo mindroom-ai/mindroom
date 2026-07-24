@@ -169,8 +169,9 @@ async def test_get_latest_agent_message_snapshot_returns_streaming_status_for_th
             "body": "Still working",
             "msgtype": "m.text",
             "io.mindroom.stream_status": "streaming",
+            "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread-root"},
         },
-        origin_server_ts=3000,
+        origin_server_ts=2000,
     )
 
 
@@ -230,8 +231,12 @@ async def test_get_latest_agent_message_snapshot_ignores_foreign_sender_edits(
     )
 
     assert snapshot == AgentMessageSnapshot(
-        content={"body": "Finished", "msgtype": "m.text"},
-        origin_server_ts=3000,
+        content={
+            "body": "Finished",
+            "msgtype": "m.text",
+            "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread-root"},
+        },
+        origin_server_ts=2000,
     )
 
 
@@ -440,7 +445,7 @@ async def test_room_scope_keeps_visible_edit_cached_in_current_runtime(
             "msgtype": "m.text",
             "io.mindroom.stream_status": "streaming",
         },
-        origin_server_ts=3000,
+        origin_server_ts=2000,
     )
 
 
@@ -698,6 +703,73 @@ async def test_room_scope_returns_latest_by_origin_server_ts_not_cached_at(
 
     assert snapshot == AgentMessageSnapshot(
         content={"body": "Newest room message", "msgtype": "m.text"},
+        origin_server_ts=3000,
+    )
+
+
+@pytest.mark.asyncio
+async def test_thread_scope_uses_authoritative_event_timestamp_after_point_update(
+    event_cache_factory: Callable[[], ConversationEventCache],
+) -> None:
+    """A stale thread-index timestamp cannot keep an older event first."""
+    cache = event_cache_factory()
+    await cache.initialize()
+    try:
+        newest = _message_event(
+            event_id="$newest",
+            sender="@agent:localhost",
+            body="Initially newest",
+            origin_server_ts=4000,
+            relates_to={"rel_type": "m.thread", "event_id": "$thread-root"},
+        )
+        older = _message_event(
+            event_id="$older",
+            sender="@agent:localhost",
+            body="Actually newest",
+            origin_server_ts=3000,
+            relates_to={"rel_type": "m.thread", "event_id": "$thread-root"},
+        )
+        await _replace_thread(
+            cache,
+            "!room:localhost",
+            "$thread-root",
+            [
+                _message_event(
+                    event_id="$thread-root",
+                    sender="@user:localhost",
+                    body="Question",
+                    origin_server_ts=500,
+                ),
+                newest,
+                older,
+            ],
+            validated_at=1000.0,
+        )
+        await cache.store_event(
+            "$newest",
+            "!room:localhost",
+            {
+                **newest,
+                "origin_server_ts": 1000,
+            },
+        )
+    finally:
+        await cache.close()
+
+    snapshot = await _read_snapshot(
+        event_cache_factory,
+        room_id="!room:localhost",
+        thread_id="$thread-root",
+        sender="@agent:localhost",
+        runtime_started_at=0.0,
+    )
+
+    assert snapshot == AgentMessageSnapshot(
+        content={
+            "body": "Actually newest",
+            "msgtype": "m.text",
+            "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread-root"},
+        },
         origin_server_ts=3000,
     )
 

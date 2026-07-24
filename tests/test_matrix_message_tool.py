@@ -175,7 +175,7 @@ def _make_bundled_replacement(
     body: str,
     msgtype: str,
     bundle_key: str | None = None,
-    sender: str = "@editor:localhost",
+    sender: str = "@alice:localhost",
     visible_body: str | None = None,
     long_text: dict[str, object] | None = None,
     url: str | None = None,
@@ -1740,6 +1740,43 @@ async def test_matrix_message_room_threads_returns_paginated_thread_roots() -> N
 
 
 @pytest.mark.asyncio
+async def test_matrix_message_room_threads_previews_the_requested_room() -> None:
+    """Cross-room thread previews must resolve edits within the requested room."""
+    tool = MatrixMessageTools()
+    ctx = _make_context()
+    requested_room_id = "!other:localhost"
+    thread_root = _make_room_thread_root(
+        event_id="$thread-root",
+        sender="@alice:localhost",
+        timestamp=1234,
+        body="Root",
+    )
+
+    with (
+        patch("mindroom.custom_tools.matrix_message.room_access_allowed", return_value=True),
+        patch(
+            "mindroom.custom_tools.matrix_conversation_operations.get_room_threads_page",
+            new=AsyncMock(return_value=([thread_root], None)),
+        ),
+        patch(
+            "mindroom.custom_tools.matrix_conversation_operations.thread_root_body_preview",
+            new=AsyncMock(return_value="Resolved"),
+        ) as mock_preview,
+        tool_runtime_context(ctx),
+    ):
+        payload = json.loads(
+            await tool.matrix_message(
+                action="room-threads",
+                room_id=requested_room_id,
+            ),
+        )
+
+    assert payload["status"] == "ok"
+    assert payload["room_id"] == requested_room_id
+    assert mock_preview.await_args.kwargs["room_id"] == requested_room_id
+
+
+@pytest.mark.asyncio
 async def test_matrix_message_room_threads_includes_latest_activity_ts() -> None:
     """room-threads should expose latest activity separately from root creation time."""
     tool = MatrixMessageTools()
@@ -1852,7 +1889,7 @@ async def test_matrix_message_room_threads_prefers_trusted_canonical_bundled_pre
     ctx = _make_context()
     thread_root = _make_room_thread_root(
         event_id="$thread-root",
-        sender="@alice:localhost",
+        sender="@mindroom_general:localhost",
         timestamp=1234,
         body="Thinking...",
         reply_count=4,
@@ -1898,6 +1935,7 @@ async def test_matrix_message_room_threads_uses_nested_bundled_replacement_previ
     ctx = _make_context()
     thread_root = nio.RoomMessageNotice.from_dict(
         {
+            "type": "m.room.message",
             "event_id": "$thread-notice",
             "sender": "@alice:localhost",
             "origin_server_ts": 1234,
@@ -1995,6 +2033,7 @@ async def test_matrix_message_room_threads_resolves_notice_root_without_replacem
         client=ctx.client,
         config=ctx.config,
         runtime_paths=ctx.runtime_paths,
+        room_id=ctx.room_id,
         trusted_sender_ids=ANY,
     )
 
@@ -2068,7 +2107,7 @@ async def test_matrix_message_room_threads_resolves_large_bundled_replacement_th
     )
     thread_root = _make_room_thread_root(
         event_id="$thread-root",
-        sender="@alice:localhost",
+        sender="@mindroom_general:localhost",
         timestamp=1234,
         body="Original root",
         reply_count=4,
@@ -2155,6 +2194,7 @@ async def test_matrix_message_room_threads_skips_malformed_roots() -> None:
         client=ctx.client,
         config=ctx.config,
         runtime_paths=ctx.runtime_paths,
+        room_id=ctx.room_id,
         trusted_sender_ids=ANY,
     )
     mock_warning.assert_called_once()

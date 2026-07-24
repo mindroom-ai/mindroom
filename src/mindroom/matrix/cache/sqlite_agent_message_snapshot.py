@@ -11,7 +11,6 @@ from .agent_message_snapshot import AgentMessageSnapshot, AgentMessageSnapshotUn
 from .agent_message_snapshot_semantics import (
     SnapshotLookupResult,
     event_matches_snapshot_scope,
-    snapshot_event_id,
     snapshot_lookup_result,
     thread_cache_has_no_snapshot,
 )
@@ -47,24 +46,23 @@ async def _snapshot_from_event(
     room_id: str,
     thread_id: str | None,
     sender: str,
+    event_id: str,
     event: dict[str, Any],
     cached_at: float | None,
     runtime_started_at: float | None,
 ) -> SnapshotLookupResult:
-    event_id = snapshot_event_id(event)
-    if event_id is None:
-        return SnapshotLookupResult(snapshot=None)
-
     latest_edit = await sqlite_event_cache_events.load_latest_edit_row(
         db,
         principal_id=principal_id,
         room_id=room_id,
         original_event_id=event_id,
         sender=sender,
+        event_type="m.room.message",
     )
     return snapshot_lookup_result(
         event,
         latest_edit=latest_edit,
+        room_id=room_id,
         thread_id=thread_id,
         cached_at=cached_at,
         runtime_started_at=runtime_started_at,
@@ -81,7 +79,7 @@ async def _iter_scope_events(
     if thread_id is not None:
         return await db.execute(
             """
-            SELECT events.event_json, events.cached_at
+            SELECT events.event_json, events.cached_at, events.event_id, events.origin_server_ts
             FROM thread_events
             JOIN events
                 ON events.principal_id = thread_events.principal_id
@@ -90,13 +88,13 @@ async def _iter_scope_events(
             WHERE thread_events.principal_id = ?
                 AND thread_events.room_id = ?
                 AND thread_events.thread_id = ?
-            ORDER BY thread_events.origin_server_ts DESC, thread_events.write_seq DESC
+            ORDER BY events.origin_server_ts DESC, thread_events.write_seq DESC
             """,
             (principal_id, room_id, thread_id),
         )
     return await db.execute(
         """
-        SELECT event_json, cached_at
+        SELECT event_json, cached_at, event_id, origin_server_ts
         FROM events
         WHERE principal_id = ? AND room_id = ?
         ORDER BY origin_server_ts DESC, write_seq DESC
@@ -128,6 +126,9 @@ async def _load_scope_snapshot(
             event = json.loads(row[0])
             if not event_matches_snapshot_scope(
                 event,
+                indexed_event_id=row[2],
+                indexed_origin_server_ts=int(row[3]),
+                room_id=room_id,
                 thread_id=thread_id,
                 sender=sender,
             ):
@@ -138,6 +139,7 @@ async def _load_scope_snapshot(
                 room_id=room_id,
                 thread_id=thread_id,
                 sender=sender,
+                event_id=row[2],
                 event=event,
                 cached_at=None if row[1] is None else float(row[1]),
                 runtime_started_at=runtime_started_at,

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from typing import TYPE_CHECKING, Any
 
 from .event_cache_events import (
@@ -17,6 +16,9 @@ from .event_cache_events import (
     filter_redacted_events,
     redaction_removal_event_ids,
     serialize_cacheable_events,
+    validated_cached_edit_row,
+    validated_cached_event_payload,
+    validated_cached_event_payloads,
 )
 
 if TYPE_CHECKING:
@@ -91,7 +93,7 @@ async def load_event(
     """Return one event only from its principal and room."""
     cursor = await db.execute(
         """
-        SELECT event_json
+        SELECT event_json, origin_server_ts
         FROM events
         WHERE principal_id = ? AND room_id = ? AND event_id = ?
         """,
@@ -99,7 +101,16 @@ async def load_event(
     )
     row = await cursor.fetchone()
     await cursor.close()
-    return None if row is None else json.loads(row[0])
+    return (
+        None
+        if row is None
+        else validated_cached_event_payload(
+            row[0],
+            event_id,
+            int(row[1]),
+            room_id=room_id,
+        )
+    )
 
 
 async def load_recent_room_events(
@@ -116,12 +127,20 @@ async def load_recent_room_events(
         return []
     cursor = await db.execute(
         """
-        SELECT event_json
+        SELECT event_json, event_id, origin_server_ts
         FROM events
         WHERE principal_id = ?
             AND room_id = ?
             AND origin_server_ts >= ?
+            AND json_type(event_json, '$.event_id') = 'text'
+            AND json_extract(event_json, '$.event_id') = event_id
+            AND json_type(event_json, '$.origin_server_ts') = 'integer'
+            AND json_extract(event_json, '$.origin_server_ts') = origin_server_ts
             AND json_extract(event_json, '$.type') = ?
+            AND (
+                json_type(event_json, '$.room_id') IS NULL
+                OR json_extract(event_json, '$.room_id') = room_id
+            )
         ORDER BY origin_server_ts DESC, write_seq DESC
         LIMIT ?
         """,
@@ -129,7 +148,7 @@ async def load_recent_room_events(
     )
     rows = await cursor.fetchall()
     await cursor.close()
-    return [json.loads(row[0]) for row in rows]
+    return validated_cached_event_payloads(rows, room_id=room_id)
 
 
 async def load_latest_edit(
@@ -138,15 +157,17 @@ async def load_latest_edit(
     principal_id: str,
     room_id: str,
     original_event_id: str,
-    sender: str | None = None,
+    sender: str,
+    event_type: str,
 ) -> dict[str, Any] | None:
     """Return the latest principal- and room-scoped edit."""
-    row = await _load_latest_edit_row(
+    row = await load_latest_edit_row(
         db,
         principal_id=principal_id,
         room_id=room_id,
         original_event_id=original_event_id,
         sender=sender,
+        event_type=event_type,
     )
     return None if row is None else row.event
 
@@ -158,30 +179,16 @@ async def load_latest_edit_row(
     room_id: str,
     original_event_id: str,
     sender: str,
+    event_type: str,
 ) -> CachedEventRow | None:
     """Return the latest edit and its write time within one ownership scope."""
-    return await _load_latest_edit_row(
-        db,
-        principal_id=principal_id,
-        room_id=room_id,
-        original_event_id=original_event_id,
-        sender=sender,
-    )
-
-
-async def _load_latest_edit_row(
-    db: aiosqlite.Connection,
-    *,
-    principal_id: str,
-    room_id: str,
-    original_event_id: str,
-    sender: str | None,
-) -> CachedEventRow | None:
-    sender_predicate = "" if sender is None else "AND json_extract(events.event_json, '$.sender') = ?"
-    parameters = (principal_id, room_id, original_event_id, *((sender,) if sender is not None else ()))
     cursor = await db.execute(
-        f"""
-        SELECT events.event_json, events.cached_at
+        """
+        SELECT
+            events.event_json,
+            events.cached_at,
+            event_edits.edit_event_id,
+            event_edits.origin_server_ts
         FROM event_edits
         JOIN events
           ON events.principal_id = event_edits.principal_id
@@ -190,17 +197,28 @@ async def _load_latest_edit_row(
         WHERE event_edits.principal_id = ?
           AND event_edits.room_id = ?
           AND event_edits.original_event_id = ?
-          {sender_predicate}
-        ORDER BY event_edits.origin_server_ts DESC, events.write_seq DESC
-        LIMIT 1
-        """,  # noqa: S608
-        parameters,
+          AND json_extract(events.event_json, '$.sender') = ?
+          AND json_extract(events.event_json, '$.type') = ?
+        ORDER BY event_edits.origin_server_ts DESC, event_edits.edit_event_id COLLATE BINARY DESC
+        """,
+        (principal_id, room_id, original_event_id, sender, event_type),
     )
-    row = await cursor.fetchone()
-    await cursor.close()
-    if row is None:
+    try:
+        while (row := await cursor.fetchone()) is not None:
+            if validated_row := validated_cached_edit_row(
+                row[0],
+                row[1],
+                row[2],
+                row[3],
+                room_id=room_id,
+                original_event_id=original_event_id,
+                sender=sender,
+                event_type=event_type,
+            ):
+                return validated_row
         return None
-    return CachedEventRow(event=json.loads(row[0]), cached_at=None if row[1] is None else float(row[1]))
+    finally:
+        await cursor.close()
 
 
 async def load_mxc_text(

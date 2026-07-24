@@ -19,7 +19,7 @@ import mindroom.matrix.client_thread_history as matrix_client_module
 from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.matrix.cache import ThreadHistoryResult, thread_cache_rejection_reason
+from mindroom.matrix.cache import ConversationEventCache, ThreadHistoryResult, thread_cache_rejection_reason
 from mindroom.matrix.cache.event_cache import ThreadCacheState
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from mindroom.matrix.cache.thread_cache_state import THREAD_HISTORY_TRUST_METADATA_KEY
@@ -32,6 +32,7 @@ from mindroom.matrix.client_thread_history import (
     _group_scanned_sources_by_thread,
     _resolve_thread_history_from_event_sources_timed,
 )
+from mindroom.matrix.client_visible_messages import resolve_latest_visible_messages
 from mindroom.matrix.conversation_cache import MatrixConversationCache
 from mindroom.matrix.membership_fence import UNCERTIFIED_MEMBERSHIP_EPOCH
 from mindroom.matrix.thread_diagnostics import (
@@ -297,6 +298,13 @@ class TestThreadHistory:
         client = AsyncMock()
         event_cache = make_event_cache_mock()
         expected_history = [{"event_id": "$thread_root", "body": "root"}]
+        root_source = {
+            "content": {"body": "root", "msgtype": "m.text"},
+            "event_id": "$thread_root",
+            "origin_server_ts": 1,
+            "sender": "@user:localhost",
+            "type": "m.room.message",
+        }
 
         with (
             patch(
@@ -304,7 +312,7 @@ class TestThreadHistory:
                 new=AsyncMock(
                     return_value=MagicMock(
                         history=expected_history,
-                        event_sources=[{"event_id": "$thread_root"}],
+                        event_sources=[root_source],
                         resolution_ms=0.0,
                         sidecar_hydration_ms=0.0,
                     ),
@@ -333,7 +341,7 @@ class TestThreadHistory:
             event_cache,
             room_id="!room:localhost",
             thread_id="$thread_root",
-            event_sources=[{"event_id": "$thread_root"}],
+            event_sources=[root_source],
             expected_membership_epoch=0,
             fetch_started_at=ANY,
         )
@@ -530,6 +538,7 @@ class TestThreadHistory:
                 "body": "* final",
                 "m.new_content": {
                     "body": "Final answer",
+                    "msgtype": "m.text",
                     "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
                     "io.mindroom.stream_status": "completed",
                 },
@@ -592,6 +601,7 @@ class TestThreadHistory:
                 "body": "* hello",
                 "m.new_content": {
                     "body": "hello\n\n⏳ Preparing isolated worker...",
+                    "msgtype": "m.text",
                     "io.mindroom.visible_body": "hello",
                     "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
                     "io.mindroom.stream_status": "completed",
@@ -972,6 +982,22 @@ class TestThreadHistory:
             server_timestamp=2000,
             source_content={
                 "body": "Thinking...",
+                "formatted_body": "<p>Thinking...</p>",
+                "format": "org.matrix.custom.html",
+                "m.relates_to": {
+                    "rel_type": "m.thread",
+                    "event_id": "$thread_root",
+                    "m.in_reply_to": {"event_id": "$thread_root"},
+                },
+            },
+        )
+        later_message = self._make_text_event(
+            event_id="$later_msg",
+            sender="@user:localhost",
+            body="Later",
+            server_timestamp=2500,
+            source_content={
+                "body": "Later",
                 "m.relates_to": {
                     "rel_type": "m.thread",
                     "event_id": "$thread_root",
@@ -987,9 +1013,10 @@ class TestThreadHistory:
                 "body": "* Thinking...",
                 "m.new_content": {
                     "body": "Final answer",
+                    "msgtype": "m.text",
                     "m.relates_to": {
                         "rel_type": "m.thread",
-                        "event_id": "$thread_root",
+                        "event_id": "$other_thread",
                     },
                 },
                 "m.relates_to": {
@@ -1000,15 +1027,945 @@ class TestThreadHistory:
         )
 
         response = MagicMock(spec=nio.RoomMessagesResponse)
-        response.chunk = [edit_event, thread_message, root_event]
+        response.chunk = [edit_event, later_message, thread_message, root_event]
         response.end = None
         client.room_messages.return_value = response
 
         history = await fetch_thread_history(client, "!room:localhost", "$thread_root")
 
-        assert [msg.event_id for msg in history] == ["$thread_root", "$agent_msg"]
+        assert [msg.event_id for msg in history] == ["$thread_root", "$agent_msg", "$later_msg"]
         assert history[1].body == "Final answer"
-        assert history[1].content["body"] == "Final answer"
+        assert history[1].timestamp == 2000
+        assert history[1].thread_id == "$thread_root"
+        assert history[1].reply_to_event_id == "$thread_root"
+        assert history[1].content == {
+            "body": "Final answer",
+            "msgtype": "m.text",
+            "m.relates_to": {
+                "rel_type": "m.thread",
+                "event_id": "$thread_root",
+                "m.in_reply_to": {"event_id": "$thread_root"},
+            },
+        }
+
+    @pytest.mark.asyncio
+    async def test_thread_resolution_ignores_wrong_sender_edits_of_known_messages(self) -> None:
+        """Wrong-sender replacements must not alter roots, threaded messages, or replies."""
+        root_event = self._make_text_event(
+            event_id="$thread_root",
+            sender="@alice:localhost",
+            body="Root",
+            server_timestamp=1000,
+            source_content={"body": "Root"},
+        )
+        thread_message = self._make_text_event(
+            event_id="$thread_message",
+            sender="@alice:localhost",
+            body="Thread message",
+            server_timestamp=2000,
+            source_content={
+                "body": "Thread message",
+                "m.relates_to": {
+                    "rel_type": "m.thread",
+                    "event_id": "$thread_root",
+                },
+            },
+        )
+        reply_event = self._make_text_event(
+            event_id="$reply",
+            sender="@alice:localhost",
+            body="Reply",
+            server_timestamp=3000,
+            source_content={
+                "body": "Reply",
+                "m.relates_to": {
+                    "rel_type": "m.thread",
+                    "event_id": "$thread_root",
+                    "m.in_reply_to": {"event_id": "$thread_message"},
+                },
+            },
+        )
+        forged_edits = [
+            self._make_text_event(
+                event_id=f"$forged_{target.removeprefix('$')}",
+                sender="@mallory:localhost",
+                body="* Forged",
+                server_timestamp=4000 + index,
+                source_content={
+                    "body": "* Forged",
+                    "m.new_content": {
+                        "body": "Forged",
+                        "m.relates_to": {
+                            "rel_type": "m.thread",
+                            "event_id": "$thread_root",
+                        },
+                    },
+                    "m.relates_to": {
+                        "rel_type": "m.replace",
+                        "event_id": target,
+                    },
+                },
+            )
+            for index, target in enumerate(("$thread_root", "$thread_message", "$reply"))
+        ]
+
+        resolution = await _resolve_thread_history_from_event_sources_timed(
+            AsyncMock(),
+            room_id="!room:localhost",
+            thread_id="$thread_root",
+            event_sources=[
+                _event_source_for_cache(root_event),
+                _event_source_for_cache(thread_message),
+                _event_source_for_cache(reply_event),
+                *[_event_source_for_cache(event) for event in forged_edits],
+            ],
+            event_cache=_event_cache(),
+        )
+
+        assert [(message.event_id, message.body, message.latest_event_id) for message in resolution.messages] == [
+            ("$thread_root", "Root", "$thread_root"),
+            ("$thread_message", "Thread message", "$thread_message"),
+            ("$reply", "Reply", "$reply"),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_thread_resolution_ignores_edit_from_explicit_other_room(self) -> None:
+        """The authoritative room must reject an edit carrying another room ID."""
+        root_event = self._make_text_event(
+            event_id="$thread_root",
+            sender="@alice:localhost",
+            body="Root",
+            server_timestamp=1000,
+            source_content={"body": "Root"},
+        )
+        edit_event = self._make_text_event(
+            event_id="$edit",
+            sender="@alice:localhost",
+            body="* Forged",
+            server_timestamp=2000,
+            source_content={
+                "body": "* Forged",
+                "m.new_content": {"body": "Forged"},
+                "m.relates_to": {
+                    "rel_type": "m.replace",
+                    "event_id": "$thread_root",
+                },
+            },
+        )
+        edit_source = _event_source_for_cache(edit_event)
+        edit_source["room_id"] = "!other:localhost"
+
+        resolution = await _resolve_thread_history_from_event_sources_timed(
+            AsyncMock(),
+            room_id="!room:localhost",
+            thread_id="$thread_root",
+            event_sources=[
+                _event_source_for_cache(root_event),
+                edit_source,
+            ],
+            event_cache=_event_cache(),
+        )
+
+        assert [(message.event_id, message.body, message.latest_event_id) for message in resolution.messages] == [
+            ("$thread_root", "Root", "$thread_root"),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_thread_resolution_ignores_original_from_explicit_other_room(self) -> None:
+        """The authoritative room must reject an original carrying another room ID."""
+        original = {
+            "event_id": "$thread_root",
+            "room_id": "!other:localhost",
+            "sender": "@alice:localhost",
+            "origin_server_ts": 1000,
+            "type": "m.room.message",
+            "content": {"msgtype": "m.text", "body": "Other room"},
+        }
+
+        resolution = await _resolve_thread_history_from_event_sources_timed(
+            AsyncMock(),
+            room_id="!room:localhost",
+            thread_id="$thread_root",
+            event_sources=[original],
+            event_cache=_event_cache(),
+        )
+
+        assert resolution.messages == []
+
+    @pytest.mark.asyncio
+    async def test_wrong_room_original_never_registers_sidecar_ownership(self) -> None:
+        """A caller-room mismatch must be removed before sidecar owner registration."""
+        wrong_room_original = {
+            "event_id": "$thread_root",
+            "room_id": "!other:localhost",
+            "sender": "@alice:localhost",
+            "origin_server_ts": 1000,
+            "type": "m.room.message",
+            "content": {
+                "body": "Preview",
+                "msgtype": "m.file",
+                "url": "mxc://localhost/sidecar",
+                "io.mindroom.long_text": {
+                    "encoding": "matrix_event_content_json",
+                    "version": 2,
+                },
+            },
+        }
+
+        with patch(
+            "mindroom.matrix.client_thread_history.prepare_sidecar_hydration_batch",
+            new=AsyncMock(return_value=None),
+        ) as prepare_hydration:
+            resolution = await _resolve_thread_history_from_event_sources_timed(
+                AsyncMock(),
+                room_id="!room:localhost",
+                thread_id="$thread_root",
+                event_sources=[wrong_room_original],
+                event_cache=_event_cache(),
+                register_sidecar_owners=True,
+            )
+
+        assert resolution.messages == []
+        prepare_hydration.assert_awaited_once_with(
+            [],
+            event_cache=ANY,
+            room_id="!room:localhost",
+            expected_membership_epoch=None,
+            register_owners=True,
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("invalidity", ["state", "other-room"])
+    async def test_bulk_room_scan_cannot_certify_invalid_thread_root(
+        self,
+        invalidity: str,
+    ) -> None:
+        """State and explicit wrong-room roots must remain missing before cache writes."""
+        root_source = {
+            "event_id": "$thread_root",
+            "sender": "@alice:localhost",
+            "origin_server_ts": 1000,
+            "type": "m.room.message",
+            "content": {"body": "Root", "msgtype": "m.text"},
+        }
+        if invalidity == "state":
+            root_source["state_key"] = ""
+        else:
+            root_source["room_id"] = "!other:localhost"
+        response = MagicMock(spec=nio.RoomMessagesResponse)
+        response.chunk = [raw_nio_event(root_source)]
+        response.end = None
+        client = MagicMock()
+        client.room_messages = AsyncMock(return_value=response)
+        event_cache = make_event_cache_mock()
+
+        stats = await matrix_client_module.bulk_refresh_room_thread_histories(
+            client,
+            "!room:localhost",
+            event_cache,
+            thread_root_ids=["$thread_root"],
+        )
+
+        assert stats.stored_threads == 0
+        assert stats.missing_root_ids == frozenset({"$thread_root"})
+        event_cache.replace_thread_if_not_newer.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("invalidity", "expected_rejection"),
+        [
+            ("state", "cache_missing_thread_root"),
+            ("other-room", None),
+        ],
+    )
+    async def test_poisoned_cached_root_is_rejected_before_resolution(
+        self,
+        event_cache: ConversationEventCache,
+        invalidity: str,
+        expected_rejection: str | None,
+    ) -> None:
+        """A previously certified invalid root must force an authoritative refill."""
+        poisoned_root = {
+            "event_id": "$thread_root",
+            "sender": "@alice:localhost",
+            "origin_server_ts": 1000,
+            "type": "m.room.message",
+            "content": {"body": "Poison", "msgtype": "m.text"},
+        }
+        if invalidity == "state":
+            poisoned_root["state_key"] = ""
+        else:
+            poisoned_root["room_id"] = "!other:localhost"
+        await _replace_thread(
+            event_cache,
+            "!room:localhost",
+            "$thread_root",
+            [poisoned_root],
+        )
+        valid_root = self._make_text_event(
+            event_id="$thread_root",
+            sender="@alice:localhost",
+            body="Valid root",
+            server_timestamp=1000,
+            source_content={"body": "Valid root"},
+        )
+        response = MagicMock(spec=nio.RoomMessagesResponse)
+        response.chunk = [valid_root]
+        response.end = None
+        client = MagicMock()
+        client.room_messages = AsyncMock(return_value=response)
+
+        history = await fetch_thread_history(
+            client,
+            "!room:localhost",
+            "$thread_root",
+            event_cache=event_cache,
+        )
+
+        assert [(message.event_id, message.body) for message in history] == [
+            ("$thread_root", "Valid root"),
+        ]
+        assert history.diagnostics[THREAD_HISTORY_SOURCE_DIAGNOSTIC] == THREAD_HISTORY_SOURCE_HOMESERVER
+        assert history.diagnostics.get(THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC) == expected_rejection
+
+    @pytest.mark.asyncio
+    async def test_thread_resolution_ignores_state_message_original_and_edit(self) -> None:
+        """State events must not become editable visible thread messages."""
+        state_original = {
+            "event_id": "$thread_root",
+            "sender": "@alice:localhost",
+            "origin_server_ts": 1000,
+            "type": "m.room.message",
+            "state_key": "",
+            "content": {"msgtype": "m.text", "body": "State"},
+        }
+        edit = {
+            "event_id": "$edit",
+            "sender": "@alice:localhost",
+            "origin_server_ts": 2000,
+            "type": "m.room.message",
+            "content": {
+                "msgtype": "m.text",
+                "body": "* Edited state",
+                "m.new_content": {"msgtype": "m.text", "body": "Edited state"},
+                "m.relates_to": {
+                    "rel_type": "m.replace",
+                    "event_id": "$thread_root",
+                },
+            },
+        }
+
+        resolution = await _resolve_thread_history_from_event_sources_timed(
+            AsyncMock(),
+            room_id="!room:localhost",
+            thread_id="$thread_root",
+            event_sources=[state_original, edit],
+            event_cache=_event_cache(),
+        )
+
+        assert resolution.messages == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("latest_id", "latest_ts", "event_id", "event_ts", "expected_id", "expected_body"),
+        [
+            ("$structural-first", 2000, "$timestamp-winner", 3000, "$timestamp-winner", "Timestamp"),
+            ("$a", 3000, "$z", 3000, "$z", "Event ID"),
+        ],
+    )
+    async def test_thread_resolution_selects_latest_bundled_replacement_candidate(
+        self,
+        latest_id: str,
+        latest_ts: int,
+        event_id: str,
+        event_ts: int,
+        expected_id: str,
+        expected_body: str,
+    ) -> None:
+        """Bundled event and latest_event candidates must use Matrix latest ordering."""
+        root = {
+            "event_id": "$thread_root",
+            "sender": "@alice:localhost",
+            "origin_server_ts": 1000,
+            "type": "m.room.message",
+            "content": {"msgtype": "m.text", "body": "Root"},
+        }
+
+        def bundled_edit(event_id: str, body: str, timestamp: int) -> dict[str, object]:
+            return {
+                "event_id": event_id,
+                "sender": "@alice:localhost",
+                "origin_server_ts": timestamp,
+                "type": "m.room.message",
+                "content": {
+                    "msgtype": "m.text",
+                    "body": f"* {body}",
+                    "m.new_content": {"msgtype": "m.text", "body": body},
+                    "m.relates_to": {
+                        "rel_type": "m.replace",
+                        "event_id": "$thread_root",
+                    },
+                },
+            }
+
+        root["unsigned"] = {
+            "m.relations": {
+                "m.replace": {
+                    "event": bundled_edit(event_id, expected_body, event_ts),
+                    "latest_event": bundled_edit(latest_id, "Structural first", latest_ts),
+                },
+            },
+        }
+
+        resolution = await _resolve_thread_history_from_event_sources_timed(
+            AsyncMock(),
+            room_id="!room:localhost",
+            thread_id="$thread_root",
+            event_sources=[root],
+            event_cache=_event_cache(),
+        )
+
+        assert [(message.event_id, message.body, message.latest_event_id) for message in resolution.messages] == [
+            ("$thread_root", expected_body, expected_id),
+        ]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("bundled", [False, True])
+    async def test_thread_resolution_applies_msgtype_changing_replacement(
+        self,
+        bundled: bool,
+    ) -> None:
+        """Direct and bundled history must apply valid ``m.text`` to ``m.emote`` edits."""
+        root = {
+            "event_id": "$thread_root",
+            "sender": "@alice:localhost",
+            "origin_server_ts": 1000,
+            "type": "m.room.message",
+            "content": {"msgtype": "m.text", "body": "Root"},
+        }
+        edit = {
+            "event_id": "$edit",
+            "sender": "@alice:localhost",
+            "origin_server_ts": 2000,
+            "type": "m.room.message",
+            "content": {
+                "msgtype": "m.emote",
+                "body": "* waves",
+                "m.new_content": {"msgtype": "m.emote", "body": "waves"},
+                "m.relates_to": {
+                    "rel_type": "m.replace",
+                    "event_id": "$thread_root",
+                },
+            },
+        }
+        event_sources = [root]
+        if bundled:
+            root["unsigned"] = {"m.relations": {"m.replace": edit}}
+        else:
+            event_sources.append(edit)
+
+        resolution = await _resolve_thread_history_from_event_sources_timed(
+            AsyncMock(),
+            room_id="!room:localhost",
+            thread_id="$thread_root",
+            event_sources=event_sources,
+            event_cache=_event_cache(),
+        )
+
+        assert [(message.event_id, message.body, message.latest_event_id) for message in resolution.messages] == [
+            ("$thread_root", "waves", "$edit"),
+        ]
+        assert resolution.messages[0].content["msgtype"] == "m.emote"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("missing_field", ["sender", "type", "origin_server_ts"])
+    async def test_thread_resolution_rejects_bundled_replacement_without_identity(
+        self,
+        missing_field: str,
+    ) -> None:
+        """Full resolution must reject the same incomplete bundled envelopes as previews."""
+        replacement = {
+            "event_id": "$edit",
+            "sender": "@alice:localhost",
+            "origin_server_ts": 2000,
+            "type": "m.room.message",
+            "content": {
+                "body": "* Forged",
+                "msgtype": "m.text",
+                "m.new_content": {"body": "Forged", "msgtype": "m.text"},
+                "m.relates_to": {
+                    "rel_type": "m.replace",
+                    "event_id": "$thread_root",
+                },
+            },
+        }
+        replacement.pop(missing_field)
+        root = {
+            "event_id": "$thread_root",
+            "sender": "@alice:localhost",
+            "origin_server_ts": 1000,
+            "type": "m.room.message",
+            "content": {"body": "Root", "msgtype": "m.text"},
+            "unsigned": {
+                "m.relations": {
+                    "m.replace": replacement,
+                },
+            },
+        }
+
+        resolution = await _resolve_thread_history_from_event_sources_timed(
+            AsyncMock(),
+            room_id="!room:localhost",
+            thread_id="$thread_root",
+            event_sources=[root],
+            event_cache=_event_cache(),
+        )
+
+        assert [(message.event_id, message.body, message.latest_event_id) for message in resolution.messages] == [
+            ("$thread_root", "Root", "$thread_root"),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_thread_resolution_rejects_bundled_self_replacement(self) -> None:
+        """A bundled replacement cannot reuse the original event ID."""
+        replacement = {
+            "event_id": "$thread_root",
+            "sender": "@alice:localhost",
+            "origin_server_ts": 2000,
+            "type": "m.room.message",
+            "content": {
+                "body": "* Forged",
+                "msgtype": "m.text",
+                "m.new_content": {"body": "Forged", "msgtype": "m.text"},
+                "m.relates_to": {
+                    "rel_type": "m.replace",
+                    "event_id": "$thread_root",
+                },
+            },
+        }
+        root = {
+            "event_id": "$thread_root",
+            "sender": "@alice:localhost",
+            "origin_server_ts": 1000,
+            "type": "m.room.message",
+            "content": {"body": "Root", "msgtype": "m.text"},
+            "unsigned": {"m.relations": {"m.replace": replacement}},
+        }
+
+        resolution = await _resolve_thread_history_from_event_sources_timed(
+            AsyncMock(),
+            room_id="!room:localhost",
+            thread_id="$thread_root",
+            event_sources=[root],
+            event_cache=_event_cache(),
+        )
+
+        assert [(message.event_id, message.body, message.latest_event_id) for message in resolution.messages] == [
+            ("$thread_root", "Root", "$thread_root"),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_thread_resolution_ignores_wrong_sender_edit_of_edit(self) -> None:
+        """A wrong-sender replacement of an edit must not create or change visible content."""
+        root_event = self._make_text_event(
+            event_id="$thread_root",
+            sender="@alice:localhost",
+            body="Root",
+            server_timestamp=1000,
+            source_content={"body": "Root"},
+        )
+        thread_message = self._make_text_event(
+            event_id="$thread_message",
+            sender="@alice:localhost",
+            body="Original",
+            server_timestamp=2000,
+            source_content={
+                "body": "Original",
+                "m.relates_to": {
+                    "rel_type": "m.thread",
+                    "event_id": "$thread_root",
+                },
+            },
+        )
+        valid_edit = self._make_text_event(
+            event_id="$alice_edit",
+            sender="@alice:localhost",
+            body="* Alice update",
+            server_timestamp=3000,
+            source_content={
+                "body": "* Alice update",
+                "m.new_content": {
+                    "body": "Alice update",
+                    "msgtype": "m.text",
+                    "m.relates_to": {
+                        "rel_type": "m.thread",
+                        "event_id": "$thread_root",
+                    },
+                },
+                "m.relates_to": {
+                    "rel_type": "m.replace",
+                    "event_id": "$thread_message",
+                },
+            },
+        )
+        forged_edit_of_edit = self._make_text_event(
+            event_id="$mallory_edit",
+            sender="@mallory:localhost",
+            body="* Forged",
+            server_timestamp=4000,
+            source_content={
+                "body": "* Forged",
+                "m.new_content": {
+                    "body": "Forged",
+                    "m.relates_to": {
+                        "rel_type": "m.thread",
+                        "event_id": "$thread_root",
+                    },
+                },
+                "m.relates_to": {
+                    "rel_type": "m.replace",
+                    "event_id": "$alice_edit",
+                },
+            },
+        )
+
+        resolution = await _resolve_thread_history_from_event_sources_timed(
+            AsyncMock(),
+            room_id="!room:localhost",
+            thread_id="$thread_root",
+            event_sources=[
+                _event_source_for_cache(root_event),
+                _event_source_for_cache(thread_message),
+                _event_source_for_cache(valid_edit),
+                _event_source_for_cache(forged_edit_of_edit),
+            ],
+            event_cache=_event_cache(),
+        )
+
+        assert [(message.event_id, message.body, message.latest_event_id) for message in resolution.messages] == [
+            ("$thread_root", "Root", "$thread_root"),
+            ("$thread_message", "Alice update", "$alice_edit"),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_thread_resolution_ignores_same_sender_edit_of_edit(self) -> None:
+        """A same-sender replacement of an edit must not create a visible message."""
+        root_event = self._make_text_event(
+            event_id="$thread_root",
+            sender="@alice:localhost",
+            body="Root",
+            server_timestamp=1000,
+            source_content={"body": "Root"},
+        )
+        thread_message = self._make_text_event(
+            event_id="$thread_message",
+            sender="@alice:localhost",
+            body="Original",
+            server_timestamp=2000,
+            source_content={
+                "body": "Original",
+                "m.relates_to": {
+                    "rel_type": "m.thread",
+                    "event_id": "$thread_root",
+                },
+            },
+        )
+        valid_edit = self._make_text_event(
+            event_id="$alice_edit",
+            sender="@alice:localhost",
+            body="* Alice update",
+            server_timestamp=3000,
+            source_content={
+                "body": "* Alice update",
+                "m.new_content": {
+                    "body": "Alice update",
+                    "msgtype": "m.text",
+                    "m.relates_to": {
+                        "rel_type": "m.thread",
+                        "event_id": "$thread_root",
+                    },
+                },
+                "m.relates_to": {
+                    "rel_type": "m.replace",
+                    "event_id": "$thread_message",
+                },
+            },
+        )
+        edit_of_edit = self._make_text_event(
+            event_id="$alice_edit_of_edit",
+            sender="@alice:localhost",
+            body="* Invalid second-order edit",
+            server_timestamp=4000,
+            source_content={
+                "body": "* Invalid second-order edit",
+                "m.new_content": {
+                    "body": "Invalid second-order edit",
+                    "m.relates_to": {
+                        "rel_type": "m.thread",
+                        "event_id": "$thread_root",
+                    },
+                },
+                "m.relates_to": {
+                    "rel_type": "m.replace",
+                    "event_id": "$alice_edit",
+                },
+            },
+        )
+
+        resolution = await _resolve_thread_history_from_event_sources_timed(
+            AsyncMock(),
+            room_id="!room:localhost",
+            thread_id="$thread_root",
+            event_sources=[
+                _event_source_for_cache(root_event),
+                _event_source_for_cache(thread_message),
+                _event_source_for_cache(valid_edit),
+                _event_source_for_cache(edit_of_edit),
+            ],
+            event_cache=_event_cache(),
+        )
+
+        assert [(message.event_id, message.body, message.latest_event_id) for message in resolution.messages] == [
+            ("$thread_root", "Root", "$thread_root"),
+            ("$thread_message", "Alice update", "$alice_edit"),
+        ]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "invalidity",
+        ["missing-msgtype", "empty-event-id", "missing-media-transport", "malformed-encrypted-file"],
+    )
+    async def test_thread_resolution_falls_back_from_malformed_newest_edit(self, invalidity: str) -> None:
+        """A malformed newest replacement must not mask the newest valid replacement."""
+        root_event = self._make_text_event(
+            event_id="$thread_root",
+            sender="@alice:localhost",
+            body="Root",
+            server_timestamp=1000,
+            source_content={"body": "Root"},
+        )
+        thread_message = self._make_text_event(
+            event_id="$thread_message",
+            sender="@alice:localhost",
+            body="Original",
+            server_timestamp=2000,
+            source_content={
+                "body": "Original",
+                "m.relates_to": {
+                    "rel_type": "m.thread",
+                    "event_id": "$thread_root",
+                },
+            },
+        )
+        valid_edit = self._make_text_event(
+            event_id="$valid_edit",
+            sender="@alice:localhost",
+            body="* Good",
+            server_timestamp=3000,
+            source_content={
+                "body": "* Good",
+                "m.new_content": {
+                    "body": "Good",
+                    "msgtype": "m.text",
+                    "m.relates_to": {
+                        "rel_type": "m.thread",
+                        "event_id": "$thread_root",
+                    },
+                },
+                "m.relates_to": {
+                    "rel_type": "m.replace",
+                    "event_id": "$thread_message",
+                },
+            },
+        )
+        malformed_content: dict[str, object] = {
+            "body": "* Malformed",
+            "m.new_content": {
+                "body": "Malformed",
+                "msgtype": "m.text",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
+            },
+            "m.relates_to": {
+                "rel_type": "m.replace",
+                "event_id": "$thread_message",
+            },
+        }
+        if invalidity == "missing-msgtype":
+            new_content = malformed_content["m.new_content"]
+            assert isinstance(new_content, dict)
+            new_content.pop("msgtype")
+        elif invalidity == "missing-media-transport":
+            malformed_content["msgtype"] = "m.image"
+            malformed_content["m.new_content"] = {
+                "body": "Malformed",
+                "msgtype": "m.image",
+            }
+        elif invalidity == "malformed-encrypted-file":
+            malformed_content["msgtype"] = "m.image"
+            malformed_content["file"] = {
+                "url": "not-an-mxc-uri",
+                "v": "v2",
+                "key": {"alg": "wrong", "k": "not-base64"},
+                "iv": "not-base64",
+                "hashes": {},
+            }
+            malformed_content["m.new_content"] = {
+                "body": "Malformed",
+                "msgtype": "m.image",
+                "file": malformed_content["file"],
+            }
+        malformed_edit = self._make_text_event(
+            event_id="" if invalidity == "empty-event-id" else "$malformed_edit",
+            sender="@alice:localhost",
+            body="* Malformed",
+            server_timestamp=4000,
+            source_content=malformed_content,
+        )
+
+        resolution = await _resolve_thread_history_from_event_sources_timed(
+            AsyncMock(),
+            room_id="!room:localhost",
+            thread_id="$thread_root",
+            event_sources=[
+                _event_source_for_cache(root_event),
+                _event_source_for_cache(thread_message),
+                _event_source_for_cache(valid_edit),
+                _event_source_for_cache(malformed_edit),
+            ],
+            event_cache=_event_cache(),
+        )
+
+        assert [(message.event_id, message.body, message.latest_event_id) for message in resolution.messages] == [
+            ("$thread_root", "Root", "$thread_root"),
+            ("$thread_message", "Good", "$valid_edit"),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_thread_resolution_does_not_synthesize_unknown_edit_target(self) -> None:
+        """An edit cannot prove ownership or validity when its target event is absent."""
+        root_event = self._make_text_event(
+            event_id="$thread_root",
+            sender="@alice:localhost",
+            body="Root",
+            server_timestamp=1000,
+            source_content={"body": "Root"},
+        )
+        matching_edit = self._make_text_event(
+            event_id="$matching_edit",
+            sender="@alice:localhost",
+            body="* Matching",
+            server_timestamp=3000,
+            source_content={
+                "body": "* Matching",
+                "m.new_content": {
+                    "body": "Matching",
+                    "m.relates_to": {
+                        "rel_type": "m.thread",
+                        "event_id": "$thread_root",
+                    },
+                },
+                "m.relates_to": {
+                    "rel_type": "m.replace",
+                    "event_id": "$missing_original",
+                },
+            },
+        )
+        newer_other_thread_edit = self._make_text_event(
+            event_id="$other_thread_edit",
+            sender="@mallory:localhost",
+            body="* Other",
+            server_timestamp=4000,
+            source_content={
+                "body": "* Other",
+                "m.new_content": {
+                    "body": "Other",
+                    "m.relates_to": {
+                        "rel_type": "m.thread",
+                        "event_id": "$other_thread",
+                    },
+                },
+                "m.relates_to": {
+                    "rel_type": "m.replace",
+                    "event_id": "$missing_original",
+                },
+            },
+        )
+
+        resolution = await _resolve_thread_history_from_event_sources_timed(
+            AsyncMock(),
+            room_id="!room:localhost",
+            thread_id="$thread_root",
+            event_sources=[
+                _event_source_for_cache(root_event),
+                _event_source_for_cache(matching_edit),
+                _event_source_for_cache(newer_other_thread_edit),
+            ],
+            event_cache=_event_cache(),
+        )
+
+        assert [(message.event_id, message.body, message.latest_event_id) for message in resolution.messages] == [
+            ("$thread_root", "Root", "$thread_root"),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_sender_filtered_resolution_keeps_target_sender_evidence(self) -> None:
+        """Sender filtering must still reject edits targeting another sender's event."""
+        original_event = self._make_text_event(
+            event_id="$bob_original",
+            sender="@bob:localhost",
+            body="Bob",
+            server_timestamp=1000,
+            source_content={"body": "Bob"},
+        )
+        forged_edit = self._make_text_event(
+            event_id="$alice_forged_edit",
+            sender="@alice:localhost",
+            body="* Forged",
+            server_timestamp=2000,
+            source_content={
+                "body": "* Forged",
+                "m.new_content": {"body": "Forged"},
+                "m.relates_to": {
+                    "rel_type": "m.replace",
+                    "event_id": "$bob_original",
+                },
+            },
+        )
+
+        resolved = await resolve_latest_visible_messages(
+            [original_event, forged_edit],
+            AsyncMock(),
+            sender="@alice:localhost",
+        )
+
+        assert resolved == {}
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("invalidity", ["state", "other-room"])
+    async def test_visible_resolution_rejects_non_timeline_originals_in_other_scope(
+        self,
+        invalidity: str,
+    ) -> None:
+        """Generic visible resolution must enforce timeline and caller-room scope."""
+        original_event = self._make_text_event(
+            event_id="$original",
+            sender="@alice:localhost",
+            body="Original",
+            server_timestamp=1000,
+            source_content={"body": "Original"},
+        )
+        if invalidity == "state":
+            original_event.source["state_key"] = ""
+        else:
+            original_event.source["room_id"] = "!other:localhost"
+
+        resolved = await resolve_latest_visible_messages(
+            [original_event],
+            AsyncMock(),
+            room_id="!room:localhost",
+        )
+
+        assert resolved == {}
 
     @pytest.mark.asyncio
     async def test_fetch_thread_history_applies_v2_sidecar_edits(self) -> None:
@@ -1331,7 +2288,7 @@ class TestThreadHistory:
         grouped, _unresolved_opaque = await _group_scanned_sources_by_thread(
             room_id="!room:localhost",
             thread_root_ids=("$room_root",),
-            latest_edits_by_original_event_id={},
+            edit_candidates_by_original_event_id={},
             scanned_message_sources={
                 "$room_root": {
                     "event_id": "$room_root",
@@ -1360,7 +2317,7 @@ class TestThreadHistory:
         grouped, _unresolved_opaque = await _group_scanned_sources_by_thread(
             room_id="!room:localhost",
             thread_root_ids=("$root",),
-            latest_edits_by_original_event_id={},
+            edit_candidates_by_original_event_id={},
             scanned_message_sources={
                 "$root": {
                     "event_id": "$root",
@@ -1399,7 +2356,7 @@ class TestThreadHistory:
         grouped, _unresolved_opaque = await _group_scanned_sources_by_thread(
             room_id="!room:localhost",
             thread_root_ids=("$root",),
-            latest_edits_by_original_event_id={},
+            edit_candidates_by_original_event_id={},
             scanned_message_sources={
                 "$root": {
                     "event_id": "$root",
@@ -1600,6 +2557,7 @@ class TestThreadHistory:
                 "body": "* partial",
                 "m.new_content": {
                     "body": "Partial answer",
+                    "msgtype": "m.text",
                     "m.relates_to": {
                         "rel_type": "m.thread",
                         "event_id": "$thread_root",
@@ -1620,6 +2578,7 @@ class TestThreadHistory:
                 "body": "* final",
                 "m.new_content": {
                     "body": "Final answer",
+                    "msgtype": "m.text",
                     "m.relates_to": {
                         "rel_type": "m.thread",
                         "event_id": "$thread_root",
@@ -1676,6 +2635,7 @@ class TestThreadHistory:
                 "body": "* replacement",
                 "m.new_content": {
                     "body": "Updated answer",
+                    "msgtype": "m.text",
                 },
                 "m.relates_to": {
                     "rel_type": "m.replace",
@@ -1780,8 +2740,8 @@ class TestThreadHistory:
         mock_extract_edit_body.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_fetch_thread_history_edit_only_event_still_visible(self) -> None:
-        """Synthesize a history entry when only edit events are returned."""
+    async def test_fetch_thread_history_edit_only_event_stays_hidden(self) -> None:
+        """An edit-only history page must not synthesize its absent target."""
         client = AsyncMock()
         root_event = self._make_text_event(
             event_id="$thread_root",
@@ -1800,6 +2760,7 @@ class TestThreadHistory:
                 "body": "* final",
                 "m.new_content": {
                     "body": "Final answer",
+                    "msgtype": "m.text",
                     "m.relates_to": {
                         "rel_type": "m.thread",
                         "event_id": "$thread_root",
@@ -1821,8 +2782,7 @@ class TestThreadHistory:
         )
         history = resolution.messages
 
-        assert [message.event_id for message in history] == ["$thread_root", "$missing_original"]
-        assert history[1].body == "Final answer"
+        assert [message.event_id for message in history] == ["$thread_root"]
 
     @pytest.mark.asyncio
     async def test_fetch_thread_history_does_not_stop_after_edit_only_page(self) -> None:
@@ -1838,6 +2798,7 @@ class TestThreadHistory:
                 "body": "* final",
                 "m.new_content": {
                     "body": "Final answer",
+                    "msgtype": "m.text",
                     "m.relates_to": {
                         "rel_type": "m.thread",
                         "event_id": "$thread_root",
@@ -2459,6 +3420,78 @@ class TestThreadHistoryCache:
         assert [message.event_id for message in history] == ["$thread_root", "$reply"]
         assert history.diagnostics[THREAD_HISTORY_SOURCE_DIAGNOSTIC] == THREAD_HISTORY_SOURCE_HOMESERVER
         assert history.diagnostics[THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC] == "cache_missing_thread_root"
+        client.room_messages.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("invalidity", "expected_rejection"),
+        [
+            ("malformed", "cache_invalid_thread_event"),
+            ("wrong-membership", "cache_invalid_thread_membership"),
+        ],
+    )
+    async def test_fetch_dispatch_thread_history_refetches_invalid_cached_child(
+        self,
+        tmp_path: Path,
+        invalidity: str,
+        expected_rejection: str,
+    ) -> None:
+        """One invalid child must reject the whole certified snapshot."""
+        cache = SqliteEventCache(tmp_path / "event_cache.db")
+        await cache.initialize()
+
+        root_event = self._make_text_event(
+            event_id="$thread_root",
+            sender="@user:localhost",
+            body="Root message",
+            server_timestamp=1000,
+            source_content={"body": "Root message"},
+        )
+        reply_event = self._make_text_event(
+            event_id="$reply",
+            sender="@user:localhost",
+            body="Follow-up in thread",
+            server_timestamp=2000,
+            source_content={
+                "body": "Follow-up in thread",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
+            },
+        )
+        poisoned_reply = json.loads(json.dumps(self._cache_source(reply_event)))
+        poisoned_content = poisoned_reply["content"]
+        assert isinstance(poisoned_content, dict)
+        if invalidity == "malformed":
+            poisoned_content.pop("msgtype")
+        else:
+            relation = poisoned_content["m.relates_to"]
+            assert isinstance(relation, dict)
+            relation["event_id"] = "$other_root"
+        await self._seed_thread_cache(
+            cache,
+            room_id="!room:localhost",
+            thread_id="$thread_root",
+            events=[self._cache_source(root_event), poisoned_reply],
+        )
+
+        client = MagicMock()
+        page = MagicMock(spec=nio.RoomMessagesResponse)
+        page.chunk = [reply_event, root_event]
+        page.end = None
+        client.room_messages = AsyncMock(return_value=page)
+
+        try:
+            history = await matrix_client_module.fetch_dispatch_thread_history(
+                client,
+                "!room:localhost",
+                "$thread_root",
+                event_cache=cache,
+            )
+        finally:
+            await cache.close()
+
+        assert [message.event_id for message in history] == ["$thread_root", "$reply"]
+        assert history.diagnostics[THREAD_HISTORY_SOURCE_DIAGNOSTIC] == THREAD_HISTORY_SOURCE_HOMESERVER
+        assert history.diagnostics[THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC] == expected_rejection
         client.room_messages.assert_awaited_once()
 
     @pytest.mark.asyncio
@@ -3295,6 +4328,13 @@ class TestThreadHistoryCache:
                 content={"body": "refreshed"},
             ),
         ]
+        root_source = {
+            "content": {"body": "refreshed", "msgtype": "m.text"},
+            "event_id": "$thread_root",
+            "origin_server_ts": 1,
+            "sender": "@user:localhost",
+            "type": "m.room.message",
+        }
 
         with (
             patch.object(matrix_client_module, "logger", logger),
@@ -3314,7 +4354,7 @@ class TestThreadHistoryCache:
                 new=AsyncMock(
                     return_value=MagicMock(
                         history=refreshed_history,
-                        event_sources=[{"event_id": "$thread_root"}],
+                        event_sources=[root_source],
                         fetch_ms=91.2,
                         room_scan_pages=7,
                         scanned_event_count=42,
@@ -4000,6 +5040,13 @@ class TestThreadHistoryCache:
         event_cache = _event_cache()
         event_cache.room_membership_epoch.side_effect = RuntimeError("cache unavailable")
         event_cache.replace_thread_if_not_newer.return_value = False
+        root_source = {
+            "content": {"body": "fresh", "msgtype": "m.text"},
+            "event_id": "$thread_root",
+            "origin_server_ts": 1,
+            "sender": "@user:localhost",
+            "type": "m.room.message",
+        }
         fetch_result = matrix_client_module._ThreadHistoryFetchResult(
             history=[
                 ResolvedVisibleMessage.synthetic(
@@ -4009,7 +5056,7 @@ class TestThreadHistoryCache:
                     content={"body": "fresh"},
                 ),
             ],
-            event_sources=[{"event_id": "$thread_root"}],
+            event_sources=[root_source],
             fetch_ms=1.0,
             room_scan_pages=1,
             scanned_event_count=1,

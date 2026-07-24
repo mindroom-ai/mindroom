@@ -3876,10 +3876,21 @@ from = ["mindroom.matrix.conversation_cache"]
 [[interfaces]]
 expose = [
     "EventInfo",
+    "approval_status_from_content",
+    "bundled_replacement_candidates",
+    "event_source_is_state_event",
+    "event_source_matches_index",
+    "event_source_matches_room",
     "event_type_supports_thread_relations",
     "is_thread_affecting_relation",
+    "is_valid_bundled_replacement",
+    "latest_valid_replacement",
     "origin_server_ts_from_event_source",
+    "ordered_valid_bundled_replacements",
+    "replacement_content_for_original",
+    "replacement_content_is_renderable",
     "reply_to_event_id_from_content",
+    "room_message_content_is_renderable",
 ]
 from = ["mindroom.matrix.event_info"]
 
@@ -3985,11 +3996,14 @@ from = ["mindroom.matrix.voice_message"]
 [[interfaces]]
 expose = [
     "ResolvedVisibleMessage",
+    "ThreadEditCandidatesByOriginalEventId",
     "apply_latest_edits_to_messages",
+    "bundled_replacement_candidates",
     "extract_visible_edit_body",
     "extract_visible_message",
     "message_preview",
-    "record_latest_thread_edit",
+    "ordered_valid_bundled_replacements",
+    "record_thread_edit_candidate",
     "replace_visible_message",
     "resolve_visible_event_source",
     "resolve_latest_visible_messages",

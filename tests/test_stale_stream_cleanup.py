@@ -316,6 +316,33 @@ def _assert_preserved_edit_payload(content: dict[str, object], expected_keys: di
         assert new_content[key] == value
 
 
+def test_resolved_state_ignores_clock_skewed_older_edit_timestamp() -> None:
+    """A clock-skewed edit must not make a fresh original eligible for stale cleanup."""
+    original_timestamp = NOW_MS - (STALE_AGE_MS - 1_000)
+    message = _history_message(
+        "$stream",
+        timestamp=original_timestamp,
+        content={"body": "Partial", "io.mindroom.stream_status": "streaming"},
+    )
+    message.apply_edit(
+        body="Updated partial",
+        latest_event_id="$edit",
+        latest_event_timestamp=NOW_MS - (STALE_AGE_MS + 1_000),
+        content={"body": "Updated partial", "io.mindroom.stream_status": "streaming"},
+    )
+    message_states: dict[str, stale_stream_cleanup_module._MessageState] = {}
+
+    stale_stream_cleanup_module._merge_resolved_message_state(
+        message_states,
+        target_event_id="$stream",
+        message=message,
+        bot_user_id=BOT_USER_ID,
+        requester_user_id=USER_ID,
+    )
+
+    assert message_states["$stream"].latest_timestamp == original_timestamp
+
+
 def test_latest_visible_thread_event_id_by_thread_prefers_same_timestamp_descendant() -> None:
     """Same-timestamp descendants should win the cleanup thread tail order."""
     same_timestamp = NOW_MS - 1_000
@@ -1268,6 +1295,71 @@ async def test_cleanup_skips_recent_in_progress_message_on_startup(tmp_path: Pat
     assert cleaned == 0
     assert interrupted == []
     mock_edit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_cleanup_skips_old_stream_with_recent_edit_on_startup(tmp_path: Path) -> None:
+    """Startup cleanup should use edit activity, not original creation time, for its recency guard."""
+    config = _make_config(tmp_path)
+    client = AsyncMock(spec=nio.AsyncClient)
+    original = _make_message_event(
+        event_id="$message",
+        body="Initial output",
+        timestamp_ms=NOW_MS - STALE_AGE_MS,
+    )
+    recent_edit = _make_message_event(
+        event_id="$recent-edit",
+        body="* Still streaming",
+        timestamp_ms=NOW_MS - 1_000,
+        relates_to={"rel_type": "m.replace", "event_id": "$message"},
+        new_content={"body": "Still streaming", "msgtype": "m.text", STREAM_STATUS_KEY: "streaming"},
+    )
+    client.room_messages.return_value = _room_messages_response(original, recent_edit)
+    client.room_get_event_relations = MagicMock(return_value=_aiter())
+
+    with (
+        patch(
+            "mindroom.matrix.stale_stream_cleanup.edit_message_result",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit")),
+        ) as mock_edit,
+        patch("mindroom.matrix.stale_stream_cleanup.time.time", return_value=NOW_MS / 1000),
+    ):
+        cleaned, interrupted = await _run_cleanup(client, config, joined_rooms=[ROOM_ID])
+
+    assert cleaned == 0
+    assert interrupted == []
+    mock_edit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_cleanup_uses_recent_edit_inside_restart_window(tmp_path: Path) -> None:
+    """A recent visible edit should keep an ancient original eligible for stale cleanup."""
+    config = _make_config(tmp_path)
+    client = AsyncMock(spec=nio.AsyncClient)
+    original = _make_message_event(
+        event_id="$message",
+        body="Initial output",
+        timestamp_ms=NOW_MS - OLD_STALE_AGE_MS,
+    )
+    stale_edit = _make_message_event(
+        event_id="$stale-edit",
+        body="* Needs cleanup",
+        timestamp_ms=NOW_MS - STALE_AGE_MS,
+        relates_to={"rel_type": "m.replace", "event_id": "$message"},
+        new_content={"body": "Needs cleanup", "msgtype": "m.text", STREAM_STATUS_KEY: "streaming"},
+    )
+    client.room_messages.return_value = _room_messages_response(original, stale_edit)
+    client.room_get_event_relations = MagicMock(return_value=_aiter())
+
+    with patch(
+        "mindroom.matrix.stale_stream_cleanup.edit_message_result",
+        new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit")),
+    ) as mock_edit:
+        cleaned, interrupted = await _run_cleanup(client, config, joined_rooms=[ROOM_ID], now_ms=NOW_MS)
+
+    assert cleaned == 1
+    assert interrupted == []
+    assert mock_edit.await_args.args[2] == "$message"
 
 
 @pytest.mark.asyncio

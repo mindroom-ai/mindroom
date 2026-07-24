@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import time
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -10,6 +9,7 @@ from .event_cache_events import (
     event_id_for_cache,
     serialize_cacheable_events,
     serialize_cached_event,
+    validated_cached_event_payloads,
 )
 from .event_normalization import normalize_event_source_for_cache
 from .postgres_cursor import fetchall, fetchone
@@ -48,7 +48,7 @@ async def load_thread_events(
     rows = await fetchall(
         db,
         """
-        SELECT thread_events.origin_server_ts, thread_events.write_seq, events.event_json
+        SELECT events.event_json, events.event_id, events.origin_server_ts
         FROM mindroom_event_cache_thread_events AS thread_events
         JOIN mindroom_event_cache_events AS events
             ON events.namespace = thread_events.namespace
@@ -57,13 +57,13 @@ async def load_thread_events(
         WHERE thread_events.namespace = %s
             AND thread_events.room_id = %s
             AND thread_events.thread_id = %s
-        ORDER BY thread_events.origin_server_ts ASC, thread_events.write_seq ASC
+        ORDER BY events.origin_server_ts ASC, thread_events.write_seq ASC
         """,
         (namespace, room_id, thread_id),
     )
     if not rows:
         return None
-    return [json.loads(row[2]) for row in rows]
+    return validated_cached_event_payloads(rows, room_id=room_id)
 
 
 async def load_thread_events_written_between(
@@ -81,7 +81,7 @@ async def load_thread_events_written_between(
     rows = await fetchall(
         db,
         """
-        SELECT thread_events.origin_server_ts, thread_events.write_seq, events.event_json
+        SELECT events.event_json, events.event_id, events.origin_server_ts
         FROM mindroom_event_cache_thread_events AS thread_events
         JOIN mindroom_event_cache_events AS events
             ON events.namespace = thread_events.namespace
@@ -94,7 +94,7 @@ async def load_thread_events_written_between(
                 (events.write_seq > %s AND events.write_seq <= %s)
                 OR (thread_events.write_seq > %s AND thread_events.write_seq <= %s)
             )
-        ORDER BY thread_events.origin_server_ts ASC, thread_events.write_seq ASC
+        ORDER BY events.origin_server_ts ASC, thread_events.write_seq ASC
         """,
         (
             namespace,
@@ -106,7 +106,7 @@ async def load_thread_events_written_between(
             through_thread_write_seq,
         ),
     )
-    return [json.loads(row[2]) for row in rows]
+    return validated_cached_event_payloads(rows, room_id=room_id)
 
 
 async def load_thread_revision(
@@ -124,7 +124,7 @@ async def load_thread_revision(
             COUNT(*),
             MAX(events.write_seq),
             MAX(thread_events.write_seq),
-            MAX(thread_events.origin_server_ts)
+            MAX(events.origin_server_ts)
         FROM mindroom_event_cache_thread_events AS thread_events
         JOIN mindroom_event_cache_events AS events
             ON events.namespace = thread_events.namespace

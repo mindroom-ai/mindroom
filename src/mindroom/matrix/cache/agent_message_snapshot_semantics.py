@@ -2,11 +2,18 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from mindroom.matrix.event_info import EventInfo
-from mindroom.matrix.visible_body import visible_content_from_content
+from mindroom.matrix.event_info import (
+    EventInfo,
+    event_source_is_state_event,
+    event_source_matches_index,
+    latest_valid_replacement,
+    replacement_content_for_original,
+    room_message_content_is_renderable,
+)
 
 from .agent_message_snapshot import AgentMessageSnapshot, AgentMessageSnapshotUnavailable
 from .thread_cache_helpers import thread_cache_rejection_reason
@@ -40,11 +47,27 @@ def thread_cache_has_no_snapshot(cache_state: ThreadCacheState | None) -> bool:
 def event_matches_snapshot_scope(
     event: dict[str, Any],
     *,
+    indexed_event_id: str,
+    indexed_origin_server_ts: int,
+    room_id: str,
     thread_id: str | None,
     sender: str,
 ) -> bool:
     """Return whether one event is a visible message candidate for a snapshot scope."""
-    if event.get("type") != "m.room.message" or event.get("sender") != sender:
+    content = event.get("content")
+    if (
+        event.get("type") != "m.room.message"
+        or event.get("sender") != sender
+        or event_source_is_state_event(event)
+        or not event_source_matches_index(
+            event,
+            indexed_event_id,
+            indexed_origin_server_ts,
+            room_id,
+        )
+        or not isinstance(content, Mapping)
+        or not room_message_content_is_renderable(content)
+    ):
         return False
     relation_type = EventInfo.from_event(event).relation_type
     if relation_type == "m.replace":
@@ -52,23 +75,28 @@ def event_matches_snapshot_scope(
     return not (thread_id is None and relation_type == "m.thread")
 
 
-def snapshot_event_id(event: dict[str, Any]) -> str | None:
-    """Return one event's usable ID for snapshot edit lookup."""
-    event_id = event.get("event_id")
-    return event_id if isinstance(event_id, str) and event_id else None
-
-
 def snapshot_lookup_result(
     event: dict[str, Any],
     *,
     latest_edit: CachedEventRow | None,
+    room_id: str,
     thread_id: str | None,
     cached_at: float | None,
     runtime_started_at: float | None,
 ) -> SnapshotLookupResult:
     """Resolve one cached event and optional edit into a visible snapshot outcome."""
-    latest_event = latest_edit.event if latest_edit is not None else event
-    visible_cached_at = latest_edit.cached_at if latest_edit is not None else cached_at
+    latest_replacement = latest_valid_replacement(
+        event,
+        () if latest_edit is None else (latest_edit.event,),
+        room_id=room_id,
+    )
+    latest_edit_event_id = None if latest_edit is None else latest_edit.event.get("event_id")
+    latest_replacement_event_id = None if latest_replacement is None else latest_replacement.get("event_id")
+    visible_cached_at = (
+        latest_edit.cached_at
+        if latest_edit is not None and latest_replacement_event_id == latest_edit_event_id
+        else cached_at
+    )
     if (
         thread_id is None
         and runtime_started_at is not None
@@ -76,11 +104,17 @@ def snapshot_lookup_result(
     ):
         return SnapshotLookupResult(snapshot=None, stop_scanning=True)
 
-    timestamp = latest_event.get("origin_server_ts")
+    timestamp = event.get("origin_server_ts")
     if not isinstance(timestamp, int) or isinstance(timestamp, bool):
         return SnapshotLookupResult(snapshot=None)
-    content = latest_event.get("content")
-    visible_content = visible_content_from_content(content) if isinstance(content, dict) else {}
+    original_content = event.get("content")
+    normalized_original_content = dict(original_content) if isinstance(original_content, dict) else {}
+    visible_content = normalized_original_content
+    if latest_replacement is not None:
+        edit_content = latest_replacement.get("content")
+        new_content = edit_content.get("m.new_content") if isinstance(edit_content, dict) else None
+        if isinstance(new_content, dict):
+            visible_content = replacement_content_for_original(normalized_original_content, new_content)
     return SnapshotLookupResult(
         snapshot=AgentMessageSnapshot(
             content=visible_content,

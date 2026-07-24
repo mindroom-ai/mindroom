@@ -3,11 +3,22 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from mindroom.matrix.event_info import EventInfo, event_type_supports_thread_relations
+from mindroom.matrix.event_info import (
+    EventInfo,
+    event_source_is_state_event,
+    event_source_matches_index,
+    event_source_matches_room,
+    event_type_supports_thread_relations,
+    replacement_content_is_renderable,
+)
 from mindroom.matrix.sidecar_content import sidecar_mxc_url
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable, Sequence
 
 _EDITABLE_EVENT_TYPES = frozenset({"m.room.message", "io.mindroom.tool_approval"})
 
@@ -30,6 +41,100 @@ class CachedEventRow:
 
     event: dict[str, Any]
     cached_at: float | None
+
+
+def validated_cached_event_payload(
+    event_json: str,
+    indexed_event_id: str,
+    indexed_origin_server_ts: int,
+    *,
+    room_id: str,
+) -> dict[str, Any] | None:
+    """Return one cached payload only when it matches its authoritative index."""
+    event = json.loads(event_json)
+    if not isinstance(event, dict) or not event_source_matches_index(
+        event,
+        indexed_event_id,
+        indexed_origin_server_ts,
+        room_id,
+    ):
+        return None
+    return event
+
+
+def validated_cached_event_payloads(
+    rows: Iterable[Sequence[object]],
+    *,
+    room_id: str,
+) -> list[dict[str, Any]]:
+    """Return cached payloads only when every row matches its authoritative index."""
+    events: list[dict[str, Any]] = []
+    for row in rows:
+        if (
+            len(row) != 3
+            or not isinstance(row[0], str)
+            or not isinstance(row[1], str)
+            or not isinstance(row[2], int)
+            or isinstance(row[2], bool)
+        ):
+            msg = "Cached event index row is malformed"
+            raise ValueError(msg)
+        event = validated_cached_event_payload(
+            row[0],
+            row[1],
+            row[2],
+            room_id=room_id,
+        )
+        if event is None:
+            msg = "Cached event payload does not match its authoritative index"
+            raise ValueError(msg)
+        events.append(event)
+    return events
+
+
+def validated_cached_edit_row(
+    event_json: str,
+    cached_at: float | None,
+    indexed_event_id: str,
+    indexed_origin_server_ts: int,
+    *,
+    room_id: str,
+    original_event_id: str,
+    sender: str,
+    event_type: str,
+) -> CachedEventRow | None:
+    """Return one cache-index candidate when its Matrix replacement envelope is valid."""
+    event = json.loads(event_json)
+    if not isinstance(event, dict):
+        return None
+    timestamp = event.get("origin_server_ts")
+    content = event.get("content")
+    if (
+        event.get("event_id") != indexed_event_id
+        or not indexed_event_id
+        or indexed_event_id == original_event_id
+        or not isinstance(timestamp, int)
+        or isinstance(timestamp, bool)
+        or timestamp != indexed_origin_server_ts
+        or event.get("sender") != sender
+        or event.get("type") != event_type
+        or event_source_is_state_event(event)
+        or not event_source_matches_room(event, room_id)
+        or not isinstance(content, Mapping)
+    ):
+        return None
+    relates_to = content.get("m.relates_to")
+    if (
+        not isinstance(relates_to, Mapping)
+        or relates_to.get("rel_type") != "m.replace"
+        or relates_to.get("event_id") != original_event_id
+        or not replacement_content_is_renderable(event_type, content)
+    ):
+        return None
+    return CachedEventRow(
+        event=event,
+        cached_at=None if cached_at is None else float(cached_at),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -144,18 +249,17 @@ def cache_rows_were_deleted(*row_counts: int) -> bool:
     return any(row_count > 0 for row_count in row_counts)
 
 
-def _event_thread_row(room_id: str, event: dict[str, Any]) -> _EventThreadRow | None:
+def _event_thread_row(room_id: str, event: SerializedCachedEvent) -> _EventThreadRow | None:
     """Return an event-to-thread row when thread membership is explicit."""
-    event_id = event.get("event_id")
-    if not isinstance(event_id, str) or not event_id or not event_type_supports_thread_relations(event.get("type")):
+    if not event_type_supports_thread_relations(event.event.get("type")):
         return None
-    event_info = EventInfo.from_event(event)
+    event_info = EventInfo.from_event(event.event)
     thread_id = event_info.thread_id
     if not isinstance(thread_id, str):
         thread_id = event_info.thread_id_from_edit
     if not isinstance(thread_id, str) or not thread_id:
         return None
-    return _EventThreadRow(room_id=room_id, event_id=event_id, thread_id=thread_id)
+    return _EventThreadRow(room_id=room_id, event_id=event.event_id, thread_id=thread_id)
 
 
 def _with_thread_root_self_rows(thread_rows: list[_EventThreadRow]) -> list[_EventThreadRow]:
@@ -173,24 +277,24 @@ def _with_thread_root_self_rows(thread_rows: list[_EventThreadRow]) -> list[_Eve
     )
 
 
-def _event_edit_row(room_id: str, event: dict[str, Any]) -> _EventEditRow | None:
+def _event_edit_row(room_id: str, event: SerializedCachedEvent) -> _EventEditRow | None:
     """Return an edit-index row when one cached event is an editable replacement."""
-    if event.get("type") not in _EDITABLE_EVENT_TYPES:
+    if event.event.get("type") not in _EDITABLE_EVENT_TYPES:
         return None
-    event_info = EventInfo.from_event(event)
+    event_info = EventInfo.from_event(event.event)
     if not event_info.is_edit or not isinstance(event_info.original_event_id, str):
         return None
     return _EventEditRow(
-        edit_event_id=event_id_for_cache(event),
+        edit_event_id=event.event_id,
         room_id=room_id,
         original_event_id=event_info.original_event_id,
-        origin_server_ts=_event_timestamp_for_cache(event),
+        origin_server_ts=event.origin_server_ts,
     )
 
 
 def event_edit_rows(room_id: str, events: list[SerializedCachedEvent]) -> list[_EventEditRow]:
     """Return the edit-index rows derived from serialized events."""
-    return [row for event in events if (row := _event_edit_row(room_id, event.event)) is not None]
+    return [row for event in events if (row := _event_edit_row(room_id, event)) is not None]
 
 
 def event_thread_rows(
@@ -207,6 +311,6 @@ def event_thread_rows(
             if event_type_supports_thread_relations(event.event.get("type"))
         ]
         if thread_id is not None
-        else [row for event in events if (row := _event_thread_row(room_id, event.event)) is not None]
+        else [row for event in events if (row := _event_thread_row(room_id, event)) is not None]
     )
     return _with_thread_root_self_rows(rows)

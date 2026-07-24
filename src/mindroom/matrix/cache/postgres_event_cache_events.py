@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from typing import TYPE_CHECKING, Any
 
 from .event_cache_events import (
@@ -17,6 +16,9 @@ from .event_cache_events import (
     filter_redacted_events,
     redaction_removal_event_ids,
     serialize_cacheable_events,
+    validated_cached_edit_row,
+    validated_cached_event_payload,
+    validated_cached_event_payloads,
 )
 from .postgres_cursor import fetchall, fetchone, rowcount
 
@@ -93,13 +95,22 @@ async def load_event(
     row = await fetchone(
         db,
         """
-        SELECT event_json
+        SELECT event_json, origin_server_ts
         FROM mindroom_event_cache_events
         WHERE namespace = %s AND room_id = %s AND event_id = %s
         """,
         (namespace, room_id, event_id),
     )
-    return None if row is None else json.loads(row[0])
+    return (
+        None
+        if row is None
+        else validated_cached_event_payload(
+            row[0],
+            event_id,
+            int(row[1]),
+            room_id=room_id,
+        )
+    )
 
 
 async def load_recent_room_events(
@@ -117,18 +128,24 @@ async def load_recent_room_events(
     rows = await fetchall(
         db,
         """
-        SELECT event_json
+        SELECT event_json, event_id, origin_server_ts
         FROM mindroom_event_cache_events
         WHERE namespace = %s
             AND room_id = %s
             AND origin_server_ts >= %s
+            AND event_json::jsonb ->> 'event_id' = event_id
+            AND event_json::jsonb -> 'origin_server_ts' = to_jsonb(origin_server_ts)
             AND event_json::jsonb ->> 'type' = %s
+            AND (
+                NOT (event_json::jsonb ? 'room_id')
+                OR event_json::jsonb ->> 'room_id' = room_id
+            )
         ORDER BY origin_server_ts DESC, write_seq DESC
         LIMIT %s
         """,
         (namespace, room_id, since_ts_ms, event_type, limit),
     )
-    return [json.loads(row[0]) for row in rows]
+    return validated_cached_event_payloads(rows, room_id=room_id)
 
 
 async def load_latest_edit(
@@ -137,15 +154,17 @@ async def load_latest_edit(
     namespace: str,
     room_id: str,
     original_event_id: str,
-    sender: str | None = None,
+    sender: str,
+    event_type: str,
 ) -> dict[str, Any] | None:
     """Return the latest cached edit event for one original event."""
-    row = await _load_latest_edit_row(
+    row = await load_latest_edit_row(
         db,
         namespace=namespace,
         room_id=room_id,
         original_event_id=original_event_id,
         sender=sender,
+        event_type=event_type,
     )
     return None if row is None else row.event
 
@@ -157,31 +176,16 @@ async def load_latest_edit_row(
     room_id: str,
     original_event_id: str,
     sender: str,
+    event_type: str,
 ) -> CachedEventRow | None:
     """Return the latest cached edit event plus its lookup-row write time."""
-    return await _load_latest_edit_row(
-        db,
-        namespace=namespace,
-        room_id=room_id,
-        original_event_id=original_event_id,
-        sender=sender,
-    )
-
-
-async def _load_latest_edit_row(
-    db: AsyncConnection,
-    *,
-    namespace: str,
-    room_id: str,
-    original_event_id: str,
-    sender: str | None,
-) -> CachedEventRow | None:
-    sender_predicate = "" if sender is None else "AND events.event_json::jsonb ->> 'sender' = %s"
-    parameters = (namespace, room_id, original_event_id, *((sender,) if sender is not None else ()))
-    row = await fetchone(
-        db,
-        f"""
-        SELECT events.event_json, events.cached_at
+    cursor = await db.execute(
+        """
+        SELECT
+            events.event_json,
+            events.cached_at,
+            edits.edit_event_id,
+            edits.origin_server_ts
         FROM mindroom_event_cache_event_edits AS edits
         JOIN mindroom_event_cache_events AS events
             ON events.namespace = edits.namespace
@@ -190,18 +194,28 @@ async def _load_latest_edit_row(
         WHERE edits.namespace = %s
             AND edits.room_id = %s
             AND edits.original_event_id = %s
-            {sender_predicate}
-        ORDER BY edits.origin_server_ts DESC, events.write_seq DESC
-        LIMIT 1
-        """,  # noqa: S608
-        parameters,
+            AND events.event_json::jsonb ->> 'sender' = %s
+            AND events.event_json::jsonb ->> 'type' = %s
+        ORDER BY edits.origin_server_ts DESC, edits.edit_event_id COLLATE "C" DESC
+        """,
+        (namespace, room_id, original_event_id, sender, event_type),
     )
-    if row is None:
+    try:
+        while (row := await cursor.fetchone()) is not None:
+            if validated_row := validated_cached_edit_row(
+                row[0],
+                row[1],
+                row[2],
+                row[3],
+                room_id=room_id,
+                original_event_id=original_event_id,
+                sender=sender,
+                event_type=event_type,
+            ):
+                return validated_row
         return None
-    return CachedEventRow(
-        event=json.loads(row[0]),
-        cached_at=None if row[1] is None else float(row[1]),
-    )
+    finally:
+        await cursor.close()
 
 
 async def load_mxc_text(

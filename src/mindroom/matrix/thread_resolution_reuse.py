@@ -13,25 +13,24 @@ Safety model (any doubt falls back to full resolution by returning ``None``):
    the thread is unchanged or whether every changed row is present in a bounded delta read. Any
    deletion, replacement, or in-place update forces full resolution.
 3. Suffix rows must be plain ``m.room.message`` events with new, unique event IDs that were never
-   seen by the snapshot (including edit targets, reply targets, and synthesized originals), and
-   every suffix edit - explicit or bundled - must target a suffix-local event, so no suffix row
-   can mutate or duplicate an already-resolved message.
+   seen by the snapshot, including every previously observed relation target, and every suffix
+   edit - explicit or bundled - must target a suffix-local event, so no suffix row can mutate or
+   duplicate an already-resolved message.
 4. Snapshots are only stored by the caller when sidecar hydration was fully served from the
    durable cache, so degraded preview bodies are never frozen into future turns.
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
-from mindroom.matrix.event_info import EventInfo
+from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage, bundled_replacement_candidates
+from mindroom.matrix.event_info import EventInfo, event_source_is_state_event, event_source_matches_room
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Sequence
+    from collections.abc import Iterable, Mapping, Sequence
 
     from mindroom.matrix.cache import ThreadRevision
 
@@ -65,6 +64,7 @@ def clone_resolved_visible_message(message: ResolvedVisibleMessage) -> ResolvedV
         thread_id=message.thread_id,
         latest_event_id=message.latest_event_id,
         stream_status=message.stream_status,
+        latest_event_timestamp=message.latest_event_timestamp,
     )
 
 
@@ -133,6 +133,7 @@ def reusable_event_source_suffix(
     snapshot: ThreadResolutionSnapshot,
     suffix: Sequence[dict[str, Any]],
     *,
+    room_id: str,
     trusted_sender_ids: frozenset[str],
     membership_epoch: int,
     revision: ThreadRevision,
@@ -158,7 +159,7 @@ def reusable_event_source_suffix(
     ):
         return None
     resolved_suffix = list(suffix)
-    if not _suffix_is_safely_appendable(snapshot, resolved_suffix):
+    if not _suffix_is_safely_appendable(snapshot, resolved_suffix, room_id=room_id):
         return None
     return resolved_suffix
 
@@ -181,11 +182,17 @@ def snapshot_matches_revision(
 def _suffix_is_safely_appendable(
     snapshot: ThreadResolutionSnapshot,
     suffix: Sequence[dict[str, Any]],
+    *,
+    room_id: str,
 ) -> bool:
     """Return whether suffix rows can only introduce new messages or edits to new messages."""
     suffix_event_ids: set[str] = set()
     for event_source in suffix:
-        if event_source.get("type") != "m.room.message":
+        if (
+            event_source.get("type") != "m.room.message"
+            or event_source_is_state_event(event_source)
+            or not event_source_matches_room(event_source, room_id)
+        ):
             return False
         event_id = event_source.get("event_id")
         if not isinstance(event_id, str) or not event_id:
@@ -204,20 +211,8 @@ def _suffix_is_safely_appendable(
 
 def _bundled_edit_target_ids(event_source: Mapping[str, Any]) -> Iterable[str]:
     """Yield original-event targets of any bundled ``m.replace`` aggregation on one row."""
-    unsigned = event_source.get("unsigned")
-    if not isinstance(unsigned, Mapping):
-        return
-    relations = unsigned.get("m.relations")
-    if not isinstance(relations, Mapping):
-        return
-    replacement = relations.get("m.replace")
-    if not isinstance(replacement, Mapping):
-        return
-    for candidate in (replacement.get("event"), replacement.get("latest_event"), replacement):
-        if not isinstance(candidate, Mapping):
-            continue
-        normalized_candidate = {key: value for key, value in candidate.items() if isinstance(key, str)}
-        target = EventInfo.from_event(normalized_candidate).original_event_id
+    for candidate in bundled_replacement_candidates(event_source):
+        target = EventInfo.from_event(candidate).original_event_id
         if target is not None:
             yield target
 

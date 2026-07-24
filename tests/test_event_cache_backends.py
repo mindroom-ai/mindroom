@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sqlite3
 import uuid
 from contextlib import asynccontextmanager
@@ -105,6 +106,108 @@ def _edit_event(
             },
         },
     }
+
+
+async def _seed_payload_identity_rows(
+    cache: ConversationEventCache,
+    *,
+    room_id: str,
+    thread_id: str,
+) -> tuple[dict[str, object], dict[str, object], dict[str, object], dict[str, object]]:
+    """Seed thread, point, recent, and edit rows for raw corruption tests."""
+    root = _message_event(
+        event_id=thread_id,
+        sender="@user:localhost",
+        body="root",
+        origin_server_ts=1000,
+    )
+    reply = _message_event(
+        event_id="$reply",
+        sender="@agent:localhost",
+        body="reply",
+        origin_server_ts=2000,
+        thread_id=thread_id,
+    )
+    poisoned_point = _message_event(
+        event_id="$poisoned-point",
+        sender="@user:localhost",
+        body="point",
+        origin_server_ts=2500,
+    )
+    valid_recent = _message_event(
+        event_id="$valid-recent",
+        sender="@agent:localhost",
+        body="valid",
+        origin_server_ts=7000,
+    )
+    poisoned_recent = _message_event(
+        event_id="$poisoned-recent",
+        sender="@agent:localhost",
+        body="poisoned",
+        origin_server_ts=8000,
+    )
+    older_edit = _edit_event(
+        event_id="$older-edit",
+        sender="@agent:localhost",
+        original_event_id="$valid-recent",
+        body="older",
+        origin_server_ts=5000,
+    )
+    poisoned_edit = _edit_event(
+        event_id="$poisoned-edit",
+        sender="@agent:localhost",
+        original_event_id="$valid-recent",
+        body="poisoned",
+        origin_server_ts=6000,
+    )
+    await _replace_thread(cache, room_id, thread_id, [root, reply])
+    await cache.store_events_batch(
+        [
+            ("$poisoned-point", room_id, poisoned_point),
+            ("$valid-recent", room_id, valid_recent),
+            ("$poisoned-recent", room_id, poisoned_recent),
+            ("$older-edit", room_id, older_edit),
+            ("$poisoned-edit", room_id, poisoned_edit),
+        ],
+    )
+    return root, poisoned_point, poisoned_recent, poisoned_edit
+
+
+async def _assert_payload_identity_poison_is_rejected(
+    cache: ConversationEventCache,
+    *,
+    room_id: str,
+    thread_id: str,
+) -> None:
+    """Assert every cached read shape rejects raw scope or identity poison."""
+    with pytest.raises(ValueError, match="does not match its authoritative index"):
+        await cache.get_thread_events(room_id, thread_id)
+
+    assert await cache.get_event(room_id, "$poisoned-point") is None
+    recent = await cache.get_recent_room_events(
+        room_id,
+        event_type="m.room.message",
+        since_ts_ms=0,
+        limit=1,
+    )
+
+    assert [event["event_id"] for event in recent] == ["$valid-recent"]
+    snapshot = await cache.get_latest_agent_message_snapshot(
+        room_id,
+        None,
+        "@agent:localhost",
+        runtime_started_at=None,
+    )
+    assert snapshot is not None
+    assert snapshot.content["body"] == "older"
+    latest_edit = await cache.get_latest_edit(
+        room_id,
+        "$valid-recent",
+        sender="@agent:localhost",
+        event_type="m.room.message",
+    )
+    assert latest_edit is not None
+    assert latest_edit["event_id"] == "$older-edit"
 
 
 def _postgres_schema_url(database_url: str, schema_name: str) -> str:
@@ -341,6 +444,34 @@ async def _seed_postgres_v2_schema(database_url: str, schema_name: str) -> str:
     return isolated_url
 
 
+async def _seed_postgres_v3_schema(database_url: str, schema_name: str) -> str:
+    """Create schema v3 with its existing narrowing latest-edit index."""
+    admin = await psycopg.AsyncConnection.connect(database_url)
+    await admin.execute(f'CREATE SCHEMA "{schema_name}"')
+    await admin.commit()
+    await admin.close()
+    isolated_url = _postgres_schema_url(database_url, schema_name)
+    db = await psycopg.AsyncConnection.connect(isolated_url)
+    await db.execute(
+        """
+        CREATE TABLE mindroom_event_cache_metadata (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )
+        """,
+    )
+    await _create_postgres_event_cache_schema(db)
+    await db.execute(
+        """
+        INSERT INTO mindroom_event_cache_metadata(key, value)
+        VALUES ('schema_version', '3')
+        """,
+    )
+    await db.commit()
+    await db.close()
+    return isolated_url
+
+
 def _runtime_paths(tmp_path: Path, *, env: dict[str, str] | None = None) -> RuntimePaths:
     config_path = tmp_path / "config.yaml"
     config_path.write_text("router:\n  model: default\n", encoding="utf-8")
@@ -400,7 +531,15 @@ async def _assert_edit_snapshot_and_mxc_behavior(
             ("$edit-latest", room_id, latest_edit),
         ],
     )
-    assert await cache.get_latest_edit(room_id, "$reply") == latest_edit
+    assert (
+        await cache.get_latest_edit(
+            room_id,
+            "$reply",
+            sender=sender,
+            event_type="m.room.message",
+        )
+        == latest_edit
+    )
     snapshot = await cache.get_latest_agent_message_snapshot(
         room_id,
         thread_id,
@@ -409,7 +548,7 @@ async def _assert_edit_snapshot_and_mxc_behavior(
     )
     assert snapshot is not None
     assert snapshot.content["body"] == "latest edit"
-    assert snapshot.origin_server_ts == 1030
+    assert snapshot.origin_server_ts == 1010
 
     mxc_owner = _message_event(
         event_id="$mxc-owner",
@@ -441,6 +580,7 @@ async def _assert_staleness_and_redaction_behavior(
     *,
     room_id: str,
     thread_id: str,
+    sender: str,
     latest_edit: dict[str, object],
 ) -> None:
     await cache.mark_thread_stale(room_id, thread_id, reason="live_thread_mutation")
@@ -456,13 +596,29 @@ async def _assert_staleness_and_redaction_behavior(
 
     assert await cache.redact_event(room_id, "$reply") is True
     assert await cache.get_event(room_id, "$reply") is None
-    assert await cache.get_latest_edit(room_id, "$reply") is None
+    assert (
+        await cache.get_latest_edit(
+            room_id,
+            "$reply",
+            sender=sender,
+            event_type="m.room.message",
+        )
+        is None
+    )
     redacted_thread = await cache.get_thread_events(room_id, thread_id)
     assert redacted_thread is not None
     assert [event["event_id"] for event in redacted_thread] == [thread_id]
 
     await cache.store_event("$edit-latest", room_id, latest_edit)
-    assert await cache.get_latest_edit(room_id, "$reply") is None
+    assert (
+        await cache.get_latest_edit(
+            room_id,
+            "$reply",
+            sender=sender,
+            event_type="m.room.message",
+        )
+        is None
+    )
 
 
 def test_cache_config_resolves_postgres_url_and_namespace_from_runtime_env(tmp_path: Path) -> None:
@@ -1633,12 +1789,222 @@ async def test_postgres_event_cache_round_trips_core_conversation_cache_behavior
             cache,
             room_id=room_id,
             thread_id=thread_id,
+            sender=sender,
             latest_edit=latest_edit,
         )
     finally:
         await cache.close()
         await shared_cache.close()
         await isolated_cache.close()
+
+
+@pytest.mark.asyncio
+async def test_postgres_v3_startup_retains_single_latest_edit_index(
+    postgres_event_cache_url: str,
+) -> None:
+    """Schema v3 keeps one narrowing index while query collation owns correctness."""
+    schema_name = f"cache_migration_v3_{uuid.uuid4().hex}"
+    isolated_url = await _seed_postgres_v3_schema(postgres_event_cache_url, schema_name)
+    cache = PostgresEventCache(database_url=isolated_url, namespace="runtime")
+    await cache.initialize()
+    try:
+        assert "cache_schema_migrated_from" not in cache.runtime_diagnostics()
+        assert cache._runtime.db is not None
+        version_cursor = await cache._runtime.db.execute(
+            "SELECT value FROM mindroom_event_cache_metadata WHERE key = 'schema_version'",
+        )
+        version = await version_cursor.fetchone()
+        indexes_cursor = await cache._runtime.db.execute(
+            """
+            SELECT indexname
+            FROM pg_indexes
+            WHERE schemaname = current_schema()
+              AND indexname LIKE 'idx_mindroom_event_cache_event_edits_room_original_ts%'
+            ORDER BY indexname
+            """,
+        )
+        indexes = await indexes_cursor.fetchall()
+    finally:
+        await cache.close()
+
+    assert version == ("3",)
+    assert indexes == [("idx_mindroom_event_cache_event_edits_room_original_ts",)]
+
+
+@pytest.mark.asyncio
+async def test_postgres_latest_edit_query_uses_bytewise_event_id_collation(
+    postgres_event_cache_url: str,
+) -> None:
+    """The production lookup must override a non-bytewise event-ID column collation."""
+    schema_name = f"collation_{uuid.uuid4().hex}"
+    admin = await psycopg.AsyncConnection.connect(postgres_event_cache_url)
+    await admin.execute(f'CREATE SCHEMA "{schema_name}"')
+    await admin.commit()
+    await admin.close()
+
+    room_id = "!room:localhost"
+    sender = "@alice:localhost"
+    namespace = f"tenant_{uuid.uuid4().hex}"
+    cache = PostgresEventCache(
+        database_url=_postgres_schema_url(postgres_event_cache_url, schema_name),
+        namespace=namespace,
+    )
+    await cache.initialize()
+    try:
+        assert cache._runtime.db is not None
+        await cache._runtime.db.execute(
+            """
+            ALTER TABLE mindroom_event_cache_event_edits
+            ALTER COLUMN edit_event_id TYPE TEXT COLLATE "und-x-icu"
+            """,
+        )
+        await cache._runtime.db.commit()
+        upper_edit = _edit_event(
+            event_id="$Z",
+            sender=sender,
+            original_event_id="$original",
+            body="Upper",
+            origin_server_ts=2000,
+        )
+        lower_edit = _edit_event(
+            event_id="$a",
+            sender=sender,
+            original_event_id="$original",
+            body="Lower",
+            origin_server_ts=2000,
+        )
+        await cache.store_events_batch(
+            [
+                ("$Z", room_id, upper_edit),
+                ("$a", room_id, lower_edit),
+            ],
+        )
+        cursor = await cache._runtime.db.execute(
+            """
+            SELECT edit_event_id
+            FROM mindroom_event_cache_event_edits
+            WHERE namespace = %s
+              AND room_id = %s
+              AND original_event_id = '$original'
+            ORDER BY origin_server_ts DESC, edit_event_id DESC
+            LIMIT 1
+            """,
+            (namespace, room_id),
+        )
+        locale_winner = await cursor.fetchone()
+        latest_edit = await cache.get_latest_edit(
+            room_id,
+            "$original",
+            sender=sender,
+            event_type="m.room.message",
+        )
+    finally:
+        await cache.close()
+
+    assert locale_winner == ("$Z",)
+    assert latest_edit is not None
+    assert latest_edit["event_id"] == "$a"
+
+
+@pytest.mark.asyncio
+async def test_sqlite_cache_rejects_raw_payload_identity_poison(tmp_path: Path) -> None:
+    """SQLite must reject thread poison and filter recent poison before LIMIT."""
+    room_id = "!room:localhost"
+    thread_id = "$thread"
+    cache = SqliteEventCache(tmp_path / "event-cache.db")
+    await cache.initialize()
+    try:
+        root, poisoned_point, poisoned_recent, poisoned_edit = await _seed_payload_identity_rows(
+            cache,
+            room_id=room_id,
+            thread_id=thread_id,
+        )
+        assert cache._runtime.db is not None
+        await cache._runtime.db.executemany(
+            """
+            UPDATE events
+            SET event_json = ?
+            WHERE principal_id = ? AND room_id = ? AND event_id = ?
+            """,
+            [
+                (
+                    json.dumps({**root, "room_id": "!other:localhost"}),
+                    cache.principal_id,
+                    room_id,
+                    thread_id,
+                ),
+                (
+                    json.dumps({**poisoned_point, "event_id": "$forged-point"}),
+                    cache.principal_id,
+                    room_id,
+                    "$poisoned-point",
+                ),
+                (
+                    json.dumps({**poisoned_recent, "event_id": "$forged-recent"}),
+                    cache.principal_id,
+                    room_id,
+                    "$poisoned-recent",
+                ),
+                (
+                    json.dumps({**poisoned_edit, "event_id": "$forged-edit"}),
+                    cache.principal_id,
+                    room_id,
+                    "$poisoned-edit",
+                ),
+            ],
+        )
+        await cache._runtime.db.commit()
+        await _assert_payload_identity_poison_is_rejected(
+            cache,
+            room_id=room_id,
+            thread_id=thread_id,
+        )
+    finally:
+        await cache.close()
+
+
+@pytest.mark.asyncio
+async def test_postgres_cache_rejects_raw_payload_identity_poison(
+    postgres_event_cache_url: str,
+) -> None:
+    """PostgreSQL must reject thread poison and filter recent poison before LIMIT."""
+    room_id = "!room:localhost"
+    thread_id = "$thread"
+    namespace = f"tenant_{uuid.uuid4().hex}"
+    cache = PostgresEventCache(
+        database_url=postgres_event_cache_url,
+        namespace=namespace,
+    )
+    await cache.initialize()
+    try:
+        root, poisoned_point, poisoned_recent, poisoned_edit = await _seed_payload_identity_rows(
+            cache,
+            room_id=room_id,
+            thread_id=thread_id,
+        )
+        assert cache._runtime.db is not None
+        for event_id, poisoned_payload in (
+            (thread_id, {**root, "room_id": "!other:localhost"}),
+            ("$poisoned-point", {**poisoned_point, "event_id": "$forged-point"}),
+            ("$poisoned-recent", {**poisoned_recent, "event_id": "$forged-recent"}),
+            ("$poisoned-edit", {**poisoned_edit, "event_id": "$forged-edit"}),
+        ):
+            await cache._runtime.db.execute(
+                """
+                UPDATE mindroom_event_cache_events
+                SET event_json = %s
+                WHERE namespace = %s AND room_id = %s AND event_id = %s
+                """,
+                (json.dumps(poisoned_payload), namespace, room_id, event_id),
+            )
+        await cache._runtime.db.commit()
+        await _assert_payload_identity_poison_is_rejected(
+            cache,
+            room_id=room_id,
+            thread_id=thread_id,
+        )
+    finally:
+        await cache.close()
 
 
 @pytest.mark.asyncio

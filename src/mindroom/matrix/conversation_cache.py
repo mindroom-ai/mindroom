@@ -40,7 +40,14 @@ from mindroom.matrix.client_thread_history import (
     fetch_thread_history,
     get_room_threads_page,
 )
-from mindroom.matrix.event_info import EventInfo
+from mindroom.matrix.event_info import (
+    EventInfo,
+    event_source_is_state_event,
+    event_source_matches_room,
+    latest_valid_replacement,
+    replacement_content_for_original,
+    room_message_content_is_renderable,
+)
 from mindroom.matrix.media import (
     is_encrypted_media_event_source,
     parse_matrix_media_event_source,
@@ -247,7 +254,11 @@ async def _apply_cached_latest_edit(
     trusted_sender_ids: Collection[str] = (),
 ) -> dict[str, Any]:
     """Project one cached original event into its latest visible edited state."""
-    if event_source.get("type") != "m.room.message":
+    if (
+        event_source.get("type") != "m.room.message"
+        or event_source_is_state_event(event_source)
+        or not event_source_matches_room(event_source, room_id)
+    ):
         return event_source
 
     event_info = EventInfo.from_event(event_source)
@@ -255,12 +266,25 @@ async def _apply_cached_latest_edit(
     if event_info.is_edit or not isinstance(event_id, str) or not event_id:
         return event_source
 
-    latest_edit_source = await event_cache.get_latest_edit(room_id, event_id)
-    if latest_edit_source is None:
+    sender = event_source.get("sender")
+    if not isinstance(sender, str) or not sender:
+        return event_source
+    latest_edit_source = await event_cache.get_latest_edit(
+        room_id,
+        event_id,
+        sender=sender,
+        event_type="m.room.message",
+    )
+    latest_replacement = latest_valid_replacement(
+        event_source,
+        () if latest_edit_source is None else (latest_edit_source,),
+        room_id=room_id,
+    )
+    if latest_replacement is None:
         return event_source
 
     edited_body, edited_content = await extract_edit_body(
-        latest_edit_source,
+        latest_replacement,
         client,
         event_cache=event_cache,
         room_id=room_id,
@@ -271,20 +295,14 @@ async def _apply_cached_latest_edit(
         return event_source
 
     original_content = event_source.get("content", {})
-    merged_content = (
-        {key: value for key, value in original_content.items() if isinstance(key, str)}
-        if isinstance(original_content, dict)
-        else {}
+    projected_content = replacement_content_for_original(
+        original_content if isinstance(original_content, dict) else {},
+        edited_content,
     )
-    merged_content.update(edited_content)
-    merged_content.setdefault("body", edited_body)
+    projected_content.setdefault("body", edited_body)
 
     updated_event_source = {key: value for key, value in event_source.items() if isinstance(key, str)}
-    updated_event_source["content"] = merged_content
-
-    latest_edit_timestamp = latest_edit_source.get("origin_server_ts")
-    if isinstance(latest_edit_timestamp, int) and not isinstance(latest_edit_timestamp, bool):
-        updated_event_source["origin_server_ts"] = latest_edit_timestamp
+    updated_event_source["content"] = projected_content
     return updated_event_source
 
 
@@ -298,6 +316,13 @@ async def _cached_room_get_event_response(
     trusted_sender_ids: Collection[str] = (),
 ) -> nio.RoomGetEventResponse | None:
     """Reconstruct one cached room-get-event response, applying visible edits when present."""
+    if not event_source_matches_room(event_source, room_id):
+        return None
+    original_content = event_source.get("content")
+    if event_source.get("type") == "m.room.message" and (
+        not isinstance(original_content, dict) or not room_message_content_is_renderable(original_content)
+    ):
+        return None
     visible_event_source = await _apply_cached_latest_edit(
         event_source,
         room_id=room_id,

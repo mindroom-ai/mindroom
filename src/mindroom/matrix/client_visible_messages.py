@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
@@ -10,17 +9,31 @@ import nio
 
 from mindroom.constants import STREAM_STATUS_KEY
 from mindroom.entity_resolution import current_internal_sender_ids
-from mindroom.matrix.event_info import EventInfo, reply_to_event_id_from_content
+from mindroom.matrix.event_info import (
+    EventInfo,
+    bundled_replacement_candidates,
+    event_source_is_state_event,
+    event_source_matches_room,
+    is_valid_bundled_replacement,
+    ordered_valid_bundled_replacements,
+    replacement_content_for_original,
+    replacement_content_is_renderable,
+    reply_to_event_id_from_content,
+    room_message_content_is_renderable,
+)
 from mindroom.matrix.message_content import extract_and_resolve_message, extract_edit_body, resolve_event_source_content
 from mindroom.matrix.visible_body import bundled_visible_body_preview, visible_body_from_event_source
 
 if TYPE_CHECKING:
+    from collections.abc import Collection, Mapping, Sequence
+
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.matrix.cache import ConversationEventCache
     from mindroom.matrix.message_content import SidecarHydrationBatch
 
 _VISIBLE_ROOM_MESSAGE_EVENT_TYPES = (nio.RoomMessageText, nio.RoomMessageNotice)
+type ThreadEditCandidatesByOriginalEventId = dict[str, list[nio.RoomMessage]]
 
 
 @dataclass(slots=True)
@@ -35,6 +48,7 @@ class ResolvedVisibleMessage:
     thread_id: str | None
     latest_event_id: str
     stream_status: str | None = None
+    latest_event_timestamp: int | None = None
 
     @classmethod
     def from_message_data(
@@ -89,25 +103,29 @@ class ResolvedVisibleMessage:
         self,
         *,
         body: str,
-        timestamp: int,
         latest_event_id: str,
-        thread_id: str | None,
+        latest_event_timestamp: int,
         content: dict[str, Any] | None,
     ) -> None:
         """Apply the newest visible edit state to this message."""
         self.body = body
-        self.timestamp = timestamp
         self.latest_event_id = latest_event_id
-        if thread_id is not None:
-            self.thread_id = thread_id
+        self.latest_event_timestamp = latest_event_timestamp
         if content is not None:
-            self.content = content
+            self.content = replacement_content_for_original(self.content, content)
         self.refresh_stream_status()
 
     @property
     def visible_event_id(self) -> str:
         """Return the event ID for the currently visible event state."""
         return self.latest_event_id
+
+    @property
+    def visible_timestamp(self) -> int:
+        """Return the timestamp of the currently visible event state."""
+        return (
+            self.timestamp if self.latest_event_timestamp is None else max(self.timestamp, self.latest_event_timestamp)
+        )
 
     @property
     def reply_to_event_id(self) -> str | None:
@@ -228,31 +246,6 @@ def message_preview(body: object, max_length: int = 120) -> str:
     return f"{compact[: max_length - 3].rstrip()}..."
 
 
-def _bundled_replacement_candidates(event_source: Mapping[str, Any]) -> list[dict[str, Any]]:
-    """Return bundled replacement candidates in preference order."""
-    candidates: list[dict[str, Any]] = []
-    unsigned = event_source.get("unsigned")
-    for container in (unsigned, event_source):
-        if not isinstance(container, Mapping):
-            continue
-        relations = container.get("m.relations")
-        if not isinstance(relations, Mapping):
-            continue
-        replacement = relations.get("m.replace")
-        if not isinstance(replacement, Mapping):
-            continue
-        for candidate in (
-            replacement.get("latest_event"),
-            replacement.get("event"),
-            replacement,
-        ):
-            if isinstance(candidate, Mapping):
-                candidates.extend(
-                    [{key: value for key, value in candidate.items() if isinstance(key, str)}],
-                )
-    return candidates
-
-
 async def bundled_replacement_body(
     event_source: Mapping[str, Any],
     *,
@@ -265,7 +258,7 @@ async def bundled_replacement_body(
 ) -> str | None:
     """Return one canonical bundled replacement body using runtime-derived sender trust."""
     trusted_sender_ids = _resolved_trusted_sender_ids(config, runtime_paths, trusted_sender_ids)
-    for candidate in _bundled_replacement_candidates(event_source):
+    for candidate in ordered_valid_bundled_replacements(event_source, room_id=room_id):
         resolved_candidate = await resolve_event_source_content(
             candidate,
             client,
@@ -364,24 +357,19 @@ def _stream_status_from_content(content: dict[str, Any] | None) -> str | None:
     return status if isinstance(status, str) else None
 
 
-def record_latest_thread_edit(
-    event: nio.RoomMessageText | nio.RoomMessageNotice,
+def record_thread_edit_candidate(
+    event: nio.RoomMessage,
     *,
     event_info: EventInfo,
-    latest_edits_by_original_event_id: dict[str, tuple[nio.RoomMessageText | nio.RoomMessageNotice, str | None]],
+    edit_candidates_by_original_event_id: ThreadEditCandidatesByOriginalEventId,
 ) -> bool:
-    """Track latest edit candidate, returning True if event is an edit."""
+    """Track one edit candidate, returning True if the event is an edit."""
     if not (event_info.is_edit and event_info.original_event_id):
         return False
+    if not event.event_id:
+        return True
 
-    original_event_id = event_info.original_event_id
-    current_latest_edit_data = latest_edits_by_original_event_id.get(original_event_id)
-    current_latest_edit = current_latest_edit_data[0] if current_latest_edit_data else None
-    if current_latest_edit is None or (event.server_timestamp, event.event_id) > (
-        current_latest_edit.server_timestamp,
-        current_latest_edit.event_id,
-    ):
-        latest_edits_by_original_event_id[original_event_id] = (event, event_info.thread_id_from_edit)
+    edit_candidates_by_original_event_id.setdefault(event_info.original_event_id, []).append(event)
     return True
 
 
@@ -389,56 +377,51 @@ async def apply_latest_edits_to_messages(
     client: nio.AsyncClient,
     *,
     messages_by_event_id: dict[str, ResolvedVisibleMessage],
-    latest_edits_by_original_event_id: dict[str, tuple[nio.RoomMessageText | nio.RoomMessageNotice, str | None]],
-    required_thread_id: str | None = None,
+    edit_candidates_by_original_event_id: ThreadEditCandidatesByOriginalEventId,
     event_cache: ConversationEventCache | None = None,
     room_id: str | None = None,
     expected_membership_epoch: int | None = None,
     hydration_batch: SidecarHydrationBatch | None = None,
     trusted_sender_ids: Collection[str] = (),
 ) -> None:
-    """Apply latest edits to message records and synthesize missing originals when allowed."""
-    for original_event_id, (edit_event, edit_thread_id) in latest_edits_by_original_event_id.items():
+    """Apply each original's newest valid same-sender replacement."""
+    for original_event_id, edit_candidates in edit_candidates_by_original_event_id.items():
         existing_message = messages_by_event_id.get(original_event_id)
-
-        # Ignore missing originals unrelated to this thread before resolving
-        # potentially large edit payloads from sidecar storage.
-        if existing_message is None and required_thread_id is not None and edit_thread_id != required_thread_id:
+        if existing_message is None:
             continue
 
-        edited_body, edited_content = await extract_edit_body(
-            edit_event.source,
-            client,
-            event_cache=event_cache,
-            room_id=room_id,
-            expected_membership_epoch=expected_membership_epoch,
-            hydration_batch=hydration_batch,
-            trusted_sender_ids=trusted_sender_ids,
+        ordered_candidates = sorted(
+            edit_candidates,
+            key=lambda edit_event: (edit_event.server_timestamp, edit_event.event_id),
+            reverse=True,
         )
-        if edited_body is None:
-            continue
-
-        if existing_message is not None:
+        for edit_event in ordered_candidates:
+            if (
+                edit_event.sender != existing_message.sender
+                or event_source_is_state_event(edit_event.source)
+                or (room_id is not None and not event_source_matches_room(edit_event.source, room_id))
+                or not room_message_content_is_renderable(existing_message.content)
+                or not replacement_content_is_renderable("m.room.message", edit_event.source.get("content", {}))
+            ):
+                continue
+            edited_body, edited_content = await extract_edit_body(
+                edit_event.source,
+                client,
+                event_cache=event_cache,
+                room_id=room_id,
+                expected_membership_epoch=expected_membership_epoch,
+                hydration_batch=hydration_batch,
+                trusted_sender_ids=trusted_sender_ids,
+            )
+            if edited_body is None:
+                continue
             existing_message.apply_edit(
                 body=edited_body,
-                timestamp=edit_event.server_timestamp,
                 latest_event_id=edit_event.event_id,
-                thread_id=edit_thread_id,
+                latest_event_timestamp=edit_event.server_timestamp,
                 content=edited_content,
             )
-            continue
-
-        synthesized_message = ResolvedVisibleMessage(
-            sender=edit_event.sender,
-            body=edited_body,
-            timestamp=edit_event.server_timestamp,
-            event_id=original_event_id,
-            content=edited_content if edited_content is not None else {},
-            thread_id=edit_thread_id,
-            latest_event_id=edit_event.event_id,
-        )
-        synthesized_message.refresh_stream_status()
-        messages_by_event_id[original_event_id] = synthesized_message
+            break
 
 
 async def resolve_latest_visible_messages(
@@ -446,21 +429,26 @@ async def resolve_latest_visible_messages(
     client: nio.AsyncClient,
     *,
     sender: str | None = None,
+    room_id: str | None = None,
     trusted_sender_ids: Collection[str] = (),
 ) -> dict[str, ResolvedVisibleMessage]:
     """Resolve the latest visible message state by original event ID for a set of message events."""
     messages_by_event_id: dict[str, ResolvedVisibleMessage] = {}
-    latest_edits_by_original_event_id: dict[str, tuple[nio.RoomMessageText | nio.RoomMessageNotice, str | None]] = {}
+    edit_candidates_by_original_event_id: ThreadEditCandidatesByOriginalEventId = {}
 
     for event in events:
-        if sender is not None and event.sender != sender:
+        if (
+            (sender is not None and event.sender != sender)
+            or event_source_is_state_event(event.source)
+            or (room_id is not None and not event_source_matches_room(event.source, room_id))
+        ):
             continue
 
         event_info = EventInfo.from_event(event.source)
-        if record_latest_thread_edit(
+        if record_thread_edit_candidate(
             event,
             event_info=event_info,
-            latest_edits_by_original_event_id=latest_edits_by_original_event_id,
+            edit_candidates_by_original_event_id=edit_candidates_by_original_event_id,
         ):
             continue
 
@@ -470,6 +458,7 @@ async def resolve_latest_visible_messages(
         message_data = await extract_and_resolve_message(
             event,
             client,
+            room_id=room_id,
             trusted_sender_ids=trusted_sender_ids,
         )
         messages_by_event_id[event.event_id] = ResolvedVisibleMessage.from_message_data(
@@ -481,7 +470,8 @@ async def resolve_latest_visible_messages(
     await apply_latest_edits_to_messages(
         client,
         messages_by_event_id=messages_by_event_id,
-        latest_edits_by_original_event_id=latest_edits_by_original_event_id,
+        edit_candidates_by_original_event_id=edit_candidates_by_original_event_id,
+        room_id=room_id,
         trusted_sender_ids=trusted_sender_ids,
     )
     return messages_by_event_id
@@ -489,12 +479,16 @@ async def resolve_latest_visible_messages(
 
 __all__ = [
     "ResolvedVisibleMessage",
+    "ThreadEditCandidatesByOriginalEventId",
     "apply_latest_edits_to_messages",
     "bundled_replacement_body",
+    "bundled_replacement_candidates",
     "extract_visible_edit_body",
     "extract_visible_message",
+    "is_valid_bundled_replacement",
     "message_preview",
-    "record_latest_thread_edit",
+    "ordered_valid_bundled_replacements",
+    "record_thread_edit_candidate",
     "replace_visible_message",
     "resolve_latest_visible_messages",
     "resolve_visible_event_source",

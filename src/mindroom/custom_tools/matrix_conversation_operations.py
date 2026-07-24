@@ -483,6 +483,7 @@ class MatrixMessageOperations:
         self,
         context: ToolRuntimeContext,
         *,
+        room_id: str,
         event: nio.Event,
         trusted_sender_ids: frozenset[str],
     ) -> dict[str, object] | None:
@@ -499,7 +500,7 @@ class MatrixMessageOperations:
         ):
             logger.warning(
                 "Skipping malformed room thread root",
-                room_id=context.room_id,
+                room_id=room_id,
                 event_type=type(event).__name__,
             )
             return None
@@ -508,6 +509,7 @@ class MatrixMessageOperations:
             client=context.client,
             config=context.config,
             runtime_paths=context.runtime_paths,
+            room_id=room_id,
             trusted_sender_ids=trusted_sender_ids,
         )
 
@@ -555,6 +557,7 @@ class MatrixMessageOperations:
         for event in thread_roots:
             thread = await self._serialize_thread_root(
                 context,
+                room_id=room_id,
                 event=event,
                 trusted_sender_ids=trusted_sender_ids,
             )

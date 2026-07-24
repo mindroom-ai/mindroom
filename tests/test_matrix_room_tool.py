@@ -419,7 +419,7 @@ def _make_bundled_replacement(
     event_id: str,
     body: str,
     bundle_key: str | None = None,
-    sender: str = "@editor:localhost",
+    sender: str = "@alice:localhost",
     visible_body: str | None = None,
     msgtype: str = "m.text",
     long_text: dict[str, object] | None = None,
@@ -499,11 +499,13 @@ async def test_threads_precompute_trusted_sender_ids_once_for_previews() -> None
         client: nio.AsyncClient,
         config: Config,
         runtime_paths: object,
+        room_id: str,
         trusted_sender_ids: frozenset[str],
     ) -> str:
         assert client is ctx.client
         assert config is ctx.config
         assert runtime_paths == ctx.runtime_paths
+        assert room_id == ctx.room_id
         assert trusted_sender_ids is trusted_sender_ids_for_assertion
         return event.body
 
@@ -567,7 +569,12 @@ async def test_threads_preview_prefers_trusted_canonical_body_from_bundled_repla
     tool = MatrixRoomTools()
     ctx = _make_context()
 
-    event = _thread_event("$thread1", body="Original body", reply_count=3)
+    event = _thread_event(
+        "$thread1",
+        sender="@mindroom_general:localhost",
+        body="Original body",
+        reply_count=3,
+    )
     event.source["unsigned"] = {
         "m.relations": {
             "m.thread": {"count": 3},
@@ -604,7 +611,12 @@ async def test_threads_preview_prefers_nested_bundled_replacement_over_wrapper_p
         sender="@mindroom_general:localhost",
         visible_body="Edited body",
     )
-    event = _thread_event("$thread1", body="Original body", reply_count=3)
+    event = _thread_event(
+        "$thread1",
+        sender="@mindroom_general:localhost",
+        body="Original body",
+        reply_count=3,
+    )
     event.source["unsigned"] = {
         "m.relations": {
             "m.thread": {"count": 3},
@@ -690,7 +702,12 @@ async def test_threads_preview_preserves_empty_bundled_replacement_body() -> Non
     tool = MatrixRoomTools()
     ctx = _make_context()
 
-    event = _thread_event("$thread1", body="ORIGINAL ROOT", reply_count=3)
+    event = _thread_event(
+        "$thread1",
+        sender="@mindroom_general:localhost",
+        body="ORIGINAL ROOT",
+        reply_count=3,
+    )
     event.source["unsigned"] = {
         "m.relations": {
             "m.thread": {"count": 3},
