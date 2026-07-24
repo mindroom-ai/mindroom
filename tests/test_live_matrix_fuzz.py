@@ -41,6 +41,7 @@ from scripts.testing.fuzz_live_matrix import (
     _persist_failure_bundle,
     _run_command,
     _sanitized_oracle_snapshot,
+    _SentPayload,
     _SentRecord,
     _source_marker,
     _validated_child_provenance,
@@ -1311,6 +1312,68 @@ async def test_coalescing_oracle_requires_own_record_for_incomplete_supersession
             oracle.resolve_response_ref("response:op:1")
     finally:
         await client.close()
+
+
+@pytest.mark.asyncio
+async def test_redacting_settled_coalesced_source_does_not_mark_optional(tmp_path: Path) -> None:
+    """Durably settled coalesced work stays required after source redaction."""
+    matrix_client = LiveMatrixClient("http://matrix.invalid", "!room:example")
+    ledger_path = tmp_path / "general_responded.json"
+    oracle = ExactReplyOracle(
+        matrix_client,
+        "@agent:example",
+        coalescing_threads=True,
+        ledger_path=ledger_path,
+    )
+    try:
+        oracle.expect("op:1", "$first", thread=0, client=0)
+        oracle.expect("op:2", "$second", thread=0, client=0)
+        for source in ("$first", "$second"):
+            oracle._ingest_event({"event_id": source, "sender": "@user:example", "type": "m.room.message"})
+        oracle._ingest_event(_agent_reply_event("$second", "$combined", "LIVE-FUZZ call=2 END call=2"))
+        _write_ledger(
+            ledger_path,
+            {
+                "$first": TurnRecord(source_event_ids=("$first",), response_event_id=None, completed=True),
+                "$second": TurnRecord(
+                    source_event_ids=("$second",),
+                    response_event_id="$combined",
+                    completed=True,
+                ),
+            },
+        )
+        oracle.refresh_ledger_attributions(min_interval=0.0)
+        assert "$first" in oracle.settled_sources()
+        assert oracle.response_ids["$first"] == set()
+
+        class RedactionClient:
+            user_id = "@user:example"
+
+            @staticmethod
+            async def redact(
+                _target_event_id: str,
+                _txn_id: str,
+                *,
+                room_id: str,
+            ) -> str:
+                assert room_id == "!room:example"
+                return "$redaction"
+
+        runner = object.__new__(LiveFuzzRunner)
+        runner.oracle = oracle
+        runner.redacted_targets = {}
+        runner.sent_records = []
+        runner._edit_event_source = {}
+        runner._resolve_target = lambda _logical_ref: asyncio.sleep(0, result="$first")  # type: ignore[method-assign]
+        runner._client_for_operation = lambda _operation: RedactionClient()  # type: ignore[method-assign]
+        runner._room_for_thread = lambda _thread: "!room:example"  # type: ignore[method-assign]
+
+        operation = LiveOperation(3, LiveOperationKind.REDACTION, 0, "op:1")
+        await runner._apply(operation)
+
+        assert "$first" not in oracle.optional_sources
+    finally:
+        await matrix_client.close()
 
 
 @pytest.mark.asyncio
@@ -2844,6 +2907,52 @@ async def test_apply_batch_records_success_when_failure_is_observed_first() -> N
 
 
 @pytest.mark.asyncio
+async def test_send_expected_message_defers_reply_checks_until_registration() -> None:
+    """A fast reply cannot be rejected while its Matrix source ID is in flight."""
+    matrix_client = LiveMatrixClient("http://matrix.invalid", "!room:example")
+    oracle = ExactReplyOracle(matrix_client, "@agent:example")
+    runner = object.__new__(LiveFuzzRunner)
+    runner.oracle = oracle
+    runner.sent_records = []
+
+    class FastReplyClient:
+        user_id = "@user:example"
+
+        @staticmethod
+        async def send_event(
+            _event_type: str,
+            _txn_id: str,
+            _content: object,
+            *,
+            room_id: str,
+        ) -> str:
+            assert room_id == "!room:example"
+            oracle._ingest_event(_agent_reply_event("$source", "$reply", "LIVE-FUZZ call=1 END call=1"))
+            oracle._assert_no_wrong_replies()
+            return "$source"
+
+    operation = LiveOperation(1, LiveOperationKind.THREAD_MESSAGE, 0, "root:0")
+    payload = _SentPayload(
+        event_type="m.room.message",
+        txn_id="txn",
+        content={"msgtype": "m.text", "body": "source"},
+    )
+    try:
+        event_id = await runner._send_expected_message(
+            operation,
+            FastReplyClient(),  # type: ignore[arg-type]
+            payload,
+            "!room:example",
+        )
+    finally:
+        await matrix_client.close()
+
+    assert event_id == "$source"
+    assert oracle.expected_sources == {"$source": "op:1"}
+    assert oracle.response_ids["$source"] == {"$reply"}
+
+
+@pytest.mark.asyncio
 async def test_failure_bundle_artifact_error_preserves_primary_failure(tmp_path: Path) -> None:
     """A broken artifact writer must not raise over the primary fuzz error."""
     bundle = FailureBundle.create(
@@ -2870,6 +2979,44 @@ async def test_failure_bundle_artifact_error_preserves_primary_failure(tmp_path:
     # Other artifacts were still written despite the one failure.
     assert (bundle.directory / "diagnostics.json").exists()
     assert (bundle.directory / "tuwunel.log").exists()
+
+
+@pytest.mark.asyncio
+async def test_failure_bundle_finalizes_when_stop_mindroom_fails(tmp_path: Path) -> None:
+    """Failure evidence survives a MindRoom stop error during capture."""
+    bundle = FailureBundle.create(
+        tmp_path / "artifacts",
+        "run-stop-failure",
+        scenario=_bundle_scenario(),
+        provenance={},
+    )
+    stack = _prepared_stack(tmp_path)
+    oracle = _snapshot_oracle()
+    runner = object.__new__(LiveFuzzRunner)
+    runner.oracle = oracle
+
+    def fail_stop() -> None:
+        message = "stop failed"
+        raise RuntimeError(message)
+
+    stack.stop_mindroom = fail_stop  # type: ignore[method-assign]
+    try:
+        _persist_failure_bundle(bundle, stack, runner, AssertionError("primary invariant"))
+    finally:
+        await oracle.client.close()
+
+    expected = {
+        "cleanup_error.txt",
+        "diagnostics.json",
+        "exception.txt",
+        "handled_turns.json",
+        "mindroom.log",
+        "model_observations.json",
+        "oracle_snapshot.json",
+        "tuwunel.log",
+    }
+    assert expected <= {path.name for path in bundle.directory.iterdir()}
+    assert "stop failed" in (bundle.directory / "cleanup_error.txt").read_text(encoding="utf-8")
 
 
 @pytest.mark.asyncio

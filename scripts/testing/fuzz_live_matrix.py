@@ -2028,6 +2028,7 @@ class ExactReplyOracle:
         self.reply_latencies: dict[str, float] = {}
         self._last_response_activity_at = time.monotonic()
         self._sync_lock = asyncio.Lock()
+        self._pending_expectation_registrations = 0
 
     async def initialize(self) -> None:
         """Establish a sync token before the fuzz traffic starts."""
@@ -2057,6 +2058,16 @@ class ExactReplyOracle:
         """Allow zero replies for a source redacted before its reply settled."""
         if event_id in self.expected_sources:
             self.optional_sources.add(event_id)
+
+    def begin_expectation_registration(self) -> None:
+        """Fence invariant checks while a sent source awaits its Matrix event ID."""
+        self._pending_expectation_registrations += 1
+
+    def finish_expectation_registration(self, *, validate: bool = True) -> None:
+        """Release one send fence and validate replies once every source is known."""
+        self._pending_expectation_registrations -= 1
+        if validate and self._pending_expectation_registrations == 0:
+            self._assert_no_wrong_replies()
 
     def refresh_ledger_attributions(self, *, min_interval: float = 0.5) -> None:
         """Re-read MindRoom's durable per-source terminal turn records."""
@@ -2387,6 +2398,8 @@ class ExactReplyOracle:
         return None
 
     def _assert_no_wrong_replies(self) -> None:
+        if self._pending_expectation_registrations:
+            return
         duplicates = {
             self.expected_sources.get(source, source): sorted(event_ids)
             for source, event_ids in self.response_ids.items()
@@ -3840,7 +3853,9 @@ class LiveFuzzRunner:
                 # this as a source redaction so the audit does not demand a
                 # revision Matrix itself rolled back.
                 self._pop_source_revision(reverted_source, target_event_id)
-            elif len(self.oracle.response_ids.get(target_event_id, ())) != 1:
+            else:
+                self.oracle.refresh_ledger_attributions(min_interval=0.0)
+            if reverted_source is None and target_event_id not in self.oracle.settled_sources():
                 # A source redacted before its reply settles legitimately races
                 # the in-flight response, so its exact cardinality is zero-or-one.
                 self.oracle.mark_source_optional(target_event_id)
@@ -3903,29 +3918,35 @@ class LiveFuzzRunner:
         payload: _SentPayload,
         room_id: str,
     ) -> str:
-        """Send one reply-expecting message and register it before any sync pump.
+        """Send one reply-expecting message behind an oracle assertion fence.
 
         Concurrent target-resolution waiters pump the oracle mid-batch, so a
-        fast agent reply must never be observable before its expectation exists.
+        fast agent reply must not be classified before its expectation exists.
         """
-        event_id = await client.send_event(payload.event_type, payload.txn_id, payload.content, room_id=room_id)
-        self.sent_records.append(
-            _SentRecord(
+        self.oracle.begin_expectation_registration()
+        registered = False
+        try:
+            event_id = await client.send_event(payload.event_type, payload.txn_id, payload.content, room_id=room_id)
+            self.sent_records.append(
+                _SentRecord(
+                    event_id,
+                    room_id,
+                    payload.event_type,
+                    sender=client.user_id,
+                    content=payload.content,
+                ),
+            )
+            self.oracle.expect(
+                operation.event_ref,
                 event_id,
-                room_id,
-                payload.event_type,
-                sender=client.user_id,
-                content=payload.content,
-            ),
-        )
-        self.oracle.expect(
-            operation.event_ref,
-            event_id,
-            thread=operation.thread,
-            client=operation.client,
-            sent_at=time.monotonic(),
-        )
-        return event_id
+                thread=operation.thread,
+                client=operation.client,
+                sent_at=time.monotonic(),
+            )
+            registered = True
+            return event_id
+        finally:
+            self.oracle.finish_expectation_registration(validate=registered)
 
     def _resolve_event_ref(self, logical_ref: str) -> str:
         if logical_ref.startswith("response:"):
@@ -4560,6 +4581,10 @@ def _persist_failure_bundle(
     print(f"Replay trace: {bundle.directory / 'scenario.json'}", file=sys.stderr)
     try:
         stack.stop_mindroom()
+    except Exception as stop_exc:
+        bundle.record_cleanup_error(stop_exc)
+        print(f"MindRoom stop before failure capture failed: {stop_exc}", file=sys.stderr)
+    try:
         oracle_snapshot = _sanitized_oracle_snapshot(runner.oracle) if runner is not None else {}
         ledger_path = stack.storage_path / "tracking" / f"{AGENT_NAME}_responded.json"
         path = bundle.finalize(
