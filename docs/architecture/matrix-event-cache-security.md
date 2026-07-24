@@ -22,7 +22,15 @@ Both unencrypted `url` and encrypted `file.url` MXC representations are tracked.
 
 Plaintext persistence succeeds only while the owning event and its reference are visible and not tombstoned.
 
-Decrypted plaintext exists only in the durable principal-owned cache; there is no runtime-wide process-local plaintext cache.
+Durable plaintext exists only in the principal-owned event cache; there is no runtime-wide process-local plaintext cache shared across bots.
+
+Each bot may retain one process-local resolved thread projection across turns, including resolved message bodies and the exact sidecar plaintext on which they depend.
+
+That projection is scoped to one room and thread, and reuse requires an exact durable event revision, membership epoch, trusted-sender set, and sidecar-text match.
+
+Every serve revalidates sidecar plaintext through the principal- and room-scoped surviving-reference check; any mismatch or uncertainty falls back to full resolution.
+
+Durable invalidation prevents reuse through the normal freshness gate, resolution failures discard the projection, and process shutdown removes it.
 
 Hydration without complete principal, room, event, and MXC identity may return freshly downloaded content to the current call, but it cannot read or populate the durable cache.
 
