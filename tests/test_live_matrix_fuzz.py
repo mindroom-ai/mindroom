@@ -535,3 +535,46 @@ async def test_exact_reply_oracle_ignores_empty_defaultdict_entries() -> None:
         oracle._assert_no_wrong_replies()
     finally:
         await client.close()
+
+
+def test_chaos_validation_blocks_targets_of_redacted_unsettled_responses() -> None:
+    """A reply suppressed by source redaction may never be awaited as a target."""
+    cross_batch = LiveFuzzScenario(
+        thread_count=1,
+        profile="chaos",
+        batches=(
+            (LiveOperation(0, LiveOperationKind.THREAD_MESSAGE, 0, "root:0"),),
+            (LiveOperation(1, LiveOperationKind.REDACTION, 0, "op:0"),),
+            (LiveOperation(2, LiveOperationKind.REACTION, 0, "response:op:0"),),
+        ),
+    )
+    with pytest.raises(ValueError, match="may never settle"):
+        cross_batch.validate()
+
+    same_batch = LiveFuzzScenario(
+        thread_count=1,
+        profile="chaos",
+        batches=(
+            (LiveOperation(0, LiveOperationKind.THREAD_MESSAGE, 0, "root:0"),),
+            (
+                LiveOperation(1, LiveOperationKind.REDACTION, 0, "op:0"),
+                LiveOperation(2, LiveOperationKind.REACTION, 0, "response:op:0"),
+            ),
+        ),
+    )
+    with pytest.raises(ValueError, match="same-batch redacted sources"):
+        same_batch.validate()
+
+    settled_first = LiveFuzzScenario(
+        thread_count=1,
+        profile="chaos",
+        batches=(
+            (LiveOperation(0, LiveOperationKind.THREAD_MESSAGE, 0, "root:0"),),
+            (LiveOperation(1, LiveOperationKind.CHECKPOINT, 0, None),),
+            (
+                LiveOperation(2, LiveOperationKind.REDACTION, 0, "op:0"),
+                LiveOperation(3, LiveOperationKind.REACTION, 0, "response:op:0"),
+            ),
+        ),
+    )
+    settled_first.validate()

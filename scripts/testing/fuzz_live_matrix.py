@@ -142,6 +142,7 @@ class _ValidationState:
     known_responses: set[str]
     message_events: set[str]
     settled_responses: set[str]
+    unusable_responses: set[str]
     authors: dict[str, int]
     operation_ids: set[int]
     mindroom_running: bool = True
@@ -220,6 +221,7 @@ class LiveFuzzScenario:
             known_responses={f"response:root:{thread}" for thread in range(self.thread_count)},
             message_events={f"root:{thread}" for thread in range(self.thread_count)},
             settled_responses={f"response:root:{thread}" for thread in range(self.thread_count)},
+            unusable_responses=set(),
             authors={f"root:{thread}": self.root_client(thread) for thread in range(self.thread_count)},
             operation_ids=set(),
         )
@@ -239,6 +241,14 @@ class LiveFuzzScenario:
                 raise ValueError(msg)
             self._validate_lifecycle_operation(batch[0], state)
             return
+        self._validate_reply_uniqueness(batch)
+        self._validate_redaction_response_races(batch, state)
+        for operation in batch:
+            self._validate_mutation_operation(operation, state)
+        self._register_batch_events(batch, state)
+
+    def _validate_reply_uniqueness(self, batch: tuple[LiveOperation, ...]) -> None:
+        """Reject reply races the exact oracle cannot attribute."""
         reply_keys = [(operation.thread, operation.client) for operation in batch if operation.kind in MESSAGE_KINDS]
         if len(reply_keys) != len(set(reply_keys)):
             msg = "same-thread messages requiring replies must use separate batches"
@@ -249,23 +259,50 @@ class LiveFuzzScenario:
                 msg = "same-thread messages requiring replies must use separate batches"
                 raise ValueError(msg)
 
-        new_events: set[str] = set()
-        new_responses: set[str] = set()
-        new_messages: set[str] = set()
-        new_authors: dict[str, int] = {}
+    def _register_batch_events(self, batch: tuple[LiveOperation, ...], state: _ValidationState) -> None:
+        """Fold one validated batch into the cross-batch bookkeeping."""
         for operation in batch:
-            self._validate_mutation_operation(operation, state)
             if operation.kind is not LiveOperationKind.IDEMPOTENT_RETRY:
-                new_events.add(operation.event_ref)
-                new_authors[operation.event_ref] = operation.client
+                state.known_events.add(operation.event_ref)
+                state.authors[operation.event_ref] = operation.client
             if operation.kind in MESSAGE_KINDS:
-                new_messages.add(operation.event_ref)
-                new_responses.add(f"response:{operation.event_ref}")
+                state.message_events.add(operation.event_ref)
+                state.known_responses.add(f"response:{operation.event_ref}")
+        for operation in batch:
+            if operation.kind is LiveOperationKind.REDACTION:
+                assert operation.target is not None
+                redacted_response = f"response:{operation.target}"
+                if redacted_response in state.known_responses and redacted_response not in state.settled_responses:
+                    state.unusable_responses.add(redacted_response)
+        if self.profile != "chaos":
+            # The fuzz runner settles every reply after each batch, so all
+            # responses are proven to exist before the next batch starts.
+            state.settled_responses = {
+                f"response:{message}" for message in state.message_events
+            } - state.unusable_responses
 
-        state.known_events.update(new_events)
-        state.known_responses.update(new_responses)
-        state.message_events.update(new_messages)
-        state.authors.update(new_authors)
+    def _validate_redaction_response_races(
+        self,
+        batch: tuple[LiveOperation, ...],
+        state: _ValidationState,
+    ) -> None:
+        """Reject batches racing a redaction against its own unsettled reply."""
+        redacted_messages = {
+            operation.target
+            for operation in batch
+            if operation.kind is LiveOperationKind.REDACTION and operation.target in state.message_events
+        }
+        unsettled_response_targets = {
+            operation.target
+            for operation in batch
+            if operation.target is not None
+            and operation.target.startswith("response:")
+            and operation.target not in state.settled_responses
+        }
+        conflicts = {f"response:{message}" for message in redacted_messages} & unsettled_response_targets
+        if conflicts:
+            msg = f"cannot target unsettled responses of same-batch redacted sources: {sorted(conflicts)}"
+            raise ValueError(msg)
 
     def _validate_lifecycle_operation(self, operation: LiveOperation, state: _ValidationState) -> None:
         self._register_operation_id(operation, state)
@@ -285,12 +322,11 @@ class LiveFuzzScenario:
         if kind is LiveOperationKind.STOP_MINDROOM:
             state.mindroom_running = False
             return
+        settled_when_quiet = {f"response:{message}" for message in state.message_events} - state.unusable_responses
         if kind is LiveOperationKind.CHECKPOINT:
-            state.settled_responses = {f"response:{message}" for message in state.message_events}
+            state.settled_responses = settled_when_quiet
             return
-        if kind is LiveOperationKind.COLD_RESTART_MINDROOM and state.settled_responses != {
-            f"response:{message}" for message in state.message_events
-        }:
+        if kind is LiveOperationKind.COLD_RESTART_MINDROOM and state.settled_responses != settled_when_quiet:
             msg = "cold restarts must directly follow a checkpoint"
             raise ValueError(msg)
         # Warm restart variants keep MindRoom running and settle at the next checkpoint.
@@ -305,6 +341,9 @@ class LiveFuzzScenario:
             raise ValueError(msg)
         if operation.kind is LiveOperationKind.IDEMPOTENT_RETRY and operation.target not in state.message_events:
             msg = "idempotent retries may only target messages"
+            raise ValueError(msg)
+        if operation.target in state.unusable_responses:
+            msg = f"{operation.target!r} may never settle after its source redaction and cannot be targeted"
             raise ValueError(msg)
         if not state.mindroom_running and operation.target in state.known_responses - state.settled_responses:
             msg = f"{operation.target!r} cannot be targeted while MindRoom is down before its reply settled"
@@ -362,6 +401,7 @@ class _ScenarioGenerationState:
     redacted: set[str]
     authors: dict[str, int]
     settled_responses: set[str]
+    unusable_responses: set[str]
 
 
 def _initial_generation_state(thread_count: int, *, client_count: int = 1) -> _ScenarioGenerationState:
@@ -374,6 +414,7 @@ def _initial_generation_state(thread_count: int, *, client_count: int = 1) -> _S
         redacted=set(),
         authors={f"root:{thread}": thread % client_count for thread in range(thread_count)},
         settled_responses={f"response:root:{thread}" for thread in range(thread_count)},
+        unusable_responses=set(),
     )
 
 
@@ -565,7 +606,7 @@ class _ChaosBuild:
         if kind is LiveOperationKind.CHECKPOINT:
             self.state.settled_responses = {
                 f"response:{message}" for messages in self.state.messages.values() for message in messages
-            }
+            } - self.state.unusable_responses
 
 
 def _pick_chaos_thread(build: _ChaosBuild) -> int:
@@ -575,7 +616,31 @@ def _pick_chaos_thread(build: _ChaosBuild) -> int:
     return 0 if index < tuning.hot_thread_weight else index - tuning.hot_thread_weight + 1
 
 
-def _choose_chaos_operation(build: _ChaosBuild, *, mindroom_running: bool) -> LiveOperation:
+def _response_target_allowed(
+    state: _ScenarioGenerationState,
+    target: str,
+    *,
+    mindroom_running: bool,
+    batch_redacted: set[str],
+) -> bool:
+    """Return whether one `response:` reference is safe to target right now."""
+    if target in state.settled_responses:
+        return True
+    if target in state.unusable_responses:
+        return False
+    source = target.removeprefix("response:")
+    if source in state.redacted or source in batch_redacted:
+        return False
+    return mindroom_running
+
+
+def _choose_chaos_operation(
+    build: _ChaosBuild,
+    *,
+    mindroom_running: bool,
+    batch_redacted: set[str],
+    batch_response_sources: set[str],
+) -> LiveOperation:
     """Choose one realistic operation honoring downtime and authorship rules."""
     randomizer = build.randomizer
     state = build.state
@@ -584,7 +649,12 @@ def _choose_chaos_operation(build: _ChaosBuild, *, mindroom_running: bool) -> Li
     random_client = randomizer.randrange(build.tuning.client_count)
 
     def response_available(target: str) -> bool:
-        return mindroom_running or target in state.settled_responses
+        return _response_target_allowed(
+            state,
+            target,
+            mindroom_running=mindroom_running,
+            batch_redacted=batch_redacted,
+        )
 
     available_responses = [target for target in state.responses[thread] if response_available(target)]
     available_reactions = [
@@ -593,7 +663,14 @@ def _choose_chaos_operation(build: _ChaosBuild, *, mindroom_running: bool) -> Li
         if not target.startswith("response:") or response_available(target)
     ]
     available_edits = [target for target in state.editable[thread] if target not in state.redacted]
-    available_redactions = [target for target in state.redactable[thread] if target not in state.redacted]
+    available_redactions = [
+        target
+        for target in state.redactable[thread]
+        if target not in state.redacted
+        # Never race a redaction against a same-batch target of its own
+        # unsettled response, or the resolver could wait forever.
+        and not (target in batch_response_sources and f"response:{target}" not in state.settled_responses)
+    ]
     available_retries = [target for target in state.messages[thread] if target not in state.redacted]
 
     target: str | None = None
@@ -628,11 +705,19 @@ def _choose_chaos_operation(build: _ChaosBuild, *, mindroom_running: bool) -> Li
 
 def _append_chaos_batch(build: _ChaosBuild, *, remaining: int, mindroom_running: bool) -> int:
     """Append one concurrent mutation batch and return its operation count."""
+    state = build.state
     batch_size = min(remaining, build.randomizer.randint(1, build.tuning.max_batch_size))
     operations: list[LiveOperation] = []
     reply_keys: set[tuple[int, int]] = set()
+    batch_redacted: set[str] = set()
+    batch_response_sources: set[str] = set()
     for _ in range(batch_size):
-        operation = _choose_chaos_operation(build, mindroom_running=mindroom_running)
+        operation = _choose_chaos_operation(
+            build,
+            mindroom_running=mindroom_running,
+            batch_redacted=batch_redacted,
+            batch_response_sources=batch_response_sources,
+        )
         if operation.kind in MESSAGE_KINDS and (operation.thread, operation.client) in reply_keys:
             operation = LiveOperation(
                 operation_id=operation.operation_id,
@@ -641,19 +726,37 @@ def _append_chaos_batch(build: _ChaosBuild, *, remaining: int, mindroom_running:
                 target=build.randomizer.choice(
                     [
                         target
-                        for target in build.state.reaction_targets[operation.thread]
+                        for target in state.reaction_targets[operation.thread]
                         if not target.startswith("response:")
-                        or mindroom_running
-                        or target in build.state.settled_responses
+                        or _response_target_allowed(
+                            state,
+                            target,
+                            mindroom_running=mindroom_running,
+                            batch_redacted=batch_redacted,
+                        )
                     ],
                 ),
                 client=operation.client,
             )
         if operation.kind in MESSAGE_KINDS:
             reply_keys.add((operation.thread, operation.client))
+        assert operation.target is not None
+        if operation.kind is LiveOperationKind.REDACTION:
+            batch_redacted.add(operation.target)
+        elif operation.target.startswith("response:"):
+            batch_response_sources.add(operation.target.removeprefix("response:"))
         operations.append(operation)
     build.batches.append(tuple(operations))
-    _update_generation_state(build.state, operations)
+    _update_generation_state(state, operations)
+    for operation in operations:
+        if operation.kind is LiveOperationKind.REDACTION:
+            assert operation.target is not None
+            redacted_response = f"response:{operation.target}"
+            if (
+                redacted_response in state.responses[operation.thread]
+                and redacted_response not in state.settled_responses
+            ):
+                state.unusable_responses.add(redacted_response)
     build.generated += len(operations)
     return len(operations)
 
