@@ -54,6 +54,11 @@
 - New focused regressions pass on both cache backends: `8 passed`.
 - Broad full/cache/backend/reuse focus passes: `471 passed`.
 - Explicit Tach dependency/interface validation passes.
+- Relevant owning/backend matrix collects `609` tests and passes with backend-dependent skips under four workers.
+- Full pytest passes: `11533 passed`, `54 skipped`, `30 warnings`.
+- All-file pre-commit passes on the second run.
+- The first hook run reformatted the same seven unrelated frontend files already known to drift from checked-in Prettier output.
+- Those unrelated formatter changes were reversed exactly and remain outside the branch.
 
 ## Preserved local files
 
