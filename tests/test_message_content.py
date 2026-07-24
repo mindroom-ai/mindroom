@@ -151,6 +151,79 @@ class TestResolvedMessageExtraction:
         assert messages["$original"].body == "Valid"
         assert messages["$original"].latest_event_id == "$valid-edit"
 
+    @pytest.mark.asyncio
+    async def test_visible_message_falls_back_from_invalid_newer_replacement(self) -> None:
+        """Malformed newer edits must not hide the newest valid replacement."""
+        original = _make_message_event(
+            body="Original",
+            content={
+                "body": "Original",
+                "msgtype": "m.text",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": "$root"},
+            },
+            event_id="$original",
+            sender="@alice:example.com",
+            timestamp_ms=1,
+        )
+        valid_edit = _make_message_event(
+            body="* Valid",
+            content={
+                "body": "* Valid",
+                "msgtype": "m.text",
+                "m.new_content": {
+                    "body": "Valid",
+                    "msgtype": "m.text",
+                    "m.relates_to": {"rel_type": "m.thread", "event_id": "$forged-root"},
+                },
+                "m.relates_to": {"event_id": "$original", "rel_type": "m.replace"},
+            },
+            event_id="$valid-edit",
+            sender="@alice:example.com",
+            timestamp_ms=2,
+        )
+        invalid_edit = _make_message_event(
+            body="* Invalid",
+            content={
+                "body": "* Invalid",
+                "msgtype": "m.text",
+                "m.relates_to": {"event_id": "$original", "rel_type": "m.replace"},
+            },
+            event_id="$invalid-edit",
+            sender="@alice:example.com",
+            timestamp_ms=3,
+        )
+
+        messages = await resolve_latest_visible_messages(
+            [original, valid_edit, invalid_edit],
+            _make_client(),
+        )
+
+        message = messages["$original"]
+        assert message.body == "Valid"
+        assert message.latest_event_id == "$valid-edit"
+        assert message.timestamp == 1
+        assert message.thread_id == "$root"
+        assert message.content["m.relates_to"] == {"rel_type": "m.thread", "event_id": "$root"}
+
+    @pytest.mark.asyncio
+    async def test_visible_edit_without_original_fails_closed(self) -> None:
+        """An edit payload cannot synthesize an unverifiable original message."""
+        edit = _make_message_event(
+            body="* Forged",
+            content={
+                "body": "* Forged",
+                "msgtype": "m.text",
+                "m.new_content": {"body": "Forged", "msgtype": "m.text"},
+                "m.relates_to": {"event_id": "$missing", "rel_type": "m.replace"},
+            },
+            event_id="$edit",
+            sender="@mallory:example.com",
+        )
+
+        messages = await resolve_latest_visible_messages([edit], _make_client())
+
+        assert messages == {}
+
     def test_download_and_durable_ownership_share_sidecar_url_validation(self) -> None:
         """Hydration and reference tracking must choose the same valid MXC URL."""
         content = {

@@ -1780,8 +1780,8 @@ class TestThreadHistory:
         mock_extract_edit_body.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_fetch_thread_history_edit_only_event_still_visible(self) -> None:
-        """Synthesize a history entry when only edit events are returned."""
+    async def test_fetch_thread_history_edit_only_event_fails_closed(self) -> None:
+        """Do not synthesize an unverifiable original from an edit payload."""
         client = AsyncMock()
         root_event = self._make_text_event(
             event_id="$thread_root",
@@ -1821,8 +1821,7 @@ class TestThreadHistory:
         )
         history = resolution.messages
 
-        assert [message.event_id for message in history] == ["$thread_root", "$missing_original"]
-        assert history[1].body == "Final answer"
+        assert [message.event_id for message in history] == ["$thread_root"]
 
     @pytest.mark.asyncio
     async def test_fetch_thread_history_does_not_stop_after_edit_only_page(self) -> None:

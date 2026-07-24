@@ -3877,8 +3877,10 @@ from = ["mindroom.matrix.conversation_cache"]
 expose = [
     "EventInfo",
     "event_type_supports_thread_relations",
+    "has_valid_message_replacement",
     "is_thread_affecting_relation",
     "origin_server_ts_from_event_source",
+    "project_message_replacement_content",
     "reply_to_event_id_from_content",
 ]
 from = ["mindroom.matrix.event_info"]

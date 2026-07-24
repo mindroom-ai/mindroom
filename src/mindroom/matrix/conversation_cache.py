@@ -40,7 +40,7 @@ from mindroom.matrix.client_thread_history import (
     fetch_thread_history,
     get_room_threads_page,
 )
-from mindroom.matrix.event_info import EventInfo
+from mindroom.matrix.event_info import EventInfo, project_message_replacement_content
 from mindroom.matrix.media import (
     is_encrypted_media_event_source,
     parse_matrix_media_event_source,
@@ -278,20 +278,13 @@ async def _apply_cached_latest_edit(
         return event_source
 
     original_content = event_source.get("content", {})
-    merged_content = (
-        {key: value for key, value in original_content.items() if isinstance(key, str)}
-        if isinstance(original_content, dict)
-        else {}
+    projected_content = project_message_replacement_content(
+        original_content if isinstance(original_content, dict) else {},
+        edited_content,
     )
-    merged_content.update(edited_content)
-    merged_content.setdefault("body", edited_body)
 
     updated_event_source = {key: value for key, value in event_source.items() if isinstance(key, str)}
-    updated_event_source["content"] = merged_content
-
-    latest_edit_timestamp = latest_edit_source.get("origin_server_ts")
-    if isinstance(latest_edit_timestamp, int) and not isinstance(latest_edit_timestamp, bool):
-        updated_event_source["origin_server_ts"] = latest_edit_timestamp
+    updated_event_source["content"] = projected_content
     return updated_event_source
 
 
