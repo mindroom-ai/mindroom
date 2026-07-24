@@ -52,9 +52,10 @@ def has_valid_message_replacement(event_source: Mapping[str, object]) -> bool:
     if not isinstance(content, Mapping):
         return False
     new_content = cast("Mapping[str, object]", content).get("m.new_content")
-    return isinstance(new_content, Mapping) and isinstance(
-        cast("Mapping[str, object]", new_content).get("body"),
-        str,
+    return (
+        isinstance(new_content, Mapping)
+        and isinstance(cast("Mapping[str, object]", new_content).get("body"), str)
+        and isinstance(cast("Mapping[str, object]", new_content).get("msgtype"), str)
     )
 
 

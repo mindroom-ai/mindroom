@@ -186,6 +186,7 @@ class TestResolvedMessageExtraction:
             content={
                 "body": "* Invalid",
                 "msgtype": "m.text",
+                "m.new_content": {"body": "Invalid"},
                 "m.relates_to": {"event_id": "$original", "rel_type": "m.replace"},
             },
             event_id="$invalid-edit",

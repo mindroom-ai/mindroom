@@ -2427,6 +2427,7 @@ async def test_cached_room_get_event_falls_back_from_invalid_newer_edit(
         server_timestamp=4000,
         source_content={
             "body": "* Invalid reply",
+            "m.new_content": {"body": "Invalid reply"},
             "m.relates_to": {"rel_type": "m.replace", "event_id": "$reply"},
         },
     )
