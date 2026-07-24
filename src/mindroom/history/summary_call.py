@@ -10,9 +10,13 @@ It enforces the call-side half of the compaction invariants
    at or above max_tokens is a 400 from Anthropic), SDK retries disabled, and
    one SDK timeout coordinated with the outer chunk budget
    (``MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS``) instead of two uncoordinated
-   constants in two modules. Claude summary output uses the loaded model's own
-   max_tokens as the truncation guard. Unknown providers pass through untouched
-   and rely on the outer chunk timeout alone.
+   constants in two modules. Claude summary output is capped at
+   ``MINDROOM_COMPACTION_SUMMARY_MAX_OUTPUT_TOKENS`` (or the model's own smaller
+   max_tokens) so the truncation guard stays reachable inside the chunk timeout:
+   a summary the model cannot finish in time must surface as a typed
+   ``CompactionSummaryOutputLimitError`` the retry policy can shrink on, not as a
+   wall-clock timeout that recurs identically on every attempt. Unknown providers
+   pass through untouched and rely on the outer chunk timeout alone.
 
 4. Retry on provider failure is deterministic.
    ``SummaryRetryPolicy`` decides which error classes warrant a smaller retry
@@ -52,7 +56,10 @@ from agno.session.summary import SessionSummary
 
 from mindroom.cancellation import request_task_cancel
 from mindroom.claude_prompt_cache import as_anthropic_claude
-from mindroom.constants import MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS
+from mindroom.constants import (
+    MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS,
+    MINDROOM_COMPACTION_SUMMARY_MAX_OUTPUT_TOKENS,
+)
 from mindroom.error_handling import TRANSIENT_PROVIDER_STATUS_CODES
 from mindroom.history.types import COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS
 from mindroom.logging_config import get_logger
@@ -227,6 +234,11 @@ def configure_summary_model(model: Model, *, timeout_seconds: float | None = Non
     claude_model.cache_system_prompt = False
     claude_model.extended_cache_time = False
     claude_model.thinking = None
+    claude_model.max_tokens = (
+        min(claude_model.max_tokens, MINDROOM_COMPACTION_SUMMARY_MAX_OUTPUT_TOKENS)
+        if claude_model.max_tokens
+        else MINDROOM_COMPACTION_SUMMARY_MAX_OUTPUT_TOKENS
+    )
     claude_model.timeout = min(claude_model.timeout, resolved_timeout) if claude_model.timeout else resolved_timeout
     client_params = dict(claude_model.client_params or {})
     client_params["max_retries"] = 0

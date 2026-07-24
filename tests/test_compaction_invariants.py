@@ -37,6 +37,7 @@ from mindroom.config.models import CompactionConfig, CompactionOverrideConfig, D
 from mindroom.constants import (
     MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS,
     MINDROOM_COMPACTION_METADATA_KEY,
+    MINDROOM_COMPACTION_SUMMARY_MAX_OUTPUT_TOKENS,
     RuntimePaths,
     resolve_runtime_paths,
 )
@@ -518,7 +519,7 @@ def test_configure_summary_model_tunes_claude_in_one_place() -> None:
     assert model.cache_system_prompt is False
     assert model.extended_cache_time is False
     assert model.thinking is None
-    assert model.max_tokens == 64_000
+    assert model.max_tokens == MINDROOM_COMPACTION_SUMMARY_MAX_OUTPUT_TOKENS
     assert model.timeout == MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS
     assert model.client_params == {"max_retries": 0, "custom": "keep"}
 
@@ -539,7 +540,7 @@ def test_configure_summary_model_tunes_vertexai_claude() -> None:
     assert model.cache_system_prompt is False
     assert model.extended_cache_time is False
     assert model.thinking is None
-    assert model.max_tokens == 8192
+    assert model.max_tokens == MINDROOM_COMPACTION_SUMMARY_MAX_OUTPUT_TOKENS
     assert model.timeout == MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS
     assert model.client_params == {"max_retries": 0}
 
@@ -583,7 +584,7 @@ async def test_generate_compaction_summary_applies_tuning_and_request_shape() ->
     assert model.cache_system_prompt is False
     assert model.extended_cache_time is False
     assert model.thinking is None
-    assert model.max_tokens == 64_000
+    assert model.max_tokens == MINDROOM_COMPACTION_SUMMARY_MAX_OUTPUT_TOKENS
     assert model.timeout == MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS
     assert model.client_params == {"max_retries": 0}
     assert [(message.role, message.content) for message in model.seen_messages] == [
@@ -631,7 +632,7 @@ async def test_generate_compaction_summary_allows_claude_summary_below_output_ca
             max_tokens=64_000,
             response=ModelResponse(
                 content="durable summary ended cleanly.",
-                output_tokens=63_999,
+                output_tokens=MINDROOM_COMPACTION_SUMMARY_MAX_OUTPUT_TOKENS - 1,
             ),
         ),
         summary_input="conversation payload",
@@ -642,21 +643,24 @@ async def test_generate_compaction_summary_allows_claude_summary_below_output_ca
 
 
 @pytest.mark.asyncio
-async def test_generate_compaction_summary_allows_full_history_summary_above_four_k() -> None:
-    summary = await generate_compaction_summary(
-        model=_RecordingClaude(
-            id="claude-sonnet-5",
-            max_tokens=8192,
-            response=ModelResponse(
-                content="durable full-history summary ended cleanly.",
-                output_tokens=4_097,
+async def test_generate_compaction_summary_caps_output_below_generous_model_max_tokens() -> None:
+    # A model max_tokens far above what the chunk timeout can generate must not
+    # become the truncation guard: a summary that fills the compaction ceiling
+    # raises the typed output-limit error instead of running into the wall-clock
+    # timeout on every attempt.
+    with pytest.raises(CompactionSummaryOutputLimitError):
+        await generate_compaction_summary(
+            model=_RecordingClaude(
+                id="claude-sonnet-5",
+                max_tokens=8192,
+                response=ModelResponse(
+                    content="durable full-history summary ended cleanly.",
+                    output_tokens=MINDROOM_COMPACTION_SUMMARY_MAX_OUTPUT_TOKENS,
+                ),
             ),
-        ),
-        summary_input="conversation payload",
-        summary_prompt="Summarize the conversation.",
-    )
-
-    assert summary.summary == "durable full-history summary ended cleanly."
+            summary_input="conversation payload",
+            summary_prompt="Summarize the conversation.",
+        )
 
 
 @pytest.mark.asyncio
