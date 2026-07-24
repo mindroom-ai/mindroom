@@ -2037,8 +2037,13 @@ class ExactReplyOracle:
         """Wait until all sources have one reply and the room stays quiet."""
         deadline = time.monotonic() + deadline_seconds
         settled_after = time.monotonic() + settle_seconds
-        while time.monotonic() < deadline:
-            await self._sync_once(timeout_ms=250, allow_limited=allow_limited)
+        incomplete_streams = set(self.expected_sources)
+        while (remaining := deadline - time.monotonic()) > 0:
+            try:
+                async with asyncio.timeout(remaining):
+                    await self._sync_once(timeout_ms=250, allow_limited=allow_limited)
+            except TimeoutError:
+                break
             self._assert_no_wrong_replies()
             incomplete_streams = self._incomplete_streaming_sources()
             gap_complete = self._gap_audit_sources is None or (
@@ -3712,6 +3717,14 @@ def _non_negative_float(value: str) -> float:
     return parsed
 
 
+def _positive_float(value: str) -> float:
+    parsed = float(value)
+    if not math.isfinite(parsed) or parsed <= 0:
+        msg = "must be a finite positive number"
+        raise argparse.ArgumentTypeError(msg)
+    return parsed
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--profile", choices=("fuzz", "recovery", "saturation"), default="fuzz")
@@ -3725,7 +3738,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--restart-interval", type=_non_negative_int, default=100)
     parser.add_argument(
         "--reply-timeout",
-        type=_non_negative_float,
+        type=_positive_float,
         help="per-reply deadline (default: 60s fuzz, 180s saturation)",
     )
     parser.add_argument(
@@ -3751,8 +3764,9 @@ def _load_trace(path: Path) -> tuple[LiveFuzzScenario, float | None, float | Non
         if isinstance(value, bool) or not isinstance(value, int | float):
             msg = f"live Matrix fuzz trace {name} must be numeric"
             raise TypeError(msg)
-        if not math.isfinite(value) or value < 0:
-            msg = f"live Matrix fuzz trace {name} must be finite and non-negative"
+        if not math.isfinite(value) or value < 0 or (name == "reply_timeout" and value == 0):
+            qualifier = "positive" if name == "reply_timeout" else "non-negative"
+            msg = f"live Matrix fuzz trace {name} must be finite and {qualifier}"
             raise ValueError(msg)
     return (
         LiveFuzzScenario.from_json(text),

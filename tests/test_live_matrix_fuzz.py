@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
@@ -167,6 +168,7 @@ def test_failure_artifact_includes_loaded_code_provenance(tmp_path: Path) -> Non
     ("field", "value", "error"),
     [
         ("reply_timeout", True, TypeError),
+        ("reply_timeout", 0, ValueError),
         ("settle_seconds", -1, ValueError),
         ("reply_timeout", float("inf"), ValueError),
     ],
@@ -999,6 +1001,29 @@ def test_exact_reply_oracle_rejects_router_duplicate() -> None:
 
     with pytest.raises(AssertionError, match=r"unexpected_responders=.*\$router-response"):
         oracle._assert_no_wrong_replies()
+
+
+@pytest.mark.asyncio
+async def test_exact_reply_deadline_bounds_a_stalled_sync(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One blocked sync request cannot outlive the advertised reply deadline."""
+
+    class Client:
+        room_slot = 0
+
+    oracle = ExactReplyOracle(cast("LiveMatrixClient", Client()), "@agent:example")
+    oracle.expect("root:0", "$source")
+
+    async def stall_sync(*, timeout_ms: int, allow_limited: bool = False) -> None:
+        del timeout_ms, allow_limited
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(oracle, "_sync_once", stall_sync)
+    started = time.monotonic()
+    with pytest.raises(AssertionError, match="timed out waiting for exact agent replies"):
+        await oracle.wait_until_exact(deadline_seconds=0.01, settle_seconds=0)
+    assert time.monotonic() - started < 0.2
 
 
 @pytest.mark.asyncio
