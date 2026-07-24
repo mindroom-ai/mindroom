@@ -15,7 +15,7 @@ from agno.run.team import TeamRunOutput
 
 from mindroom.agent_storage import get_agent_session, get_team_session
 from mindroom.agents import remove_run_by_event_id
-from mindroom.handled_turns import HandledTurnLedger, TurnRecord, TurnRecordCodec, same_turn_identity
+from mindroom.handled_turns import HandledTurnLedger, TurnRecord, TurnRecordCodec, merge_edit_facts, same_turn_identity
 from mindroom.history.storage import invalidate_compacted_replay, read_scope_seen_event_ids
 from mindroom.session_ids import create_session_id
 
@@ -727,6 +727,7 @@ def _reconcile_ledger_and_recovery(
             if backfilled_record != ledger_record
             else ledger_record
         )
+    source_event_prompts, source_event_revisions = merge_edit_facts(ledger_record, recovery_record)
     recovered_record = replace(
         ledger_record,
         discovery_event_ids=(*ledger_record.discovery_event_ids, *recovery_record.discovery_event_ids),
@@ -736,8 +737,8 @@ def _reconcile_ledger_and_recovery(
         ),
         response_event_id=recovery_record.response_event_id,
         completed=recovery_record.completed,
-        source_event_prompts=recovery_record.source_event_prompts or ledger_record.source_event_prompts,
-        source_event_revisions=(recovery_record.source_event_revisions or ledger_record.source_event_revisions),
+        source_event_prompts=source_event_prompts,
+        source_event_revisions=source_event_revisions,
         source_event_metadata=recovery_record.source_event_metadata or ledger_record.source_event_metadata,
         response_owner=recovery_record.response_owner or ledger_record.response_owner,
         requester_id=recovery_record.requester_id or ledger_record.requester_id,

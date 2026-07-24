@@ -204,10 +204,7 @@ class TurnRecord:
             completed=completed,
             visible_echo_event_id=visible_echo_event_id,
             source_event_prompts=source_event_prompts,
-            source_event_revisions=typing.cast(
-                "Mapping[str, SourceEventRevision] | None",
-                source_event_revisions,
-            ),
+            source_event_revisions=typing.cast("Mapping[str, SourceEventRevision] | None", source_event_revisions),
             source_event_metadata=typing.cast("Mapping[str, SourceEventMetadata] | None", source_event_metadata),
             response_owner=response_owner,
             requester_id=requester_id,
@@ -243,7 +240,7 @@ class TurnRecordCodec:
         return _TURN_RECORD_SCHEMA_VERSION
 
     @staticmethod
-    def to_ledger_record(record: TurnRecord) -> dict[str, object]:
+    def to_ledger_record(record: TurnRecord) -> dict[str, object]:  # noqa: C901
         """Serialize one exact record for the versioned handled-turn ledger."""
         payload: dict[str, object] = {
             "anchor_event_id": record.anchor_event_id,
@@ -260,7 +257,10 @@ class TurnRecordCodec:
             payload["visible_echo_event_id"] = record.visible_echo_event_id
         if record.source_event_prompts is not None:
             payload["source_event_prompts"] = dict(record.source_event_prompts)
-        payload.update(_optional_revision_payload("source_event_revisions", record.source_event_revisions))
+        if record.source_event_revisions is not None:
+            payload["source_event_revisions"] = {
+                event_id: list(revision) for event_id, revision in record.source_event_revisions.items()
+            }
         if record.source_event_metadata is not None:
             payload["source_event_metadata"] = {
                 event_id: metadata.to_record() for event_id, metadata in record.source_event_metadata.items()
@@ -349,12 +349,10 @@ class TurnRecordCodec:
             )
         if record.source_event_prompts is not None:
             metadata[constants.MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY] = dict(record.source_event_prompts)
-        metadata.update(
-            _optional_revision_payload(
-                constants.MATRIX_SOURCE_EVENT_REVISIONS_METADATA_KEY,
-                record.source_event_revisions,
-            ),
-        )
+        if record.source_event_revisions is not None:
+            metadata[constants.MATRIX_SOURCE_EVENT_REVISIONS_METADATA_KEY] = {
+                event_id: list(revision) for event_id, revision in record.source_event_revisions.items()
+            }
         if record.source_event_metadata is not None:
             metadata[constants.MATRIX_SOURCE_EVENT_METADATA_KEY] = {
                 event_id: source_metadata.to_record()
@@ -877,14 +875,16 @@ def _immutable_prompt_map(
     return MappingProxyType(prompt_map) if prompt_map else None
 
 
-def _optional_revision_payload(
-    key: str,
-    revisions: Mapping[str, SourceEventRevision] | None,
-) -> dict[str, object]:
-    """Return one optional serialized revision mapping."""
-    if revisions is None:
-        return {}
-    return {key: {event_id: list(revision) for event_id, revision in revisions.items()}}
+def merge_edit_facts(ledger: TurnRecord, recovery: TurnRecord) -> tuple[dict[str, str], dict[str, SourceEventRevision]]:
+    """Merge source prompts and revisions by canonical Matrix revision."""
+    prompts = dict(recovery.source_event_prompts or {})
+    revisions = dict(recovery.source_event_revisions or {})
+    for event_id, revision in (ledger.source_event_revisions or {}).items():
+        if revision >= revisions.get(event_id, revision):
+            revisions[event_id] = revision
+            if ledger.source_event_prompts is not None and event_id in ledger.source_event_prompts:
+                prompts[event_id] = ledger.source_event_prompts[event_id]
+    return prompts, revisions
 
 
 def _immutable_source_event_revisions(

@@ -1158,6 +1158,43 @@ def test_newer_delivered_run_recovers_mutable_facts_after_crash(tmp_path: Path) 
     assert loaded.timestamp == 20
 
 
+def test_recovery_preserves_newer_ledger_only_sibling_edit(tmp_path: Path) -> None:
+    """Recovery must merge edit facts per source instead of replacing the whole map."""
+    store = _store(tmp_path)
+    ledger_record = TurnRecord.create(
+        ["$first", "$anchor"],
+        response_event_id="$old-response",
+        source_event_prompts={"$first": "old first", "$anchor": "suppressed anchor"},
+        source_event_revisions={"$anchor": (30, "$anchor-edit")},
+        timestamp=10,
+    )
+    store._ledger.record_handled_turn(ledger_record)
+    recovery_record = TurnRecord.create(
+        ["$first", "$anchor"],
+        response_event_id="$new-response",
+        source_event_prompts={"$first": "edited first", "$anchor": "old anchor"},
+        source_event_revisions={"$first": (20, "$first-edit")},
+        timestamp=20,
+    )
+
+    loaded = _load_with_recovery(
+        store,
+        original_event_id="$first",
+        recovery_record=recovery_record,
+    )
+
+    assert loaded is not None
+    assert loaded.source_event_prompts == {
+        "$first": "edited first",
+        "$anchor": "suppressed anchor",
+    }
+    assert loaded.source_event_revisions == {
+        "$first": (20, "$first-edit"),
+        "$anchor": (30, "$anchor-edit"),
+    }
+    assert loaded.response_event_id == "$new-response"
+
+
 def test_same_second_delivered_run_repairs_fractional_ledger_timestamp(tmp_path: Path) -> None:
     """Second-resolution run times should still repair a later run from the same second."""
     store = _store(tmp_path)
