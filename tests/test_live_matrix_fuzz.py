@@ -223,6 +223,19 @@ def test_recovery_scenario_rejects_reused_coalescing_lane() -> None:
         scenario.validate()
 
 
+def test_recovery_scenario_rejects_operation_the_runner_cannot_execute() -> None:
+    """Recovery traces must fail validation before unsupported execution."""
+    scenario = LiveFuzzScenario(
+        thread_count=1,
+        client_count=1,
+        profile="recovery",
+        batches=((LiveOperation(0, LiveOperationKind.EDIT, 0, "root:0:0"),),),
+    )
+
+    with pytest.raises(ValueError, match="recovery profile does not support"):
+        scenario.validate()
+
+
 @pytest.mark.asyncio
 async def test_exact_reply_oracle_counts_only_canonical_agent_thread_replies() -> None:
     """Edits and duplicate sync delivery must not inflate canonical counts."""
@@ -284,8 +297,14 @@ async def test_exact_reply_oracle_hydrates_limited_sync_from_pagination(
         },
     }
 
-    async def sync(_since: str | None, *, timeout_ms: int) -> dict[str, Any]:
+    async def sync(
+        _since: str | None,
+        *,
+        timeout_ms: int,
+        timeline_limit: int = 2000,
+    ) -> dict[str, Any]:
         assert timeout_ms == 0
+        assert timeline_limit == 2000
         return {
             "next_batch": "sync-token",
             "rooms": {
@@ -330,11 +349,19 @@ async def test_exact_reply_oracle_audits_bounded_limited_gap(
     """The independent gap audit must expose a server-boundary source omission."""
     client = LiveMatrixClient("http://matrix.invalid", "!room:example")
     oracle = ExactReplyOracle(client, "@agent:example")
-    oracle.expect("root:0", "$source")
+    oracle.expect("old-root", "$old-source")
     oracle.next_batch = "since-position"
+    oracle.arm_gap_audit()
+    oracle.expect("root:0", "$source")
 
-    async def sync(_since: str | None, *, timeout_ms: int) -> dict[str, Any]:
+    async def sync(
+        _since: str | None,
+        *,
+        timeout_ms: int,
+        timeline_limit: int = 2000,
+    ) -> dict[str, Any]:
         assert timeout_ms == 0
+        assert timeline_limit == 50
         return {
             "next_batch": "sync-position",
             "rooms": {
@@ -373,7 +400,7 @@ async def test_exact_reply_oracle_audits_bounded_limited_gap(
     monkeypatch.setattr(client, "sync", sync)
     monkeypatch.setattr(client, "messages_before", messages_before)
     try:
-        await oracle._sync_once(timeout_ms=0, allow_limited=True)
+        await oracle.audit_armed_limited_gap()
     finally:
         await client.close()
 

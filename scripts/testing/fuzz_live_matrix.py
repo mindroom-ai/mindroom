@@ -48,6 +48,7 @@ INSTANCE_REGISTRY = PROJECT_ROOT / "local" / "instances" / "deploy" / "instances
 MODEL_ID = "mindroom-live-fuzz"
 AGENT_NAME = "general"
 ROOM_KEY = "lobby"
+RECOVERY_TIMELINE_LIMIT = 50
 
 
 def _required_int(value: Mapping[str, object], key: str) -> int:
@@ -84,6 +85,13 @@ class LiveOperationKind(StrEnum):
     REDACTION = "redaction"
     IDEMPOTENT_RETRY = "idempotent_retry"
     RESTART_MINDROOM = "restart_mindroom"
+
+
+_RECOVERY_OPERATION_KINDS = {
+    LiveOperationKind.THREAD_MESSAGE,
+    LiveOperationKind.PLAIN_REPLY,
+    LiveOperationKind.IDEMPOTENT_RETRY,
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -194,6 +202,7 @@ class LiveFuzzScenario:
             new_responses: set[str] = set()
             new_messages: set[str] = set()
             for operation in batch:
+                _validate_profile_operation(self.profile, operation)
                 _validate_live_operation(
                     operation,
                     thread_count=self.thread_count,
@@ -248,6 +257,12 @@ def _validate_live_batch_shape(batch: tuple[LiveOperation, ...]) -> None:
     ]
     if len(reply_threads) != len(set(reply_threads)):
         msg = "same-thread messages requiring replies must use separate batches"
+        raise ValueError(msg)
+
+
+def _validate_profile_operation(profile: str, operation: LiveOperation) -> None:
+    if profile == "recovery" and operation.kind not in _RECOVERY_OPERATION_KINDS:
+        msg = f"recovery profile does not support {operation.kind}"
         raise ValueError(msg)
 
 
@@ -494,8 +509,10 @@ def recovery_scenario_from_seed(
     if min(messages_per_room, room_count, thread_count, client_count, max_batch_size) < 1:
         msg = "recovery profile dimensions must be positive"
         raise ValueError(msg)
-    if messages_per_room < 51:
-        msg = "recovery profile requires at least 51 messages per room to exceed the sync window"
+    if messages_per_room <= RECOVERY_TIMELINE_LIMIT:
+        msg = (
+            f"recovery profile requires more than {RECOVERY_TIMELINE_LIMIT} messages per room to exceed the sync window"
+        )
         raise ValueError(msg)
     if messages_per_room > client_count * thread_count:
         msg = (
@@ -1139,11 +1156,17 @@ class LiveMatrixClient:
             raise TypeError(msg)
         return redaction_id
 
-    async def sync(self, since: str | None, *, timeout_ms: int) -> dict[str, Any]:
+    async def sync(
+        self,
+        since: str | None,
+        *,
+        timeout_ms: int,
+        timeline_limit: int = 2000,
+    ) -> dict[str, Any]:
         """Read one incremental sync window from the real homeserver."""
         params: dict[str, str | int] = {
             "timeout": timeout_ms,
-            "filter": json.dumps({"room": {"timeline": {"limit": 2000}}}),
+            "filter": json.dumps({"room": {"timeline": {"limit": timeline_limit}}}),
         }
         if since is not None:
             params["since"] = since
@@ -1260,6 +1283,7 @@ class ExactReplyOracle:
         self.pagination_page_count = 0
         self.gap_audit_page_count = 0
         self.gap_audit_missing_sources: set[str] = set()
+        self._gap_audit_sources: set[str] | None = None
         self._gap_audit_completed = False
         self._last_response_at = time.monotonic()
 
@@ -1270,6 +1294,31 @@ class ExactReplyOracle:
     def expect(self, logical_ref: str, event_id: str) -> None:
         """Require exactly one canonical agent reply to a source event."""
         self.expected_sources[event_id] = logical_ref
+        if self._gap_audit_sources is not None and not self._gap_audit_completed:
+            self._gap_audit_sources.add(event_id)
+
+    def arm_gap_audit(self) -> None:
+        """Scope the next limited-gap audit to subsequently expected sources."""
+        if self.next_batch is None:
+            msg = "limited-gap audit requires an established sync token"
+            raise RuntimeError(msg)
+        self._gap_audit_sources = set()
+        self.gap_audit_missing_sources.clear()
+        self._gap_audit_completed = False
+
+    async def audit_armed_limited_gap(self) -> None:
+        """Sync the offline burst and require the armed limited-gap audit to run."""
+        if self._gap_audit_sources is None:
+            msg = "limited-gap audit is not armed"
+            raise RuntimeError(msg)
+        await self._sync_once(
+            timeout_ms=0,
+            allow_limited=True,
+            timeline_limit=RECOVERY_TIMELINE_LIMIT,
+        )
+        if not self._gap_audit_completed:
+            msg = "recovery source burst did not produce a limited observer timeline"
+            raise AssertionError(msg)
 
     async def wait_until_exact(
         self,
@@ -1311,9 +1360,19 @@ class ExactReplyOracle:
             raise KeyError(msg)
         return event_id
 
-    async def _sync_once(self, *, timeout_ms: int, allow_limited: bool = False) -> None:
+    async def _sync_once(
+        self,
+        *,
+        timeout_ms: int,
+        allow_limited: bool = False,
+        timeline_limit: int = 2000,
+    ) -> None:
         since = self.next_batch
-        data = await self.client.sync(since, timeout_ms=timeout_ms)
+        data = await self.client.sync(
+            since,
+            timeout_ms=timeout_ms,
+            timeline_limit=timeline_limit,
+        )
         next_batch = data.get("next_batch")
         if not isinstance(next_batch, str):
             msg = "Matrix sync omitted next_batch"
@@ -1327,7 +1386,7 @@ class ExactReplyOracle:
             raise AssertionError(msg)
         if timeline.get("limited") is True:
             self.limited_timeline_count += 1
-            if since is not None and not self._gap_audit_completed:
+            if since is not None and self._gap_audit_sources is not None and not self._gap_audit_completed:
                 await self._audit_limited_gap(timeline, since)
             await self._ingest_paginated_history(next_batch)
         events = timeline.get("events", [])
@@ -1372,9 +1431,8 @@ class ExactReplyOracle:
         else:
             msg = "bounded Matrix oracle pagination exceeded 20 pages"
             raise AssertionError(msg)
-        self.gap_audit_missing_sources.update(
-            self.expected_sources.keys() - observed_ids,
-        )
+        assert self._gap_audit_sources is not None
+        self.gap_audit_missing_sources.update(self._gap_audit_sources - observed_ids)
         self._gap_audit_completed = True
 
     async def _ingest_paginated_history(self, from_token: str) -> None:
@@ -1500,6 +1558,8 @@ class LiveFuzzRunner:
         await asyncio.gather(*(oracle.initialize() for oracle in oracles))
         await self._send_recovery_roots(oracles)
 
+        for oracle in oracles:
+            oracle.arm_gap_audit()
         self.stack.stop_mindroom()
         offline_started = time.monotonic()
         message_count = 0
@@ -1517,6 +1577,7 @@ class LiveFuzzRunner:
                 oracles[operation.room].expect(operation.event_ref, event_id)
             self.executed_batches += 1
 
+        await asyncio.gather(*(oracle.audit_armed_limited_gap() for oracle in oracles))
         self.stack.resume_mindroom()
         self.restart_count += 1
         await asyncio.gather(
