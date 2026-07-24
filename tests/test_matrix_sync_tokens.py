@@ -296,6 +296,8 @@ async def test_login_identity_change_rebinds_principal_cache_view(tmp_path: Path
     await old_cache.store_event(event_id, room_id, event)
     bot = _agent_bot(tmp_path)
     bot.event_cache = old_cache
+    response_admission_lock = asyncio.Lock()
+    bot.response_admission_lock = response_admission_lock
     matrix_id_before_login = bot.matrix_id
 
     try:
@@ -303,6 +305,7 @@ async def test_login_identity_change_rebinds_principal_cache_view(tmp_path: Path
         bot._rebuild_runtime_components_after_login_if_identity_changed(matrix_id_before_login)
 
         assert bot.event_cache.principal_id == new_principal_id
+        assert bot.response_admission_lock is response_admission_lock
         assert await bot.event_cache.get_event(room_id, event_id) is None
         assert await old_cache.get_event(room_id, event_id) == event
     finally:

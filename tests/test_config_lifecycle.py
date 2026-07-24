@@ -374,6 +374,7 @@ async def test_response_start_during_config_load_waits_until_apply_finishes(
     response_admitted = asyncio.Event()
     release_response = asyncio.Event()
     active_responses = [0]
+    observed_apply_counts: list[int] = []
     admission_lock = asyncio.Lock()
     current_config = Config()
     new_config = Config()
@@ -392,7 +393,7 @@ async def test_response_start_during_config_load_waits_until_apply_finishes(
     )
 
     async def apply_plan(*_args: object) -> bool:
-        assert active_responses[0] == 0
+        observed_apply_counts.append(active_responses[0])
         return True
 
     lifecycle.apply_update_plan = AsyncMock(side_effect=apply_plan)
@@ -421,6 +422,7 @@ async def test_response_start_during_config_load_waits_until_apply_finishes(
         await asyncio.wait_for(response_admitted.wait(), timeout=1)
 
         lifecycle.apply_update_plan.assert_awaited_once()
+        assert observed_apply_counts == [0]
     finally:
         release_load.set()
         release_response.set()

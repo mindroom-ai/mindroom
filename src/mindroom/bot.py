@@ -609,10 +609,12 @@ class AgentBot:
         if self.agent_user.user_id == matrix_id_before_login.full_id:
             return
 
+        response_admission_lock = self.response_admission_lock
         self.agent_user.__dict__.pop("matrix_id", None)
         self.__dict__.pop("matrix_id", None)
         self.event_cache = self.event_cache.for_principal(self.matrix_id.full_id)
         self._init_runtime_components()
+        self.response_admission_lock = response_admission_lock
 
     @property
     def client(self) -> nio.AsyncClient | None:
