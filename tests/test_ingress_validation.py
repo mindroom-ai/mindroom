@@ -6,6 +6,8 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
 from unittest.mock import MagicMock
 
+import nio
+
 from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.config.main import Config
 from mindroom.constants import ORIGINAL_SENDER_KEY, SOURCE_KIND_KEY
@@ -21,13 +23,11 @@ from tests.identity_helpers import entity_ids
 if TYPE_CHECKING:
     from pathlib import Path
 
-    import nio
-
     from mindroom.turn_policy import TurnPolicy
 
 
-def test_auto_resume_relay_resolves_requester_to_original_human(tmp_path: Path) -> None:
-    """Router-authored auto-resume should preserve human requester without trusting outsiders."""
+def test_trusted_relay_resolves_requester_and_allows_self_authored_ingress(tmp_path: Path) -> None:
+    """Trusted relays should preserve human requesters without trusting outsiders."""
     config = bind_runtime_paths(
         Config(
             agents={"test_agent": {"display_name": "Test Agent"}},
@@ -38,6 +38,29 @@ def test_auto_resume_relay_resolves_requester_to_original_human(tmp_path: Path) 
     )
     runtime_paths = runtime_paths_for(config)
     ids = entity_ids(config, runtime_paths)
+    runtime = BotRuntimeState(
+        client=None,
+        config=config,
+        runtime_paths=runtime_paths,
+        enable_streaming=False,
+        orchestrator=None,
+        event_cache=None,
+        event_cache_write_coordinator=None,
+    )
+    turn_store = MagicMock()
+    turn_store.is_handled.return_value = False
+    turn_store.is_claimed_in_flight.return_value = False
+    turn_policy = MagicMock()
+    turn_policy.can_reply_to_sender.return_value = True
+    validator = IngressValidator(
+        IngressValidatorDeps(
+            runtime=runtime,
+            runtime_paths=runtime_paths,
+            matrix_id=ids["test_agent"],
+            turn_store=turn_store,
+            turn_policy=turn_policy,
+        ),
+    )
     human_sender = "@human:localhost"
     content = stale_stream_cleanup._build_auto_resume_content(
         stale_stream_cleanup._InterruptedThread(
@@ -50,24 +73,6 @@ def test_auto_resume_relay_resolves_requester_to_original_human(tmp_path: Path) 
         ),
         config=config,
         runtime_paths=runtime_paths,
-    )
-    runtime = BotRuntimeState(
-        client=None,
-        config=config,
-        runtime_paths=runtime_paths,
-        enable_streaming=False,
-        orchestrator=None,
-        event_cache=None,
-        event_cache_write_coordinator=None,
-    )
-    validator = IngressValidator(
-        IngressValidatorDeps(
-            runtime=runtime,
-            runtime_paths=runtime_paths,
-            matrix_id=ids["test_agent"],
-            turn_store=cast("TurnStore", object()),
-            turn_policy=cast("TurnPolicy", object()),
-        ),
     )
 
     assert content[ORIGINAL_SENDER_KEY] == human_sender
@@ -86,6 +91,24 @@ def test_auto_resume_relay_resolves_requester_to_original_human(tmp_path: Path) 
         )
         == "@untrusted:localhost"
     )
+    agent_id = ids["test_agent"]
+    event = nio.RoomMessageText.from_dict(
+        {
+            "event_id": "$spawn",
+            "sender": agent_id.full_id,
+            "origin_server_ts": 1234567890,
+            "content": {
+                "msgtype": "m.text",
+                "body": f"{agent_id.full_id} do work",
+                "m.mentions": {"user_ids": [agent_id.full_id]},
+                ORIGINAL_SENDER_KEY: human_sender,
+                SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+            },
+        },
+    )
+    room = nio.MatrixRoom("!room:localhost", agent_id.full_id)
+
+    assert validator.precheck_event(room, event) == human_sender
 
 
 def _real_turn_store(tmp_path: Path) -> TurnStore:
