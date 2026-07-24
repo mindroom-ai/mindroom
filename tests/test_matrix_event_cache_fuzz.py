@@ -173,6 +173,115 @@ def test_hypothesis_sequential_traces_match_reference_model(
 
 
 @pytest.mark.asyncio
+async def test_every_operation_kind_has_deterministic_reference_coverage(tmp_path: Path) -> None:
+    """Every state-machine transition must run against the independent model."""
+    scenario = FuzzScenario(
+        batches=tuple(
+            (
+                FuzzOperation(
+                    kind=kind,
+                    room=0,
+                    thread=index % 2,
+                    slot=index,
+                    target=index,
+                    variant=index,
+                ),
+            )
+            for index, kind in enumerate(OperationKind)
+        ),
+        room_count=1,
+        thread_count=2,
+        verify_reference_model=True,
+    )
+
+    await run_scenario(
+        lambda: SqliteEventCache(tmp_path / "transition-coverage.db"),
+        scenario,
+        verify_restart=False,
+    )
+
+
+@pytest.mark.asyncio
+async def test_reference_model_rejects_tombstoned_replay_and_cleans_invalidated_mapping(tmp_path: Path) -> None:
+    """Rejected replay and full invalidation cannot leave model-only indexes."""
+    message = FuzzOperation(OperationKind.THREADED_MESSAGE, 0, 0, 0, 0, 0)
+    scenario = FuzzScenario(
+        batches=(
+            (message,),
+            (FuzzOperation(OperationKind.REDACTION, 0, 0, 1, 0, 1),),
+            (message,),
+            (FuzzOperation(OperationKind.INVALIDATE_THREAD, 0, 1, 0, 0, 0),),
+        ),
+        room_count=1,
+        thread_count=2,
+        verify_reference_model=True,
+    )
+
+    await run_scenario(
+        lambda: SqliteEventCache(tmp_path / "rejected-replay.db"),
+        scenario,
+        verify_restart=False,
+    )
+
+
+@pytest.mark.asyncio
+async def test_concurrent_batch_uses_independent_cache_connections(tmp_path: Path) -> None:
+    """One concurrent batch must cross separate backend runtimes."""
+    factory_calls = 0
+
+    def cache_factory() -> SqliteEventCache:
+        nonlocal factory_calls
+        factory_calls += 1
+        return SqliteEventCache(tmp_path / "concurrent-connections.db")
+
+    state = await run_scenario(
+        cache_factory,
+        FuzzScenario(
+            batches=(
+                (
+                    FuzzOperation(OperationKind.THREADED_MESSAGE, 0, 0, 1, 0, 0),
+                    FuzzOperation(OperationKind.THREADED_MESSAGE, 0, 1, 1, 0, 0),
+                ),
+            ),
+            room_count=1,
+            thread_count=2,
+        ),
+        verify_restart=False,
+    )
+
+    assert factory_calls == 3
+    observed_events = {(current_room_id, event_id): payload for current_room_id, event_id, payload in state.events}
+    assert observed_events[(room_id(0), message_id(0, 0, 1))] is not None
+    assert observed_events[(room_id(0), message_id(0, 1, 1))] is not None
+
+
+@pytest.mark.asyncio
+async def test_batch_timeout_emits_replayable_trace(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A stalled operation must fail within the bound and preserve its trace."""
+
+    async def stall(_runner: CacheFuzzRunner, _operation: FuzzOperation) -> None:
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(CacheFuzzRunner, "_apply_operation", stall)
+    scenario = FuzzScenario(
+        batches=((FuzzOperation(OperationKind.THREADED_MESSAGE, 0, 0, 0, 0, 0),),),
+        room_count=1,
+        thread_count=1,
+    )
+
+    with pytest.raises(AssertionError, match="Matrix cache fuzz trace"):
+        await run_scenario(
+            lambda: SqliteEventCache(tmp_path / "timeout.db"),
+            scenario,
+            verify_restart=False,
+            max_batch_seconds=0.01,
+        )
+
+
+@pytest.mark.asyncio
 async def test_seeded_concurrent_trace_matches_every_cache_backend(
     event_cache_factory: Callable[[], ConversationEventCache],
 ) -> None:

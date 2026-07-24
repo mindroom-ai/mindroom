@@ -36,6 +36,7 @@ from mindroom.matrix.cache import (
     ThreadRevision,
     thread_cache_rejection_reason,
 )
+from mindroom.matrix.cache.event_cache_events import event_redaction_candidate_ids
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from mindroom.matrix.cache.thread_write_cache_ops import ThreadMutationCacheOps
 from mindroom.matrix.cache.thread_writes import ThreadSyncWritePolicy
@@ -50,6 +51,7 @@ if TYPE_CHECKING:
 FUZZ_PRINCIPAL = "@mindroom_cache_fuzz:localhost"
 OTHER_PRINCIPAL = "@mindroom_cache_fuzz_other:localhost"
 _BASE_TIMESTAMP = 1_700_000_000_000
+_MAX_CONCURRENT_CACHE_RUNTIMES = 16
 
 
 def _required_int(value: dict[str, object], key: str) -> int:
@@ -366,6 +368,11 @@ class ReferenceCacheModel:
         current_room_id = cast("str", source["room_id"])
         event_id = cast("str", source["event_id"])
         event_type = source.get("type")
+        if self._source_is_tombstoned(source):
+            current_thread_id = self._resolve_source_thread(source)
+            if current_thread_id is not None:
+                self._mark_thread_stale_by_id(current_room_id, current_thread_id, "sync_append_failed")
+            return
         accepted = self._store_point_event(source)
         if event_type == "m.reaction":
             return
@@ -402,18 +409,19 @@ class ReferenceCacheModel:
         )
         self._revalidate_thread_by_id(current_room_id, current_thread_id)
 
+    def _source_is_tombstoned(self, source: dict[str, Any]) -> bool:
+        """Return whether the source or its replacement target is tombstoned."""
+        current_room_id = cast("str", source["room_id"])
+        event_id = cast("str", source["event_id"])
+        original_event_id = self._edit_target(source)
+        return (current_room_id, event_id) in self.tombstones or (
+            original_event_id is not None and (current_room_id, original_event_id) in self.tombstones
+        )
+
     def _store_point_event(self, source: dict[str, Any]) -> bool:
         current_room_id = cast("str", source["room_id"])
         event_id = cast("str", source["event_id"])
         key = (current_room_id, event_id)
-        relation = cast("dict[str, Any]", source.get("content", {})).get("m.relates_to")
-        original_event_id = (
-            relation.get("event_id") if isinstance(relation, dict) and relation.get("rel_type") == "m.replace" else None
-        )
-        if key in self.tombstones or (
-            isinstance(original_event_id, str) and (current_room_id, original_event_id) in self.tombstones
-        ):
-            return False
         previous = self.events.get(key)
         if (
             previous is not None
@@ -488,12 +496,25 @@ class ReferenceCacheModel:
 
     def _delete_event(self, current_room_id: str, event_id: str) -> None:
         self.events.pop((current_room_id, event_id), None)
-        mapped_thread_id = self.mappings.pop((current_room_id, event_id), None)
-        for (event_room_id, _thread_id), members in self.threads.items():
+        self.mappings.pop((current_room_id, event_id), None)
+        affected_thread_ids: set[str] = set()
+        for (event_room_id, current_thread_id), members in self.threads.items():
             if event_room_id == current_room_id:
+                if event_id in members:
+                    affected_thread_ids.add(current_thread_id)
                 members.pop(event_id, None)
-        if mapped_thread_id == event_id and self.threads.get((current_room_id, event_id)):
-            self.mappings[(current_room_id, event_id)] = event_id
+        for current_thread_id in affected_thread_ids:
+            root_key = (current_room_id, current_thread_id)
+            has_surviving_relation = any(
+                event_room_id == current_room_id
+                and related_event_id != current_thread_id
+                and mapped_thread_id == current_thread_id
+                for (event_room_id, related_event_id), mapped_thread_id in self.mappings.items()
+            )
+            if has_surviving_relation:
+                self.mappings[root_key] = current_thread_id
+            else:
+                self.mappings.pop(root_key, None)
 
     def replace_thread(
         self,
@@ -589,12 +610,20 @@ class ReferenceCacheModel:
         self.room_reasons.pop(current_room_id, None)
         self.room_invalidated_at.pop(current_room_id, None)
 
-    def latest_edit(self, current_room_id: str, original_event_id: str) -> dict[str, Any] | None:
+    def latest_edit(
+        self,
+        current_room_id: str,
+        original_event_id: str,
+        *,
+        sender: str | None = None,
+    ) -> dict[str, Any] | None:
         """Select a valid surviving edit by the Matrix timestamp/event-ID order."""
         candidates = [
             event
             for (event_room_id, _event_id), event in self.events.items()
-            if event_room_id == current_room_id and self._edit_target(event) == original_event_id
+            if event_room_id == current_room_id
+            and self._edit_target(event) == original_event_id
+            and (sender is None or event.get("sender") == sender)
         ]
         return max(
             candidates,
@@ -619,13 +648,28 @@ class ReferenceCacheModel:
             assert await cache.get_event(current_room_id, event_id) == self.events.get(key), (
                 f"reference point payload mismatch: {current_room_id} {event_id}"
             )
-            assert await cache.get_thread_id_for_event(current_room_id, event_id) == self.mappings.get(key), (
-                f"reference thread mapping mismatch: {current_room_id} {event_id}"
+            actual_mapping = await cache.get_thread_id_for_event(current_room_id, event_id)
+            expected_mapping = self.mappings.get(key)
+            assert actual_mapping == expected_mapping, (
+                f"reference thread mapping mismatch: {current_room_id} {event_id} "
+                f"expected={expected_mapping!r} actual={actual_mapping!r}"
             )
             assert await cache.get_latest_edit(current_room_id, event_id) == self.latest_edit(
                 current_room_id,
                 event_id,
             ), f"reference latest-edit mismatch: {current_room_id} {event_id}"
+            event = self.events.get(key)
+            sender = None if event is None else event.get("sender")
+            if isinstance(sender, str):
+                assert await cache.get_latest_edit(
+                    current_room_id,
+                    event_id,
+                    sender=sender,
+                ) == self.latest_edit(
+                    current_room_id,
+                    event_id,
+                    sender=sender,
+                ), f"reference sender-scoped latest-edit mismatch: {current_room_id} {event_id}"
         for room in range(room_count):
             current_room_id = room_id(room)
             for thread in range(thread_count):
@@ -657,20 +701,40 @@ class ReferenceCacheModel:
                     assert revision.max_origin_server_ts == max(
                         timestamp for timestamp, _sequence in expected_members.values()
                     )
+                    assert revision.max_write_seq > 0
+                    assert revision.max_thread_write_seq > 0
                 state = await cache.get_thread_cache_state(current_room_id, current_thread_id)
                 expected_thread_reason = self.thread_reasons.get(key)
                 expected_room_reason = self.room_reasons.get(current_room_id)
-                if state is not None:
-                    assert state.invalidation_reason == expected_thread_reason, (
-                        f"reference thread invalidation mismatch: {current_room_id} "
-                        f"{current_thread_id} expected={expected_thread_reason!r} "
-                        f"actual={state.invalidation_reason!r}"
-                    )
-                    assert state.room_invalidation_reason == expected_room_reason, (
-                        f"reference room invalidation mismatch: {current_room_id} "
-                        f"{current_thread_id} expected={expected_room_reason!r} "
-                        f"actual={state.room_invalidation_reason!r}"
-                    )
+                state_expected = (
+                    expected_members is not None or key in self.thread_reasons or expected_room_reason is not None
+                )
+                assert (state is not None) is state_expected, (
+                    f"reference cache-state presence mismatch: {current_room_id} {current_thread_id}"
+                )
+                if state is None:
+                    continue
+                assert state.invalidation_reason == expected_thread_reason, (
+                    f"reference thread invalidation mismatch: {current_room_id} "
+                    f"{current_thread_id} expected={expected_thread_reason!r} "
+                    f"actual={state.invalidation_reason!r}"
+                )
+                assert state.room_invalidation_reason == expected_room_reason, (
+                    f"reference room invalidation mismatch: {current_room_id} "
+                    f"{current_thread_id} expected={expected_room_reason!r} "
+                    f"actual={state.room_invalidation_reason!r}"
+                )
+                assert (state.invalidated_at is not None) is (expected_thread_reason is not None)
+                assert (state.room_invalidated_at is not None) is (expected_room_reason is not None)
+                expected_room_is_newer = self.room_invalidated_at.get(current_room_id, -1) >= (
+                    self.thread_validated_at.get(key, -1)
+                )
+                actual_room_is_newer = state.room_invalidated_at is not None and (
+                    state.validated_at is None or state.room_invalidated_at >= state.validated_at
+                )
+                assert actual_room_is_newer is (expected_room_reason is not None and expected_room_is_newer), (
+                    f"reference room/thread trust ordering mismatch: {current_room_id} {current_thread_id}"
+                )
 
 
 def room_id(room: int) -> str:
@@ -1121,6 +1185,7 @@ class CacheFuzzRunner:
     def __init__(
         self,
         cache: ConversationEventCache,
+        cache_factory: Callable[[], ConversationEventCache],
         scenario: FuzzScenario,
         *,
         room_count: int,
@@ -1129,6 +1194,7 @@ class CacheFuzzRunner:
         verify_reference_model: bool = False,
     ) -> None:
         self.root_cache = cache
+        self.cache_factory = cache_factory
         self.cache = cache.for_principal(FUZZ_PRINCIPAL)
         self.other_cache = cache.for_principal(OTHER_PRINCIPAL)
         self.policy = _build_sync_policy(self.cache)
@@ -1187,18 +1253,102 @@ class CacheFuzzRunner:
                         thread_count=self.thread_count,
                     )
             started = time.perf_counter()
-            await asyncio.gather(
-                *(self._apply_operation(operation) for operation in batch),
-            )
+            batch_run = self._apply_batch(batch)
+            if self.max_batch_seconds is None:
+                await batch_run
+            else:
+                try:
+                    async with asyncio.timeout(self.max_batch_seconds):
+                        await batch_run
+                except TimeoutError as exc:
+                    msg = f"cache fuzz batch timed out after {self.max_batch_seconds:.3f}s"
+                    raise AssertionError(msg) from exc
             batch_seconds = time.perf_counter() - started
             self.max_batch_latency_ms = max(self.max_batch_latency_ms, batch_seconds * 1000)
             if self.max_batch_seconds is not None:
                 assert batch_seconds <= self.max_batch_seconds, (
                     f"cache fuzz batch exceeded latency bound: {batch_seconds:.3f}s > {self.max_batch_seconds:.3f}s"
                 )
+            await self._assert_concurrent_batch_postconditions(batch)
             await self.assert_invariants()
             await self._assert_reference_model()
         return await self.observe()
+
+    async def _assert_concurrent_batch_postconditions(self, batch: tuple[FuzzOperation, ...]) -> None:
+        """Require independent concurrent writes to remain observable."""
+        if len(batch) == 1:
+            return
+        destructive_lanes = {
+            (operation.room, operation.thread)
+            for operation in batch
+            if operation.kind in {OperationKind.REPLACE_THREAD, OperationKind.INVALIDATE_THREAD}
+        }
+        redaction_targets = {
+            (room_id(operation.room), _redaction_target(operation))
+            for operation in batch
+            if operation.kind is OperationKind.REDACTION
+        }
+        for operation in batch:
+            if (
+                operation.kind
+                not in {
+                    OperationKind.THREADED_MESSAGE,
+                    OperationKind.PLAIN_REPLY,
+                    OperationKind.EDIT,
+                    OperationKind.REACTION,
+                    OperationKind.REFERENCE,
+                    OperationKind.CIPHERTEXT_REPLAY,
+                }
+                or (operation.room, operation.thread) in destructive_lanes
+            ):
+                continue
+            source = _operation_sources(operation)[0]
+            current_room_id = cast("str", source["room_id"])
+            event_id = cast("str", source["event_id"])
+            room_redacted_ids = {
+                redacted_event_id
+                for known_room_id, redacted_event_id in self.redacted_ids
+                if known_room_id == current_room_id
+            }
+            if (
+                (current_room_id, event_id) in redaction_targets
+                or (current_room_id, event_id) in self.redacted_ids
+                or not event_redaction_candidate_ids(event_id, source).isdisjoint(room_redacted_ids)
+            ):
+                continue
+            assert await self.cache.get_event(current_room_id, event_id) is not None, (
+                f"independent concurrent event write disappeared: {current_room_id} {event_id}"
+            )
+
+    async def _apply_batch(self, batch: tuple[FuzzOperation, ...]) -> None:
+        """Run concurrent operations through independent storage connections."""
+        if len(batch) == 1:
+            await self._apply_operation(batch[0])
+            return
+        roots: list[ConversationEventCache] = []
+        runners: list[CacheFuzzRunner] = []
+        try:
+            for _ in range(min(len(batch), _MAX_CONCURRENT_CACHE_RUNTIMES)):
+                root = self.cache_factory()
+                await root.initialize()
+                roots.append(root)
+                runner = CacheFuzzRunner(
+                    root,
+                    self.cache_factory,
+                    FuzzScenario(batches=()),
+                    room_count=self.room_count,
+                    thread_count=self.thread_count,
+                )
+                runner.known_ids = self.known_ids
+                runner.redacted_ids = self.redacted_ids
+                runner.reaction_ids = self.reaction_ids
+                runner.clear_event_ids = self.clear_event_ids
+                runners.append(runner)
+            await asyncio.gather(
+                *(runners[index % len(runners)]._apply_operation(operation) for index, operation in enumerate(batch)),
+            )
+        finally:
+            await asyncio.gather(*(root.close() for root in roots))
 
     async def _assert_reference_model(self) -> None:
         if self.reference_model is None:
@@ -1351,12 +1501,18 @@ class CacheFuzzRunner:
     async def _apply_room_rejoin(self, operation: FuzzOperation) -> None:
         """Cross a durable departure epoch, purge, rejoin, and incrementally refill."""
         current_room_id = room_id(operation.room)
+        old_membership_epoch = await self.cache.room_membership_epoch(current_room_id)
+        assert old_membership_epoch is not None
+        stale_fetch_started_at = time.time()
         departure_epoch = self.cache.mark_room_departed(current_room_id)
         await self.cache.purge_room(current_room_id)
         await self.cache.mark_room_joined(
             current_room_id,
             expected_departure_epoch=departure_epoch,
         )
+        new_membership_epoch = await self.cache.room_membership_epoch(current_room_id)
+        assert new_membership_epoch is not None
+        assert new_membership_epoch != old_membership_epoch
         for known_room_id, event_id in tuple(self.redacted_ids):
             if known_room_id == current_room_id:
                 self.redacted_ids.discard((known_room_id, event_id))
@@ -1367,6 +1523,15 @@ class CacheFuzzRunner:
             if known_room_id == current_room_id:
                 self.clear_event_ids.discard((known_room_id, event_id))
         await self._seed_room(operation.room)
+        stale_write_accepted = await self.cache.replace_thread_if_not_newer(
+            current_room_id,
+            thread_id(operation.room, operation.thread),
+            [root_source(operation.room, operation.thread)],
+            expected_membership_epoch=old_membership_epoch,
+            fetch_started_at=stale_fetch_started_at,
+            validated_at=time.time(),
+        )
+        assert not stale_write_accepted
         self.rejoin_count += 1
 
     async def _assert_tombstone_invariants(self) -> None:
@@ -1388,6 +1553,15 @@ class CacheFuzzRunner:
         for current_room_id, event_id in sorted(self.known_ids):
             assert await self.other_cache.get_event(current_room_id, event_id) is None
             assert await self.other_cache.get_thread_id_for_event(current_room_id, event_id) is None
+            assert await self.other_cache.get_latest_edit(current_room_id, event_id) is None
+
+        for room in range(self.room_count):
+            for thread in range(self.thread_count):
+                current_room_id = room_id(room)
+                current_thread_id = thread_id(room, thread)
+                assert await self.other_cache.get_thread_events(current_room_id, current_thread_id) is None
+                assert await self.other_cache.get_thread_revision(current_room_id, current_thread_id) is None
+                assert await self.other_cache.get_thread_cache_state(current_room_id, current_thread_id) is None
 
         for current_room_id, event_id in sorted(self.reaction_ids):
             assert await self.cache.get_thread_id_for_event(current_room_id, event_id) is None
@@ -1528,6 +1702,7 @@ async def run_scenario(
     await root_cache.initialize()
     runner = CacheFuzzRunner(
         root_cache,
+        cache_factory,
         scenario,
         room_count=scenario.room_count,
         thread_count=scenario.thread_count,
@@ -1552,6 +1727,7 @@ async def run_scenario(
     await reopened_root.initialize()
     reopened = CacheFuzzRunner(
         reopened_root,
+        cache_factory,
         FuzzScenario(batches=()),
         room_count=scenario.room_count,
         thread_count=scenario.thread_count,
@@ -1560,7 +1736,7 @@ async def run_scenario(
     reopened.redacted_ids = redacted_ids
     reopened.reaction_ids = reaction_ids
     reopened.clear_event_ids = set(runner.clear_event_ids)
-    reopened.cache_generation = reopened_root.cache_generation
+    reopened.cache_generation = runner.cache_generation
     try:
         await reopened.assert_invariants()
         restarted_result = await reopened.observe()
