@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -20,6 +20,55 @@ from scripts.testing.fuzz_live_matrix import (
 )
 
 LIMITED_SYNC_REPRODUCER = Path(__file__).parent / "fixtures" / "matrix_fuzz" / "limited_sync_concurrent_branch.json"
+
+
+def test_exact_nio_provenance_fails_closed() -> None:
+    """An exact campaign may not run against unverifiable or different nio."""
+    provenance = fuzz_live_matrix.RuntimeProvenance(
+        mindroom_revision="mindroom-sha",
+        nio_module_path="/loaded/nio/__init__.py",
+        nio_version="1.0",
+        nio_revision="loaded-sha",
+        nio_expected_revision="required-sha",
+    )
+
+    with pytest.raises(RuntimeError, match=r"required-sha.*loaded-sha"):
+        fuzz_live_matrix._validate_nio_provenance(provenance)
+
+
+def test_failure_artifact_includes_loaded_code_provenance(tmp_path: Path) -> None:
+    """Failure JSON must identify both loaded repositories and exact trace."""
+    provenance = fuzz_live_matrix.RuntimeProvenance(
+        mindroom_revision="mindroom-sha",
+        nio_module_path="/loaded/nio/__init__.py",
+        nio_version="1.0",
+        nio_revision="nio-sha",
+        nio_expected_revision="nio-sha",
+    )
+
+    class ArtifactStack:
+        log_path = tmp_path / "mindroom.log"
+
+        @staticmethod
+        def diagnostic_counts() -> dict[str, int]:
+            return {"event_loop_stalls": 0}
+
+    ArtifactStack.log_path.write_text("runtime output", encoding="utf-8")
+    artifact = fuzz_live_matrix._failure_artifact(
+        error=AssertionError("boom"),
+        scenario=live_scenario_from_seed(1, steps=1, thread_count=1, restart_interval=0),
+        seed=1,
+        provenance=provenance,
+        stack=cast("fuzz_live_matrix.ManagedTuwunelStack", ArtifactStack()),
+        runtime_ms=123,
+    )
+
+    assert artifact["mindroom_revision"] == "mindroom-sha"
+    assert artifact["nio_module_path"] == "/loaded/nio/__init__.py"
+    assert artifact["nio_version"] == "1.0"
+    assert artifact["nio_revision"] == "nio-sha"
+    assert artifact["scenario"]["version"] == 1
+    assert artifact["mindroom_log"] == "runtime output"
 
 
 def test_live_scenario_is_deterministic_and_json_replayable() -> None:

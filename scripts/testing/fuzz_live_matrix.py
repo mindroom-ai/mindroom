@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import importlib.metadata
 import itertools
 import json
 import os
@@ -38,6 +39,7 @@ from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import quote
 
 import httpx
+import nio
 import yaml
 
 if TYPE_CHECKING:
@@ -52,6 +54,21 @@ ROOM_KEY = "lobby"
 RECOVERY_TIMELINE_LIMIT = 50
 REGISTRY_READ_ATTEMPTS = 3
 REGISTRY_READ_RETRY_SECONDS = 0.05
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeProvenance:
+    """Exact code loaded by one live campaign."""
+
+    mindroom_revision: str
+    nio_module_path: str
+    nio_version: str
+    nio_revision: str
+    nio_expected_revision: str
+
+    def as_dict(self) -> dict[str, str]:
+        """Return JSON-ready provenance fields."""
+        return asdict(self)
 
 
 def _required_int(value: Mapping[str, object], key: str) -> int:
@@ -779,6 +796,70 @@ def _run_command(*command: str) -> str:
         msg = f"command failed ({' '.join(command)}):\n{result.stdout}\n{result.stderr}"
         raise RuntimeError(msg)
     return result.stdout
+
+
+def _git_revision_for_file(path: Path) -> str | None:
+    """Return HEAD only when `path` is tracked by the containing worktree."""
+    root_result = subprocess.run(
+        ("git", "-C", str(path.parent), "rev-parse", "--show-toplevel"),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if root_result.returncode:
+        return None
+    root = Path(root_result.stdout.strip()).resolve()
+    resolved_path = path.resolve()
+    if not resolved_path.is_relative_to(root):
+        return None
+    relative_path = resolved_path.relative_to(root)
+    tracked_result = subprocess.run(
+        ("git", "-C", str(root), "ls-files", "--error-unmatch", str(relative_path)),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if tracked_result.returncode:
+        return None
+    revision_result = subprocess.run(
+        ("git", "-C", str(root), "rev-parse", "HEAD"),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return revision_result.stdout.strip() if revision_result.returncode == 0 else None
+
+
+def _runtime_provenance() -> RuntimeProvenance:
+    """Inspect the imported nio package instead of trusting an environment label."""
+    nio_file = nio.__file__
+    if nio_file is None:
+        msg = "imported nio module has no filesystem path"
+        raise RuntimeError(msg)
+    nio_path = Path(nio_file).resolve()
+    nio_revision = _git_revision_for_file(nio_path)
+    mindroom_revision = _git_revision_for_file(PROJECT_ROOT / "pyproject.toml")
+    if mindroom_revision is None:
+        msg = "could not resolve the MindRoom revision containing the live runner"
+        raise RuntimeError(msg)
+    return RuntimeProvenance(
+        mindroom_revision=mindroom_revision,
+        nio_module_path=str(nio_path),
+        nio_version=importlib.metadata.version("mindroom-nio"),
+        nio_revision=nio_revision or "unverified",
+        nio_expected_revision=os.getenv("MINDROOM_NIO_FUZZ_COMMIT", "unspecified"),
+    )
+
+
+def _validate_nio_provenance(provenance: RuntimeProvenance) -> None:
+    """Fail closed when a campaign requests an exact nio revision."""
+    expected = provenance.nio_expected_revision
+    if expected not in {"unspecified", provenance.nio_revision}:
+        msg = (
+            "loaded mindroom-nio revision does not match campaign requirement: "
+            f"expected {expected}, loaded {provenance.nio_revision} from {provenance.nio_module_path}"
+        )
+        raise RuntimeError(msg)
 
 
 def _read_instance_registry() -> dict[str, Any]:
@@ -2253,6 +2334,30 @@ async def _run_live(
         await asyncio.gather(*(client.close() for client in clients))
 
 
+def _failure_artifact(
+    *,
+    error: Exception,
+    scenario: LiveFuzzScenario,
+    seed: int | str,
+    provenance: RuntimeProvenance,
+    stack: ManagedTuwunelStack,
+    runtime_ms: int,
+) -> dict[str, Any]:
+    """Build one replayable failure record with loaded-code provenance."""
+    return {
+        "diagnostics": stack.diagnostic_counts(),
+        "error": f"{type(error).__name__}: {error}",
+        "mindroom_log": (
+            stack.log_path.read_text(encoding="utf-8", errors="replace") if stack.log_path.exists() else ""
+        ),
+        "profile": scenario.profile,
+        "runtime_ms": runtime_ms,
+        "scenario": json.loads(scenario.to_json()),
+        "seed": seed,
+        **provenance.as_dict(),
+    }
+
+
 def main() -> None:
     """Run one trace against a fresh disposable real-server stack."""
     args = _parse_args()
@@ -2293,8 +2398,11 @@ def main() -> None:
         stream_segments=96 if scenario.profile == "saturation" else 4,
         stream_delay=0.012 if scenario.profile == "saturation" else 0.001,
     )
+    provenance = _runtime_provenance()
+    seed: int | str = args.seed if args.trace is None else "trace"
     started = time.monotonic()
     try:
+        _validate_nio_provenance(provenance)
         stack.start()
         result = asyncio.run(
             _run_live(
@@ -2305,21 +2413,28 @@ def main() -> None:
             ),
         )
         result["profile"] = scenario.profile
-        result["seed"] = args.seed if args.trace is None else "trace"
-        result["nio_revision"] = os.getenv("MINDROOM_NIO_FUZZ_COMMIT", "installed")
+        result["seed"] = seed
         result["preexisting_fuzz_servers"] = stack.preexisting_fuzz_servers
         result["runtime_ms"] = round((time.monotonic() - started) * 1000)
+        result.update(provenance.as_dict())
         result.update(stack.diagnostic_counts())
         print(json.dumps(result, sort_keys=True))
-    except Exception:
-        print("Live Matrix fuzz trace:", file=sys.stderr)
-        print(args.trace or scenario.to_json(), file=sys.stderr)
-        print(json.dumps(stack.diagnostic_counts(), sort_keys=True), file=sys.stderr)
-        if args.failure_log is not None and stack.log_path.exists():
-            args.failure_log.write_text(
-                stack.log_path.read_text(encoding="utf-8", errors="replace"),
-                encoding="utf-8",
-            )
+    except Exception as error:
+        artifact = _failure_artifact(
+            error=error,
+            scenario=scenario,
+            seed=seed,
+            provenance=provenance,
+            stack=stack,
+            runtime_ms=round((time.monotonic() - started) * 1000),
+        )
+        print("Live Matrix fuzz failure:", file=sys.stderr)
+        print(
+            json.dumps({key: value for key, value in artifact.items() if key != "mindroom_log"}, sort_keys=True),
+            file=sys.stderr,
+        )
+        if args.failure_log is not None:
+            args.failure_log.write_text(json.dumps(artifact, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         log_tail = stack.log_tail()
         if log_tail:
             print("MindRoom log tail:", file=sys.stderr)
