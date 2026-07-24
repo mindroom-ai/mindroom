@@ -36,6 +36,13 @@
 - The real-Tuwunel gate did not run at `18a863399`.
 - The direct production-seam reproduction changed from forged output to the original body, and bundled validation changed from `True` to `False`.
 - New focused regressions plus all approval-manager tests pass: `115 passed`.
+- Full owning files pass: `260 passed`.
+- Relevant cache/backend/consumer matrix passes: `600 passed`.
+- Full pytest passes: `11524 passed`, `54 skipped`, `30 warnings`.
+- Explicit Tach dependency/interface validation passes.
+- All-file pre-commit passes on the second run.
+- The first hook run reformatted seven unrelated frontend files already known to drift from the checked-in Prettier output.
+- Those unrelated hook changes were reversed exactly and remain outside the branch.
 
 ## Preserved local files
 
