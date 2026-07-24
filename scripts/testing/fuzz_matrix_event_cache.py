@@ -55,7 +55,15 @@ _BASE_TIMESTAMP = 1_700_000_000_000
 def _required_int(value: dict[str, object], key: str) -> int:
     field = value.get(key)
     if not isinstance(field, int) or isinstance(field, bool):
-        msg = f"Matrix cache fuzz operation field {key!r} must be an integer"
+        msg = f"Matrix cache fuzz field {key!r} must be an integer"
+        raise TypeError(msg)
+    return field
+
+
+def _required_bool(value: dict[str, object], key: str) -> bool:
+    field = value.get(key)
+    if not isinstance(field, bool):
+        msg = f"Matrix cache fuzz field {key!r} must be a boolean"
         raise TypeError(msg)
     return field
 
@@ -109,24 +117,44 @@ class FuzzOperation:
 
 @dataclass(frozen=True, slots=True)
 class FuzzScenario:
-    """Ordered concurrent batches forming one replayable cache history."""
+    """Self-describing cache workload made of ordered concurrent batches.
+
+    Replay preserves the exact operations and batch boundaries. Operations within one batch run
+    concurrently, but their event-loop interleaving is deliberately not recorded.
+    """
 
     batches: tuple[tuple[FuzzOperation, ...], ...]
+    room_count: int = 2
+    thread_count: int = 4
+    verify_reference_model: bool = False
 
     def to_json(self) -> str:
         """Serialize the complete trace for exact replay."""
         payload = {
-            "version": 1,
+            "version": 2,
             "batches": [[asdict(operation) for operation in batch] for batch in self.batches],
+            "room_count": self.room_count,
+            "thread_count": self.thread_count,
+            "verify_reference_model": self.verify_reference_model,
         }
         return json.dumps(payload, indent=2, sort_keys=True)
 
     def validate(self) -> None:
         """Reject lifecycle operations that cannot safely race storage users."""
+        if self.room_count < 1 or self.thread_count < 1:
+            msg = "Matrix cache fuzz room and thread counts must be positive"
+            raise ValueError(msg)
         for batch in self.batches:
             if not batch:
                 msg = "Matrix cache fuzz batches must not be empty"
                 raise ValueError(msg)
+            for operation in batch:
+                if not 0 <= operation.room < self.room_count:
+                    msg = f"Matrix cache fuzz room index {operation.room} exceeds configured room count"
+                    raise ValueError(msg)
+                if not 0 <= operation.thread < self.thread_count:
+                    msg = f"Matrix cache fuzz thread index {operation.thread} exceeds configured thread count"
+                    raise ValueError(msg)
             if (
                 any(operation.kind in {OperationKind.REOPEN_CACHE, OperationKind.REJOIN_ROOM} for operation in batch)
                 and len(batch) != 1
@@ -139,7 +167,7 @@ class FuzzScenario:
     def from_json(cls, value: str) -> FuzzScenario:
         """Load a trace emitted by :meth:`to_json`."""
         payload = json.loads(value)
-        if not isinstance(payload, dict) or payload.get("version") != 1:
+        if not isinstance(payload, dict) or payload.get("version") != 2:
             msg = "unsupported Matrix cache fuzz trace"
             raise ValueError(msg)
         raw_batches = payload.get("batches")
@@ -151,6 +179,9 @@ class FuzzScenario:
                 tuple(FuzzOperation.from_dict(cast("dict[str, object]", operation)) for operation in batch)
                 for batch in raw_batches
             ),
+            room_count=_required_int(payload, "room_count"),
+            thread_count=_required_int(payload, "thread_count"),
+            verify_reference_model=_required_bool(payload, "verify_reference_model"),
         )
         scenario.validate()
         return scenario
@@ -230,6 +261,26 @@ class ObservableCacheState:
             comparable_revisions,
             self.invalidation_reasons,
         )
+
+
+_REFERENCE_INCREMENTAL_THREAD_REASONS = frozenset(
+    {
+        "live_thread_mutation",
+        "outbound_thread_mutation",
+        "sync_thread_mutation",
+    },
+)
+
+
+def _reduce_thread_invalidation_reason(current: str | None, incoming: str) -> str:
+    """Apply the cache contract's sticky precedence without calling production reducers."""
+    if current is None:
+        return incoming
+    current_is_incremental = current in _REFERENCE_INCREMENTAL_THREAD_REASONS
+    incoming_is_incremental = incoming in _REFERENCE_INCREMENTAL_THREAD_REASONS
+    if current_is_incremental != incoming_is_incremental:
+        return current if incoming_is_incremental else incoming
+    return incoming
 
 
 @dataclass(slots=True)
@@ -490,7 +541,11 @@ class ReferenceCacheModel:
         current_thread_id: str,
         reason: str,
     ) -> None:
-        self.thread_reasons[(current_room_id, current_thread_id)] = reason
+        key = (current_room_id, current_thread_id)
+        self.thread_reasons[key] = _reduce_thread_invalidation_reason(
+            self.thread_reasons.get(key),
+            reason,
+        )
 
     def _revalidate_thread(self, room: int, thread: int) -> None:
         self._revalidate_thread_by_id(room_id(room), thread_id(room, thread))
@@ -1462,11 +1517,8 @@ async def run_scenario(
     cache_factory: Callable[[], ConversationEventCache],
     scenario: FuzzScenario,
     *,
-    room_count: int = 2,
-    thread_count: int = 4,
     verify_restart: bool = True,
     max_batch_seconds: float | None = None,
-    verify_reference_model: bool = False,
 ) -> ObservableCacheState:
     """Run one scenario, emitting its exact trace on failure."""
     root_cache = cache_factory()
@@ -1474,10 +1526,10 @@ async def run_scenario(
     runner = CacheFuzzRunner(
         root_cache,
         scenario,
-        room_count=room_count,
-        thread_count=thread_count,
+        room_count=scenario.room_count,
+        thread_count=scenario.thread_count,
         max_batch_seconds=max_batch_seconds,
-        verify_reference_model=verify_reference_model,
+        verify_reference_model=scenario.verify_reference_model,
     )
     try:
         result = await runner.run()
@@ -1498,8 +1550,8 @@ async def run_scenario(
     reopened = CacheFuzzRunner(
         reopened_root,
         FuzzScenario(batches=()),
-        room_count=room_count,
-        thread_count=thread_count,
+        room_count=scenario.room_count,
+        thread_count=scenario.thread_count,
     )
     reopened.known_ids = known_ids
     reopened.redacted_ids = redacted_ids
@@ -1548,6 +1600,7 @@ def scenario_from_seed(
     room_count: int = 2,
     thread_count: int = 4,
     max_batch_size: int = 8,
+    verify_reference_model: bool = False,
 ) -> FuzzScenario:
     """Generate a deterministic long-running scenario."""
     randomizer = random.Random(seed)  # noqa: S311 - deterministic test trace generation
@@ -1588,7 +1641,12 @@ def scenario_from_seed(
             )
         batches.append(tuple(batch_operations))
         remaining -= batch_size
-    scenario = FuzzScenario(batches=tuple(batches))
+    scenario = FuzzScenario(
+        batches=tuple(batches),
+        room_count=room_count,
+        thread_count=thread_count,
+        verify_reference_model=verify_reference_model,
+    )
     scenario.validate()
     return scenario
 
@@ -1610,6 +1668,7 @@ def model_based_scenario() -> FuzzScenario:
             (operation(OperationKind.REDACTION, 0, 0, 10, 6, 3),),
             (operation(OperationKind.THREADED_MESSAGE, 0, 0, 4, 0, 0),),
             (operation(OperationKind.CIPHERTEXT_REPLAY, 0, 0, 4, 0, 0),),
+            (operation(OperationKind.THREADED_MESSAGE, 0, 0, 4, 0, 0),),
             (operation(OperationKind.REOPEN_CACHE, 0, 0, 0, 0, 0),),
             (
                 operation(OperationKind.THREADED_MESSAGE, 0, 1, 1, 0, 0),
@@ -1620,6 +1679,9 @@ def model_based_scenario() -> FuzzScenario:
             (operation(OperationKind.REJOIN_ROOM, 1, 0, 0, 0, 0),),
             (operation(OperationKind.THREADED_MESSAGE, 1, 2, 3, 0, 0),),
         ),
+        room_count=2,
+        thread_count=3,
+        verify_reference_model=True,
     )
     scenario.validate()
     return scenario
@@ -1660,6 +1722,8 @@ def concurrent_fanout_scenario(thread_count: int = 45) -> FuzzScenario:
     )
     scenario = FuzzScenario(
         batches=(initial_messages, mixed_mutations, disruptive_mutations),
+        room_count=1,
+        thread_count=thread_count,
     )
     scenario.validate()
     return scenario
@@ -1680,6 +1744,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--rooms", type=_positive_int, default=2)
     parser.add_argument("--threads", type=_positive_int, default=4)
     parser.add_argument("--max-batch-size", type=_positive_int, default=8)
+    parser.add_argument(
+        "--verify-reference-model",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Verify generated traces against the independent model; replay uses the saved setting.",
+    )
     parser.add_argument("--trace", type=Path)
     parser.add_argument("--save-trace", type=Path)
     return parser.parse_args()
@@ -1697,6 +1767,7 @@ def main() -> None:
             room_count=args.rooms,
             thread_count=args.threads,
             max_batch_size=args.max_batch_size,
+            verify_reference_model=args.verify_reference_model,
         )
     )
     if args.save_trace is not None:
@@ -1707,8 +1778,6 @@ def main() -> None:
             run_scenario(
                 lambda: SqliteEventCache(db_path),
                 scenario,
-                room_count=args.rooms,
-                thread_count=args.threads,
             ),
         )
     print(
@@ -1716,8 +1785,11 @@ def main() -> None:
             {
                 "batches": len(scenario.batches),
                 "operations": sum(len(batch) for batch in scenario.batches),
+                "rooms": scenario.room_count,
                 "seed": args.seed if args.trace is None else None,
                 "status": "PASS",
+                "threads": scenario.thread_count,
+                "verify_reference_model": scenario.verify_reference_model,
             },
             sort_keys=True,
         ),

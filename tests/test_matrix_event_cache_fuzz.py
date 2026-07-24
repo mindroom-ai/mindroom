@@ -18,6 +18,8 @@ from scripts.testing.fuzz_matrix_event_cache import (
     FuzzOperation,
     FuzzScenario,
     OperationKind,
+    ReferenceCacheModel,
+    _reduce_thread_invalidation_reason,
     ciphertext_source,
     concurrent_fanout_scenario,
     edit_source,
@@ -66,7 +68,13 @@ def _scenario_strategy() -> st.SearchStrategy[FuzzScenario]:
         st.one_of(concurrent_batch, lifecycle_batch),
         min_size=1,
         max_size=4,
-    ).map(lambda batches: FuzzScenario(batches=tuple(batches)))
+    ).map(
+        lambda batches: FuzzScenario(
+            batches=tuple(batches),
+            room_count=2,
+            thread_count=3,
+        ),
+    )
 
 
 _CONCURRENT_REDACTION_REPLAY = FuzzScenario(
@@ -87,6 +95,8 @@ _CONCURRENT_REDACTION_REPLAY = FuzzScenario(
             FuzzOperation(OperationKind.REPLACE_THREAD, 0, 0, 0, 0, 4),
         ),
     ),
+    room_count=2,
+    thread_count=3,
 )
 
 
@@ -109,8 +119,6 @@ def test_hypothesis_matrix_cache_traces_preserve_sqlite_invariants(
             run_scenario(
                 lambda: SqliteEventCache(db_path),
                 scenario,
-                room_count=2,
-                thread_count=3,
                 verify_restart=False,
             ),
         )
@@ -130,8 +138,6 @@ async def test_seeded_concurrent_trace_matches_every_cache_backend(
             thread_count=4,
             max_batch_size=6,
         ),
-        room_count=2,
-        thread_count=4,
     )
 
 
@@ -142,16 +148,13 @@ async def test_model_trace_has_exact_semantics_and_backend_parity(
 ) -> None:
     """The explicit state model agrees across both durable implementations."""
     sqlite_path = tmp_path / "model-event-cache.db"
-    postgres_namespace = f"model_fuzz_{uuid.uuid4().hex}"
+    postgres_namespace = f"test_model_fuzz_{uuid.uuid4().hex}"
     scenario = model_based_scenario()
 
     sqlite_state = await run_scenario(
         lambda: SqliteEventCache(sqlite_path),
         scenario,
-        room_count=2,
-        thread_count=3,
         max_batch_seconds=5,
-        verify_reference_model=True,
     )
     postgres_state = await run_scenario(
         lambda: PostgresEventCache(
@@ -159,10 +162,7 @@ async def test_model_trace_has_exact_semantics_and_backend_parity(
             namespace=postgres_namespace,
         ),
         scenario,
-        room_count=2,
-        thread_count=3,
         max_batch_seconds=5,
-        verify_reference_model=True,
     )
 
     assert sqlite_state.backend_parity_projection() == postgres_state.backend_parity_projection()
@@ -233,8 +233,6 @@ async def test_forty_five_thread_fanout_matches_every_cache_backend(
     await run_scenario(
         event_cache_factory,
         concurrent_fanout_scenario(),
-        room_count=1,
-        thread_count=45,
         verify_restart=False,
     )
 
@@ -247,6 +245,7 @@ def test_fuzz_trace_json_round_trip_is_exact() -> None:
         room_count=2,
         thread_count=3,
         max_batch_size=5,
+        verify_reference_model=True,
     )
 
     assert FuzzScenario.from_json(scenario.to_json()) == scenario
@@ -257,6 +256,40 @@ def test_fuzz_trace_json_round_trip_is_exact() -> None:
             room_count=2,
             thread_count=3,
             max_batch_size=5,
+            verify_reference_model=True,
         )
         == scenario
     )
+
+
+@pytest.mark.parametrize(
+    ("current", "incoming", "expected"),
+    [
+        (None, "sync_thread_mutation", "sync_thread_mutation"),
+        ("sync_thread_mutation", "sync_opaque_encrypted_event", "sync_opaque_encrypted_event"),
+        ("sync_opaque_encrypted_event", "sync_thread_mutation", "sync_opaque_encrypted_event"),
+        ("sync_opaque_encrypted_event", "sync_redaction", "sync_redaction"),
+    ],
+)
+def test_reference_thread_reason_reducer_keeps_nonincremental_staleness_sticky(
+    current: str | None,
+    incoming: str,
+    expected: str,
+) -> None:
+    """The independent model matches durable stale-reason precedence."""
+    assert _reduce_thread_invalidation_reason(current, incoming) == expected
+
+
+def test_reference_model_keeps_opaque_staleness_after_cleartext_upgrade() -> None:
+    """A later clear event cannot make an opaque-poisoned snapshot reusable."""
+    operation = FuzzOperation(OperationKind.CIPHERTEXT_REPLAY, 0, 0, 3, 0, 0)
+    model = ReferenceCacheModel.empty()
+    model.seed_room(0, 1)
+
+    model.apply_operation(operation, thread_count=1)
+    model.apply_operation(
+        FuzzOperation(OperationKind.THREADED_MESSAGE, 0, 0, 3, 0, 0),
+        thread_count=1,
+    )
+
+    assert model.thread_reasons[(room_id(0), thread_id(0, 0))] == "sync_opaque_encrypted_event"
