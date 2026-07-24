@@ -247,7 +247,7 @@ class ObservableCacheState:
     mappings: tuple[tuple[str, str, str | None], ...]
     threads: tuple[tuple[str, str, tuple[str, ...]], ...]
     revisions: tuple[tuple[str, str, ThreadRevision | None], ...]
-    invalidation_reasons: tuple[tuple[str, str, str | None, str | None], ...]
+    cache_states: tuple[tuple[str, str, bool, bool, str | None, str | None], ...]
 
     def backend_parity_projection(self) -> tuple[object, ...]:
         """Return behavior excluding backend-owned write-sequence values."""
@@ -264,7 +264,7 @@ class ObservableCacheState:
             self.mappings,
             self.threads,
             comparable_revisions,
-            self.invalidation_reasons,
+            self.cache_states,
         )
 
 
@@ -369,9 +369,11 @@ class ReferenceCacheModel:
         event_id = cast("str", source["event_id"])
         event_type = source.get("type")
         if self._source_is_tombstoned(source):
-            current_thread_id = self._resolve_source_thread(source)
-            if current_thread_id is not None:
-                self._mark_thread_stale_by_id(current_room_id, current_thread_id, "sync_append_failed")
+            if event_type != "m.reaction":
+                current_thread_id = self._resolve_source_thread(source)
+                if current_thread_id is not None:
+                    reason = "sync_opaque_encrypted_event" if event_type == "m.room.encrypted" else "sync_append_failed"
+                    self._mark_thread_stale_by_id(current_room_id, current_thread_id, reason)
             return
         accepted = self._store_point_event(source)
         if event_type == "m.reaction":
@@ -399,7 +401,7 @@ class ReferenceCacheModel:
         )
         key = (current_room_id, current_thread_id)
         members = self.threads.get(key)
-        if members is None:
+        if not members:
             self.thread_reasons[key] = "sync_append_failed"
             return
         self.thread_write_sequence += 1
@@ -496,8 +498,8 @@ class ReferenceCacheModel:
 
     def _delete_event(self, current_room_id: str, event_id: str) -> None:
         self.events.pop((current_room_id, event_id), None)
-        self.mappings.pop((current_room_id, event_id), None)
-        affected_thread_ids: set[str] = set()
+        mapped_thread_id = self.mappings.pop((current_room_id, event_id), None)
+        affected_thread_ids = {mapped_thread_id} if mapped_thread_id is not None else set()
         for (event_room_id, current_thread_id), members in self.threads.items():
             if event_room_id == current_room_id:
                 if event_id in members:
@@ -527,7 +529,9 @@ class ReferenceCacheModel:
         current_thread_id = thread_id(room, thread)
         key = (current_room_id, current_thread_id)
         existing_ids = set(self.threads.get(key, {}))
-        accepted_sources = [source for source in sources if self._store_point_event(source)]
+        accepted_sources = [
+            source for source in sources if not self._source_is_tombstoned(source) and self._store_point_event(source)
+        ]
         replacement_ids = {cast("str", source["event_id"]) for source in accepted_sources}
         for removed_event_id in existing_ids - replacement_ids:
             self._delete_event(current_room_id, removed_event_id)
@@ -679,7 +683,7 @@ class ReferenceCacheModel:
                 events = await cache.get_thread_events(current_room_id, current_thread_id)
                 expected_ids = (
                     None
-                    if expected_members is None
+                    if not expected_members
                     else tuple(
                         event_id
                         for event_id, _order in sorted(
@@ -693,7 +697,7 @@ class ReferenceCacheModel:
                     f"reference thread membership/order mismatch: {current_room_id} {current_thread_id}"
                 )
                 revision = await cache.get_thread_revision(current_room_id, current_thread_id)
-                if expected_members is None:
+                if not expected_members:
                     assert revision is None
                 else:
                     assert revision is not None
@@ -726,6 +730,7 @@ class ReferenceCacheModel:
                 )
                 assert (state.invalidated_at is not None) is (expected_thread_reason is not None)
                 assert (state.room_invalidated_at is not None) is (expected_room_reason is not None)
+                assert (state.validated_at is not None) is (key in self.thread_validated_at)
                 expected_room_is_newer = self.room_invalidated_at.get(current_room_id, -1) >= (
                     self.thread_validated_at.get(key, -1)
                 )
@@ -1240,7 +1245,7 @@ class CacheFuzzRunner:
     async def run(self) -> ObservableCacheState:
         """Execute all batches and return stable observable state."""
         self.scenario.validate()
-        self.cache_generation = self.root_cache.cache_generation
+        self.cache_generation = self.cache.cache_generation
         assert self.cache_generation is not None
         await self.seed()
         await self.assert_invariants()
@@ -1622,7 +1627,7 @@ class CacheFuzzRunner:
 
     async def assert_invariants(self) -> None:
         """Assert cache consistency through only the public storage contract."""
-        assert self.root_cache.cache_generation == self.cache_generation
+        assert self.cache.cache_generation == self.cache_generation
         await self._assert_tombstone_invariants()
         await self._assert_isolation_and_reaction_invariants()
         await self._assert_thread_invariants()
@@ -1650,7 +1655,7 @@ class CacheFuzzRunner:
             )
         threads: list[tuple[str, str, tuple[str, ...]]] = []
         revisions: list[tuple[str, str, ThreadRevision | None]] = []
-        invalidation_reasons: list[tuple[str, str, str | None, str | None]] = []
+        cache_states: list[tuple[str, str, bool, bool, str | None, str | None]] = []
         for room in range(self.room_count):
             current_room_id = room_id(room)
             for thread in range(self.thread_count):
@@ -1673,10 +1678,12 @@ class CacheFuzzRunner:
                     ),
                 )
                 state = await self.cache.get_thread_cache_state(current_room_id, current_thread_id)
-                invalidation_reasons.append(
+                cache_states.append(
                     (
                         current_room_id,
                         current_thread_id,
+                        state is not None,
+                        state is not None and state.validated_at is not None,
                         None if state is None else state.invalidation_reason,
                         None if state is None else state.room_invalidation_reason,
                     ),
@@ -1686,7 +1693,7 @@ class CacheFuzzRunner:
             mappings=tuple(mappings),
             threads=tuple(threads),
             revisions=tuple(revisions),
-            invalidation_reasons=tuple(invalidation_reasons),
+            cache_states=tuple(cache_states),
         )
 
 

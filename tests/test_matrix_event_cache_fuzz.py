@@ -15,6 +15,7 @@ from hypothesis import strategies as st
 from mindroom.matrix.cache.postgres_event_cache import PostgresEventCache
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from scripts.testing.fuzz_matrix_event_cache import (
+    FUZZ_PRINCIPAL,
     CacheFuzzRunner,
     FuzzOperation,
     FuzzScenario,
@@ -222,6 +223,90 @@ async def test_reference_model_rejects_tombstoned_replay_and_cleans_invalidated_
         scenario,
         verify_restart=False,
     )
+
+
+@pytest.mark.asyncio
+async def test_reference_model_rejects_tombstoned_snapshot_replacement(tmp_path: Path) -> None:
+    """A later authoritative snapshot cannot resurrect a tombstoned event."""
+    scenario = FuzzScenario(
+        batches=(
+            (FuzzOperation(OperationKind.REDACTION, 0, 0, 0, 0, 0),),
+            (FuzzOperation(OperationKind.REPLACE_THREAD, 0, 0, 0, 0, 1),),
+        ),
+        room_count=1,
+        thread_count=1,
+        verify_reference_model=True,
+    )
+
+    await run_scenario(
+        lambda: SqliteEventCache(tmp_path / "tombstoned-replacement.db"),
+        scenario,
+        verify_restart=False,
+    )
+
+
+@pytest.mark.asyncio
+async def test_reference_model_removes_point_only_opaque_root_mapping(tmp_path: Path) -> None:
+    """Redacting an opaque point event must remove its model thread index."""
+    scenario = FuzzScenario(
+        batches=(
+            (FuzzOperation(OperationKind.CIPHERTEXT_REPLAY, 0, 0, 3, 0, 0),),
+            (FuzzOperation(OperationKind.REDACTION, 0, 0, 0, 3, 1),),
+        ),
+        room_count=1,
+        thread_count=1,
+        verify_reference_model=True,
+    )
+
+    await run_scenario(
+        lambda: SqliteEventCache(tmp_path / "opaque-redaction.db"),
+        scenario,
+        verify_restart=False,
+    )
+
+
+@pytest.mark.asyncio
+async def test_reference_model_preserves_tombstoned_reaction_and_ciphertext_semantics(tmp_path: Path) -> None:
+    """Late reaction replay is inert while late ciphertext keeps opaque staleness."""
+    scenario = FuzzScenario(
+        batches=(
+            (FuzzOperation(OperationKind.REACTION, 0, 0, 4, 0, 0),),
+            (FuzzOperation(OperationKind.REDACTION, 0, 0, 4, 0, 3),),
+            (FuzzOperation(OperationKind.REACTION, 0, 0, 4, 0, 0),),
+            (FuzzOperation(OperationKind.REDACTION, 0, 0, 0, 3, 1),),
+            (FuzzOperation(OperationKind.CIPHERTEXT_REPLAY, 0, 0, 3, 0, 0),),
+        ),
+        room_count=1,
+        thread_count=1,
+        verify_reference_model=True,
+    )
+
+    await run_scenario(
+        lambda: SqliteEventCache(tmp_path / "tombstoned-replay-types.db"),
+        scenario,
+        verify_restart=False,
+    )
+
+
+@pytest.mark.asyncio
+async def test_runner_certifies_the_bound_principal_generation(tmp_path: Path) -> None:
+    """Restart checks must bind cache generation to the fuzz Matrix principal."""
+    root = SqliteEventCache(tmp_path / "principal-generation.db")
+    await root.initialize()
+    runner = CacheFuzzRunner(
+        root,
+        lambda: SqliteEventCache(tmp_path / "principal-generation.db"),
+        FuzzScenario(batches=()),
+        room_count=1,
+        thread_count=1,
+    )
+
+    try:
+        await runner.run()
+        assert runner.cache_generation == root.for_principal(FUZZ_PRINCIPAL).cache_generation
+        assert runner.cache_generation != root.cache_generation
+    finally:
+        await root.close()
 
 
 @pytest.mark.asyncio
