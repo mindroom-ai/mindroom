@@ -171,6 +171,7 @@ def _record_handled_turn(
     response_event_id: str | None = None,
     source_event_prompts: dict[str, str] | None = None,
     response_owner: str | None = None,
+    requester_id: str | None = "@user:example.com",
     history_scope: HistoryScope | None = None,
     conversation_target: MessageTarget | None = None,
 ) -> None:
@@ -182,6 +183,7 @@ def _record_handled_turn(
             visible_echo_event_id=response_event_id,
             source_event_prompts=source_event_prompts,
             response_owner=response_owner,
+            requester_id=requester_id,
             history_scope=history_scope,
             conversation_target=conversation_target,
         ),
@@ -201,6 +203,7 @@ def _team_history_scope(team_name: str) -> HistoryScope:
 def _run_response_context_metadata(
     *,
     response_owner: str,
+    requester_id: str = "@user:example.com",
     history_scope: HistoryScope,
     conversation_target: MessageTarget,
 ) -> dict[str, object]:
@@ -208,6 +211,7 @@ def _run_response_context_metadata(
     return {
         MATRIX_TURN_SCHEMA_VERSION_METADATA_KEY: TurnRecordCodec.schema_version(),
         MATRIX_RESPONSE_OWNER_METADATA_KEY: response_owner,
+        "requester_id": requester_id,
         MATRIX_HISTORY_SCOPE_METADATA_KEY: history_scope.to_metadata(),
         MATRIX_CONVERSATION_TARGET_METADATA_KEY: conversation_target.to_metadata(),
     }

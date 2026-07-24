@@ -333,7 +333,7 @@ class TurnRecordCodec:
         return turn_record
 
     @staticmethod
-    def to_run_metadata(record: TurnRecord) -> dict[str, object]:
+    def to_run_metadata(record: TurnRecord) -> dict[str, object]:  # noqa: C901
         """Project one record into the recoverable subset stored with an Agno run."""
         if not record.source_event_ids:
             return {}
@@ -360,6 +360,8 @@ class TurnRecordCodec:
             }
         if record.response_owner is not None:
             metadata[constants.MATRIX_RESPONSE_OWNER_METADATA_KEY] = record.response_owner
+        if record.requester_id is not None:
+            metadata["requester_id"] = record.requester_id
         if record.history_scope is not None:
             metadata[constants.MATRIX_HISTORY_SCOPE_METADATA_KEY] = record.history_scope.to_metadata()
         if record.conversation_target is not None:
@@ -896,20 +898,17 @@ def _immutable_source_event_revisions(
     """Normalize and freeze edit revisions belonging to canonical live sources."""
     if not source_event_revisions:
         return None
-    revisions: dict[str, SourceEventRevision] = {}
-    for event_id in indexed_event_ids:
-        if event_id in excluded_event_ids:
-            continue
-        raw_revision = source_event_revisions.get(event_id)
-        if (
-            isinstance(raw_revision, tuple | list)
-            and len(raw_revision) == 2
-            and isinstance(raw_revision[0], int)
-            and not isinstance(raw_revision[0], bool)
-            and isinstance(raw_revision[1], str)
-            and raw_revision[1]
-        ):
-            revisions[event_id] = (raw_revision[0], raw_revision[1])
+    revisions = {
+        event_id: (raw_revision[0], raw_revision[1])
+        for event_id in indexed_event_ids
+        if event_id not in excluded_event_ids
+        if isinstance((raw_revision := source_event_revisions.get(event_id)), tuple | list)
+        and len(raw_revision) == 2
+        and isinstance(raw_revision[0], int)
+        and not isinstance(raw_revision[0], bool)
+        and isinstance(raw_revision[1], str)
+        and raw_revision[1]
+    }
     return MappingProxyType(revisions) if revisions else None
 
 

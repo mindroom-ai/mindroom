@@ -1347,6 +1347,44 @@ class TestAgentBot(AgentBotTestBase):
         bot._turn_store.release_pending_turn_claim(competing_claim)
 
     @pytest.mark.asyncio
+    async def test_router_relay_claims_original_alias_before_first_async_preparation(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """An edit of a routed original must see its relay claim before ingress can yield."""
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = _make_matrix_client_mock()
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!room:localhost"
+        event = self._router_relay_event()
+        ingress_started = asyncio.Event()
+        release_ingress = asyncio.Event()
+
+        async def hold_ingress(*_args: object, **_kwargs: object) -> None:
+            ingress_started.set()
+            await release_ingress.wait()
+
+        with (
+            patch.object(
+                bot._turn_controller,
+                "_precheck_dispatch_event",
+                return_value=_PrecheckedEvent(event=event, requester_user_id="@user:localhost"),
+            ),
+            patch.object(bot._turn_controller, "_ingest_live_text_event", side_effect=hold_ingress),
+        ):
+            task = asyncio.create_task(bot._on_message(room, event))
+            await ingress_started.wait()
+            competing_claim = TurnRecord.create(["$user_msg:localhost"], completed=False)
+            assert bot._turn_store.try_claim_turn(competing_claim) is False
+            release_ingress.set()
+            await task
+
+        assert bot._turn_store.try_claim_turn(competing_claim) is True
+        bot._turn_store.release_pending_turn_claim(competing_claim)
+
+    @pytest.mark.asyncio
     async def test_handle_message_inner_enqueues_active_thread_follow_up_as_coalescible_gate_event(
         self,
         mock_agent_user: AgentMatrixUser,

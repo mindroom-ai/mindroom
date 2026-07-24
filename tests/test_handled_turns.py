@@ -416,6 +416,7 @@ def test_source_event_revisions_persist_across_restart_and_run_recovery(temp_dir
         response_event_id="$response",
         source_event_prompts={"$first": "edited first", "$second": "edited second"},
         source_event_revisions=revisions,
+        requester_id="@user:example.com",
     )
     tracker = HandledTurnLedger("test_source_revisions_reload", base_path=temp_dir)
     tracker.record_handled_turn(record)
@@ -432,6 +433,7 @@ def test_source_event_revisions_persist_across_restart_and_run_recovery(temp_dir
 
     assert recovered is not None
     assert recovered.source_event_revisions == revisions
+    assert recovered.requester_id == "@user:example.com"
 
 
 def test_source_event_revisions_keep_only_valid_live_sources() -> None:

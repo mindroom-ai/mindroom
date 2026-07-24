@@ -28,6 +28,7 @@ if TYPE_CHECKING:
     from mindroom.hooks import MessageEnvelope
     from mindroom.matrix.event_info import EventInfo
     from mindroom.message_target import MessageTarget
+    from mindroom.sync_restart_retry import SyncRestartRetryQueue
     from mindroom.turn_policy import IngressHookRunner
     from mindroom.turn_store import TurnStore
 
@@ -52,6 +53,7 @@ class EditRegeneratorDeps:
     ingress_hook_runner: IngressHookRunner
     generate_response: _GenerateResponse
     wait_for_turn_settled: Callable[[tuple[str, ...]], Awaitable[None]]
+    restart_retry: SyncRestartRetryQueue
     timestamp_formatter: Callable[[float | None], str | None]
 
 
@@ -61,11 +63,9 @@ class _Edit:
     body: str
     context: MessageContext
     envelope: MessageEnvelope
-    requester_user_id: str
-    correlation_id: str
-    timestamp_ms: int
     revision: SourceEventRevision
     suppressed: bool
+    retry: Callable[[], Awaitable[None]]
 
 
 @dataclass
@@ -100,9 +100,10 @@ class EditRegenerator:
         conversation_target: MessageTarget,
     ) -> MessageContext:
         """Return edit context aligned with the recorded thread root."""
-        if conversation_target.resolved_thread_id is None:
-            return context
-        if context.thread_id == conversation_target.resolved_thread_id:
+        if (
+            conversation_target.resolved_thread_id is None
+            or context.thread_id == conversation_target.resolved_thread_id
+        ):
             return context
         thread_history = await self.deps.resolver.fetch_thread_history(
             room.room_id,
@@ -120,7 +121,7 @@ class EditRegenerator:
             requires_model_history_refresh=context.requires_model_history_refresh,
         )
 
-    async def handle_message_edit(  # noqa: C901, PLR0911
+    async def handle_message_edit(  # noqa: C901, PLR0911, PLR0912
         self,
         room: nio.MatrixRoom,
         event: nio.RoomMessageText,
@@ -171,10 +172,9 @@ class EditRegenerator:
             self._logger().warning(
                 "Skipping edited turn regeneration without persisted response context",
                 original_event_id=original_event_id,
-                has_conversation_target=turn_record.conversation_target is not None,
-                has_history_scope=turn_record.history_scope is not None,
-                has_response_owner=turn_record.response_owner is not None,
             )
+            return
+        if turn_record.requester_id != requester_user_id:
             return
         context = await self.edit_regeneration_context(
             context,
@@ -182,11 +182,7 @@ class EditRegenerator:
             conversation_target=turn_record.conversation_target,
         )
         if turn_record.response_owner != self.deps.agent_name:
-            self._logger().debug(
-                "Ignoring edited message for turn owned by another entity",
-                original_event_id=original_event_id,
-                response_owner=turn_record.response_owner,
-            )
+            self._logger().debug("Ignoring edit for turn owned by another entity", original_event_id=original_event_id)
             return
         if original_event_id in turn_record.redacted_source_event_ids:
             self._logger().debug("Ignoring edit for redacted source message", original_event_id=original_event_id)
@@ -218,18 +214,16 @@ class EditRegenerator:
             body=edited_content,
             context=context,
             envelope=envelope,
-            requester_user_id=requester_user_id,
-            correlation_id=event.event_id,
-            timestamp_ms=event.server_timestamp,
             revision=revision,
             suppressed=await self.deps.ingress_hook_runner.emit_message_received_hooks(
                 envelope=envelope,
                 correlation_id=event.event_id,
                 policy=hook_ingress_policy(envelope),
             ),
+            retry=lambda: self.handle_message_edit(room, event, event_info, requester_user_id),
         )
         assert turn_record.anchor_event_id is not None
-        key = (turn_record.conversation_target.room_id, turn_record.anchor_event_id, requester_user_id)
+        key = (turn_record.conversation_target.room_id, turn_record.anchor_event_id, envelope.requester_id)
         mailbox = self._mailboxes.setdefault(key, _Mailbox())
         queued = mailbox.pending.get(original_event_id)
         if queued is not None and revision <= queued.revision:
@@ -254,7 +248,7 @@ class EditRegenerator:
             room=room,
             thread_id=latest.context.thread_id,
             original_event_id=latest.original_event_id,
-            requester_user_id=latest.requester_user_id,
+            requester_user_id=latest.envelope.requester_id,
         )
         if (
             record is None
@@ -317,6 +311,7 @@ class EditRegenerator:
         record = replace(record, source_event_revisions=revisions)
         assert record.conversation_target is not None
         target = record.conversation_target
+        requester_id = driving_edit.envelope.requester_id
         metadata = self.deps.turn_store.build_run_metadata(
             record,
             additional_discovery_event_ids=(
@@ -325,20 +320,26 @@ class EditRegenerator:
                 else ()
             ),
         )
+
+        def retry_after_sync_restart() -> None:
+            applied.clear()
+            self.deps.turn_store.remove_stale_runs_for_edit(turn_record=record, requester_user_id=requester_id)
+            self.deps.restart_retry.register(driving_edit.revision[1], driving_edit.retry, room_id=room.room_id)
+
         return (
             ResponseRequest(
                 thread_history=driving_edit.context.thread_history,
                 prompt=prompt,
                 response_envelope=driving_edit.envelope,
                 existing_event_id=record.response_event_id,
-                user_id=driving_edit.requester_user_id,
-                correlation_id=driving_edit.correlation_id,
+                user_id=requester_id,
+                correlation_id=driving_edit.revision[1],
                 matrix_run_metadata=metadata,
-                current_timestamp_ms=normalize_timestamp_ms(driving_edit.timestamp_ms),
+                current_timestamp_ms=normalize_timestamp_ms(driving_edit.revision[0]),
                 current_prompt_is_structured=structured,
                 on_lifecycle_lock_acquired=lambda: self.deps.turn_store.remove_stale_runs_for_edit(
                     turn_record=record,
-                    requester_user_id=driving_edit.requester_user_id,
+                    requester_user_id=requester_id,
                 ),
                 prepare_source_turn=lambda: self.deps.turn_store.prepare_response_for_redactions(
                     target=target,
@@ -346,8 +347,11 @@ class EditRegenerator:
                         dict.fromkeys((*record.replay_source_event_ids, driving_edit.original_event_id)),
                     ),
                 ),
-                on_deferred_outcome_handled=lambda response_event_id: self.deps.turn_store.record_turn(
-                    replace(record, response_event_id=response_event_id),
+                on_sync_restart_cancelled=retry_after_sync_restart,
+                on_deferred_outcome_handled=lambda response_event_id: (
+                    self.deps.turn_store.record_turn(replace(record, response_event_id=response_event_id))
+                    if applied
+                    else None
                 ),
             ),
             record,

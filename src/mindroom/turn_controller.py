@@ -1901,13 +1901,7 @@ class TurnController:
                 if len(handoff.source_event_ids) > 1
                 else None,
             )
-            for pending_event in batch.pending_events:
-                for item in pending_event.dispatch_metadata:
-                    if item.kind == _PENDING_TURN_CLAIM_METADATA_KIND:
-                        item.close()
-                pending_event.dispatch_metadata = tuple(
-                    item for item in pending_event.dispatch_metadata if item.kind != _PENDING_TURN_CLAIM_METADATA_KIND
-                )
+            close_pending_event_metadata_once(list(batch.pending_events))
             await self._dispatch_handoff(
                 handoff,
                 handled_turn=handled_turn,
@@ -2008,7 +2002,9 @@ class TurnController:
                 await reservation_owner.release()
                 await self._handle_edit_event(room, prechecked_event, event_info, dispatch_timing)
                 return
-            turn_claim = TurnRecord.create([event.event_id], completed=False)
+            routed_alias = self.deps.ingress.router_relay_original_event_id(event)
+            claim_aliases = (routed_alias,) if routed_alias else ()
+            turn_claim = TurnRecord.create([event.event_id], discovery_event_ids=claim_aliases, completed=False)
             if not self.deps.turn_store.try_claim_turn(turn_claim):
                 return
             reservation_owner.pending_turn_claim = turn_claim

@@ -23,6 +23,7 @@ from mindroom.hooks.ingress import HookIngressPolicy
 from mindroom.matrix.event_info import EventInfo
 from mindroom.message_target import MessageTarget
 from mindroom.response_runner import ResponseRequest
+from mindroom.sync_restart_retry import SyncRestartRetryQueue
 from mindroom.timestamp_formatting import format_timestamp_ms
 from mindroom.turn_policy import IngressHookRunner
 from mindroom.turn_store import TurnStore
@@ -63,6 +64,7 @@ class _Harness:
     ingress_hook_runner: MagicMock
     generate_response: AsyncMock
     wait_for_turn_settled: AsyncMock
+    restart_retry: SyncRestartRetryQueue
     logger: MagicMock
     config: Config
     runtime_paths: RuntimePaths
@@ -101,6 +103,7 @@ def _turn_record(
         source_event_prompts=source_event_prompts,
         source_event_metadata=source_event_metadata,
         response_owner=response_owner,
+        requester_id=USER_ID,
         history_scope=HistoryScope(kind="agent", scope_id=AGENT_NAME),
         conversation_target=MessageTarget.resolve(ROOM_ID, thread_id, anchor),
     )
@@ -183,6 +186,7 @@ def _harness(tmp_path: Path, *, turn_record: TurnRecord | None) -> _Harness:
             return await generate_response(request)
 
     wait_for_turn_settled = AsyncMock()
+    restart_retry = SyncRestartRetryQueue()
     logger = MagicMock()
     regenerator = EditRegenerator(
         EditRegeneratorDeps(
@@ -195,6 +199,7 @@ def _harness(tmp_path: Path, *, turn_record: TurnRecord | None) -> _Harness:
             ingress_hook_runner=ingress_hook_runner,
             generate_response=run_locked_response,
             wait_for_turn_settled=wait_for_turn_settled,
+            restart_retry=restart_retry,
             timestamp_formatter=lambda timestamp_ms: format_timestamp_ms(timestamp_ms, timezone=config.timezone),
         ),
     )
@@ -205,6 +210,7 @@ def _harness(tmp_path: Path, *, turn_record: TurnRecord | None) -> _Harness:
         ingress_hook_runner=ingress_hook_runner,
         generate_response=generate_response,
         wait_for_turn_settled=wait_for_turn_settled,
+        restart_retry=restart_retry,
         logger=logger,
         config=config,
         runtime_paths=runtime_paths,
@@ -1019,6 +1025,68 @@ async def test_generate_response_failure_propagates_without_recording(tmp_path: 
         await _handle_edit(harness, event, event_info)
 
     harness.turn_store.record_turn.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_sync_restart_cancellation_retries_without_committing_interrupted_edit(tmp_path: Path) -> None:
+    """A sync-restart interruption leaves the revision uncommitted and retries it once."""
+    record = _turn_record()
+    harness = _harness(tmp_path, turn_record=record)
+    attempts = 0
+
+    async def interrupt_then_succeed(request: ResponseRequest) -> str:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            assert request.on_sync_restart_cancelled is not None
+            assert request.on_deferred_outcome_handled is not None
+            request.on_sync_restart_cancelled()
+            request.on_deferred_outcome_handled("$interrupted:example.org")
+            raise asyncio.CancelledError
+        return NEW_RESPONSE_EVENT_ID
+
+    harness.generate_response.side_effect = interrupt_then_succeed
+    event, event_info = _edit_event(new_body="latest after restart")
+
+    with pytest.raises(asyncio.CancelledError):
+        await _handle_edit(harness, event, event_info)
+
+    assert harness.restart_retry.has_pending is True
+    harness.turn_store.record_turn.assert_not_called()
+    assert harness.regenerator._mailboxes == {}
+
+    await harness.restart_retry.flush()
+
+    assert harness.restart_retry.has_pending is False
+    assert attempts == 2
+    assert harness.generate_response.await_args.args[0].prompt == "latest after restart"
+    recorded = harness.turn_store.record_turn.call_args.args[0]
+    assert recorded.response_event_id == NEW_RESPONSE_EVENT_ID
+    assert recorded.source_event_revisions == {
+        ORIGINAL_EVENT_ID: (event.server_timestamp, event.event_id),
+    }
+    harness.turn_store.remove_stale_runs_for_edit.assert_called_once_with(
+        turn_record=replace(
+            record,
+            source_event_revisions={
+                ORIGINAL_EVENT_ID: (event.server_timestamp, event.event_id),
+            },
+        ),
+        requester_user_id=USER_ID,
+    )
+
+
+@pytest.mark.asyncio
+async def test_edit_from_non_owning_requester_is_ignored(tmp_path: Path) -> None:
+    """A requester cannot regenerate another requester's durable response."""
+    harness = _harness(tmp_path, turn_record=_turn_record())
+    attacker_id = "@attacker:example.org"
+    event, event_info = _edit_event(sender=attacker_id)
+
+    await harness.regenerator.handle_message_edit(harness.room, event, event_info, attacker_id)
+
+    _assert_no_regeneration(harness)
+    harness.resolver.build_message_envelope.assert_not_called()
 
 
 @pytest.mark.asyncio
