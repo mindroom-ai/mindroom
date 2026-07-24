@@ -28,7 +28,7 @@ if TYPE_CHECKING:
     from mindroom.matrix.message_content import SidecarHydrationBatch
 
 _VISIBLE_ROOM_MESSAGE_EVENT_TYPES = (nio.RoomMessageText, nio.RoomMessageNotice)
-type ThreadEditCandidatesByOriginalEventId = dict[str, list[nio.RoomMessageText | nio.RoomMessageNotice]]
+type ThreadEditCandidatesByOriginalEventId = dict[str, list[nio.RoomMessage]]
 
 
 @dataclass(slots=True)
@@ -235,25 +235,40 @@ def bundled_replacement_candidates(event_source: Mapping[str, Any]) -> list[dict
     """Return bundled replacement candidates in preference order."""
     candidates: list[dict[str, Any]] = []
     unsigned = event_source.get("unsigned")
-    for container in (unsigned, event_source):
-        if not isinstance(container, Mapping):
-            continue
-        relations = container.get("m.relations")
-        if not isinstance(relations, Mapping):
-            continue
-        replacement = relations.get("m.replace")
-        if not isinstance(replacement, Mapping):
-            continue
-        for candidate in (
-            replacement.get("latest_event"),
-            replacement.get("event"),
-            replacement,
-        ):
-            if isinstance(candidate, Mapping):
-                candidates.extend(
-                    [{key: value for key, value in candidate.items() if isinstance(key, str)}],
-                )
+    if not isinstance(unsigned, Mapping):
+        return candidates
+    relations = unsigned.get("m.relations")
+    if not isinstance(relations, Mapping):
+        return candidates
+    replacement = relations.get("m.replace")
+    if not isinstance(replacement, Mapping):
+        return candidates
+    for candidate in (
+        replacement.get("latest_event"),
+        replacement.get("event"),
+        replacement,
+    ):
+        if isinstance(candidate, Mapping):
+            candidates.extend(
+                [{key: value for key, value in candidate.items() if isinstance(key, str)}],
+            )
     return candidates
+
+
+def _room_message_replacement_is_renderable(
+    original_content: Mapping[str, Any],
+    replacement_event_source: Mapping[str, Any],
+) -> bool:
+    """Return whether an ``m.room.message`` replacement has valid visible content."""
+    replacement_content = replacement_event_source.get("content")
+    if not isinstance(replacement_content, Mapping):
+        return False
+    new_content = replacement_content.get("m.new_content")
+    return isinstance(new_content, Mapping) and all(
+        isinstance(candidate_content.get(field), str)
+        for candidate_content in (original_content, replacement_content, new_content)
+        for field in ("body", "msgtype")
+    )
 
 
 def is_valid_bundled_replacement(
@@ -321,11 +336,9 @@ def is_valid_bundled_replacement(
         or not isinstance(content.get("m.new_content"), Mapping)
     ):
         return False
-    new_content = content["m.new_content"]
-    return original_type != "m.room.message" or all(
-        isinstance(candidate_content.get(field), str)
-        for candidate_content in (original_content, content, new_content)
-        for field in ("body", "msgtype")
+    return original_type != "m.room.message" or _room_message_replacement_is_renderable(
+        original_content,
+        replacement_event_source,
     )
 
 
@@ -461,7 +474,7 @@ def _stream_status_from_content(content: dict[str, Any] | None) -> str | None:
 
 
 def record_thread_edit_candidate(
-    event: nio.RoomMessageText | nio.RoomMessageNotice,
+    event: nio.RoomMessage,
     *,
     event_info: EventInfo,
     edit_candidates_by_original_event_id: ThreadEditCandidatesByOriginalEventId,
@@ -501,6 +514,7 @@ async def apply_latest_edits_to_messages(
                 edit_event.sender != existing_message.sender
                 or event_source_is_state_event(edit_event.source)
                 or (room_id is not None and not event_source_matches_room(edit_event.source, room_id))
+                or not _room_message_replacement_is_renderable(existing_message.content, edit_event.source)
             ):
                 continue
             edited_body, edited_content = await extract_edit_body(

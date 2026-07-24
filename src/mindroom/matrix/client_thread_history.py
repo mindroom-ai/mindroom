@@ -317,14 +317,6 @@ def _parse_room_message_event(event_source: dict[str, Any]) -> nio.Event | None:
     return parsed_event if _is_room_message_event(parsed_event) else None
 
 
-def _parse_visible_text_message_event(
-    event_source: dict[str, Any],
-) -> nio.RoomMessageText | nio.RoomMessageNotice | None:
-    """Parse one event dict into a visible text or notice message when possible."""
-    parsed_event = _parse_room_message_event(event_source)
-    return parsed_event if isinstance(parsed_event, (nio.RoomMessageText, nio.RoomMessageNotice)) else None
-
-
 def _event_source_for_cache(event: nio.Event) -> dict[str, Any]:
     """Normalize one nio event source for persistent cache storage."""
     return normalize_nio_event_for_cache(event)
@@ -373,8 +365,8 @@ def _record_bundled_thread_edit_candidates(
 ) -> None:
     """Record every valid bundled replacement for deterministic latest selection."""
     for replacement_source in ordered_valid_bundled_replacements(event.source, room_id=room_id):
-        replacement = _parse_visible_text_message_event(replacement_source)
-        if not isinstance(replacement, _VISIBLE_ROOM_MESSAGE_EVENT_TYPES):
+        replacement = _parse_room_message_event(replacement_source)
+        if not isinstance(replacement, nio.RoomMessage):
             continue
         record_thread_edit_candidate(
             replacement,
@@ -433,7 +425,7 @@ async def _resolve_thread_history_from_event_sources_timed(
             room_id=room_id,
             edit_candidates_by_original_event_id=edit_candidates_by_original_event_id,
         )
-        if isinstance(event, _VISIBLE_ROOM_MESSAGE_EVENT_TYPES) and record_thread_edit_candidate(
+        if isinstance(event, nio.RoomMessage) and record_thread_edit_candidate(
             event,
             event_info=event_info,
             edit_candidates_by_original_event_id=edit_candidates_by_original_event_id,
@@ -1518,7 +1510,7 @@ def _record_scanned_room_message_source(
         return None
 
     event_info = EventInfo.from_event(event.source)
-    if isinstance(event, _VISIBLE_ROOM_MESSAGE_EVENT_TYPES) and record_thread_edit_candidate(
+    if isinstance(event, nio.RoomMessage) and record_thread_edit_candidate(
         event,
         event_info=event_info,
         edit_candidates_by_original_event_id=edit_candidates_by_original_event_id,

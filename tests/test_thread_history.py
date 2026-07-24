@@ -538,6 +538,7 @@ class TestThreadHistory:
                 "body": "* final",
                 "m.new_content": {
                     "body": "Final answer",
+                    "msgtype": "m.text",
                     "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
                     "io.mindroom.stream_status": "completed",
                 },
@@ -600,6 +601,7 @@ class TestThreadHistory:
                 "body": "* hello",
                 "m.new_content": {
                     "body": "hello\n\n⏳ Preparing isolated worker...",
+                    "msgtype": "m.text",
                     "io.mindroom.visible_body": "hello",
                     "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
                     "io.mindroom.stream_status": "completed",
@@ -1428,6 +1430,54 @@ class TestThreadHistory:
         ]
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("bundled", [False, True])
+    async def test_thread_resolution_applies_msgtype_changing_replacement(
+        self,
+        bundled: bool,
+    ) -> None:
+        """Direct and bundled history must apply valid ``m.text`` to ``m.emote`` edits."""
+        root = {
+            "event_id": "$thread_root",
+            "sender": "@alice:localhost",
+            "origin_server_ts": 1000,
+            "type": "m.room.message",
+            "content": {"msgtype": "m.text", "body": "Root"},
+        }
+        edit = {
+            "event_id": "$edit",
+            "sender": "@alice:localhost",
+            "origin_server_ts": 2000,
+            "type": "m.room.message",
+            "content": {
+                "msgtype": "m.emote",
+                "body": "* waves",
+                "m.new_content": {"msgtype": "m.emote", "body": "waves"},
+                "m.relates_to": {
+                    "rel_type": "m.replace",
+                    "event_id": "$thread_root",
+                },
+            },
+        }
+        event_sources = [root]
+        if bundled:
+            root["unsigned"] = {"m.relations": {"m.replace": edit}}
+        else:
+            event_sources.append(edit)
+
+        resolution = await _resolve_thread_history_from_event_sources_timed(
+            AsyncMock(),
+            room_id="!room:localhost",
+            thread_id="$thread_root",
+            event_sources=event_sources,
+            event_cache=_event_cache(),
+        )
+
+        assert [(message.event_id, message.body, message.latest_event_id) for message in resolution.messages] == [
+            ("$thread_root", "waves", "$edit"),
+        ]
+        assert resolution.messages[0].content["msgtype"] == "m.emote"
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize("missing_field", ["sender", "type", "origin_server_ts"])
     async def test_thread_resolution_rejects_bundled_replacement_without_identity(
         self,
@@ -1507,6 +1557,7 @@ class TestThreadHistory:
                 "body": "* Alice update",
                 "m.new_content": {
                     "body": "Alice update",
+                    "msgtype": "m.text",
                     "m.relates_to": {
                         "rel_type": "m.thread",
                         "event_id": "$thread_root",
@@ -1589,6 +1640,7 @@ class TestThreadHistory:
                 "body": "* Alice update",
                 "m.new_content": {
                     "body": "Alice update",
+                    "msgtype": "m.text",
                     "m.relates_to": {
                         "rel_type": "m.thread",
                         "event_id": "$thread_root",
@@ -1671,6 +1723,7 @@ class TestThreadHistory:
                 "body": "* Good",
                 "m.new_content": {
                     "body": "Good",
+                    "msgtype": "m.text",
                     "m.relates_to": {
                         "rel_type": "m.thread",
                         "event_id": "$thread_root",
@@ -1689,6 +1742,7 @@ class TestThreadHistory:
             server_timestamp=4000,
             source_content={
                 "body": "* Malformed",
+                "m.new_content": {"body": "Malformed"},
                 "m.relates_to": {
                     "rel_type": "m.replace",
                     "event_id": "$thread_message",
@@ -2431,6 +2485,7 @@ class TestThreadHistory:
                 "body": "* partial",
                 "m.new_content": {
                     "body": "Partial answer",
+                    "msgtype": "m.text",
                     "m.relates_to": {
                         "rel_type": "m.thread",
                         "event_id": "$thread_root",
@@ -2451,6 +2506,7 @@ class TestThreadHistory:
                 "body": "* final",
                 "m.new_content": {
                     "body": "Final answer",
+                    "msgtype": "m.text",
                     "m.relates_to": {
                         "rel_type": "m.thread",
                         "event_id": "$thread_root",
@@ -2507,6 +2563,7 @@ class TestThreadHistory:
                 "body": "* replacement",
                 "m.new_content": {
                     "body": "Updated answer",
+                    "msgtype": "m.text",
                 },
                 "m.relates_to": {
                     "rel_type": "m.replace",
@@ -2631,6 +2688,7 @@ class TestThreadHistory:
                 "body": "* final",
                 "m.new_content": {
                     "body": "Final answer",
+                    "msgtype": "m.text",
                     "m.relates_to": {
                         "rel_type": "m.thread",
                         "event_id": "$thread_root",
@@ -2668,6 +2726,7 @@ class TestThreadHistory:
                 "body": "* final",
                 "m.new_content": {
                     "body": "Final answer",
+                    "msgtype": "m.text",
                     "m.relates_to": {
                         "rel_type": "m.thread",
                         "event_id": "$thread_root",
