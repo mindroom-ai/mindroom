@@ -596,9 +596,9 @@ class _MultiAgentOrchestrator:
         if config is not None:
             await self._recover_pending_replacement_rooms(config)
         self._external_trigger_runtime.bind_if_ready(self.config, self.agent_bots)
-        # Mirror the reload-replay guard: a recovery landing mid-shutdown
+        # Mirror the maintenance-debt guard: a recovery landing mid-shutdown
         # (after stop() cancelled maintenance but before retry tasks die)
-        # must not schedule a detached recheck against a closing client.
+        # must not resume deferred maintenance against a closing client.
         if config is not None and self.running:
             self._startup_maintenance.resume_pending_maintenance(
                 config=config,

@@ -2058,12 +2058,12 @@ class TestMultiAgentOrchestrator:
             await orchestrator._run_bot_start_retry("general")
 
     @pytest.mark.asyncio
-    async def test_bot_recovery_mid_shutdown_does_not_schedule_pending_recheck(self, tmp_path: Path) -> None:
-        """A recovery finishing after stop() must not spawn a detached recheck task.
+    async def test_bot_recovery_mid_shutdown_does_not_resume_maintenance_debt(self, tmp_path: Path) -> None:
+        """A recovery finishing after stop() must not resume maintenance debt.
 
         stop() flips self.running first, cancels startup maintenance, and only
         later cancels bot-start retry tasks; a recovery landing in that window
-        would otherwise resume the pending recheck against a closing client.
+        would otherwise resume deferred maintenance against a closing client.
         """
         orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
         orchestrator.config = MagicMock()

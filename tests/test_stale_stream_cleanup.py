@@ -3402,12 +3402,14 @@ async def test_orchestrator_recovery_uses_router_for_resume_and_all_started_bots
     router_bot.client = router_client
     router_bot.agent_user = MagicMock(user_id="@mindroom_router:example.com")
     router_bot._conversation_cache = MagicMock()
+    router_bot.runtime_generation = "router-generation"
     agent_client = AsyncMock(spec=nio.AsyncClient)
     agent_bot = MagicMock()
     agent_bot.agent_name = "test_agent"
     agent_bot.client = agent_client
     agent_bot.agent_user = MagicMock(user_id=BOT_USER_ID)
     agent_bot._conversation_cache = MagicMock()
+    agent_bot.runtime_generation = "agent-generation"
     orchestrator.agent_bots = {ROUTER_AGENT_NAME: router_bot, "test_agent": agent_bot}
 
     with patch(
@@ -3425,6 +3427,8 @@ async def test_orchestrator_recovery_uses_router_for_resume_and_all_started_bots
     actors = mock_recover.await_args.args[0]
     assert set(actors) == {"@mindroom_router:example.com", BOT_USER_ID}
     assert actors[BOT_USER_ID].client is agent_client
+    assert actors["@mindroom_router:example.com"].runtime_generation == "router-generation"
+    assert actors[BOT_USER_ID].runtime_generation == "agent-generation"
     assert mock_recover.await_args.kwargs["resume_client"] is router_client
     assert mock_recover.await_args.kwargs["resume_conversation_cache"] is router_bot._conversation_cache
     assert mock_recover.await_args.kwargs["config"] == config
