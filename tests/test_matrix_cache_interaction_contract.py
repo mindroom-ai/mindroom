@@ -1382,6 +1382,7 @@ async def test_sync_categories_outside_joined_timeline_are_deliberately_excluded
         {"body": "departed", "msgtype": "m.text"},
         timestamp=100,
     )
+    departed_room_event["room_id"] = leave_room_id
     await event_cache.store_event(
         "$departed-room-event",
         leave_room_id,

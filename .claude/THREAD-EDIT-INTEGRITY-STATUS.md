@@ -60,6 +60,9 @@
 - The exact prior CI failure files pass `47/47`, including the PostgreSQL 45-thread fanout.
 - The new full/bundled/cache/approval/clock-skew regression selection passes `35/35`, including both cache backends.
 - One stale malformed-encrypted-media assertion now matches its existing fail-closed name and docstring by expecting `None`, not a `RoomGetEventResponse` carrying `BadEvent`.
+- Full pytest on `4f6fca022` found two cache-contract fixture failures because a row stored under `!leave:localhost` still claimed the default room in its payload.
+- That fixture now names its actual room and passes on SQLite and PostgreSQL.
+- The third full-suite failure was an unrelated random opaque callback token containing the letters `jq`; the same test passes independently without code changes.
 - Add deterministic full-resolution plus SQLite and PostgreSQL regressions for every blocker.
 - Run focused tests before each atomic commit.
 - Re-run relevant backend tests, full pytest, Tach, and all-file pre-commit under resource ownership.
