@@ -142,14 +142,6 @@ def parse_matrix_room_id(room_id: str) -> str:
     if not room_id.startswith("!"):
         msg = f"Invalid Matrix room ID: {room_id}"
         raise ValueError(msg)
-    try:
-        encoded_room_id = room_id.encode("utf-8")
-    except UnicodeEncodeError as exc:
-        msg = f"Invalid Matrix room ID: {room_id}"
-        raise ValueError(msg) from exc
-    if len(encoded_room_id) > 255:
-        msg = f"Invalid Matrix room ID length: {room_id}"
-        raise ValueError(msg)
 
     if ":" not in room_id:
         if _DOMAINLESS_ROOM_ID_PATTERN.fullmatch(room_id[1:]) is None:
@@ -163,6 +155,9 @@ def parse_matrix_room_id(room_id: str) -> str:
         raise ValueError(msg)
     if not _valid_current_server_name(server_name):
         msg = f"Invalid Matrix room ID server name: {room_id}"
+        raise ValueError(msg)
+    if len(room_id.encode("utf-8")) > 255:
+        msg = f"Invalid Matrix room ID length: {room_id}"
         raise ValueError(msg)
     return room_id
 
