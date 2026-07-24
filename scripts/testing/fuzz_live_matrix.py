@@ -2607,6 +2607,15 @@ class LiveFuzzRunner:
         # reached Matrix (``orig`` on send, the edit marker after an edit
         # revises it). The final audit binds each turn's model call to these.
         self.source_current_markers: dict[str, str] = {}
+        # Per source event id, the ordered stack of surviving revision markers
+        # (bottom is ``orig``, each applied edit pushes its marker). Redacting an
+        # ``m.replace`` reverts the source to its latest *surviving* revision, so
+        # a redaction of an edit event pops that revision and restores the one
+        # beneath it. ``source_current_markers`` always mirrors the stack top.
+        self._source_revision_stack: dict[str, list[str]] = {}
+        # Maps an edit event id to the source event id it revised so a later
+        # redaction targeting that edit knows which source's stack to revert.
+        self._edit_event_source: dict[str, str] = {}
         self.operation_count = 0
         self.restart_count = 0
         self.tuwunel_restart_count = 0
@@ -3155,8 +3164,11 @@ class LiveFuzzRunner:
             event_id = await client.send_event("m.room.message", txn_id, content, room_id=room_id)
             self.sent_records.append(_SentRecord(event_id, room_id, "m.room.message"))
             # The edit revises the target source in place, so its current marker
-            # becomes the edit revision the model must now observe.
-            self.source_current_markers[target_event_id] = edit_marker
+            # becomes the edit revision the model must now observe. Push the
+            # revision so a later redaction of this edit event can revert the
+            # source to whatever revision was current beneath it.
+            self._push_source_revision(target_event_id, edit_marker)
+            self._edit_event_source[event_id] = target_event_id
             return operation, event_id, None
 
         if operation.kind is LiveOperationKind.REACTION:
@@ -3173,11 +3185,20 @@ class LiveFuzzRunner:
             return operation, event_id, None
 
         if operation.kind is LiveOperationKind.REDACTION:
-            # A source redacted before its reply settles legitimately races the
-            # in-flight response, so its exact cardinality becomes zero-or-one.
-            if len(self.oracle.response_ids.get(target_event_id, ())) != 1:
-                self.oracle.mark_source_optional(target_event_id)
-            self.redacted_targets.add(target_event_id)
+            reverted_source = self._edit_event_source.get(target_event_id)
+            if reverted_source is not None:
+                # Redacting an ``m.replace`` reverts its target source to the
+                # latest surviving revision, so the model correctly ends at that
+                # earlier body. Revert the expected marker rather than treating
+                # this as a source redaction so the audit does not demand a
+                # revision Matrix itself rolled back.
+                self._pop_source_revision(reverted_source, target_event_id)
+            else:
+                # A source redacted before its reply settles legitimately races
+                # the in-flight response, so its exact cardinality is zero-or-one.
+                if len(self.oracle.response_ids.get(target_event_id, ())) != 1:
+                    self.oracle.mark_source_optional(target_event_id)
+                self.redacted_targets.add(target_event_id)
             event_id = await client.redact(target_event_id, txn_id, room_id=room_id)
             return operation, event_id, None
 
@@ -3187,6 +3208,40 @@ class LiveFuzzRunner:
             msg = f"idempotent retry changed event ID for {operation.target}: {target_event_id} -> {event_id}"
             raise AssertionError(msg)
         return operation, event_id, None
+
+    def _push_source_revision(self, source_event_id: str, marker: str) -> None:
+        """Record a new current revision for a source and mirror it as the marker.
+
+        The stack is seeded lazily from the source's already-registered ``orig``
+        marker so a redaction of the first edit can restore it.
+        """
+        stack = self._source_revision_stack.get(source_event_id)
+        if stack is None:
+            base = self.source_current_markers.get(source_event_id)
+            stack = [base] if base is not None else []
+            self._source_revision_stack[source_event_id] = stack
+        stack.append(marker)
+        self.source_current_markers[source_event_id] = marker
+
+    def _pop_source_revision(self, source_event_id: str, edit_event_id: str) -> None:
+        """Revert a source to its prior surviving revision after an edit redaction.
+
+        Matrix reverts an ``m.replace`` target to its latest surviving revision,
+        so dropping the redacted edit's marker restores whichever revision now
+        sits on top (an earlier edit or ``orig``). The edit is de-registered
+        first, and a redaction of an already-reverted (or never-registered) edit
+        is a no-op so it can never pop a second, unrelated revision.
+        """
+        if self._edit_event_source.pop(edit_event_id, None) is None:
+            return
+        stack = self._source_revision_stack.get(source_event_id)
+        if not stack:
+            return
+        stack.pop()
+        if stack:
+            self.source_current_markers[source_event_id] = stack[-1]
+        else:
+            self.source_current_markers.pop(source_event_id, None)
 
     async def _send_expected_message(
         self,

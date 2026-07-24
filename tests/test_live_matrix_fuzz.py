@@ -1407,6 +1407,61 @@ async def test_model_source_audit_requires_live_sibling_not_redacted_sibling(tmp
         await auditor.client.close()
 
 
+def _revision_runner() -> LiveFuzzRunner:
+    """Bare runner exposing only the source-revision maintenance state."""
+    runner = object.__new__(LiveFuzzRunner)
+    runner.source_current_markers = {}
+    runner._source_revision_stack = {}
+    runner._edit_event_source = {}
+    return runner
+
+
+def test_redacting_edit_event_reverts_source_marker_to_original() -> None:
+    """Redacting an ``m.replace`` restores the source's pre-edit current marker.
+
+    This is the root:44 live-gate false positive: the edit event itself, not the
+    source, was redacted, so Matrix reverts the source body to ``orig`` and the
+    model correctly ends there. The oracle's expected marker must follow.
+    """
+    runner = _revision_runner()
+    orig = _source_marker("root:44", ORIGINAL_REVISION)
+    edited = _source_marker("root:44", "edit:13")
+    runner.source_current_markers["$root"] = orig
+
+    runner._push_source_revision("$root", edited)
+    runner._edit_event_source["$edit"] = "$root"
+    assert runner.source_current_markers["$root"] == edited
+
+    runner._pop_source_revision("$root", "$edit")
+    assert runner.source_current_markers["$root"] == orig
+    # A duplicate redaction of the same edit must not pop an unrelated revision.
+    assert "$edit" not in runner._edit_event_source
+    runner._pop_source_revision("$root", "$edit")
+    assert runner.source_current_markers["$root"] == orig
+
+
+def test_redacting_latest_edit_reverts_to_prior_surviving_edit() -> None:
+    """With chained edits, redacting the newest reverts to the previous edit body."""
+    runner = _revision_runner()
+    orig = _source_marker("root:5", ORIGINAL_REVISION)
+    first = _source_marker("root:5", "edit:3")
+    second = _source_marker("root:5", "edit:8")
+    runner.source_current_markers["$root"] = orig
+
+    runner._push_source_revision("$root", first)
+    runner._edit_event_source["$e1"] = "$root"
+    runner._push_source_revision("$root", second)
+    runner._edit_event_source["$e2"] = "$root"
+    assert runner.source_current_markers["$root"] == second
+
+    # Redacting the newest edit falls back to the earlier surviving edit body.
+    runner._pop_source_revision("$root", "$e2")
+    assert runner.source_current_markers["$root"] == first
+    # Redacting the remaining edit falls back to the original body.
+    runner._pop_source_revision("$root", "$e1")
+    assert runner.source_current_markers["$root"] == orig
+
+
 class _FakeStack:
     """Minimal stand-in exposing the fields the failure-bundle path reads.
 
