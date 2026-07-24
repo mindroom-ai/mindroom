@@ -194,28 +194,29 @@ async def test_exact_reply_oracle_allows_response_to_internal_restart_relay() ->
         "@agent:example",
         internal_relay_senders=("@router:example",),
     )
-    oracle._ingest_event(
-        {
-            "event_id": "$resume-relay",
-            "sender": "@router:example",
-            "type": "m.room.message",
-            "content": {"body": "resume"},
-        },
-    )
-    oracle._ingest_event(
-        {
-            "event_id": "$response",
-            "sender": "@agent:example",
-            "type": "m.room.message",
-            "content": {
-                "m.relates_to": {
-                    "rel_type": "m.thread",
-                    "event_id": "$root",
-                    "m.in_reply_to": {"event_id": "$resume-relay"},
+    try:
+        oracle._ingest_event(
+            {
+                "event_id": "$resume-relay",
+                "sender": "@router:example",
+                "type": "m.room.message",
+                "content": {"body": "resume"},
+            },
+        )
+        oracle._ingest_event(
+            {
+                "event_id": "$response",
+                "sender": "@agent:example",
+                "type": "m.room.message",
+                "content": {
+                    "m.relates_to": {
+                        "rel_type": "m.thread",
+                        "event_id": "$root",
+                        "m.in_reply_to": {"event_id": "$resume-relay"},
+                    },
                 },
             },
-        },
-    )
-
-    oracle._assert_no_wrong_replies()
-    await client.close()
+        )
+        oracle._assert_no_wrong_replies()
+    finally:
+        await client.close()
