@@ -97,6 +97,7 @@ async def dispatch_text_message(
     turn_claim = handled_turn or TurnRecord.create([raw_event.event_id], completed=False)
     if not turn_claim_held and not _try_claim_turn(controller, turn_claim, queued_notice_reservation):
         return
+    turn_claim = _claim_router_relay_alias(controller, raw_event, turn_claim)
     claim_transferred = False
 
     def mark_claim_transferred() -> None:
@@ -121,7 +122,6 @@ async def dispatch_text_message(
         )
         if prepared is None:
             return
-        turn_claim = _expand_turn_claim_with_prepared_aliases(controller, turn_claim, prepared.handled_turn)
         timing_scope_token = timing_scope_context.set(event_timing_scope(prepared.event.event_id))
         if await _blocked_before_plan(controller, room, prepared, requester_user_id=requester_user_id):
             return
@@ -168,30 +168,32 @@ async def dispatch_text_message(
             timing_scope_context.reset(timing_scope_token)
 
 
-def _expand_turn_claim_with_prepared_aliases(
+def _claim_router_relay_alias(
     controller: TurnController,
+    raw_event: TextDispatchEvent,
     turn_claim: TurnRecord,
-    prepared_turn: TurnRecord,
 ) -> TurnRecord:
-    """Fold preparation-discovered identity aliases into the live claim.
+    """Claim the routed-human alias a trusted router relay replies to, up front.
 
-    A trusted router relay learns the routed human event id only while
-    preparing its prompt; expanding here keeps alias-addressed replays
-    dropped for exactly as long as this turn owns the response.
+    The relay knows the routed human event id from its own reply relation
+    before any await, so claiming it here keeps alias-addressed replays dropped
+    for exactly as long as this turn owns the response, without a preparation
+    window in which the alias is still claimable.
 
-    Expansion is collision-aware: an alias already owned by another live turn
-    is left with its original owner. The rebound claim record covers only the
-    aliases this turn actually claimed, so the transfer and finally releases
-    never strip another turn's claim.
+    The claim is collision-aware: an alias already owned by another live turn is
+    left with its original owner (a relay may legitimately overlap the routed
+    original). The alias is folded into this turn's claim record only when it was
+    acquired, so the transfer and finally releases never strip another turn's
+    claim.
     """
-    if prepared_turn.indexed_event_ids == turn_claim.indexed_event_ids:
+    alias_event_id = controller.deps.ingress.router_relay_original_event_id(raw_event)
+    if alias_event_id is None or alias_event_id in turn_claim.indexed_event_ids:
         return turn_claim
-    accepted_aliases = controller.deps.turn_store.expand_pending_turn_claim(turn_claim, prepared_turn)
-    if not accepted_aliases:
+    if not controller.deps.turn_store.try_claim_turn_alias(alias_event_id):
         return turn_claim
     return replace(
         turn_claim,
-        discovery_event_ids=(*turn_claim.discovery_event_ids, *accepted_aliases),
+        discovery_event_ids=(*turn_claim.discovery_event_ids, alias_event_id),
     )
 
 

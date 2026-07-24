@@ -59,28 +59,27 @@ def _store(tmp_path: Path) -> TurnStore:
     )
 
 
-def test_expand_pending_turn_claim_adds_only_new_aliases(tmp_path: Path) -> None:
-    """Expansion folds newly discovered aliases into the live claim set."""
+def test_try_claim_turn_alias_claims_a_free_alias(tmp_path: Path) -> None:
+    """A relay claims the routed-human alias when no live turn owns it."""
     store = _store(tmp_path)
     claimed_turn = TurnRecord.create(["$relay"], completed=False)
     assert store.try_claim_turn(claimed_turn)
-    expanded_turn = replace(claimed_turn, discovery_event_ids=("$routed",))
 
-    accepted = store.expand_pending_turn_claim(claimed_turn, expanded_turn)
+    assert store.try_claim_turn_alias("$routed") is True
 
-    assert accepted == ("$routed",)
     assert store.is_claimed_in_flight("$routed") is True
+    expanded_turn = replace(claimed_turn, discovery_event_ids=("$routed",))
     store.release_pending_turn_claim(expanded_turn)
     assert store.is_claimed_in_flight("$routed") is False
     assert store.is_claimed_in_flight("$relay") is False
 
 
-def test_expand_pending_turn_claim_never_steals_another_live_turns_alias(tmp_path: Path) -> None:
-    """An alias already owned by another live turn is not folded in or released.
+def test_try_claim_turn_alias_leaves_another_live_turns_alias_untouched(tmp_path: Path) -> None:
+    """An alias already owned by another live turn is rejected, not stolen.
 
-    If turn B expanded to include turn A's live source and then finished, its
-    release would strip A's claim while A is still running, letting a replay of
-    A's source re-enter. Expansion must leave the collided alias with A.
+    If turn B claimed turn A's live source and then finished, its release would
+    strip A's claim while A is still running, letting a replay of A's source
+    re-enter. The scalar alias claim must fail and leave the alias with A.
     """
     store = _store(tmp_path)
     turn_a = TurnRecord.create(["$shared"], completed=False)
@@ -88,12 +87,8 @@ def test_expand_pending_turn_claim_never_steals_another_live_turns_alias(tmp_pat
     assert store.try_claim_turn(turn_a)
     assert store.try_claim_turn(turn_b)
 
-    # B discovers $shared during preparation, but A already owns it.
-    b_expanded = replace(turn_b, discovery_event_ids=("$shared",))
-    accepted = store.expand_pending_turn_claim(turn_b, b_expanded)
-
-    # The collided alias is rejected: B never claims it.
-    assert accepted == ()
+    # B relays a message that replies to $shared, but A already owns it.
+    assert store.try_claim_turn_alias("$shared") is False
 
     # B finishes and releases only what it actually owns.
     store.release_pending_turn_claim(turn_b)
@@ -103,45 +98,29 @@ def test_expand_pending_turn_claim_never_steals_another_live_turns_alias(tmp_pat
     assert store.is_claimed_in_flight("$relay") is False
 
 
-def test_expand_pending_turn_claim_partially_accepts_only_free_aliases(tmp_path: Path) -> None:
-    """Expansion claims the free aliases while leaving an owned one with its holder."""
-    store = _store(tmp_path)
-    turn_a = TurnRecord.create(["$owned"], completed=False)
-    turn_b = TurnRecord.create(["$relay"], completed=False)
-    assert store.try_claim_turn(turn_a)
-    assert store.try_claim_turn(turn_b)
-
-    b_expanded = replace(turn_b, discovery_event_ids=("$owned", "$free"))
-    accepted = store.expand_pending_turn_claim(turn_b, b_expanded)
-
-    assert accepted == ("$free",)
-    assert store.is_claimed_in_flight("$free") is True
-    # $owned still belongs to A, not B.
-    store.release_pending_turn_claim(replace(turn_b, discovery_event_ids=("$free",)))
-    assert store.is_claimed_in_flight("$owned") is True
-    assert store.is_claimed_in_flight("$free") is False
-
-
 @pytest.mark.asyncio
-async def test_dispatch_expands_claim_with_prepared_discovery_aliases(tmp_path: Path) -> None:
-    """Aliases discovered during preparation join the live claim and its release scope.
+async def test_dispatch_claims_router_relay_alias_up_front(tmp_path: Path) -> None:
+    """A trusted router relay claims its routed-human alias before the first await.
 
-    The claim is acquired before preparation, but a trusted router relay only
-    learns the routed human event id while preparing. Without mid-flight
-    expansion, an alias-addressed replay passed is_claimed_in_flight while
-    the canonical relay response was live.
+    The relay knows the routed human event id from its own reply relation, so it
+    claims that alias up front and holds it for the whole turn. Without the claim,
+    an alias-addressed replay passed is_claimed_in_flight while the canonical
+    relay response was live.
     """
     store = _store(tmp_path)
-    controller = cast("TurnController", SimpleNamespace(deps=SimpleNamespace(turn_store=store)))
+    ingress = SimpleNamespace(router_relay_original_event_id=lambda _event: "$routed")
+    controller = cast(
+        "TurnController",
+        SimpleNamespace(deps=SimpleNamespace(turn_store=store, ingress=ingress)),
+    )
     raw_event = PreparedTextEvent(
-        sender="@user:example.org",
+        sender="@router:example.org",
         event_id="$relay",
         body="relayed",
         source={},
         server_timestamp=1_000,
     )
-    expanded_turn = replace(TurnRecord.create(["$relay"], completed=False), discovery_event_ids=("$routed",))
-    prepared = SimpleNamespace(handled_turn=expanded_turn, event=raw_event)
+    prepared = SimpleNamespace(handled_turn=TurnRecord.create(["$relay"], completed=False), event=raw_event)
     observed: dict[str, bool] = {}
 
     async def blocked(*_args: object, **_kwargs: object) -> bool:
@@ -167,6 +146,52 @@ async def test_dispatch_expands_claim_with_prepared_discovery_aliases(tmp_path: 
 
     assert observed["routed_in_flight"] is True
     assert store.is_claimed_in_flight("$routed") is False
+    assert store.is_claimed_in_flight("$relay") is False
+
+
+@pytest.mark.asyncio
+async def test_dispatch_leaves_alias_owned_by_another_live_turn(tmp_path: Path) -> None:
+    """A relay whose routed alias is already owned leaves that owner untouched.
+
+    The routed original may still be live when the relay overlaps it. The relay's
+    up-front claim must fail for that alias and never release it, so the original
+    turn's claim survives the relay's finally block.
+    """
+    store = _store(tmp_path)
+    assert store.try_claim_turn(TurnRecord.create(["$routed"], completed=False))
+    ingress = SimpleNamespace(router_relay_original_event_id=lambda _event: "$routed")
+    controller = cast(
+        "TurnController",
+        SimpleNamespace(deps=SimpleNamespace(turn_store=store, ingress=ingress)),
+    )
+    raw_event = PreparedTextEvent(
+        sender="@router:example.org",
+        event_id="$relay",
+        body="relayed",
+        source={},
+        server_timestamp=1_000,
+    )
+    prepared = SimpleNamespace(handled_turn=TurnRecord.create(["$relay"], completed=False), event=raw_event)
+
+    with (
+        patch(
+            "mindroom.text_ingress_dispatch._prepare_text_dispatch",
+            new=AsyncMock(return_value=prepared),
+        ),
+        patch(
+            "mindroom.text_ingress_dispatch._blocked_before_plan",
+            new=AsyncMock(return_value=True),
+        ),
+    ):
+        await dispatch_text_message(
+            controller,
+            MagicMock(room_id="!room:example.org"),
+            raw_event,
+            "@user:example.org",
+        )
+
+    # The relay released only $relay; the routed original still owns $routed.
+    assert store.is_claimed_in_flight("$routed") is True
     assert store.is_claimed_in_flight("$relay") is False
 
 
