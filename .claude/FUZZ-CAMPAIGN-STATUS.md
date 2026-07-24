@@ -4,16 +4,19 @@
 > Update it after every material finding, fix, campaign result, review result, push, or PR state change.
 > Do not include it in a product PR unless the user explicitly requests that.
 
-Last updated: 2026-07-24 (handoff for fresh Claude Fable session).
+Last updated: 2026-07-24 (fresh Fable session, supervisor authorized continuation; Items A and B RESOLVED).
 
 ## Fresh-session TL;DR (read this first)
 
 - Branch: `test/fuzz-live-chaos-expansion`. Worktree: `/Users/bas.nijholt/.codex/worktrees/fd26/mindroom-worktrees/test-fuzz-live-chaos-expansion`.
-- Local HEAD == remote `origin/test/fuzz-live-chaos-expansion` == PR #1639 head == `aba3c9067` (after this handoff commit, both advance by one — see "Exact heads at this handoff").
+- Local HEAD == remote `origin/test/fuzz-live-chaos-expansion` == PR #1639 head == `64ca7c360` (handoff `bc241598c` + Item A `13da9895d` + Item B `64ca7c360`).
 - Pinned review base: `origin/main` == `66dd4f4a68bcfd1a5e43b2cac20a1b464f306ab1`. Always diff against `origin/main`, never the old `test/matrix-cache-fuzz`.
-- All three MindRoom product fixes are verified correct by fresh-context review. Full test suite is green except one branch-owned test-name mismatch that is now FIXED (`aba3c9067`).
-- Implementation is STOPPED by supervisor order. Two open review items remain (do NOT start them until the supervisor says so): (A) reviewer blocker — missing cached-path regression for Fix 1; (B) Qodo inline claim — config-reload during Fix 2's recheck sleep replays full maintenance. Both fully specified below.
-- Living-doc rule: this file must be REMOVED from the branch before PR #1639 is merge-ready. Do not merge anything.
+- All three MindRoom product fixes are verified correct by fresh-context review.
+- Item A (reviewer blocker, cached-path regression for Fix 1): DONE in `13da9895d` (test-only, 4 passed in `tests/test_dispatch_replay_guard.py`).
+- Item B (Qodo, full-maintenance replay during recheck sleep): DONE in `64ca7c360` (`recheck_pending` resumable phase; 8 passed in `tests/test_startup_maintenance.py`); Qodo inline thread answered (reply id 3646283901).
+- Postgres 45-thread fanout ISOLATED RERUN: 2 passed solo (postgres call 10.29 s, sqlite 1.72 s, 60 s timeout untouched) — prior pressure was xdist contention, not a product slowdown.
+- Remaining gates: full-suite summary line, pre-commit all-files, fresh-context pr-review loop against `origin/main`.
+- Living-doc rule: this file must be REMOVED from the branch before PR #1639 is merge-ready (only when the supervisor says so). Do not merge anything.
 
 ## Merge recommendation for PR #1638
 
@@ -85,13 +88,11 @@ Keep all work unmerged until review, CI, and user approval are complete.
 - Merge status: active investigation and not merge-ready. Fresh-context review verdict: CHANGES REQUIRED (one blocker, see below).
 - This living handoff must be removed before PR #1639 is merge-ready.
 
-## Exact heads at this handoff
+## Exact heads (2026-07-24, after Items A and B)
 
-- Local HEAD before handoff commit: `aba3c90673cedd44f96ef6944f3486d50aaac48c`.
-- Remote `origin/test/fuzz-live-chaos-expansion` before handoff commit: `aba3c90673cedd44f96ef6944f3486d50aaac48c`.
+- Local HEAD == remote == PR #1639 head: `64ca7c360` (verify with `git rev-parse HEAD` vs `git ls-remote`).
 - `origin/main` (pinned review base): `66dd4f4a68bcfd1a5e43b2cac20a1b464f306ab1`.
-- Ahead/behind vs `origin/main`: 16 commits ahead (before handoff commit), 0 behind.
-- After this handoff doc is committed and pushed, both local and remote heads advance by exactly one commit (the handoff commit). Re-run `git rev-parse HEAD` and `git ls-remote origin refs/heads/test/fuzz-live-chaos-expansion` to confirm they match.
+- New commits this session (both pushed): `13da9895d` (Item A cached-path regression test) and `64ca7c360` (Item B recheck-only replay + lifecycle tests).
 
 ## Full commit list vs origin/main (oldest to newest)
 
@@ -112,6 +113,9 @@ fcbcfaca4 Drop replayed delivery of an in-flight-claimed source event    (Fix 3)
 2dc2e52d5 docs: record follow-up PR state
 28b45c004 docs: record oracle streaming-settle fix and C2 seed 4 pass
 aba3c9067 Fix stale-stream test ref to public recency-guard constant
+bc241598c docs: refresh fuzz handoff for fresh-session pickup
+13da9895d Cover cached-path coalesced-sibling exclusion in replay guard   (Item A)
+64ca7c360 Replay only the pending recency recheck after config reload     (Item B)
 ```
 
 ### MindRoom PR #1640
@@ -226,9 +230,11 @@ Review risk: the same event must not appear in a prompt or visible reply twice.
 
 These were test-system defects or semantic gaps and must not be reported as MindRoom product bugs.
 
-## Open review items (implementation STOPPED — do not start until supervisor authorizes)
+## Open review items (RESOLVED 2026-07-24 after supervisor authorization)
 
-### Item A — reviewer blocker: Fix 1 cached-path exclusion has no regression test
+### Item A — reviewer blocker: Fix 1 cached-path exclusion has no regression test — RESOLVED in `13da9895d`
+
+Resolution: added `test_cached_guard_never_treats_own_coalesced_sources_as_superseding` plus a sibling-outside-turn control (`test_cached_guard_skips_for_newer_cached_event_outside_current_turn`) to `tests/test_dispatch_replay_guard.py`, exercising `has_newer_unresponded_cached_thread_event` with `current_turn_event_ids`. Test-only change; 4 passed. Original spec follows.
 
 Source: fresh-context `pr-review` (agent `prreview1639`), verdict CHANGES REQUIRED, single blocker. All three product fixes were independently verified correct, minimal, and architecture-respecting; the harness was verified clean; all 29 harness tests and all 11 fix-regression tests pass. The sole gate is missing coverage.
 
@@ -239,7 +245,9 @@ Source: fresh-context `pr-review` (agent `prreview1639`), verdict CHANGES REQUIR
 - Why it gates: the task explicitly required proving the two paths equivalent. The cached path is the exact path hit after a cold restart / degraded sync — precisely what the chaos harness stresses — so an unguarded regression there would stay green.
 - Minimal fix (≈30 lines, NO production change): add one cached-path test mirroring `test_guard_never_treats_own_coalesced_sources_as_superseding` — call `has_newer_unresponded_cached_thread_event` with a newer cached event whose `event_id` is in `current_turn_event_ids`, assert `False`; plus a sibling-outside-turn control asserting `True`.
 
-### Item B — Qodo inline claim (PR #1639): config reload during Fix 2 recheck sleep replays full maintenance
+### Item B — Qodo inline claim (PR #1639): config reload during Fix 2 recheck sleep replays full maintenance — RESOLVED in `64ca7c360`
+
+Resolution: `StartupMaintenanceController` now tracks the pending recency recheck as an explicit resumable phase (`recheck_pending` field, set after runtime-support ready, cleared after the recheck phase). `restart_after_config_reload` replays only the sleep + recheck when `recheck_pending` is set; a fresh `start()` resets the flag so a new startup generation runs every phase. Qodo's Option B as written (make `cancel()` return False after main phases) was rejected because it would silently drop the pending recheck and resurrect the frozen-stream bug. Skipping runtime-support re-marking on the recheck-only path is safe because `_finalize_config_reload` (orchestrator.py:1453) re-syncs and re-marks it on every successful reload. Three lifecycle tests added (reload-during-sleep, repeated reloads, fresh-start reset); 8 passed in `tests/test_startup_maintenance.py`. Qodo inline thread answered (reply id 3646283901). Original spec follows.
 
 Source: GitHub Qodo inline comment on PR #1639, relayed by supervisor. VERIFIED against code and CONFIRMED as a real behavioral wart introduced by Fix 2. Not yet fixed (implementation stopped). This must be addressed and the inline thread answered before merge-readiness.
 
@@ -259,10 +267,10 @@ Source: GitHub Qodo inline comment on PR #1639, relayed by supervisor. VERIFIED 
 
 ## Full-suite gate results
 
-- `uv run pytest -n auto --no-cov` (full suite): the only failures were collection errors in `tests/test_stale_stream_cleanup.py` — `AttributeError: module 'mindroom.matrix.stale_stream_cleanup' has no attribute '_STALE_STREAM_RECENCY_GUARD_MS'`. This was a branch-owned test-name miss: production Fix 2 promoted the constant to public `STALE_STREAM_RECENCY_GUARD_MS` (imported by `src/mindroom/startup_maintenance.py`), but `tests/test_stale_stream_cleanup.py:68` still referenced the old private `_`-prefixed name. `_STALE_STREAM_LOOKBACK_MS` (line 69) is legitimately still private and was left unchanged.
-- Fix committed in `aba3c9067` (test-only, one-line). Solo re-run `uv run pytest tests/test_stale_stream_cleanup.py -n 0 --no-cov` → 80 passed.
-- Focused live-fuzz suite `tests/test_live_matrix_fuzz.py`: 29 passed.
-- ACTION FOR FRESH SESSION: re-run the FULL suite `uv run pytest -n auto --no-cov` once more end-to-end to confirm the stale-stream fix clears it with zero remaining errors, and record the exact summary line here. The prior full run was interrupted for triage before a clean summary line was captured.
+- FULL SUITE CLEAN (2026-07-24, at `64ca7c360` + doc edits): `uv run pytest -n auto --no-cov` → `11526 passed, 54 skipped, 68 warnings in 84.04s (0:01:24)`. Zero failures, zero errors.
+- Prior stale-stream collection error (`_STALE_STREAM_RECENCY_GUARD_MS` rename miss) was fixed in `aba3c9067`; confirmed cleared by the full run above.
+- Focused suites at this head: `tests/test_dispatch_replay_guard.py` 4 passed; `tests/test_startup_maintenance.py` 8 passed; `tests/test_stale_stream_cleanup.py` 80 passed; `tests/test_live_matrix_fuzz.py` 29 passed (pre-session).
+- `uv run pre-commit run --all-files` (2026-07-24): every hook passes except `prettier`, which deterministically reformats 7 `frontend/src/` files that are byte-identical to `origin/main` on this branch (verified `git diff origin/main -- frontend/` empty). That is pre-existing main-side formatting drift under this environment's prettier, NOT branch-owned; the churn was stashed (`prettier all-files drift on main-owned frontend files`) and must not be committed to PR #1639. Commit-scoped hooks are unaffected because the branch touches no frontend files.
 
 ## Current live campaign state
 
@@ -286,10 +294,10 @@ Source: GitHub Qodo inline comment on PR #1639, relayed by supervisor. VERIFIED 
 - Local HEAD equals pushed `origin/test/fuzz-live-chaos-expansion` at `aba3c9067` (plus the handoff commit added by this update).
 - Campaign details and minimized traces live in the Claude worktree's `.claude/REPORT.md` (gitignored working artifact — never commit or force-add it).
 
-## Postgres 45-thread fanout note (supervisor-flagged)
+## Postgres 45-thread fanout note (supervisor-flagged) — RESOLVED 2026-07-24
 
-- Supervisor asked to isolated-rerun the Postgres 45-thread fanout after the rest of the full suite is idle, because parallel suites likely contended.
-- This has NOT been rerun in isolation yet. Do NOT loosen its timeout without proof of a real MindRoom slowdown; first prove whether the pressure was xdist/Postgres contention by running it solo with the rest of the suite idle.
+- Isolated rerun DONE with the rest of the suite idle: `uv run pytest "tests/test_matrix_event_cache_fuzz.py::test_forty_five_thread_fanout_matches_every_cache_backend" -n 0 --no-cov` → 2 passed in 14.29 s (postgres call 10.29 s + 1.87 s container setup; sqlite call 1.72 s).
+- Verdict: comfortable margin under the 60 s per-test timeout when solo, so the earlier pressure was xdist/Postgres contention, not a MindRoom slowdown. Timeout left untouched.
 
 ## Required supervision gates before either extension PR
 
@@ -332,16 +340,14 @@ gh pr view 1638 --repo mindroom-ai/mindroom --json state,isDraft,headRefOid,merg
 gh pr view 20 --repo mindroom-ai/mindroom-nio --json state,isDraft,headRefOid,mergeStateStatus,url
 ```
 
-## Pending work for the next session (in priority order)
+## Pending work (2026-07-24, after Items A and B resolved)
 
-1. Confirm git state: `git rev-parse HEAD` == `git ls-remote origin refs/heads/test/fuzz-live-chaos-expansion` == PR #1639 head. Pin `origin/main` = `66dd4f4a68...` for all diffs.
-2. Re-run the FULL suite clean and capture the summary line: `nix-shell shell.nix` (on NixOS host) then `uv run pytest -n auto --no-cov`. Expect zero errors now that `aba3c9067` fixed the stale-stream constant ref. Record the exact `N passed` line in this doc.
-3. Isolated-rerun the Postgres 45-thread fanout test solo with the rest of the suite idle (see "Postgres 45-thread fanout note"). Do not touch its timeout without proof.
-4. Address reviewer blocker Item A: add the cached-path regression to `tests/test_dispatch_replay_guard.py` (no production change). Run `uv run pytest tests/test_dispatch_replay_guard.py -n 0 --no-cov`.
-5. Address Qodo Item B: refactor Fix 2 so config-reload cancel/replay only re-runs the pending recency recheck, not the full maintenance sequence; add reload/shutdown/repeated-start lifecycle tests in `tests/test_startup_maintenance.py`. Then reply on the Qodo inline thread.
-6. Run `uv run pre-commit run --all-files` (run `uv sync --all-extras` first in a fresh worktree/env).
-7. Commit each tested increment individually (`git add <file>`, never `git add .`; author `Bas Nijholt <bas@nijho.lt>`; no amend/force-push), push, and update this handoff.
-8. Before PR #1639 is merge-ready: REMOVE this file (`.claude/FUZZ-CAMPAIGN-STATUS.md`) from the branch. Do not merge.
+1. DONE: git state confirmed (`64ca7c360` everywhere), Item A (`13da9895d`), Item B (`64ca7c360`), Qodo reply (id 3646283901), Postgres fanout isolated rerun (2 passed solo).
+2. Re-run the FULL suite clean and record the exact `N passed` summary line in this doc (in progress this session).
+3. Run `uv run pre-commit run --all-files`.
+4. Run fresh-context `pr-review` against `origin/main`; fix all valid blockers; repeat until clean.
+5. Commit each tested increment individually (`git add <file>`, never `git add .`; author `Bas Nijholt <bas@nijho.lt>`; no amend/force-push), push, and update this handoff.
+6. Before PR #1639 is merge-ready: REMOVE this file (`.claude/FUZZ-CAMPAIGN-STATUS.md`) from the branch — only when the supervisor says so. Do not merge.
 
 ## Precise commands
 
