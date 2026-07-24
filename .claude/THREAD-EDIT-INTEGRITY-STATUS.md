@@ -64,6 +64,20 @@ The fuzzer tracks actual edit targets so its PostgreSQL fanout remains below the
 
 All three affected files, including every exact CI failure, pass with `47 passed`.
 
+Published follow-up head `51a083380c143073d8ef25b90341f3588aa9f35c` has green GitHub pytest.
+
+Tach passes.
+
+All-file pre-commit passes on its second run.
+
+The same seven unrelated frontend Prettier rewrites were reversed exactly and are absent from the branch.
+
+A local full rerun passed `11561` tests and had only an unrelated knowledge Git-status flake plus a PostgreSQL 45-thread fanout timeout while multiple repository-wide suites shared Docker/PostgreSQL.
+
+The exact knowledge test passes alone.
+
+The PostgreSQL fanout and full suite must rerun after the concurrent repository tests finish; do not increase the timeout or weaken the invariant.
+
 ## Verified blockers
 
 - Cold room scans admit explicit wrong-room and state events before root accounting, grouping, cache certification, and sidecar owner registration.
