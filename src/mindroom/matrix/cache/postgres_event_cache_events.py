@@ -484,25 +484,17 @@ async def _reconcile_thread_root_self_rows(
 ) -> None:
     """Keep root self-mappings exactly while a current row still proves them."""
     for root_id in candidate_root_ids:
-        support_row = await fetchone(
+        surviving_child = await fetchone(
             db,
             """
-            SELECT
-                EXISTS(
-                    SELECT 1
-                    FROM mindroom_event_cache_events
-                    WHERE namespace = %s AND room_id = %s AND event_id = %s
-                )
-                OR EXISTS(
-                    SELECT 1
-                    FROM mindroom_event_cache_event_threads
-                    WHERE namespace = %s AND room_id = %s AND thread_id = %s AND event_id <> %s
-                )
+            SELECT 1
+            FROM mindroom_event_cache_event_threads
+            WHERE namespace = %s AND room_id = %s AND thread_id = %s AND event_id <> %s
+            LIMIT 1
             """,
-            (namespace, room_id, root_id, namespace, room_id, root_id, root_id),
+            (namespace, room_id, root_id, root_id),
         )
-        assert support_row is not None
-        if bool(support_row[0]) or root_id in current_self_root_ids:
+        if surviving_child is not None or root_id in current_self_root_ids:
             await db.execute(
                 """
                 INSERT INTO mindroom_event_cache_event_threads(namespace, room_id, event_id, thread_id)
@@ -707,8 +699,9 @@ async def delete_event_thread_rows(
     room_id: str,
     *,
     event_ids: list[str],
+    current_self_root_ids: Collection[str] = (),
 ) -> int:
-    """Delete event mappings and unsupported roots whose proof was removed."""
+    """Delete event mappings while preserving roots proven by the current snapshot."""
     if not event_ids:
         return 0
     affected_thread_ids = await _thread_ids_for_events(
@@ -730,7 +723,7 @@ async def delete_event_thread_rows(
         namespace,
         room_id,
         candidate_root_ids=affected_thread_ids,
-        current_self_root_ids=set(),
+        current_self_root_ids=set(current_self_root_ids),
     )
     return deleted_rows
 

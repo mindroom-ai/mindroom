@@ -742,34 +742,6 @@ async def test_restoring_event_without_thread_relation_removes_stale_mapping(
 
 
 @pytest.mark.asyncio
-async def test_removing_last_child_relation_preserves_cached_root_mapping(
-    event_cache_factory: Callable[[], ConversationEventCache],
-) -> None:
-    """A cached root remains sufficient proof after its last child loses the thread relation."""
-    root = _shared_cache(event_cache_factory)
-    await root.initialize()
-    cache = root.for_principal("@alice:localhost")
-    room_id = "!room:localhost"
-    root_event_id = "$thread-root"
-    child_event_id = "$child"
-    threaded_child = _event(child_event_id, 2)
-    threaded_child["content"]["m.relates_to"] = {
-        "rel_type": "m.thread",
-        "event_id": root_event_id,
-    }
-    try:
-        await cache.store_event(root_event_id, room_id, _event(root_event_id, 1))
-        await cache.store_event(child_event_id, room_id, threaded_child)
-
-        await cache.store_event(child_event_id, room_id, _event(child_event_id, 3))
-
-        assert await cache.get_thread_id_for_event(room_id, child_event_id) is None
-        assert await cache.get_thread_id_for_event(room_id, root_event_id) == root_event_id
-    finally:
-        await root.close()
-
-
-@pytest.mark.asyncio
 async def test_storing_thread_root_preserves_child_proven_self_mapping(
     event_cache_factory: Callable[[], ConversationEventCache],
 ) -> None:

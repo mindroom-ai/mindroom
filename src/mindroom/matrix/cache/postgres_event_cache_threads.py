@@ -390,6 +390,7 @@ async def _replace_thread_locked(
             namespace,
             room_id,
             event_ids=removed_event_ids,
+            current_self_root_ids={thread_id} if thread_id in replacement_event_ids else (),
         )
 
 

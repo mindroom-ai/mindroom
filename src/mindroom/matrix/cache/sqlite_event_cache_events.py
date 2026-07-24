@@ -505,32 +505,16 @@ async def _reconcile_thread_root_self_rows(
     for root_id in candidate_root_ids:
         cursor = await db.execute(
             """
-            SELECT
-                EXISTS(
-                    SELECT 1
-                    FROM events
-                    WHERE principal_id = ? AND room_id = ? AND event_id = ?
-                )
-                OR EXISTS(
-                    SELECT 1
-                    FROM event_threads
-                    WHERE principal_id = ? AND room_id = ? AND thread_id = ? AND event_id <> ?
-                )
+            SELECT 1
+            FROM event_threads
+            WHERE principal_id = ? AND room_id = ? AND thread_id = ? AND event_id <> ?
+            LIMIT 1
             """,
-            (
-                principal_id,
-                room_id,
-                root_id,
-                principal_id,
-                room_id,
-                root_id,
-                root_id,
-            ),
+            (principal_id, room_id, root_id, root_id),
         )
-        support_row = await cursor.fetchone()
+        has_surviving_child = await cursor.fetchone() is not None
         await cursor.close()
-        assert support_row is not None
-        if bool(support_row[0]) or root_id in current_self_root_ids:
+        if has_surviving_child or root_id in current_self_root_ids:
             await db.execute(
                 """
                 INSERT OR IGNORE INTO event_threads(principal_id, room_id, event_id, thread_id)
@@ -737,8 +721,9 @@ async def delete_event_thread_rows(
     room_id: str,
     *,
     event_ids: list[str],
+    current_self_root_ids: Collection[str] = (),
 ) -> int:
-    """Delete event-to-thread rows within one owner and room."""
+    """Delete event mappings while preserving roots proven by the current snapshot."""
     affected_thread_ids = await _thread_ids_for_events(
         db,
         principal_id,
@@ -758,7 +743,7 @@ async def delete_event_thread_rows(
         principal_id,
         room_id,
         candidate_root_ids=affected_thread_ids,
-        current_self_root_ids=set(),
+        current_self_root_ids=set(current_self_root_ids),
     )
     return deleted_rows
 
