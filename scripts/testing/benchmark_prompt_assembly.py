@@ -228,7 +228,6 @@ async def _benchmark_prompt_branches(
             agent_name="benchmark",
             shared_scope_storage=None,
             pipeline_timing=None,
-            cancel_memory_on_agent_failure=True,
         )
 
     before_samples: list[float] = []

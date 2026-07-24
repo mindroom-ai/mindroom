@@ -1190,7 +1190,6 @@ async def _prepare_agent_and_prompt(
                     shared_scope_storage=scope_context.storage if scope_context is not None else None,
                     pipeline_timing=pipeline_timing,
                     caller_owned_agent=reusable_agent,
-                    cancel_memory_on_agent_failure=memory_backend == "file",
                 )
             finally:
                 _mark_pipeline_timing(pipeline_timing, "prompt_branches_ready")
@@ -1249,7 +1248,7 @@ async def _prepare_agent_and_prompt(
         thread_history=thread_history,
         runtime_paths=runtime_paths,
         config=config,
-        resolved_runtime_model=runtime_model if memory_backend == "mem0" else None,
+        resolved_runtime_model=runtime_model,
         compaction_lifecycle=compaction_lifecycle,
         current_sender_id=None if include_openai_compat_guidance else ctx.requester_id,
         current_timestamp_ms=current_timestamp_ms,

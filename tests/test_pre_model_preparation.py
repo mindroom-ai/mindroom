@@ -71,44 +71,6 @@ async def test_prepare_prompt_branches_propagates_failure_directly(
 
 
 @pytest.mark.asyncio
-async def test_prepare_prompt_branches_agent_failure_cancels_memory_sibling() -> None:
-    """File-mode agent failure cancels and joins its async memory sibling."""
-    memory_started = threading.Event()
-    memory_cleaned = asyncio.Event()
-    agent_error = RuntimeError("agent failed")
-
-    async def blocked_memory() -> MemoryPromptParts:
-        memory_started.set()
-        try:
-            await asyncio.Event().wait()
-        finally:
-            memory_cleaned.set()
-
-    def failed_agent() -> tuple[ResolvedRuntimeModel, MagicMock]:
-        if not memory_started.wait(5.0):
-            msg = "timed out waiting for memory preparation"
-            raise TimeoutError(msg)
-        raise agent_error
-
-    baseline_tasks = set(asyncio.all_tasks())
-    with pytest.raises(RuntimeError) as raised:
-        await prepare_prompt_branches(
-            prepare_memory=blocked_memory,
-            build_agent=failed_agent,
-            agent_name="general",
-            shared_scope_storage=None,
-            pipeline_timing=None,
-            cancel_memory_on_agent_failure=True,
-        )
-
-    assert raised.value is agent_error
-    assert memory_cleaned.is_set()
-    await asyncio.sleep(0)
-    leaked_tasks = {task for task in asyncio.all_tasks() - baseline_tasks if not task.done()}
-    assert leaked_tasks == set()
-
-
-@pytest.mark.asyncio
 async def test_prepare_prompt_branches_memory_failure_joins_agent_sibling(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -144,7 +106,6 @@ async def test_prepare_prompt_branches_memory_failure_joins_agent_sibling(
             agent_name="general",
             shared_scope_storage=None,
             pipeline_timing=None,
-            cancel_memory_on_agent_failure=True,
         ),
     )
     try:

@@ -144,10 +144,7 @@ async def test_prepare_agent_and_prompt_joins_overlapping_branches_before_histor
         assert len(kwargs["transient_context_messages"]) == 1
         assert kwargs["transient_context_messages"][0].content == render_transient_context(("turn memory",))
         assert kwargs["transient_context_messages"][0].add_to_agent_memory is False
-        if memory_backend == "mem0":
-            assert kwargs["resolved_runtime_model"].model_name == "default"
-        else:
-            assert kwargs["resolved_runtime_model"] is None
+        assert kwargs["resolved_runtime_model"].model_name == "default"
         return SimpleNamespace(
             prepared_history=PreparedHistoryState(),
             replay_plan=None,
@@ -279,7 +276,7 @@ async def test_prepare_agent_and_prompt_keeps_cold_default_workspace_serial(
     )
 
     assert prepared.agent is built_agent
-    assert prepare_history.await_args.kwargs["resolved_runtime_model"] is None
+    assert prepare_history.await_args.kwargs["resolved_runtime_model"].model_name == "default"
     assert pipeline_timing.metadata["prompt_branches_parallel"] is False
     assert pipeline_timing.metadata["prompt_branches_serial_reason"] == "default_workspace_scaffold_pending"
 
@@ -296,7 +293,7 @@ async def test_prepare_agent_and_prompt_file_memory_preserves_reusable_agent(
 
     async def prepare_history(*_args: object, **kwargs: object) -> SimpleNamespace:
         assert kwargs["agent"] is reusable_agent
-        assert kwargs["resolved_runtime_model"] is None
+        assert kwargs["resolved_runtime_model"].model_name == "default"
         transient_messages = kwargs["transient_context_messages"]
         assert [message.content for message in transient_messages] == [render_transient_context(("turn memory",))]
         return SimpleNamespace(
@@ -344,7 +341,7 @@ async def test_parallel_file_prompt_matches_sequential_output_and_bookkeeping(
 ) -> None:
     """Parallel file preparation preserves sequential prompt and history results."""
     built_agents: list[MagicMock] = []
-    history_inputs: list[tuple[str, tuple[str, ...], object]] = []
+    history_inputs: list[tuple[str, tuple[str, ...], str]] = []
 
     async def prepare_memory(*_args: object, **_kwargs: object) -> MemoryPromptParts:
         return MemoryPromptParts(
@@ -364,7 +361,7 @@ async def test_parallel_file_prompt_matches_sequential_output_and_bookkeeping(
             (
                 kwargs["prompt"],
                 tuple(message.content for message in transient_messages),
-                kwargs["resolved_runtime_model"],
+                kwargs["resolved_runtime_model"].model_name,
             ),
         )
         return SimpleNamespace(
@@ -416,12 +413,12 @@ async def test_parallel_file_prompt_matches_sequential_output_and_bookkeeping(
         (
             "raw prompt\n\nmodel metadata",
             (render_transient_context(("retrieved memory",)),),
-            None,
+            "default",
         ),
         (
             "raw prompt\n\nmodel metadata",
             (render_transient_context(("retrieved memory",)),),
-            None,
+            "default",
         ),
     ]
 
