@@ -17,6 +17,7 @@ from .event_cache_events import (
     filter_redacted_events,
     redaction_removal_event_ids,
     serialize_cacheable_events,
+    validated_cached_edit_row,
 )
 from .postgres_cursor import fetchall, fetchone, rowcount
 
@@ -162,19 +163,13 @@ async def load_latest_edit_row(
     event_type: str,
 ) -> CachedEventRow | None:
     """Return the latest cached edit event plus its lookup-row write time."""
-    parameters = (
-        namespace,
-        room_id,
-        original_event_id,
-        sender,
-        event_type,
-        room_id,
-        original_event_id,
-    )
-    row = await fetchone(
-        db,
+    cursor = await db.execute(
         """
-        SELECT events.event_json, events.cached_at
+        SELECT
+            events.event_json,
+            events.cached_at,
+            edits.edit_event_id,
+            edits.origin_server_ts
         FROM mindroom_event_cache_event_edits AS edits
         JOIN mindroom_event_cache_events AS events
             ON events.namespace = edits.namespace
@@ -183,45 +178,26 @@ async def load_latest_edit_row(
         WHERE edits.namespace = %s
             AND edits.room_id = %s
             AND edits.original_event_id = %s
-            AND events.event_json::jsonb ->> 'sender' = %s
-            AND events.event_json::jsonb ->> 'type' = %s
-            AND (
-                NOT (events.event_json::jsonb ? 'room_id')
-                OR events.event_json::jsonb ->> 'room_id' = %s
-            )
-            AND NOT (events.event_json::jsonb ? 'state_key')
-            AND jsonb_typeof(events.event_json::jsonb -> 'event_id') = 'string'
-            AND events.event_json::jsonb ->> 'event_id' = edits.edit_event_id
-            AND jsonb_typeof(events.event_json::jsonb -> 'origin_server_ts') = 'number'
-            AND events.event_json::jsonb ->> 'origin_server_ts' ~ '^-?[0-9]+$'
-            AND jsonb_typeof(events.event_json::jsonb -> 'content') = 'object'
-            AND events.event_json::jsonb -> 'content' -> 'm.relates_to' ->> 'rel_type' = 'm.replace'
-            AND events.event_json::jsonb -> 'content' -> 'm.relates_to' ->> 'event_id' = %s
-            AND jsonb_typeof(events.event_json::jsonb -> 'content' -> 'm.new_content') = 'object'
-            AND (
-                events.event_json::jsonb ->> 'type' != 'm.room.message'
-                OR (
-                    jsonb_typeof(events.event_json::jsonb -> 'content' -> 'body') = 'string'
-                    AND jsonb_typeof(events.event_json::jsonb -> 'content' -> 'msgtype') = 'string'
-                    AND jsonb_typeof(
-                        events.event_json::jsonb -> 'content' -> 'm.new_content' -> 'body'
-                    ) = 'string'
-                    AND jsonb_typeof(
-                        events.event_json::jsonb -> 'content' -> 'm.new_content' -> 'msgtype'
-                    ) = 'string'
-                )
-            )
         ORDER BY edits.origin_server_ts DESC, edits.edit_event_id COLLATE "C" DESC
-        LIMIT 1
         """,
-        parameters,
+        (namespace, room_id, original_event_id),
     )
-    if row is None:
+    try:
+        while (row := await cursor.fetchone()) is not None:
+            if validated_row := validated_cached_edit_row(
+                row[0],
+                row[1],
+                row[2],
+                row[3],
+                room_id=room_id,
+                original_event_id=original_event_id,
+                sender=sender,
+                event_type=event_type,
+            ):
+                return validated_row
         return None
-    return CachedEventRow(
-        event=json.loads(row[0]),
-        cached_at=None if row[1] is None else float(row[1]),
-    )
+    finally:
+        await cursor.close()
 
 
 async def load_mxc_text(

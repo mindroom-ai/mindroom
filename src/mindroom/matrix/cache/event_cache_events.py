@@ -3,10 +3,16 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from mindroom.matrix.event_info import EventInfo, event_type_supports_thread_relations
+from mindroom.matrix.event_info import (
+    EventInfo,
+    event_source_is_state_event,
+    event_source_matches_room,
+    event_type_supports_thread_relations,
+)
 from mindroom.matrix.sidecar_content import sidecar_mxc_url
 
 _EDITABLE_EVENT_TYPES = frozenset({"m.room.message", "io.mindroom.tool_approval"})
@@ -30,6 +36,57 @@ class CachedEventRow:
 
     event: dict[str, Any]
     cached_at: float | None
+
+
+def validated_cached_edit_row(
+    event_json: str,
+    cached_at: float | None,
+    indexed_event_id: str,
+    indexed_origin_server_ts: int,
+    *,
+    room_id: str,
+    original_event_id: str,
+    sender: str,
+    event_type: str,
+) -> CachedEventRow | None:
+    """Return one cache-index candidate when its Matrix replacement envelope is valid."""
+    event = json.loads(event_json)
+    if not isinstance(event, dict):
+        return None
+    timestamp = event.get("origin_server_ts")
+    content = event.get("content")
+    if (
+        event.get("event_id") != indexed_event_id
+        or not indexed_event_id
+        or not isinstance(timestamp, int)
+        or isinstance(timestamp, bool)
+        or timestamp != indexed_origin_server_ts
+        or event.get("sender") != sender
+        or event.get("type") != event_type
+        or event_source_is_state_event(event)
+        or not event_source_matches_room(event, room_id)
+        or not isinstance(content, Mapping)
+    ):
+        return None
+    relates_to = content.get("m.relates_to")
+    new_content = content.get("m.new_content")
+    if (
+        not isinstance(relates_to, Mapping)
+        or relates_to.get("rel_type") != "m.replace"
+        or relates_to.get("event_id") != original_event_id
+        or not isinstance(new_content, Mapping)
+    ):
+        return None
+    if event_type == "m.room.message" and not all(
+        isinstance(candidate_content.get(field), str)
+        for candidate_content in (content, new_content)
+        for field in ("body", "msgtype")
+    ):
+        return None
+    return CachedEventRow(
+        event=event,
+        cached_at=None if cached_at is None else float(cached_at),
+    )
 
 
 @dataclass(frozen=True, slots=True)

@@ -17,6 +17,7 @@ from .event_cache_events import (
     filter_redacted_events,
     redaction_removal_event_ids,
     serialize_cacheable_events,
+    validated_cached_edit_row,
 )
 
 if TYPE_CHECKING:
@@ -163,18 +164,13 @@ async def load_latest_edit_row(
     event_type: str,
 ) -> CachedEventRow | None:
     """Return the latest edit and its write time within one ownership scope."""
-    parameters = (
-        principal_id,
-        room_id,
-        original_event_id,
-        sender,
-        event_type,
-        room_id,
-        original_event_id,
-    )
     cursor = await db.execute(
         """
-        SELECT events.event_json, events.cached_at
+        SELECT
+            events.event_json,
+            events.cached_at,
+            event_edits.edit_event_id,
+            event_edits.origin_server_ts
         FROM event_edits
         JOIN events
           ON events.principal_id = event_edits.principal_id
@@ -183,39 +179,26 @@ async def load_latest_edit_row(
         WHERE event_edits.principal_id = ?
           AND event_edits.room_id = ?
           AND event_edits.original_event_id = ?
-          AND json_extract(events.event_json, '$.sender') = ?
-          AND json_extract(events.event_json, '$.type') = ?
-          AND (
-              json_type(events.event_json, '$.room_id') IS NULL
-              OR json_extract(events.event_json, '$.room_id') = ?
-          )
-          AND json_type(events.event_json, '$.state_key') IS NULL
-          AND json_type(events.event_json, '$.event_id') = 'text'
-          AND json_extract(events.event_json, '$.event_id') = event_edits.edit_event_id
-          AND json_type(events.event_json, '$.origin_server_ts') = 'integer'
-          AND json_type(events.event_json, '$.content') = 'object'
-          AND json_extract(events.event_json, '$.content."m.relates_to".rel_type') = 'm.replace'
-          AND json_extract(events.event_json, '$.content."m.relates_to".event_id') = ?
-          AND json_type(events.event_json, '$.content."m.new_content"') = 'object'
-          AND (
-              json_extract(events.event_json, '$.type') != 'm.room.message'
-              OR (
-                  json_type(events.event_json, '$.content.body') = 'text'
-                  AND json_type(events.event_json, '$.content.msgtype') = 'text'
-                  AND json_type(events.event_json, '$.content."m.new_content".body') = 'text'
-                  AND json_type(events.event_json, '$.content."m.new_content".msgtype') = 'text'
-              )
-          )
-        ORDER BY event_edits.origin_server_ts DESC, event_edits.edit_event_id DESC
-        LIMIT 1
+        ORDER BY event_edits.origin_server_ts DESC, event_edits.edit_event_id COLLATE BINARY DESC
         """,
-        parameters,
+        (principal_id, room_id, original_event_id),
     )
-    row = await cursor.fetchone()
-    await cursor.close()
-    if row is None:
+    try:
+        while (row := await cursor.fetchone()) is not None:
+            if validated_row := validated_cached_edit_row(
+                row[0],
+                row[1],
+                row[2],
+                row[3],
+                room_id=room_id,
+                original_event_id=original_event_id,
+                sender=sender,
+                event_type=event_type,
+            ):
+                return validated_row
         return None
-    return CachedEventRow(event=json.loads(row[0]), cached_at=None if row[1] is None else float(row[1]))
+    finally:
+        await cursor.close()
 
 
 async def load_mxc_text(

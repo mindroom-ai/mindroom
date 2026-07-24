@@ -5,52 +5,55 @@
 - Branch: `fix/thread-edit-integrity`.
 - Pull request: https://github.com/mindroom-ai/mindroom/pull/1641.
 - Base: `origin/main` at `66dd4f4a68bcfd1a5e43b2cac20a1b464f306ab1`.
-- Last frozen local, remote, and PR head: `be6ee9f9a807e5c88b07db3e1c3a8a5b7d8aa49b`.
+- Current committed local, remote, and PR head: `fa5b0ed377259f7124baaa8b8fd7f0e8c612175f`.
 - Never merge this pull request.
 - Never amend or force-push.
 
 ## Current gate state
 
-- Exact head `be6ee9f9a807e5c88b07db3e1c3a8a5b7d8aa49b` is rejected.
-- Both fresh native Codex reviewers returned `CHANGES REQUIRED`.
-- The isolated Claude Fable 5 xhigh review is still running on the rejected head for evidence only.
-- Any CI or AI approval on the rejected head is non-gating.
+- Exact head `be6ee9f9a807e5c88b07db3e1c3a8a5b7d8aa49b` was rejected by two fresh native Codex reviewers.
+- Follow-up commits through `fa5b0ed377259f7124baaa8b8fd7f0e8c612175f` address every verified finding from those reviews.
+- The isolated Fable review of rejected head `be6ee9f9a807e5c88b07db3e1c3a8a5b7d8aa49b` remains evidence-only.
+- Current GitHub CI is running on `fa5b0ed377259f7124baaa8b8fd7f0e8c612175f`.
+- Pending cache-query simplification will invalidate that CI and every prior review.
 - The real-Tuwunel gate has not run on this implementation.
-- `RESOURCE-GATE.md` currently assigns heavy work to PR #1640, with reconstructed nio ahead of exact-head real-Tuwunel.
+- `RESOURCE-GATE.md` currently assigns heavy work to reconstructed nio, with exact-head real-Tuwunel next.
 - Do not run full pytest, PostgreSQL fanout, all-file hooks, Docker Matrix, or real-Tuwunel until the resource gate grants the slot.
 
-## Verified blockers
+## Completed follow-up fixes
 
-- Full and bundled thread resolution record only `RoomMessageText` and `RoomMessageNotice` replacements.
-- Matrix permits a replacement `m.room.message` to change `msgtype`, including `m.text` to `m.emote`.
-- Full resolution accepts a replacement whose `m.new_content` has `body` but no required `msgtype`, while bundled and SQLite/PostgreSQL paths reject it.
-- Incremental reuse does not reject explicit wrong-room or state suffix rows before merging.
-- Bundled extraction accepts non-spec top-level `m.relations`, while incremental reuse inspects only the spec-defined `unsigned.m.relations`, causing full/reuse divergence.
-- PostgreSQL schema-v3 compatibility changes in the diff are semantic no-ops and should be restored to `origin/main`.
+- Full and bundled history now accept every valid `m.room.message` replacement, including `msgtype` changes.
+- Direct and bundled paths reject malformed message replacements and fall back to the next valid candidate.
+- Bundled extraction reads only the spec-defined `unsigned.m.relations`.
+- Incremental reuse rejects state and explicit wrong-room suffix rows.
+- Incremental reuse uses the canonical bundled replacement candidate extractor.
+- The no-op PostgreSQL schema-v3 compatibility diff was removed.
+- Deterministic regressions cover direct, bundled, incremental, SQLite, and PostgreSQL behavior.
 
-## Planned fixes
+## Current change
 
-- Record every valid nio `RoomMessage` replacement while keeping originals visible across all supported message `msgtype` values.
-- Share in-memory replacement renderability validation so direct and bundled paths require valid `m.room.message` content.
-- Read bundled aggregations only from `unsigned.m.relations`.
-- Pass authoritative room scope into the incremental suffix guard and reject state or explicit wrong-room rows.
-- Reuse the canonical bundled candidate extractor in the suffix guard.
-- Restore the no-op PostgreSQL schema compatibility expressions to `origin/main`.
-- Add deterministic full/bundled and incremental-reuse regressions.
+- The SQLite and PostgreSQL latest-edit queries previously duplicated a long Matrix validity predicate in two JSON dialects.
+- SQL now owns only cache scope, joins, and canonical timestamp plus event-ID ordering.
+- One backend-neutral Python validator owns sender, type, room, state, index identity, timestamp identity, relation target, `m.new_content`, and `m.room.message` renderability.
+- Both backends scan the ordered cursor only until the first valid candidate, so malformed newest edits still fall back without loading a candidate list.
+- PostgreSQL retains explicit bytewise `COLLATE "C"` event-ID ordering.
+- SQLite uses explicit `COLLATE BINARY` event-ID ordering.
 
-## Existing validation
+## Current validation
 
-- The prior owning/backend matrix passed at 100%.
-- The thirteen published pytest regressions pass in a focused `47 passed` rerun.
-- Isolated SQLite/PostgreSQL fanout, seeded trace, and knowledge-status tests passed with `5 passed`.
-- Prior exact-head GitHub pytest passed with `11590 passed, 14 skipped`.
-- Tach and all-file pre-commit passed before this reopened handoff commit.
-- Every new commit invalidates that validation as a final gate.
+- Focused backend-neutral semantics and SQLite latest-edit regressions pass with `24 passed`.
+- Ruff passes on the three changed production files.
+- The prior focused all-message replacement tests pass with `5 passed`.
+- Incremental reuse passes with `30 passed`.
+- Each follow-up commit passed its commit hooks.
+- Every new commit invalidates validation as a final gate.
 
-## Required final gates
+## Required next steps
 
-- Run focused tests after each fix commit.
-- When heavy ownership returns, run relevant SQLite/PostgreSQL backend tests, full pytest, Tach, and all-file pre-commit.
+- Finish focused static checks and commit the cache-query simplification.
+- Push and update the external campaign notes.
+- When heavy ownership returns, run relevant SQLite and PostgreSQL backend tests, the exact thirteen prior CI failures, full pytest, Tach, and all-file pre-commit.
+- Update the stale PR body.
 - Remove this file only when a new final head is frozen.
 - Run two fresh native Codex reviews and one fresh isolated Claude Fable 5 xhigh review on the exact frozen head.
 - Verify every current GitHub review comment and CI check.

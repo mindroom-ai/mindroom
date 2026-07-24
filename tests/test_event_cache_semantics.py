@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING
 
 import pytest
 
 from mindroom.matrix.cache import ThreadRevision
+from mindroom.matrix.cache.event_cache_events import validated_cached_edit_row
 from mindroom.matrix.cache.thread_cache_state import thread_cache_state_row, thread_revision_row
 
 if TYPE_CHECKING:
@@ -59,4 +61,34 @@ def test_thread_revision_row_normalizes_backend_values() -> None:
         max_write_seq=7,
         max_thread_write_seq=9,
         max_origin_server_ts=1000,
+    )
+
+
+def test_validated_cached_edit_row_rejects_index_timestamp_mismatch() -> None:
+    """Latest-edit ordering must not trust an index timestamp that disagrees with its event."""
+    event = {
+        "event_id": "$edit",
+        "origin_server_ts": 2000,
+        "sender": "@alice:localhost",
+        "type": "m.room.message",
+        "content": {
+            "body": "* Edited",
+            "msgtype": "m.text",
+            "m.new_content": {"body": "Edited", "msgtype": "m.text"},
+            "m.relates_to": {"rel_type": "m.replace", "event_id": "$original"},
+        },
+    }
+
+    assert (
+        validated_cached_edit_row(
+            json.dumps(event),
+            None,
+            "$edit",
+            3000,
+            room_id="!room:localhost",
+            original_event_id="$original",
+            sender="@alice:localhost",
+            event_type="m.room.message",
+        )
+        is None
     )
