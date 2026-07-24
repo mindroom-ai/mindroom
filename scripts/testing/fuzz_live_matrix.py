@@ -1591,6 +1591,7 @@ class ExactReplyOracle:
         self.optional_sources: set[str] = set()
         self.source_threads: dict[str, int] = {}
         self.observed_sources: set[str] = set()
+        self.chains: dict[tuple[int, int], list[str]] = defaultdict(list)
         self.response_ids: dict[str, set[str]] = defaultdict(set)
         self.response_event_by_ref: dict[str, str] = {}
         self.seen_event_ids: set[str] = set()
@@ -1610,11 +1611,13 @@ class ExactReplyOracle:
         event_id: str,
         *,
         thread: int = 0,
+        client: int = 0,
         sent_at: float | None = None,
     ) -> None:
         """Require one canonical agent reply covering a source event."""
         self.expected_sources[event_id] = logical_ref
         self.source_threads[event_id] = thread
+        self.chains[thread, client].append(event_id)
         if sent_at is not None:
             self.sent_at[event_id] = sent_at
         # A concurrent pump may have synced the source before this
@@ -1637,27 +1640,45 @@ class ExactReplyOracle:
         self._ledger_read_at = now
         self._ledger_attributions = read_ledger_attributions(self.ledger_path)
 
-    def unsettled_required_sources(self) -> list[str]:
-        """Return sources blocking settlement under the active reply model.
+    def directly_settled(self, event_id: str) -> bool:
+        """Return whether one source has its own reply or ledger attribution."""
+        return len(self.response_ids.get(event_id, ())) == 1 or event_id in self._ledger_attributions
 
-        Under coalescing, a source is settled once it was observed on `/sync`
-        and either collected its direct canonical reply or was durably
-        attributed to a completed combined turn in the handled-turn ledger.
+    def settled_sources(self) -> set[str]:
+        """Return sources settled under per-(thread, sender) chain semantics.
+
+        MindRoom may supersede an older unresponded message once the same
+        requester sends a newer one in the same thread, so a chain settles
+        from its newest required member backwards: the newest must be
+        directly replied or ledger-attributed, and every older member is
+        then either individually attributed or legitimately superseded.
         """
+        settled: set[str] = set()
+        for chain in self.chains.values():
+            anchored = False
+            for event_id in reversed(chain):
+                if event_id in self.optional_sources:
+                    if anchored:
+                        settled.add(event_id)
+                    continue
+                if anchored or self.directly_settled(event_id):
+                    anchored = True
+                    settled.add(event_id)
+        return settled
+
+    def unsettled_required_sources(self) -> list[str]:
+        """Return sources blocking settlement under the active reply model."""
         if not self.coalescing_threads:
             return [
                 event_id
                 for event_id in self.expected_sources
                 if event_id not in self.optional_sources and len(self.response_ids.get(event_id, ())) != 1
             ]
+        settled = self.settled_sources()
         return [
             event_id
             for event_id in self.expected_sources
-            if event_id not in self.optional_sources
-            and not (
-                event_id in self.observed_sources
-                and (len(self.response_ids.get(event_id, ())) == 1 or event_id in self._ledger_attributions)
-            )
+            if event_id not in self.optional_sources and not (event_id in self.observed_sources and event_id in settled)
         ]
 
     async def pump(self, *, timeout_ms: int = 0) -> None:
@@ -1713,11 +1734,28 @@ class ExactReplyOracle:
                 None,
             )
             if source_event_id is not None:
-                covering = self._ledger_attributions.get(source_event_id)
+                covering = self._covering_response(source_event_id)
                 if covering is not None:
                     return covering
         msg = f"response event not observed for {response_ref!r}"
         raise KeyError(msg)
+
+    def _covering_response(self, source_event_id: str) -> str | None:
+        """Return the reply covering one coalesced or superseded source."""
+        attribution = self._ledger_attributions.get(source_event_id)
+        if attribution is not None:
+            return attribution
+        chain = next((chain for chain in self.chains.values() if source_event_id in chain), None)
+        if chain is None:
+            return None
+        for later_source in chain[chain.index(source_event_id) + 1 :]:
+            attribution = self._ledger_attributions.get(later_source)
+            if attribution is not None:
+                return attribution
+            replies = self.response_ids.get(later_source, set())
+            if len(replies) == 1:
+                return next(iter(replies))
+        return None
 
     async def _sync_once(self, *, timeout_ms: int, allow_limited: bool = False) -> None:
         async with self._sync_lock:
@@ -1884,12 +1922,12 @@ class FinalStateAuditor:
         self._assert_reply_cardinality(replies)
         completed = self._assert_final_bodies_complete(events, replies)
         self._assert_sync_view_parity(events, sent_records, replies)
-        audited_turns = self._assert_ledger_attribution(replies) if self.ledger_path is not None else 0
+        ledger_metrics = self._assert_ledger_attribution(replies) if self.ledger_path is not None else {}
         return {
             "audited_events": len(events),
             "audited_rooms": len(set(room_ids)),
             "completed_final_bodies": completed,
-            "ledger_attributed_sources": audited_turns,
+            **ledger_metrics,
         }
 
     def _assert_sent_events_canonical(
@@ -1961,13 +1999,14 @@ class FinalStateAuditor:
             msg = f"final reply cardinality audit failed: {problems}"
             raise AssertionError(msg)
 
-    def _assert_ledger_attribution(self, replies: Mapping[str, set[str]]) -> int:
-        """Every required source must be durably attributed to one visible reply.
+    def _assert_ledger_attribution(self, replies: Mapping[str, set[str]]) -> dict[str, int]:
+        """Every required source must be durably attributed or superseded.
 
         Matrix relations cannot expose which sources one coalesced reply
         covered, so exact per-source attribution comes from MindRoom's
-        handled-turn ledger and is cross-checked against the `/messages`
-        view in both directions.
+        handled-turn ledger, walked per (thread, sender) chain to honor the
+        supersede policy, and cross-checked against the `/messages` view in
+        both directions.
         """
         assert self.ledger_path is not None
         oracle = self.oracle
@@ -1986,21 +2025,26 @@ class FinalStateAuditor:
         problems: list[str] = []
         ledger_response_ids: set[str] = set()
         attributed = 0
-        for source_event_id, logical_ref in oracle.expected_sources.items():
-            if source_event_id in oracle.optional_sources:
-                continue
-            record = TurnRecordCodec.from_ledger_record(source_event_id, raw_records.get(source_event_id))
-            if record is None:
-                problems.append(f"source {logical_ref} ({source_event_id}) has no durable turn record")
-                continue
-            if not record.completed:
-                problems.append(f"source {logical_ref} ({source_event_id}) never durably completed")
-                continue
-            if record.response_event_id is None:
-                problems.append(f"source {logical_ref} ({source_event_id}) completed without a response event")
-                continue
-            ledger_response_ids.add(record.response_event_id)
-            attributed += 1
+        superseded = 0
+        for chain in oracle.chains.values():
+            anchored = False
+            for source_event_id in reversed(chain):
+                if source_event_id in oracle.optional_sources:
+                    continue
+                logical_ref = oracle.expected_sources[source_event_id]
+                record = TurnRecordCodec.from_ledger_record(source_event_id, raw_records.get(source_event_id))
+                if record is not None and record.completed and record.response_event_id is not None:
+                    ledger_response_ids.add(record.response_event_id)
+                    attributed += 1
+                    anchored = True
+                elif anchored:
+                    # An older unresponded message legitimately superseded by a
+                    # newer settled message from the same sender in this thread.
+                    superseded += 1
+                else:
+                    problems.append(
+                        f"newest chain source {logical_ref} ({source_event_id}) has no durable attribution",
+                    )
 
         all_expected_reply_ids = {
             reply_id
@@ -2025,7 +2069,7 @@ class FinalStateAuditor:
         if problems:
             msg = f"durable turn attribution audit failed: {problems}"
             raise AssertionError(msg)
-        return attributed
+        return {"ledger_attributed_sources": attributed, "ledger_superseded_sources": superseded}
 
     def _assert_final_bodies_complete(
         self,
@@ -2568,7 +2612,13 @@ class LiveFuzzRunner:
             logical_ref = f"root:{thread}"
             self.event_ids[logical_ref] = event_id
             self.sent_payloads[logical_ref] = payload
-            self.oracle.expect(logical_ref, event_id, thread=thread, sent_at=sent_at)
+            self.oracle.expect(
+                logical_ref,
+                event_id,
+                thread=thread,
+                client=self.scenario.root_client(thread),
+                sent_at=sent_at,
+            )
         await self.oracle.wait_until_exact(
             deadline_seconds=self.reply_timeout,
             settle_seconds=self.settle_seconds,
@@ -2662,7 +2712,13 @@ class LiveFuzzRunner:
         """
         event_id = await client.send_event(payload.event_type, payload.txn_id, payload.content, room_id=room_id)
         self.sent_records.append(_SentRecord(event_id, room_id, payload.event_type))
-        self.oracle.expect(operation.event_ref, event_id, thread=operation.thread, sent_at=time.monotonic())
+        self.oracle.expect(
+            operation.event_ref,
+            event_id,
+            thread=operation.thread,
+            client=operation.client,
+            sent_at=time.monotonic(),
+        )
         return event_id
 
     def _resolve_event_ref(self, logical_ref: str) -> str:

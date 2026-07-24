@@ -598,36 +598,33 @@ async def test_coalescing_oracle_settles_via_ledger_attribution(tmp_path: Path) 
         ledger_path=ledger_path,
     )
     try:
-        oracle.expect("op:1", "$first", thread=3)
-        oracle.expect("op:2", "$second", thread=3)
+        oracle.expect("op:1", "$first", thread=3, client=1)
+        oracle.expect("op:2", "$second", thread=3, client=1)
         for source in ("$first", "$second"):
             oracle._ingest_event({"event_id": source, "sender": "@user:example", "type": "m.room.message"})
+        assert set(oracle.unsettled_required_sources()) == {"$first", "$second"}
+
         oracle._ingest_event(_agent_reply_event("$second", "$combined-reply", "LIVE-FUZZ call=2 END call=2"))
-        assert oracle.unsettled_required_sources() == ["$first"]
-        with pytest.raises(KeyError):
-            oracle.resolve_response_ref("response:op:1")
+        assert oracle.unsettled_required_sources() == []
+        assert oracle.resolve_response_ref("response:op:2") == "$combined-reply"
+        assert oracle.resolve_response_ref("response:op:1") == "$combined-reply"
 
         record = TurnRecord(
-            source_event_ids=("$first", "$second"),
-            response_event_id="$combined-reply",
+            source_event_ids=("$first",),
+            response_event_id="$dedicated-reply",
             completed=True,
         )
         ledger_path.write_text(
             json.dumps(
                 {
                     "schema_version": TurnRecordCodec.schema_version(),
-                    "records": {
-                        "$first": TurnRecordCodec.to_ledger_record(record),
-                        "$second": TurnRecordCodec.to_ledger_record(record),
-                    },
+                    "records": {"$first": TurnRecordCodec.to_ledger_record(record)},
                 },
             ),
             encoding="utf-8",
         )
         oracle.refresh_ledger_attributions(min_interval=0.0)
-        assert oracle.unsettled_required_sources() == []
-        assert oracle.resolve_response_ref("response:op:2") == "$combined-reply"
-        assert oracle.resolve_response_ref("response:op:1") == "$combined-reply"
+        assert oracle.resolve_response_ref("response:op:1") == "$dedicated-reply"
         oracle._assert_no_wrong_replies()
     finally:
         await client.close()
@@ -672,45 +669,47 @@ async def test_ledger_attribution_flags_missing_and_orphaned_turns(tmp_path: Pat
             response_event_id="$combined-reply",
             completed=True,
         )
-        ledger_path.write_text(
-            json.dumps(
-                {
-                    "schema_version": TurnRecordCodec.schema_version(),
-                    "records": {
-                        "$first": TurnRecordCodec.to_ledger_record(record),
-                        "$second": TurnRecordCodec.to_ledger_record(record),
-                    },
+        full_ledger = json.dumps(
+            {
+                "schema_version": TurnRecordCodec.schema_version(),
+                "records": {
+                    "$first": TurnRecordCodec.to_ledger_record(record),
+                    "$second": TurnRecordCodec.to_ledger_record(record),
                 },
-            ),
-            encoding="utf-8",
+            },
         )
-        assert auditor._assert_ledger_attribution(replies) == 2
+        ledger_path.write_text(full_ledger, encoding="utf-8")
+        assert auditor._assert_ledger_attribution(replies) == {
+            "ledger_attributed_sources": 2,
+            "ledger_superseded_sources": 0,
+        }
 
         ledger_path.write_text(
             json.dumps(
                 {
                     "schema_version": TurnRecordCodec.schema_version(),
-                    "records": {"$second": TurnRecordCodec.to_ledger_record(record)},
+                    "records": {"$first": TurnRecordCodec.to_ledger_record(record)},
                 },
             ),
             encoding="utf-8",
         )
-        with pytest.raises(AssertionError, match="no durable turn record"):
+        with pytest.raises(AssertionError, match="newest chain source"):
             auditor._assert_ledger_attribution(replies)
 
-        orphan = {"$second": {"$combined-reply"}, "$first": {"$rogue-reply"}}
-        ledger_path.write_text(
-            json.dumps(
-                {
-                    "schema_version": TurnRecordCodec.schema_version(),
-                    "records": {
-                        "$first": TurnRecordCodec.to_ledger_record(record),
-                        "$second": TurnRecordCodec.to_ledger_record(record),
-                    },
-                },
-            ),
-            encoding="utf-8",
+        superseded_ledger = json.dumps(
+            {
+                "schema_version": TurnRecordCodec.schema_version(),
+                "records": {"$second": TurnRecordCodec.to_ledger_record(record)},
+            },
         )
+        ledger_path.write_text(superseded_ledger, encoding="utf-8")
+        assert auditor._assert_ledger_attribution(replies) == {
+            "ledger_attributed_sources": 1,
+            "ledger_superseded_sources": 1,
+        }
+
+        orphan = {"$second": {"$combined-reply"}, "$first": {"$rogue-reply"}}
+        ledger_path.write_text(full_ledger, encoding="utf-8")
         with pytest.raises(AssertionError, match="not attributed by any durable turn record"):
             auditor._assert_ledger_attribution(orphan)
     finally:
