@@ -938,18 +938,95 @@ def test_live_model_tracks_edit_and_redaction_transitions() -> None:
         fuzz_live_matrix._history_fingerprint((edited_identity,)),
     )
 
-    runner._record_redaction(
-        LiveOperation(2, LiveOperationKind.REDACTION, 0, edit.event_ref),
+    assert (
+        runner._record_redaction(
+            LiveOperation(2, LiveOperationKind.REDACTION, 0, edit.event_ref),
+        )
+        is None
     )
     assert runner.oracle.expected_model_identity["$root"] == (
         original_identity,
         fuzz_live_matrix._history_fingerprint((original_identity,)),
     )
 
-    runner._record_redaction(
-        LiveOperation(3, LiveOperationKind.REDACTION, 0, "root:0"),
-    )
+    assert runner._record_redaction(LiveOperation(3, LiveOperationKind.REDACTION, 0, "root:0")) == (0, 0)
     assert runner._history_identities((0, 0)) == ()
+
+
+@pytest.mark.asyncio
+async def test_source_redaction_sends_fresh_history_audit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A trace ending in source redaction must not reuse an already-satisfied oracle."""
+
+    class Client:
+        room_slot = 0
+        room_id = "!room:example"
+        sent_content: dict[str, Any] | None = None
+
+        async def send_event(
+            self,
+            _event_type: str,
+            txn_id: str,
+            content: dict[str, Any],
+        ) -> str:
+            assert txn_id == "live-fuzz-redaction-audit:op:1"
+            relation = cast("dict[str, Any]", content["m.relates_to"])
+            assert relation["m.in_reply_to"] == {"event_id": "$response"}
+            self.sent_content = content
+            return "$audit"
+
+    class Stack:
+        agent_id = "@agent:example"
+
+    fake_client = Client()
+    client = cast("LiveMatrixClient", fake_client)
+    redaction = LiveOperation(1, LiveOperationKind.REDACTION, 0, "root:0")
+    runner = fuzz_live_matrix.LiveFuzzRunner(
+        cast("fuzz_live_matrix.ManagedTuwunelStack", Stack()),
+        (client,),
+        LiveFuzzScenario(thread_count=1, batches=((redaction,),)),
+        reply_timeout=1,
+        settle_seconds=0,
+    )
+    root_content = runner._message_content("Original", source_marker="root:0")
+    runner.event_ids["root:0"] = "$root"
+    runner._expect_source(
+        runner.oracle,
+        "root:0",
+        "$root",
+        root_event_id="$root",
+        room=0,
+        thread=0,
+        source_content=root_content,
+    )
+    runner.oracle.response_event_by_ref["response:root:0"] = "$response"
+
+    async def apply(
+        operation: LiveOperation,
+    ) -> tuple[LiveOperation, str, None]:
+        return operation, "$redaction", None
+
+    async def wait_until_exact(
+        *,
+        deadline_seconds: float,
+        settle_seconds: float,
+        allow_limited: bool = False,
+    ) -> None:
+        assert (deadline_seconds, settle_seconds, allow_limited) == (1, 0, False)
+        assert runner.oracle.expected_sources["$audit"] == "redaction-audit:op:1"
+        assert fake_client.sent_content is not None
+        audit_identity = fuzz_live_matrix._source_marker_from_content(fake_client.sent_content)
+        assert runner.oracle.expected_model_identity["$audit"][1] == fuzz_live_matrix._history_fingerprint(
+            (audit_identity,),
+        )
+
+    monkeypatch.setattr(runner, "_apply", apply)
+    monkeypatch.setattr(runner.oracle, "wait_until_exact", wait_until_exact)
+
+    result = await runner._run_batches(((redaction,),))
+
+    assert result["redaction_history_audits"] == 1
 
 
 def test_exact_reply_oracle_rejects_malformed_visible_agent_original() -> None:

@@ -2134,6 +2134,7 @@ class LiveFuzzRunner:
         self.operation_count = 0
         self.restart_count = 0
         self.executed_batches = 0
+        self.redaction_history_audits = 0
         self._history_markers: dict[tuple[int, int], list[str]] = defaultdict(list)
         self._latest_source_ref: dict[tuple[int, int, int], str] = {}
         self._source_revisions: dict[str, list[tuple[str, str]]] = {}
@@ -2200,19 +2201,74 @@ class LiveFuzzRunner:
         self._edit_sources[operation.event_ref] = source_ref
         self._refresh_source_expectation(source_ref)
 
-    def _record_redaction(self, operation: LiveOperation) -> None:
-        """Apply source or edit redaction to future canonical histories."""
+    def _record_redaction(self, operation: LiveOperation) -> tuple[int, int] | None:
+        """Apply a redaction and return the source lane needing a fresh audit."""
         assert operation.target is not None
         target_ref = operation.target
         if target_ref in self._source_revisions:
             self._redacted_source_refs.add(target_ref)
-            return
+            return self._source_lanes[target_ref]
         source_ref = self._edit_sources.get(target_ref)
         if source_ref is None:
-            return
+            return None
         revisions = self._source_revisions[source_ref]
         revisions[:] = [revision for revision in revisions if revision[0] != target_ref]
         self._refresh_source_expectation(source_ref)
+        return None
+
+    def _redaction_audits(
+        self,
+        operation: LiveOperation,
+    ) -> tuple[tuple[LiveOperation, tuple[int, int]], ...]:
+        """Return the optional post-redaction audit as an iterable."""
+        lane = self._record_redaction(operation)
+        return () if lane is None else ((operation, lane),)
+
+    async def _send_redaction_history_audit(
+        self,
+        operation: LiveOperation,
+        lane: tuple[int, int],
+    ) -> None:
+        """Send a new turn proving a source redaction changed visible history."""
+        room, thread = lane
+        logical_ref = f"redaction-audit:{operation.event_ref}"
+        root_event_id = self.event_ids[f"root:{thread}"]
+        latest_source_ref = self._latest_source_ref[(room, 0, thread)]
+        reply_event_id = self.oracle.resolve_response_ref(f"response:{latest_source_ref}")
+        content = self._message_content(
+            f"Live fuzz redaction audit {operation.operation_id}",
+            relation={
+                "rel_type": "m.thread",
+                "event_id": root_event_id,
+                "is_falling_back": True,
+                "m.in_reply_to": {"event_id": reply_event_id},
+            },
+            source_marker=logical_ref,
+        )
+        event_id = await self._client_for_thread(thread).send_event(
+            "m.room.message",
+            f"live-fuzz-{logical_ref}",
+            content,
+        )
+        self.event_ids[logical_ref] = event_id
+        self._expect_source(
+            self.oracle,
+            logical_ref,
+            event_id,
+            root_event_id=root_event_id,
+            room=room,
+            thread=thread,
+            source_content=content,
+        )
+        self.redaction_history_audits += 1
+
+    async def _send_redaction_history_audits(
+        self,
+        audits: Collection[tuple[LiveOperation, tuple[int, int]]],
+    ) -> None:
+        """Send every fresh turn required by one redaction batch."""
+        for operation, lane in audits:
+            await self._send_redaction_history_audit(operation, lane)
 
     async def run(self) -> dict[str, int | str]:
         """Execute every batch and enforce the reply invariant after each."""
@@ -2911,6 +2967,7 @@ class LiveFuzzRunner:
         """Run one contiguous scenario segment against already-created roots."""
         for relative_batch_index, batch in enumerate(batches):
             batch_index = batch_index_offset + relative_batch_index
+            redaction_audits: list[tuple[LiveOperation, tuple[int, int]]] = []
             if batch[0].kind is LiveOperationKind.RESTART_MINDROOM:
                 self.stack.restart_mindroom()
                 self.restart_count += 1
@@ -2942,7 +2999,8 @@ class LiveFuzzRunner:
                         assert payload is not None
                         self._record_edit_revision(operation, payload.content)
                     elif operation.kind is LiveOperationKind.REDACTION:
-                        self._record_redaction(operation)
+                        redaction_audits.extend(self._redaction_audits(operation))
+                await self._send_redaction_history_audits(redaction_audits)
             try:
                 await self.oracle.wait_until_exact(
                     deadline_seconds=self.reply_timeout,
@@ -2957,6 +3015,7 @@ class LiveFuzzRunner:
             "batches": self.executed_batches,
             "canonical_agent_replies": len(self.oracle.expected_sources),
             "operations": self.operation_count,
+            "redaction_history_audits": self.redaction_history_audits,
             "restarts": self.restart_count,
             "roots": self.scenario.thread_count,
             "status": "PASS",
