@@ -1928,6 +1928,7 @@ depends_on = [
     "mindroom.matrix.message_content",
     "mindroom.matrix.thread_bookkeeping",
     "mindroom.matrix.thread_membership",
+    "mindroom.matrix.thread_resolution_reuse",
     "mindroom.matrix.thread_room_scan",
     "mindroom.matrix.visible_body",
 ]
@@ -2329,6 +2330,7 @@ visibility = [
     "mindroom.matrix.client",
     "mindroom.matrix.client_thread_history",
     "mindroom.matrix.stale_stream_cleanup",
+    "mindroom.matrix.thread_resolution_reuse",
     "mindroom.response_runner",
     "mindroom.routing",
     "mindroom.thread_export.selection",
@@ -2391,6 +2393,7 @@ depends_on = [
     "mindroom.matrix.message_content",
     "mindroom.matrix.thread_membership",
     "mindroom.matrix.thread_projection",
+    "mindroom.matrix.thread_resolution_reuse",
     "mindroom.matrix.visible_body",
 ]
 visibility = [
@@ -2402,6 +2405,17 @@ visibility = [
     "mindroom.matrix.conversation_cache",
     "mindroom.matrix.thread_room_scan",
     "mindroom.thread_export.execution",
+]
+
+[[modules]]
+path = "mindroom.matrix.thread_resolution_reuse"
+depends_on = [
+    "mindroom.matrix.client_visible_messages",
+    "mindroom.matrix.event_info",
+]
+visibility = [
+    "mindroom.matrix.client_thread_history",
+    "mindroom.matrix.conversation_cache",
 ]
 
 [[modules]]

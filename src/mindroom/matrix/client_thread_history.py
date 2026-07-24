@@ -77,6 +77,7 @@ from mindroom.matrix.membership_fence import UNCERTIFIED_MEMBERSHIP_EPOCH
 from mindroom.matrix.message_content import (
     SidecarHydrationBatch,
     extract_and_resolve_message,
+    has_sidecar_references,
     prepare_sidecar_hydration_batch,
     resolve_event_source_content,
 )
@@ -100,6 +101,12 @@ from mindroom.matrix.thread_projection import (
     resolve_thread_ids_for_event_infos,
     sort_thread_event_sources_root_first,
     sort_thread_messages_root_first,
+)
+from mindroom.matrix.thread_resolution_reuse import (
+    ThreadResolutionReuseCache,
+    ThreadResolutionSnapshot,
+    build_thread_resolution_snapshot,
+    reusable_event_source_suffix,
 )
 from mindroom.matrix.visible_body import visible_body_from_event_source
 from mindroom.timing import elapsed_ms_since
@@ -366,6 +373,17 @@ def _sidecar_hydration_sources(
     return hydration_sources
 
 
+@dataclass(slots=True)
+class _ResolvedThreadEventSources:
+    """One resolution pass over raw thread rows plus the inputs needed to reuse it later."""
+
+    messages: list[ResolvedVisibleMessage]
+    sidecar_hydration_ms: float
+    input_order_by_event_id: dict[str, int]
+    related_event_id_by_event_id: dict[str, str]
+    hydration_complete: bool
+
+
 async def _resolve_thread_history_from_event_sources_timed(
     client: nio.AsyncClient,
     *,
@@ -377,7 +395,7 @@ async def _resolve_thread_history_from_event_sources_timed(
     expected_membership_epoch: int | None = None,
     trusted_sender_ids: Collection[str] = (),
     register_sidecar_owners: bool = False,
-) -> tuple[list[ResolvedVisibleMessage], float]:
+) -> _ResolvedThreadEventSources:
     """Resolve visible thread history and return approximate sidecar hydration time."""
     input_order_by_event_id: dict[str, int] = {}
     related_event_id_by_event_id: dict[str, str] = {}
@@ -396,8 +414,9 @@ async def _resolve_thread_history_from_event_sources_timed(
     messages_by_event_id: dict[str, ResolvedVisibleMessage] = {}
     latest_edits_by_original_event_id: dict[str, tuple[nio.RoomMessageText | nio.RoomMessageNotice, str | None]] = {}
     sidecar_hydration_started = time.perf_counter()
+    hydration_sources = _sidecar_hydration_sources(event_sources, hydrate_sidecars=hydrate_sidecars)
     hydration_batch = await prepare_sidecar_hydration_batch(
-        _sidecar_hydration_sources(event_sources, hydrate_sidecars=hydrate_sidecars),
+        hydration_sources,
         event_cache=event_cache,
         room_id=room_id,
         expected_membership_epoch=expected_membership_epoch,
@@ -454,7 +473,17 @@ async def _resolve_thread_history_from_event_sources_timed(
         input_order_by_event_id=input_order_by_event_id,
         related_event_id_by_event_id=related_event_id_by_event_id,
     )
-    return messages, elapsed_ms_since(sidecar_hydration_started, clock=time.perf_counter)
+    if hydration_batch is None:
+        hydration_complete = not has_sidecar_references(hydration_sources)
+    else:
+        hydration_complete = hydration_batch.references <= frozenset(hydration_batch.cached_texts)
+    return _ResolvedThreadEventSources(
+        messages=messages,
+        sidecar_hydration_ms=elapsed_ms_since(sidecar_hydration_started, clock=time.perf_counter),
+        input_order_by_event_id=input_order_by_event_id,
+        related_event_id_by_event_id=related_event_id_by_event_id,
+        hydration_complete=hydration_complete,
+    )
 
 
 async def _load_stale_cached_thread_history(
@@ -497,7 +526,7 @@ async def _load_stale_cached_thread_history(
         return None
 
     resolution_started = time.perf_counter()
-    resolved_history, sidecar_hydration_ms = await _resolve_cached_thread_history(
+    resolved_history, sidecar_hydration_ms, _reuse_kind = await _resolve_cached_thread_history(
         client,
         room_id=room_id,
         thread_id=thread_id,
@@ -543,18 +572,20 @@ async def _resolve_cached_thread_history(
     hydrate_sidecars: bool = True,
     expected_membership_epoch: int,
     trusted_sender_ids: Collection[str] = (),
-) -> tuple[list[ResolvedVisibleMessage] | None, float]:
+    resolution_reuse: ThreadResolutionReuseCache | None = None,
+) -> tuple[list[ResolvedVisibleMessage] | None, float, str]:
     """Resolve cached thread history or invalidate the cache entry on corruption."""
     try:
-        return await _resolve_thread_history_from_event_sources_timed(
+        return await _resolve_cached_thread_history_with_reuse(
             client,
             room_id=room_id,
             thread_id=thread_id,
-            event_sources=cached_event_sources,
-            hydrate_sidecars=hydrate_sidecars,
             event_cache=event_cache,
+            cached_event_sources=cached_event_sources,
+            hydrate_sidecars=hydrate_sidecars,
             expected_membership_epoch=expected_membership_epoch,
             trusted_sender_ids=trusted_sender_ids,
+            resolution_reuse=resolution_reuse,
         )
     except Exception as exc:
         logger.warning(
@@ -563,8 +594,133 @@ async def _resolve_cached_thread_history(
             thread_id=thread_id,
             error=str(exc),
         )
+        if resolution_reuse is not None:
+            resolution_reuse.discard(room_id, thread_id)
         await _invalidate_thread_cache_entry(event_cache, room_id=room_id, thread_id=thread_id)
-        return None, 0.0
+        return None, 0.0, "full"
+
+
+async def _resolve_cached_thread_history_with_reuse(
+    client: nio.AsyncClient,
+    *,
+    room_id: str,
+    thread_id: str,
+    event_cache: ConversationEventCache,
+    cached_event_sources: Sequence[dict[str, Any]],
+    hydrate_sidecars: bool,
+    expected_membership_epoch: int,
+    trusted_sender_ids: Collection[str],
+    resolution_reuse: ThreadResolutionReuseCache | None,
+) -> tuple[list[ResolvedVisibleMessage], float, str]:
+    """Serve one durable-cache read, reusing the prior resolution when provably identical."""
+    # Reuse only applies to fully hydrated reads: snapshot-mode bodies are intentionally degraded
+    # and must never be frozen into (or served from) a reusable resolution.
+    reuse_cache = resolution_reuse if hydrate_sidecars else None
+    snapshot_trusted_sender_ids = frozenset(trusted_sender_ids)
+    if reuse_cache is not None:
+        snapshot = reuse_cache.get(room_id, thread_id)
+        if snapshot is not None:
+            suffix = reusable_event_source_suffix(
+                snapshot,
+                cached_event_sources,
+                trusted_sender_ids=snapshot_trusted_sender_ids,
+                membership_epoch=expected_membership_epoch,
+            )
+            if suffix is not None:
+                if not suffix:
+                    return snapshot.cloned_messages(), 0.0, "reuse"
+                merged = await _resolve_reused_thread_suffix(
+                    client,
+                    room_id=room_id,
+                    thread_id=thread_id,
+                    event_cache=event_cache,
+                    cached_event_sources=cached_event_sources,
+                    snapshot=snapshot,
+                    suffix=suffix,
+                    expected_membership_epoch=expected_membership_epoch,
+                    trusted_sender_ids=trusted_sender_ids,
+                    resolution_reuse=reuse_cache,
+                )
+                if merged is not None:
+                    return merged
+    resolved = await _resolve_thread_history_from_event_sources_timed(
+        client,
+        room_id=room_id,
+        thread_id=thread_id,
+        event_sources=cached_event_sources,
+        hydrate_sidecars=hydrate_sidecars,
+        event_cache=event_cache,
+        expected_membership_epoch=expected_membership_epoch,
+        trusted_sender_ids=trusted_sender_ids,
+    )
+    if reuse_cache is not None and resolved.hydration_complete:
+        reuse_cache.store(
+            room_id,
+            thread_id,
+            build_thread_resolution_snapshot(
+                event_sources=cached_event_sources,
+                messages=resolved.messages,
+                input_order_by_event_id=resolved.input_order_by_event_id,
+                related_event_id_by_event_id=resolved.related_event_id_by_event_id,
+                trusted_sender_ids=snapshot_trusted_sender_ids,
+                membership_epoch=expected_membership_epoch,
+            ),
+        )
+    return resolved.messages, resolved.sidecar_hydration_ms, "full"
+
+
+async def _resolve_reused_thread_suffix(
+    client: nio.AsyncClient,
+    *,
+    room_id: str,
+    thread_id: str,
+    event_cache: ConversationEventCache,
+    cached_event_sources: Sequence[dict[str, Any]],
+    snapshot: ThreadResolutionSnapshot,
+    suffix: list[dict[str, Any]],
+    expected_membership_epoch: int,
+    trusted_sender_ids: Collection[str],
+    resolution_reuse: ThreadResolutionReuseCache,
+) -> tuple[list[ResolvedVisibleMessage], float, str] | None:
+    """Resolve only the appended raw rows and merge them onto the reusable snapshot."""
+    suffix_resolution = await _resolve_thread_history_from_event_sources_timed(
+        client,
+        room_id=room_id,
+        thread_id=thread_id,
+        event_sources=suffix,
+        hydrate_sidecars=True,
+        event_cache=event_cache,
+        expected_membership_epoch=expected_membership_epoch,
+        trusted_sender_ids=trusted_sender_ids,
+    )
+    if not suffix_resolution.hydration_complete:
+        return None
+    prefix_length = len(snapshot.event_sources)
+    input_order_by_event_id = dict(snapshot.input_order_by_event_id)
+    for event_id, suffix_index in suffix_resolution.input_order_by_event_id.items():
+        input_order_by_event_id[event_id] = prefix_length + suffix_index
+    related_event_id_by_event_id = dict(snapshot.related_event_id_by_event_id)
+    related_event_id_by_event_id.update(suffix_resolution.related_event_id_by_event_id)
+    messages = snapshot.cloned_messages() + suffix_resolution.messages
+    sort_thread_messages_root_first(
+        messages,
+        thread_id=thread_id,
+        input_order_by_event_id=input_order_by_event_id,
+        related_event_id_by_event_id=related_event_id_by_event_id,
+    )
+    resolution_reuse.store(
+        room_id,
+        thread_id,
+        build_thread_resolution_snapshot(
+            event_sources=cached_event_sources,
+            messages=messages,
+            input_order_by_event_id=input_order_by_event_id,
+            related_event_id_by_event_id=related_event_id_by_event_id,
+            trusted_sender_ids=snapshot.trusted_sender_ids,
+            membership_epoch=expected_membership_epoch,
+        ),
+    )
+    return messages, suffix_resolution.sidecar_hydration_ms, "incremental"
 
 
 def _cache_reject_diagnostics(
@@ -599,6 +755,7 @@ async def _load_cached_thread_history_if_usable(
     event_cache: ConversationEventCache,
     hydrate_sidecars: bool,
     trusted_sender_ids: Collection[str] = (),
+    resolution_reuse: ThreadResolutionReuseCache | None = None,
 ) -> tuple[ThreadHistoryResult | None, dict[str, str | int | float | bool] | None]:
     """Return a durable thread snapshot when the current runtime may safely trust it."""
     cached_membership_epoch = await _capture_membership_epoch(event_cache, room_id)
@@ -639,7 +796,7 @@ async def _load_cached_thread_history_if_usable(
         return None, cache_reject_diagnostics
 
     resolution_started = time.perf_counter()
-    resolved_history, sidecar_hydration_ms = await _resolve_cached_thread_history(
+    resolved_history, sidecar_hydration_ms, resolution_reuse_kind = await _resolve_cached_thread_history(
         client,
         room_id=room_id,
         thread_id=thread_id,
@@ -648,6 +805,7 @@ async def _load_cached_thread_history_if_usable(
         hydrate_sidecars=hydrate_sidecars,
         expected_membership_epoch=cached_membership_epoch,
         trusted_sender_ids=trusted_sender_ids,
+        resolution_reuse=resolution_reuse,
     )
     if resolved_history is None:
         return None, {
@@ -661,6 +819,7 @@ async def _load_cached_thread_history_if_usable(
             "cache_read_ms": elapsed_ms_since(cache_read_started, clock=time.perf_counter),
             "resolution_ms": elapsed_ms_since(resolution_started, clock=time.perf_counter),
             "sidecar_hydration_ms": sidecar_hydration_ms,
+            "thread_resolution_reuse": resolution_reuse_kind,
             THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_CACHE,
         },
     ), None
@@ -965,6 +1124,7 @@ async def fetch_thread_history(
     trusted_sender_ids: Collection[str] = (),
     caller_label: str = "unknown",
     coordinator_queue_wait_ms: float = 0.0,
+    resolution_reuse: ThreadResolutionReuseCache | None = None,
 ) -> ThreadHistoryResult:
     """Fetch all messages in a thread."""
     cache_reject_diagnostics: dict[str, str | int | float | bool] | None = None
@@ -976,6 +1136,7 @@ async def fetch_thread_history(
             event_cache=event_cache,
             hydrate_sidecars=True,
             trusted_sender_ids=trusted_sender_ids,
+            resolution_reuse=resolution_reuse,
         )
     except Exception as exc:
         logger.warning(
@@ -1019,6 +1180,7 @@ async def fetch_dispatch_thread_history(
     trusted_sender_ids: Collection[str] = (),
     caller_label: str = "unknown",
     coordinator_queue_wait_ms: float = 0.0,
+    resolution_reuse: ThreadResolutionReuseCache | None = None,
 ) -> ThreadHistoryResult:
     """Fetch strict full thread history for dispatch using only fresh cache data or a homeserver refill."""
     cache_reject_diagnostics: dict[str, str | int | float | bool] | None = None
@@ -1030,6 +1192,7 @@ async def fetch_dispatch_thread_history(
             event_cache=event_cache,
             hydrate_sidecars=True,
             trusted_sender_ids=trusted_sender_ids,
+            resolution_reuse=resolution_reuse,
         )
     except Exception as exc:
         logger.warning(
@@ -1074,6 +1237,7 @@ async def fetch_dispatch_thread_snapshot(
     trusted_sender_ids: Collection[str] = (),
     caller_label: str = "unknown",
     coordinator_queue_wait_ms: float = 0.0,
+    resolution_reuse: ThreadResolutionReuseCache | None = None,
 ) -> ThreadHistoryResult:
     """Fetch strict lightweight dispatch context using only fresh cache data or a homeserver refill."""
     cache_reject_diagnostics: dict[str, str | int | float | bool] | None = None
@@ -1085,6 +1249,7 @@ async def fetch_dispatch_thread_snapshot(
             event_cache=event_cache,
             hydrate_sidecars=False,
             trusted_sender_ids=trusted_sender_ids,
+            resolution_reuse=resolution_reuse,
         )
     except Exception as exc:
         logger.warning(
@@ -1133,7 +1298,7 @@ async def _fetch_thread_history_via_room_messages_with_events(
     fetch_started = time.perf_counter()
     scan_result = await fetch_thread_event_sources_via_room_messages(client, room_id, thread_id)
     resolution_started = time.perf_counter()
-    history, sidecar_hydration_ms = await _resolve_thread_history_from_event_sources_timed(
+    resolution = await _resolve_thread_history_from_event_sources_timed(
         client,
         room_id=room_id,
         thread_id=thread_id,
@@ -1145,13 +1310,13 @@ async def _fetch_thread_history_via_room_messages_with_events(
         register_sidecar_owners=True,
     )
     return _ThreadHistoryFetchResult(
-        history=history,
+        history=resolution.messages,
         event_sources=scan_result.event_sources,
         fetch_ms=elapsed_ms_since(fetch_started, clock=time.perf_counter),
         room_scan_pages=scan_result.page_count,
         scanned_event_count=scan_result.scanned_event_count,
         resolution_ms=elapsed_ms_since(resolution_started, clock=time.perf_counter),
-        sidecar_hydration_ms=sidecar_hydration_ms,
+        sidecar_hydration_ms=resolution.sidecar_hydration_ms,
     )
 
 

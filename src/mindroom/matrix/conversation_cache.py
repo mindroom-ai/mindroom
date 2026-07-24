@@ -50,6 +50,7 @@ from mindroom.matrix.message_content import extract_edit_body
 from mindroom.matrix.thread_bookkeeping import ThreadMutationResolver
 from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
 from mindroom.matrix.thread_membership import resolve_event_thread_membership
+from mindroom.matrix.thread_resolution_reuse import ThreadResolutionReuseCache
 from mindroom.matrix.thread_room_scan import (
     fetch_event_info_for_client,
     lookup_thread_id_from_conversation_cache,
@@ -394,9 +395,11 @@ class MatrixConversationCache(ConversationCacheProtocol):
     _outbound: ThreadOutboundWritePolicy = field(init=False, repr=False)
     _live: ThreadLiveWritePolicy = field(init=False, repr=False)
     _sync: ThreadSyncWritePolicy = field(init=False, repr=False)
+    _thread_resolution_reuse: ThreadResolutionReuseCache = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Bind extracted read/write collaborators to this facade."""
+        self._thread_resolution_reuse = ThreadResolutionReuseCache()
         self._reads = ThreadReadPolicy(
             logger_getter=lambda: self.logger,
             runtime=self.runtime,
@@ -681,6 +684,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
             trusted_sender_ids=self._trusted_sender_ids(),
             caller_label=caller_label,
             coordinator_queue_wait_ms=coordinator_queue_wait_ms,
+            resolution_reuse=self._thread_resolution_reuse,
         )
 
     async def _refresh_dispatch_thread_snapshot_for_startup_prewarm(
