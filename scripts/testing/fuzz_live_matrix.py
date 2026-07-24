@@ -2216,14 +2216,6 @@ class LiveFuzzRunner:
         self._refresh_source_expectation(source_ref)
         return None
 
-    def _redaction_audits(
-        self,
-        operation: LiveOperation,
-    ) -> tuple[tuple[LiveOperation, tuple[int, int]], ...]:
-        """Return the optional post-redaction audit as an iterable."""
-        lane = self._record_redaction(operation)
-        return () if lane is None else ((operation, lane),)
-
     async def _send_redaction_history_audit(
         self,
         operation: LiveOperation,
@@ -2262,12 +2254,9 @@ class LiveFuzzRunner:
         )
         self.redaction_history_audits += 1
 
-    async def _send_redaction_history_audits(
-        self,
-        audits: Collection[tuple[LiveOperation, tuple[int, int]]],
-    ) -> None:
-        """Send every fresh turn required by one redaction batch."""
-        for operation, lane in audits:
+    async def _record_redaction_and_audit(self, operation: LiveOperation) -> None:
+        """Apply one redaction transition and send its required history audit."""
+        if lane := self._record_redaction(operation):
             await self._send_redaction_history_audit(operation, lane)
 
     async def run(self) -> dict[str, int | str]:
@@ -2967,7 +2956,6 @@ class LiveFuzzRunner:
         """Run one contiguous scenario segment against already-created roots."""
         for relative_batch_index, batch in enumerate(batches):
             batch_index = batch_index_offset + relative_batch_index
-            redaction_audits: list[tuple[LiveOperation, tuple[int, int]]] = []
             if batch[0].kind is LiveOperationKind.RESTART_MINDROOM:
                 self.stack.restart_mindroom()
                 self.restart_count += 1
@@ -2999,8 +2987,7 @@ class LiveFuzzRunner:
                         assert payload is not None
                         self._record_edit_revision(operation, payload.content)
                     elif operation.kind is LiveOperationKind.REDACTION:
-                        redaction_audits.extend(self._redaction_audits(operation))
-                await self._send_redaction_history_audits(redaction_audits)
+                        await self._record_redaction_and_audit(operation)
             try:
                 await self.oracle.wait_until_exact(
                     deadline_seconds=self.reply_timeout,

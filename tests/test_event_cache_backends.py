@@ -132,7 +132,7 @@ async def test_latest_edit_tie_breaks_by_event_id(
     await event_cache.store_events_batch(
         [
             ("$z-edit", room_id, edit_z),
-            ("$a-edit", room_id, edit_a),
+            ("$A-edit", room_id, edit_a),
         ],
     )
 

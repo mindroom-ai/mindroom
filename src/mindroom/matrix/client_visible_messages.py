@@ -99,13 +99,12 @@ class ResolvedVisibleMessage:
         *,
         body: str,
         latest_event_id: str,
-        content: dict[str, Any] | None,
+        content: dict[str, Any],
     ) -> None:
         """Apply the newest visible edit state to this message."""
         self.body = body
         self.latest_event_id = latest_event_id
-        if content is not None:
-            self.content = project_message_replacement_content(self.content, content)
+        self.content = project_message_replacement_content(self.content, content)
         self.refresh_stream_status()
 
     @property
@@ -404,22 +403,10 @@ async def apply_latest_edits_to_messages(
     trusted_sender_ids: Collection[str] = (),
 ) -> None:
     """Apply the newest valid same-sender edit to each existing message."""
-    applicable_edits: dict[str, tuple[nio.RoomMessageText | nio.RoomMessageNotice, str | None]] = {}
-    for (original_event_id, edit_sender), edit_data in latest_edits_by_original_event_id.items():
+    for (original_event_id, edit_sender), (edit_event, _edit_thread_id) in latest_edits_by_original_event_id.items():
         existing_message = messages_by_event_id.get(original_event_id)
         if existing_message is None or edit_sender != existing_message.sender:
             continue
-        current_edit_data = applicable_edits.get(original_event_id)
-        current_edit = current_edit_data[0] if current_edit_data else None
-        edit_event = edit_data[0]
-        if current_edit is None or (edit_event.server_timestamp, edit_event.event_id) > (
-            current_edit.server_timestamp,
-            current_edit.event_id,
-        ):
-            applicable_edits[original_event_id] = edit_data
-
-    for original_event_id, (edit_event, _edit_thread_id) in applicable_edits.items():
-        existing_message = messages_by_event_id[original_event_id]
         edited_body, edited_content = await extract_edit_body(
             edit_event.source,
             client,
@@ -429,7 +416,7 @@ async def apply_latest_edits_to_messages(
             hydration_batch=hydration_batch,
             trusted_sender_ids=trusted_sender_ids,
         )
-        if edited_body is None:
+        if edited_body is None or edited_content is None:
             continue
         existing_message.apply_edit(
             body=edited_body,
