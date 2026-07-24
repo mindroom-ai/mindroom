@@ -2234,12 +2234,57 @@ class FinalStateAuditor:
         reply_event_id: str,
         body: str,
     ) -> bool:
-        """Return whether an interrupted terminal note was covered by auto-resume."""
+        """Return whether an interrupted terminal note was covered by auto-resume.
+
+        Recovery is proven only by the exact causal chain ``I <- R <- A``: the
+        interrupted response ``I`` (``reply_event_id``) must be answered by an
+        internal relay ``R`` authored by a configured relay sender in the same
+        thread, and the completed canonical agent response ``A`` must reply to
+        that relay in the same thread. A completed reply to any unrelated relay
+        in the thread never counts.
+        """
         if not body.endswith((INTERRUPTED_RESPONSE_NOTE, RESTART_INTERRUPTED_RESPONSE_NOTE)):
             return False
         thread_root = self._thread_root(events.get(reply_event_id, {}))
         if thread_root is None:
             return False
+        for relay_id, relay in events.items():
+            if not self._relay_replies_to(relay, thread_root, reply_event_id):
+                continue
+            if self._agent_response_completes_relay(events, thread_root, relay_id):
+                return True
+        return False
+
+    def _relay_replies_to(
+        self,
+        relay: Mapping[str, Any],
+        thread_root: str,
+        interrupted_event_id: str,
+    ) -> bool:
+        """A relay proves recovery only if it replies to ``interrupted_event_id``."""
+        if relay.get("sender") not in self.oracle.internal_relay_senders:
+            return False
+        if relay.get("type") != "m.room.message":
+            return False
+        content = relay.get("content")
+        if not isinstance(content, dict):
+            return False
+        relation = content.get("m.relates_to")
+        if not isinstance(relation, dict):
+            return False
+        if relation.get("rel_type") != "m.thread" or relation.get("event_id") != thread_root:
+            return False
+        in_reply_to = relation.get("m.in_reply_to")
+        target = in_reply_to.get("event_id") if isinstance(in_reply_to, dict) else None
+        return target == interrupted_event_id
+
+    def _agent_response_completes_relay(
+        self,
+        events: Mapping[str, Mapping[str, Any]],
+        thread_root: str,
+        relay_id: str,
+    ) -> bool:
+        """A completed canonical agent reply must reply to ``relay_id`` in-thread."""
         for event_id, event in events.items():
             if event.get("sender") != self.agent_id or event.get("type") != "m.room.message":
                 continue
@@ -2249,9 +2294,11 @@ class FinalStateAuditor:
             relation = content.get("m.relates_to")
             if not isinstance(relation, dict) or relation.get("event_id") != thread_root:
                 continue
+            if relation.get("rel_type") != "m.thread":
+                continue
             in_reply_to = relation.get("m.in_reply_to")
             resumed_source = in_reply_to.get("event_id") if isinstance(in_reply_to, dict) else None
-            if resumed_source not in self.oracle.internal_source_ids:
+            if resumed_source != relay_id:
                 continue
             resumed_body = self._latest_agent_body(events, event_id)
             call_id = _body_call_id(resumed_body)

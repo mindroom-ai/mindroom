@@ -448,6 +448,31 @@ def _agent_reply_event(source: str, event_id: str, body: str) -> dict[str, Any]:
     }
 
 
+def _threaded_reply_event(
+    *,
+    sender: str,
+    event_id: str,
+    thread_root: str,
+    in_reply_to: str,
+    body: str,
+) -> dict[str, Any]:
+    """Build a threaded reply with explicit thread root and reply target."""
+    return {
+        "event_id": event_id,
+        "sender": sender,
+        "type": "m.room.message",
+        "origin_server_ts": 100,
+        "content": {
+            "body": body,
+            "m.relates_to": {
+                "rel_type": "m.thread",
+                "event_id": thread_root,
+                "m.in_reply_to": {"event_id": in_reply_to},
+            },
+        },
+    }
+
+
 @pytest.mark.asyncio
 async def test_final_state_auditor_flags_incomplete_final_bodies() -> None:
     """An interrupted terminal note must fail the completed-stream audit."""
@@ -783,35 +808,200 @@ async def test_ledger_attribution_flags_missing_and_orphaned_turns(tmp_path: Pat
         await client.close()
 
 
-@pytest.mark.asyncio
-async def test_final_body_audit_accepts_only_recovered_interruptions() -> None:
-    """An interrupted note passes only with a completed same-thread resume answer."""
-    client = LiveMatrixClient("http://matrix.invalid", "!room:example")
-    oracle = ExactReplyOracle(client, "@agent:example", coalescing_threads=True)
+def _recovery_auditor(client: LiveMatrixClient) -> FinalStateAuditor:
+    oracle = ExactReplyOracle(
+        client,
+        "@agent:example",
+        coalescing_threads=True,
+        internal_relay_senders=("@router:example",),
+    )
     auditor = FinalStateAuditor(
         client,
         oracle,
         agent_id="@agent:example",
         expected_body_for=lambda call_id: f"LIVE-FUZZ call={call_id} END call={call_id}",
     )
+    oracle.expect("op:1", "$source", thread=0)
+    return auditor
+
+
+def _interrupted_reply(thread_root: str = "$root") -> dict[str, Any]:
+    interrupted = _agent_reply_event(
+        "$source",
+        "$reply",
+        f"LIVE-FUZZ call=9 {RESTART_INTERRUPTED_RESPONSE_NOTE}",
+    )
+    interrupted["content"]["m.relates_to"]["event_id"] = thread_root
+    return interrupted
+
+
+@pytest.mark.asyncio
+async def test_final_body_audit_accepts_exact_resume_relay_chain() -> None:
+    """An interrupted note passes only with the exact ``I <- R <- A`` chain."""
+    client = LiveMatrixClient("http://matrix.invalid", "!room:example")
+    auditor = _recovery_auditor(client)
     try:
-        oracle.expect("op:1", "$source", thread=0)
-        oracle.internal_source_ids.add("$resume-relay")
-        interrupted = _agent_reply_event(
-            "$source",
-            "$reply",
-            "LIVE-FUZZ call=9 **[Response interrupted by service restart]**",
-        )
-        interrupted["content"]["m.relates_to"]["event_id"] = "$root"
-        events: dict[str, Any] = {"$reply": interrupted}
+        events: dict[str, Any] = {"$reply": _interrupted_reply()}
         replies = {"$source": {"$reply"}}
+        # An interrupted note with no resume chain fails.
         with pytest.raises(AssertionError, match="non-canonical body"):
             auditor._assert_final_bodies_complete(events, replies)
 
-        resumed = _agent_reply_event("$resume-relay", "$resumed", "LIVE-FUZZ call=11 END call=11")
-        resumed["content"]["m.relates_to"]["event_id"] = "$root"
-        events["$resumed"] = resumed
+        # The relay R replies to the interrupted response I in the same thread.
+        events["$relay"] = _threaded_reply_event(
+            sender="@router:example",
+            event_id="$relay",
+            thread_root="$root",
+            in_reply_to="$reply",
+            body="resume",
+        )
+        # The completed agent response A replies to the relay R in the thread.
+        events["$resumed"] = _threaded_reply_event(
+            sender="@agent:example",
+            event_id="$resumed",
+            thread_root="$root",
+            in_reply_to="$relay",
+            body="LIVE-FUZZ call=11 END call=11",
+        )
         assert auditor._assert_final_bodies_complete(events, replies) == 1
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_final_body_audit_rejects_relay_for_another_interruption() -> None:
+    """A relay replying to a different interrupted response never recovers this one."""
+    client = LiveMatrixClient("http://matrix.invalid", "!room:example")
+    auditor = _recovery_auditor(client)
+    try:
+        events: dict[str, Any] = {
+            "$reply": _interrupted_reply(),
+            # Relay points at some other interrupted response, not $reply.
+            "$relay": _threaded_reply_event(
+                sender="@router:example",
+                event_id="$relay",
+                thread_root="$root",
+                in_reply_to="$other-interrupted",
+                body="resume",
+            ),
+            "$resumed": _threaded_reply_event(
+                sender="@agent:example",
+                event_id="$resumed",
+                thread_root="$root",
+                in_reply_to="$relay",
+                body="LIVE-FUZZ call=11 END call=11",
+            ),
+        }
+        replies = {"$source": {"$reply"}}
+        with pytest.raises(AssertionError, match="non-canonical body"):
+            auditor._assert_final_bodies_complete(events, replies)
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_final_body_audit_rejects_agent_reply_to_other_event() -> None:
+    """A completed agent reply to some non-relay event never recovers the note."""
+    client = LiveMatrixClient("http://matrix.invalid", "!room:example")
+    auditor = _recovery_auditor(client)
+    try:
+        events: dict[str, Any] = {
+            "$reply": _interrupted_reply(),
+            "$relay": _threaded_reply_event(
+                sender="@router:example",
+                event_id="$relay",
+                thread_root="$root",
+                in_reply_to="$reply",
+                body="resume",
+            ),
+            # Agent reply targets a bystander event, not the relay.
+            "$resumed": _threaded_reply_event(
+                sender="@agent:example",
+                event_id="$resumed",
+                thread_root="$root",
+                in_reply_to="$bystander",
+                body="LIVE-FUZZ call=11 END call=11",
+            ),
+        }
+        replies = {"$source": {"$reply"}}
+        with pytest.raises(AssertionError, match="non-canonical body"):
+            auditor._assert_final_bodies_complete(events, replies)
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_final_body_audit_rejects_resume_in_wrong_thread() -> None:
+    """A completed agent reply to the relay in another thread never recovers."""
+    client = LiveMatrixClient("http://matrix.invalid", "!room:example")
+    auditor = _recovery_auditor(client)
+    try:
+        events: dict[str, Any] = {
+            "$reply": _interrupted_reply(),
+            "$relay": _threaded_reply_event(
+                sender="@router:example",
+                event_id="$relay",
+                thread_root="$root",
+                in_reply_to="$reply",
+                body="resume",
+            ),
+            # Correct reply target but a different thread root.
+            "$resumed": _threaded_reply_event(
+                sender="@agent:example",
+                event_id="$resumed",
+                thread_root="$other-root",
+                in_reply_to="$relay",
+                body="LIVE-FUZZ call=11 END call=11",
+            ),
+        }
+        replies = {"$source": {"$reply"}}
+        with pytest.raises(AssertionError, match="non-canonical body"):
+            auditor._assert_final_bodies_complete(events, replies)
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_final_body_audit_rejects_missing_relay_event() -> None:
+    """A resume answer whose relay event is absent from the map never recovers."""
+    client = LiveMatrixClient("http://matrix.invalid", "!room:example")
+    auditor = _recovery_auditor(client)
+    try:
+        events: dict[str, Any] = {
+            "$reply": _interrupted_reply(),
+            # No $relay event in the map, even though the agent reply names it.
+            "$resumed": _threaded_reply_event(
+                sender="@agent:example",
+                event_id="$resumed",
+                thread_root="$root",
+                in_reply_to="$relay",
+                body="LIVE-FUZZ call=11 END call=11",
+            ),
+        }
+        replies = {"$source": {"$reply"}}
+        with pytest.raises(AssertionError, match="non-canonical body"):
+            auditor._assert_final_bodies_complete(events, replies)
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_latest_agent_body_breaks_timestamp_ties_by_event_id() -> None:
+    """Equal-timestamp replacements select the lexicographically larger event ID.
+
+    Regression guard for the refuted O2 finding: Matrix v1.19 selects the
+    largest event ID on a replacement timestamp tie, so arrival order must not
+    override event-ID ordering.
+    """
+    client = LiveMatrixClient("http://matrix.invalid", "!room:example")
+    auditor = _recovery_auditor(client)
+    try:
+        events: dict[str, Any] = {"$reply": _agent_reply_event("$source", "$reply", "partial")}
+        # Insert the smaller-ID edit last, in the opposite order from event-ID
+        # ordering, so arrival order and ID ordering disagree.
+        events["$zzz"] = _agent_edit_event("$reply", "$zzz", "PARTIAL EDIT", ts=200)
+        events["$aaa"] = _agent_edit_event("$reply", "$aaa", "FINAL EDIT", ts=200)
+        assert auditor._latest_agent_body(events, "$reply") == "PARTIAL EDIT"
     finally:
         await client.close()
 
