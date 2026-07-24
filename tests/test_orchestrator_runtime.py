@@ -2057,6 +2057,37 @@ class TestMultiAgentOrchestrator:
             await orchestrator._run_bot_start_retry("general")
 
     @pytest.mark.asyncio
+    async def test_bot_recovery_mid_shutdown_does_not_schedule_pending_recheck(self, tmp_path: Path) -> None:
+        """A recovery finishing after stop() must not spawn a detached recheck task.
+
+        stop() flips self.running first, cancels startup maintenance, and only
+        later cancels bot-start retry tasks; a recovery landing in that window
+        would otherwise resume the pending recheck against a closing client.
+        """
+        orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
+        orchestrator.config = MagicMock()
+        bot = MagicMock()
+        bot.agent_name = "general"
+        orchestrator.agent_bots = {"general": bot}
+
+        with (
+            patch.object(orchestrator, "_bots_to_setup_after_background_start", return_value=[]),
+            patch.object(orchestrator, "_bind_started_runtime_support_services"),
+            patch.object(orchestrator, "_resolve_bot_room_aliases"),
+            patch.object(orchestrator, "_start_sync_task"),
+            patch.object(orchestrator, "_recover_pending_replacement_rooms", new=AsyncMock()),
+            patch.object(orchestrator, "_external_trigger_runtime", new=MagicMock()),
+            patch.object(orchestrator._startup_maintenance, "resume_pending_recheck") as resume,
+        ):
+            orchestrator.running = False
+            await orchestrator._finish_recovered_bot_start("general", bot)
+            resume.assert_not_called()
+
+            orchestrator.running = True
+            await orchestrator._finish_recovered_bot_start("general", bot)
+            resume.assert_called_once()
+
+    @pytest.mark.asyncio
     async def test_shutdown_expires_in_flight_approval_send_after_event_id_arrives(  # noqa: PLR0915
         self,
         tmp_path: Path,
