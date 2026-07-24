@@ -5,20 +5,21 @@
 - Branch: `fix/thread-edit-integrity`.
 - Pull request: https://github.com/mindroom-ai/mindroom/pull/1641.
 - Base: `origin/main` at `66dd4f4a68bcfd1a5e43b2cac20a1b464f306ab1`.
-- Latest production and test commit: `e728373f7136c0e5deb2a3ceda6fac179cf869cb`.
+- Latest production and test commit: `275bdf78edebb4ffaedd2b6b64255f4e6e91a09b`.
 - Never merge this pull request.
 - Never amend or force-push.
 
 ## Current gate state
 
 - Exact head `be6ee9f9a807e5c88b07db3e1c3a8a5b7d8aa49b` was rejected by two fresh native Codex reviewers.
-- Follow-up commits through `fa5b0ed377259f7124baaa8b8fd7f0e8c612175f` address every verified finding from those reviews.
+- Follow-up commits through `e728373f7136c0e5deb2a3ceda6fac179cf869cb` address every verified finding from those reviews and the rejected-head Fable review.
+- Test-only successor `275bdf78edebb4ffaedd2b6b64255f4e6e91a09b` corrects one stale invalid stream-edit fixture exposed by full pytest.
 - The isolated Fable review of rejected head `be6ee9f9a807e5c88b07db3e1c3a8a5b7d8aa49b` returned `CHANGES REQUIRED` and is evidence-only.
-- Current GitHub CI is queued on `e728373f7136c0e5deb2a3ceda6fac179cf869cb`.
+- Current GitHub CI targets `275bdf78edebb4ffaedd2b6b64255f4e6e91a09b`.
 - Every prior exact-head review is invalid.
 - The real-Tuwunel gate has not run on this implementation.
-- `RESOURCE-GATE.md` currently assigns heavy work to reconstructed nio, with exact-head real-Tuwunel next.
-- Do not run full pytest, PostgreSQL fanout, all-file hooks, Docker Matrix, or real-Tuwunel until the resource gate grants the slot.
+- PR #1641 released the heavy resource slot after PostgreSQL coverage, full pytest, Tach, and all-file pre-commit passed.
+- Nio PR #20 exact-head real-Tuwunel is first in the resource queue.
 
 ## Completed follow-up fixes
 
@@ -46,20 +47,21 @@
 ## Current validation
 
 - Focused backend-neutral semantics and SQLite latest-edit regressions pass with `24 passed`.
+- The exact prior CI failure files pass with `47 passed`.
+- `tests/test_event_cache.py` passes with `148 passed` across SQLite and PostgreSQL.
+- `tests/test_event_cache_backends.py` passes with `45 passed`, including hostile ICU collation and schema-v3 index coverage.
 - Stale-stream activity-window regressions pass with `4 passed`.
 - Thread-resolution reuse and neighboring activity consumers pass with `34 passed`.
 - Room-scan minimality regressions pass with `3 passed`.
-- Ruff passes on the three changed production files.
-- The prior focused all-message replacement tests pass with `5 passed`.
-- Incremental reuse passes with `30 passed`.
+- Exact-head full pytest passes with `11298 passed` and `327 skipped`.
+- Explicit Tach passes.
+- All-file pre-commit passes after excluding the known seven unrelated frontend Prettier rewrites.
 - Each follow-up commit passed its commit hooks.
 - Every new commit invalidates validation as a final gate.
 
 ## Required next steps
 
-- Monitor current CI while waiting for the heavy resource slot.
-- When heavy ownership returns, run relevant SQLite and PostgreSQL backend tests, the exact thirteen prior CI failures, full pytest, Tach, and all-file pre-commit.
-- Update the stale PR body.
+- Update the PR body with current exact validation.
 - Remove this file only when a new final head is frozen.
 - Run two fresh native Codex reviews and one fresh isolated Claude Fable 5 xhigh review on the exact frozen head.
 - Verify every current GitHub review comment and CI check.
