@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
-from typing import Any
+import json
+from typing import TYPE_CHECKING, Any
+
+from mindroom.handled_turns import TurnRecord, TurnRecordCodec
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 import pytest
 
@@ -578,3 +584,108 @@ def test_chaos_validation_blocks_targets_of_redacted_unsettled_responses() -> No
         ),
     )
     settled_first.validate()
+
+
+@pytest.mark.asyncio
+async def test_coalescing_oracle_settles_on_thread_tails_and_resolves_covering_replies() -> None:
+    """Sources swallowed into a combined follow-up turn settle via the newest source."""
+    client = LiveMatrixClient("http://matrix.invalid", "!room:example")
+    oracle = ExactReplyOracle(client, "@agent:example", coalescing_threads=True)
+    try:
+        oracle.expect("op:1", "$first", thread=3)
+        oracle.expect("op:2", "$second", thread=3)
+        for source in ("$first", "$second"):
+            oracle._ingest_event({"event_id": source, "sender": "@user:example", "type": "m.room.message"})
+        assert oracle.unsettled_required_sources() == ["$second"]
+
+        oracle._ingest_event(_agent_reply_event("$second", "$combined-reply", "LIVE-FUZZ call=2 END call=2"))
+        assert oracle.unsettled_required_sources() == []
+        assert oracle.resolve_response_ref("response:op:2") == "$combined-reply"
+        assert oracle.resolve_response_ref("response:op:1") == "$combined-reply"
+        oracle._assert_no_wrong_replies()
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_coalescing_oracle_requires_every_source_observed() -> None:
+    """A source lost by the homeserver or sync stream blocks settlement."""
+    client = LiveMatrixClient("http://matrix.invalid", "!room:example")
+    oracle = ExactReplyOracle(client, "@agent:example", coalescing_threads=True)
+    try:
+        oracle.expect("op:1", "$observed", thread=0)
+        oracle.expect("op:2", "$lost", thread=0)
+        oracle._ingest_event({"event_id": "$observed", "sender": "@user:example", "type": "m.room.message"})
+        oracle._ingest_event(_agent_reply_event("$observed", "$reply", "LIVE-FUZZ call=1 END call=1"))
+
+        assert oracle.unsettled_required_sources() == ["$lost"]
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_ledger_attribution_flags_missing_and_orphaned_turns(tmp_path: Path) -> None:
+    """Durable attribution must cover every required source and every visible reply."""
+    client = LiveMatrixClient("http://matrix.invalid", "!room:example")
+    oracle = ExactReplyOracle(client, "@agent:example", coalescing_threads=True)
+    ledger_path = tmp_path / "general_responded.json"
+    auditor = FinalStateAuditor(
+        client,
+        oracle,
+        agent_id="@agent:example",
+        expected_body_for=lambda call_id: f"LIVE-FUZZ call={call_id} END call={call_id}",
+        ledger_path=ledger_path,
+    )
+    try:
+        oracle.expect("op:1", "$first", thread=0)
+        oracle.expect("op:2", "$second", thread=0)
+        replies = {"$second": {"$combined-reply"}}
+
+        record = TurnRecord(
+            source_event_ids=("$first", "$second"),
+            response_event_id="$combined-reply",
+            completed=True,
+        )
+        ledger_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": TurnRecordCodec.schema_version(),
+                    "records": {
+                        "$first": TurnRecordCodec.to_ledger_record(record),
+                        "$second": TurnRecordCodec.to_ledger_record(record),
+                    },
+                },
+            ),
+            encoding="utf-8",
+        )
+        assert auditor._assert_ledger_attribution(replies) == 2
+
+        ledger_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": TurnRecordCodec.schema_version(),
+                    "records": {"$second": TurnRecordCodec.to_ledger_record(record)},
+                },
+            ),
+            encoding="utf-8",
+        )
+        with pytest.raises(AssertionError, match="no durable turn record"):
+            auditor._assert_ledger_attribution(replies)
+
+        orphan = {"$second": {"$combined-reply"}, "$first": {"$rogue-reply"}}
+        ledger_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": TurnRecordCodec.schema_version(),
+                    "records": {
+                        "$first": TurnRecordCodec.to_ledger_record(record),
+                        "$second": TurnRecordCodec.to_ledger_record(record),
+                    },
+                },
+            ),
+            encoding="utf-8",
+        )
+        with pytest.raises(AssertionError, match="not attributed by any durable turn record"):
+            auditor._assert_ledger_attribution(orphan)
+    finally:
+        await client.close()
