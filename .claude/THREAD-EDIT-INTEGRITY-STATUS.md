@@ -6,49 +6,35 @@
 - Pull request: https://github.com/mindroom-ai/mindroom/pull/1641.
 - Base: `origin/main` at `66dd4f4a68bcfd1a5e43b2cac20a1b464f306ab1`.
 - Rejected frozen head: `abb8d4292672c91c4cb551772d214cdca54378e0`.
-- Current pushed head before the active review-fix slice: `62a9e64c9f226dfc74003305115b58a5acdf31fe`.
+- Current pushed head before the active CI-fix slice: `b39029c76e06656d53aced0f921503212cd2bfad`.
 - Never merge this pull request.
 - Never amend or force-push.
 
 ## Current gate state
 
-- Fresh native Codex review returned `CHANGES REQUIRED` on exact head `abb8d4292672c91c4cb551772d214cdca54378e0`.
-- Claude `opus` at xhigh approved the rejected head but is stale and non-gating.
+- Exact-head GitHub pytest failed `12` tests on `b39029c76e06656d53aced0f921503212cd2bfad`; that candidate is invalid.
+- All independent approvals are stale and non-gating after the review-fix commits.
 - Real-Tuwunel has not run.
-- PR #1641 does not own the heavy resource slot.
-- Every approval, CI result, and live gate for `abb8d4292` is invalid after the next code commit.
+- PR #1646 owns the heavy resource slot; PR #1641 is next, before mindroom-nio PR #20.
+- Every approval, CI result, and live gate before the next pushed head is invalid.
 
 ## Verified blockers
 
-- Encrypted media replacement validation accepts envelopes that violate Matrix `EncryptedFile` v2 and JWK requirements, so a malformed newest edit can mask an older usable edit and later fail decryption.
-- Cached thread reads return payload JSON without checking its event ID against the joined authoritative index row.
-- Recent-room reads return payload JSON without index validation, so a poisoned approval row can act on a different event ID.
-- Thread snapshot ordering trusts stale `thread_events.origin_server_ts`, and snapshot validation does not compare payload time to the authoritative event row.
-- Cached point and snapshot projection ignore valid bundled `unsigned.m.relations.m.replace` candidates that full history applies.
-- Latest-edit queries validate sender and type only after materializing every edit candidate, allowing foreign-sender rows to make lookup unbounded.
+- Thread-cache certification incorrectly required raw non-message interaction events to parse as visible room messages, forcing a homeserver refill instead of preserving them as raw-only members.
+- Public cache writes now normalize their tuple-key event ID into the payload, so two old tests no longer created poisoned rows and instead asserted stale fallback behavior.
+- The grouping helper test expected a payload event ID to override its authoritative tuple key, contrary to the corrected storage contract.
+- A state root is rejected as a missing visible root, while an explicit wrong-room row is rejected earlier by the backend authoritative-index boundary and therefore has no later resolver diagnostic.
+- Raw backend regressions must prove thread room-scope and point, recent, snapshot, and edit identity poison all fail closed without relying on public-write normalization.
 
 ## Required next steps
 
-- Strict Matrix encrypted-file v2/JWK validation now rejects malformed newest replacements across shared selection, with focused full, SQLite, and pure-validator tests passing.
-- Bundled and cached self-replacements are now rejected.
-- Cache storage now makes the API event ID authoritative, and derived edit/thread indexes use the serialized index identity.
-- Point, recent-room, full-thread, suffix-thread, and snapshot reads now validate payload ID and timestamp against authoritative event rows.
-- Thread reads and snapshots order by the authoritative event-row timestamp instead of stale duplicated membership timestamps.
-- Focused cache contracts, SQLite snapshots, recent reads, edit lookups, and durable thread-cache reuse pass; PostgreSQL execution remains resource-gated.
-- Certified thread snapshots now reject malformed, duplicate, and canonically cross-thread child rows before resolution.
-- Focused malformed-child and wrong-membership cases refetch authoritative history instead of silently omitting poisoned rows.
-- The active slice gives cached point and snapshot projections the same bundled-plus-explicit `(origin_server_ts, event_id)` selection as full history.
-- The active slice keeps full replacement validation in shared Python and adds only narrow sender and event-type SQL prefilters.
-- Focused full-history and SQLite cache regressions pass `44` tests, focused file hooks pass, and Tach passes.
-- Deterministic raw-storage regressions now cover poisoned thread and recent-room payload identities on both cache backends.
-- The new SQLite poison regression passes, while its PostgreSQL twin remains queued behind the heavy resource owner.
-- Current CodeRabbit comments were verified against source rather than accepted automatically.
-- Cross-room thread previews now use the requested room, URL-safe JWK keys reject standard Base64 characters, and the approval test fake matches production room and timeline scope.
-- The suggested general thread-event ID tie-break is rejected because only replacement selection uses that Matrix rule, while cached thread order preserves authoritative equal-timestamp input order.
-- The review-fix regression selection passes `18` tests and focused hooks pass.
-- Current production source diff is `+898/-388`, net `+510` against the exact merge base.
-- Add deterministic full-resolution, point, snapshot, recent-room, SQLite, and PostgreSQL regressions at the owning seams.
-- Keep full correctness validation in shared Python helpers and use only narrow SQL sender/type prefilters for bounded edit lookup.
+- Thread certification now requires a visible non-state root and valid relation-capable message members while preserving other interaction families as raw-only cache members.
+- Public-write tests now exercise malformed message content only; raw SQL corruption owns event-ID mismatch coverage.
+- Raw backend coverage now poisons a thread root's explicit room plus point, recent, snapshot, and latest-edit payload identities.
+- The exact local SQLite replay for all affected contracts passes `14` tests with no fanout.
+- Focused Ruff lint and formatting pass on all changed files.
+- PostgreSQL poison and failed-test replay remain queued behind PR #1646.
+- Current candidate production source diff is `+916/-390`, net `+526` against the exact merge base.
 - Re-run exact failed files, owning cache suites, full pytest, Tach, and all-file pre-commit under resource ownership.
 - Push small follow-up commits after verifying Git author.
 - Refresh the PR body and all campaign evidence for the new exact head.

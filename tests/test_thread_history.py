@@ -1275,14 +1275,14 @@ class TestThreadHistory:
         ("invalidity", "expected_rejection"),
         [
             ("state", "cache_missing_thread_root"),
-            ("other-room", "cache_invalid_event_scope"),
+            ("other-room", None),
         ],
     )
     async def test_poisoned_cached_root_is_rejected_before_resolution(
         self,
         event_cache: ConversationEventCache,
         invalidity: str,
-        expected_rejection: str,
+        expected_rejection: str | None,
     ) -> None:
         """A previously certified invalid root must force an authoritative refill."""
         poisoned_root = {
@@ -1326,7 +1326,7 @@ class TestThreadHistory:
             ("$thread_root", "Valid root"),
         ]
         assert history.diagnostics[THREAD_HISTORY_SOURCE_DIAGNOSTIC] == THREAD_HISTORY_SOURCE_HOMESERVER
-        assert history.diagnostics[THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC] == expected_rejection
+        assert history.diagnostics.get(THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC) == expected_rejection
 
     @pytest.mark.asyncio
     async def test_thread_resolution_ignores_state_message_original_and_edit(self) -> None:

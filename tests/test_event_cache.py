@@ -305,7 +305,7 @@ def test_group_lookup_events_by_room_normalizes_and_preserves_order() -> None:
                 "$b",
                 {
                     "type": "m.room.message",
-                    "event_id": "$already-present",
+                    "event_id": "$b",
                     "content": {"body": "beta first"},
                 },
             ),
@@ -2062,10 +2062,8 @@ async def test_cached_room_get_event_cache_hit_avoids_network_call(event_cache: 
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("invalidity", ["wrong-event-id", "missing-msgtype"])
 async def test_cached_original_validation_precedes_edit_projection(
     event_cache: ConversationEventCache,
-    invalidity: str,
 ) -> None:
     """Point reads and snapshots must reject invalid originals before applying edits."""
     older_event = _make_text_event(
@@ -2083,10 +2081,7 @@ async def test_cached_original_validation_precedes_edit_projection(
         source_content={"body": "Cached original"},
     )
     cached_source = _cache_source(cached_original)
-    if invalidity == "wrong-event-id":
-        cached_source["event_id"] = "$other"
-    else:
-        cached_source["content"].pop("msgtype")
+    cached_source["content"].pop("msgtype")
     edit = _make_text_event(
         event_id="$edit",
         sender="@agent:localhost",
@@ -2461,7 +2456,6 @@ async def test_cached_point_and_snapshot_reads_apply_bundled_replacement(
         "missing-msgtype",
         "missing-media-transport",
         "malformed-encrypted-file",
-        "wrong-event-id",
         "wrong-target",
     ],
 )
@@ -2534,8 +2528,6 @@ async def test_cached_edit_paths_fall_back_from_invalid_newest_event_envelope(
             "msgtype": "m.image",
             "file": malformed_content["file"],
         }
-    elif invalidity == "wrong-event-id":
-        malformed_source["event_id"] = "$different"
     else:
         malformed_content["m.relates_to"]["event_id"] = "$different"
     await event_cache.store_event(

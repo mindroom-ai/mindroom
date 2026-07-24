@@ -74,6 +74,7 @@ from mindroom.matrix.event_info import (
     EventInfo,
     event_source_is_state_event,
     event_source_matches_room,
+    event_type_supports_thread_relations,
     is_thread_affecting_relation,
 )
 from mindroom.matrix.media import (
@@ -1185,12 +1186,23 @@ async def _thread_history_cache_rejection_reason(
     sources_by_event_id: dict[str, dict[str, Any]] = {}
     for event_source in event_sources:
         event_id = _event_id_from_source(event_source)
-        if not event_id or event_id in sources_by_event_id or _parse_room_message_event(event_source) is None:
+        if not event_id or event_id in sources_by_event_id:
             return _INVALID_THREAD_EVENT_REJECTION
         sources_by_event_id[event_id] = event_source
     root_source = sources_by_event_id.get(thread_id)
-    if root_source is None or EventInfo.from_event(root_source).is_edit:
+    if (
+        root_source is None
+        or _parse_room_message_event(root_source) is None
+        or EventInfo.from_event(root_source).is_edit
+    ):
         return _MISSING_THREAD_ROOT_REJECTION
+    if any(
+        event_id != thread_id
+        and event_type_supports_thread_relations(event_source.get("type"))
+        and _parse_room_message_event(event_source) is None
+        for event_id, event_source in sources_by_event_id.items()
+    ):
+        return _INVALID_THREAD_EVENT_REJECTION
     event_infos = {
         event_id: EventInfo.from_event(event_source) for event_id, event_source in sources_by_event_id.items()
     }
@@ -1200,11 +1212,13 @@ async def _thread_history_cache_rejection_reason(
         ordered_event_ids=ordered_event_ids_from_scanned_event_sources(event_sources),
         resolved_thread_ids={thread_id: thread_id},
     )
-    if any(
-        event_id != thread_id and resolved_thread_ids.get(event_id) != thread_id for event_id in sources_by_event_id
-    ):
-        return _INVALID_THREAD_MEMBERSHIP_REJECTION
-    return None
+    return (
+        _INVALID_THREAD_MEMBERSHIP_REJECTION
+        if any(
+            event_id != thread_id and resolved_thread_ids.get(event_id) != thread_id for event_id in sources_by_event_id
+        )
+        else None
+    )
 
 
 async def _mark_thread_stale_for_opaque_history(

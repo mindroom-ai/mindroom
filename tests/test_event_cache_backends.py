@@ -113,8 +113,8 @@ async def _seed_payload_identity_rows(
     *,
     room_id: str,
     thread_id: str,
-) -> tuple[dict[str, object], dict[str, object]]:
-    """Seed one thread child and one newer recent-room row for raw corruption tests."""
+) -> tuple[dict[str, object], dict[str, object], dict[str, object], dict[str, object]]:
+    """Seed thread, point, recent, and edit rows for raw corruption tests."""
     root = _message_event(
         event_id=thread_id,
         sender="@user:localhost",
@@ -128,26 +128,49 @@ async def _seed_payload_identity_rows(
         origin_server_ts=2000,
         thread_id=thread_id,
     )
+    poisoned_point = _message_event(
+        event_id="$poisoned-point",
+        sender="@user:localhost",
+        body="point",
+        origin_server_ts=2500,
+    )
     valid_recent = _message_event(
         event_id="$valid-recent",
         sender="@agent:localhost",
         body="valid",
-        origin_server_ts=3000,
+        origin_server_ts=7000,
     )
     poisoned_recent = _message_event(
         event_id="$poisoned-recent",
         sender="@agent:localhost",
         body="poisoned",
-        origin_server_ts=4000,
+        origin_server_ts=8000,
+    )
+    older_edit = _edit_event(
+        event_id="$older-edit",
+        sender="@agent:localhost",
+        original_event_id="$valid-recent",
+        body="older",
+        origin_server_ts=5000,
+    )
+    poisoned_edit = _edit_event(
+        event_id="$poisoned-edit",
+        sender="@agent:localhost",
+        original_event_id="$valid-recent",
+        body="poisoned",
+        origin_server_ts=6000,
     )
     await _replace_thread(cache, room_id, thread_id, [root, reply])
     await cache.store_events_batch(
         [
+            ("$poisoned-point", room_id, poisoned_point),
             ("$valid-recent", room_id, valid_recent),
             ("$poisoned-recent", room_id, poisoned_recent),
+            ("$older-edit", room_id, older_edit),
+            ("$poisoned-edit", room_id, poisoned_edit),
         ],
     )
-    return reply, poisoned_recent
+    return root, poisoned_point, poisoned_recent, poisoned_edit
 
 
 async def _assert_payload_identity_poison_is_rejected(
@@ -156,10 +179,11 @@ async def _assert_payload_identity_poison_is_rejected(
     room_id: str,
     thread_id: str,
 ) -> None:
-    """Assert thread reads fail closed while recent reads skip poison before limiting."""
+    """Assert every cached read shape rejects raw scope or identity poison."""
     with pytest.raises(ValueError, match="does not match its authoritative index"):
         await cache.get_thread_events(room_id, thread_id)
 
+    assert await cache.get_event(room_id, "$poisoned-point") is None
     recent = await cache.get_recent_room_events(
         room_id,
         event_type="m.room.message",
@@ -168,6 +192,22 @@ async def _assert_payload_identity_poison_is_rejected(
     )
 
     assert [event["event_id"] for event in recent] == ["$valid-recent"]
+    snapshot = await cache.get_latest_agent_message_snapshot(
+        room_id,
+        None,
+        "@agent:localhost",
+        runtime_started_at=None,
+    )
+    assert snapshot is not None
+    assert snapshot.content["body"] == "older"
+    latest_edit = await cache.get_latest_edit(
+        room_id,
+        "$valid-recent",
+        sender="@agent:localhost",
+        event_type="m.room.message",
+    )
+    assert latest_edit is not None
+    assert latest_edit["event_id"] == "$older-edit"
 
 
 def _postgres_schema_url(database_url: str, schema_name: str) -> str:
@@ -1874,7 +1914,7 @@ async def test_sqlite_cache_rejects_raw_payload_identity_poison(tmp_path: Path) 
     cache = SqliteEventCache(tmp_path / "event-cache.db")
     await cache.initialize()
     try:
-        reply, poisoned_recent = await _seed_payload_identity_rows(
+        root, poisoned_point, poisoned_recent, poisoned_edit = await _seed_payload_identity_rows(
             cache,
             room_id=room_id,
             thread_id=thread_id,
@@ -1888,16 +1928,28 @@ async def test_sqlite_cache_rejects_raw_payload_identity_poison(tmp_path: Path) 
             """,
             [
                 (
-                    json.dumps({**reply, "event_id": "$forged-reply"}),
+                    json.dumps({**root, "room_id": "!other:localhost"}),
                     cache.principal_id,
                     room_id,
-                    "$reply",
+                    thread_id,
+                ),
+                (
+                    json.dumps({**poisoned_point, "event_id": "$forged-point"}),
+                    cache.principal_id,
+                    room_id,
+                    "$poisoned-point",
                 ),
                 (
                     json.dumps({**poisoned_recent, "event_id": "$forged-recent"}),
                     cache.principal_id,
                     room_id,
                     "$poisoned-recent",
+                ),
+                (
+                    json.dumps({**poisoned_edit, "event_id": "$forged-edit"}),
+                    cache.principal_id,
+                    room_id,
+                    "$poisoned-edit",
                 ),
             ],
         )
@@ -1925,15 +1977,17 @@ async def test_postgres_cache_rejects_raw_payload_identity_poison(
     )
     await cache.initialize()
     try:
-        reply, poisoned_recent = await _seed_payload_identity_rows(
+        root, poisoned_point, poisoned_recent, poisoned_edit = await _seed_payload_identity_rows(
             cache,
             room_id=room_id,
             thread_id=thread_id,
         )
         assert cache._runtime.db is not None
         for event_id, poisoned_payload in (
-            ("$reply", {**reply, "event_id": "$forged-reply"}),
+            (thread_id, {**root, "room_id": "!other:localhost"}),
+            ("$poisoned-point", {**poisoned_point, "event_id": "$forged-point"}),
             ("$poisoned-recent", {**poisoned_recent, "event_id": "$forged-recent"}),
+            ("$poisoned-edit", {**poisoned_edit, "event_id": "$forged-edit"}),
         ):
             await cache._runtime.db.execute(
                 """
