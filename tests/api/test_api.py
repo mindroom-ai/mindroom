@@ -4838,13 +4838,18 @@ def test_trusted_upstream_auth_email_template_requires_email_header_config(tmp_p
 
 @pytest.mark.parametrize(
     "template",
-    ["@alice:example.org", "@{localpart}-{localpart}:example.org"],
+    [
+        "@alice:example.org",
+        "@{localpart}-{localpart}:example.org",
+        "@{localpart}:example.org{",
+        "@{localpart}:{other}",
+    ],
 )
-def test_trusted_upstream_auth_email_template_requires_exactly_one_localpart_placeholder(
+def test_trusted_upstream_auth_email_template_rejects_malformed_syntax(
     tmp_path: Path,
     template: str,
 ) -> None:
-    """Trusted auth should reject constant or ambiguous email-to-Matrix templates."""
+    """Trusted auth should reject ambiguous or malformed email-to-Matrix templates."""
     runtime_paths = _runtime_paths(
         tmp_path,
         process_env={
@@ -4867,7 +4872,7 @@ def test_trusted_upstream_auth_email_template_requires_exactly_one_localpart_pla
 
     assert response.status_code == 500
     assert response.json()["detail"] == (
-        "Trusted upstream email-to-Matrix template must contain exactly one {localpart} placeholder"
+        "Trusted upstream email-to-Matrix template must contain exactly one {localpart} placeholder and no other braces"
     )
 
 

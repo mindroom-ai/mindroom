@@ -106,7 +106,12 @@ def test_origin_room_default_accepts_trusted_browser_auth_runtime(tmp_path) -> N
 
 @pytest.mark.parametrize(
     "template",
-    ["@alice:example.org", "@{localpart}-{localpart}:example.org"],
+    [
+        "@alice:example.org",
+        "@{localpart}-{localpart}:example.org",
+        "@{localpart}:example.org{",
+        "@{localpart}:{other}",
+    ],
 )
 def test_origin_room_default_rejects_malformed_email_mapping(tmp_path, template: str) -> None:  # noqa: ANN001
     """Protected defaults should reject mappings that runtime auth cannot use."""
