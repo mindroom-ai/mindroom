@@ -1324,6 +1324,33 @@ class CacheFuzzRunner:
             assert await self.cache.get_event(current_room_id, event_id) is not None, (
                 f"independent concurrent event write disappeared: {current_room_id} {event_id}"
             )
+            expected_thread_id = self._explicit_source_thread_id(source)
+            if expected_thread_id is None or operation.kind is OperationKind.REACTION:
+                continue
+            assert await self.cache.get_thread_id_for_event(current_room_id, event_id) == expected_thread_id, (
+                f"independent concurrent event mapping disappeared: {current_room_id} {event_id}"
+            )
+            state = await self.cache.get_thread_cache_state(current_room_id, expected_thread_id)
+            events = await self.cache.get_thread_events(current_room_id, expected_thread_id)
+            if state is not None and events is not None and thread_cache_rejection_reason(state) is None:
+                assert event_id in {cast("str", event["event_id"]) for event in events}, (
+                    f"independent concurrent thread member disappeared: {current_room_id} {event_id}"
+                )
+
+    @staticmethod
+    def _explicit_source_thread_id(source: dict[str, Any]) -> str | None:
+        """Return the thread root declared directly by an event or its replacement body."""
+        content = source.get("content")
+        if not isinstance(content, dict):
+            return None
+        relation = content.get("m.relates_to")
+        if isinstance(relation, dict) and relation.get("rel_type") == "m.thread":
+            thread_root = relation.get("event_id")
+            return thread_root if isinstance(thread_root, str) else None
+        new_content = content.get("m.new_content")
+        new_relation = new_content.get("m.relates_to") if isinstance(new_content, dict) else None
+        thread_root = new_relation.get("event_id") if isinstance(new_relation, dict) else None
+        return thread_root if isinstance(thread_root, str) and new_relation.get("rel_type") == "m.thread" else None
 
     async def _apply_batch(self, batch: tuple[FuzzOperation, ...]) -> None:
         """Run concurrent operations through independent storage connections."""

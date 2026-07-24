@@ -341,6 +341,42 @@ async def test_concurrent_batch_uses_independent_cache_connections(tmp_path: Pat
 
 
 @pytest.mark.asyncio
+async def test_concurrent_batch_rejects_point_only_thread_writes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Concurrent success requires thread indexes, not merely surviving point rows."""
+
+    async def store_point_only(runner: CacheFuzzRunner, operation: FuzzOperation) -> None:
+        source = threaded_message_source(operation)
+        runner._remember_source(source)
+        await runner.cache.store_event(
+            source["event_id"],
+            source["room_id"],
+            source,
+        )
+
+    monkeypatch.setattr(CacheFuzzRunner, "_apply_source_operation", store_point_only)
+    scenario = FuzzScenario(
+        batches=(
+            (
+                FuzzOperation(OperationKind.THREADED_MESSAGE, 0, 0, 1, 0, 0),
+                FuzzOperation(OperationKind.THREADED_MESSAGE, 0, 1, 1, 0, 0),
+            ),
+        ),
+        room_count=1,
+        thread_count=2,
+    )
+
+    with pytest.raises(AssertionError, match="concurrent thread member disappeared"):
+        await run_scenario(
+            lambda: SqliteEventCache(tmp_path / "point-only-concurrent.db"),
+            scenario,
+            verify_restart=False,
+        )
+
+
+@pytest.mark.asyncio
 async def test_concurrent_runtime_initialization_does_not_deadlock(
     event_cache_factory: Callable[[], ConversationEventCache],
 ) -> None:
