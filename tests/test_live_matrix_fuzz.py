@@ -987,6 +987,28 @@ def test_model_response_is_bound_to_source_and_ordered_history() -> None:
     )
 
 
+def test_model_identity_rejects_marker_preserved_in_truncated_source() -> None:
+    """The semantic marker cannot replace the complete source body."""
+    source_body = "complete source body"
+    marker = fuzz_live_matrix._source_identity("root:0", source_body)
+    saved_bodies = dict(fuzz_live_matrix._ModelHandler.expected_source_bodies)
+    fuzz_live_matrix._ModelHandler.expected_source_bodies[marker] = source_body
+    try:
+        assert (
+            fuzz_live_matrix._ModelHandler._request_identity(
+                {"messages": [{"content": f"{source_body} LIVE-SOURCE[{marker}]"}]},
+            )[0]
+            == marker
+        )
+        with pytest.raises(ValueError, match="truncated"):
+            fuzz_live_matrix._ModelHandler._request_identity(
+                {"messages": [{"content": f"LIVE-SOURCE[{marker}]"}]},
+            )
+    finally:
+        fuzz_live_matrix._ModelHandler.expected_source_bodies.clear()
+        fuzz_live_matrix._ModelHandler.expected_source_bodies.update(saved_bodies)
+
+
 def test_live_model_tracks_edit_and_redaction_transitions() -> None:
     """Edit redaction restores the prior revision; source redaction removes history."""
 

@@ -36,7 +36,7 @@ from enum import StrEnum
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 from urllib.parse import quote
 
 import httpx
@@ -963,6 +963,7 @@ class _ModelHandler(BaseHTTPRequestHandler):
     call_ids = itertools.count(1)
     stream_segments = 4
     stream_delay = 0.001
+    expected_source_bodies: ClassVar[dict[str, str]] = {}
 
     def _send_json(self, payload: Mapping[str, object]) -> None:
         body = json.dumps(payload).encode()
@@ -1029,31 +1030,47 @@ class _ModelHandler(BaseHTTPRequestHandler):
         segments = " ".join(f"segment-{index:03d}" for index in range(cls.stream_segments))
         return f"LIVE-FUZZ call={call_id} source={source_marker} history={fingerprint} {segments} END call={call_id}"
 
-    @staticmethod
-    def _request_identity(payload: Mapping[str, object]) -> tuple[str, str]:
+    @classmethod
+    def _request_identity(cls, payload: Mapping[str, object]) -> tuple[str, str]:
         """Bind deterministic output to the latest source and ordered source history."""
         markers: list[str] = []
-
-        def collect(value: object, message_markers: list[str]) -> None:
-            if isinstance(value, str):
-                message_markers.extend(SOURCE_MARKER_PATTERN.findall(value))
-            elif isinstance(value, list):
-                for item in value:
-                    collect(item, message_markers)
-            elif isinstance(value, dict):
-                for item in value.values():
-                    collect(item, message_markers)
-
         messages = payload.get("messages")
         if isinstance(messages, list):
             for message in messages:
-                message_markers: list[str] = []
-                collect(message, message_markers)
-                markers.extend(dict.fromkeys(message_markers))
+                markers.extend(cls._validated_source_markers(message))
         else:
-            collect(messages, markers)
+            markers.extend(cls._validated_source_markers(messages))
         source_marker = markers[-1] if markers else "unbound"
         return source_marker, _history_fingerprint(markers)
+
+    @classmethod
+    def _validated_source_markers(cls, value: object) -> tuple[str, ...]:
+        """Return deduplicated markers whose complete source body is present."""
+        message_markers: list[str] = []
+        message_texts: list[str] = []
+
+        def collect(item: object) -> None:
+            if isinstance(item, str):
+                message_texts.append(item)
+                message_markers.extend(SOURCE_MARKER_PATTERN.findall(item))
+            elif isinstance(item, list):
+                for nested in item:
+                    collect(nested)
+            elif isinstance(item, dict):
+                for nested in item.values():
+                    collect(nested)
+
+        collect(value)
+        markers = tuple(dict.fromkeys(message_markers))
+        for marker in markers:
+            expected_body = cls.expected_source_bodies.get(marker)
+            marker_text = f"LIVE-SOURCE[{marker}]"
+            if expected_body is not None and not any(
+                expected_body in text and marker_text in text for text in message_texts
+            ):
+                msg = f"model request truncated live-fuzz source body for {marker}"
+                raise ValueError(msg)
+        return markers
 
     def _send_stream(self, call_id: int, content: str) -> None:
         self.send_response(HTTPStatus.OK)
@@ -1477,6 +1494,7 @@ class ManagedTuwunelStack:
     def _start_model_server(self) -> int:
         _ModelHandler.stream_segments = self._stream_segments
         _ModelHandler.stream_delay = self._stream_delay
+        _ModelHandler.expected_source_bodies.clear()
         self._model_server = ThreadingHTTPServer(("127.0.0.1", 0), _ModelHandler)
         port = self._model_server.server_address[1]
         self._model_thread = threading.Thread(
@@ -3340,6 +3358,11 @@ class LiveFuzzRunner:
         source_marker: str | None = None,
     ) -> dict[str, Any]:
         source_identity = _source_identity(source_marker, body) if source_marker is not None else None
+        if source_identity is not None:
+            previous_body = _ModelHandler.expected_source_bodies.setdefault(source_identity, body)
+            if previous_body != body:
+                msg = f"live-fuzz source identity collision for {source_identity}"
+                raise AssertionError(msg)
         marker_suffix = f" LIVE-SOURCE[{source_identity}]" if source_identity is not None else ""
         content: dict[str, Any] = {
             "msgtype": "m.text",
