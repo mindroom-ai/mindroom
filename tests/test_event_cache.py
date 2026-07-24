@@ -2399,6 +2399,59 @@ async def test_cached_room_get_event_falls_back_from_malformed_newest_edit(
 
 
 @pytest.mark.asyncio
+async def test_cached_point_and_snapshot_reads_apply_bundled_replacement(
+    event_cache: ConversationEventCache,
+) -> None:
+    """Cached projections must honor the same valid bundled edit as full history."""
+    original_event = _cache_source(
+        _make_text_event(
+            event_id="$reply",
+            sender="@alice:localhost",
+            body="Original",
+            server_timestamp=2000,
+            source_content={"body": "Original", "msgtype": "m.text"},
+        ),
+    )
+    original_event["unsigned"] = {
+        "m.relations": {
+            "m.replace": {
+                "event_id": "$bundled_edit",
+                "sender": "@alice:localhost",
+                "origin_server_ts": 3000,
+                "type": "m.room.message",
+                "content": {
+                    "body": "* Bundled",
+                    "msgtype": "m.text",
+                    "m.new_content": {"body": "Bundled", "msgtype": "m.text"},
+                    "m.relates_to": {"rel_type": "m.replace", "event_id": "$reply"},
+                },
+            },
+        },
+    }
+    await event_cache.store_event("$reply", "!room:localhost", original_event)
+
+    response, _ = await _cached_room_get_event(
+        AsyncMock(),
+        event_cache,
+        "!room:localhost",
+        "$reply",
+    )
+    snapshot = await event_cache.get_latest_agent_message_snapshot(
+        "!room:localhost",
+        None,
+        "@alice:localhost",
+        runtime_started_at=None,
+    )
+
+    assert isinstance(response, nio.RoomGetEventResponse)
+    assert response.event.body == "Bundled"
+    assert response.event.server_timestamp == 2000
+    assert snapshot is not None
+    assert snapshot.content == {"body": "Bundled", "msgtype": "m.text"}
+    assert snapshot.origin_server_ts == 2000
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "invalidity",
     [

@@ -197,9 +197,11 @@ async def load_latest_edit_row(
         WHERE event_edits.principal_id = ?
           AND event_edits.room_id = ?
           AND event_edits.original_event_id = ?
+          AND json_extract(events.event_json, '$.sender') = ?
+          AND json_extract(events.event_json, '$.type') = ?
         ORDER BY event_edits.origin_server_ts DESC, event_edits.edit_event_id COLLATE BINARY DESC
         """,
-        (principal_id, room_id, original_event_id),
+        (principal_id, room_id, original_event_id, sender, event_type),
     )
     try:
         while (row := await cursor.fetchone()) is not None:

@@ -11,7 +11,7 @@ from mindroom.matrix.cache import ThreadRevision
 from mindroom.matrix.cache.event_cache_events import validated_cached_edit_row
 from mindroom.matrix.cache.event_normalization import normalize_event_source_for_cache
 from mindroom.matrix.cache.thread_cache_state import thread_cache_state_row, thread_revision_row
-from mindroom.matrix.event_info import room_message_content_is_renderable
+from mindroom.matrix.event_info import latest_valid_replacement, room_message_content_is_renderable
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -105,6 +105,51 @@ def test_cache_normalization_uses_authoritative_event_id() -> None:
         )["event_id"]
         == "$indexed"
     )
+
+
+@pytest.mark.parametrize(
+    ("bundled_timestamp", "explicit_timestamp", "expected_event_id"),
+    [
+        (2000, 3000, "$a"),
+        (2000, 2000, "$z"),
+    ],
+)
+def test_latest_valid_replacement_orders_bundled_and_explicit_candidates_together(
+    bundled_timestamp: int,
+    explicit_timestamp: int,
+    expected_event_id: str,
+) -> None:
+    """Cached and bundled candidates share Matrix timestamp and event-ID ordering."""
+    original = {
+        "event_id": "$original",
+        "sender": "@alice:localhost",
+        "origin_server_ts": 1000,
+        "type": "m.room.message",
+        "content": {"body": "Original", "msgtype": "m.text"},
+    }
+
+    def edit(event_id: str, timestamp: int) -> dict[str, object]:
+        return {
+            "event_id": event_id,
+            "sender": "@alice:localhost",
+            "origin_server_ts": timestamp,
+            "type": "m.room.message",
+            "content": {
+                "body": f"* {event_id}",
+                "msgtype": "m.text",
+                "m.new_content": {"body": event_id, "msgtype": "m.text"},
+                "m.relates_to": {"rel_type": "m.replace", "event_id": "$original"},
+            },
+        }
+
+    original["unsigned"] = {
+        "m.relations": {"m.replace": edit("$z", bundled_timestamp)},
+    }
+
+    latest = latest_valid_replacement(original, [edit("$a", explicit_timestamp)])
+
+    assert latest is not None
+    assert latest["event_id"] == expected_event_id
 
 
 _VALID_ENCRYPTED_FILE = {

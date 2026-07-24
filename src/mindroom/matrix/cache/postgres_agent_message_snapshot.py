@@ -63,6 +63,7 @@ async def _snapshot_from_event(
     return snapshot_lookup_result(
         event,
         latest_edit=latest_edit,
+        room_id=room_id,
         thread_id=thread_id,
         cached_at=cached_at,
         runtime_started_at=runtime_started_at,

@@ -194,9 +194,11 @@ async def load_latest_edit_row(
         WHERE edits.namespace = %s
             AND edits.room_id = %s
             AND edits.original_event_id = %s
+            AND events.event_json::jsonb ->> 'sender' = %s
+            AND events.event_json::jsonb ->> 'type' = %s
         ORDER BY edits.origin_server_ts DESC, edits.edit_event_id COLLATE "C" DESC
         """,
-        (namespace, room_id, original_event_id),
+        (namespace, room_id, original_event_id, sender, event_type),
     )
     try:
         while (row := await cursor.fetchone()) is not None:

@@ -44,6 +44,7 @@ from mindroom.matrix.event_info import (
     EventInfo,
     event_source_is_state_event,
     event_source_matches_room,
+    latest_valid_replacement,
     replacement_content_for_original,
     room_message_content_is_renderable,
 )
@@ -274,11 +275,16 @@ async def _apply_cached_latest_edit(
         sender=sender,
         event_type="m.room.message",
     )
-    if latest_edit_source is None:
+    latest_replacement = latest_valid_replacement(
+        event_source,
+        () if latest_edit_source is None else (latest_edit_source,),
+        room_id=room_id,
+    )
+    if latest_replacement is None:
         return event_source
 
     edited_body, edited_content = await extract_edit_body(
-        latest_edit_source,
+        latest_replacement,
         client,
         event_cache=event_cache,
         room_id=room_id,

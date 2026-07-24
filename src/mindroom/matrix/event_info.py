@@ -8,9 +8,9 @@ from __future__ import annotations
 
 import base64
 import binascii
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from typing import cast
+from typing import Any, cast
 
 _THREAD_RELATION_EVENT_TYPES = frozenset({"m.room.encrypted", "m.room.message"})
 _MATRIX_MEDIA_MESSAGE_TYPES = frozenset({"m.audio", "m.file", "m.image", "m.video"})
@@ -166,6 +166,148 @@ def replacement_content_for_original(
     if "m.relates_to" in original_content:
         replacement_content["m.relates_to"] = original_content["m.relates_to"]
     return replacement_content
+
+
+def bundled_replacement_candidates(event_source: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Return bundled replacement candidates without trusting structural preference."""
+    unsigned = event_source.get("unsigned")
+    if not isinstance(unsigned, Mapping):
+        return []
+    relations = unsigned.get("m.relations")
+    if not isinstance(relations, Mapping):
+        return []
+    replacement = relations.get("m.replace")
+    if not isinstance(replacement, Mapping):
+        return []
+    return [
+        {key: value for key, value in candidate.items() if isinstance(key, str)}
+        for candidate in (
+            replacement.get("latest_event"),
+            replacement.get("event"),
+            replacement,
+        )
+        if isinstance(candidate, Mapping)
+    ]
+
+
+def is_valid_bundled_replacement(
+    original_event_source: Mapping[str, Any],
+    replacement_event_source: dict[str, Any],
+    *,
+    room_id: str | None = None,
+) -> bool:
+    """Return whether one candidate satisfies Matrix replacement validity."""
+    original = {key: value for key, value in original_event_source.items() if isinstance(key, str)}
+    original_event_id = original.get("event_id")
+    replacement_event_id = replacement_event_source.get("event_id")
+    original_sender = original.get("sender")
+    original_type = original.get("type")
+    original_timestamp = origin_server_ts_from_event_source(original)
+    replacement_timestamp = origin_server_ts_from_event_source(replacement_event_source)
+    original_content = original.get("content")
+    identities_are_valid = (
+        isinstance(original_event_id, str)
+        and bool(original_event_id)
+        and isinstance(replacement_event_id, str)
+        and bool(replacement_event_id)
+        and replacement_event_id != original_event_id
+        and isinstance(original_sender, str)
+        and bool(original_sender)
+        and replacement_event_source.get("sender") == original_sender
+        and isinstance(original_type, str)
+        and bool(original_type)
+        and replacement_event_source.get("type") == original_type
+        and isinstance(original_timestamp, int)
+        and not isinstance(original_timestamp, bool)
+    )
+    if not identities_are_valid or (
+        not isinstance(replacement_timestamp, int)
+        or isinstance(replacement_timestamp, bool)
+        or event_source_is_state_event(original)
+        or event_source_is_state_event(replacement_event_source)
+        or EventInfo.from_event(original).is_edit
+    ):
+        return False
+    if not isinstance(original_content, Mapping):
+        return False
+
+    original_room_id = original.get("room_id")
+    replacement_room_id = replacement_event_source.get("room_id")
+    rooms_are_valid = not (
+        room_id is not None
+        and (
+            not event_source_matches_room(original, room_id)
+            or not event_source_matches_room(replacement_event_source, room_id)
+        )
+    ) and not (
+        isinstance(original_room_id, str)
+        and isinstance(replacement_room_id, str)
+        and original_room_id != replacement_room_id
+    )
+    if not rooms_are_valid:
+        return False
+
+    replacement_info = EventInfo.from_event(replacement_event_source)
+    content = replacement_event_source.get("content")
+    if (
+        not replacement_info.is_edit
+        or replacement_info.original_event_id != original_event_id
+        or not isinstance(content, Mapping)
+        or not isinstance(content.get("m.new_content"), Mapping)
+    ):
+        return False
+    return original_type != "m.room.message" or (
+        room_message_content_is_renderable(original_content)
+        and replacement_content_is_renderable(original_type, content)
+    )
+
+
+def ordered_valid_bundled_replacements(
+    original_event_source: Mapping[str, Any],
+    *,
+    room_id: str | None = None,
+) -> list[dict[str, Any]]:
+    """Return valid bundled replacements in canonical Matrix latest-first order."""
+    return sorted(
+        (
+            candidate
+            for candidate in bundled_replacement_candidates(original_event_source)
+            if is_valid_bundled_replacement(original_event_source, candidate, room_id=room_id)
+        ),
+        key=lambda candidate: (
+            origin_server_ts_from_event_source(candidate),
+            candidate["event_id"],
+        ),
+        reverse=True,
+    )
+
+
+def latest_valid_replacement(
+    original_event_source: Mapping[str, Any],
+    replacement_event_sources: Iterable[Mapping[str, Any]] = (),
+    *,
+    room_id: str | None = None,
+) -> dict[str, Any] | None:
+    """Return the Matrix-latest valid bundled or explicit replacement."""
+    candidates = [
+        *(
+            {key: value for key, value in candidate.items() if isinstance(key, str)}
+            for candidate in replacement_event_sources
+        ),
+        *bundled_replacement_candidates(original_event_source),
+    ]
+    return max(
+        (
+            candidate
+            for candidate in candidates
+            if is_valid_bundled_replacement(original_event_source, candidate, room_id=room_id)
+        ),
+        key=lambda candidate: (
+            origin_server_ts_from_event_source(candidate),
+            candidate["event_id"],
+        ),
+        default=None,
+    )
 
 
 def reply_to_event_id_from_content(content: Mapping[str, object] | None) -> str | None:
