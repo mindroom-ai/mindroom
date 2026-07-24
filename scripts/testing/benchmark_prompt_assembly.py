@@ -53,6 +53,24 @@ if TYPE_CHECKING:
 _COUNTERS: dict[str, int] = {}
 
 
+def _positive_int(value: str) -> int:
+    """Parse a positive iteration count for benchmark arguments."""
+    parsed = int(value)
+    if parsed < 1:
+        msg = "must be at least 1"
+        raise argparse.ArgumentTypeError(msg)
+    return parsed
+
+
+def _nonnegative_float(value: str) -> float:
+    """Parse a nonnegative synthetic-delay value."""
+    parsed = float(value)
+    if parsed < 0:
+        msg = "must be nonnegative"
+        raise argparse.ArgumentTypeError(msg)
+    return parsed
+
+
 def _count(name: str) -> None:
     _COUNTERS[name] = _COUNTERS.get(name, 0) + 1
 
@@ -259,11 +277,11 @@ async def _benchmark_prompt_branches(
 def main() -> None:
     """Run the prompt-assembly benchmark and print JSON results."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--builds", type=int, default=25)
-    parser.add_argument("--turns", type=int, default=25)
-    parser.add_argument("--branch-runs", type=int, default=10)
-    parser.add_argument("--branch-memory-ms", type=float, default=20.0)
-    parser.add_argument("--branch-agent-ms", type=float, default=40.0)
+    parser.add_argument("--builds", type=_positive_int, default=25)
+    parser.add_argument("--turns", type=_positive_int, default=25)
+    parser.add_argument("--branch-runs", type=_positive_int, default=10)
+    parser.add_argument("--branch-memory-ms", type=_nonnegative_float, default=20.0)
+    parser.add_argument("--branch-agent-ms", type=_nonnegative_float, default=40.0)
     args = parser.parse_args()
 
     logging.getLogger().setLevel(logging.ERROR)
