@@ -1578,12 +1578,14 @@ class ExactReplyOracle:
         internal_relay_senders: Collection[str] = (),
         coalescing_threads: bool = False,
         ledger_path: Path | None = None,
+        expected_body_for: Callable[[int], str] = _ModelHandler.response_text_for,
     ) -> None:
         self.client = client
         self.agent_id = agent_id
         self.internal_relay_senders = frozenset(internal_relay_senders)
         self.coalescing_threads = coalescing_threads
         self.ledger_path = ledger_path
+        self.expected_body_for = expected_body_for
         self._ledger_attributions: dict[str, str] = {}
         self._ledger_read_at = 0.0
         self.internal_source_ids: set[str] = set()
@@ -1595,6 +1597,10 @@ class ExactReplyOracle:
         self.chains: dict[tuple[int, int], list[str]] = defaultdict(list)
         self.response_ids: dict[str, set[str]] = defaultdict(set)
         self.response_event_by_ref: dict[str, str] = {}
+        # Newest visible body per agent reply (keyed by the reply event id),
+        # folding in `m.replace` edits so settlement can tell a still-streaming
+        # placeholder apart from a completed canonical body.
+        self.latest_reply_bodies: dict[str, tuple[int, str]] = {}
         self.seen_event_ids: set[str] = set()
         self.event_summaries: dict[str, dict[str, Any]] = {}
         self.sent_at: dict[str, float] = {}
@@ -1700,17 +1706,19 @@ class ExactReplyOracle:
             await self._sync_once(timeout_ms=250)
             self._assert_no_wrong_replies()
             self.refresh_ledger_attributions()
-            if not self.unsettled_required_sources():
+            if not self.unsettled_required_sources() and not self.incomplete_streaming_sources():
                 settled_after = max(settled_after, self._last_response_at + settle_seconds)
                 if time.monotonic() >= settled_after:
                     return
+        streaming = set(self.incomplete_streaming_sources())
         missing = {
             f"{self.expected_sources[event_id]} ({event_id})": {
                 "direct_replies": len(self.response_ids.get(event_id, ())),
                 "ledger_attributed": event_id in self._ledger_attributions,
                 "observed": event_id in self.observed_sources,
+                "reply_streaming_incomplete": event_id in streaming,
             }
-            for event_id in self.unsettled_required_sources()
+            for event_id in {*self.unsettled_required_sources(), *streaming}
         }
         msg = f"timed out waiting for exact agent replies: {missing}"
         raise AssertionError(msg)
@@ -1792,6 +1800,7 @@ class ExactReplyOracle:
             "relates_to": (event.get("content") or {}).get("m.relates_to")
             if isinstance(event.get("content"), dict)
             else None,
+            "origin_server_ts": event.get("origin_server_ts"),
         }
         if event_id in self.expected_sources:
             self.observed_sources.add(event_id)
@@ -1804,6 +1813,7 @@ class ExactReplyOracle:
         if not isinstance(content, dict):
             return
         relation = content.get("m.relates_to")
+        self._track_reply_body(event_id, content, relation)
         if not isinstance(relation, dict) or relation.get("rel_type") != "m.thread":
             return
         reply = relation.get("m.in_reply_to")
@@ -1818,6 +1828,71 @@ class ExactReplyOracle:
         if sent_at is not None and source_event_id not in self.reply_latencies:
             self.reply_latencies[source_event_id] = time.monotonic() - sent_at
         self._last_response_at = time.monotonic()
+
+    def _track_reply_body(
+        self,
+        event_id: str,
+        content: Mapping[str, Any],
+        relation: Any,  # noqa: ANN401
+    ) -> None:
+        """Fold one agent message (original reply or `m.replace` edit) into latest bodies."""
+        is_edit = isinstance(relation, dict) and relation.get("rel_type") == "m.replace"
+        reply_event_id = relation.get("event_id") if is_edit else event_id
+        if not isinstance(reply_event_id, str):
+            return
+        new_content = content.get("m.new_content")
+        body_source = new_content if isinstance(new_content, dict) else content
+        body = body_source.get("body")
+        if not isinstance(body, str):
+            return
+        timestamp = self.event_summaries.get(event_id, {}).get("origin_server_ts")
+        ordinal = timestamp if isinstance(timestamp, int) else len(self.seen_event_ids)
+        current = self.latest_reply_bodies.get(reply_event_id)
+        if current is None or ordinal >= current[0]:
+            self.latest_reply_bodies[reply_event_id] = (ordinal, body)
+
+    def _reply_body_complete(self, body: str) -> bool:
+        """Return whether one reply body is a settled terminal state.
+
+        A body is terminal when it is the exact completed stream for its model
+        call, or a by-design interrupted note (restart recovery and the final
+        audit own the validity of those). Placeholders and partial streams are
+        not terminal, so they must keep settlement open.
+        """
+        if body.endswith((INTERRUPTED_RESPONSE_NOTE, RESTART_INTERRUPTED_RESPONSE_NOTE)):
+            return True
+        call_id = _body_call_id(body)
+        return call_id is not None and body == self.expected_body_for(call_id)
+
+    def incomplete_streaming_sources(self) -> list[str]:
+        """Return observed required sources whose covering reply is still streaming.
+
+        Settlement otherwise depends only on a reply being *observed*, which a
+        placeholder edit satisfies; a required reply that has not reached a
+        terminal body must keep the window open so the final audit never reads a
+        mid-stream ``Thinking...`` body. A genuinely frozen stream never reaches
+        a terminal body either, so the checkpoint deadline still fails it.
+        """
+        blocking: list[str] = []
+        for event_id in self.expected_sources:
+            if event_id in self.optional_sources or event_id not in self.observed_sources:
+                continue
+            reply_event_id = self._settled_reply_event(event_id)
+            if reply_event_id is None:
+                continue
+            latest = self.latest_reply_bodies.get(reply_event_id)
+            if latest is None or not self._reply_body_complete(latest[1]):
+                blocking.append(event_id)
+        return blocking
+
+    def _settled_reply_event(self, source_event_id: str) -> str | None:
+        """Return the reply event covering one source, if one is known yet."""
+        replies = self.response_ids.get(source_event_id)
+        if replies and len(replies) == 1:
+            return next(iter(replies))
+        if self.coalescing_threads:
+            return self._covering_response(source_event_id)
+        return None
 
     def _assert_no_wrong_replies(self) -> None:
         duplicates = {
@@ -2231,6 +2306,7 @@ class LiveFuzzRunner:
                 if scenario.profile == "chaos"
                 else None
             ),
+            expected_body_for=_ModelHandler.response_text_for,
         )
         self.event_ids: dict[str, str] = {}
         self.sent_payloads: dict[str, _SentPayload] = {}

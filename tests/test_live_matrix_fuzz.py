@@ -6,6 +6,7 @@ import json
 from typing import TYPE_CHECKING, Any
 
 from mindroom.handled_turns import TurnRecord, TurnRecordCodec
+from mindroom.streaming import RESTART_INTERRUPTED_RESPONSE_NOTE
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -747,3 +748,82 @@ async def test_final_body_audit_accepts_only_recovered_interruptions() -> None:
         assert auditor._assert_final_bodies_complete(events, replies) == 1
     finally:
         await client.close()
+
+
+def _short_body_for(call_id: int) -> str:
+    return f"LIVE-FUZZ call={call_id} END call={call_id}"
+
+
+def _agent_edit_event(reply_event_id: str, event_id: str, body: str, *, ts: int) -> dict[str, Any]:
+    """Build an `m.replace` edit whose real streamed body lives in `m.new_content`."""
+    return {
+        "event_id": event_id,
+        "sender": "@agent:example",
+        "type": "m.room.message",
+        "origin_server_ts": ts,
+        "content": {
+            "body": f" * {body}",
+            "m.new_content": {"body": body, "msgtype": "m.text"},
+            "m.relates_to": {"rel_type": "m.replace", "event_id": reply_event_id},
+        },
+    }
+
+
+def _streaming_oracle() -> ExactReplyOracle:
+    client = LiveMatrixClient("http://matrix.invalid", "!room:example")
+    oracle = ExactReplyOracle(
+        client,
+        "@agent:example",
+        coalescing_threads=True,
+        expected_body_for=_short_body_for,
+    )
+    oracle.expect("op:1", "$source", thread=0)
+    oracle._ingest_event({"event_id": "$source", "sender": "@user:example", "type": "m.room.message"})
+    return oracle
+
+
+@pytest.mark.asyncio
+async def test_incomplete_streaming_reply_blocks_settlement() -> None:
+    """A placeholder body on an observed reply keeps the source unsettled."""
+    oracle = _streaming_oracle()
+    try:
+        placeholder = _agent_reply_event("$source", "$reply", "Thinking...")
+        oracle._ingest_event(placeholder)
+
+        # The reply is observed, so the reply-count model alone treats it settled.
+        assert oracle.unsettled_required_sources() == []
+        # The body gate keeps it open until the stream reaches a terminal body.
+        assert oracle.incomplete_streaming_sources() == ["$source"]
+    finally:
+        await oracle.client.close()
+
+
+@pytest.mark.asyncio
+async def test_completed_streaming_reply_settles_after_edit() -> None:
+    """Once the final edit carries the canonical body the source settles."""
+    oracle = _streaming_oracle()
+    try:
+        oracle._ingest_event(_agent_reply_event("$source", "$reply", "Thinking..."))
+        assert oracle.incomplete_streaming_sources() == ["$source"]
+
+        oracle._ingest_event(
+            _agent_edit_event("$reply", "$edit", _short_body_for(1), ts=200),
+        )
+
+        assert oracle.incomplete_streaming_sources() == []
+        assert oracle.unsettled_required_sources() == []
+    finally:
+        await oracle.client.close()
+
+
+@pytest.mark.asyncio
+async def test_interrupted_note_reply_does_not_block_settlement() -> None:
+    """A by-design interrupted note is terminal; restart recovery owns its validity."""
+    oracle = _streaming_oracle()
+    try:
+        note_body = f"partial stream {RESTART_INTERRUPTED_RESPONSE_NOTE}"
+        oracle._ingest_event(_agent_reply_event("$source", "$reply", note_body))
+
+        assert oracle.incomplete_streaming_sources() == []
+    finally:
+        await oracle.client.close()
