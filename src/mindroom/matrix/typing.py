@@ -67,7 +67,11 @@ async def _refresh_typing(
     """Start and refresh one shared Matrix typing indicator."""
     try:
         await _set_typing(client, room_id, True, timeout_seconds)
-    except BaseException as exc:
+    except asyncio.CancelledError:
+        if not started.done():
+            started.cancel()
+        raise
+    except Exception as exc:
         if not started.done():
             started.set_exception(exc)
         raise
