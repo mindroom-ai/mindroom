@@ -18,7 +18,7 @@ from scripts.testing.fuzz_live_matrix import (
     saturation_scenario,
 )
 
-LIMITED_SYNC_REPRODUCER = Path(__file__).parent / "fixtures" / "matrix_fuzz" / "nio_limited_sync_concurrent_branch.json"
+LIMITED_SYNC_REPRODUCER = Path(__file__).parent / "fixtures" / "matrix_fuzz" / "limited_sync_concurrent_branch.json"
 
 
 def test_live_scenario_is_deterministic_and_json_replayable() -> None:
@@ -135,8 +135,8 @@ def test_recovery_scenario_is_replayable_and_forces_every_room_past_sync_limit()
         assert len(reply_threads) == len(set(reply_threads))
 
 
-def test_limited_sync_external_reproducer_remains_an_exact_seeded_trace() -> None:
-    """Keep the minimized Tuwunel concurrent-branch reproducer replayable."""
+def test_limited_sync_concurrent_reproducer_remains_an_exact_seeded_trace() -> None:
+    """Keep the minimized limited-sync concurrency trace replayable."""
     saved = LiveFuzzScenario.from_json(LIMITED_SYNC_REPRODUCER.read_text(encoding="utf-8"))
     generated = recovery_scenario_from_seed(
         1638,
