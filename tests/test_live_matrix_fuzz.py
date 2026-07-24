@@ -756,6 +756,8 @@ async def test_exact_reply_oracle_counts_only_canonical_agent_thread_replies() -
         "sender": "@agent:example",
         "type": "m.room.message",
         "content": {
+            "body": "Thinking...",
+            "msgtype": "m.text",
             "m.relates_to": {
                 "rel_type": "m.thread",
                 "event_id": "$source",
@@ -799,6 +801,8 @@ async def test_exact_reply_oracle_hydrates_limited_sync_from_pagination(
         "sender": "@agent:example",
         "type": "m.room.message",
         "content": {
+            "body": "Thinking...",
+            "msgtype": "m.text",
             "m.relates_to": {
                 "rel_type": "m.thread",
                 "event_id": "$source",
@@ -863,6 +867,7 @@ def _agent_reply_event(source_event_id: str, response_event_id: str, body: str) 
         "origin_server_ts": 100,
         "content": {
             "body": body,
+            "msgtype": "m.text",
             "m.relates_to": {
                 "rel_type": "m.thread",
                 "event_id": source_event_id,
@@ -927,6 +932,63 @@ def test_exact_reply_oracle_rejects_corrupt_intermediate_stream_edit() -> None:
     )
 
     with pytest.raises(AssertionError, match=r"corrupt_stream_edits=.*\$corrupt"):
+        oracle._assert_no_wrong_replies()
+
+
+def test_exact_reply_oracle_rejects_complete_wrong_identity_before_valid_final() -> None:
+    """A complete wrong response cannot self-whitelist before a correct final edit."""
+    source_marker = fuzz_live_matrix._source_identity("root:0", "source")
+    history = fuzz_live_matrix._history_fingerprint((source_marker,))
+    oracle = ExactReplyOracle(cast("LiveMatrixClient", object()), "@agent:example")
+    oracle.expect(
+        "root:0",
+        "$source",
+        source_marker=source_marker,
+        history_markers=(source_marker,),
+    )
+    oracle._ingest_event(_agent_reply_event("$source", "$response", "Thinking..."))
+    oracle._ingest_event(
+        _agent_edit_event(
+            "$response",
+            fuzz_live_matrix._ModelHandler.response_text_for(
+                1,
+                source_marker="wrong-source",
+                history_fingerprint=history,
+            ),
+            event_id="$wrong-complete",
+        ),
+    )
+    oracle._ingest_event(
+        _agent_edit_event(
+            "$response",
+            fuzz_live_matrix._ModelHandler.response_text_for(
+                2,
+                source_marker=source_marker,
+                history_fingerprint=history,
+            ),
+            event_id="$final",
+            timestamp=102,
+        ),
+    )
+
+    with pytest.raises(AssertionError, match=r"corrupt_stream_edits=.*\$wrong-complete"):
+        oracle._assert_no_wrong_replies()
+
+
+def test_exact_reply_oracle_rejects_router_duplicate() -> None:
+    """A router-authored reply cannot hide beside the one expected agent reply."""
+    oracle = ExactReplyOracle(
+        cast("LiveMatrixClient", object()),
+        "@agent:example",
+        "@router:example",
+    )
+    oracle.expect("root:0", "$source")
+    oracle._ingest_event(_agent_reply_event("$source", "$response", "Thinking..."))
+    router_reply = _agent_reply_event("$source", "$router-response", "router")
+    router_reply["sender"] = "@router:example"
+    oracle._ingest_event(router_reply)
+
+    with pytest.raises(AssertionError, match=r"unexpected_responders=.*\$router-response"):
         oracle._assert_no_wrong_replies()
 
 
@@ -1084,6 +1146,7 @@ def test_live_history_includes_completed_assistant_before_next_source() -> None:
 
     class Stack:
         agent_id = "@agent:example"
+        router_id = "@router:example"
 
     runner = fuzz_live_matrix.LiveFuzzRunner(
         cast("fuzz_live_matrix.ManagedTuwunelStack", Stack()),
@@ -1146,6 +1209,7 @@ def test_live_model_tracks_edit_and_redaction_transitions() -> None:
 
     class Stack:
         agent_id = "@agent:example"
+        router_id = "@router:example"
 
     client = cast("LiveMatrixClient", object())
     runner = fuzz_live_matrix.LiveFuzzRunner(
@@ -1225,6 +1289,7 @@ async def test_source_redaction_sends_fresh_history_audit(
 
     class Stack:
         agent_id = "@agent:example"
+        router_id = "@router:example"
 
     fake_client = Client()
     client = cast("LiveMatrixClient", fake_client)
@@ -1326,6 +1391,7 @@ def test_saturation_final_audit_rejects_late_corrupt_edit() -> None:
 
     class Stack:
         agent_id = "@agent:example"
+        router_id = "@router:example"
 
     runner = fuzz_live_matrix.LiveFuzzRunner(
         cast("fuzz_live_matrix.ManagedTuwunelStack", Stack()),
@@ -1343,6 +1409,63 @@ def test_saturation_final_audit_rejects_late_corrupt_edit() -> None:
     }
 
     with pytest.raises(AssertionError, match="corrupt_bodies"):
+        runner._assert_saturation_replies(expected)
+
+
+def test_saturation_audit_rejects_complete_wrong_edit_before_valid_final() -> None:
+    """Saturation cannot ignore an incorrect complete intermediate replacement."""
+    source_marker = fuzz_live_matrix._source_identity("op:1", "source")
+    history = fuzz_live_matrix._history_fingerprint((source_marker,))
+    original = _agent_reply_event("$source", "$response", "Thinking...")
+    original["content"]["m.relates_to"]["event_id"] = "$root"
+    wrong = _agent_edit_event(
+        "$response",
+        fuzz_live_matrix._ModelHandler.response_text_for(
+            1,
+            source_marker="wrong-source",
+            history_fingerprint=history,
+        ),
+        event_id="$wrong-complete",
+    )
+    final = _agent_edit_event(
+        "$response",
+        fuzz_live_matrix._ModelHandler.response_text_for(
+            2,
+            source_marker=source_marker,
+            history_fingerprint=history,
+        ),
+        event_id="$final",
+        timestamp=102,
+    )
+
+    class Client:
+        def __init__(self) -> None:
+            self.seen_events = {
+                "$response": original,
+                "$wrong-complete": wrong,
+                "$final": final,
+            }
+
+    class Stack:
+        agent_id = "@agent:example"
+        router_id = "@router:example"
+
+    runner = fuzz_live_matrix.LiveFuzzRunner(
+        cast("fuzz_live_matrix.ManagedTuwunelStack", Stack()),
+        (cast("LiveMatrixClient", Client()),),
+        LiveFuzzScenario(thread_count=2, batches=(), profile="saturation"),
+        reply_timeout=1,
+        settle_seconds=0,
+    )
+    expected = {
+        "$source": fuzz_live_matrix._ExpectedSaturationReply(
+            root_event_id="$root",
+            source_marker=source_marker,
+            history_fingerprint=history,
+        ),
+    }
+
+    with pytest.raises(AssertionError, match=r"corrupt_edits=.*\$wrong-complete"):
         runner._assert_saturation_replies(expected)
 
 

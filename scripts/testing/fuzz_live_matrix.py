@@ -1951,9 +1951,11 @@ class ExactReplyOracle:
         self,
         client: LiveMatrixClient,
         agent_id: str,
+        router_id: str | None = None,
     ) -> None:
         self.client = client
         self.agent_id = agent_id
+        self.router_id = router_id
         self.next_batch: str | None = None
         self.expected_sources: dict[str, str] = {}
         self.expected_thread_roots: dict[str, str] = {}
@@ -1967,6 +1969,7 @@ class ExactReplyOracle:
         self.reply_events_with_edits: set[str] = set()
         self.response_edit_targets: dict[str, str] = {}
         self.response_edit_bodies: dict[str, str] = {}
+        self.unexpected_responder_ids: dict[str, str] = {}
         self.seen_event_ids: set[str] = set()
         self.limited_timeline_count = 0
         self.pagination_page_count = 0
@@ -2177,15 +2180,40 @@ class ExactReplyOracle:
         if not isinstance(event_id, str) or event_id in self.seen_event_ids:
             return
         self.seen_event_ids.add(event_id)
-        if event.get("sender") != self.agent_id or event.get("type") != "m.room.message":
+        if event.get("type") != "m.room.message":
             return
+        self._ingest_message_event(event_id, event)
+
+    def _ingest_message_event(
+        self,
+        event_id: str,
+        event: Mapping[str, Any],
+    ) -> None:
+        """Classify one unseen Matrix message from the agent or router."""
         content = event.get("content")
         if not isinstance(content, dict):
-            self.malformed_response_ids.add(event_id)
+            if event.get("sender") == self.agent_id:
+                self.malformed_response_ids.add(event_id)
             return
+        sender = event.get("sender")
+        if sender == self.router_id:
+            self._track_router_response(event_id, content)
+        elif sender == self.agent_id:
+            self._ingest_agent_message(event_id, event, content)
+
+    def _ingest_agent_message(
+        self,
+        event_id: str,
+        event: Mapping[str, Any],
+        content: Mapping[str, Any],
+    ) -> None:
+        """Classify one original or replacement message from the expected agent."""
         relation = content.get("m.relates_to")
         if isinstance(relation, dict) and relation.get("rel_type") == "m.replace":
             self._ingest_agent_edit(event_id, event, content, relation)
+            return
+        if not isinstance(content.get("body"), str) or not isinstance(content.get("msgtype"), str):
+            self.malformed_response_ids.add(event_id)
             return
         self._track_reply_body(event_id, event, content, relation)
         if not isinstance(relation, dict) or relation.get("rel_type") != "m.thread":
@@ -2212,6 +2240,25 @@ class ExactReplyOracle:
         if logical_ref is not None:
             self.response_event_by_ref[f"response:{logical_ref}"] = event_id
         self._last_response_at = time.monotonic()
+
+    def _track_router_response(
+        self,
+        event_id: str,
+        content: Mapping[str, Any],
+    ) -> None:
+        """Reject router replies or edits that duplicate an expected agent response."""
+        relation = content.get("m.relates_to")
+        if not isinstance(relation, dict):
+            return
+        if relation.get("rel_type") == "m.replace":
+            target_event_id = relation.get("event_id")
+            if target_event_id in self.response_event_by_ref.values():
+                self.unexpected_responder_ids[event_id] = cast("str", self.router_id)
+            return
+        in_reply_to = relation.get("m.in_reply_to")
+        source_event_id = in_reply_to.get("event_id") if isinstance(in_reply_to, dict) else None
+        if source_event_id in self.expected_sources:
+            self.unexpected_responder_ids[event_id] = cast("str", self.router_id)
 
     def _ingest_agent_edit(
         self,
@@ -2329,21 +2376,20 @@ class ExactReplyOracle:
             for event_id, target_event_id in self.response_edit_targets.items()
             if target_event_id not in canonical_response_ids
         }
-        corrupt_stream_edits: dict[str, str] = {}
-        edits_by_target: dict[str, list[tuple[str, str]]] = defaultdict(list)
-        for event_id, target_event_id in self.response_edit_targets.items():
-            edits_by_target[target_event_id].append((event_id, self.response_edit_bodies[event_id]))
-        for edits in edits_by_target.values():
-            complete_bodies = [body for _event_id, body in edits if self._is_complete_model_body(body)]
-            if not complete_bodies:
-                continue
-            corrupt_stream_edits.update(
-                {
-                    event_id: body
-                    for event_id, body in edits
-                    if not any(complete_body.startswith(body) for complete_body in complete_bodies)
-                },
-            )
+        expected_identity_by_response = {
+            next(iter(response_event_ids)): identity
+            for source_event_id, response_event_ids in self.response_ids.items()
+            if len(response_event_ids) == 1
+            and (identity := self.expected_model_identity.get(source_event_id)) is not None
+        }
+        response_edits = {
+            event_id: (target_event_id, self.response_edit_bodies[event_id])
+            for event_id, target_event_id in self.response_edit_targets.items()
+        }
+        corrupt_stream_edits = self._corrupt_stream_edit_ids(
+            response_edits,
+            expected_identity_by_response,
+        )
         if (
             duplicates
             or unexpected
@@ -2351,14 +2397,52 @@ class ExactReplyOracle:
             or orphan_edits
             or corrupt_stream_edits
             or self.malformed_response_ids
+            or self.unexpected_responder_ids
         ):
             msg = (
                 "agent reply invariant failed: "
                 f"duplicates={duplicates}, unexpected={unexpected}, wrong_thread_roots={wrong_roots}, "
                 f"orphan_edits={orphan_edits}, corrupt_stream_edits={sorted(corrupt_stream_edits)}, "
-                f"malformed={sorted(self.malformed_response_ids)}"
+                f"malformed={sorted(self.malformed_response_ids)}, "
+                f"unexpected_responders={self.unexpected_responder_ids}"
             )
             raise AssertionError(msg)
+
+    @classmethod
+    def _corrupt_stream_edit_ids(
+        cls,
+        response_edits: Mapping[str, tuple[str, str]],
+        expected_identity_by_response: Mapping[str, tuple[str, str]],
+    ) -> dict[str, str]:
+        """Return edits that cannot be a prefix of a semantically correct final body."""
+        edits_by_target: dict[str, list[tuple[str, str]]] = defaultdict(list)
+        for event_id, (target_event_id, body) in response_edits.items():
+            edits_by_target[target_event_id].append((event_id, body))
+        corrupt: dict[str, str] = {}
+        for target_event_id, edits in edits_by_target.items():
+            expected_identity = expected_identity_by_response.get(target_event_id)
+            complete_bodies = [
+                body
+                for _event_id, body in edits
+                if (
+                    cls._is_complete_model_body(body)
+                    if expected_identity is None
+                    else cls._is_complete_model_body(
+                        body,
+                        expected_source_marker=expected_identity[0],
+                        expected_history_fingerprint=expected_identity[1],
+                    )
+                )
+            ]
+            if complete_bodies:
+                corrupt.update(
+                    {
+                        event_id: body
+                        for event_id, body in edits
+                        if not any(complete_body.startswith(body) for complete_body in complete_bodies)
+                    },
+                )
+        return corrupt
 
 
 class LiveFuzzRunner:
@@ -2379,7 +2463,7 @@ class LiveFuzzRunner:
         self.scenario = scenario
         self.reply_timeout = reply_timeout
         self.settle_seconds = settle_seconds
-        self.oracle = ExactReplyOracle(self.client, stack.agent_id)
+        self.oracle = ExactReplyOracle(self.client, stack.agent_id, stack.router_id)
         self.event_ids: dict[str, str] = {}
         self.response_event_ids: dict[str, str] = {}
         self.sent_payloads: dict[str, _SentPayload] = {}
@@ -2561,7 +2645,7 @@ class LiveFuzzRunner:
     async def _run_recovery(self) -> dict[str, int | str]:
         """Replay a bounded outage, limited sync, reconnect, and duplicate audit."""
         observers = tuple(self._recovery_client(room, 0) for room in range(self.scenario.room_count))
-        oracles = tuple(ExactReplyOracle(client, self.stack.agent_id) for client in observers)
+        oracles = tuple(ExactReplyOracle(client, self.stack.agent_id, self.stack.router_id) for client in observers)
         await asyncio.gather(*(oracle.initialize() for oracle in oracles))
         await self._send_recovery_roots(oracles)
         await self._send_recovery_checkpoint_barrier(oracles)
@@ -3010,6 +3094,30 @@ class LiveFuzzRunner:
         all_events = {event_id: event for client in self.clients for event_id, event in client.seen_events.items()}
         response_ids = self._canonical_response_ids(all_events.values())
         response_roots = self._canonical_response_roots(all_events.values())
+        response_event_ids = {event_id for event_ids in response_ids.values() for event_id in event_ids}
+        response_edits, malformed_edits = self._agent_response_edits(all_events.values())
+        orphan_edits = {
+            event_id: target_event_id
+            for event_id, (target_event_id, _body) in response_edits.items()
+            if target_event_id not in response_event_ids
+        }
+        expected_identity_by_response = {
+            next(iter(event_ids)): (
+                expected_sources[source_event_id].source_marker,
+                expected_sources[source_event_id].history_fingerprint,
+            )
+            for source_event_id, event_ids in response_ids.items()
+            if source_event_id in expected_sources and len(event_ids) == 1
+        }
+        corrupt_edits = ExactReplyOracle._corrupt_stream_edit_ids(
+            response_edits,
+            expected_identity_by_response,
+        )
+        unexpected_routers = self._unexpected_router_responses(
+            all_events.values(),
+            expected_sources,
+            response_event_ids,
+        )
         duplicates = {
             source_event_id: sorted(event_ids)
             for source_event_id, event_ids in response_ids.items()
@@ -3039,11 +3147,25 @@ class LiveFuzzRunner:
                 expected_history_fingerprint=expectation.history_fingerprint,
             ):
                 corrupt_bodies.append(source_event_id)
-        if duplicates or missing or unexpected or malformed or wrong_roots or corrupt_bodies:
+        if (
+            duplicates
+            or missing
+            or unexpected
+            or malformed
+            or malformed_edits
+            or orphan_edits
+            or corrupt_edits
+            or unexpected_routers
+            or wrong_roots
+            or corrupt_bodies
+        ):
             msg = (
                 "saturation reply invariant failed: "
                 f"duplicates={duplicates}, missing={missing}, unexpected={unexpected}, "
-                f"malformed={malformed}, wrong_roots={wrong_roots}, corrupt_bodies={sorted(corrupt_bodies)}"
+                f"malformed={malformed}, malformed_edits={sorted(malformed_edits)}, "
+                f"orphan_edits={orphan_edits}, corrupt_edits={sorted(corrupt_edits)}, "
+                f"unexpected_routers={sorted(unexpected_routers)}, wrong_roots={wrong_roots}, "
+                f"corrupt_bodies={sorted(corrupt_bodies)}"
             )
             raise AssertionError(msg)
 
@@ -3181,9 +3303,69 @@ class LiveFuzzRunner:
                 or not isinstance(relation.get("event_id"), str)
                 or not isinstance(in_reply_to, dict)
                 or not isinstance(in_reply_to.get("event_id"), str)
+                or not isinstance(content.get("body"), str)
+                or not isinstance(content.get("msgtype"), str)
             ):
                 malformed.add(event_id)
         return malformed
+
+    def _agent_response_edits(
+        self,
+        events: Collection[Mapping[str, Any]],
+    ) -> tuple[dict[str, tuple[str, str]], set[str]]:
+        """Collect structurally valid agent replacements and malformed IDs."""
+        edits: dict[str, tuple[str, str]] = {}
+        malformed: set[str] = set()
+        for event in events:
+            if event.get("type") != "m.room.message" or event.get("sender") != self.stack.agent_id:
+                continue
+            event_id = event.get("event_id")
+            content = event.get("content")
+            relation = content.get("m.relates_to") if isinstance(content, dict) else None
+            if (
+                not isinstance(event_id, str)
+                or not isinstance(relation, dict)
+                or relation.get("rel_type") != "m.replace"
+            ):
+                continue
+            target_event_id = relation.get("event_id")
+            new_content = content.get("m.new_content") if isinstance(content, dict) else None
+            if (
+                not isinstance(target_event_id, str)
+                or not isinstance(new_content, dict)
+                or not isinstance(new_content.get("body"), str)
+                or not isinstance(new_content.get("msgtype"), str)
+            ):
+                malformed.add(event_id)
+                continue
+            edits[event_id] = (target_event_id, cast("str", new_content["body"]))
+        return edits, malformed
+
+    def _unexpected_router_responses(
+        self,
+        events: Collection[Mapping[str, Any]],
+        expected_sources: Mapping[str, _ExpectedSaturationReply],
+        response_event_ids: set[str],
+    ) -> set[str]:
+        """Return router replies or edits that overlap the agent response lane."""
+        unexpected: set[str] = set()
+        for event in events:
+            if event.get("type") != "m.room.message" or event.get("sender") != self.stack.router_id:
+                continue
+            event_id = event.get("event_id")
+            content = event.get("content")
+            relation = content.get("m.relates_to") if isinstance(content, dict) else None
+            if not isinstance(event_id, str) or not isinstance(relation, dict):
+                continue
+            if relation.get("rel_type") == "m.replace":
+                if relation.get("event_id") in response_event_ids:
+                    unexpected.add(event_id)
+                continue
+            in_reply_to = relation.get("m.in_reply_to")
+            source_event_id = in_reply_to.get("event_id") if isinstance(in_reply_to, dict) else None
+            if source_event_id in expected_sources:
+                unexpected.add(event_id)
+        return unexpected
 
     def _canonical_response_roots(
         self,
