@@ -59,6 +59,9 @@ RECOVERY_TIMELINE_LIMIT = 50
 REGISTRY_READ_ATTEMPTS = 3
 REGISTRY_READ_RETRY_SECONDS = 0.05
 SOURCE_MARKER_PATTERN = re.compile(r"LIVE-SOURCE\[([A-Za-z0-9_.:-]+)\]")
+MODEL_BODY_PATTERN = re.compile(
+    r"LIVE-FUZZ call=(\d+) source=([A-Za-z0-9_.:-]+) history=([0-9a-f]{16}) .*? END call=(\d+)",
+)
 _SERIOUS_DIAGNOSTICS = (
     "cache_coordinator_timeouts",
     "degraded_thread_reads",
@@ -76,6 +79,11 @@ def _history_fingerprint(source_markers: Collection[str]) -> str:
 def _source_identity(logical_ref: str, body: str) -> str:
     """Bind one logical source revision to its canonical visible body."""
     return f"{logical_ref}.{hashlib.sha256(body.encode()).hexdigest()[:12]}"
+
+
+def _assistant_identity(source_marker: str, history_fingerprint: str) -> str:
+    """Return a call-ID-independent identity for one complete assistant body."""
+    return f"assistant.{source_marker}.{history_fingerprint}"
 
 
 def _source_marker_from_content(content: Mapping[str, object]) -> str:
@@ -1033,26 +1041,49 @@ class _ModelHandler(BaseHTTPRequestHandler):
     @classmethod
     def _request_identity(cls, payload: Mapping[str, object]) -> tuple[str, str]:
         """Bind deterministic output to the latest source and ordered source history."""
-        markers: list[str] = []
+        identities: list[str] = []
+        source_markers: list[str] = []
         messages = payload.get("messages")
         if isinstance(messages, list):
             for message in messages:
-                markers.extend(cls._validated_source_markers(message))
+                message_identities, message_sources = cls._validated_history_identities(message)
+                identities.extend(message_identities)
+                source_markers.extend(message_sources)
         else:
-            markers.extend(cls._validated_source_markers(messages))
-        source_marker = markers[-1] if markers else "unbound"
-        return source_marker, _history_fingerprint(markers)
+            message_identities, message_sources = cls._validated_history_identities(messages)
+            identities.extend(message_identities)
+            source_markers.extend(message_sources)
+        source_marker = source_markers[-1] if source_markers else "unbound"
+        return source_marker, _history_fingerprint(identities)
 
     @classmethod
-    def _validated_source_markers(cls, value: object) -> tuple[str, ...]:
-        """Return deduplicated markers whose complete source body is present."""
-        message_markers: list[str] = []
+    def _validated_history_identities(
+        cls,
+        value: object,
+    ) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        """Return ordered complete source and assistant identities."""
+        message_texts = cls._message_texts(value)
+        source_markers = tuple(
+            dict.fromkeys(marker for text in message_texts for marker in SOURCE_MARKER_PATTERN.findall(text)),
+        )
+        for marker in source_markers:
+            expected_body = cls.expected_source_bodies.get(marker)
+            marker_text = f"LIVE-SOURCE[{marker}]"
+            if expected_body is not None and not any(
+                expected_body in text and marker_text in text for text in message_texts
+            ):
+                msg = f"model request truncated live-fuzz source body for {marker}"
+                raise ValueError(msg)
+        return cls._ordered_history_identities(message_texts), source_markers
+
+    @staticmethod
+    def _message_texts(value: object) -> tuple[str, ...]:
+        """Flatten one OpenAI message into ordered text fields."""
         message_texts: list[str] = []
 
         def collect(item: object) -> None:
             if isinstance(item, str):
                 message_texts.append(item)
-                message_markers.extend(SOURCE_MARKER_PATTERN.findall(item))
             elif isinstance(item, list):
                 for nested in item:
                     collect(nested)
@@ -1061,16 +1092,34 @@ class _ModelHandler(BaseHTTPRequestHandler):
                     collect(nested)
 
         collect(value)
-        markers = tuple(dict.fromkeys(message_markers))
-        for marker in markers:
-            expected_body = cls.expected_source_bodies.get(marker)
-            marker_text = f"LIVE-SOURCE[{marker}]"
-            if expected_body is not None and not any(
-                expected_body in text and marker_text in text for text in message_texts
-            ):
-                msg = f"model request truncated live-fuzz source body for {marker}"
-                raise ValueError(msg)
-        return markers
+        return tuple(message_texts)
+
+    @classmethod
+    def _ordered_history_identities(cls, message_texts: tuple[str, ...]) -> tuple[str, ...]:
+        """Order source markers and exact assistant bodies as they appear."""
+        positioned_identities: list[tuple[int, int, str]] = []
+        for text_index, text in enumerate(message_texts):
+            positioned_identities.extend(
+                (text_index, match.start(), match.group(1)) for match in SOURCE_MARKER_PATTERN.finditer(text)
+            )
+            for match in MODEL_BODY_PATTERN.finditer(text):
+                if match.group(1) != match.group(4):
+                    continue
+                expected_body = cls.response_text_for(
+                    int(match.group(1)),
+                    source_marker=match.group(2),
+                    history_fingerprint=match.group(3),
+                )
+                if match.group(0) == expected_body:
+                    positioned_identities.append(
+                        (
+                            text_index,
+                            match.start(),
+                            _assistant_identity(match.group(2), match.group(3)),
+                        ),
+                    )
+        positioned_identities.sort()
+        return tuple(dict.fromkeys(identity for _, _, identity in positioned_identities))
 
     def _send_stream(self, call_id: int, content: str) -> None:
         self.send_response(HTTPStatus.OK)
@@ -1909,6 +1958,7 @@ class ExactReplyOracle:
         self.expected_thread_roots: dict[str, str] = {}
         self.expected_model_identity: dict[str, tuple[str, str]] = {}
         self.response_ids: dict[str, set[str]] = defaultdict(set)
+        self.response_event_order: dict[str, tuple[int, str]] = {}
         self.wrong_thread_roots: dict[str, set[tuple[str, str | None]]] = defaultdict(set)
         self.malformed_response_ids: set[str] = set()
         self.response_event_by_ref: dict[str, str] = {}
@@ -2019,6 +2069,29 @@ class ExactReplyOracle:
             raise KeyError(msg)
         return event_id
 
+    def completed_assistant_identity(self, source_event_id: str) -> str | None:
+        """Return the semantic identity of one exact completed response."""
+        response_event_ids = self.response_ids[source_event_id]
+        expected_identity = self.expected_model_identity.get(source_event_id)
+        if len(response_event_ids) != 1 or expected_identity is None:
+            return None
+        response_event_id = next(iter(response_event_ids))
+        latest = self.latest_reply_bodies.get(response_event_id)
+        if latest is None or not self._is_complete_model_body(
+            latest[2],
+            expected_source_marker=expected_identity[0],
+            expected_history_fingerprint=expected_identity[1],
+        ):
+            return None
+        return _assistant_identity(*expected_identity)
+
+    def response_order(self, source_event_id: str) -> tuple[int, str] | None:
+        """Return the deterministic Matrix order of one canonical response."""
+        response_event_ids = self.response_ids[source_event_id]
+        if len(response_event_ids) != 1:
+            return None
+        return self.response_event_order.get(next(iter(response_event_ids)))
+
     async def _sync_once(
         self,
         *,
@@ -2128,6 +2201,11 @@ class ExactReplyOracle:
                 (event_id, observed_root if isinstance(observed_root, str) else None),
             )
         self.response_ids[source_event_id].add(event_id)
+        raw_timestamp = event.get("origin_server_ts")
+        self.response_event_order[event_id] = (
+            raw_timestamp if isinstance(raw_timestamp, int) else 0,
+            event_id,
+        )
         logical_ref = self.expected_sources.get(source_event_id)
         if logical_ref is not None:
             self.response_event_by_ref[f"response:{logical_ref}"] = event_id
@@ -2212,10 +2290,7 @@ class ExactReplyOracle:
         expected_source_marker: str | None = None,
         expected_history_fingerprint: str | None = None,
     ) -> bool:
-        match = re.fullmatch(
-            r"LIVE-FUZZ call=(\d+) source=([A-Za-z0-9_.:-]+) history=([0-9a-f]{16}) .* END call=(\d+)",
-            body,
-        )
+        match = MODEL_BODY_PATTERN.fullmatch(body)
         if match is None or match.group(1) != match.group(4):
             return False
         source_marker = match.group(2)
@@ -2286,10 +2361,14 @@ class LiveFuzzRunner:
         self.restart_count = 0
         self.executed_batches = 0
         self.redaction_history_audits = 0
-        self._history_markers: dict[tuple[int, int], list[str]] = defaultdict(list)
+        self._history_entries: dict[tuple[int, int], list[tuple[str, str]]] = defaultdict(list)
+        self._saturation_history: dict[tuple[int, int], list[str]] = defaultdict(list)
         self._latest_source_ref: dict[tuple[int, int, int], str] = {}
         self._source_revisions: dict[str, list[tuple[str, str]]] = {}
         self._source_lanes: dict[str, tuple[int, int]] = {}
+        self._source_oracles: dict[str, ExactReplyOracle] = {}
+        self._assistant_identities: dict[str, str] = {}
+        self._assistant_entry_sources: set[str] = set()
         self._edit_sources: dict[str, str] = {}
         self._redacted_source_refs: set[str] = set()
 
@@ -2307,10 +2386,12 @@ class LiveFuzzRunner:
     ) -> None:
         """Register exact reply, thread, source, and history expectations together."""
         lane = (room, thread)
-        self._history_markers[lane].append(logical_ref)
+        self._capture_completed_assistants(lane)
+        self._history_entries[lane].append(("source", logical_ref))
         source_identity = _source_marker_from_content(source_content)
         self._source_revisions[logical_ref] = [(logical_ref, source_identity)]
         self._source_lanes[logical_ref] = lane
+        self._source_oracles[logical_ref] = oracle
         self._latest_source_ref[(room, client, thread)] = logical_ref
         oracle.expect(
             logical_ref,
@@ -2322,11 +2403,34 @@ class LiveFuzzRunner:
 
     def _history_identities(self, lane: tuple[int, int]) -> tuple[str, ...]:
         """Return ordered canonical identities still visible in one lane."""
-        return tuple(
-            self._source_revisions[source_ref][-1][1]
-            for source_ref in self._history_markers[lane]
-            if source_ref not in self._redacted_source_refs
-        )
+        self._capture_completed_assistants(lane)
+        identities: list[str] = []
+        for kind, source_ref in self._history_entries[lane]:
+            if kind == "source":
+                if source_ref not in self._redacted_source_refs:
+                    identities.append(self._source_revisions[source_ref][-1][1])
+            elif assistant_identity := self._assistant_identities.get(source_ref):
+                identities.append(assistant_identity)
+        return tuple(identities)
+
+    def _capture_completed_assistants(self, lane: tuple[int, int]) -> None:
+        """Append newly completed assistants in deterministic Matrix order."""
+        pending: list[tuple[tuple[int, str], str, str]] = []
+        for source_ref, source_lane in self._source_lanes.items():
+            if source_lane != lane:
+                continue
+            oracle = self._source_oracles[source_ref]
+            source_event_id = self.event_ids[source_ref]
+            identity = oracle.completed_assistant_identity(source_event_id)
+            response_order = oracle.response_order(source_event_id)
+            if identity is None or response_order is None:
+                continue
+            self._assistant_identities[source_ref] = identity
+            if source_ref not in self._assistant_entry_sources:
+                pending.append((response_order, source_ref, identity))
+        for _response_order, source_ref, _identity in sorted(pending):
+            self._history_entries[lane].append(("assistant", source_ref))
+            self._assistant_entry_sources.add(source_ref)
 
     def _refresh_source_expectation(self, source_ref: str) -> None:
         """Require regeneration against the source's current visible revision."""
@@ -2945,7 +3049,7 @@ class LiveFuzzRunner:
         txn_id = f"live-saturation-{label}-{secrets.token_hex(4)}"
         source_event_id = await client.send_event("m.room.message", txn_id, content)
         root_event_id = thread_root or source_event_id
-        history_markers = self._history_markers[(0, thread)]
+        history_markers = self._saturation_history[(0, thread)]
         source_marker = _source_marker_from_content(content)
         history_markers.append(source_marker)
         history_fingerprint = _history_fingerprint(history_markers)
@@ -2961,6 +3065,7 @@ class LiveFuzzRunner:
             source_marker=source_marker,
             history_markers=history_markers,
         )
+        history_markers.append(_assistant_identity(source_marker, history_fingerprint))
         return root_event_id, response_event_id
 
     async def _wait_for_completed_response(

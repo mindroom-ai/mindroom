@@ -986,6 +986,26 @@ def test_model_response_is_bound_to_source_and_ordered_history() -> None:
         expected_history_fingerprint=fuzz_live_matrix._history_fingerprint((original, edited)),
     )
 
+    first_history = fuzz_live_matrix._history_fingerprint((original,))
+    assistant_body = fuzz_live_matrix._ModelHandler.response_text_for(
+        3,
+        source_marker=original,
+        history_fingerprint=first_history,
+    )
+    source, assistant_history = fuzz_live_matrix._ModelHandler._request_identity(
+        {
+            "messages": [
+                {"content": f"first LIVE-SOURCE[{original}]"},
+                {"content": assistant_body},
+                {"content": f"latest LIVE-SOURCE[{edited}]"},
+            ],
+        },
+    )
+    assert source == edited
+    assert assistant_history == fuzz_live_matrix._history_fingerprint(
+        (original, fuzz_live_matrix._assistant_identity(original, first_history), edited),
+    )
+
 
 def test_model_identity_rejects_marker_preserved_in_truncated_source() -> None:
     """The semantic marker cannot replace the complete source body."""
@@ -1007,6 +1027,68 @@ def test_model_identity_rejects_marker_preserved_in_truncated_source() -> None:
     finally:
         fuzz_live_matrix._ModelHandler.expected_source_bodies.clear()
         fuzz_live_matrix._ModelHandler.expected_source_bodies.update(saved_bodies)
+
+
+def test_live_history_includes_completed_assistant_before_next_source() -> None:
+    """The independent history oracle orders completed assistants before later turns."""
+
+    class Stack:
+        agent_id = "@agent:example"
+
+    runner = fuzz_live_matrix.LiveFuzzRunner(
+        cast("fuzz_live_matrix.ManagedTuwunelStack", Stack()),
+        (cast("LiveMatrixClient", object()),),
+        LiveFuzzScenario(thread_count=1, batches=()),
+        reply_timeout=1,
+        settle_seconds=0,
+    )
+    root_content = runner._message_content("Root", source_marker="root:0")
+    root_identity = fuzz_live_matrix._source_marker_from_content(root_content)
+    runner.event_ids["root:0"] = "$root"
+    runner._expect_source(
+        runner.oracle,
+        "root:0",
+        "$root",
+        root_event_id="$root",
+        room=0,
+        thread=0,
+        source_content=root_content,
+    )
+    root_history = fuzz_live_matrix._history_fingerprint((root_identity,))
+    response = _agent_reply_event(
+        "$root",
+        "$response",
+        fuzz_live_matrix._ModelHandler.response_text_for(
+            1,
+            source_marker=root_identity,
+            history_fingerprint=root_history,
+        ),
+    )
+    runner.oracle._ingest_event(response)
+
+    next_content = runner._message_content("Next", source_marker="op:1")
+    next_identity = fuzz_live_matrix._source_marker_from_content(next_content)
+    runner.event_ids["op:1"] = "$next"
+    runner._expect_source(
+        runner.oracle,
+        "op:1",
+        "$next",
+        root_event_id="$root",
+        room=0,
+        thread=0,
+        source_content=next_content,
+    )
+
+    assert runner.oracle.expected_model_identity["$next"] == (
+        next_identity,
+        fuzz_live_matrix._history_fingerprint(
+            (
+                root_identity,
+                fuzz_live_matrix._assistant_identity(root_identity, root_history),
+                next_identity,
+            ),
+        ),
+    )
 
 
 def test_live_model_tracks_edit_and_redaction_transitions() -> None:
