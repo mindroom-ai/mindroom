@@ -34,6 +34,7 @@ from dataclasses import asdict, dataclass
 from enum import StrEnum
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 from urllib.parse import quote
@@ -3399,14 +3400,9 @@ def _run_provenance() -> dict[str, object]:
     else:
         provenance["mindroom_head"] = head.stdout.strip() or f"<git error: {head.stderr.strip()}>"
     try:
-        from importlib.metadata import PackageNotFoundError, version  # noqa: PLC0415
-
-        try:
-            provenance["nio_version"] = version("matrix-nio")
-        except PackageNotFoundError:
-            provenance["nio_version"] = "<not installed>"
-    except ImportError as exc:  # pragma: no cover - importlib.metadata is stdlib
-        provenance["nio_version"] = f"<unavailable: {exc}>"
+        provenance["nio_version"] = version("mindroom-nio")
+    except PackageNotFoundError:
+        provenance["nio_version"] = "<not installed>"
     return provenance
 
 
