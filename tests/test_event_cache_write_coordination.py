@@ -946,6 +946,43 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             await asyncio.gather(*tasks)
 
     @pytest.mark.asyncio
+    async def test_coordination_keys_do_not_alias_on_component_delimiters(self) -> None:
+        """Structured scope and room keys should remain distinct for arbitrary strings."""
+        started = [asyncio.Event(), asyncio.Event()]
+        release_updates = asyncio.Event()
+        coordinator = EventCacheWriteCoordinator(
+            logger=MagicMock(),
+            background_task_owner=object(),
+        )
+
+        async def update(index: int) -> None:
+            started[index].set()
+            await release_updates.wait()
+
+        tasks = [
+            coordinator.queue_room_update(
+                "room",
+                lambda: update(0),
+                name="matrix_cache_delimited_scope",
+                coordination_scope="scope\x1fother",
+            ),
+            coordinator.queue_room_update(
+                "other\x1froom",
+                lambda: update(1),
+                name="matrix_cache_delimited_room",
+                coordination_scope="scope",
+            ),
+        ]
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*(event.wait() for event in started)),
+                timeout=1.0,
+            )
+        finally:
+            release_updates.set()
+            await asyncio.gather(*tasks)
+
+    @pytest.mark.asyncio
     async def test_shared_event_cache_write_coordinator_allows_other_thread_updates_while_one_thread_runs(
         self,
     ) -> None:

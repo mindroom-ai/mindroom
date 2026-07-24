@@ -350,7 +350,7 @@ async def _cleanup_team_notice_state(
     """Strip queued-message notices from returned and persisted team state."""
     await ai_runtime.cleanup_queued_notice_state_async(
         run_output=run_output,
-        storage=scope_context.storage if scope_context is not None else None,
+        storage_factory=scope_context.storage_factory if scope_context is not None else None,
         session_id=session_id,
         session_type=SessionType.TEAM,
         entity_name=entity_name,

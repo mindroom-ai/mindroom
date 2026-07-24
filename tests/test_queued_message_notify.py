@@ -362,6 +362,7 @@ class _FakeStorage:
     def __init__(self) -> None:
         self.session: AgentSession | TeamSession | None = None
         self.upserted = False
+        self.closed = False
 
     def get_session(self, session_id: str, _session_type: object) -> AgentSession | TeamSession | None:
         if self.session is None or self.session.session_id != session_id:
@@ -372,6 +373,9 @@ class _FakeStorage:
         self.session = session
         self.upserted = True
         return session
+
+    def close(self) -> None:
+        self.closed = True
 
 
 class _FakeModel:
@@ -551,7 +555,12 @@ def test_same_target_batch_reservation_consumes_all_pending_messages(tmp_path: P
 
 @contextmanager
 def _open_scope(storage: _FakeStorage) -> object:
-    yield SimpleNamespace(storage=storage, session=storage.session, scope=HistoryScope("agent", "general"))
+    yield SimpleNamespace(
+        storage=storage,
+        storage_factory=lambda: storage,
+        session=storage.session,
+        scope=HistoryScope("agent", "general"),
+    )
 
 
 class _PrelockBarrierLock:
@@ -3332,44 +3341,54 @@ def test_cleanup_queued_notice_state_strips_nested_team_member_responses() -> No
 @pytest.mark.asyncio
 async def test_async_cleanup_keeps_session_storage_io_off_event_loop() -> None:
     """Slow synchronous session storage must not stall concurrent asyncio work."""
+    request_started = threading.Event()
+    release_request = threading.Event()
+    created_storages: list[_BlockingStorage] = []
+    event_loop_thread_id = threading.get_ident()
 
     class _BlockingStorage(_FakeStorage):
         def __init__(self) -> None:
             super().__init__()
-            self.started = threading.Event()
-            self.release = threading.Event()
+            self.created_thread_id = threading.get_ident()
 
         def get_session(self, session_id: str, _session_type: object) -> AgentSession | TeamSession | None:
-            self.started.set()
-            self.release.wait(timeout=1)
+            request_started.set()
+            release_request.wait(timeout=1)
             return super().get_session(session_id, _session_type)
 
-    storage = _BlockingStorage()
-    storage.session = AgentSession(
-        session_id="session-1",
-        runs=[
-            RunOutput(
-                run_id="run-1",
-                session_id="session-1",
-                messages=[_queued_notice_message()],
-            ),
-        ],
-    )
+    def storage_factory() -> _BlockingStorage:
+        storage = _BlockingStorage()
+        storage.session = AgentSession(
+            session_id="session-1",
+            runs=[
+                RunOutput(
+                    run_id="run-1",
+                    session_id="session-1",
+                    messages=[_queued_notice_message()],
+                ),
+            ],
+        )
+        created_storages.append(storage)
+        return storage
+
     cleanup_task = asyncio.create_task(
         cleanup_queued_notice_state_async(
             run_output=None,
-            storage=storage,
+            storage_factory=storage_factory,
             session_id="session-1",
             session_type=SessionType.AGENT,
             entity_name="queued-notice-agent",
         ),
     )
     try:
-        assert await asyncio.to_thread(storage.started.wait, 1)
+        assert await asyncio.to_thread(request_started.wait, 1)
         await asyncio.wait_for(asyncio.sleep(0), timeout=0.1)
         assert not cleanup_task.done()
     finally:
-        storage.release.set()
+        release_request.set()
 
     await asyncio.wait_for(cleanup_task, timeout=1)
+    storage = created_storages[0]
+    assert storage.created_thread_id != event_loop_thread_id
     assert storage.upserted is True
+    assert storage.closed is True

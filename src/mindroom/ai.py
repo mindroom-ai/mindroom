@@ -1051,7 +1051,7 @@ async def _run_non_streaming_agent_attempts(
     finally:
         await ai_runtime.cleanup_queued_notice_state_async(
             run_output=response,
-            storage=scope_context.storage if scope_context is not None else None,
+            storage_factory=scope_context.storage_factory if scope_context is not None else None,
             session_id=run_context.session_id,
             session_type=SessionType.AGENT,
             entity_name=run_context.agent_name,
@@ -1967,7 +1967,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
         holder.attempt_started = False
         await ai_runtime.cleanup_queued_notice_state_async(
             run_output=None,
-            storage=scope_context.storage if scope_context is not None else None,
+            storage_factory=scope_context.storage_factory if scope_context is not None else None,
             session_id=session_id,
             session_type=SessionType.AGENT,
             entity_name=agent_name,

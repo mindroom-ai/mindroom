@@ -285,19 +285,19 @@ def cleanup_queued_notice_state(
 async def cleanup_queued_notice_state_async(
     *,
     run_output: RunOutput | TeamRunOutput | None,
-    storage: BaseDb | None,
+    storage_factory: Callable[[], BaseDb] | None,
     session_id: str | None,
     session_type: SessionType,
     entity_name: str,
 ) -> None:
-    """Strip queued notices without running synchronous session I/O on the event loop."""
+    """Strip queued notices using worker-owned storage off the event loop."""
     _cleanup_queued_notice_from_run_output(run_output)
-    if storage is None or not session_id:
+    if storage_factory is None or not session_id:
         return
     try:
         await asyncio.to_thread(
-            _strip_queued_notice_from_session_storage,
-            storage,
+            _strip_queued_notice_from_new_session_storage,
+            storage_factory,
             session_id,
             session_type=session_type,
         )
@@ -308,6 +308,24 @@ async def cleanup_queued_notice_state_async(
             session_id=session_id,
             session_type=session_type.value,
         )
+
+
+def _strip_queued_notice_from_new_session_storage(
+    storage_factory: Callable[[], BaseDb],
+    session_id: str,
+    *,
+    session_type: SessionType,
+) -> None:
+    """Create, use, and close one session storage handle in its worker thread."""
+    storage = storage_factory()
+    try:
+        _strip_queued_notice_from_session_storage(
+            storage,
+            session_id,
+            session_type=session_type,
+        )
+    finally:
+        storage.close()
 
 
 def scrub_queued_notice_session_context(

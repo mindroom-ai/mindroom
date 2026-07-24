@@ -154,6 +154,7 @@ class ScopeSessionContext:
     storage: BaseDb
     session: AgentSession | TeamSession | None
     session_id: str | None = None
+    storage_factory: Callable[[], BaseDb] | None = None
 
 
 @dataclass(frozen=True)
@@ -885,6 +886,7 @@ def _build_scope_session_context(
     scope: HistoryScope | None,
     session_id: str | None,
     storage: BaseDb,
+    storage_factory: Callable[[], BaseDb],
     create_session_if_missing: bool = False,
 ) -> ScopeSessionContext | None:
     """Build one scope/session context from an already-open storage handle."""
@@ -903,6 +905,7 @@ def _build_scope_session_context(
         storage=storage,
         session=session,
         session_id=session_id,
+        storage_factory=storage_factory,
     )
 
 
@@ -924,6 +927,16 @@ def open_resolved_scope_session_context(
     if scope is None:
         yield None
         return
+
+    def storage_factory() -> BaseDb:
+        return create_scope_session_storage(
+            agent_name=agent_name,
+            scope=scope,
+            config=config,
+            runtime_paths=runtime_paths,
+            execution_identity=execution_identity,
+        )
+
     with _open_scope_storage(
         agent_name=agent_name,
         scope=scope,
@@ -935,6 +948,7 @@ def open_resolved_scope_session_context(
             scope=scope,
             session_id=session_id,
             storage=storage,
+            storage_factory=storage_factory,
             create_session_if_missing=create_session_if_missing,
         )
 
