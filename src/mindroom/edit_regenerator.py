@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Protocol
 
 from mindroom.coalescing_batch import coalesced_prompt, tagged_coalesced_prompt
@@ -56,9 +56,31 @@ class EditRegenerator:
     """Re-run the owned response for one edited user turn."""
 
     deps: EditRegeneratorDeps
+    # Highest edit revision committed under the response lifecycle lock, keyed by
+    # the response-turn identity (the visible response event every revision of
+    # one turn edits in place). Matrix edit callbacks run as independent tasks
+    # and reorder before reaching the lock, so ranking here — not at callback
+    # arrival — is what makes newest-wins deterministic: whichever revision
+    # reaches the lock last with a lower rank is suppressed instead of clobbering
+    # the newest body. Ranked by ``(server_timestamp, event_id)`` to match the
+    # visible-history projection in ``record_latest_thread_edit``.
+    _committed_edit_revisions: dict[str, tuple[int, str]] = field(default_factory=dict)
 
     def _logger(self) -> structlog.stdlib.BoundLogger:
         return self.deps.get_logger()
+
+    def _commit_edit_revision(self, turn_key: str, revision: tuple[int, str]) -> bool:
+        """Claim the turn for this revision under the lock; reject a stale edit.
+
+        Returns ``True`` when ``revision`` is the newest seen for ``turn_key``
+        (advancing the watermark), ``False`` when a greater-or-equal revision has
+        already committed — meaning this callback carries a superseded edit.
+        """
+        committed = self._committed_edit_revisions.get(turn_key)
+        if committed is not None and revision <= committed:
+            return False
+        self._committed_edit_revisions[turn_key] = revision
+        return True
 
     def _client(self) -> nio.AsyncClient:
         client = self.deps.runtime.client
@@ -258,6 +280,7 @@ class EditRegenerator:
             self.deps.turn_store.record_turn(regeneration_turn_record)
             return
 
+        edit_revision = (event.server_timestamp, event.event_id)
         regenerated_event_id = await self.deps.generate_response(
             ResponseRequest(
                 thread_history=context.thread_history,
@@ -269,6 +292,10 @@ class EditRegenerator:
                 matrix_run_metadata=regeneration_matrix_run_metadata,
                 current_timestamp_ms=normalize_timestamp_ms(event.server_timestamp),
                 current_prompt_is_structured=current_prompt_is_structured,
+                commit_current_revision_under_lock=lambda: self._commit_edit_revision(
+                    response_event_id,
+                    edit_revision,
+                ),
                 on_lifecycle_lock_acquired=lambda: self.deps.turn_store.remove_stale_runs_for_edit(
                     turn_record=regeneration_turn_record,
                     requester_user_id=requester_user_id,

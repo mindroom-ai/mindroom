@@ -324,6 +324,7 @@ class ResponseRequest:
     current_timestamp_ms: float | None = None
     current_prompt_is_structured: bool = False
     on_lifecycle_lock_acquired: Callable[[], None] | None = None
+    commit_current_revision_under_lock: Callable[[], bool] | None = None
     prepare_source_turn: Callable[[], bool] | None = None
     pipeline_timing: DispatchPipelineTiming | None = None
     queued_notice_reservation: QueuedHumanNoticeReservation | None = None
@@ -1113,6 +1114,16 @@ class ResponseRunner:
     ) -> ResponseRequest | None:
         """Expose a locked turn before running its potentially slow preparation."""
         placeholder_state = early_placeholder_state or _EarlyPlaceholderState()
+        if request.commit_current_revision_under_lock is not None and not request.commit_current_revision_under_lock():
+            # A newer revision of this turn already committed under the same
+            # lock, so this callback carries a stale (older) edit. Suppress it
+            # before any side effect rather than let the last lock holder
+            # overwrite the newest body or prune the newest run's state.
+            self.deps.logger.debug(
+                "response_suppressed_for_superseded_revision",
+                source_event_id=request.response_envelope.source_event_id,
+            )
+            return None
         if request.on_lifecycle_lock_acquired is not None:
             request.on_lifecycle_lock_acquired()
         request = self._request_with_locked_target(request, resolved_target)
