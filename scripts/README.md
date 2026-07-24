@@ -55,7 +55,7 @@ uv run python scripts/testing/fuzz_live_matrix.py --profile chaos --seed 42 --st
 The saturation profile uses a 180-second per-reply deadline because its slow 12-way stream workload intentionally queues much more work than normal fuzz runs.
 
 The chaos profile runs sustained multi-sender multi-room load that only settles at generated checkpoints, mixing hot-thread floods, in-flight edits and redactions, MindRoom warm/kill/cold restarts, Tuwunel restarts, and full outage windows with recovery gaps.
-Every failure prints the exact JSON trace, which replays byte-for-byte with `--trace`.
+Every failure persists the exact JSON trace as `scenario.json` in the failure bundle and prints its path, which replays byte-for-byte with `--trace`.
 Set `MINDROOM_LIVE_FUZZ_UV_WITH=/path/to/checkout` to overlay one dependency (for example a pinned `mindroom-nio`) onto the spawned MindRoom without touching the lockfile.
 
 ### Generate and sync managed avatars

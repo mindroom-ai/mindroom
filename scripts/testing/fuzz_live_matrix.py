@@ -22,6 +22,7 @@ import os
 import random
 import re
 import secrets
+import shutil
 import signal
 import socket
 import subprocess
@@ -42,6 +43,7 @@ from urllib.parse import quote
 import httpx
 import yaml
 
+from mindroom.dispatch_source import AUTO_RESUME_MESSAGE
 from mindroom.handled_turns import TurnRecord, TurnRecordCodec
 from mindroom.streaming import INTERRUPTED_RESPONSE_NOTE, RESTART_INTERRUPTED_RESPONSE_NOTE
 
@@ -248,6 +250,7 @@ class LiveFuzzScenario:
             self._validate_lifecycle_operation(batch[0], state)
             return
         self._validate_reply_uniqueness(batch)
+        self._validate_edit_uniqueness(batch)
         self._validate_redaction_response_races(batch, state)
         for operation in batch:
             self._validate_mutation_operation(operation, state)
@@ -264,6 +267,18 @@ class LiveFuzzScenario:
             if len(reply_threads) != len(set(reply_threads)):
                 msg = "same-thread messages requiring replies must use separate batches"
                 raise ValueError(msg)
+
+    def _validate_edit_uniqueness(self, batch: tuple[LiveOperation, ...]) -> None:
+        """Reject two concurrent edits of one source the auditor cannot resolve.
+
+        Same-batch edits of a shared target land in nondeterministic Matrix
+        order, so the surviving revision is unknowable and the final-body audit
+        would flap.
+        """
+        edited = [operation.target for operation in batch if operation.kind is LiveOperationKind.EDIT]
+        if len(edited) != len(set(edited)):
+            msg = "one source may be edited at most once per batch"
+            raise ValueError(msg)
 
     def _register_batch_events(self, batch: tuple[LiveOperation, ...], state: _ValidationState) -> None:
         """Fold one validated batch into the cross-batch bookkeeping."""
@@ -430,10 +445,15 @@ def _choose_operation(
     *,
     operation_id: int,
     thread_count: int,
+    batch_edited: set[str],
 ) -> LiveOperation:
     thread = randomizer.randrange(thread_count)
     kind = randomizer.choice(_WEIGHTED_KINDS)
-    available_edits = [target for target in state.editable[thread] if target not in state.redacted]
+    # Two same-batch edits of one source race to a nondeterministic surviving
+    # revision, so a target already edited this batch is off limits.
+    available_edits = [
+        target for target in state.editable[thread] if target not in state.redacted and target not in batch_edited
+    ]
     available_redactions = [target for target in state.redactable[thread] if target not in state.redacted]
     available_retries = [target for target in state.messages[thread] if target not in state.redacted]
 
@@ -441,8 +461,8 @@ def _choose_operation(
         target = randomizer.choice(state.messages[thread])
     elif kind is LiveOperationKind.PLAIN_REPLY:
         target = randomizer.choice(state.responses[thread])
-    elif kind is LiveOperationKind.EDIT:
-        target = randomizer.choice(available_edits or state.messages[thread])
+    elif kind is LiveOperationKind.EDIT and available_edits:
+        target = randomizer.choice(available_edits)
     elif kind is LiveOperationKind.REACTION:
         target = randomizer.choice(state.reaction_targets[thread])
     elif kind is LiveOperationKind.REDACTION and available_redactions:
@@ -519,12 +539,14 @@ def live_scenario_from_seed(
         batch_size = min(steps - generated, randomizer.randint(1, max_batch_size))
         operations: list[LiveOperation] = []
         reply_threads: set[int] = set()
+        batch_edited: set[str] = set()
         for offset in range(batch_size):
             operation = _choose_operation(
                 randomizer,
                 state,
                 operation_id=operation_id + offset,
                 thread_count=thread_count,
+                batch_edited=batch_edited,
             )
             needs_reply = operation.kind in {
                 LiveOperationKind.THREAD_MESSAGE,
@@ -541,6 +563,9 @@ def live_scenario_from_seed(
             operations.append(operation)
             if needs_reply:
                 reply_threads.add(operation.thread)
+            elif operation.kind is LiveOperationKind.EDIT:
+                assert operation.target is not None
+                batch_edited.add(operation.target)
         operation_id += batch_size
 
         batches.append(tuple(operations))
@@ -646,6 +671,7 @@ def _choose_chaos_operation(
     mindroom_running: bool,
     batch_redacted: set[str],
     batch_response_sources: set[str],
+    batch_edited: set[str],
 ) -> LiveOperation:
     """Choose one realistic operation honoring downtime and authorship rules."""
     randomizer = build.randomizer
@@ -668,7 +694,12 @@ def _choose_chaos_operation(
         for target in state.reaction_targets[thread]
         if not target.startswith("response:") or response_available(target)
     ]
-    available_edits = [target for target in state.editable[thread] if target not in state.redacted]
+    # Two concurrent edits of one source race to the last surviving Matrix
+    # revision, so their final body is nondeterministic. Forbid a second
+    # same-batch edit of a target already edited this batch.
+    available_edits = [
+        target for target in state.editable[thread] if target not in state.redacted and target not in batch_edited
+    ]
     available_redactions = [
         target
         for target in state.redactable[thread]
@@ -717,12 +748,14 @@ def _append_chaos_batch(build: _ChaosBuild, *, remaining: int, mindroom_running:
     reply_keys: set[tuple[int, int]] = set()
     batch_redacted: set[str] = set()
     batch_response_sources: set[str] = set()
+    batch_edited: set[str] = set()
     for _ in range(batch_size):
         operation = _choose_chaos_operation(
             build,
             mindroom_running=mindroom_running,
             batch_redacted=batch_redacted,
             batch_response_sources=batch_response_sources,
+            batch_edited=batch_edited,
         )
         if operation.kind in MESSAGE_KINDS and (operation.thread, operation.client) in reply_keys:
             operation = LiveOperation(
@@ -749,6 +782,8 @@ def _append_chaos_batch(build: _ChaosBuild, *, remaining: int, mindroom_running:
         assert operation.target is not None
         if operation.kind is LiveOperationKind.REDACTION:
             batch_redacted.add(operation.target)
+        elif operation.kind is LiveOperationKind.EDIT:
+            batch_edited.add(operation.target)
         elif operation.target.startswith("response:"):
             batch_response_sources.add(operation.target.removeprefix("response:"))
         operations.append(operation)
@@ -1972,7 +2007,13 @@ class ExactReplyOracle:
         if event_id in self.expected_sources:
             self.observed_sources.add(event_id)
         if event.get("sender") in self.internal_relay_senders:
-            self.internal_source_ids.add(event_id)
+            # Only a structurally valid auto-resume relay may exempt an agent
+            # reply from the wrong-reply invariant. Blanket-trusting every
+            # router-authored event (a greeting, topic chatter, a malformed
+            # recovery) would mask agent/router reply loops, so require the
+            # canonical relay shape production emits: a threaded resume message.
+            if self._is_auto_resume_relay(event):
+                self.internal_source_ids.add(event_id)
             return
         if event.get("sender") != self.agent_id or event.get("type") != "m.room.message":
             return
@@ -2001,6 +2042,30 @@ class ExactReplyOracle:
         sent_at = self.sent_at.get(source_event_id)
         if sent_at is not None and source_event_id not in self.reply_latencies:
             self.reply_latencies[source_event_id] = time.monotonic() - sent_at
+
+    @staticmethod
+    def _is_auto_resume_relay(event: Mapping[str, Any]) -> bool:
+        """Whether one relay-sender event is a structurally valid resume relay.
+
+        Production posts an auto-resume relay as a threaded ``m.room.message``
+        whose body carries ``AUTO_RESUME_MESSAGE`` and whose ``m.relates_to``
+        replies (``m.in_reply_to``) to the interrupted agent response. Any
+        other router-authored event is ordinary room traffic and must not
+        exempt agent replies from the wrong-reply invariant.
+        """
+        if event.get("type") != "m.room.message":
+            return False
+        content = event.get("content")
+        if not isinstance(content, dict):
+            return False
+        body = content.get("body")
+        if not isinstance(body, str) or AUTO_RESUME_MESSAGE not in body:
+            return False
+        relation = content.get("m.relates_to")
+        if not isinstance(relation, dict) or relation.get("rel_type") != "m.thread":
+            return False
+        in_reply_to = relation.get("m.in_reply_to")
+        return isinstance(in_reply_to, dict) and isinstance(in_reply_to.get("event_id"), str)
 
     def _track_reply_body(
         self,
@@ -2123,6 +2188,13 @@ class _SentRecord:
     room_id: str
     event_type: str
     reaction_key: str | None = None
+    # The exact ``content`` dict the fuzzer sent. The final audit compares this
+    # verbatim against the paginated homeserver copy, so a wrong body, dropped
+    # marker, changed ``msgtype``, lost reply target, or retargeted relation is
+    # caught. Matrix persists client ``content`` unchanged (server metadata
+    # lives in ``unsigned``/top-level fields, outside ``content``), so no
+    # normalization carve-out is required for these unencrypted rooms.
+    content: Mapping[str, Any] | None = None
 
 
 _CALL_ID_PREFIX = "LIVE-FUZZ call="
@@ -2217,15 +2289,14 @@ class FinalStateAuditor:
                 if content.get("body") is not None or content.get("m.relates_to") is not None:
                     problems.append(f"redacted event kept visible content: {record.event_id}")
                 continue
-            if record.event_type == "m.reaction":
-                relation = content.get("m.relates_to")
-                key = relation.get("key") if isinstance(relation, dict) else None
-                if key != record.reaction_key:
-                    problems.append(
-                        f"reaction {record.event_id} lost its key: expected {record.reaction_key!r}, got {key!r}",
-                    )
-            elif record.event_type == "m.room.message" and not isinstance(content.get("body"), str):
-                problems.append(f"message {record.event_id} lost its body")
+            # Matrix stores client ``content`` verbatim, so any divergence — a
+            # corrupted body, dropped marker, changed ``msgtype``, lost reply
+            # target, or retargeted annotation — is a real end-state defect.
+            if record.content is not None and content != dict(record.content):
+                problems.append(
+                    f"{record.event_type} {record.event_id} content diverged from sent payload: "
+                    f"expected {dict(record.content)!r}, got {content!r}",
+                )
         if problems:
             msg = f"final Matrix state audit failed: {problems}"
             raise AssertionError(msg)
@@ -2403,11 +2474,13 @@ class FinalStateAuditor:
         """
         problems: list[str] = []
         checked = 0
-        audited_sources = [
-            (source_event_id, logical_ref)
-            for source_event_id, logical_ref in self.oracle.expected_sources.items()
-            if source_event_id not in self.oracle.optional_sources
-        ]
+        # Optional sources permit *zero* replies after a redaction race, but any
+        # reply that still exists must pass the same canonical/recovered-terminal
+        # checks — a frozen ``Thinking...`` placeholder, a partial stream, or an
+        # unrecovered interruption left visible is still a failure. The inner
+        # ``replies.get(source_event_id, ())`` loop naturally tolerates the
+        # zero-reply case, so every expected source is audited here.
+        audited_sources = list(self.oracle.expected_sources.items())
         audited_sources.extend((relay_id, f"relay:{relay_id}") for relay_id in self.oracle.internal_source_ids)
         for source_event_id, logical_ref in audited_sources:
             for reply_event_id in replies.get(source_event_id, ()):
@@ -2607,12 +2680,14 @@ class LiveFuzzRunner:
         # reached Matrix (``orig`` on send, the edit marker after an edit
         # revises it). The final audit binds each turn's model call to these.
         self.source_current_markers: dict[str, str] = {}
-        # Per source event id, the ordered stack of surviving revision markers
-        # (bottom is ``orig``, each applied edit pushes its marker). Redacting an
+        # Per source event id, the ordered stack of surviving revisions as
+        # ``(edit_event_id, marker)`` entries (bottom is ``(None, orig)``, each
+        # applied edit pushes ``(its event id, its marker)``). Redacting an
         # ``m.replace`` reverts the source to its latest *surviving* revision, so
-        # a redaction of an edit event pops that revision and restores the one
-        # beneath it. ``source_current_markers`` always mirrors the stack top.
-        self._source_revision_stack: dict[str, list[str]] = {}
+        # a redaction removes that edit's entry by identity — not blindly the
+        # top, which would be wrong when a non-newest edit is redacted — and the
+        # current marker becomes whichever entry now sits on top.
+        self._source_revision_stack: dict[str, list[tuple[str | None, str]]] = {}
         # Maps an edit event id to the source event id it revised so a later
         # redaction targeting that edit knows which source's stack to revert.
         self._edit_event_source: dict[str, str] = {}
@@ -2856,7 +2931,7 @@ class LiveFuzzRunner:
                 self.stack.restart_mindroom()
                 self.restart_count += 1
             else:
-                results = await asyncio.gather(*(self._apply(operation) for operation in batch))
+                results = await self._apply_batch_in_completion_order(batch)
                 self._record_batch_results(results)
             try:
                 await self.oracle.wait_until_exact(
@@ -2876,6 +2951,21 @@ class LiveFuzzRunner:
             "roots": self.scenario.thread_count,
             "status": "PASS",
         }
+
+    async def _apply_batch_in_completion_order(
+        self,
+        batch: tuple[LiveOperation, ...],
+    ) -> list[tuple[LiveOperation, str | None, _SentPayload | None]]:
+        """Apply a batch concurrently, returning results in true completion order.
+
+        ``asyncio.gather`` yields results in input order, which would make the
+        durable journal misrepresent a nondeterministic race. Draining the
+        applies as they finish records each op the instant its send resolves, so
+        the trace reconstructs the actual completion sequence. Operations only
+        reference events from prior batches, so per-completion registration is
+        order-independent within the batch.
+        """
+        return [await coroutine for coroutine in asyncio.as_completed([self._apply(operation) for operation in batch])]
 
     def _record_batch_results(
         self,
@@ -2918,7 +3008,7 @@ class LiveFuzzRunner:
             if first.kind in LIFECYCLE_KINDS:
                 await self._apply_lifecycle(first.kind, batch_index)
             else:
-                results = await asyncio.gather(*(self._apply(operation) for operation in batch))
+                results = await self._apply_batch_in_completion_order(batch)
                 self._record_batch_results(results)
                 try:
                     await self.oracle.pump()
@@ -3091,7 +3181,7 @@ class LiveFuzzRunner:
                 payload.content,
                 room_id=room_id,
             )
-            self.sent_records.append(_SentRecord(event_id, room_id, payload.event_type))
+            self.sent_records.append(_SentRecord(event_id, room_id, payload.event_type, content=payload.content))
             return thread, event_id, payload, time.monotonic()
 
         roots = await asyncio.gather(*(send_root(thread) for thread in threads))
@@ -3162,12 +3252,13 @@ class LiveFuzzRunner:
                 "m.relates_to": {"rel_type": "m.replace", "event_id": target_event_id},
             }
             event_id = await client.send_event("m.room.message", txn_id, content, room_id=room_id)
-            self.sent_records.append(_SentRecord(event_id, room_id, "m.room.message"))
+            self.sent_records.append(_SentRecord(event_id, room_id, "m.room.message", content=content))
             # The edit revises the target source in place, so its current marker
             # becomes the edit revision the model must now observe. Push the
-            # revision so a later redaction of this edit event can revert the
-            # source to whatever revision was current beneath it.
-            self._push_source_revision(target_event_id, edit_marker)
+            # revision keyed by this edit's event id so a later redaction of this
+            # edit can revert the source to whatever revision was current beneath
+            # it, even if a newer edit has since landed on top.
+            self._push_source_revision(target_event_id, event_id, edit_marker)
             self._edit_event_source[event_id] = target_event_id
             return operation, event_id, None
 
@@ -3181,7 +3272,9 @@ class LiveFuzzRunner:
                 },
             }
             event_id = await client.send_event("m.reaction", txn_id, content, room_id=room_id)
-            self.sent_records.append(_SentRecord(event_id, room_id, "m.reaction", reaction_key=reaction_key))
+            self.sent_records.append(
+                _SentRecord(event_id, room_id, "m.reaction", reaction_key=reaction_key, content=content),
+            )
             return operation, event_id, None
 
         if operation.kind is LiveOperationKind.REDACTION:
@@ -3209,37 +3302,45 @@ class LiveFuzzRunner:
             raise AssertionError(msg)
         return operation, event_id, None
 
-    def _push_source_revision(self, source_event_id: str, marker: str) -> None:
+    def _push_source_revision(self, source_event_id: str, edit_event_id: str, marker: str) -> None:
         """Record a new current revision for a source and mirror it as the marker.
 
         The stack is seeded lazily from the source's already-registered ``orig``
-        marker so a redaction of the first edit can restore it.
+        marker (as a base entry with no edit id) so a redaction of the first edit
+        can restore it.
         """
         stack = self._source_revision_stack.get(source_event_id)
         if stack is None:
             base = self.source_current_markers.get(source_event_id)
-            stack = [base] if base is not None else []
+            stack = [(None, base)] if base is not None else []
             self._source_revision_stack[source_event_id] = stack
-        stack.append(marker)
+        stack.append((edit_event_id, marker))
         self.source_current_markers[source_event_id] = marker
 
     def _pop_source_revision(self, source_event_id: str, edit_event_id: str) -> None:
-        """Revert a source to its prior surviving revision after an edit redaction.
+        """Revert a source past one redacted edit, restoring the surviving top.
 
-        Matrix reverts an ``m.replace`` target to its latest surviving revision,
-        so dropping the redacted edit's marker restores whichever revision now
-        sits on top (an earlier edit or ``orig``). The edit is de-registered
-        first, and a redaction of an already-reverted (or never-registered) edit
-        is a no-op so it can never pop a second, unrelated revision.
+        Matrix reverts an ``m.replace`` target to its latest *surviving*
+        revision, so the redacted edit's entry is removed by identity from
+        wherever it sits in the stack — not blindly the top, which would corrupt
+        the current marker when a non-newest edit is redacted while a newer one
+        still survives. The edit is de-registered first, and a redaction of an
+        already-reverted (or never-registered) edit is a no-op so it can never
+        drop an unrelated revision.
         """
         if self._edit_event_source.pop(edit_event_id, None) is None:
             return
         stack = self._source_revision_stack.get(source_event_id)
         if not stack:
             return
-        stack.pop()
+        for index in range(len(stack) - 1, -1, -1):
+            if stack[index][0] == edit_event_id:
+                del stack[index]
+                break
+        else:
+            return
         if stack:
-            self.source_current_markers[source_event_id] = stack[-1]
+            self.source_current_markers[source_event_id] = stack[-1][1]
         else:
             self.source_current_markers.pop(source_event_id, None)
 
@@ -3256,7 +3357,7 @@ class LiveFuzzRunner:
         fast agent reply must never be observable before its expectation exists.
         """
         event_id = await client.send_event(payload.event_type, payload.txn_id, payload.content, room_id=room_id)
-        self.sent_records.append(_SentRecord(event_id, room_id, payload.event_type))
+        self.sent_records.append(_SentRecord(event_id, room_id, payload.event_type, content=payload.content))
         self.oracle.expect(
             operation.event_ref,
             event_id,
@@ -3522,6 +3623,16 @@ class FailureBundle:
         with self.journal_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(dict(entry), sort_keys=True) + "\n")
 
+    def discard(self) -> None:
+        """Remove the pre-created bundle after a successful run.
+
+        The directory is created before the run starts so a mid-startup kill
+        still leaves a manifest, but a run that passes has no failure to
+        preserve. Removing it here keeps ``artifact_root`` from accumulating a
+        stale ``scenario.json``/``provenance.json``/journal per successful run.
+        """
+        shutil.rmtree(self.directory, ignore_errors=True)
+
     def _write_isolated(self, name: str, writer: Callable[[Path], None]) -> None:
         """Run one artifact writer, folding any failure into the transcript."""
         try:
@@ -3624,6 +3735,9 @@ def main() -> None:
         result["wall_seconds"] = round(time.monotonic() - started_at, 1)
         result.update(stack.diagnostic_counts())
         print(json.dumps(result, sort_keys=True))
+        # A passing run has no failure to preserve; drop the pre-created bundle
+        # so the artifact root does not accumulate stale scenario/journal dirs.
+        bundle.discard()
     except Exception as exc:
         _persist_failure_bundle(bundle, stack, runner_holder.get("runner"), exc)
         if args.failure_log is not None and stack.log_path.exists():
@@ -3648,8 +3762,12 @@ def _persist_failure_bundle(
     captured while the container still exists. Any error assembling the bundle
     is reported but does not replace the fuzz assertion, which ``main`` re-raises.
     """
-    print("Live Matrix fuzz trace:", file=sys.stderr)
+    print("MindRoom log tail:", file=sys.stderr)
     print(stack.log_tail(), file=sys.stderr)
+    # The exact replayable JSON trace is too large to dump to stderr; it is
+    # persisted verbatim as scenario.json inside the failure bundle below, and
+    # its path is printed so the run can be replayed byte-for-byte with --trace.
+    print(f"Replay trace: {bundle.directory / 'scenario.json'}", file=sys.stderr)
     try:
         stack.stop_mindroom()
         oracle_snapshot = _sanitized_oracle_snapshot(runner.oracle) if runner is not None else {}

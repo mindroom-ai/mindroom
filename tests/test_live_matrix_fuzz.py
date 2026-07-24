@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import TYPE_CHECKING, Any
 
+from mindroom.dispatch_source import AUTO_RESUME_MESSAGE
 from mindroom.handled_turns import TurnRecord, TurnRecordCodec
 from mindroom.streaming import RESTART_INTERRUPTED_RESPONSE_NOTE
 
@@ -222,7 +224,7 @@ async def test_exact_reply_oracle_rejects_duplicate_canonical_replies() -> None:
 
 @pytest.mark.asyncio
 async def test_exact_reply_oracle_allows_response_to_internal_restart_relay() -> None:
-    """Restart recovery may validly answer a router-authored resume relay."""
+    """Restart recovery may validly answer a structurally valid resume relay."""
     client = LiveMatrixClient("http://matrix.invalid", "!room:example")
     oracle = ExactReplyOracle(
         client,
@@ -235,7 +237,14 @@ async def test_exact_reply_oracle_allows_response_to_internal_restart_relay() ->
                 "event_id": "$resume-relay",
                 "sender": "@router:example",
                 "type": "m.room.message",
-                "content": {"body": "resume"},
+                "content": {
+                    "body": f"@agent {AUTO_RESUME_MESSAGE}",
+                    "m.relates_to": {
+                        "rel_type": "m.thread",
+                        "event_id": "$root",
+                        "m.in_reply_to": {"event_id": "$interrupted"},
+                    },
+                },
             },
         )
         oracle._ingest_event(
@@ -253,6 +262,47 @@ async def test_exact_reply_oracle_allows_response_to_internal_restart_relay() ->
             },
         )
         oracle._assert_no_wrong_replies()
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_exact_reply_oracle_flags_reply_to_unrelated_router_traffic() -> None:
+    """An agent reply to ordinary router traffic is unexpected, not exempt."""
+    client = LiveMatrixClient("http://matrix.invalid", "!room:example")
+    oracle = ExactReplyOracle(
+        client,
+        "@agent:example",
+        internal_relay_senders=("@router:example",),
+    )
+    try:
+        # A router greeting is not an auto-resume relay: no AUTO_RESUME_MESSAGE
+        # body, no threaded reply relation.
+        oracle._ingest_event(
+            {
+                "event_id": "$greeting",
+                "sender": "@router:example",
+                "type": "m.room.message",
+                "content": {"body": "not a resume"},
+            },
+        )
+        assert "$greeting" not in oracle.internal_source_ids
+        oracle._ingest_event(
+            {
+                "event_id": "$response",
+                "sender": "@agent:example",
+                "type": "m.room.message",
+                "content": {
+                    "m.relates_to": {
+                        "rel_type": "m.thread",
+                        "event_id": "$root",
+                        "m.in_reply_to": {"event_id": "$greeting"},
+                    },
+                },
+            },
+        )
+        with pytest.raises(AssertionError, match="unexpected"):
+            oracle._assert_no_wrong_replies()
     finally:
         await client.close()
 
@@ -379,6 +429,30 @@ def test_chaos_validation_pins_mutations_to_their_author() -> None:
     )
     with pytest.raises(ValueError, match="fuzz-authored"):
         response_edit.validate()
+
+
+def test_chaos_validation_rejects_two_edits_of_one_source_in_a_batch() -> None:
+    """Codex #6: concurrent edits of one source have no deterministic winner.
+
+    Two same-batch ``m.replace`` events on the same target land in
+    nondeterministic Matrix order, so the surviving revision is unknowable and
+    the final-body audit would flap. Generation excludes such pairs; the
+    validator rejects them defensively for hand-written and replayed traces.
+    """
+    scenario = LiveFuzzScenario(
+        thread_count=1,
+        profile="chaos",
+        batches=(
+            (LiveOperation(0, LiveOperationKind.THREAD_MESSAGE, 0, "root:0"),),
+            (
+                LiveOperation(1, LiveOperationKind.EDIT, 0, "op:0"),
+                LiveOperation(2, LiveOperationKind.EDIT, 0, "op:0"),
+            ),
+            (LiveOperation(3, LiveOperationKind.CHECKPOINT, 0, None),),
+        ),
+    )
+    with pytest.raises(ValueError, match="edited at most once per batch"):
+        scenario.validate()
 
 
 def test_chaos_validation_requires_checkpoint_before_cold_restart() -> None:
@@ -516,6 +590,39 @@ async def test_final_state_auditor_flags_incomplete_final_bodies() -> None:
 
 
 @pytest.mark.asyncio
+async def test_final_state_auditor_validates_visible_optional_source_replies() -> None:
+    """Optional sources allow zero replies but must still validate any visible reply."""
+    client = LiveMatrixClient("http://matrix.invalid", "!room:example")
+    oracle = ExactReplyOracle(client, "@agent:example")
+    auditor = FinalStateAuditor(
+        client,
+        oracle,
+        agent_id="@agent:example",
+        expected_body_for=lambda call_id: f"LIVE-FUZZ call={call_id} END call={call_id}",
+    )
+    try:
+        oracle.expect("root:0", "$optional")
+        oracle.mark_source_optional("$optional")
+
+        # Zero replies is valid for an optional source (redaction race).
+        assert auditor._assert_final_bodies_complete({}, {}) == 0
+
+        # A still-visible non-terminal reply (frozen placeholder) must fail even
+        # though the source is optional.
+        partial = {"$reply": _agent_reply_event("$optional", "$reply", "Thinking...")}
+        replies = auditor._canonical_agent_replies(partial)
+        with pytest.raises(AssertionError, match="non-canonical body"):
+            auditor._assert_final_bodies_complete(partial, replies)
+
+        # A completed reply to the optional source passes.
+        done = {"$reply": _agent_reply_event("$optional", "$reply", "LIVE-FUZZ call=7 END call=7")}
+        done_replies = auditor._canonical_agent_replies(done)
+        assert auditor._assert_final_bodies_complete(done, done_replies) == 1
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
 async def test_final_state_auditor_enforces_redaction_and_reaction_semantics() -> None:
     """Redacted events must be pruned and live reactions must keep their key."""
     client = LiveMatrixClient("http://matrix.invalid", "!room:example")
@@ -526,32 +633,82 @@ async def test_final_state_auditor_enforces_redaction_and_reaction_semantics() -
         agent_id="@agent:example",
         expected_body_for=lambda call_id: f"LIVE-FUZZ call={call_id} END call={call_id}",
     )
+    msg_content = {"body": "hello", "msgtype": "m.text"}
+    react_content = {"m.relates_to": {"rel_type": "m.annotation", "event_id": "$msg", "key": "fuzz-9"}}
     records = [
-        _SentRecord("$msg", "!room:example", "m.room.message"),
-        _SentRecord("$gone", "!room:example", "m.room.message"),
-        _SentRecord("$react", "!room:example", "m.reaction", reaction_key="fuzz-9"),
+        _SentRecord("$msg", "!room:example", "m.room.message", content=msg_content),
+        _SentRecord("$gone", "!room:example", "m.room.message", content={"body": "bye", "msgtype": "m.text"}),
+        _SentRecord("$react", "!room:example", "m.reaction", reaction_key="fuzz-9", content=react_content),
     ]
     try:
         events = {
-            "$msg": {"event_id": "$msg", "type": "m.room.message", "content": {"body": "hello"}},
+            "$msg": {"event_id": "$msg", "type": "m.room.message", "content": dict(msg_content)},
             "$gone": {"event_id": "$gone", "type": "m.room.message", "content": {}},
-            "$react": {
-                "event_id": "$react",
-                "type": "m.reaction",
-                "content": {"m.relates_to": {"rel_type": "m.annotation", "event_id": "$msg", "key": "fuzz-9"}},
-            },
+            "$react": {"event_id": "$react", "type": "m.reaction", "content": dict(react_content)},
         }
         auditor._assert_sent_events_canonical(events, records, {"$gone"})
 
         with pytest.raises(AssertionError, match="kept visible content"):
             auditor._assert_sent_events_canonical(events, records, {"$gone", "$msg"})
 
-        events["$react"]["content"]["m.relates_to"]["key"] = "wrong"
-        with pytest.raises(AssertionError, match="lost its key"):
-            auditor._assert_sent_events_canonical(events, records, {"$gone"})
-
         with pytest.raises(AssertionError, match="missing from /messages"):
             auditor._assert_sent_events_canonical({}, records, set())
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_final_state_auditor_rejects_diverged_content() -> None:
+    """The verbatim audit catches any content that diverges from the sent payload."""
+    client = LiveMatrixClient("http://matrix.invalid", "!room:example")
+    oracle = ExactReplyOracle(client, "@agent:example")
+    auditor = FinalStateAuditor(
+        client,
+        oracle,
+        agent_id="@agent:example",
+        expected_body_for=lambda call_id: f"LIVE-FUZZ call={call_id} END call={call_id}",
+    )
+    msg_content = {"body": "LIVE-FUZZ call=1 END call=1", "msgtype": "m.text"}
+    react_content = {"m.relates_to": {"rel_type": "m.annotation", "event_id": "$msg", "key": "fuzz-9"}}
+    records = [
+        _SentRecord("$msg", "!room:example", "m.room.message", content=msg_content),
+        _SentRecord("$react", "!room:example", "m.reaction", reaction_key="fuzz-9", content=react_content),
+    ]
+    try:
+        # A corrupted paginated body must fail even though it is still a string.
+        with pytest.raises(AssertionError, match="content diverged"):
+            auditor._assert_sent_events_canonical(
+                {"$msg": {"event_id": "$msg", "type": "m.room.message", "content": {"body": "CORRUPTED"}}},
+                [records[0]],
+                set(),
+            )
+
+        # A dropped marker / changed msgtype must fail.
+        with pytest.raises(AssertionError, match="content diverged"):
+            auditor._assert_sent_events_canonical(
+                {"$msg": {"event_id": "$msg", "type": "m.room.message", "content": {"body": msg_content["body"]}}},
+                [records[0]],
+                set(),
+            )
+
+        # A retargeted reaction relation must fail.
+        wrong_react = {"m.relates_to": {"rel_type": "m.annotation", "event_id": "$other", "key": "fuzz-9"}}
+        with pytest.raises(AssertionError, match="content diverged"):
+            auditor._assert_sent_events_canonical(
+                {"$react": {"event_id": "$react", "type": "m.reaction", "content": wrong_react}},
+                [records[1]],
+                set(),
+            )
+
+        # The exact payload round-trips cleanly.
+        auditor._assert_sent_events_canonical(
+            {
+                "$msg": {"event_id": "$msg", "type": "m.room.message", "content": dict(msg_content)},
+                "$react": {"event_id": "$react", "type": "m.reaction", "content": dict(react_content)},
+            },
+            records,
+            set(),
+        )
     finally:
         await client.close()
 
@@ -1428,7 +1585,7 @@ def test_redacting_edit_event_reverts_source_marker_to_original() -> None:
     edited = _source_marker("root:44", "edit:13")
     runner.source_current_markers["$root"] = orig
 
-    runner._push_source_revision("$root", edited)
+    runner._push_source_revision("$root", "$edit", edited)
     runner._edit_event_source["$edit"] = "$root"
     assert runner.source_current_markers["$root"] == edited
 
@@ -1448,9 +1605,9 @@ def test_redacting_latest_edit_reverts_to_prior_surviving_edit() -> None:
     second = _source_marker("root:5", "edit:8")
     runner.source_current_markers["$root"] = orig
 
-    runner._push_source_revision("$root", first)
+    runner._push_source_revision("$root", "$e1", first)
     runner._edit_event_source["$e1"] = "$root"
-    runner._push_source_revision("$root", second)
+    runner._push_source_revision("$root", "$e2", second)
     runner._edit_event_source["$e2"] = "$root"
     assert runner.source_current_markers["$root"] == second
 
@@ -1459,6 +1616,34 @@ def test_redacting_latest_edit_reverts_to_prior_surviving_edit() -> None:
     assert runner.source_current_markers["$root"] == first
     # Redacting the remaining edit falls back to the original body.
     runner._pop_source_revision("$root", "$e1")
+    assert runner.source_current_markers["$root"] == orig
+
+
+def test_redacting_non_newest_edit_keeps_newer_surviving_revision() -> None:
+    """Redacting a middle edit removes only its revision, not the surviving top.
+
+    Codex #6: the revision stack popped its top unconditionally, so redacting an
+    older edit while a newer one still survived reverted the source to the wrong
+    (older) body. The redacted edit's entry must be removed by identity, leaving
+    the newest surviving revision current.
+    """
+    runner = _revision_runner()
+    orig = _source_marker("root:9", ORIGINAL_REVISION)
+    first = _source_marker("root:9", "edit:1")
+    second = _source_marker("root:9", "edit:2")
+    runner.source_current_markers["$root"] = orig
+
+    runner._push_source_revision("$root", "$e1", first)
+    runner._edit_event_source["$e1"] = "$root"
+    runner._push_source_revision("$root", "$e2", second)
+    runner._edit_event_source["$e2"] = "$root"
+    assert runner.source_current_markers["$root"] == second
+
+    # Redacting the older edit leaves the newer edit as the surviving body.
+    runner._pop_source_revision("$root", "$e1")
+    assert runner.source_current_markers["$root"] == second
+    # Redacting the newer edit now falls all the way back to the original.
+    runner._pop_source_revision("$root", "$e2")
     assert runner.source_current_markers["$root"] == orig
 
 
@@ -1604,6 +1789,34 @@ def test_failure_bundle_records_realized_completion_order(tmp_path: Path) -> Non
     assert [entry["event_id"] for entry in journal] == ["$late-thread", "$early-thread"]
     assert [entry["thread"] for entry in journal] == [2, 0]
     assert [entry["sequence"] for entry in journal] == [1, 2]
+
+
+@pytest.mark.asyncio
+async def test_apply_batch_returns_results_in_true_completion_order() -> None:
+    """Codex #5: a concurrent batch is journaled by completion, not input order.
+
+    ``asyncio.gather`` preserves input order, so the durable journal would
+    misrepresent which send actually landed first. The batch driver drains each
+    apply as it resolves, so a later-listed op that finishes first is recorded
+    first.
+    """
+    runner = object.__new__(LiveFuzzRunner)
+
+    async def fake_apply(operation: LiveOperation) -> tuple[LiveOperation, str, None]:
+        # The first-listed op sleeps longest, so completion order reverses input.
+        await asyncio.sleep(0.03 if operation.thread == 0 else 0.0)
+        return operation, f"$done-{operation.thread}", None
+
+    runner._apply = fake_apply  # type: ignore[method-assign]
+    batch = (
+        LiveOperation(0, LiveOperationKind.THREAD_MESSAGE, 0, None, client=0),
+        LiveOperation(1, LiveOperationKind.THREAD_MESSAGE, 2, None, client=1),
+    )
+
+    results = await runner._apply_batch_in_completion_order(batch)
+
+    # Thread 2 (listed second) resolves first, so it leads the completion order.
+    assert [operation.thread for operation, _event_id, _payload in results] == [2, 0]
 
 
 @pytest.mark.asyncio
