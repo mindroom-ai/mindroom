@@ -1174,8 +1174,165 @@ class TestThreadHistory:
         ]
 
     @pytest.mark.asyncio
-    async def test_thread_resolution_selects_matching_thread_before_latest_unknown_sender_edit(self) -> None:
-        """Missing originals should recover from the latest edit belonging to the requested thread."""
+    async def test_thread_resolution_ignores_same_sender_edit_of_edit(self) -> None:
+        """A same-sender replacement of an edit must not create a visible message."""
+        root_event = self._make_text_event(
+            event_id="$thread_root",
+            sender="@alice:localhost",
+            body="Root",
+            server_timestamp=1000,
+            source_content={"body": "Root"},
+        )
+        thread_message = self._make_text_event(
+            event_id="$thread_message",
+            sender="@alice:localhost",
+            body="Original",
+            server_timestamp=2000,
+            source_content={
+                "body": "Original",
+                "m.relates_to": {
+                    "rel_type": "m.thread",
+                    "event_id": "$thread_root",
+                },
+            },
+        )
+        valid_edit = self._make_text_event(
+            event_id="$alice_edit",
+            sender="@alice:localhost",
+            body="* Alice update",
+            server_timestamp=3000,
+            source_content={
+                "body": "* Alice update",
+                "m.new_content": {
+                    "body": "Alice update",
+                    "m.relates_to": {
+                        "rel_type": "m.thread",
+                        "event_id": "$thread_root",
+                    },
+                },
+                "m.relates_to": {
+                    "rel_type": "m.replace",
+                    "event_id": "$thread_message",
+                },
+            },
+        )
+        edit_of_edit = self._make_text_event(
+            event_id="$alice_edit_of_edit",
+            sender="@alice:localhost",
+            body="* Invalid second-order edit",
+            server_timestamp=4000,
+            source_content={
+                "body": "* Invalid second-order edit",
+                "m.new_content": {
+                    "body": "Invalid second-order edit",
+                    "m.relates_to": {
+                        "rel_type": "m.thread",
+                        "event_id": "$thread_root",
+                    },
+                },
+                "m.relates_to": {
+                    "rel_type": "m.replace",
+                    "event_id": "$alice_edit",
+                },
+            },
+        )
+
+        resolution = await _resolve_thread_history_from_event_sources_timed(
+            AsyncMock(),
+            room_id="!room:localhost",
+            thread_id="$thread_root",
+            event_sources=[
+                _event_source_for_cache(root_event),
+                _event_source_for_cache(thread_message),
+                _event_source_for_cache(valid_edit),
+                _event_source_for_cache(edit_of_edit),
+            ],
+            event_cache=_event_cache(),
+        )
+
+        assert [(message.event_id, message.body, message.latest_event_id) for message in resolution.messages] == [
+            ("$thread_root", "Root", "$thread_root"),
+            ("$thread_message", "Alice update", "$alice_edit"),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_thread_resolution_falls_back_from_malformed_newest_edit(self) -> None:
+        """A malformed newest replacement must not mask the newest valid replacement."""
+        root_event = self._make_text_event(
+            event_id="$thread_root",
+            sender="@alice:localhost",
+            body="Root",
+            server_timestamp=1000,
+            source_content={"body": "Root"},
+        )
+        thread_message = self._make_text_event(
+            event_id="$thread_message",
+            sender="@alice:localhost",
+            body="Original",
+            server_timestamp=2000,
+            source_content={
+                "body": "Original",
+                "m.relates_to": {
+                    "rel_type": "m.thread",
+                    "event_id": "$thread_root",
+                },
+            },
+        )
+        valid_edit = self._make_text_event(
+            event_id="$valid_edit",
+            sender="@alice:localhost",
+            body="* Good",
+            server_timestamp=3000,
+            source_content={
+                "body": "* Good",
+                "m.new_content": {
+                    "body": "Good",
+                    "m.relates_to": {
+                        "rel_type": "m.thread",
+                        "event_id": "$thread_root",
+                    },
+                },
+                "m.relates_to": {
+                    "rel_type": "m.replace",
+                    "event_id": "$thread_message",
+                },
+            },
+        )
+        malformed_edit = self._make_text_event(
+            event_id="$malformed_edit",
+            sender="@alice:localhost",
+            body="* Malformed",
+            server_timestamp=4000,
+            source_content={
+                "body": "* Malformed",
+                "m.relates_to": {
+                    "rel_type": "m.replace",
+                    "event_id": "$thread_message",
+                },
+            },
+        )
+
+        resolution = await _resolve_thread_history_from_event_sources_timed(
+            AsyncMock(),
+            room_id="!room:localhost",
+            thread_id="$thread_root",
+            event_sources=[
+                _event_source_for_cache(root_event),
+                _event_source_for_cache(thread_message),
+                _event_source_for_cache(valid_edit),
+                _event_source_for_cache(malformed_edit),
+            ],
+            event_cache=_event_cache(),
+        )
+
+        assert [(message.event_id, message.body, message.latest_event_id) for message in resolution.messages] == [
+            ("$thread_root", "Root", "$thread_root"),
+            ("$thread_message", "Good", "$valid_edit"),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_thread_resolution_does_not_synthesize_unknown_edit_target(self) -> None:
+        """An edit cannot prove ownership or validity when its target event is absent."""
         root_event = self._make_text_event(
             event_id="$thread_root",
             sender="@alice:localhost",
@@ -1238,7 +1395,6 @@ class TestThreadHistory:
 
         assert [(message.event_id, message.body, message.latest_event_id) for message in resolution.messages] == [
             ("$thread_root", "Root", "$thread_root"),
-            ("$missing_original", "Matching", "$matching_edit"),
         ]
 
     @pytest.mark.asyncio
@@ -1595,7 +1751,7 @@ class TestThreadHistory:
         grouped, _unresolved_opaque = await _group_scanned_sources_by_thread(
             room_id="!room:localhost",
             thread_root_ids=("$room_root",),
-            latest_edits_by_original_event_id={},
+            edit_candidates_by_original_event_id={},
             scanned_message_sources={
                 "$room_root": {
                     "event_id": "$room_root",
@@ -1624,7 +1780,7 @@ class TestThreadHistory:
         grouped, _unresolved_opaque = await _group_scanned_sources_by_thread(
             room_id="!room:localhost",
             thread_root_ids=("$root",),
-            latest_edits_by_original_event_id={},
+            edit_candidates_by_original_event_id={},
             scanned_message_sources={
                 "$root": {
                     "event_id": "$root",
@@ -1663,7 +1819,7 @@ class TestThreadHistory:
         grouped, _unresolved_opaque = await _group_scanned_sources_by_thread(
             room_id="!room:localhost",
             thread_root_ids=("$root",),
-            latest_edits_by_original_event_id={},
+            edit_candidates_by_original_event_id={},
             scanned_message_sources={
                 "$root": {
                     "event_id": "$root",
@@ -2044,8 +2200,8 @@ class TestThreadHistory:
         mock_extract_edit_body.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_fetch_thread_history_edit_only_event_still_visible(self) -> None:
-        """Synthesize a history entry when only edit events are returned."""
+    async def test_fetch_thread_history_edit_only_event_stays_hidden(self) -> None:
+        """An edit-only history page must not synthesize its absent target."""
         client = AsyncMock()
         root_event = self._make_text_event(
             event_id="$thread_root",
@@ -2085,8 +2241,7 @@ class TestThreadHistory:
         )
         history = resolution.messages
 
-        assert [message.event_id for message in history] == ["$thread_root", "$missing_original"]
-        assert history[1].body == "Final answer"
+        assert [message.event_id for message in history] == ["$thread_root"]
 
     @pytest.mark.asyncio
     async def test_fetch_thread_history_does_not_stop_after_edit_only_page(self) -> None:

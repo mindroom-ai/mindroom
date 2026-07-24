@@ -65,10 +65,10 @@ from mindroom.matrix.cache.thread_cache_invalidation import (
     mark_thread_stale_fail_closed,
 )
 from mindroom.matrix.client_visible_messages import (
-    LatestThreadEditsByOriginalEventId,
     ResolvedVisibleMessage,
+    ThreadEditCandidatesByOriginalEventId,
     apply_latest_edits_to_messages,
-    record_latest_thread_edit,
+    record_thread_edit_candidate,
 )
 from mindroom.matrix.event_info import EventInfo, is_thread_affecting_relation
 from mindroom.matrix.media import (
@@ -415,9 +415,8 @@ async def _resolve_thread_history_from_event_sources_timed(
         for event_source in event_sources
         if (parsed_event := _parse_room_message_event(event_source)) is not None
     ]
-    known_event_senders_by_event_id = {event.event_id: event.sender for event in parsed_events}
     messages_by_event_id: dict[str, ResolvedVisibleMessage] = {}
-    latest_edits_by_original_event_id: LatestThreadEditsByOriginalEventId = {}
+    edit_candidates_by_original_event_id: ThreadEditCandidatesByOriginalEventId = {}
     sidecar_hydration_started = time.perf_counter()
     hydration_sources = _sidecar_hydration_sources(event_sources, hydrate_sidecars=hydrate_sidecars)
     hydration_batch = await prepare_sidecar_hydration_batch(
@@ -433,15 +432,15 @@ async def _resolve_thread_history_from_event_sources_timed(
         if bundled_replacement_source is not None:
             bundled_replacement = nio.Event.parse_event(bundled_replacement_source)
             if isinstance(bundled_replacement, _VISIBLE_ROOM_MESSAGE_EVENT_TYPES):
-                record_latest_thread_edit(
+                record_thread_edit_candidate(
                     bundled_replacement,
                     event_info=EventInfo.from_event(bundled_replacement.source),
-                    latest_edits_by_original_event_id=latest_edits_by_original_event_id,
+                    edit_candidates_by_original_event_id=edit_candidates_by_original_event_id,
                 )
-        if isinstance(event, _VISIBLE_ROOM_MESSAGE_EVENT_TYPES) and record_latest_thread_edit(
+        if isinstance(event, _VISIBLE_ROOM_MESSAGE_EVENT_TYPES) and record_thread_edit_candidate(
             event,
             event_info=event_info,
-            latest_edits_by_original_event_id=latest_edits_by_original_event_id,
+            edit_candidates_by_original_event_id=edit_candidates_by_original_event_id,
         ):
             continue
         if event_info.is_edit or event.event_id in messages_by_event_id:
@@ -463,9 +462,7 @@ async def _resolve_thread_history_from_event_sources_timed(
     await apply_latest_edits_to_messages(
         client,
         messages_by_event_id=messages_by_event_id,
-        latest_edits_by_original_event_id=latest_edits_by_original_event_id,
-        known_event_senders_by_event_id=known_event_senders_by_event_id,
-        required_thread_id=thread_id,
+        edit_candidates_by_original_event_id=edit_candidates_by_original_event_id,
         event_cache=event_cache,
         room_id=room_id,
         expected_membership_epoch=expected_membership_epoch,
@@ -1488,7 +1485,7 @@ def _is_opaque_thread_affecting_event_source(event_source: Mapping[str, Any]) ->
 def _record_scanned_room_message_source(
     event: nio.Event,
     *,
-    latest_edits_by_original_event_id: LatestThreadEditsByOriginalEventId,
+    edit_candidates_by_original_event_id: ThreadEditCandidatesByOriginalEventId,
     scanned_message_sources: dict[str, dict[str, Any]],
 ) -> str | None:
     """Record one scanned room-message source and return the recorded event ID."""
@@ -1502,10 +1499,10 @@ def _record_scanned_room_message_source(
         return None
 
     event_info = EventInfo.from_event(event.source)
-    if isinstance(event, _VISIBLE_ROOM_MESSAGE_EVENT_TYPES) and record_latest_thread_edit(
+    if isinstance(event, _VISIBLE_ROOM_MESSAGE_EVENT_TYPES) and record_thread_edit_candidate(
         event,
         event_info=event_info,
-        latest_edits_by_original_event_id=latest_edits_by_original_event_id,
+        edit_candidates_by_original_event_id=edit_candidates_by_original_event_id,
     ):
         return None
     if event_info.is_edit:
@@ -1601,7 +1598,7 @@ async def _group_scanned_sources_by_thread(
     room_id: str,
     thread_root_ids: Collection[str],
     scanned_message_sources: dict[str, dict[str, Any]],
-    latest_edits_by_original_event_id: LatestThreadEditsByOriginalEventId,
+    edit_candidates_by_original_event_id: ThreadEditCandidatesByOriginalEventId,
 ) -> tuple[dict[str, list[dict[str, Any]]], frozenset[str]]:
     """Bucket room-scan sources per requested thread and report unresolved opaque relations."""
     grouped: dict[str, dict[str, dict[str, Any]]] = {
@@ -1637,8 +1634,8 @@ async def _group_scanned_sources_by_thread(
     )
 
     edits_by_root: dict[str, list[dict[str, Any]]] = {}
-    for original_event_id, latest_edits_by_sender in latest_edits_by_original_event_id.items():
-        for edit_event, edit_thread_id in latest_edits_by_sender.values():
+    for original_event_id, edit_candidates in edit_candidates_by_original_event_id.items():
+        for edit_event, edit_thread_id in edit_candidates:
             target_roots = {
                 root_id
                 for root_id in (original_event_id, resolved_thread_ids.get(original_event_id), edit_thread_id)
@@ -1664,7 +1661,7 @@ async def _bulk_scan_thread_event_sources(
     thread_root_ids: Collection[str],
 ) -> _BulkThreadScanResult:
     """Walk room history backward once and recover every requested thread's event sources."""
-    latest_edits_by_original_event_id: LatestThreadEditsByOriginalEventId = {}
+    edit_candidates_by_original_event_id: ThreadEditCandidatesByOriginalEventId = {}
     scanned_message_sources: dict[str, dict[str, Any]] = {}
     remaining_root_ids = set(thread_root_ids)
     from_token: str | None = None
@@ -1692,7 +1689,7 @@ async def _bulk_scan_thread_event_sources(
             scanned_event_count += 1
             recorded_event_id = _record_scanned_room_message_source(
                 event,
-                latest_edits_by_original_event_id=latest_edits_by_original_event_id,
+                edit_candidates_by_original_event_id=edit_candidates_by_original_event_id,
                 scanned_message_sources=scanned_message_sources,
             )
             if recorded_event_id is not None:
@@ -1705,7 +1702,7 @@ async def _bulk_scan_thread_event_sources(
         room_id=room_id,
         thread_root_ids=thread_root_ids,
         scanned_message_sources=scanned_message_sources,
-        latest_edits_by_original_event_id=latest_edits_by_original_event_id,
+        edit_candidates_by_original_event_id=edit_candidates_by_original_event_id,
     )
     return _BulkThreadScanResult(
         thread_event_sources=thread_event_sources,

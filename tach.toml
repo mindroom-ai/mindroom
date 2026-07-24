@@ -3984,13 +3984,13 @@ from = ["mindroom.matrix.voice_message"]
 
 [[interfaces]]
 expose = [
-    "LatestThreadEditsByOriginalEventId",
     "ResolvedVisibleMessage",
+    "ThreadEditCandidatesByOriginalEventId",
     "apply_latest_edits_to_messages",
     "extract_visible_edit_body",
     "extract_visible_message",
     "message_preview",
-    "record_latest_thread_edit",
+    "record_thread_edit_candidate",
     "replace_visible_message",
     "resolve_visible_event_source",
     "resolve_latest_visible_messages",
