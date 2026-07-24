@@ -365,9 +365,11 @@ async def test_exact_reply_oracle_hydrates_limited_sync_from_pagination(
         to_token: str | None = None,
         limit: int = 1000,
     ) -> tuple[list[dict[str, Any]], str | None]:
-        assert from_position == "gap-position"
         assert to_token == "since-position"  # noqa: S105 - opaque sync token
         assert limit == 1000
+        if from_position == "gap-position":
+            return [], "empty-page-token"
+        assert from_position == "empty-page-token"
         return [canonical], None
 
     monkeypatch.setattr(client, "sync", sync)
@@ -379,7 +381,56 @@ async def test_exact_reply_oracle_hydrates_limited_sync_from_pagination(
 
     assert oracle.response_ids == {"$source": {"$response"}}
     assert oracle.limited_timeline_count == 1
-    assert oracle.pagination_page_count == 1
+    assert oracle.pagination_page_count == 2
+
+
+def _agent_reply_event(source_event_id: str, response_event_id: str, body: str) -> dict[str, Any]:
+    return {
+        "event_id": response_event_id,
+        "sender": "@agent:example",
+        "type": "m.room.message",
+        "origin_server_ts": 100,
+        "content": {
+            "body": body,
+            "m.relates_to": {
+                "rel_type": "m.thread",
+                "event_id": source_event_id,
+                "m.in_reply_to": {"event_id": source_event_id},
+            },
+        },
+    }
+
+
+def _agent_edit_event(response_event_id: str, body: str) -> dict[str, Any]:
+    return {
+        "event_id": "$edit",
+        "sender": "@agent:example",
+        "type": "m.room.message",
+        "origin_server_ts": 101,
+        "content": {
+            "body": f" * {body}",
+            "m.new_content": {"body": body, "msgtype": "m.text"},
+            "m.relates_to": {"rel_type": "m.replace", "event_id": response_event_id},
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_exact_reply_oracle_requires_completed_streaming_body() -> None:
+    """A placeholder original is not complete until its final edit arrives."""
+    client = LiveMatrixClient("http://matrix.invalid", "!room:example")
+    oracle = ExactReplyOracle(client, "@agent:example")
+    oracle.expect("root:0", "$source")
+    try:
+        oracle._ingest_event(_agent_reply_event("$source", "$response", "Thinking..."))
+        assert oracle._incomplete_streaming_sources() == {"$source"}
+
+        body = fuzz_live_matrix._ModelHandler.response_text_for(7)
+        oracle._ingest_event(_agent_edit_event("$response", body))
+
+        assert oracle._incomplete_streaming_sources() == set()
+    finally:
+        await client.close()
 
 
 @pytest.mark.asyncio

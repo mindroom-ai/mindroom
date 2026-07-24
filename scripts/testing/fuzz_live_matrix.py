@@ -19,6 +19,7 @@ import itertools
 import json
 import os
 import random
+import re
 import secrets
 import signal
 import socket
@@ -679,7 +680,7 @@ class _ModelHandler(BaseHTTPRequestHandler):
         content_length = int(self.headers.get("Content-Length", "0"))
         payload = json.loads(self.rfile.read(content_length))
         call_id = next(self.call_ids)
-        content = self._response_text(call_id)
+        content = self.response_text_for(call_id)
         if payload.get("stream") is True:
             self._send_stream(call_id, content)
             return
@@ -701,7 +702,8 @@ class _ModelHandler(BaseHTTPRequestHandler):
         )
 
     @classmethod
-    def _response_text(cls, call_id: int) -> str:
+    def response_text_for(cls, call_id: int) -> str:
+        """Return the only complete body accepted for one model call."""
         segments = " ".join(f"segment-{index:03d}" for index in range(cls.stream_segments))
         return f"LIVE-FUZZ call={call_id} {segments} END call={call_id}"
 
@@ -1299,7 +1301,9 @@ class ExactReplyOracle:
         self.expected_sources: dict[str, str] = {}
         self.response_ids: dict[str, set[str]] = defaultdict(set)
         self.response_event_by_ref: dict[str, str] = {}
+        self.latest_reply_bodies: dict[str, tuple[int, int, str]] = {}
         self.seen_event_ids: set[str] = set()
+        self._ingest_ordinal = 0
         self.limited_timeline_count = 0
         self.pagination_page_count = 0
         self.gap_audit_page_count = 0
@@ -1354,7 +1358,8 @@ class ExactReplyOracle:
         while time.monotonic() < deadline:
             await self._sync_once(timeout_ms=250, allow_limited=allow_limited)
             self._assert_no_wrong_replies()
-            if all(len(self.response_ids[source]) == 1 for source in self.expected_sources):
+            incomplete_streams = self._incomplete_streaming_sources()
+            if all(len(self.response_ids[source]) == 1 for source in self.expected_sources) and not incomplete_streams:
                 settled_after = max(settled_after, self._last_response_at + settle_seconds)
                 if time.monotonic() >= settled_after:
                     return
@@ -1364,7 +1369,7 @@ class ExactReplyOracle:
                 "reply_count": len(self.response_ids[event_id]),
             }
             for event_id, logical_ref in self.expected_sources.items()
-            if len(self.response_ids[event_id]) != 1
+            if len(self.response_ids[event_id]) != 1 or event_id in incomplete_streams
         }
         missing_gap_refs = sorted(self.expected_sources[event_id] for event_id in self.gap_audit_missing_sources)
         msg = (
@@ -1449,7 +1454,7 @@ class ExactReplyOracle:
             observed_ids.update(event_id for event in events if isinstance((event_id := event.get("event_id")), str))
             for event in reversed(events):
                 self._ingest_event(event)
-            if not events or next_token is None:
+            if next_token is None:
                 break
             token = next_token
         else:
@@ -1464,6 +1469,7 @@ class ExactReplyOracle:
         if not isinstance(event_id, str) or event_id in self.seen_event_ids:
             return
         self.seen_event_ids.add(event_id)
+        self._ingest_ordinal += 1
         if event.get("sender") in self.internal_relay_senders:
             self.internal_source_ids.add(event_id)
             return
@@ -1473,6 +1479,7 @@ class ExactReplyOracle:
         if not isinstance(content, dict):
             return
         relation = content.get("m.relates_to")
+        self._track_reply_body(event_id, event, content, relation)
         if not isinstance(relation, dict) or relation.get("rel_type") != "m.thread":
             return
         reply = relation.get("m.in_reply_to")
@@ -1484,6 +1491,51 @@ class ExactReplyOracle:
         if logical_ref is not None:
             self.response_event_by_ref[f"response:{logical_ref}"] = event_id
         self._last_response_at = time.monotonic()
+
+    def _track_reply_body(
+        self,
+        event_id: str,
+        event: Mapping[str, Any],
+        content: Mapping[str, Any],
+        relation: object,
+    ) -> None:
+        """Fold originals and `m.replace` edits into one visible reply body."""
+        is_edit = isinstance(relation, dict) and relation.get("rel_type") == "m.replace"
+        response_event_id = relation.get("event_id") if is_edit else event_id
+        if not isinstance(response_event_id, str):
+            return
+        new_content = content.get("m.new_content")
+        body_source = new_content if isinstance(new_content, dict) else content
+        body = body_source.get("body")
+        if not isinstance(body, str):
+            return
+        raw_timestamp = event.get("origin_server_ts")
+        timestamp = raw_timestamp if isinstance(raw_timestamp, int) else 0
+        candidate = (timestamp, self._ingest_ordinal, body)
+        current = self.latest_reply_bodies.get(response_event_id)
+        if current is None or candidate[:2] >= current[:2]:
+            self.latest_reply_bodies[response_event_id] = candidate
+            self._last_response_at = time.monotonic()
+
+    def _incomplete_streaming_sources(self) -> set[str]:
+        """Return sources whose one reply is still a placeholder or partial edit."""
+        incomplete: set[str] = set()
+        for source_event_id in self.expected_sources:
+            response_event_ids = self.response_ids[source_event_id]
+            if len(response_event_ids) != 1:
+                continue
+            response_event_id = next(iter(response_event_ids))
+            latest = self.latest_reply_bodies.get(response_event_id)
+            if latest is None or not self._is_complete_model_body(latest[2]):
+                incomplete.add(source_event_id)
+        return incomplete
+
+    @staticmethod
+    def _is_complete_model_body(body: str) -> bool:
+        match = re.fullmatch(r"LIVE-FUZZ call=(\d+) .* END call=(\d+)", body)
+        if match is None or match.group(1) != match.group(2):
+            return False
+        return body == _ModelHandler.response_text_for(int(match.group(1)))
 
     def _assert_no_wrong_replies(self) -> None:
         duplicates = {
