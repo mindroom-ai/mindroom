@@ -2693,7 +2693,7 @@ def test_stack_close_attempts_every_stage_after_failures(
     def stop_mindroom() -> None:
         events.append("mindroom")
         message = "stop failed"
-        raise RuntimeError(message)
+        raise KeyboardInterrupt(message)
 
     stack._stop_mindroom = stop_mindroom  # type: ignore[method-assign]
     stack._log_handle = FakeLog()
@@ -3069,6 +3069,25 @@ async def test_failure_bundle_artifact_error_preserves_primary_failure(tmp_path:
     assert (bundle.directory / "tuwunel.log").exists()
 
 
+def test_failure_bundle_records_artifact_error_after_finalize(tmp_path: Path) -> None:
+    """Late evidence failures append after the main bundle was finalized."""
+    bundle = FailureBundle.create(
+        tmp_path / "artifacts",
+        "run-late-artifact-error",
+        scenario=_bundle_scenario(),
+        provenance={},
+    )
+
+    def fail_writer(_destination: Path) -> None:
+        message = "late artifact failed"
+        raise OSError(message)
+
+    bundle._write_isolated("late.txt", fail_writer)
+
+    errors = (bundle.directory / "artifact_errors.txt").read_text(encoding="utf-8")
+    assert "late.txt: late artifact failed" in errors
+
+
 @pytest.mark.asyncio
 async def test_failure_bundle_finalizes_when_stop_mindroom_fails(tmp_path: Path) -> None:
     """Failure evidence survives a MindRoom stop error during capture."""
@@ -3258,6 +3277,72 @@ def test_main_bundle_capture_failure_preserves_primary_and_closes_stack(
     assert stack_events == ["start", "close"]
 
 
+def test_main_stop_interrupt_preserves_primary_and_closes_stack(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An interrupted evidence stage cannot mask the run error or skip close."""
+    args = SimpleNamespace(
+        artifact_root=tmp_path / "artifacts",
+        failure_log=None,
+        pending_grace=0.0,
+        reply_timeout=1.0,
+        save_trace=None,
+        seed=1,
+        settle_seconds=0.0,
+        trace=None,
+    )
+    storage_path = tmp_path / "mindroom_data"
+    (storage_path / "tracking").mkdir(parents=True)
+    log_path = tmp_path / "mindroom.log"
+    log_path.write_text("mindroom output\n", encoding="utf-8")
+    stack_events: list[str] = []
+
+    class InterruptedStack:
+        runtime_provenance = None
+
+        def __init__(self, **_kwargs: object) -> None:
+            self.log_path = log_path
+            self.storage_path = storage_path
+
+        def start(self) -> None:
+            stack_events.append("start")
+
+        def log_tail(self) -> str:
+            return "tail"
+
+        def stop_mindroom(self) -> None:
+            stack_events.append("stop")
+            raise KeyboardInterrupt
+
+        def diagnostic_counts(self) -> dict[str, int]:
+            return {}
+
+        def tuwunel_log(self) -> str:
+            return "tuwunel"
+
+        def close(self) -> None:
+            stack_events.append("close")
+
+    async def fail_run(*_args: object, **_kwargs: object) -> dict[str, object]:
+        message = "primary invariant"
+        raise AssertionError(message)
+
+    monkeypatch.setattr(live_fuzz, "_parse_args", lambda: args)
+    monkeypatch.setattr(live_fuzz, "_scenario_from_args", lambda _args: _bundle_scenario())
+    monkeypatch.setattr(live_fuzz, "_run_provenance", dict)
+    monkeypatch.setattr(live_fuzz, "ManagedTuwunelStack", InterruptedStack)
+    monkeypatch.setattr(live_fuzz, "_run_live", fail_run)
+
+    with pytest.raises(AssertionError, match="primary invariant"):
+        live_fuzz.main()
+
+    assert stack_events == ["start", "stop", "close"]
+    cleanup_files = list((tmp_path / "artifacts").glob("*/cleanup_error.txt"))
+    assert len(cleanup_files) == 1
+    assert "KeyboardInterrupt" in cleanup_files[0].read_text(encoding="utf-8")
+
+
 def test_failure_bundle_appends_every_cleanup_error(tmp_path: Path) -> None:
     """Multiple teardown failures remain visible in occurrence order."""
     bundle = FailureBundle.create(
@@ -3268,11 +3353,21 @@ def test_failure_bundle_appends_every_cleanup_error(tmp_path: Path) -> None:
     )
 
     bundle.record_cleanup_error(OSError("failure-log failed"))
-    bundle.record_cleanup_error(RuntimeError("close failed"))
+    bundle.record_cleanup_error(
+        ExceptionGroup(
+            "close failed",
+            [
+                RuntimeError("remove instance: docker failed"),
+                RuntimeError("release lease: lock failed"),
+            ],
+        ),
+    )
 
     cleanup_errors = (bundle.directory / "cleanup_error.txt").read_text(encoding="utf-8")
     assert "OSError: failure-log failed" in cleanup_errors
-    assert "RuntimeError: close failed" in cleanup_errors
+    assert "ExceptionGroup: close failed" in cleanup_errors
+    assert "RuntimeError: remove instance: docker failed" in cleanup_errors
+    assert "RuntimeError: release lease: lock failed" in cleanup_errors
     assert cleanup_errors.index("failure-log failed") < cleanup_errors.index("close failed")
 
 

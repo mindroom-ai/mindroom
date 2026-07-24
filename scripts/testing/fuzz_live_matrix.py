@@ -1242,7 +1242,7 @@ def _attempt_cleanup(
     """Run one teardown stage while retaining its failure."""
     try:
         action()
-    except Exception as exc:
+    except BaseException as exc:
         errors.append(RuntimeError(f"{label}: {exc}"))
 
 
@@ -4462,9 +4462,16 @@ class FailureBundle:
     def record_cleanup_error(self, error: BaseException) -> None:
         """Retain teardown failure details without replacing a primary failure."""
 
+        def error_lines(current: BaseException) -> list[str]:
+            lines = [f"{type(current).__name__}: {current}"]
+            if isinstance(current, BaseExceptionGroup):
+                for child in current.exceptions:
+                    lines.extend(error_lines(child))
+            return lines
+
         def append_error(destination: Path) -> None:
             with destination.open("a", encoding="utf-8") as handle:
-                handle.write(f"{type(error).__name__}: {error}\n")
+                handle.write("\n".join(error_lines(error)) + "\n")
 
         self._write_isolated(
             "cleanup_error.txt",
@@ -4476,7 +4483,14 @@ class FailureBundle:
         try:
             writer(self.directory / name)
         except (OSError, ValueError, TypeError) as exc:
-            self._cleanup_errors.append(f"{name}: {exc}")
+            detail = f"{name}: {exc}"
+            self._cleanup_errors.append(detail)
+            if name != "artifact_errors.txt":
+                with (
+                    suppress(OSError),
+                    (self.directory / "artifact_errors.txt").open("a", encoding="utf-8") as handle,
+                ):
+                    handle.write(detail + "\n")
 
     def finalize(
         self,
@@ -4525,11 +4539,6 @@ class FailureBundle:
             "tuwunel.log",
             lambda destination: destination.write_text(tuwunel_log, encoding="utf-8"),
         )
-        if self._cleanup_errors:
-            self._write_isolated(
-                "artifact_errors.txt",
-                lambda destination: destination.write_text("\n".join(self._cleanup_errors) + "\n", encoding="utf-8"),
-            )
         return self.directory
 
 
