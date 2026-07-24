@@ -9,7 +9,7 @@ Last updated: 2026-07-24 (campaign-wide exact-head refresh; no active PR is merg
 ## CAMPAIGN-WIDE CURRENT STATE
 
 - Canonical gate ledger: `/Users/bas.nijholt/.codex/campaigns/mindroom-fuzz-2026-07-24/MERGE-GATES.md`.
-- MindRoom #1639: PR tip `07e9aa343`; stable code head `5646c1173`; implementation frozen; fresh independent Codex, fresh independent Fable, and real-Tuwunel gates all pending.
+- MindRoom #1639: stable code head `5646c1173`; later branch commits only update this living document; exact PR tip is recorded externally in `MERGE-GATES.md`; implementation frozen; all three gates pending.
 - MindRoom #1640: head `6427d9288`; paused with nine exact-head review blockers and dependency on corrected mindroom-nio recovery.
 - MindRoom #1641: head `bf7a963dc` rejected by fresh Codex review because cache SQL lets newer `m.new_content={}` mask an older valid edit; Fable review still running; live gate stopped; root fix active.
 - mindroom-nio #20: head `af585b42`; CI green but rejected by fresh Codex reviews for recovery/multi-room/store/migration/fanout/journal blockers; Fable review still running; live gate pending.
