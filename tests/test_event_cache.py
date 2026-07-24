@@ -2244,8 +2244,16 @@ async def test_cached_room_get_event_ignores_wrong_event_type_edit(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "malformed_new_content",
+    [
+        pytest.param(None, id="missing-new-content"),
+        pytest.param({}, id="empty-new-content"),
+    ],
+)
 async def test_cached_room_get_event_falls_back_from_malformed_newest_edit(
     event_cache: ConversationEventCache,
+    malformed_new_content: dict[str, object] | None,
 ) -> None:
     """Cached reconstruction must retain an older valid edit when the newest edit is malformed."""
     original_event = _make_text_event(
@@ -2266,15 +2274,18 @@ async def test_cached_room_get_event_falls_back_from_malformed_newest_edit(
             "m.relates_to": {"rel_type": "m.replace", "event_id": "$reply"},
         },
     )
+    malformed_content: dict[str, object] = {
+        "body": "* Malformed",
+        "m.relates_to": {"rel_type": "m.replace", "event_id": "$reply"},
+    }
+    if malformed_new_content is not None:
+        malformed_content["m.new_content"] = malformed_new_content
     malformed_edit = _make_text_event(
         event_id="$malformed_edit",
         sender="@alice:localhost",
         body="* Malformed",
         server_timestamp=4000,
-        source_content={
-            "body": "* Malformed",
-            "m.relates_to": {"rel_type": "m.replace", "event_id": "$reply"},
-        },
+        source_content=malformed_content,
     )
     client = MagicMock()
     client.room_get_event = AsyncMock()
@@ -2292,6 +2303,68 @@ async def test_cached_room_get_event_falls_back_from_malformed_newest_edit(
     assert response.event.body == "Good"
     assert response.event.server_timestamp == 3000
     client.room_get_event.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_latest_agent_message_snapshot_falls_back_from_empty_new_content(
+    event_cache: ConversationEventCache,
+) -> None:
+    """Cached snapshots must ignore an unrenderable newest message replacement."""
+    original_event = _make_text_event(
+        event_id="$reply",
+        sender="@agent:localhost",
+        body="Original reply",
+        server_timestamp=2000,
+        source_content={"body": "Original reply", "msgtype": "m.text"},
+    )
+    valid_edit = _make_text_event(
+        event_id="$valid_edit",
+        sender="@agent:localhost",
+        body="* Good",
+        server_timestamp=3000,
+        source_content={
+            "body": "* Good",
+            "m.new_content": {"body": "Good", "msgtype": "m.text"},
+            "m.relates_to": {"rel_type": "m.replace", "event_id": "$reply"},
+        },
+    )
+    malformed_edit = _make_text_event(
+        event_id="$malformed_edit",
+        sender="@agent:localhost",
+        body="* Malformed",
+        server_timestamp=4000,
+        source_content={
+            "body": "* Malformed",
+            "m.new_content": {},
+            "m.relates_to": {"rel_type": "m.replace", "event_id": "$reply"},
+        },
+    )
+    await event_cache.store_events_batch(
+        [
+            ("$reply", "!room:localhost", _cache_source(original_event)),
+            ("$valid_edit", "!room:localhost", _cache_source(valid_edit)),
+            ("$malformed_edit", "!room:localhost", _cache_source(malformed_edit)),
+        ],
+    )
+
+    latest_edit = await event_cache.get_latest_edit(
+        "!room:localhost",
+        "$reply",
+        sender="@agent:localhost",
+        event_type="m.room.message",
+    )
+    snapshot = await event_cache.get_latest_agent_message_snapshot(
+        "!room:localhost",
+        None,
+        "@agent:localhost",
+        runtime_started_at=None,
+    )
+
+    assert latest_edit is not None
+    assert latest_edit["event_id"] == "$valid_edit"
+    assert snapshot is not None
+    assert snapshot.content["body"] == "Good"
+    assert snapshot.origin_server_ts == 3000
 
 
 @pytest.mark.asyncio

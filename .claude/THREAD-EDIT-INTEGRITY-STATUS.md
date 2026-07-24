@@ -20,8 +20,8 @@
 
 ## Required next work
 
-- Make cached `m.room.message` selection require a renderable string body in `m.new_content`, while preserving custom approval-card edits.
-- Add SQLite and PostgreSQL regressions for point-event and snapshot fallback from a newest empty-object replacement.
+- Cached `m.room.message` selection now requires a string body in `m.new_content`, while custom approval-card edits remain supported.
+- SQLite and PostgreSQL point-event and snapshot fallback regressions pass for a newest empty-object replacement.
 - Validate bundled replacements at the shared thread-root preview seam and add sender/type/target/state/edit-of-edit regressions.
 - Execute the production PostgreSQL query against an isolated ICU-collated edit-event-ID column and prove bytewise Matrix ordering.
 - Run targeted tests, backend suites, full pytest, Tach, and all-file pre-commit.
@@ -29,6 +29,10 @@
 - Update the PR body and both external campaign notes.
 - Remove this handoff before declaring a new stable candidate.
 - Restart fresh Codex, Fable, CI/AI, and real-Tuwunel validation from the exact new head.
+
+## Current test evidence
+
+- Cache malformed-fallback and approval-card focus: `8 passed` across SQLite and PostgreSQL.
 
 ## Preserved local files
 

@@ -206,6 +206,10 @@ async def _load_latest_edit_row(
             {event_type_predicate}
             AND NOT (events.event_json::jsonb ? 'state_key')
             AND jsonb_typeof(events.event_json::jsonb -> 'content' -> 'm.new_content') = 'object'
+            AND (
+                events.event_json::jsonb ->> 'type' != 'm.room.message'
+                OR jsonb_typeof(events.event_json::jsonb -> 'content' -> 'm.new_content' -> 'body') = 'string'
+            )
         ORDER BY edits.origin_server_ts DESC, edits.edit_event_id COLLATE "C" DESC
         LIMIT 1
         """,  # noqa: S608

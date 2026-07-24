@@ -206,6 +206,10 @@ async def _load_latest_edit_row(
           {event_type_predicate}
           AND json_type(events.event_json, '$.state_key') IS NULL
           AND json_type(events.event_json, '$.content."m.new_content"') = 'object'
+          AND (
+              json_extract(events.event_json, '$.type') != 'm.room.message'
+              OR json_type(events.event_json, '$.content."m.new_content".body') = 'text'
+          )
         ORDER BY event_edits.origin_server_ts DESC, event_edits.edit_event_id DESC
         LIMIT 1
         """,  # noqa: S608
