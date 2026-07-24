@@ -27,6 +27,7 @@
 - Cached latest-edit reads can scope by sender and event type.
 - Cached latest-edit reads skip state events and replacements without object-valued `m.new_content`.
 - PostgreSQL query and index ordering use bytewise `COLLATE "C"`.
+- The new C-collated index uses a distinct name without dropping the legacy index during startup.
 
 ## Test evidence
 
@@ -34,6 +35,8 @@
 - Full `tests/test_thread_history.py`: 84 passed.
 - SQLite and PostgreSQL cached correctness plus PostgreSQL index regression: 9 passed.
 - Full cache/backend/approval owning set: passed.
+- PostgreSQL seeded concurrent cache trace and C-collated index regression pass together.
+- Three unrelated shell timing failures from full-suite attempts pass five consecutive focused reruns each.
 
 ## Remaining gates
 

@@ -315,11 +315,6 @@ async def _create_postgres_event_cache_schema(db: AsyncConnection) -> None:
     )
     await db.execute(
         """
-        DROP INDEX IF EXISTS idx_mindroom_event_cache_event_edits_room_original_ts
-        """,
-    )
-    await db.execute(
-        """
         CREATE INDEX IF NOT EXISTS idx_mindroom_event_cache_event_edits_room_original_ts_c
         ON mindroom_event_cache_event_edits(
             namespace,
