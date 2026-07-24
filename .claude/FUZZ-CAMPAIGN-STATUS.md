@@ -4,7 +4,7 @@
 > Update it after every material finding, fix, campaign result, review result, push, or PR state change.
 > Do not include it in a product PR unless the user explicitly requests that.
 
-Last updated: 2026-07-24 07:35 PDT.
+Last updated: 2026-07-24 07:52 PDT.
 
 ## Merge recommendation for PR #1638
 
@@ -183,6 +183,7 @@ Review risk: the same event must not appear in a prompt or visible reply twice.
 - `a4fa5a360` uses the durable turn ledger to prove every coalesced source was covered by a completed turn.
 - `ad8fb814c` models same-sender supersede policy during chaos settlement.
 - `3fc214e88` accepts an interrupted visible body only when a completed auto-resume reply exists and separately audits that resumed reply.
+- `22e8cd078` blocks settlement while an observed required source's covering reply is still streaming a non-terminal body, so the final audit can no longer read a mid-stream `Thinking...` placeholder as a non-canonical final body. This tightens the oracle without loosening any timeout: a genuinely frozen stream still fails at the checkpoint deadline.
 
 These were test-system defects or semantic gaps and must not be reported as MindRoom product bugs.
 
@@ -201,6 +202,9 @@ These were test-system defects or semantic gaps and must not be reported as Mind
 - The chaos profile supports warm restart, kill restart, cold restart, Tuwunel restart, MindRoom outage windows, checkpoints, multi-client authorship, multi-room mapping, slow streaming calls, and exact trace replay.
 - The final auditor independently paginates Matrix history, checks latest edits and redactions, validates reply cardinality, and cross-checks the durable handled-turn ledger.
 - Post-fix verification is rerunning original failing seeds and extra seeds.
+- The C2-seed4 chaos run previously failed with a harness premature-audit defect (settlement fired mid-stream on a trailing batch after the last checkpoint); fixed by `22e8cd078`. The `C2-seed4-refix` re-run PASSED: 200 ops, 111 canonical replies, 107 completed final bodies, 109 ledger-attributed sources, 1 kill-restart, 1 tuwunel restart, 1 outage, zero cache/dispatch timeouts, zero event-loop stalls, wall 66 s. The full verification matrix (S1 seed 7, S2 seed 11, V seed 19, V seed 23, C2 seed 4) is now green.
+- Review diffs for follow-up PR #1639 are taken against `origin/main` (PR #1638 is merged; base is `main`).
+- Local HEAD equals pushed `origin/test/fuzz-live-chaos-expansion` at `2dc2e52d5`, which includes the oracle fix `22e8cd078`.
 - Campaign details and minimized traces live in the Claude worktree's `.claude/REPORT.md`.
 
 ## Required supervision gates before either extension PR
