@@ -530,6 +530,7 @@ class TestThreadHistory:
                 "body": "* final",
                 "m.new_content": {
                     "body": "Final answer",
+                    "msgtype": "m.text",
                     "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
                     "io.mindroom.stream_status": "completed",
                 },
@@ -592,6 +593,7 @@ class TestThreadHistory:
                 "body": "* hello",
                 "m.new_content": {
                     "body": "hello\n\n⏳ Preparing isolated worker...",
+                    "msgtype": "m.text",
                     "io.mindroom.visible_body": "hello",
                     "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
                     "io.mindroom.stream_status": "completed",
@@ -987,6 +989,7 @@ class TestThreadHistory:
                 "body": "* Thinking...",
                 "m.new_content": {
                     "body": "Final answer",
+                    "msgtype": "m.text",
                     "m.relates_to": {
                         "rel_type": "m.thread",
                         "event_id": "$thread_root",
@@ -1600,6 +1603,7 @@ class TestThreadHistory:
                 "body": "* partial",
                 "m.new_content": {
                     "body": "Partial answer",
+                    "msgtype": "m.text",
                     "m.relates_to": {
                         "rel_type": "m.thread",
                         "event_id": "$thread_root",
@@ -1620,6 +1624,7 @@ class TestThreadHistory:
                 "body": "* final",
                 "m.new_content": {
                     "body": "Final answer",
+                    "msgtype": "m.text",
                     "m.relates_to": {
                         "rel_type": "m.thread",
                         "event_id": "$thread_root",
@@ -1667,7 +1672,7 @@ class TestThreadHistory:
                 },
             },
         )
-        malformed_edit = self._make_text_event(
+        edit_event = self._make_text_event(
             event_id="$edit1",
             sender="@agent:localhost",
             body="* replacement",
@@ -1676,6 +1681,7 @@ class TestThreadHistory:
                 "body": "* replacement",
                 "m.new_content": {
                     "body": "Updated answer",
+                    "msgtype": "m.text",
                 },
                 "m.relates_to": {
                     "rel_type": "m.replace",
@@ -1685,7 +1691,7 @@ class TestThreadHistory:
         )
 
         response = MagicMock(spec=nio.RoomMessagesResponse)
-        response.chunk = [malformed_edit, thread_message, root_event]
+        response.chunk = [edit_event, thread_message, root_event]
         response.end = None
         client.room_messages.return_value = response
 
@@ -1800,6 +1806,7 @@ class TestThreadHistory:
                 "body": "* final",
                 "m.new_content": {
                     "body": "Final answer",
+                    "msgtype": "m.text",
                     "m.relates_to": {
                         "rel_type": "m.thread",
                         "event_id": "$thread_root",
@@ -1837,6 +1844,7 @@ class TestThreadHistory:
                 "body": "* final",
                 "m.new_content": {
                     "body": "Final answer",
+                    "msgtype": "m.text",
                     "m.relates_to": {
                         "rel_type": "m.thread",
                         "event_id": "$thread_root",
