@@ -14,10 +14,17 @@ import pytest
 import mindroom.tools  # noqa: F401
 from mindroom.agent_descriptions import describe_agent
 from mindroom.config.agent import AgentConfig
-from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME, RuntimePaths, resolve_runtime_paths
+from mindroom.constants import (
+    ORIGINAL_SENDER_KEY,
+    ROUTER_AGENT_NAME,
+    SOURCE_KIND_KEY,
+    RuntimePaths,
+    resolve_runtime_paths,
+)
 from mindroom.custom_tools import subagents as subagents_module
 from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.custom_tools.subagents import SubAgentsTools
+from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.message_target import MessageTarget
 from mindroom.session_ids import create_session_id, parse_session_id
@@ -686,6 +693,29 @@ async def test_send_matrix_text_uses_latest_thread_event_id_for_fallback(
     assert content["m.relates_to"]["event_id"] == ctx.thread_id
     assert content["m.relates_to"]["m.in_reply_to"]["event_id"] == "$latest:localhost"
     assert content[ORIGINAL_SENDER_KEY] == ctx.requester_id
+
+
+@pytest.mark.asyncio
+async def test_send_matrix_text_marks_original_sender_as_trusted_relay(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Root session messages should carry trusted human-relay metadata."""
+    send_mock = AsyncMock(side_effect=delivered_matrix_side_effect("$evt"))
+    monkeypatch.setattr(subagents_module, "send_message_result", send_mock)
+    ctx = _make_context(tmp_path, requester_id="@user:localhost")
+
+    await subagents_module._send_matrix_text(
+        ctx,
+        room_id=ctx.room_id,
+        text="@actual_openclaw:localhost do work",
+        thread_id=None,
+        original_sender=ctx.requester_id,
+    )
+
+    content = send_mock.await_args.args[2]
+    assert content[ORIGINAL_SENDER_KEY] == ctx.requester_id
+    assert content[SOURCE_KIND_KEY] == TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 
 
 @pytest.mark.asyncio
