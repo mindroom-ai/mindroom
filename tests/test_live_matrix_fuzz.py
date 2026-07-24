@@ -3,7 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import json
+import shutil
+import signal
+import sys
+from collections import defaultdict
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 from mindroom.dispatch_source import AUTO_RESUME_MESSAGE
@@ -11,10 +17,12 @@ from mindroom.handled_turns import TurnRecord, TurnRecordCodec
 from mindroom.streaming import RESTART_INTERRUPTED_RESPONSE_NOTE
 
 if TYPE_CHECKING:
+    from collections.abc import Collection
     from pathlib import Path
 
 import pytest
 
+import scripts.testing.fuzz_live_matrix as live_fuzz
 from scripts.testing.fuzz_live_matrix import (
     ORIGINAL_REVISION,
     ChaosTuning,
@@ -26,17 +34,123 @@ from scripts.testing.fuzz_live_matrix import (
     LiveMatrixClient,
     LiveOperation,
     LiveOperationKind,
+    ManagedTuwunelStack,
     _body_call_id,
     _ModelHandler,
     _parse_markers,
     _persist_failure_bundle,
+    _run_command,
     _sanitized_oracle_snapshot,
     _SentRecord,
     _source_marker,
+    _validated_child_provenance,
     chaos_scenario_from_seed,
     live_scenario_from_seed,
     saturation_scenario,
 )
+
+
+def test_model_stream_disconnect_does_not_escape_request_handler() -> None:
+    """Chaos may kill the streaming client without failing the model stub."""
+    handler = object.__new__(_ModelHandler)
+    payload = json.dumps({"messages": [], "stream": True}).encode()
+    handler.path = "/v1/chat/completions"
+    handler.headers = {"Content-Length": str(len(payload))}
+    handler.rfile = io.BytesIO(payload)
+    handler.call_ids = iter((1,))
+    handler.close_connection = False
+
+    def disconnect(_call_id: int, _content: str) -> None:
+        raise BrokenPipeError
+
+    handler._send_stream = disconnect  # type: ignore[method-assign]
+    handler.do_POST()
+
+    assert handler.close_connection is True
+
+
+def test_lifecycle_command_timeout_kills_bounded_process_group() -> None:
+    """A hung lifecycle command must time out instead of hanging the campaign."""
+    with pytest.raises(TimeoutError, match="command timed out"):
+        _run_command(
+            sys.executable,
+            "-c",
+            "import time; time.sleep(60)",
+            timeout_seconds=0.01,
+        )
+
+
+def test_lifecycle_timeout_kills_descendant_after_leader_exits() -> None:
+    """An exited leader cannot leave a pipe-owning descendant hanging cleanup."""
+    script = "import subprocess,sys;subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)'])"
+    with pytest.raises(TimeoutError, match="command timed out"):
+        _run_command(
+            sys.executable,
+            "-c",
+            script,
+            timeout_seconds=0.05,
+        )
+
+
+@pytest.mark.parametrize(
+    ("hard_kill", "expected_signal"),
+    [(False, signal.SIGINT), (True, signal.SIGKILL)],
+)
+def test_stop_mindroom_targets_exact_process_group(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    hard_kill: bool,
+    expected_signal: signal.Signals,
+) -> None:
+    """Graceful and hard stops signal the owned child group, then reap it."""
+
+    class FakeProcess:
+        pid = 4242
+
+        def __init__(self) -> None:
+            self.waited = False
+
+        def poll(self) -> None:
+            return None
+
+        def wait(self, *, timeout: float) -> int:
+            assert timeout in {10, 20}
+            self.waited = True
+            return 0
+
+    process = FakeProcess()
+    stack = object.__new__(ManagedTuwunelStack)
+    stack._mindroom_process = process
+    signals: list[tuple[int, signal.Signals]] = []
+    monkeypatch.setattr("scripts.testing.fuzz_live_matrix.os.killpg", lambda pid, sig: signals.append((pid, sig)))
+
+    stack._stop_mindroom(kill=hard_kill)
+
+    assert signals == [(process.pid, expected_signal)]
+    assert process.waited
+    assert stack._mindroom_process is None
+
+
+def test_stop_mindroom_kills_group_after_leader_already_exited(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Owned descendants must die even when the process-group leader exited."""
+
+    class FakeProcess:
+        pid = 4242
+
+        def poll(self) -> int:
+            return 0
+
+    stack = object.__new__(ManagedTuwunelStack)
+    stack._mindroom_process = FakeProcess()
+    signals: list[tuple[int, signal.Signals]] = []
+    monkeypatch.setattr("scripts.testing.fuzz_live_matrix.os.killpg", lambda pid, sig: signals.append((pid, sig)))
+
+    stack._stop_mindroom()
+
+    assert signals == [(4242, signal.SIGKILL)]
+    assert stack._mindroom_process is None
 
 
 def test_live_scenario_is_deterministic_and_json_replayable() -> None:
@@ -248,6 +362,14 @@ async def test_exact_reply_oracle_allows_response_to_internal_restart_relay() ->
         internal_relay_senders=("@router:example",),
     )
     try:
+        oracle.expect("op:1", "$source")
+        interrupted = _agent_reply_event(
+            "$source",
+            "$interrupted",
+            f"LIVE-FUZZ call=1 {RESTART_INTERRUPTED_RESPONSE_NOTE}",
+        )
+        interrupted["content"]["m.relates_to"]["event_id"] = "$root"
+        oracle._ingest_event(interrupted)
         oracle._ingest_event(
             {
                 "event_id": "$resume-relay",
@@ -317,6 +439,46 @@ async def test_exact_reply_oracle_flags_reply_to_unrelated_router_traffic() -> N
                 },
             },
         )
+        with pytest.raises(AssertionError, match="unexpected"):
+            oracle._assert_no_wrong_replies()
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_exact_reply_oracle_rejects_resume_relay_after_completed_reply() -> None:
+    """A resume-shaped relay is internal only when its target is interrupted."""
+    client = LiveMatrixClient("http://matrix.invalid", "!room:example")
+    oracle = ExactReplyOracle(
+        client,
+        "@agent:example",
+        internal_relay_senders=("@router:example",),
+    )
+    try:
+        oracle.expect("op:1", "$source")
+        completed = _agent_reply_event("$source", "$completed", "LIVE-FUZZ call=1 END call=1")
+        completed["content"]["m.relates_to"]["event_id"] = "$root"
+        oracle._ingest_event(completed)
+        oracle._ingest_event(
+            _threaded_reply_event(
+                sender="@router:example",
+                event_id="$false-relay",
+                thread_root="$root",
+                in_reply_to="$completed",
+                body=f"@agent {AUTO_RESUME_MESSAGE}",
+            ),
+        )
+        oracle._ingest_event(
+            _threaded_reply_event(
+                sender="@agent:example",
+                event_id="$extra",
+                thread_root="$root",
+                in_reply_to="$false-relay",
+                body="LIVE-FUZZ call=2 END call=2",
+            ),
+        )
+
+        assert "$false-relay" not in oracle.internal_source_ids
         with pytest.raises(AssertionError, match="unexpected"):
             oracle._assert_no_wrong_replies()
     finally:
@@ -469,6 +631,39 @@ def test_chaos_validation_rejects_two_edits_of_one_source_in_a_batch() -> None:
     )
     with pytest.raises(ValueError, match="edited at most once per batch"):
         scenario.validate()
+
+
+def test_chaos_validation_rejects_duplicate_redactions_in_one_batch() -> None:
+    """One target cannot have two nondeterministically winning redaction IDs."""
+    scenario = LiveFuzzScenario(
+        thread_count=1,
+        profile="chaos",
+        batches=(
+            (
+                LiveOperation(0, LiveOperationKind.REDACTION, 0, "root:0"),
+                LiveOperation(1, LiveOperationKind.REDACTION, 0, "root:0"),
+            ),
+        ),
+    )
+    with pytest.raises(ValueError, match="redacted at most once"):
+        scenario.validate()
+
+
+def test_generators_never_redact_one_target_twice_per_batch() -> None:
+    """Generated replay traces preserve exact redaction provenance."""
+    scenarios = [live_scenario_from_seed(seed, steps=100, thread_count=6) for seed in range(8)]
+    scenarios.extend(
+        chaos_scenario_from_seed(
+            seed,
+            steps=100,
+            tuning=ChaosTuning(thread_count=6, client_count=3, room_count=2),
+        )
+        for seed in range(8)
+    )
+    for scenario in scenarios:
+        for batch in scenario.batches:
+            redacted = [operation.target for operation in batch if operation.kind is LiveOperationKind.REDACTION]
+            assert len(redacted) == len(set(redacted))
 
 
 def test_chaos_validation_requires_checkpoint_before_cold_restart() -> None:
@@ -658,17 +853,99 @@ async def test_final_state_auditor_enforces_redaction_and_reaction_semantics() -
     ]
     try:
         events = {
-            "$msg": {"event_id": "$msg", "type": "m.room.message", "content": dict(msg_content)},
-            "$gone": {"event_id": "$gone", "type": "m.room.message", "content": {}},
-            "$react": {"event_id": "$react", "type": "m.reaction", "content": dict(react_content)},
+            "$msg": {
+                "event_id": "$msg",
+                "type": "m.room.message",
+                "content": dict(msg_content),
+                "_audit_room_id": "!room:example",
+            },
+            "$gone": {
+                "event_id": "$gone",
+                "type": "m.room.message",
+                "content": {},
+                "_audit_room_id": "!room:example",
+            },
+            "$react": {
+                "event_id": "$react",
+                "type": "m.reaction",
+                "content": dict(react_content),
+                "_audit_room_id": "!room:example",
+            },
         }
         auditor._assert_sent_events_canonical(events, records, {"$gone"})
 
         with pytest.raises(AssertionError, match="kept visible content"):
             auditor._assert_sent_events_canonical(events, records, {"$gone", "$msg"})
 
+        retained_msgtype = {
+            **events,
+            "$gone": {**events["$gone"], "content": {"msgtype": "m.text"}},
+        }
+        with pytest.raises(AssertionError, match="kept visible content"):
+            auditor._assert_sent_events_canonical(retained_msgtype, records, {"$gone"})
+
         with pytest.raises(AssertionError, match="missing from /messages"):
             auditor._assert_sent_events_canonical({}, records, set())
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_final_state_auditor_requires_exact_redaction_provenance() -> None:
+    """A redacted shell and its redaction event must point to each other exactly."""
+    client = LiveMatrixClient("http://matrix.invalid", "!room:example")
+    oracle = ExactReplyOracle(client, "@agent:example")
+    auditor = FinalStateAuditor(
+        client,
+        oracle,
+        agent_id="@agent:example",
+        expected_body_for=lambda call_id: f"LIVE-FUZZ call={call_id} END call={call_id}",
+    )
+    records = [
+        _SentRecord("$target", "!room:example", "m.room.message", content={"body": "gone"}),
+        _SentRecord(
+            "$redaction",
+            "!room:example",
+            "m.room.redaction",
+            redacts="$target",
+            content={"reason": "live cache fuzz"},
+        ),
+    ]
+    events = {
+        "$target": {
+            "event_id": "$target",
+            "type": "m.room.message",
+            "content": {},
+            "unsigned": {"redacted_because": {"event_id": "$redaction"}},
+            "_audit_room_id": "!room:example",
+        },
+        "$redaction": {
+            "event_id": "$redaction",
+            "type": "m.room.redaction",
+            "content": {"reason": "live cache fuzz", "redacts": "$target"},
+            "_audit_room_id": "!room:example",
+        },
+    }
+    try:
+        auditor._assert_sent_events_canonical(events, records, {"$target": "$redaction"})
+
+        without_shell = {event_id: event for event_id, event in events.items() if event_id != "$target"}
+        with pytest.raises(AssertionError, match="missing from /messages"):
+            auditor._assert_sent_events_canonical(without_shell, records, {"$target": "$redaction"})
+
+        wrong_envelope = {**events, "$target": {**events["$target"], "unsigned": {}}}
+        with pytest.raises(AssertionError, match="points to"):
+            auditor._assert_sent_events_canonical(wrong_envelope, records, {"$target": "$redaction"})
+
+        wrong_redacts = {
+            **events,
+            "$redaction": {
+                **events["$redaction"],
+                "content": {**events["$redaction"]["content"], "redacts": "$other"},
+            },
+        }
+        with pytest.raises(AssertionError, match="redacts"):
+            auditor._assert_sent_events_canonical(wrong_redacts, records, {"$target": "$redaction"})
     finally:
         await client.close()
 
@@ -719,12 +996,108 @@ async def test_final_state_auditor_rejects_diverged_content() -> None:
         # The exact payload round-trips cleanly.
         auditor._assert_sent_events_canonical(
             {
-                "$msg": {"event_id": "$msg", "type": "m.room.message", "content": dict(msg_content)},
-                "$react": {"event_id": "$react", "type": "m.reaction", "content": dict(react_content)},
+                "$msg": {
+                    "event_id": "$msg",
+                    "type": "m.room.message",
+                    "content": dict(msg_content),
+                    "_audit_room_id": "!room:example",
+                },
+                "$react": {
+                    "event_id": "$react",
+                    "type": "m.reaction",
+                    "content": dict(react_content),
+                    "_audit_room_id": "!room:example",
+                },
             },
             records,
             set(),
         )
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("field", "wrong_value", "message"),
+    [
+        ("_audit_room_id", "!wrong:example", "appeared in room"),
+        ("sender", "@mallory:example", "has sender"),
+        ("type", "m.reaction", "has type"),
+    ],
+)
+async def test_final_state_auditor_rejects_wrong_event_provenance(
+    field: str,
+    wrong_value: str,
+    message: str,
+) -> None:
+    """Final state must preserve the exact room, author, and event type."""
+    client = LiveMatrixClient("http://matrix.invalid", "!room:example")
+    oracle = ExactReplyOracle(client, "@agent:example")
+    auditor = FinalStateAuditor(
+        client,
+        oracle,
+        agent_id="@agent:example",
+        expected_body_for=lambda call_id: f"LIVE-FUZZ call={call_id} END call={call_id}",
+    )
+    record = _SentRecord(
+        "$msg",
+        "!room:example",
+        "m.room.message",
+        sender="@alice:example",
+        content={"body": "hello", "msgtype": "m.text"},
+    )
+    event = {
+        "event_id": "$msg",
+        "type": "m.room.message",
+        "sender": "@alice:example",
+        "content": {"body": "hello", "msgtype": "m.text"},
+        "_audit_room_id": "!room:example",
+        field: wrong_value,
+    }
+    try:
+        with pytest.raises(AssertionError, match=message):
+            auditor._assert_sent_events_canonical({"$msg": event}, [record], set())
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("wrong_field", ["room", "root"])
+async def test_final_state_auditor_rejects_reply_outside_source_thread(
+    wrong_field: str,
+) -> None:
+    """A direct reply must share both room and canonical root with its source."""
+    client = LiveMatrixClient("http://matrix.invalid", "!room:example")
+    oracle = ExactReplyOracle(client, "@agent:example")
+    auditor = FinalStateAuditor(
+        client,
+        oracle,
+        agent_id="@agent:example",
+        expected_body_for=lambda call_id: f"LIVE-FUZZ call={call_id} END call={call_id}",
+    )
+    oracle.expect("root:0", "$source")
+    source_record = _SentRecord(
+        "$source",
+        "!room:example",
+        "m.room.message",
+        content={"body": "source"},
+    )
+    reply = _agent_reply_event("$source", "$reply", "LIVE-FUZZ call=1 END call=1")
+    reply["_audit_room_id"] = "!other:example" if wrong_field == "room" else "!room:example"
+    if wrong_field == "root":
+        reply["content"]["m.relates_to"]["event_id"] = "$wrong-root"
+    events = {
+        "$source": {
+            "event_id": "$source",
+            "type": "m.room.message",
+            "content": {"body": "source"},
+            "_audit_room_id": "!room:example",
+        },
+        "$reply": reply,
+    }
+    try:
+        with pytest.raises(AssertionError, match="reply provenance"):
+            auditor._canonical_agent_replies(events, sent_records=[source_record])
     finally:
         await client.close()
 
@@ -734,6 +1107,47 @@ def test_body_call_id_parses_only_canonical_prefixes() -> None:
     assert _body_call_id("LIVE-FUZZ call=17 segment-000 END call=17") == 17
     assert _body_call_id("[Response interrupted by service restart]") is None
     assert _body_call_id("LIVE-FUZZ call=x END") is None
+
+
+@pytest.mark.asyncio
+async def test_all_reply_body_oracles_use_same_total_replacement_order() -> None:
+    """Edits beat originals, then timestamp and event ID break edit ties."""
+    client = LiveMatrixClient("http://matrix.invalid", "!room:example")
+    oracle = ExactReplyOracle(client, "@agent:example")
+    auditor = FinalStateAuditor(
+        client,
+        oracle,
+        agent_id="@agent:example",
+        expected_body_for=lambda call_id: f"LIVE-FUZZ call={call_id} END call={call_id}",
+    )
+    original = _agent_reply_event("$source", "$reply", "original")
+    original["origin_server_ts"] = 999
+
+    def edit(event_id: str, body: str) -> dict[str, Any]:
+        return {
+            "event_id": event_id,
+            "sender": "@agent:example",
+            "type": "m.room.message",
+            "origin_server_ts": 100,
+            "content": {
+                "body": f"* {body}",
+                "m.new_content": {"body": body},
+                "m.relates_to": {"rel_type": "m.replace", "event_id": "$reply"},
+            },
+        }
+
+    edit_z = edit("$edit-z", "winner")
+    edit_a = edit("$edit-a", "loser")
+    try:
+        for event in (original, edit_z, edit_a):
+            oracle._ingest_event(event)
+        assert oracle.latest_reply_bodies["$reply"][1] == "winner"
+
+        events = {event["event_id"]: event for event in (original, edit_z, edit_a)}
+        assert auditor._latest_agent_body(events, "$reply") == "winner"
+        assert LiveFuzzRunner._latest_event_body(events.values(), "$reply") == "winner"
+    finally:
+        await client.close()
 
 
 @pytest.mark.asyncio
@@ -985,6 +1399,61 @@ async def test_ledger_attribution_flags_missing_and_orphaned_turns(tmp_path: Pat
         _write_ledger(ledger_path, {"$first": superseded_first})
         with pytest.raises(AssertionError, match="newest chain source"):
             auditor._assert_ledger_attribution(replies)
+
+        foreign = TurnRecord(
+            source_event_ids=("$other",),
+            discovery_event_ids=("$first",),
+            response_event_id="$combined-reply",
+            completed=True,
+        )
+        _write_ledger(ledger_path, {"$first": foreign, "$second": anchor_second})
+        with pytest.raises(AssertionError, match="does not own"):
+            auditor._assert_ledger_attribution(replies)
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_visible_optional_reply_requires_durable_attribution(tmp_path: Path) -> None:
+    """Optional means zero replies are allowed, not unattributed visible replies."""
+    client = LiveMatrixClient("http://matrix.invalid", "!room:example")
+    oracle = ExactReplyOracle(client, "@agent:example", coalescing_threads=True)
+    ledger_path = tmp_path / "general_responded.json"
+    auditor = FinalStateAuditor(
+        client,
+        oracle,
+        agent_id="@agent:example",
+        expected_body_for=lambda call_id: f"LIVE-FUZZ call={call_id} END call={call_id}",
+        ledger_path=ledger_path,
+    )
+    try:
+        oracle.expect("op:1", "$optional", thread=0)
+        oracle.mark_source_optional("$optional")
+        replies = {"$optional": {"$reply"}}
+
+        _write_ledger(ledger_path, {})
+        with pytest.raises(AssertionError, match="optional-source reply"):
+            auditor._assert_ledger_attribution(replies)
+
+        record = TurnRecord(source_event_ids=("$optional",), response_event_id="$reply", completed=True)
+        _write_ledger(ledger_path, {"$optional": record})
+        assert auditor._assert_ledger_attribution(replies) == {
+            "ledger_attributed_sources": 1,
+            "ledger_superseded_sources": 0,
+        }
+
+        _write_ledger(
+            ledger_path,
+            {
+                "$optional": TurnRecord(
+                    source_event_ids=("$optional",),
+                    response_event_id="$phantom",
+                    completed=True,
+                ),
+            },
+        )
+        with pytest.raises(AssertionError, match="not a visible canonical reply"):
+            auditor._assert_ledger_attribution({})
     finally:
         await client.close()
 
@@ -1034,7 +1503,7 @@ async def test_final_body_audit_accepts_exact_resume_relay_chain() -> None:
             event_id="$relay",
             thread_root="$root",
             in_reply_to="$reply",
-            body="resume",
+            body=f"@agent {AUTO_RESUME_MESSAGE}",
         )
         # The completed agent response A replies to the relay R in the thread.
         events["$resumed"] = _threaded_reply_event(
@@ -1063,7 +1532,7 @@ async def test_final_body_audit_rejects_relay_for_another_interruption() -> None
                 event_id="$relay",
                 thread_root="$root",
                 in_reply_to="$other-interrupted",
-                body="resume",
+                body=f"@agent {AUTO_RESUME_MESSAGE}",
             ),
             "$resumed": _threaded_reply_event(
                 sender="@agent:example",
@@ -1093,7 +1562,7 @@ async def test_final_body_audit_rejects_agent_reply_to_other_event() -> None:
                 event_id="$relay",
                 thread_root="$root",
                 in_reply_to="$reply",
-                body="resume",
+                body=f"@agent {AUTO_RESUME_MESSAGE}",
             ),
             # Agent reply targets a bystander event, not the relay.
             "$resumed": _threaded_reply_event(
@@ -1124,7 +1593,7 @@ async def test_final_body_audit_rejects_resume_in_wrong_thread() -> None:
                 event_id="$relay",
                 thread_root="$root",
                 in_reply_to="$reply",
-                body="resume",
+                body=f"@agent {AUTO_RESUME_MESSAGE}",
             ),
             # Correct reply target but a different thread root.
             "$resumed": _threaded_reply_event(
@@ -1584,9 +2053,39 @@ def _revision_runner() -> LiveFuzzRunner:
     """Bare runner exposing only the source-revision maintenance state."""
     runner = object.__new__(LiveFuzzRunner)
     runner.source_current_markers = {}
+    runner.source_revision_markers = defaultdict(dict)
     runner._source_revision_stack = {}
     runner._edit_event_source = {}
     return runner
+
+
+@pytest.mark.asyncio
+async def test_final_source_revision_uses_matrix_order_not_completion_order() -> None:
+    """Concurrent edit completion order cannot change the canonical source body."""
+    client = LiveMatrixClient("http://matrix.invalid", "!room:example")
+    oracle = ExactReplyOracle(client, "@agent:example")
+    oracle.expect("root:0", "$root")
+    first = _source_marker("root:0", "edit:1")
+    second = _source_marker("root:0", "edit:2")
+    auditor = FinalStateAuditor(
+        client,
+        oracle,
+        agent_id="@agent:example",
+        expected_body_for=_short_body_for,
+        source_revision_markers={"$root": {"$edit-a": first, "$edit-z": second}},
+    )
+    events = {
+        "$edit-a": {"event_id": "$edit-a", "origin_server_ts": 100},
+        "$edit-z": {"event_id": "$edit-z", "origin_server_ts": 100},
+    }
+    try:
+        auditor._resolve_source_revision_markers(events, {})
+        assert auditor.source_current_markers["$root"] == second
+
+        auditor._resolve_source_revision_markers(events, {"$edit-z": "$redaction"})
+        assert auditor.source_current_markers["$root"] == first
+    finally:
+        await client.close()
 
 
 def test_redacting_edit_event_reverts_source_marker_to_original() -> None:
@@ -1754,8 +2253,6 @@ async def test_failure_bundle_persists_evidence_and_survives_teardown(tmp_path: 
         await oracle.client.close()
 
     # Teardown deletes the stack's temp storage; the bundle must not point into it.
-    import shutil  # noqa: PLC0415 - local to this teardown-simulation test
-
     shutil.rmtree(tmp_path / "mindroom_data")
 
     directory = bundle.directory
@@ -1826,6 +2323,375 @@ def test_successful_run_discards_its_failure_bundle(tmp_path: Path) -> None:
     bundle.discard()
 
 
+def test_child_provenance_uses_loaded_overlay(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exact provenance must describe the child overlay, not the parent install."""
+    attestation = tmp_path / "runtime-attestation.json"
+    attestation.write_text(
+        json.dumps(
+            {
+                "mindroom_module_path": str(tmp_path / "mindroom" / "__init__.py"),
+                "nio_module_path": str(tmp_path / "overlay" / "nio" / "__init__.py"),
+                "nio_version": "1.2.3",
+                "python": "3.13",
+            },
+        ),
+        encoding="utf-8",
+    )
+
+    def git_state(path: Path, **_kwargs: object) -> tuple[str, bool]:
+        return ("nio-head", False) if "overlay" in str(path) else ("mindroom-head", False)
+
+    monkeypatch.setattr("scripts.testing.fuzz_live_matrix._git_state_for_file", git_state)
+    monkeypatch.setattr(
+        "scripts.testing.fuzz_live_matrix._git_revision",
+        lambda path: "nio-head" if "overlay" in str(path) else "mindroom-head",
+    )
+
+    provenance = _validated_child_provenance(
+        attestation,
+        overlay=str(tmp_path / "overlay"),
+    )
+
+    assert provenance["nio_module_path"] == str((tmp_path / "overlay" / "nio" / "__init__.py").resolve())
+    assert provenance["nio_revision"] == "nio-head"
+    assert provenance["nio_expected_revision"] == "nio-head"
+
+
+def test_child_provenance_rejects_same_head_from_other_checkout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Commit equality cannot substitute for the requested editable checkout."""
+    overlay = tmp_path / "requested-overlay"
+    other = tmp_path / "other-checkout"
+    attestation = tmp_path / "runtime-attestation.json"
+    attestation.write_text(
+        json.dumps(
+            {
+                "mindroom_module_path": str(tmp_path / "mindroom" / "__init__.py"),
+                "nio_module_path": str(other / "src" / "nio" / "__init__.py"),
+            },
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "scripts.testing.fuzz_live_matrix._git_state_for_file",
+        lambda *_args, **_kwargs: ("same-head", False),
+    )
+    monkeypatch.setattr(
+        "scripts.testing.fuzz_live_matrix._git_revision",
+        lambda _path: "same-head",
+    )
+
+    with pytest.raises(RuntimeError, match="outside requested editable overlay"):
+        _validated_child_provenance(attestation, overlay=str(overlay))
+
+
+def test_start_mindroom_uses_editable_overlay_and_persists_each_pid(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The attested nio path must remain inside its requested Git checkout."""
+    stack = ManagedTuwunelStack(state_root=tmp_path / "state")
+    commands: list[list[str]] = []
+    manifests: list[dict[str, object]] = []
+
+    class FakeProcess:
+        pid = 4242
+
+        def poll(self) -> None:
+            return None
+
+    def popen(command: list[str], **_kwargs: object) -> FakeProcess:
+        commands.append(command)
+        return FakeProcess()
+
+    try:
+        stack._log_handle = io.StringIO()
+        stack.api_port = 18765
+        stack._env = {}
+        stack.storage_path.mkdir(parents=True)
+        (stack.storage_path / "matrix_state.yaml").write_text(
+            json.dumps({"rooms": {"lobby": {"room_id": "!room:example"}}}),
+            encoding="utf-8",
+        )
+        stack._wait_for_runtime_attestation = lambda: None  # type: ignore[method-assign]
+        stack._wait_for_url = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
+        stack._write_manifest = lambda **kwargs: manifests.append(kwargs)  # type: ignore[method-assign]
+        monkeypatch.setenv("MINDROOM_LIVE_FUZZ_UV_WITH", "/persistent/mindroom-nio")
+        monkeypatch.setattr("scripts.testing.fuzz_live_matrix.subprocess.Popen", popen)
+
+        stack._start_mindroom()
+
+        assert commands
+        assert commands[0][2:4] == ["--with-editable", "/persistent/mindroom-nio"]
+        assert manifests == [
+            {"state": "starting_mindroom", "mindroom_pid": 4242},
+            {"state": "ready", "mindroom_pid": 4242},
+        ]
+    finally:
+        stack.temp_dir.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_run_live_closes_every_client_without_masking_primary_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Client-close failures annotate, but never replace, the fuzz failure."""
+    closed: list[int] = []
+    clients: list[object] = []
+    primary = ValueError("primary fuzz failure")
+
+    class FakeClient:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            self.index = len(clients)
+            clients.append(self)
+
+        async def close(self) -> None:
+            closed.append(self.index)
+            if self.index == 0:
+                message = "close failed"
+                raise RuntimeError(message)
+
+    class FakeRunner:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        async def run(self) -> dict[str, object]:
+            raise primary
+
+    monkeypatch.setattr(live_fuzz, "LiveMatrixClient", FakeClient)
+    monkeypatch.setattr(live_fuzz, "LiveFuzzRunner", FakeRunner)
+    stack: Any = SimpleNamespace(
+        homeserver="http://matrix.invalid",
+        room_ids={"lobby": "!room:example"},
+        room_keys=("lobby",),
+        room_id="!room:example",
+    )
+    scenario = LiveFuzzScenario(thread_count=1, client_count=3, batches=())
+
+    with pytest.raises(ValueError, match="primary fuzz failure") as raised:
+        await live_fuzz._run_live(
+            stack,
+            scenario,
+            reply_timeout=1,
+            settle_seconds=0,
+        )
+
+    assert raised.value is primary
+    assert closed == [0, 1, 2]
+    assert any("Matrix client cleanup failures" in note for note in primary.__notes__)
+
+
+def test_pass_receipt_survives_bundle_discard(tmp_path: Path) -> None:
+    """A successful exact-head run keeps compact provenance after bulky cleanup."""
+    root = tmp_path / "artifacts"
+    bundle = FailureBundle.create(root, "run-pass", scenario=_bundle_scenario(), provenance={"parent": True})
+    provenance = {"mindroom_revision": "abc", "nio_revision": "def"}
+
+    receipt = bundle.retain_pass_receipt({"status": "PASS"}, provenance)
+    bundle.discard()
+
+    assert receipt.exists()
+    payload = json.loads(receipt.read_text(encoding="utf-8"))
+    assert payload["cleanup"] == "PASS"
+    assert payload["result"]["status"] == "PASS"
+    assert payload["provenance"] == provenance
+    assert len(payload["scenario_sha256"]) == 64
+
+
+def test_stack_close_attempts_every_stage_after_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One teardown failure must not skip later cleanup stages."""
+    events: list[str] = []
+
+    class FakeLog:
+        closed = False
+
+        def close(self) -> None:
+            events.append("log")
+            self.closed = True
+
+    class FakeServer:
+        def shutdown(self) -> None:
+            events.append("shutdown")
+            message = "shutdown failed"
+            raise RuntimeError(message)
+
+        def server_close(self) -> None:
+            events.append("server_close")
+
+    class FakeThread:
+        def join(self, *, timeout: float) -> None:
+            assert timeout == 5
+            events.append("thread")
+
+        def is_alive(self) -> bool:
+            return False
+
+    class FakeTempDir:
+        def cleanup(self) -> None:
+            events.append("temp")
+
+    stack = object.__new__(ManagedTuwunelStack)
+
+    def stop_mindroom() -> None:
+        events.append("mindroom")
+        message = "stop failed"
+        raise RuntimeError(message)
+
+    stack._stop_mindroom = stop_mindroom  # type: ignore[method-assign]
+    stack._log_handle = FakeLog()
+    stack._model_server = FakeServer()
+    stack._model_thread = FakeThread()
+    stack._created = True
+    stack.instance_name = "fuzz-test"
+    stack.temp_dir = FakeTempDir()
+    stack._write_manifest = lambda **_kwargs: events.append("manifest")  # type: ignore[method-assign]
+    stack._release_host_lease = lambda: events.append("lease")  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        "scripts.testing.fuzz_live_matrix._run_command",
+        lambda *_args, **_kwargs: events.append("instance"),
+    )
+
+    with pytest.raises(ExceptionGroup) as raised:
+        stack.close()
+
+    assert events == [
+        "mindroom",
+        "log",
+        "shutdown",
+        "server_close",
+        "thread",
+        "instance",
+        "temp",
+        "manifest",
+        "lease",
+    ]
+    assert len(raised.value.exceptions) == 2
+
+
+def test_host_lease_excludes_second_live_stack(tmp_path: Path) -> None:
+    """Separate worktrees cannot allocate colliding Matrix ports concurrently."""
+    first = ManagedTuwunelStack(state_root=tmp_path / "state")
+    second = ManagedTuwunelStack(state_root=tmp_path / "state")
+    try:
+        first._acquire_host_lease()
+        with pytest.raises(RuntimeError, match="host-wide"):
+            second._acquire_host_lease()
+        first._release_host_lease()
+        second._acquire_host_lease()
+    finally:
+        first._release_host_lease()
+        second._release_host_lease()
+        first.temp_dir.cleanup()
+        second.temp_dir.cleanup()
+
+
+def test_live_stack_manifest_is_atomic_and_recoverable(tmp_path: Path) -> None:
+    """Durable manifest names the exact instance and evidence directory."""
+    artifact = tmp_path / "artifacts" / "run"
+    stack = ManagedTuwunelStack(
+        state_root=tmp_path / "state",
+        artifact_directory=artifact,
+    )
+    try:
+        stack._write_manifest(
+            state="ready",
+            matrix_port=18008,
+            api_port=18765,
+            mindroom_pid=1234,
+        )
+        payload = json.loads(stack.manifest_path.read_text(encoding="utf-8"))
+
+        assert payload["instance_name"] == stack.instance_name
+        assert payload["artifact_directory"] == str(artifact)
+        assert payload["state"] == "ready"
+        assert payload["matrix_port"] == 18008
+        assert payload["api_port"] == 18765
+        assert payload["mindroom_pid"] == 1234
+        assert not stack.manifest_path.with_suffix(".tmp").exists()
+    finally:
+        stack.temp_dir.cleanup()
+
+
+def test_abandoned_manifest_recovery_is_registry_aware_and_kills_exact_group(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stale cleanup error cannot make an already-removed instance block forever."""
+    state_root = tmp_path / "state"
+    old_root = tmp_path / "old-worktree"
+    registry_path = old_root / "local" / "instances" / "deploy" / "instances.json"
+    registry_path.parent.mkdir(parents=True)
+    registry_path.write_text(json.dumps({"instances": {}}), encoding="utf-8")
+    manifest_path = state_root / "runs" / "fuzz-old.json"
+    manifest_path.parent.mkdir(parents=True)
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "instance_name": "fuzz-old",
+                "project_root": str(old_root),
+                "state": "cleanup_failed",
+                "mindroom_pid": 4242,
+                "mindroom_command_marker": "/persistent/attestation.json",
+            },
+        ),
+        encoding="utf-8",
+    )
+    stack = ManagedTuwunelStack(state_root=state_root)
+    events: list[str] = []
+    try:
+        monkeypatch.setattr(
+            stack,
+            "_terminate_recorded_mindroom",
+            lambda _payload: events.append("process"),
+        )
+        monkeypatch.setattr(
+            "scripts.testing.fuzz_live_matrix._run_command",
+            lambda *_args, **_kwargs: events.append("instance"),
+        )
+
+        stack._recover_abandoned_runs()
+
+        assert events == ["process"]
+        assert json.loads(manifest_path.read_text(encoding="utf-8"))["state"] == "recovered"
+    finally:
+        stack.temp_dir.cleanup()
+
+
+def test_abandoned_process_group_requires_exact_command_marker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Crash recovery kills only the process group named by its durable manifest."""
+    ps_result = SimpleNamespace(
+        stdout=(
+            " 4242 4242 uv run python /repo/fuzz_live_matrix.py "
+            "__mindroom_runtime_child__ /persistent/attestation.json run\n"
+            " 4243 4242 python mindroom-worker\n"
+        ),
+    )
+    monkeypatch.setattr(
+        "scripts.testing.fuzz_live_matrix.subprocess.run",
+        lambda *_args, **_kwargs: ps_result,
+    )
+    signals: list[tuple[int, signal.Signals]] = []
+    monkeypatch.setattr("scripts.testing.fuzz_live_matrix.os.killpg", lambda pid, sig: signals.append((pid, sig)))
+
+    ManagedTuwunelStack._terminate_recorded_mindroom(
+        {
+            "mindroom_pid": 4242,
+            "mindroom_command_marker": "/persistent/attestation.json",
+        },
+    )
+
+    assert signals == [(4242, signal.SIGKILL)]
+
+
 def test_failure_bundle_interleaves_lifecycle_boundaries(tmp_path: Path) -> None:
     """Codex #5: restarts and outages appear in the realized sequence.
 
@@ -1892,6 +2758,89 @@ async def test_apply_batch_returns_results_in_true_completion_order() -> None:
 
     # Thread 2 (listed second) resolves first, so it leads the completion order.
     assert [operation.thread for operation, _event_id, _payload in results] == [2, 0]
+
+
+@pytest.mark.asyncio
+async def test_apply_batch_journals_landed_sibling_before_failure() -> None:
+    """A failed concurrent sibling must not erase an already-landed mutation."""
+    runner = object.__new__(LiveFuzzRunner)
+    runner.operation_count = 0
+    runner._realized_sequence = 0
+    runner.event_ids = {}
+    runner.sent_payloads = {}
+    runner._mindroom_running = True
+    journal: list[dict[str, object]] = []
+    runner._journal = journal.append
+    landed = asyncio.Event()
+    blocker_started = asyncio.Event()
+    blocker_cancelled = asyncio.Event()
+    never = asyncio.Event()
+
+    async def fake_apply(
+        operation: LiveOperation,
+    ) -> tuple[LiveOperation, str | None, None]:
+        if operation.thread == 0:
+            landed.set()
+            return operation, "$landed", None
+        if operation.thread == 1:
+            await landed.wait()
+            await blocker_started.wait()
+            message = "sibling failed"
+            raise RuntimeError(message)
+        blocker_started.set()
+        try:
+            await never.wait()
+        finally:
+            blocker_cancelled.set()
+
+    runner._apply = fake_apply  # type: ignore[method-assign]
+    batch = (
+        LiveOperation(0, LiveOperationKind.THREAD_MESSAGE, 0, None),
+        LiveOperation(1, LiveOperationKind.THREAD_MESSAGE, 1, None),
+        LiveOperation(2, LiveOperationKind.THREAD_MESSAGE, 2, None),
+    )
+
+    with pytest.raises(RuntimeError, match="sibling failed"):
+        await runner._apply_batch_in_completion_order(
+            batch,
+            on_complete=runner._record_batch_results,
+        )
+
+    assert runner.operation_count == 1
+    assert runner.event_ids == {"op:0": "$landed"}
+    assert [entry["event_id"] for entry in journal] == ["$landed"]
+    assert blocker_cancelled.is_set()
+
+
+@pytest.mark.asyncio
+async def test_apply_batch_records_success_when_failure_is_observed_first() -> None:
+    """A failed task cannot hide another task that already returned success."""
+    runner = object.__new__(LiveFuzzRunner)
+    recorded: list[str] = []
+
+    async def fake_apply(
+        operation: LiveOperation,
+    ) -> tuple[LiveOperation, str | None, None]:
+        if operation.thread == 0:
+            message = "first task failed"
+            raise RuntimeError(message)
+        return operation, "$landed", None
+
+    def record(
+        results: Collection[tuple[LiveOperation, str | None, object]],
+    ) -> None:
+        recorded.extend(event_id for _operation, event_id, _payload in results if event_id is not None)
+
+    runner._apply = fake_apply  # type: ignore[method-assign]
+    batch = (
+        LiveOperation(0, LiveOperationKind.THREAD_MESSAGE, 0, None),
+        LiveOperation(1, LiveOperationKind.THREAD_MESSAGE, 1, None),
+    )
+
+    with pytest.raises(RuntimeError, match="first task failed"):
+        await runner._apply_batch_in_completion_order(batch, on_complete=record)
+
+    assert recorded == ["$landed"]
 
 
 @pytest.mark.asyncio

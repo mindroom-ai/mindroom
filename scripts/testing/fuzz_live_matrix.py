@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import fcntl
 import hashlib
 import itertools
 import json
@@ -24,13 +25,13 @@ import re
 import secrets
 import shutil
 import signal
-import socket
 import subprocess
 import sys
 import tempfile
 import threading
 import time
 from collections import defaultdict
+from contextlib import suppress
 from dataclasses import asdict, dataclass
 from enum import StrEnum
 from http import HTTPStatus
@@ -41,8 +42,10 @@ from typing import TYPE_CHECKING, Any, ClassVar, cast
 from urllib.parse import quote
 
 import httpx
+import nio
 import yaml
 
+import mindroom
 from mindroom.dispatch_source import AUTO_RESUME_MESSAGE
 from mindroom.handled_turns import TurnRecord, TurnRecordCodec
 from mindroom.streaming import INTERRUPTED_RESPONSE_NOTE, RESTART_INTERRUPTED_RESPONSE_NOTE
@@ -53,9 +56,11 @@ if TYPE_CHECKING:
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 INSTANCE_REGISTRY = PROJECT_ROOT / "local" / "instances" / "deploy" / "instances.json"
+DEFAULT_LIVE_FUZZ_STATE_ROOT = Path.home() / ".mindroom" / "live-fuzz"
 MODEL_ID = "mindroom-live-fuzz"
 AGENT_NAME = "general"
 ROOM_KEY = "lobby"
+LIFECYCLE_COMMAND_TIMEOUT_SECONDS = 180.0
 
 
 def _required_int(value: Mapping[str, object], key: str) -> int:
@@ -167,7 +172,7 @@ class LiveFuzzScenario:
     room_count: int = 1
 
     def to_json(self) -> str:
-        """Serialize the complete trace for exact replay on a fresh server."""
+        """Serialize the complete logical workload for replay on a fresh server."""
         return json.dumps(
             {
                 "version": 1,
@@ -251,6 +256,7 @@ class LiveFuzzScenario:
             return
         self._validate_reply_uniqueness(batch)
         self._validate_edit_uniqueness(batch)
+        self._validate_redaction_uniqueness(batch)
         self._validate_redaction_response_races(batch, state)
         for operation in batch:
             self._validate_mutation_operation(operation, state)
@@ -278,6 +284,13 @@ class LiveFuzzScenario:
         edited = [operation.target for operation in batch if operation.kind is LiveOperationKind.EDIT]
         if len(edited) != len(set(edited)):
             msg = "one source may be edited at most once per batch"
+            raise ValueError(msg)
+
+    def _validate_redaction_uniqueness(self, batch: tuple[LiveOperation, ...]) -> None:
+        """Reject duplicate concurrent redactions with nondeterministic provenance."""
+        redacted = [operation.target for operation in batch if operation.kind is LiveOperationKind.REDACTION]
+        if len(redacted) != len(set(redacted)):
+            msg = "one event may be redacted at most once per batch"
             raise ValueError(msg)
 
     def _register_batch_events(self, batch: tuple[LiveOperation, ...], state: _ValidationState) -> None:
@@ -446,6 +459,7 @@ def _choose_operation(
     operation_id: int,
     thread_count: int,
     batch_edited: set[str],
+    batch_redacted: set[str],
 ) -> LiveOperation:
     thread = randomizer.randrange(thread_count)
     kind = randomizer.choice(_WEIGHTED_KINDS)
@@ -454,7 +468,9 @@ def _choose_operation(
     available_edits = [
         target for target in state.editable[thread] if target not in state.redacted and target not in batch_edited
     ]
-    available_redactions = [target for target in state.redactable[thread] if target not in state.redacted]
+    available_redactions = [
+        target for target in state.redactable[thread] if target not in state.redacted and target not in batch_redacted
+    ]
     available_retries = [target for target in state.messages[thread] if target not in state.redacted]
 
     if kind is LiveOperationKind.THREAD_MESSAGE:
@@ -540,6 +556,7 @@ def live_scenario_from_seed(
         operations: list[LiveOperation] = []
         reply_threads: set[int] = set()
         batch_edited: set[str] = set()
+        batch_redacted: set[str] = set()
         for offset in range(batch_size):
             operation = _choose_operation(
                 randomizer,
@@ -547,6 +564,7 @@ def live_scenario_from_seed(
                 operation_id=operation_id + offset,
                 thread_count=thread_count,
                 batch_edited=batch_edited,
+                batch_redacted=batch_redacted,
             )
             needs_reply = operation.kind in {
                 LiveOperationKind.THREAD_MESSAGE,
@@ -566,6 +584,9 @@ def live_scenario_from_seed(
             elif operation.kind is LiveOperationKind.EDIT:
                 assert operation.target is not None
                 batch_edited.add(operation.target)
+            elif operation.kind is LiveOperationKind.REDACTION:
+                assert operation.target is not None
+                batch_redacted.add(operation.target)
         operation_id += batch_size
 
         batches.append(tuple(operations))
@@ -704,6 +725,7 @@ def _choose_chaos_operation(
         target
         for target in state.redactable[thread]
         if target not in state.redacted
+        and target not in batch_redacted
         # Never race a redaction against a same-batch target of its own
         # unsettled response, or the resolver could wait forever.
         and not (target in batch_response_sources and f"response:{target}" not in state.settled_responses)
@@ -1081,7 +1103,13 @@ class _ModelHandler(BaseHTTPRequestHandler):
         if self._is_slow_call(call_id) and self.first_token_delay > 0:
             time.sleep(self.first_token_delay)
         if payload.get("stream") is True:
-            self._send_stream(call_id, content)
+            try:
+                self._send_stream(call_id, content)
+            except OSError:
+                # Chaos intentionally kills MindRoom with model streams in
+                # flight. The abandoned HTTP connection is expected and must
+                # not escape from the request-handler thread.
+                self.close_connection = True
             return
         self._send_json(
             {
@@ -1165,24 +1193,48 @@ class _ModelHandler(BaseHTTPRequestHandler):
         """Keep hundreds of deterministic model calls out of test output."""
 
 
-def _available_port() -> int:
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return cast("int", sock.getsockname()[1])
-
-
-def _run_command(*command: str) -> str:
-    result = subprocess.run(
+def _run_command(
+    *command: str,
+    timeout_seconds: float = LIFECYCLE_COMMAND_TIMEOUT_SECONDS,
+    cwd: Path = PROJECT_ROOT,
+) -> str:
+    """Run one bounded lifecycle command in its own killable process group."""
+    process = subprocess.Popen(
         command,
-        check=False,
-        cwd=PROJECT_ROOT,
-        capture_output=True,
+        cwd=cwd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
+        start_new_session=True,
     )
-    if result.returncode:
-        msg = f"command failed ({' '.join(command)}):\n{result.stdout}\n{result.stderr}"
+    try:
+        stdout, stderr = process.communicate(timeout=timeout_seconds)
+    except subprocess.TimeoutExpired as exc:
+        with suppress(ProcessLookupError):
+            os.killpg(process.pid, signal.SIGKILL)
+        try:
+            stdout, stderr = process.communicate(timeout=10)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            stdout, stderr = process.communicate(timeout=5)
+        msg = f"command timed out ({' '.join(command)}):\n{stdout}\n{stderr}"
+        raise TimeoutError(msg) from exc
+    if process.returncode:
+        msg = f"command failed ({' '.join(command)}):\n{stdout}\n{stderr}"
         raise RuntimeError(msg)
-    return result.stdout
+    return stdout
+
+
+def _attempt_cleanup(
+    errors: list[Exception],
+    label: str,
+    action: Callable[[], object],
+) -> None:
+    """Run one teardown stage while retaining its failure."""
+    try:
+        action()
+    except Exception as exc:
+        errors.append(RuntimeError(f"{label}: {exc}"))
 
 
 @dataclass(frozen=True, slots=True)
@@ -1205,17 +1257,25 @@ class ManagedTuwunelStack:
         *,
         stream_profile: StreamProfile | None = None,
         room_keys: tuple[str, ...] = (ROOM_KEY,),
+        provenance_sink: Callable[[Mapping[str, object]], None] | None = None,
+        artifact_directory: Path | None = None,
+        state_root: Path = DEFAULT_LIVE_FUZZ_STATE_ROOT,
     ) -> None:
         token = secrets.token_hex(4)
         self._stream_profile = stream_profile or StreamProfile()
         self.instance_name = f"fuzz{token}"
         self.namespace = self.instance_name
+        self.state_root = state_root
+        self.manifest_path = state_root / "runs" / f"{self.instance_name}.json"
+        self.artifact_directory = artifact_directory
         self.temp_dir = tempfile.TemporaryDirectory(prefix="mindroom-live-matrix-fuzz-")
         self.root = Path(self.temp_dir.name)
         self.storage_path = self.root / "mindroom_data"
         self.config_path = self.root / "config.yaml"
         self.log_path = self.root / "mindroom.log"
-        self.api_port = _available_port()
+        self.attestation_path = self.root / "runtime-attestation.json"
+        self.runtime_provenance: dict[str, object] | None = None
+        self.api_port = 0
         self.homeserver = ""
         self.server_name = ""
         self.room_keys = room_keys
@@ -1229,14 +1289,134 @@ class ManagedTuwunelStack:
         self._mindroom_process: subprocess.Popen[str] | None = None
         self._log_handle: TextIOWrapper | None = None
         self._env: dict[str, str] = {}
+        self._provenance_sink = provenance_sink
+        self._host_lease: TextIOWrapper | None = None
+
+    def _acquire_host_lease(self) -> None:
+        """Serialize live stacks across worktrees and retain crash ownership."""
+        self.state_root.mkdir(parents=True, exist_ok=True)
+        lease = (self.state_root / "host.lock").open("a+", encoding="utf-8")
+        try:
+            fcntl.flock(lease.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            lease.close()
+            msg = "another host-wide MindRoom live fuzz stack owns the durable lease"
+            raise RuntimeError(msg) from None
+        self._host_lease = lease
+
+    def _write_manifest(self, *, state: str, **fields: object) -> None:
+        """Atomically persist exact resources for crash recovery."""
+        self.manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        payload: dict[str, object] = {}
+        if self.manifest_path.exists():
+            existing = json.loads(self.manifest_path.read_text(encoding="utf-8"))
+            if isinstance(existing, dict):
+                payload.update(existing)
+        payload.update(
+            {
+                "artifact_directory": str(self.artifact_directory) if self.artifact_directory is not None else None,
+                "harness_pid": os.getpid(),
+                "instance_name": self.instance_name,
+                "mindroom_command_marker": str(self.attestation_path),
+                "project_root": str(PROJECT_ROOT),
+                "state": state,
+                **fields,
+            },
+        )
+        temporary = self.manifest_path.with_suffix(".tmp")
+        temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        temporary.replace(self.manifest_path)
+
+    def _recover_abandoned_runs(self) -> None:
+        """Remove exact resources left by a prior lease owner that crashed."""
+        runs = self.state_root / "runs"
+        if not runs.exists():
+            return
+        for manifest_path in sorted(runs.glob("fuzz*.json")):
+            if manifest_path == self.manifest_path:
+                continue
+            payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict) or payload.get("state") in {"closed", "recovered"}:
+                continue
+            instance_name = payload.get("instance_name")
+            project_root = payload.get("project_root")
+            if (
+                not isinstance(instance_name, str)
+                or not instance_name.startswith("fuzz")
+                or not isinstance(project_root, str)
+            ):
+                msg = f"invalid abandoned live-fuzz manifest: {manifest_path}"
+                raise RuntimeError(msg)
+            old_root = Path(project_root)
+            if not old_root.exists():
+                msg = f"abandoned live-fuzz worktree is unavailable: {old_root}"
+                raise RuntimeError(msg)
+            self._terminate_recorded_mindroom(payload)
+            registry_path = old_root / "local" / "instances" / "deploy" / "instances.json"
+            registry = json.loads(registry_path.read_text(encoding="utf-8")) if registry_path.exists() else {}
+            instances = registry.get("instances", {}) if isinstance(registry, dict) else {}
+            if isinstance(instances, dict) and instance_name in instances:
+                _run_command(
+                    "just",
+                    "local-instances-remove",
+                    instance_name,
+                    cwd=old_root,
+                )
+            payload["state"] = "recovered"
+            temporary = manifest_path.with_suffix(".tmp")
+            temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            temporary.replace(manifest_path)
+
+    @staticmethod
+    def _terminate_recorded_mindroom(payload: Mapping[str, object]) -> None:
+        """Kill only the exact attested process group retained by one manifest."""
+        pid = payload.get("mindroom_pid")
+        marker = payload.get("mindroom_command_marker")
+        if not isinstance(pid, int) or not isinstance(marker, str):
+            return
+        result = subprocess.run(
+            ("ps", "-axo", "pid=,pgid=,command="),
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        group_commands: list[str] = []
+        for line in result.stdout.splitlines():
+            fields = line.strip().split(maxsplit=2)
+            if len(fields) != 3:
+                continue
+            _, pgid, command = fields
+            if pgid.isdigit() and int(pgid) == pid:
+                group_commands.append(command)
+        if not group_commands:
+            return
+        if not any(marker in command and "__mindroom_runtime_child__" in command for command in group_commands):
+            msg = f"refusing to kill unverified abandoned process group {pid}"
+            raise RuntimeError(msg)
+        with suppress(ProcessLookupError):
+            os.killpg(pid, signal.SIGKILL)
+
+    def _release_host_lease(self) -> None:
+        """Release the host lease after exact resource cleanup is attempted."""
+        lease = self._host_lease
+        if lease is None:
+            return
+        fcntl.flock(lease.fileno(), fcntl.LOCK_UN)
+        lease.close()
+        self._host_lease = None
 
     def start(self) -> None:
         """Create every live dependency and wait for the managed room."""
+        self._acquire_host_lease()
+        self._recover_abandoned_runs()
+        self._write_manifest(state="creating")
         _run_command("just", "local-instances-create", self.instance_name, "tuwunel")
         self._created = True
         registry = json.loads(INSTANCE_REGISTRY.read_text(encoding="utf-8"))
         instance = registry["instances"][self.instance_name]
         matrix_port = int(instance["matrix_port"])
+        self.api_port = int(instance["mindroom_port"])
         domain = str(instance["domain"])
         self.homeserver = f"http://127.0.0.1:{matrix_port}"
         self.server_name = f"m-{domain}"
@@ -1261,6 +1441,12 @@ class ManagedTuwunelStack:
         }
         self._log_handle = self.log_path.open("a", encoding="utf-8")
         self._start_mindroom()
+        self._write_manifest(
+            state="ready",
+            matrix_port=matrix_port,
+            api_port=self.api_port,
+            mindroom_pid=self._mindroom_process.pid if self._mindroom_process is not None else None,
+        )
 
     def restart_mindroom(self) -> None:
         """Restart only MindRoom while preserving its cache and Matrix account."""
@@ -1295,22 +1481,49 @@ class ManagedTuwunelStack:
         self._wait_for_url(f"{self.homeserver}/_matrix/client/versions", timeout=60)
 
     def close(self) -> None:
-        """Stop child processes and delete the exact disposable instance."""
-        self._stop_mindroom()
+        """Attempt every teardown stage and report all cleanup failures."""
+        errors: list[Exception] = []
+
+        _attempt_cleanup(errors, "stop MindRoom", self._stop_mindroom)
         if self._log_handle is not None:
-            self._log_handle.close()
-            self._log_handle = None
+            handle = self._log_handle
+            _attempt_cleanup(errors, "close MindRoom log", handle.close)
+            if handle.closed:
+                self._log_handle = None
         if self._model_server is not None:
-            self._model_server.shutdown()
-            self._model_server.server_close()
+            server = self._model_server
+            _attempt_cleanup(errors, "stop model server", server.shutdown)
+            _attempt_cleanup(errors, "close model server", server.server_close)
             self._model_server = None
         if self._model_thread is not None:
-            self._model_thread.join(timeout=5)
-            self._model_thread = None
+            thread = self._model_thread
+            _attempt_cleanup(errors, "join model server thread", lambda: thread.join(timeout=5))
+            if thread.is_alive():
+                errors.append(RuntimeError("join model server thread: thread remained alive"))
+            else:
+                self._model_thread = None
         if self._created:
-            _run_command("just", "local-instances-remove", self.instance_name)
-            self._created = False
-        self.temp_dir.cleanup()
+            _attempt_cleanup(
+                errors,
+                "remove Tuwunel instance",
+                lambda: _run_command("just", "local-instances-remove", self.instance_name),
+            )
+            if not any(str(error).startswith("remove Tuwunel instance:") for error in errors):
+                self._created = False
+        _attempt_cleanup(errors, "remove temporary stack storage", self.temp_dir.cleanup)
+        cleanup_state = "cleanup_failed" if errors else "closed"
+        _attempt_cleanup(
+            errors,
+            "write cleanup manifest",
+            lambda: self._write_manifest(
+                state=cleanup_state,
+                cleanup_errors=[str(error) for error in errors],
+            ),
+        )
+        _attempt_cleanup(errors, "release host lease", self._release_host_lease)
+        if errors:
+            message = "live Matrix fuzz cleanup failed"
+            raise ExceptionGroup(message, errors)
 
     def log_tail(self, lines: int = 80) -> str:
         """Return recent MindRoom output when a live invariant fails."""
@@ -1416,13 +1629,17 @@ class ManagedTuwunelStack:
         # MINDROOM_LIVE_FUZZ_UV_WITH overlays one dependency (for example a
         # pinned mindroom-nio checkout) without touching pyproject or uv.lock.
         overlay = os.environ.get("MINDROOM_LIVE_FUZZ_UV_WITH")
-        overlay_args = ("--with", overlay) if overlay else ()
+        overlay_args = ("--with-editable", overlay) if overlay else ()
+        self.attestation_path.unlink(missing_ok=True)
         self._mindroom_process = subprocess.Popen(
             [
                 "uv",
                 "run",
                 *overlay_args,
-                "mindroom",
+                "python",
+                str(Path(__file__).resolve()),
+                "__mindroom_runtime_child__",
+                str(self.attestation_path),
                 "run",
                 "--api-port",
                 str(self.api_port),
@@ -1434,7 +1651,13 @@ class ManagedTuwunelStack:
             stdout=self._log_handle,
             stderr=subprocess.STDOUT,
             text=True,
+            start_new_session=True,
         )
+        self._write_manifest(
+            state="starting_mindroom",
+            mindroom_pid=self._mindroom_process.pid,
+        )
+        self._wait_for_runtime_attestation()
         self._wait_for_url(f"http://127.0.0.1:{self.api_port}/api/health", timeout=60)
         state_path = self.storage_path / "matrix_state.yaml"
         deadline = time.monotonic() + 60
@@ -1454,26 +1677,53 @@ class ManagedTuwunelStack:
                 if len(room_ids) == len(self.room_keys):
                     self.room_ids = room_ids
                     self.room_id = room_ids[self.room_keys[0]]
+                    self._write_manifest(
+                        state="ready",
+                        mindroom_pid=self._mindroom_process.pid,
+                    )
                     return
             time.sleep(0.2)
         msg = f"MindRoom did not create all of {self.room_keys!r}:\n{self.log_tail()}"
+        raise TimeoutError(msg)
+
+    def _wait_for_runtime_attestation(self) -> None:
+        """Capture and validate the exact modules loaded by the spawned child."""
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            if self.attestation_path.exists():
+                self.runtime_provenance = _validated_child_provenance(
+                    self.attestation_path,
+                    overlay=os.environ.get("MINDROOM_LIVE_FUZZ_UV_WITH"),
+                )
+                if self._provenance_sink is not None:
+                    self._provenance_sink(self.runtime_provenance)
+                return
+            if self._mindroom_process is not None and self._mindroom_process.poll() is not None:
+                msg = f"MindRoom exited before runtime attestation:\n{self.log_tail()}"
+                raise RuntimeError(msg)
+            time.sleep(0.05)
+        msg = "MindRoom child did not attest loaded runtime paths"
         raise TimeoutError(msg)
 
     def _stop_mindroom(self, *, kill: bool = False) -> None:
         process = self._mindroom_process
         if process is None:
             return
-        if process.poll() is None:
-            if kill:
-                process.kill()
+        running = process.poll() is None
+        if kill or not running:
+            with suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGKILL)
+            if running:
                 process.wait(timeout=10)
-            else:
-                process.send_signal(signal.SIGINT)
-                try:
-                    process.wait(timeout=20)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait(timeout=10)
+        else:
+            with suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGINT)
+            try:
+                process.wait(timeout=20)
+            except subprocess.TimeoutExpired:
+                with suppress(ProcessLookupError):
+                    os.killpg(process.pid, signal.SIGKILL)
+                process.wait(timeout=10)
         self._mindroom_process = None
 
     @staticmethod
@@ -1507,6 +1757,7 @@ class LiveMatrixClient:
         self.room_ids = room_ids or (room_id,)
         self.http = httpx.AsyncClient(timeout=30)
         self.access_token = ""
+        self.user_id = ""
         self.next_batch: str | None = None
         self.seen_events: dict[str, dict[str, Any]] = {}
         self.transport_retry_seconds = 0.0
@@ -1541,6 +1792,7 @@ class LiveMatrixClient:
             msg = "Matrix registration omitted access_token or user_id"
             raise TypeError(msg)
         self.access_token = token
+        self.user_id = user_id
         return user_id
 
     async def join_room(self) -> None:
@@ -1769,7 +2021,7 @@ class ExactReplyOracle:
         # Newest visible body per agent reply (keyed by the reply event id),
         # folding in `m.replace` edits so settlement can tell a still-streaming
         # placeholder apart from a completed canonical body.
-        self.latest_reply_bodies: dict[str, tuple[int, str]] = {}
+        self.latest_reply_bodies: dict[str, tuple[tuple[int, int, str], str]] = {}
         self.seen_event_ids: set[str] = set()
         self.event_summaries: dict[str, dict[str, Any]] = {}
         self.sent_at: dict[str, float] = {}
@@ -2012,7 +2264,24 @@ class ExactReplyOracle:
             # router-authored event (a greeting, topic chatter, a malformed
             # recovery) would mask agent/router reply loops, so require the
             # canonical relay shape production emits: a threaded resume message.
-            if self._is_auto_resume_relay(event):
+            relay_target = _auto_resume_relay_target(
+                event,
+                relay_senders=self.internal_relay_senders,
+            )
+            target = self.event_summaries.get(relay_target[0], {}) if relay_target is not None else {}
+            target_relation = target.get("relates_to")
+            target_root = target_relation.get("event_id") if isinstance(target_relation, dict) else None
+            latest_target_body = self.latest_reply_bodies.get(relay_target[0]) if relay_target is not None else None
+            if (
+                relay_target is not None
+                and target.get("sender") == self.agent_id
+                and target.get("type") == "m.room.message"
+                and target_root == relay_target[1]
+                and latest_target_body is not None
+                and latest_target_body[1].endswith(
+                    (INTERRUPTED_RESPONSE_NOTE, RESTART_INTERRUPTED_RESPONSE_NOTE),
+                )
+            ):
                 self.internal_source_ids.add(event_id)
             return
         if event.get("sender") != self.agent_id or event.get("type") != "m.room.message":
@@ -2043,30 +2312,6 @@ class ExactReplyOracle:
         if sent_at is not None and source_event_id not in self.reply_latencies:
             self.reply_latencies[source_event_id] = time.monotonic() - sent_at
 
-    @staticmethod
-    def _is_auto_resume_relay(event: Mapping[str, Any]) -> bool:
-        """Whether one relay-sender event is a structurally valid resume relay.
-
-        Production posts an auto-resume relay as a threaded ``m.room.message``
-        whose body carries ``AUTO_RESUME_MESSAGE`` and whose ``m.relates_to``
-        replies (``m.in_reply_to``) to the interrupted agent response. Any
-        other router-authored event is ordinary room traffic and must not
-        exempt agent replies from the wrong-reply invariant.
-        """
-        if event.get("type") != "m.room.message":
-            return False
-        content = event.get("content")
-        if not isinstance(content, dict):
-            return False
-        body = content.get("body")
-        if not isinstance(body, str) or AUTO_RESUME_MESSAGE not in body:
-            return False
-        relation = content.get("m.relates_to")
-        if not isinstance(relation, dict) or relation.get("rel_type") != "m.thread":
-            return False
-        in_reply_to = relation.get("m.in_reply_to")
-        return isinstance(in_reply_to, dict) and isinstance(in_reply_to.get("event_id"), str)
-
     def _track_reply_body(
         self,
         event_id: str,
@@ -2092,10 +2337,10 @@ class ExactReplyOracle:
         if not isinstance(body, str):
             return False
         timestamp = self.event_summaries.get(event_id, {}).get("origin_server_ts")
-        ordinal = timestamp if isinstance(timestamp, int) else len(self.seen_event_ids)
+        order = _replacement_order(event_id, timestamp, is_edit=is_edit)
         current = self.latest_reply_bodies.get(reply_event_id)
-        if current is None or ordinal >= current[0]:
-            self.latest_reply_bodies[reply_event_id] = (ordinal, body)
+        if current is None or order >= current[0]:
+            self.latest_reply_bodies[reply_event_id] = (order, body)
         return True
 
     def _reply_body_complete(self, body: str) -> bool:
@@ -2187,6 +2432,8 @@ class _SentRecord:
     event_id: str
     room_id: str
     event_type: str
+    sender: str | None = None
+    redacts: str | None = None
     reaction_key: str | None = None
     # The exact ``content`` dict the fuzzer sent. The final audit compares this
     # verbatim against the paginated homeserver copy, so a wrong body, dropped
@@ -2198,6 +2445,36 @@ class _SentRecord:
 
 
 _CALL_ID_PREFIX = "LIVE-FUZZ call="
+
+
+def _replacement_order(event_id: str, timestamp: object, *, is_edit: bool) -> tuple[int, int, str]:
+    """Return one canonical total order for an original and its replacements."""
+    return (int(is_edit), timestamp if isinstance(timestamp, int) else 0, event_id)
+
+
+def _auto_resume_relay_target(
+    event: Mapping[str, Any],
+    *,
+    relay_senders: Collection[str],
+) -> tuple[str, str] | None:
+    """Return the interrupted target and thread root for one exact resume relay."""
+    if event.get("sender") not in relay_senders or event.get("type") != "m.room.message":
+        return None
+    content = event.get("content")
+    if not isinstance(content, dict):
+        return None
+    body = content.get("body")
+    if not isinstance(body, str) or AUTO_RESUME_MESSAGE not in body:
+        return None
+    relation = content.get("m.relates_to")
+    if not isinstance(relation, dict) or relation.get("rel_type") != "m.thread":
+        return None
+    root = relation.get("event_id")
+    in_reply_to = relation.get("m.in_reply_to")
+    target = in_reply_to.get("event_id") if isinstance(in_reply_to, dict) else None
+    if not isinstance(root, str) or not isinstance(target, str):
+        return None
+    return target, root
 
 
 def _body_call_id(body: str) -> int | None:
@@ -2226,6 +2503,7 @@ class FinalStateAuditor:
         expected_body_for: Callable[[int], str],
         ledger_path: Path | None = None,
         source_current_markers: Mapping[str, str] | None = None,
+        source_revision_markers: Mapping[str, Mapping[str, str]] | None = None,
         observed_markers_for: Callable[[int], frozenset[str]] = _ModelHandler.observed_markers_for,
     ) -> None:
         self.client = client
@@ -2236,6 +2514,9 @@ class FinalStateAuditor:
         # Per source event id, the marker of the latest valid revision the runner
         # sent to Matrix. Empty when the run does not track revisions.
         self.source_current_markers = dict(source_current_markers or {})
+        self.source_revision_markers = {
+            source_event_id: dict(revisions) for source_event_id, revisions in (source_revision_markers or {}).items()
+        }
         self.observed_markers_for = observed_markers_for
 
     async def audit(
@@ -2243,7 +2524,7 @@ class FinalStateAuditor:
         *,
         room_ids: Collection[str],
         sent_records: Collection[_SentRecord],
-        redacted_targets: Collection[str],
+        redacted_targets: Mapping[str, str] | Collection[str],
     ) -> dict[str, int]:
         """Run every final-state assertion and return audit metrics."""
         events: dict[str, dict[str, Any]] = {}
@@ -2251,10 +2532,11 @@ class FinalStateAuditor:
             for event in await self.client.paginate_room(room_id):
                 event_id = event.get("event_id")
                 if isinstance(event_id, str) and event_id not in events:
-                    events[event_id] = event
-        redacted = set(redacted_targets)
+                    events[event_id] = {**event, "_audit_room_id": room_id}
+        redacted = dict(redacted_targets) if isinstance(redacted_targets, dict) else dict.fromkeys(redacted_targets, "")
+        self._resolve_source_revision_markers(events, redacted)
         self._assert_sent_events_canonical(events, sent_records, redacted)
-        replies = self._canonical_agent_replies(events)
+        replies = self._canonical_agent_replies(events, sent_records=sent_records)
         self._assert_reply_cardinality(replies)
         completed = self._assert_final_bodies_complete(events, replies)
         self._assert_sync_view_parity(events, sent_records, replies)
@@ -2269,41 +2551,136 @@ class FinalStateAuditor:
             **ledger_metrics,
         }
 
+    def _resolve_source_revision_markers(
+        self,
+        events: Mapping[str, Mapping[str, Any]],
+        redacted: Mapping[str, str],
+    ) -> None:
+        """Resolve each source's latest surviving edit from canonical Matrix order."""
+        for source_event_id, logical_ref in self.oracle.expected_sources.items():
+            self.source_current_markers[source_event_id] = _source_marker(logical_ref, ORIGINAL_REVISION)
+            revisions = self.source_revision_markers.get(source_event_id, {})
+            surviving = [
+                (
+                    _replacement_order(
+                        edit_event_id,
+                        events.get(edit_event_id, {}).get("origin_server_ts"),
+                        is_edit=True,
+                    ),
+                    marker,
+                )
+                for edit_event_id, marker in revisions.items()
+                if edit_event_id in events and edit_event_id not in redacted
+            ]
+            if surviving:
+                self.source_current_markers[source_event_id] = max(surviving)[1]
+
     def _assert_sent_events_canonical(
         self,
         events: Mapping[str, Mapping[str, Any]],
         sent_records: Collection[_SentRecord],
-        redacted: set[str],
+        redacted: Mapping[str, str] | Collection[str],
     ) -> None:
         """Every sent event survives verbatim, redactions prune, reactions stay visible."""
+        redaction_ids = dict(redacted) if isinstance(redacted, dict) else dict.fromkeys(redacted, "")
         problems: list[str] = []
         for record in sent_records:
             event = events.get(record.event_id)
             if event is None:
-                if record.event_id not in redacted:
-                    problems.append(f"missing from /messages: {record.event_id} ({record.event_type})")
+                problems.append(f"missing from /messages: {record.event_id} ({record.event_type})")
                 continue
-            content = event.get("content")
-            content = content if isinstance(content, dict) else {}
-            if record.event_id in redacted:
-                if content.get("body") is not None or content.get("m.relates_to") is not None:
-                    problems.append(f"redacted event kept visible content: {record.event_id}")
-                continue
-            # Matrix stores client ``content`` verbatim, so any divergence — a
-            # corrupted body, dropped marker, changed ``msgtype``, lost reply
-            # target, or retargeted annotation — is a real end-state defect.
-            if record.content is not None and content != dict(record.content):
-                problems.append(
-                    f"{record.event_type} {record.event_id} content diverged from sent payload: "
-                    f"expected {dict(record.content)!r}, got {content!r}",
-                )
+            problems.extend(self._sent_event_problems(record, event, redaction_ids))
         if problems:
             msg = f"final Matrix state audit failed: {problems}"
             raise AssertionError(msg)
 
-    def _canonical_agent_replies(self, events: Mapping[str, Mapping[str, Any]]) -> dict[str, set[str]]:
+    @staticmethod
+    def _sent_event_problems(
+        record: _SentRecord,
+        event: Mapping[str, Any],
+        redaction_ids: Mapping[str, str],
+    ) -> list[str]:
+        """Return canonical-state mismatches for one present event."""
+        problems: list[str] = []
+        content = event.get("content")
+        content = content if isinstance(content, dict) else {}
+        if event.get("_audit_room_id") != record.room_id:
+            problems.append(
+                f"{record.event_id} appeared in room {event.get('_audit_room_id')}, expected {record.room_id}",
+            )
+        if event.get("type") != record.event_type:
+            problems.append(
+                f"{record.event_id} has type {event.get('type')}, expected {record.event_type}",
+            )
+        if record.sender is not None and event.get("sender") != record.sender:
+            problems.append(
+                f"{record.event_id} has sender {event.get('sender')}, expected {record.sender}",
+            )
+        if record.redacts is not None:
+            problems.extend(FinalStateAuditor._redaction_event_problems(record, event, content))
+        if record.event_id in redaction_ids:
+            problems.extend(FinalStateAuditor._redaction_problems(record, event, content, redaction_ids))
+        elif record.redacts is None and record.content is not None and content != dict(record.content):
+            problems.append(
+                f"{record.event_type} {record.event_id} content diverged from sent payload: "
+                f"expected {dict(record.content)!r}, got {content!r}",
+            )
+        return problems
+
+    @staticmethod
+    def _redaction_event_problems(
+        record: _SentRecord,
+        event: Mapping[str, Any],
+        content: Mapping[str, Any],
+    ) -> list[str]:
+        """Validate pre-v11 and v11+ redaction event target placement."""
+        assert record.redacts is not None
+        top_level_target = event.get("redacts")
+        content_target = content.get("redacts")
+        targets = {target for target in (top_level_target, content_target) if isinstance(target, str)}
+        problems: list[str] = []
+        if targets != {record.redacts}:
+            problems.append(
+                f"{record.event_id} redacts {sorted(targets)}, expected {record.redacts}",
+            )
+        expected_reason = record.content.get("reason") if record.content is not None else None
+        if content.get("reason") != expected_reason:
+            problems.append(
+                f"{record.event_id} redaction reason is {content.get('reason')!r}, expected {expected_reason!r}",
+            )
+        return problems
+
+    @staticmethod
+    def _redaction_problems(
+        record: _SentRecord,
+        event: Mapping[str, Any],
+        content: Mapping[str, Any],
+        redaction_ids: Mapping[str, str],
+    ) -> list[str]:
+        """Return mismatches for one redacted event shell."""
+        problems: list[str] = []
+        if content:
+            problems.append(f"redacted event kept visible content: {record.event_id}: {dict(content)!r}")
+        redaction_event_id = redaction_ids[record.event_id]
+        unsigned = event.get("unsigned")
+        redacted_because = unsigned.get("redacted_because") if isinstance(unsigned, dict) else None
+        actual_redaction_id = redacted_because.get("event_id") if isinstance(redacted_because, dict) else None
+        if redaction_event_id and actual_redaction_id != redaction_event_id:
+            problems.append(
+                f"redacted event {record.event_id} points to {actual_redaction_id}, expected {redaction_event_id}",
+            )
+        return problems
+
+    def _canonical_agent_replies(
+        self,
+        events: Mapping[str, Mapping[str, Any]],
+        *,
+        sent_records: Collection[_SentRecord] = (),
+    ) -> dict[str, set[str]]:
         """Index canonical agent originals by source from the paginated view."""
+        records = {record.event_id: record for record in sent_records}
         replies: dict[str, set[str]] = defaultdict(set)
+        problems: list[str] = []
         for event_id, event in events.items():
             if event.get("sender") != self.agent_id or event.get("type") != "m.room.message":
                 continue
@@ -2316,8 +2693,62 @@ class FinalStateAuditor:
             reply = relation.get("m.in_reply_to")
             source_event_id = reply.get("event_id") if isinstance(reply, dict) else None
             if isinstance(source_event_id, str):
+                source_record = records.get(source_event_id)
+                source_event = events.get(source_event_id, {})
+                source_room = source_record.room_id if source_record is not None else source_event.get("_audit_room_id")
+                if isinstance(source_room, str) and event.get("_audit_room_id") != source_room:
+                    problems.append(
+                        f"agent reply {event_id} is in room {event.get('_audit_room_id')}, "
+                        f"but source {source_event_id} is in {source_room}",
+                    )
+                    continue
+                expected_root = self._source_thread_root(
+                    source_event_id,
+                    events,
+                    records,
+                    seen=set(),
+                )
+                if expected_root is not None and relation.get("event_id") != expected_root:
+                    problems.append(
+                        f"agent reply {event_id} uses thread root {relation.get('event_id')}, "
+                        f"expected {expected_root} for source {source_event_id}",
+                    )
+                    continue
                 replies[source_event_id].add(event_id)
+        if problems:
+            msg = f"final agent reply provenance audit failed: {problems}"
+            raise AssertionError(msg)
         return replies
+
+    @classmethod
+    def _source_thread_root(
+        cls,
+        event_id: str,
+        events: Mapping[str, Mapping[str, Any]],
+        records: Mapping[str, _SentRecord],
+        *,
+        seen: set[str],
+    ) -> str | None:
+        """Resolve one source's canonical thread root through reply ancestry."""
+        if event_id in seen:
+            return None
+        seen.add(event_id)
+        record = records.get(event_id)
+        event = events.get(event_id, {})
+        content: object = record.content if record is not None else event.get("content")
+        if not isinstance(content, dict):
+            return None
+        relation = content.get("m.relates_to")
+        if not isinstance(relation, dict):
+            return event_id
+        root = relation.get("event_id")
+        if relation.get("rel_type") == "m.thread" and isinstance(root, str):
+            return root
+        reply = relation.get("m.in_reply_to")
+        target = reply.get("event_id") if isinstance(reply, dict) else None
+        if isinstance(target, str):
+            return cls._source_thread_root(target, events, records, seen=seen)
+        return event_id
 
     def _assert_reply_cardinality(self, replies: Mapping[str, set[str]]) -> None:
         """Server-canonical replies must match the active reply model."""
@@ -2357,8 +2788,8 @@ class FinalStateAuditor:
         records = read_ledger_records(self.ledger_path)
 
         problems: list[str] = []
-        ledger_response_ids: set[str] = set()
-        attributed = 0
+        ledger_response_ids, attributed, optional_problems = self._attribute_optional_replies(replies, records)
+        problems.extend(optional_problems)
         superseded = 0
         for chain in oracle.chains.values():
             anchored = False
@@ -2367,6 +2798,11 @@ class FinalStateAuditor:
                     continue
                 logical_ref = oracle.expected_sources[source_event_id]
                 record = records.get(source_event_id)
+                if record is not None and source_event_id not in record.source_event_ids:
+                    problems.append(
+                        f"turn record keyed by {source_event_id} does not own that source: {record.source_event_ids}",
+                    )
+                    record = None
                 if record is not None and record.response_event_id is not None:
                     ledger_response_ids.add(record.response_event_id)
                     attributed += 1
@@ -2392,12 +2828,7 @@ class FinalStateAuditor:
             if source_event_id in oracle.expected_sources
             for reply_id in reply_ids
         }
-        required_reply_ids = {
-            reply_id
-            for source_event_id, reply_ids in replies.items()
-            if source_event_id in oracle.expected_sources and source_event_id not in oracle.optional_sources
-            for reply_id in reply_ids
-        }
+        required_reply_ids = all_expected_reply_ids
         problems.extend(
             f"ledger response {response_id} is not a visible canonical reply"
             for response_id in sorted(ledger_response_ids - all_expected_reply_ids)
@@ -2410,6 +2841,36 @@ class FinalStateAuditor:
             msg = f"durable turn attribution audit failed: {problems}"
             raise AssertionError(msg)
         return {"ledger_attributed_sources": attributed, "ledger_superseded_sources": superseded}
+
+    def _attribute_optional_replies(
+        self,
+        replies: Mapping[str, set[str]],
+        records: Mapping[str, TurnRecord],
+    ) -> tuple[set[str], int, list[str]]:
+        """Require attribution only when an optional source kept a visible reply."""
+        response_ids: set[str] = set()
+        problems: list[str] = []
+        for source_event_id in self.oracle.optional_sources:
+            visible_reply_ids = replies.get(source_event_id, set())
+            record = records.get(source_event_id)
+            if record is not None and source_event_id not in record.source_event_ids:
+                problems.append(
+                    f"turn record keyed by {source_event_id} does not own that source: {record.source_event_ids}",
+                )
+                record = None
+            if not visible_reply_ids:
+                if record is not None and record.response_event_id is not None:
+                    response_ids.add(record.response_event_id)
+                continue
+            logical_ref = self.oracle.expected_sources[source_event_id]
+            if record is None or record.response_event_id not in visible_reply_ids:
+                problems.append(
+                    f"visible optional-source reply for {logical_ref} ({source_event_id}) "
+                    "has no matching durable attribution",
+                )
+            else:
+                response_ids.add(record.response_event_id)
+        return response_ids, len(response_ids), problems
 
     def _assert_model_saw_current_sources(self, events: Mapping[str, Mapping[str, Any]]) -> None:
         """Every response-backed turn must be generated from its sources' current bodies.
@@ -2534,21 +2995,11 @@ class FinalStateAuditor:
         interrupted_event_id: str,
     ) -> bool:
         """A relay proves recovery only if it replies to ``interrupted_event_id``."""
-        if relay.get("sender") not in self.oracle.internal_relay_senders:
-            return False
-        if relay.get("type") != "m.room.message":
-            return False
-        content = relay.get("content")
-        if not isinstance(content, dict):
-            return False
-        relation = content.get("m.relates_to")
-        if not isinstance(relation, dict):
-            return False
-        if relation.get("rel_type") != "m.thread" or relation.get("event_id") != thread_root:
-            return False
-        in_reply_to = relation.get("m.in_reply_to")
-        target = in_reply_to.get("event_id") if isinstance(in_reply_to, dict) else None
-        return target == interrupted_event_id
+        target = _auto_resume_relay_target(
+            relay,
+            relay_senders=self.oracle.internal_relay_senders,
+        )
+        return target == (interrupted_event_id, thread_root)
 
     def _agent_response_completes_relay(
         self,
@@ -2592,7 +3043,7 @@ class FinalStateAuditor:
 
     def _latest_agent_body(self, events: Mapping[str, Mapping[str, Any]], reply_event_id: str) -> str:
         """Return the newest visible body for one agent reply."""
-        candidates: list[tuple[int, str, str]] = []
+        candidates: list[tuple[tuple[int, int, str], str]] = []
         for event_id, event in events.items():
             if event.get("sender") != self.agent_id:
                 continue
@@ -2613,8 +3064,8 @@ class FinalStateAuditor:
             body = body_source.get("body")
             if isinstance(body, str):
                 timestamp = event.get("origin_server_ts")
-                candidates.append((timestamp if isinstance(timestamp, int) else 0, event_id, body))
-        return max(candidates, default=(0, "", ""))[2]
+                candidates.append((_replacement_order(event_id, timestamp, is_edit=is_edit), body))
+        return max(candidates, default=((0, 0, ""), ""))[1]
 
     def _assert_sync_view_parity(
         self,
@@ -2675,11 +3126,15 @@ class LiveFuzzRunner:
         self.event_ids: dict[str, str] = {}
         self.sent_payloads: dict[str, _SentPayload] = {}
         self.sent_records: list[_SentRecord] = []
-        self.redacted_targets: set[str] = set()
+        # Maps every redacted event to the redaction event that removed it.
+        # The final audit requires both the redacted shell and its exact
+        # ``unsigned.redacted_because`` provenance.
+        self.redacted_targets: dict[str, str] = {}
         # Per source event id, the marker of the latest valid revision that
         # reached Matrix (``orig`` on send, the edit marker after an edit
         # revises it). The final audit binds each turn's model call to these.
         self.source_current_markers: dict[str, str] = {}
+        self.source_revision_markers: dict[str, dict[str, str]] = defaultdict(dict)
         # Per source event id, the ordered stack of surviving revisions as
         # ``(edit_event_id, marker)`` entries (bottom is ``(None, orig)``, each
         # applied edit pushes ``(its event id, its marker)``). Redacting an
@@ -2899,7 +3354,7 @@ class LiveFuzzRunner:
         response_event_id: str,
     ) -> str:
         """Return the newest original or edit body for one response."""
-        candidates: list[tuple[int, str]] = []
+        candidates: list[tuple[tuple[int, int, str], str]] = []
         for event in events:
             event_id = event.get("event_id")
             content = event.get("content")
@@ -2919,8 +3374,8 @@ class LiveFuzzRunner:
             body = body_source.get("body")
             if isinstance(body, str):
                 timestamp = event.get("origin_server_ts")
-                candidates.append((timestamp if isinstance(timestamp, int) else 0, body))
-        return max(candidates, default=(0, ""))[1]
+                candidates.append((_replacement_order(event_id, timestamp, is_edit=is_edit), body))
+        return max(candidates, default=((0, 0, ""), ""))[1]
 
     async def _run_batches(
         self,
@@ -2936,8 +3391,10 @@ class LiveFuzzRunner:
                 self.restart_count += 1
                 self._record_lifecycle(LiveOperationKind.RESTART_MINDROOM)
             else:
-                results = await self._apply_batch_in_completion_order(batch)
-                self._record_batch_results(results)
+                await self._apply_batch_in_completion_order(
+                    batch,
+                    on_complete=self._record_batch_results,
+                )
             try:
                 await self.oracle.wait_until_exact(
                     deadline_seconds=self.reply_timeout,
@@ -2960,17 +3417,42 @@ class LiveFuzzRunner:
     async def _apply_batch_in_completion_order(
         self,
         batch: tuple[LiveOperation, ...],
+        *,
+        on_complete: Callable[
+            [Collection[tuple[LiveOperation, str | None, _SentPayload | None]]],
+            None,
+        ]
+        | None = None,
     ) -> list[tuple[LiveOperation, str | None, _SentPayload | None]]:
         """Apply a batch concurrently, returning results in true completion order.
 
         ``asyncio.gather`` yields results in input order, which would make the
         durable journal misrepresent a nondeterministic race. Draining the
-        applies as they finish records each op the instant its send resolves, so
-        the trace reconstructs the actual completion sequence. Operations only
-        reference events from prior batches, so per-completion registration is
-        order-independent within the batch.
+        applies as they finish lets the caller record each op the instant its
+        send resolves. If one sibling fails, already-landed results remain
+        journaled while every unfinished task is cancelled and joined.
         """
-        return [await coroutine for coroutine in asyncio.as_completed([self._apply(operation) for operation in batch])]
+        results: list[tuple[LiveOperation, str | None, _SentPayload | None]] = []
+
+        async def apply_and_record(
+            operation: LiveOperation,
+        ) -> tuple[LiveOperation, str | None, _SentPayload | None]:
+            result = await self._apply(operation)
+            results.append(result)
+            if on_complete is not None:
+                on_complete((result,))
+            return result
+
+        tasks = [asyncio.create_task(apply_and_record(operation)) for operation in batch]
+        try:
+            await asyncio.gather(*tasks)
+        except BaseException:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
+        return results
 
     def _record_batch_results(
         self,
@@ -3036,8 +3518,10 @@ class LiveFuzzRunner:
             if first.kind in LIFECYCLE_KINDS:
                 await self._apply_lifecycle(first.kind, batch_index)
             else:
-                results = await self._apply_batch_in_completion_order(batch)
-                self._record_batch_results(results)
+                await self._apply_batch_in_completion_order(
+                    batch,
+                    on_complete=self._record_batch_results,
+                )
                 try:
                     await self.oracle.pump()
                 except AssertionError as exc:
@@ -3055,6 +3539,7 @@ class LiveFuzzRunner:
             expected_body_for=_ModelHandler.response_text_for,
             ledger_path=self.stack.storage_path / "tracking" / f"{AGENT_NAME}_responded.json",
             source_current_markers=self.source_current_markers,
+            source_revision_markers=self.source_revision_markers,
         )
         audit = await auditor.audit(
             room_ids=tuple(self.stack.room_ids.values()),
@@ -3116,7 +3601,7 @@ class LiveFuzzRunner:
         self._record_lifecycle(kind)
 
     async def _wait_for_restart_recovery_window(self) -> None:
-        """Give startup maintenance its recency-guard recheck after a late restart.
+        """Give delayed startup recovery time to settle after a late restart.
 
         Streams interrupted by a restart are cleaned and auto-resumed by a
         delayed startup pass, so the final audit must not run before that
@@ -3215,7 +3700,15 @@ class LiveFuzzRunner:
                 payload.content,
                 room_id=room_id,
             )
-            self.sent_records.append(_SentRecord(event_id, room_id, payload.event_type, content=payload.content))
+            self.sent_records.append(
+                _SentRecord(
+                    event_id,
+                    room_id,
+                    payload.event_type,
+                    sender=root_client.user_id,
+                    content=payload.content,
+                ),
+            )
             return thread, event_id, payload, time.monotonic()
 
         roots = await asyncio.gather(*(send_root(thread) for thread in threads))
@@ -3286,7 +3779,15 @@ class LiveFuzzRunner:
                 "m.relates_to": {"rel_type": "m.replace", "event_id": target_event_id},
             }
             event_id = await client.send_event("m.room.message", txn_id, content, room_id=room_id)
-            self.sent_records.append(_SentRecord(event_id, room_id, "m.room.message", content=content))
+            self.sent_records.append(
+                _SentRecord(
+                    event_id,
+                    room_id,
+                    "m.room.message",
+                    sender=client.user_id,
+                    content=content,
+                ),
+            )
             # The edit revises the target source in place, so its current marker
             # becomes the edit revision the model must now observe. Push the
             # revision keyed by this edit's event id so a later redaction of this
@@ -3307,11 +3808,30 @@ class LiveFuzzRunner:
             }
             event_id = await client.send_event("m.reaction", txn_id, content, room_id=room_id)
             self.sent_records.append(
-                _SentRecord(event_id, room_id, "m.reaction", reaction_key=reaction_key, content=content),
+                _SentRecord(
+                    event_id,
+                    room_id,
+                    "m.reaction",
+                    sender=client.user_id,
+                    reaction_key=reaction_key,
+                    content=content,
+                ),
             )
             return operation, event_id, None
 
         if operation.kind is LiveOperationKind.REDACTION:
+            event_id = await client.redact(target_event_id, txn_id, room_id=room_id)
+            self.redacted_targets[target_event_id] = event_id
+            self.sent_records.append(
+                _SentRecord(
+                    event_id,
+                    room_id,
+                    "m.room.redaction",
+                    sender=client.user_id,
+                    redacts=target_event_id,
+                    content={"reason": "live cache fuzz"},
+                ),
+            )
             reverted_source = self._edit_event_source.get(target_event_id)
             if reverted_source is not None:
                 # Redacting an ``m.replace`` reverts its target source to the
@@ -3320,13 +3840,10 @@ class LiveFuzzRunner:
                 # this as a source redaction so the audit does not demand a
                 # revision Matrix itself rolled back.
                 self._pop_source_revision(reverted_source, target_event_id)
-            else:
+            elif len(self.oracle.response_ids.get(target_event_id, ())) != 1:
                 # A source redacted before its reply settles legitimately races
                 # the in-flight response, so its exact cardinality is zero-or-one.
-                if len(self.oracle.response_ids.get(target_event_id, ())) != 1:
-                    self.oracle.mark_source_optional(target_event_id)
-                self.redacted_targets.add(target_event_id)
-            event_id = await client.redact(target_event_id, txn_id, room_id=room_id)
+                self.oracle.mark_source_optional(target_event_id)
             return operation, event_id, None
 
         payload = self.sent_payloads[operation.target]
@@ -3349,6 +3866,7 @@ class LiveFuzzRunner:
             stack = [(None, base)] if base is not None else []
             self._source_revision_stack[source_event_id] = stack
         stack.append((edit_event_id, marker))
+        self.source_revision_markers[source_event_id][edit_event_id] = marker
         self.source_current_markers[source_event_id] = marker
 
     def _pop_source_revision(self, source_event_id: str, edit_event_id: str) -> None:
@@ -3391,7 +3909,15 @@ class LiveFuzzRunner:
         fast agent reply must never be observable before its expectation exists.
         """
         event_id = await client.send_event(payload.event_type, payload.txn_id, payload.content, room_id=room_id)
-        self.sent_records.append(_SentRecord(event_id, room_id, payload.event_type, content=payload.content))
+        self.sent_records.append(
+            _SentRecord(
+                event_id,
+                room_id,
+                payload.event_type,
+                sender=client.user_id,
+                content=payload.content,
+            ),
+        )
         self.oracle.expect(
             operation.event_ref,
             event_id,
@@ -3507,10 +4033,29 @@ async def _run_live(
     )
     if runner_sink is not None:
         runner_sink(runner)
+    primary_error: BaseException | None = None
     try:
         return await runner.run()
+    except BaseException as exc:
+        primary_error = exc
+        raise
     finally:
-        await asyncio.gather(*(client.close() for client in clients))
+        close_results = await asyncio.gather(
+            *(client.close() for client in clients),
+            return_exceptions=True,
+        )
+        close_errors = [result for result in close_results if isinstance(result, BaseException)]
+        if close_errors:
+            details = "; ".join(f"{type(error).__name__}: {error}" for error in close_errors)
+            if primary_error is not None:
+                primary_error.add_note(f"Matrix client cleanup failures: {details}")
+            else:
+                wrapped = [
+                    error if isinstance(error, Exception) else RuntimeError(f"{type(error).__name__}: {error}")
+                    for error in close_errors
+                ]
+                message = "Matrix client cleanup failed"
+                raise ExceptionGroup(message, wrapped)
 
 
 def _scenario_from_args(args: argparse.Namespace) -> LiveFuzzScenario:
@@ -3567,8 +4112,141 @@ def _room_keys_for(scenario: LiveFuzzScenario) -> tuple[str, ...]:
 DEFAULT_ARTIFACT_ROOT = PROJECT_ROOT / "tmp" / "live-fuzz-artifacts"
 
 
+def _git_state_for_file(
+    path: Path,
+    *,
+    scopes: Collection[Path] = (),
+) -> tuple[str | None, bool]:
+    """Return the containing Git revision and whether its checkout is dirty."""
+    root_result = subprocess.run(
+        ("git", "-C", str(path.parent), "rev-parse", "--show-toplevel"),
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    if root_result.returncode:
+        return None, False
+    root = Path(root_result.stdout.strip()).resolve()
+    resolved = path.resolve()
+    if not resolved.is_relative_to(root):
+        return None, False
+    tracked = subprocess.run(
+        ("git", "-C", str(root), "ls-files", "--error-unmatch", str(resolved.relative_to(root))),
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    if tracked.returncode:
+        return None, True
+    relative_scopes = [
+        str(scope.resolve().relative_to(root)) for scope in scopes or (path,) if scope.resolve().is_relative_to(root)
+    ]
+    status = subprocess.run(
+        ("git", "-C", str(root), "status", "--short", "--untracked-files=all", "--", *relative_scopes),
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    revision = subprocess.run(
+        ("git", "-C", str(root), "rev-parse", "HEAD"),
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    return (
+        revision.stdout.strip() if revision.returncode == 0 else None,
+        status.returncode != 0 or bool(status.stdout.strip()),
+    )
+
+
+def _git_revision(path: Path) -> str | None:
+    """Return one checkout's HEAD, if the path belongs to a Git checkout."""
+    result = subprocess.run(
+        ("git", "-C", str(path), "rev-parse", "HEAD"),
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    return result.stdout.strip() if result.returncode == 0 else None
+
+
+def _validated_child_provenance(
+    attestation_path: Path,
+    *,
+    overlay: str | None,
+) -> dict[str, object]:
+    """Validate actual child imports against the runner and requested overlay."""
+    raw = json.loads(attestation_path.read_text(encoding="utf-8"))
+    if not isinstance(raw, dict):
+        msg = "MindRoom runtime attestation must be a JSON object"
+        raise TypeError(msg)
+    mindroom_value = raw.get("mindroom_module_path")
+    nio_value = raw.get("nio_module_path")
+    if not isinstance(mindroom_value, str) or not isinstance(nio_value, str):
+        msg = "MindRoom runtime attestation omitted module paths"
+        raise TypeError(msg)
+    mindroom_path = Path(mindroom_value).resolve()
+    nio_path = Path(nio_value).resolve()
+    mindroom_revision, mindroom_dirty = _git_state_for_file(
+        mindroom_path,
+        scopes=(PROJECT_ROOT / "src" / "mindroom", Path(__file__)),
+    )
+    nio_revision, nio_dirty = _git_state_for_file(nio_path, scopes=(nio_path.parent,))
+    expected_mindroom_revision = _git_revision(PROJECT_ROOT)
+    if mindroom_revision is None or expected_mindroom_revision is None:
+        msg = "could not verify the loaded MindRoom revision"
+        raise RuntimeError(msg)
+    if mindroom_dirty:
+        msg = "live fuzz requires a clean loaded MindRoom checkout"
+        raise RuntimeError(msg)
+    if mindroom_revision != expected_mindroom_revision:
+        msg = (
+            "loaded MindRoom revision does not match the live runner: "
+            f"expected {expected_mindroom_revision}, loaded {mindroom_revision}"
+        )
+        raise RuntimeError(msg)
+    expected_nio_revision: str | None = None
+    if overlay is not None:
+        overlay_path = Path(overlay).resolve()
+        if not nio_path.is_relative_to(overlay_path):
+            msg = f"loaded mindroom-nio path is outside requested editable overlay: {nio_path}"
+            raise RuntimeError(msg)
+        nio_revision, nio_dirty = _git_state_for_file(
+            nio_path,
+            scopes=(
+                overlay_path / "src",
+                overlay_path / "pyproject.toml",
+                overlay_path / "uv.lock",
+            ),
+        )
+        expected_nio_revision = _git_revision(overlay_path)
+        if expected_nio_revision is None or nio_revision != expected_nio_revision:
+            msg = (
+                "loaded mindroom-nio revision does not match the requested overlay: "
+                f"expected {expected_nio_revision}, loaded {nio_revision} from {nio_path}"
+            )
+            raise RuntimeError(msg)
+        if nio_dirty:
+            msg = "live fuzz requires a clean loaded mindroom-nio overlay"
+            raise RuntimeError(msg)
+    return {
+        **raw,
+        "mindroom_revision": mindroom_revision,
+        "mindroom_expected_revision": expected_mindroom_revision,
+        "mindroom_dirty": mindroom_dirty,
+        "nio_revision": nio_revision or "unverified",
+        "nio_expected_revision": expected_nio_revision or "",
+        "nio_dirty": nio_dirty,
+    }
+
+
 def _run_provenance() -> dict[str, object]:
-    """Capture the exact code that produced a run, for durable diagnosis.
+    """Capture parent identity until child-attested provenance replaces it.
 
     Only inert build/version identity is recorded; no credentials, tokens, or
     environment secrets are captured.
@@ -3576,6 +4254,8 @@ def _run_provenance() -> dict[str, object]:
     provenance: dict[str, object] = {
         "python": sys.version.split()[0],
         "platform": sys.platform,
+        "mindroom_module_path": str(Path(mindroom.__file__ or "").resolve()),
+        "nio_module_path": str(Path(nio.__file__ or "").resolve()),
     }
     try:
         head = subprocess.run(
@@ -3594,6 +4274,29 @@ def _run_provenance() -> dict[str, object]:
     except PackageNotFoundError:
         provenance["nio_version"] = "<not installed>"
     return provenance
+
+
+def _run_mindroom_runtime_child(attestation_path: Path, arguments: list[str]) -> None:
+    """Attest actual imported packages, then enter the real MindRoom CLI."""
+    from mindroom.cli.main import app  # noqa: PLC0415
+
+    mindroom_file = mindroom.__file__
+    nio_file = nio.__file__
+    if mindroom_file is None or nio_file is None:
+        msg = "runtime child imported packages without filesystem paths"
+        raise RuntimeError(msg)
+    payload = {
+        "python": sys.version.split()[0],
+        "platform": sys.platform,
+        "mindroom_module_path": str(Path(mindroom_file).resolve()),
+        "nio_module_path": str(Path(nio_file).resolve()),
+        "nio_version": version("mindroom-nio"),
+    }
+    temporary = attestation_path.with_suffix(".tmp")
+    temporary.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+    temporary.replace(attestation_path)
+    sys.argv = ["mindroom", *arguments]
+    app()
 
 
 def _sanitized_oracle_snapshot(oracle: ExactReplyOracle) -> dict[str, object]:
@@ -3645,10 +4348,7 @@ class FailureBundle:
         directory.mkdir(parents=True, exist_ok=True)
         bundle = cls(directory)
         (directory / "scenario.json").write_text(scenario.to_json() + "\n", encoding="utf-8")
-        (directory / "provenance.json").write_text(
-            json.dumps(dict(provenance), indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
+        bundle.update_provenance(provenance)
         bundle.journal_path.touch()
         return bundle
 
@@ -3656,6 +4356,37 @@ class FailureBundle:
         """Append one realized activity record in true completion order."""
         with self.journal_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(dict(entry), sort_keys=True) + "\n")
+
+    def update_provenance(self, provenance: Mapping[str, object]) -> None:
+        """Atomically replace parent identity with child-attested runtime identity."""
+        destination = self.directory / "provenance.json"
+        temporary = destination.with_suffix(".tmp")
+        temporary.write_text(
+            json.dumps(dict(provenance), indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        temporary.replace(destination)
+
+    def retain_pass_receipt(
+        self,
+        result: Mapping[str, object],
+        provenance: Mapping[str, object],
+    ) -> Path:
+        """Keep compact exact-head PASS evidence after deleting bulky run inputs."""
+        receipts = self.directory.parent / "receipts"
+        receipts.mkdir(parents=True, exist_ok=True)
+        destination = receipts / f"{self.directory.name}.json"
+        scenario_bytes = (self.directory / "scenario.json").read_bytes()
+        payload = {
+            "cleanup": "PASS",
+            "result": dict(result),
+            "provenance": dict(provenance),
+            "scenario_sha256": hashlib.sha256(scenario_bytes).hexdigest(),
+        }
+        temporary = destination.with_suffix(".tmp")
+        temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        temporary.replace(destination)
+        return destination
 
     def discard(self) -> None:
         """Remove the pre-created bundle after a successful run.
@@ -3666,6 +4397,16 @@ class FailureBundle:
         stale ``scenario.json``/``provenance.json``/journal per successful run.
         """
         shutil.rmtree(self.directory, ignore_errors=True)
+
+    def record_cleanup_error(self, error: BaseException) -> None:
+        """Retain teardown failure details without replacing a primary failure."""
+        self._write_isolated(
+            "cleanup_error.txt",
+            lambda destination: destination.write_text(
+                f"{type(error).__name__}: {error}\n",
+                encoding="utf-8",
+            ),
+        )
 
     def _write_isolated(self, name: str, writer: Callable[[Path], None]) -> None:
         """Run one artifact writer, folding any failure into the transcript."""
@@ -3731,6 +4472,9 @@ class FailureBundle:
 
 def main() -> None:
     """Run one trace against a fresh disposable real-server stack."""
+    if len(sys.argv) >= 4 and sys.argv[1] == "__mindroom_runtime_child__":
+        _run_mindroom_runtime_child(Path(sys.argv[2]), sys.argv[3:])
+        return
     args = _parse_args()
     scenario = _scenario_from_args(args)
     if args.save_trace is not None:
@@ -3749,6 +4493,8 @@ def main() -> None:
     stack = ManagedTuwunelStack(
         stream_profile=_PROFILE_STREAMS[scenario.profile],
         room_keys=_room_keys_for(scenario),
+        provenance_sink=bundle.update_provenance,
+        artifact_directory=bundle.directory,
     )
     runner_holder: dict[str, LiveFuzzRunner] = {}
     try:
@@ -3768,10 +4514,6 @@ def main() -> None:
         result["seed"] = args.seed if args.trace is None else "trace"
         result["wall_seconds"] = round(time.monotonic() - started_at, 1)
         result.update(stack.diagnostic_counts())
-        print(json.dumps(result, sort_keys=True))
-        # A passing run has no failure to preserve; drop the pre-created bundle
-        # so the artifact root does not accumulate stale scenario/journal dirs.
-        bundle.discard()
     except Exception as exc:
         _persist_failure_bundle(bundle, stack, runner_holder.get("runner"), exc)
         if args.failure_log is not None and stack.log_path.exists():
@@ -3779,9 +4521,23 @@ def main() -> None:
                 stack.log_path.read_text(encoding="utf-8", errors="replace"),
                 encoding="utf-8",
             )
+        try:
+            stack.close()
+        except Exception as cleanup_exc:
+            bundle.record_cleanup_error(cleanup_exc)
+            print(f"Live Matrix fuzz cleanup error: {cleanup_exc}", file=sys.stderr)
         raise
-    finally:
-        stack.close()
+    stack.close()
+    provenance = stack.runtime_provenance
+    if provenance is None:
+        msg = "passing live run omitted child runtime provenance"
+        raise RuntimeError(msg)
+    receipt = bundle.retain_pass_receipt(result, provenance)
+    result["pass_receipt"] = str(receipt)
+    print(json.dumps(result, sort_keys=True))
+    # A passing run has no failure to preserve. Delete its bundle only after
+    # teardown also succeeds, so a cleanup failure retains recovery evidence.
+    bundle.discard()
 
 
 def _persist_failure_bundle(
@@ -3798,9 +4554,9 @@ def _persist_failure_bundle(
     """
     print("MindRoom log tail:", file=sys.stderr)
     print(stack.log_tail(), file=sys.stderr)
-    # The exact replayable JSON trace is too large to dump to stderr; it is
-    # persisted verbatim as scenario.json inside the failure bundle below, and
-    # its path is printed so the run can be replayed byte-for-byte with --trace.
+    # The exact logical-workload JSON is too large to dump to stderr; it is
+    # persisted as scenario.json inside the failure bundle below, and its path
+    # is printed so the same operation batches and inputs can be replayed.
     print(f"Replay trace: {bundle.directory / 'scenario.json'}", file=sys.stderr)
     try:
         stack.stop_mindroom()
