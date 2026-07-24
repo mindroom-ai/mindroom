@@ -26,6 +26,11 @@ logger = get_logger(__name__)
 # guard when startup recovery scans, so one delayed recheck runs after the
 # guard window has provably elapsed.
 _DEFAULT_RECENCY_RECHECK_DELAY_SECONDS = STALE_STREAM_RECENCY_GUARD_MS / 1000 + 2.0
+# The delayed recheck is the only pass that can see guard-hidden streams, so a
+# transient failure retries autonomously a bounded number of times before the
+# remaining debt waits for a reload or bot-recovery replay.
+_DEFAULT_RECHECK_MAX_ATTEMPTS = 3
+_DEFAULT_RECHECK_RETRY_DELAY_SECONDS = 30.0
 
 type _StartupBot = AgentBot | TeamBot
 type _SetupRooms = Callable[[list[_StartupBot]], Awaitable[None]]
@@ -44,6 +49,8 @@ class StartupMaintenanceController:
     sync_runtime_support: _SyncRuntimeSupport
     mark_runtime_support_ready: _MarkRuntimeSupportReady
     recency_recheck_delay_seconds: float = _DEFAULT_RECENCY_RECHECK_DELAY_SECONDS
+    recheck_max_attempts: int = _DEFAULT_RECHECK_MAX_ATTEMPTS
+    recheck_retry_delay_seconds: float = _DEFAULT_RECHECK_RETRY_DELAY_SECONDS
     task: asyncio.Task[None] | None = field(default=None, init=False)
     startup_cutoff_ms: int | None = field(default=None, init=False)
     recheck_pending: bool = field(default=False, init=False)
@@ -166,15 +173,20 @@ class StartupMaintenanceController:
         # cleanup recency guard on the first scans; rescan every room once the
         # guard window has elapsed so a fast restart cannot freeze them forever.
         await asyncio.sleep(self.recency_recheck_delay_seconds)
-        completed = await self._run_phase(
-            "startup_maintenance.stale_stream_recovery.recency_guard_recheck",
-            lambda: self.recover_stale_streams(bots, config, startup_cutoff_ms, set()),
-            failure_message="Recency-guard stale stream recovery recheck failed",
-        )
-        # A failed recheck keeps the debt on record: this pass is the only one
-        # that can see streams the recency guard hid, so a transient failure
-        # must stay replayable instead of silently recreating frozen streams.
-        self.recheck_pending = not completed
+        for attempt in range(max(1, self.recheck_max_attempts)):
+            if attempt:
+                await asyncio.sleep(self.recheck_retry_delay_seconds)
+            completed = await self._run_phase(
+                "startup_maintenance.stale_stream_recovery.recency_guard_recheck",
+                lambda: self.recover_stale_streams(bots, config, startup_cutoff_ms, set()),
+                failure_message="Recency-guard stale stream recovery recheck failed",
+            )
+            if completed:
+                self.recheck_pending = False
+                return
+        # All bounded attempts failed: keep the debt on record so a later
+        # reload or bot-recovery replay retries instead of silently
+        # recreating permanently frozen streams.
 
     async def _run_phase(
         self,

@@ -137,6 +137,8 @@ async def test_startup_maintenance_continues_after_failed_recovery_and_room_setu
         sync_runtime_support=sync_runtime_support,
         mark_runtime_support_ready=mark_runtime_support_ready,
         recency_recheck_delay_seconds=0.0,
+        recheck_max_attempts=1,
+        recheck_retry_delay_seconds=0.0,
     )
 
     controller.start([MagicMock()], MagicMock(), startup_cutoff_ms=123456)
@@ -324,38 +326,63 @@ async def test_bot_start_recovery_resumes_stranded_recheck() -> None:
     assert counts["recover"] == 3
 
 
-@pytest.mark.asyncio
-async def test_failed_recheck_stays_pending_and_replays_on_next_reload() -> None:
-    """A recheck phase failure must not mark the recovery debt as settled."""
-    counts = {"recover": 0}
-    fail_next_recheck = True
+def _recheck_failure_controller(
+    counts: dict[str, int],
+    failing_recheck_attempts: set[int],
+    *,
+    recheck_max_attempts: int,
+) -> StartupMaintenanceController:
+    """Build a controller whose recheck waves fail on the given attempt numbers."""
 
     async def recover_stale(_: list[object], __: object, ___: int, ____: set[str]) -> None:
         counts["recover"] += 1
-        is_recheck_wave = counts["recover"] >= 3
-        if is_recheck_wave and fail_next_recheck:
+        recheck_attempt = counts["recover"] - 2
+        if recheck_attempt in failing_recheck_attempts:
             msg = "transient recheck failure"
             raise RuntimeError(msg)
 
-    controller = StartupMaintenanceController(
+    return StartupMaintenanceController(
         recover_stale_streams=recover_stale,
         setup_rooms_and_memberships=AsyncMock(),
         sync_runtime_support=AsyncMock(),
         mark_runtime_support_ready=AsyncMock(),
         recency_recheck_delay_seconds=0.0,
+        recheck_max_attempts=recheck_max_attempts,
+        recheck_retry_delay_seconds=0.0,
     )
+
+
+@pytest.mark.asyncio
+async def test_failed_recheck_retries_automatically_until_success() -> None:
+    """A transient recheck failure recovers in the same run without any reload."""
+    counts = {"recover": 0}
+    controller = _recheck_failure_controller(counts, failing_recheck_attempts={1}, recheck_max_attempts=3)
 
     controller.start([MagicMock()], MagicMock(), startup_cutoff_ms=123456)
     await _wait_for_controller(controller)
 
+    assert counts["recover"] == 4
+    assert controller.recheck_pending is False
+    assert await controller.cancel() is False
+
+
+@pytest.mark.asyncio
+async def test_exhausted_recheck_retries_stay_pending_and_replay_on_next_reload() -> None:
+    """Exhausting bounded retries keeps the debt replayable by a later reload."""
+    counts = {"recover": 0}
+    controller = _recheck_failure_controller(counts, failing_recheck_attempts={1, 2, 3}, recheck_max_attempts=3)
+
+    controller.start([MagicMock()], MagicMock(), startup_cutoff_ms=123456)
+    await _wait_for_controller(controller)
+
+    assert counts["recover"] == 5
     assert controller.recheck_pending is True
     assert await controller.cancel() is True
 
-    fail_next_recheck = False
     controller.restart_after_config_reload(config=MagicMock(), running_bots=lambda: [MagicMock()])
     await _wait_for_controller(controller)
 
-    assert counts["recover"] == 4
+    assert counts["recover"] == 6
     assert controller.recheck_pending is False
 
 
