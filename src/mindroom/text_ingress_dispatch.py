@@ -40,7 +40,7 @@ from mindroom.timing import (
 from mindroom.timing import timing_scope as timing_scope_context
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Awaitable, Callable, Sequence
 
     import nio
 
@@ -93,6 +93,15 @@ async def dispatch_text_message(
     current_prompt_is_structured: bool = False,
 ) -> None:
     """Run the normal text or command dispatch pipeline for a prepared text event."""
+    turn_claim = handled_turn or TurnRecord.create([raw_event.event_id], completed=False)
+    if not controller.deps.turn_store.try_claim_turn(turn_claim):
+        return
+    claim_transferred = False
+
+    def mark_claim_transferred() -> None:
+        nonlocal claim_transferred
+        claim_transferred = True
+
     timing_scope_token = None
     try:
         dispatch_timing = get_dispatch_pipeline_timing(raw_event.source)
@@ -145,8 +154,11 @@ async def dispatch_text_message(
             trusted_attachment_ids=trusted_attachment_ids,
             media_events=media_events,
             queued_notice_reservation=queued_notice_reservation,
+            mark_claim_transferred=mark_claim_transferred,
         )
     finally:
+        if not claim_transferred:
+            controller.deps.turn_store.release_pending_turn_claim(turn_claim)
         if queued_notice_reservation is not None:
             queued_notice_reservation.cancel()
         if timing_scope_token is not None:
@@ -361,6 +373,7 @@ async def _apply_turn_plan(
     trusted_attachment_ids: list[str],
     media_events: list[MediaDispatchEvent] | None,
     queued_notice_reservation: QueuedHumanNoticeReservation | None,
+    mark_claim_transferred: Callable[[], None],
 ) -> None:
     if plan.kind == "ignore":
         if plan.ignore_reason == "router":
@@ -410,21 +423,29 @@ async def _apply_turn_plan(
     # response lock; the response itself keeps running on a runner-owned task.
     response_started = asyncio.Event()
     response_task = controller.deps.response_runner.track_inbox_response(
-        controller._execute_response_action(
-            room,
-            prepared.event,
-            prepared.dispatch,
-            plan.response_action,
-            payload_inputs,
-            processing_log="Processing",
-            dispatch_started_at=prepared.dispatch_started_at,
-            handled_turn=handled_turn,
-            matrix_run_metadata=controller.deps.turn_store.build_run_metadata(handled_turn),
-            queued_notice_reservation=queued_notice_reservation,
-            on_lifecycle_lock_acquired=response_started.set,
+        _run_claimed_response(
+            controller,
+            handled_turn,
+            controller._execute_response_action(
+                room,
+                prepared.event,
+                prepared.dispatch,
+                plan.response_action,
+                payload_inputs,
+                processing_log="Processing",
+                dispatch_started_at=prepared.dispatch_started_at,
+                handled_turn=handled_turn,
+                matrix_run_metadata=controller.deps.turn_store.build_run_metadata(handled_turn),
+                queued_notice_reservation=queued_notice_reservation,
+                on_lifecycle_lock_acquired=response_started.set,
+            ),
         ),
         name=f"inbox_response:{prepared.event.event_id}",
     )
+    # Ownership moves synchronously after task creation. If this dispatch task
+    # is cancelled while waiting for the lifecycle lock, its finally block must
+    # not reopen the source while the runner-owned response still exists.
+    mark_claim_transferred()
     started_wait = asyncio.ensure_future(response_started.wait())
     try:
         await asyncio.wait({started_wait, response_task}, return_when=asyncio.FIRST_COMPLETED)
@@ -439,6 +460,18 @@ async def _apply_turn_plan(
         # own cancellation state. The queued-notice reservation still cancels
         # in dispatch_text_message's finally, which is the cleanup contract.
         response_task.result()
+
+
+async def _run_claimed_response(
+    controller: TurnController,
+    handled_turn: TurnRecord,
+    response: Awaitable[None],
+) -> None:
+    """Release exclusive response ownership after every terminal path."""
+    try:
+        await response
+    finally:
+        controller.deps.turn_store.release_pending_turn_claim(handled_turn)
 
 
 async def _execute_route_plan(
