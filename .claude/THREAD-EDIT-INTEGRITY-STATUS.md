@@ -44,7 +44,13 @@ Exact new regressions now cover:
 
 The focused new regression selection passes.
 
-Broad targeted tests and final gates remain pending.
+The first broad touched/backend run passed every behavior test and exposed one stale schema-v4 assertion.
+
+That assertion and the current-version maintenance probe now expect retained schema v3.
+
+The full storage-maintenance file and Tach pass after the correction.
+
+A clean broad rerun and final gates remain pending.
 
 ## Verified blockers
 

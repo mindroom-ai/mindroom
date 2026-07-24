@@ -11,7 +11,6 @@ from mindroom.matrix.event_info import (
     event_source_matches_room,
     replacement_content_for_original,
 )
-from mindroom.matrix.visible_body import visible_content_from_content
 
 from .agent_message_snapshot import AgentMessageSnapshot, AgentMessageSnapshotUnavailable
 from .thread_cache_helpers import thread_cache_rejection_reason
@@ -90,12 +89,13 @@ def snapshot_lookup_result(
     if not isinstance(timestamp, int) or isinstance(timestamp, bool):
         return SnapshotLookupResult(snapshot=None)
     original_content = event.get("content")
-    visible_content = visible_content_from_content(original_content) if isinstance(original_content, dict) else {}
+    normalized_original_content = dict(original_content) if isinstance(original_content, dict) else {}
+    visible_content = normalized_original_content
     if latest_edit is not None:
         edit_content = latest_edit.event.get("content")
         new_content = edit_content.get("m.new_content") if isinstance(edit_content, dict) else None
         if isinstance(new_content, dict):
-            visible_content = replacement_content_for_original(visible_content, new_content)
+            visible_content = replacement_content_for_original(normalized_original_content, new_content)
     return SnapshotLookupResult(
         snapshot=AgentMessageSnapshot(
             content=visible_content,

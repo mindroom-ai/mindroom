@@ -268,7 +268,9 @@ def is_valid_bundled_replacement(
     replacement_event_id = replacement_event_source.get("event_id")
     original_sender = original.get("sender")
     original_type = original.get("type")
+    original_timestamp = origin_server_ts_from_event_source(original)
     replacement_timestamp = origin_server_ts_from_event_source(replacement_event_source)
+    original_content = original.get("content")
     identities_are_valid = (
         isinstance(original_event_id, str)
         and bool(original_event_id)
@@ -280,6 +282,8 @@ def is_valid_bundled_replacement(
         and isinstance(original_type, str)
         and bool(original_type)
         and replacement_event_source.get("type") == original_type
+        and isinstance(original_timestamp, int)
+        and not isinstance(original_timestamp, bool)
     )
     if not identities_are_valid or (
         not isinstance(replacement_timestamp, int)
@@ -288,6 +292,8 @@ def is_valid_bundled_replacement(
         or event_source_is_state_event(replacement_event_source)
         or EventInfo.from_event(original).is_edit
     ):
+        return False
+    if not isinstance(original_content, Mapping):
         return False
 
     original_room_id = original.get("room_id")
@@ -318,7 +324,7 @@ def is_valid_bundled_replacement(
     new_content = content["m.new_content"]
     return original_type != "m.room.message" or all(
         isinstance(candidate_content.get(field), str)
-        for candidate_content in (content, new_content)
+        for candidate_content in (original_content, content, new_content)
         for field in ("body", "msgtype")
     )
 
