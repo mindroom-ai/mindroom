@@ -68,7 +68,9 @@ _SOURCE_PATH_KEY = "source_path"
 _SOURCE_MTIME_NS_KEY = "source_mtime_ns"
 _SOURCE_SIZE_KEY = "source_size"
 _SOURCE_DIGEST_KEY = "source_digest"
-_MAX_CONCURRENT_KNOWLEDGE_FILE_INDEXES = 4
+_DEFAULT_MAX_CONCURRENT_KNOWLEDGE_FILE_INDEXES = 4
+_MAX_CONCURRENT_KNOWLEDGE_FILE_INDEXES_ENV = "MINDROOM_KNOWLEDGE_FILE_INDEX_CONCURRENCY"
+_MAX_ALLOWED_CONCURRENT_KNOWLEDGE_FILE_INDEXES = 128
 _POST_INDEX_VECTOR_VISIBILITY_RETRY_DELAYS_SECONDS = (0.0, 0.01, 0.05)
 _INDEXING_STATUS_RESETTING = "resetting"
 _INDEXING_STATUS_INDEXING = "indexing"
@@ -79,6 +81,25 @@ _INDEXING_STATUSES = {
     _INDEXING_STATUS_COMPLETE,
 }
 _FileSignature = tuple[int, int, str]
+
+
+def _max_concurrent_knowledge_file_indexes() -> int:
+    """Return bounded file-level indexing concurrency."""
+    raw_value = os.getenv(_MAX_CONCURRENT_KNOWLEDGE_FILE_INDEXES_ENV)
+    if raw_value is None:
+        return _DEFAULT_MAX_CONCURRENT_KNOWLEDGE_FILE_INDEXES
+    try:
+        value = int(raw_value)
+    except ValueError as exc:
+        msg = f"{_MAX_CONCURRENT_KNOWLEDGE_FILE_INDEXES_ENV} must be an integer, got {raw_value!r}"
+        raise ValueError(msg) from exc
+    if not 1 <= value <= _MAX_ALLOWED_CONCURRENT_KNOWLEDGE_FILE_INDEXES:
+        msg = (
+            f"{_MAX_CONCURRENT_KNOWLEDGE_FILE_INDEXES_ENV} must be between 1 and "
+            f"{_MAX_ALLOWED_CONCURRENT_KNOWLEDGE_FILE_INDEXES}, got {value}"
+        )
+        raise ValueError(msg)
+    return value
 
 
 @runtime_checkable
@@ -1141,7 +1162,7 @@ class KnowledgeManager:
                     vanished_files.add(relative_path)
                 return False
 
-        concurrency = min(_MAX_CONCURRENT_KNOWLEDGE_FILE_INDEXES, len(files))
+        concurrency = min(_max_concurrent_knowledge_file_indexes(), len(files))
         if concurrency <= 1:
             indexed_count = 0
             for file_path in files:
