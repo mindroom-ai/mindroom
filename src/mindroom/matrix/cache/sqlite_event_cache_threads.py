@@ -96,8 +96,10 @@ async def load_thread_events_written_between(
     thread_id: str,
     after_write_seq: int,
     through_write_seq: int,
+    after_thread_write_seq: int,
+    through_thread_write_seq: int,
 ) -> list[dict[str, Any]]:
-    """Return cached thread events written in one durable sequence interval."""
+    """Return cached thread events changed in bounded durable revision intervals."""
     cursor = await db.execute(
         """
         SELECT thread_events.origin_server_ts, thread_events.write_seq, events.event_json
@@ -109,11 +111,21 @@ async def load_thread_events_written_between(
         WHERE thread_events.principal_id = ?
             AND thread_events.room_id = ?
             AND thread_events.thread_id = ?
-            AND events.write_seq > ?
-            AND events.write_seq <= ?
+            AND (
+                (events.write_seq > ? AND events.write_seq <= ?)
+                OR (thread_events.write_seq > ? AND thread_events.write_seq <= ?)
+            )
         ORDER BY thread_events.origin_server_ts ASC, thread_events.write_seq ASC
         """,
-        (principal_id, room_id, thread_id, after_write_seq, through_write_seq),
+        (
+            principal_id,
+            room_id,
+            thread_id,
+            after_write_seq,
+            through_write_seq,
+            after_thread_write_seq,
+            through_thread_write_seq,
+        ),
     )
     rows = await cursor.fetchall()
     await cursor.close()
@@ -162,6 +174,7 @@ async def _load_thread_cache_state_row(
             room_cache_state.invalidation_reason,
             COALESCE(thread_stats.event_count, 0),
             thread_stats.max_write_seq,
+            thread_stats.max_thread_write_seq,
             thread_stats.max_origin_server_ts
         FROM (
             SELECT ? AS requested_principal_id, ? AS requested_room_id, ? AS requested_thread_id
@@ -177,6 +190,7 @@ async def _load_thread_cache_state_row(
             SELECT
                 COUNT(*) AS event_count,
                 MAX(events.write_seq) AS max_write_seq,
+                MAX(thread_events.write_seq) AS max_thread_write_seq,
                 MAX(thread_events.origin_server_ts) AS max_origin_server_ts
             FROM thread_events
             JOIN events

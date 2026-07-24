@@ -636,6 +636,7 @@ async def _resolve_cached_thread_history_with_reuse(
     if reuse_cache is not None and resolved.hydration_complete and _thread_cache_state_has_revision(cache_state):
         assert cache_state is not None
         assert cache_state.max_write_seq is not None
+        assert cache_state.max_thread_write_seq is not None
         assert cache_state.max_origin_server_ts is not None
         reuse_cache.store(
             room_id,
@@ -649,6 +650,7 @@ async def _resolve_cached_thread_history_with_reuse(
                 membership_epoch=expected_membership_epoch,
                 event_count=cache_state.event_count,
                 max_write_seq=cache_state.max_write_seq,
+                max_thread_write_seq=cache_state.max_thread_write_seq,
                 max_origin_server_ts=cache_state.max_origin_server_ts,
                 sidecar_texts=resolved.sidecar_texts,
             ),
@@ -683,6 +685,7 @@ async def _resolve_reused_thread_suffix(
     if not suffix_resolution.hydration_complete:
         return None
     assert cache_state.max_write_seq is not None
+    assert cache_state.max_thread_write_seq is not None
     assert cache_state.max_origin_server_ts is not None
     prefix_length = snapshot.event_count
     input_order_by_event_id = dict(snapshot.input_order_by_event_id)
@@ -709,6 +712,7 @@ async def _resolve_reused_thread_suffix(
             membership_epoch=expected_membership_epoch,
             event_count=cache_state.event_count,
             max_write_seq=cache_state.max_write_seq,
+            max_thread_write_seq=cache_state.max_thread_write_seq,
             max_origin_server_ts=cache_state.max_origin_server_ts,
             sidecar_texts={**snapshot.sidecar_texts, **suffix_resolution.sidecar_texts},
             prior_known_event_ids=snapshot.known_event_ids,
@@ -747,6 +751,7 @@ def _thread_cache_state_has_revision(cache_state: ThreadCacheState | None) -> bo
         cache_state is not None
         and cache_state.event_count > 0
         and cache_state.max_write_seq is not None
+        and cache_state.max_thread_write_seq is not None
         and cache_state.max_origin_server_ts is not None
     )
 
@@ -773,6 +778,7 @@ async def _try_reuse_cached_thread_resolution(
     assert resolution_reuse is not None
     assert cache_state is not None
     assert cache_state.max_write_seq is not None
+    assert cache_state.max_thread_write_seq is not None
     assert cache_state.max_origin_server_ts is not None
     snapshot_trusted_sender_ids = frozenset(trusted_sender_ids)
     if not await _snapshot_sidecars_unchanged(
@@ -788,6 +794,7 @@ async def _try_reuse_cached_thread_resolution(
         membership_epoch=membership_epoch,
         event_count=cache_state.event_count,
         max_write_seq=cache_state.max_write_seq,
+        max_thread_write_seq=cache_state.max_thread_write_seq,
     ):
         return snapshot.cloned_messages(), 0.0, "reuse"
     return await _try_merge_cached_thread_delta(
@@ -845,8 +852,12 @@ async def _try_merge_cached_thread_delta(
 ) -> tuple[list[ResolvedVisibleMessage], float, str] | None:
     """Load and merge one complete append-only durable delta."""
     assert cache_state.max_write_seq is not None
+    assert cache_state.max_thread_write_seq is not None
     assert cache_state.max_origin_server_ts is not None
-    if cache_state.max_write_seq <= snapshot.max_write_seq:
+    if (
+        cache_state.max_write_seq <= snapshot.max_write_seq
+        and cache_state.max_thread_write_seq <= snapshot.max_thread_write_seq
+    ):
         return None
     try:
         candidate_suffix = await event_cache.get_thread_events_written_between(
@@ -854,6 +865,8 @@ async def _try_merge_cached_thread_delta(
             thread_id,
             after_write_seq=snapshot.max_write_seq,
             through_write_seq=cache_state.max_write_seq,
+            after_thread_write_seq=snapshot.max_thread_write_seq,
+            through_thread_write_seq=cache_state.max_thread_write_seq,
         )
     except Exception as exc:
         logger.debug(
@@ -870,6 +883,7 @@ async def _try_merge_cached_thread_delta(
         membership_epoch=membership_epoch,
         event_count=cache_state.event_count,
         max_write_seq=cache_state.max_write_seq,
+        max_thread_write_seq=cache_state.max_thread_write_seq,
         max_origin_server_ts=cache_state.max_origin_server_ts,
     )
     if suffix is None:

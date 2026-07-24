@@ -22,6 +22,7 @@ class ThreadCacheState:
     room_invalidation_reason: str | None
     event_count: int = 0
     max_write_seq: int | None = None
+    max_thread_write_seq: int | None = None
     max_origin_server_ts: int | None = None
 
 
@@ -88,8 +89,10 @@ class ConversationEventCache(Protocol):
         *,
         after_write_seq: int,
         through_write_seq: int,
+        after_thread_write_seq: int,
+        through_thread_write_seq: int,
     ) -> list[dict[str, Any]]:
-        """Return thread events written in one durable sequence interval."""
+        """Return thread events changed in bounded payload or thread-index intervals."""
 
     async def get_recent_room_thread_ids(self, room_id: str, *, limit: int) -> list[str]:
         """Return locally known thread IDs for one room ordered by newest cached activity."""

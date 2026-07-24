@@ -9,9 +9,9 @@ Safety model (any doubt falls back to full resolution by returning ``None``):
 
 1. A snapshot is only comparable when the trusted internal sender set and the durable room
    membership epoch are identical to the ones the snapshot was resolved under.
-2. The durable event count and monotonic write sequence prove whether the thread is unchanged or
-   whether every changed row is present in a bounded delta read. Any deletion, replacement, or
-   in-place update forces full resolution.
+2. The durable event count plus monotonic payload and thread-index write sequences prove whether
+   the thread is unchanged or whether every changed row is present in a bounded delta read. Any
+   deletion, replacement, or in-place update forces full resolution.
 3. Suffix rows must be plain ``m.room.message`` events with new, unique event IDs that were never
    seen by the snapshot (including edit targets, reply targets, and synthesized originals), and
    every suffix edit - explicit or bundled - must target a suffix-local event, so no suffix row
@@ -46,6 +46,7 @@ class ThreadResolutionSnapshot:
     membership_epoch: int
     event_count: int
     max_write_seq: int
+    max_thread_write_seq: int
     max_origin_server_ts: int
     sidecar_texts: dict[tuple[str, str], str]
 
@@ -78,6 +79,7 @@ def build_thread_resolution_snapshot(
     membership_epoch: int,
     event_count: int,
     max_write_seq: int,
+    max_thread_write_seq: int,
     max_origin_server_ts: int,
     sidecar_texts: Mapping[tuple[str, str], str],
     prior_known_event_ids: frozenset[str] = frozenset(),
@@ -104,6 +106,7 @@ def build_thread_resolution_snapshot(
         membership_epoch=membership_epoch,
         event_count=event_count,
         max_write_seq=max_write_seq,
+        max_thread_write_seq=max_thread_write_seq,
         max_origin_server_ts=max_origin_server_ts,
         sidecar_texts=dict(sidecar_texts),
     )
@@ -141,6 +144,7 @@ def reusable_event_source_suffix(
     membership_epoch: int,
     event_count: int,
     max_write_seq: int,
+    max_thread_write_seq: int,
     max_origin_server_ts: int,
 ) -> list[dict[str, Any]] | None:
     """Return a complete append-only delta when it is safe to merge, else None."""
@@ -154,7 +158,7 @@ def reusable_event_source_suffix(
         snapshot.trusted_sender_ids != trusted_sender_ids
         or snapshot.membership_epoch != membership_epoch
         or event_count <= snapshot.event_count
-        or max_write_seq <= snapshot.max_write_seq
+        or (max_write_seq <= snapshot.max_write_seq and max_thread_write_seq <= snapshot.max_thread_write_seq)
         or len(suffix) != event_count - snapshot.event_count
         or max_origin_server_ts < snapshot.max_origin_server_ts
         or unsafe_timestamp
@@ -173,6 +177,7 @@ def snapshot_matches_revision(
     membership_epoch: int,
     event_count: int,
     max_write_seq: int,
+    max_thread_write_seq: int,
 ) -> bool:
     """Return whether durable state still names the snapshot's exact raw rows."""
     return (
@@ -180,6 +185,7 @@ def snapshot_matches_revision(
         and snapshot.membership_epoch == membership_epoch
         and snapshot.event_count == event_count
         and snapshot.max_write_seq == max_write_seq
+        and snapshot.max_thread_write_seq == max_thread_write_seq
     )
 
 

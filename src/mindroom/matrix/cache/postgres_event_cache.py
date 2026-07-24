@@ -1259,8 +1259,10 @@ class PostgresEventCache:
         *,
         after_write_seq: int,
         through_write_seq: int,
+        after_thread_write_seq: int,
+        through_thread_write_seq: int,
     ) -> list[dict[str, Any]]:
-        """Return thread events written in one durable sequence interval."""
+        """Return thread events changed in bounded payload or thread-index intervals."""
         return await self._operation(
             room_id,
             operation="get_thread_events_written_between",
@@ -1272,6 +1274,8 @@ class PostgresEventCache:
                 thread_id=thread_id,
                 after_write_seq=after_write_seq,
                 through_write_seq=through_write_seq,
+                after_thread_write_seq=after_thread_write_seq,
+                through_thread_write_seq=through_thread_write_seq,
             ),
         )
 

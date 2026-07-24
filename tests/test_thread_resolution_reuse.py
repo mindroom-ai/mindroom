@@ -134,6 +134,7 @@ async def _resolve(
         room_invalidation_reason=None,
         event_count=len(rows),
         max_write_seq=max_write_seq,
+        max_thread_write_seq=max_write_seq,
         max_origin_server_ts=max(int(row["origin_server_ts"]) for row in rows),
     )
     cache.get_thread_events.return_value = rows
@@ -176,6 +177,7 @@ def _guard_suffix(
         membership_epoch=EPOCH,
         event_count=snapshot.event_count + len(suffix),
         max_write_seq=snapshot.max_write_seq + len(suffix),
+        max_thread_write_seq=snapshot.max_thread_write_seq + len(suffix),
         max_origin_server_ts=max(
             snapshot.max_origin_server_ts,
             *(int(row["origin_server_ts"]) for row in suffix),
@@ -398,6 +400,7 @@ class TestSnapshotReuse:
                     room_invalidation_reason=None,
                     event_count=1,
                     max_write_seq=2,
+                    max_thread_write_seq=2,
                     max_origin_server_ts=1000,
                 ),
             )
@@ -549,6 +552,7 @@ class TestSuffixSafetyGuards:
             membership_epoch=EPOCH,
             event_count=0,
             max_write_seq=0,
+            max_thread_write_seq=0,
             max_origin_server_ts=0,
             sidecar_texts={},
         )
@@ -571,6 +575,7 @@ class TestReuseCacheBounds:
             membership_epoch=EPOCH,
             event_count=1,
             max_write_seq=1,
+            max_thread_write_seq=1,
             max_origin_server_ts=1,
             sidecar_texts={},
         )
@@ -675,4 +680,60 @@ class TestFetchPathIntegration:
             await cache.close()
 
         assert [message.body for message in second] == ["root", "updated"]
+        assert second.diagnostics["thread_resolution_reuse"] == "full"
+
+    @pytest.mark.asyncio
+    async def test_thread_reindex_forces_full_resolution_when_payload_revision_is_unchanged(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A replaced thread index cannot masquerade as an unchanged payload revision."""
+        from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache  # noqa: PLC0415
+
+        cache = SqliteEventCache(tmp_path / "event_cache.db")
+        await cache.initialize()
+        root = _message_row(THREAD, 1000, "root")
+        old_reply = _message_row("$old", 2000, "old")
+        shared_reply = _message_row("$shared", 3000, "shared")
+        new_reply = _message_row("$new", 2000, "new")
+        await cache.store_event("$new", ROOM, new_reply)
+        await replace_thread_unconditionally(cache, ROOM, THREAD, [root, old_reply, shared_reply])
+
+        client = MagicMock()
+        client.user_id = "@mindroom_general:localhost"
+        client.room_messages = AsyncMock(side_effect=AssertionError("should not refetch fresh cache"))
+        reuse = ThreadResolutionReuseCache()
+        try:
+            await fetch_thread_history(client, ROOM, THREAD, event_cache=cache, resolution_reuse=reuse)
+            before = await cache.get_thread_cache_state(ROOM, THREAD)
+            opaque_rows = [
+                {
+                    "event_id": row["event_id"],
+                    "origin_server_ts": row["origin_server_ts"],
+                    "type": "m.room.encrypted",
+                    "sender": row["sender"],
+                    "content": {"algorithm": "m.megolm.v1.aes-sha2", "ciphertext": "opaque"},
+                }
+                for row in (root, new_reply, shared_reply)
+            ]
+            await replace_thread_unconditionally(cache, ROOM, THREAD, opaque_rows)
+            after = await cache.get_thread_cache_state(ROOM, THREAD)
+            second = await fetch_thread_history(
+                client,
+                ROOM,
+                THREAD,
+                event_cache=cache,
+                resolution_reuse=reuse,
+            )
+        finally:
+            await cache.close()
+
+        assert before is not None
+        assert after is not None
+        assert before.event_count == after.event_count == 3
+        assert before.max_write_seq == after.max_write_seq
+        assert before.max_thread_write_seq is not None
+        assert after.max_thread_write_seq is not None
+        assert after.max_thread_write_seq > before.max_thread_write_seq
+        assert [message.event_id for message in second] == [THREAD, "$new", "$shared"]
         assert second.diagnostics["thread_resolution_reuse"] == "full"
