@@ -130,6 +130,7 @@ async def _load_scope_snapshot(
             event = json.loads(row[0])
             if not event_matches_snapshot_scope(
                 event,
+                room_id=room_id,
                 thread_id=thread_id,
                 sender=sender,
             ):

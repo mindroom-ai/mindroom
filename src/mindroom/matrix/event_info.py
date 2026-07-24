@@ -18,6 +18,16 @@ def event_type_supports_thread_relations(event_type: object) -> bool:
     return isinstance(event_type, str) and event_type in _THREAD_RELATION_EVENT_TYPES
 
 
+def event_source_is_state_event(event_source: Mapping[str, object]) -> bool:
+    """Return whether one raw Matrix event source carries a state key."""
+    return "state_key" in event_source
+
+
+def event_source_matches_room(event_source: Mapping[str, object], room_id: str) -> bool:
+    """Return whether explicit room evidence agrees with the authoritative room."""
+    return "room_id" not in event_source or event_source.get("room_id") == room_id
+
+
 def origin_server_ts_from_event_source(event_source: object) -> int | float | None:
     """Return a Matrix origin timestamp from one raw event source if present."""
     if not isinstance(event_source, Mapping):

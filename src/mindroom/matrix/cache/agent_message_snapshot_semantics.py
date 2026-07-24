@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from mindroom.matrix.event_info import EventInfo
+from mindroom.matrix.event_info import EventInfo, event_source_is_state_event, event_source_matches_room
 from mindroom.matrix.visible_body import visible_content_from_content
 
 from .agent_message_snapshot import AgentMessageSnapshot, AgentMessageSnapshotUnavailable
@@ -40,11 +40,17 @@ def thread_cache_has_no_snapshot(cache_state: ThreadCacheState | None) -> bool:
 def event_matches_snapshot_scope(
     event: dict[str, Any],
     *,
+    room_id: str,
     thread_id: str | None,
     sender: str,
 ) -> bool:
     """Return whether one event is a visible message candidate for a snapshot scope."""
-    if event.get("type") != "m.room.message" or event.get("sender") != sender:
+    if (
+        event.get("type") != "m.room.message"
+        or event.get("sender") != sender
+        or event_source_is_state_event(event)
+        or not event_source_matches_room(event, room_id)
+    ):
         return False
     relation_type = EventInfo.from_event(event).relation_type
     if relation_type == "m.replace":

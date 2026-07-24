@@ -42,7 +42,6 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
@@ -68,9 +67,11 @@ from mindroom.matrix.client_visible_messages import (
     ResolvedVisibleMessage,
     ThreadEditCandidatesByOriginalEventId,
     apply_latest_edits_to_messages,
+    bundled_replacement_candidates,
+    is_valid_bundled_replacement,
     record_thread_edit_candidate,
 )
-from mindroom.matrix.event_info import EventInfo, is_thread_affecting_relation
+from mindroom.matrix.event_info import EventInfo, event_source_is_state_event, is_thread_affecting_relation
 from mindroom.matrix.media import (
     is_encrypted_media_event_source,
     parse_matrix_media_event_source,
@@ -115,6 +116,8 @@ from mindroom.matrix.visible_body import visible_body_from_event_source
 from mindroom.timing import elapsed_ms_since
 
 if TYPE_CHECKING:
+    from collections.abc import Collection, Iterable, Mapping, Sequence
+
     from mindroom.matrix.cache import ConversationEventCache
 
 logger = get_logger(__name__)
@@ -295,6 +298,8 @@ def _snapshot_message_dict(
 
 def _parse_room_message_event(event_source: dict[str, Any]) -> nio.Event | None:
     """Parse one event dict into a room-message event when possible."""
+    if event_source_is_state_event(event_source):
+        return None
     if is_encrypted_media_event_source(event_source):
         parsed_event = parse_matrix_media_event_source(event_source)
     else:
@@ -328,49 +333,20 @@ def _event_id_from_source(event_source: Mapping[str, Any]) -> str | None:
     return event_id if isinstance(event_id, str) else None
 
 
-def _bundled_replacement_source(event_source: Mapping[str, Any]) -> dict[str, Any] | None:
-    """Return one bundled replacement event source when Matrix already included it."""
-    unsigned = event_source.get("unsigned")
-    if not isinstance(unsigned, Mapping):
-        return None
-    relations = unsigned.get("m.relations")
-    if not isinstance(relations, Mapping):
-        return None
-    replacement = relations.get("m.replace")
-    if not isinstance(replacement, Mapping):
-        return None
-    candidates: tuple[object, ...] = (
-        replacement.get("event"),
-        replacement.get("latest_event"),
-    )
-    for candidate in candidates:
-        if not isinstance(candidate, Mapping):
-            continue
-        normalized_candidate = {key: value for key, value in candidate.items() if isinstance(key, str)}
-        if _parse_visible_text_message_event(normalized_candidate) is not None:
-            return normalized_candidate
-    replacement_candidate = {key: value for key, value in replacement.items() if isinstance(key, str)}
-    if {
-        "event_id",
-        "sender",
-        "type",
-        "origin_server_ts",
-    }.issubset(replacement_candidate) and _parse_visible_text_message_event(replacement_candidate) is not None:
-        return replacement_candidate
-    return None
-
-
 def _sidecar_hydration_sources(
     event_sources: Sequence[dict[str, Any]],
     *,
     hydrate_sidecars: bool,
+    room_id: str,
 ) -> list[dict[str, Any]]:
     """Return sources whose sidecars this resolution pass may hydrate."""
     hydration_sources: list[dict[str, Any]] = []
     for event_source in event_sources:
-        bundled_replacement = _bundled_replacement_source(event_source)
-        if bundled_replacement is not None:
-            hydration_sources.append(bundled_replacement)
+        hydration_sources.extend(
+            candidate
+            for candidate in bundled_replacement_candidates(event_source)
+            if is_valid_bundled_replacement(event_source, candidate, room_id=room_id)
+        )
         if hydrate_sidecars or EventInfo.from_event(event_source).is_edit:
             hydration_sources.append(event_source)
     return hydration_sources
@@ -386,6 +362,26 @@ class _ResolvedThreadEventSources:
     related_event_id_by_event_id: dict[str, str]
     hydration_complete: bool
     sidecar_texts: dict[tuple[str, str], str]
+
+
+def _record_bundled_thread_edit_candidates(
+    event: nio.Event,
+    *,
+    room_id: str,
+    edit_candidates_by_original_event_id: ThreadEditCandidatesByOriginalEventId,
+) -> None:
+    """Record every valid bundled replacement for deterministic latest selection."""
+    for replacement_source in bundled_replacement_candidates(event.source):
+        if not is_valid_bundled_replacement(event.source, replacement_source, room_id=room_id):
+            continue
+        replacement = _parse_visible_text_message_event(replacement_source)
+        if not isinstance(replacement, _VISIBLE_ROOM_MESSAGE_EVENT_TYPES):
+            continue
+        record_thread_edit_candidate(
+            replacement,
+            event_info=EventInfo.from_event(replacement.source),
+            edit_candidates_by_original_event_id=edit_candidates_by_original_event_id,
+        )
 
 
 async def _resolve_thread_history_from_event_sources_timed(
@@ -418,7 +414,11 @@ async def _resolve_thread_history_from_event_sources_timed(
     messages_by_event_id: dict[str, ResolvedVisibleMessage] = {}
     edit_candidates_by_original_event_id: ThreadEditCandidatesByOriginalEventId = {}
     sidecar_hydration_started = time.perf_counter()
-    hydration_sources = _sidecar_hydration_sources(event_sources, hydrate_sidecars=hydrate_sidecars)
+    hydration_sources = _sidecar_hydration_sources(
+        event_sources,
+        hydrate_sidecars=hydrate_sidecars,
+        room_id=room_id,
+    )
     hydration_batch = await prepare_sidecar_hydration_batch(
         hydration_sources,
         event_cache=event_cache,
@@ -428,15 +428,11 @@ async def _resolve_thread_history_from_event_sources_timed(
     )
     for event in parsed_events:
         event_info = EventInfo.from_event(event.source)
-        bundled_replacement_source = _bundled_replacement_source(event.source)
-        if bundled_replacement_source is not None:
-            bundled_replacement = nio.Event.parse_event(bundled_replacement_source)
-            if isinstance(bundled_replacement, _VISIBLE_ROOM_MESSAGE_EVENT_TYPES):
-                record_thread_edit_candidate(
-                    bundled_replacement,
-                    event_info=EventInfo.from_event(bundled_replacement.source),
-                    edit_candidates_by_original_event_id=edit_candidates_by_original_event_id,
-                )
+        _record_bundled_thread_edit_candidates(
+            event,
+            room_id=room_id,
+            edit_candidates_by_original_event_id=edit_candidates_by_original_event_id,
+        )
         if isinstance(event, _VISIBLE_ROOM_MESSAGE_EVENT_TYPES) and record_thread_edit_candidate(
             event,
             event_info=event_info,

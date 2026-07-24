@@ -189,6 +189,7 @@ async def _load_latest_edit_row(
         original_event_id,
         *((sender,) if sender is not None else ()),
         *((event_type,) if event_type is not None else ()),
+        room_id,
     )
     row = await fetchone(
         db,
@@ -204,6 +205,10 @@ async def _load_latest_edit_row(
             AND edits.original_event_id = %s
             {sender_predicate}
             {event_type_predicate}
+            AND (
+                NOT (events.event_json::jsonb ? 'room_id')
+                OR events.event_json::jsonb ->> 'room_id' = %s
+            )
             AND NOT (events.event_json::jsonb ? 'state_key')
             AND jsonb_typeof(events.event_json::jsonb -> 'content' -> 'm.new_content') = 'object'
             AND (

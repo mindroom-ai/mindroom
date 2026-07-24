@@ -190,6 +190,7 @@ async def _load_latest_edit_row(
         original_event_id,
         *((sender,) if sender is not None else ()),
         *((event_type,) if event_type is not None else ()),
+        room_id,
     )
     cursor = await db.execute(
         f"""
@@ -204,6 +205,10 @@ async def _load_latest_edit_row(
           AND event_edits.original_event_id = ?
           {sender_predicate}
           {event_type_predicate}
+          AND (
+              json_type(events.event_json, '$.room_id') IS NULL
+              OR json_extract(events.event_json, '$.room_id') = ?
+          )
           AND json_type(events.event_json, '$.state_key') IS NULL
           AND json_type(events.event_json, '$.content."m.new_content"') = 'object'
           AND (

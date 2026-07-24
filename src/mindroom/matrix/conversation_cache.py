@@ -40,7 +40,7 @@ from mindroom.matrix.client_thread_history import (
     fetch_thread_history,
     get_room_threads_page,
 )
-from mindroom.matrix.event_info import EventInfo
+from mindroom.matrix.event_info import EventInfo, event_source_is_state_event, event_source_matches_room
 from mindroom.matrix.media import (
     is_encrypted_media_event_source,
     parse_matrix_media_event_source,
@@ -247,7 +247,11 @@ async def _apply_cached_latest_edit(
     trusted_sender_ids: Collection[str] = (),
 ) -> dict[str, Any]:
     """Project one cached original event into its latest visible edited state."""
-    if event_source.get("type") != "m.room.message":
+    if (
+        event_source.get("type") != "m.room.message"
+        or event_source_is_state_event(event_source)
+        or not event_source_matches_room(event_source, room_id)
+    ):
         return event_source
 
     event_info = EventInfo.from_event(event_source)
@@ -306,6 +310,8 @@ async def _cached_room_get_event_response(
     trusted_sender_ids: Collection[str] = (),
 ) -> nio.RoomGetEventResponse | None:
     """Reconstruct one cached room-get-event response, applying visible edits when present."""
+    if not event_source_matches_room(event_source, room_id):
+        return None
     visible_event_source = await _apply_cached_latest_edit(
         event_source,
         room_id=room_id,

@@ -1134,6 +1134,92 @@ class TestThreadHistory:
         ]
 
     @pytest.mark.asyncio
+    async def test_thread_resolution_ignores_state_message_original_and_edit(self) -> None:
+        """State events must not become editable visible thread messages."""
+        state_original = {
+            "event_id": "$thread_root",
+            "sender": "@alice:localhost",
+            "origin_server_ts": 1000,
+            "type": "m.room.message",
+            "state_key": "",
+            "content": {"msgtype": "m.text", "body": "State"},
+        }
+        edit = {
+            "event_id": "$edit",
+            "sender": "@alice:localhost",
+            "origin_server_ts": 2000,
+            "type": "m.room.message",
+            "content": {
+                "msgtype": "m.text",
+                "body": "* Edited state",
+                "m.new_content": {"msgtype": "m.text", "body": "Edited state"},
+                "m.relates_to": {
+                    "rel_type": "m.replace",
+                    "event_id": "$thread_root",
+                },
+            },
+        }
+
+        resolution = await _resolve_thread_history_from_event_sources_timed(
+            AsyncMock(),
+            room_id="!room:localhost",
+            thread_id="$thread_root",
+            event_sources=[state_original, edit],
+            event_cache=_event_cache(),
+        )
+
+        assert resolution.messages == []
+
+    @pytest.mark.asyncio
+    async def test_thread_resolution_selects_latest_bundled_replacement_candidate(self) -> None:
+        """Bundled event and latest_event candidates must use Matrix latest ordering."""
+        root = {
+            "event_id": "$thread_root",
+            "sender": "@alice:localhost",
+            "origin_server_ts": 1000,
+            "type": "m.room.message",
+            "content": {"msgtype": "m.text", "body": "Root"},
+        }
+
+        def bundled_edit(event_id: str, body: str, timestamp: int) -> dict[str, object]:
+            return {
+                "event_id": event_id,
+                "sender": "@alice:localhost",
+                "origin_server_ts": timestamp,
+                "type": "m.room.message",
+                "content": {
+                    "msgtype": "m.text",
+                    "body": f"* {body}",
+                    "m.new_content": {"msgtype": "m.text", "body": body},
+                    "m.relates_to": {
+                        "rel_type": "m.replace",
+                        "event_id": "$thread_root",
+                    },
+                },
+            }
+
+        root["unsigned"] = {
+            "m.relations": {
+                "m.replace": {
+                    "event": bundled_edit("$old", "Old", 2000),
+                    "latest_event": bundled_edit("$latest", "Latest", 3000),
+                },
+            },
+        }
+
+        resolution = await _resolve_thread_history_from_event_sources_timed(
+            AsyncMock(),
+            room_id="!room:localhost",
+            thread_id="$thread_root",
+            event_sources=[root],
+            event_cache=_event_cache(),
+        )
+
+        assert [(message.event_id, message.body, message.latest_event_id) for message in resolution.messages] == [
+            ("$thread_root", "Latest", "$latest"),
+        ]
+
+    @pytest.mark.asyncio
     async def test_thread_resolution_ignores_wrong_sender_edit_of_edit(self) -> None:
         """A wrong-sender replacement of an edit must not create or change visible content."""
         root_event = self._make_text_event(

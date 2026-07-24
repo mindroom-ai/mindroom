@@ -10,7 +10,12 @@ import nio
 
 from mindroom.constants import STREAM_STATUS_KEY
 from mindroom.entity_resolution import current_internal_sender_ids
-from mindroom.matrix.event_info import EventInfo, reply_to_event_id_from_content
+from mindroom.matrix.event_info import (
+    EventInfo,
+    event_source_is_state_event,
+    event_source_matches_room,
+    reply_to_event_id_from_content,
+)
 from mindroom.matrix.message_content import extract_and_resolve_message, extract_edit_body, resolve_event_source_content
 from mindroom.matrix.visible_body import bundled_visible_body_preview, visible_body_from_event_source
 
@@ -232,7 +237,7 @@ def message_preview(body: object, max_length: int = 120) -> str:
     return f"{compact[: max_length - 3].rstrip()}..."
 
 
-def _bundled_replacement_candidates(event_source: Mapping[str, Any]) -> list[dict[str, Any]]:
+def bundled_replacement_candidates(event_source: Mapping[str, Any]) -> list[dict[str, Any]]:
     """Return bundled replacement candidates in preference order."""
     candidates: list[dict[str, Any]] = []
     unsigned = event_source.get("unsigned")
@@ -257,7 +262,7 @@ def _bundled_replacement_candidates(event_source: Mapping[str, Any]) -> list[dic
     return candidates
 
 
-def _is_valid_bundled_replacement(
+def is_valid_bundled_replacement(
     original_event_source: Mapping[str, Any],
     replacement_event_source: dict[str, Any],
     *,
@@ -274,8 +279,8 @@ def _is_valid_bundled_replacement(
         or not replacement_event_id
         or replacement_event_source.get("sender") != original.get("sender")
         or replacement_event_source.get("type") != original.get("type")
-        or "state_key" in original
-        or "state_key" in replacement_event_source
+        or event_source_is_state_event(original)
+        or event_source_is_state_event(replacement_event_source)
         or EventInfo.from_event(original).is_edit
     ):
         return False
@@ -283,8 +288,8 @@ def _is_valid_bundled_replacement(
     original_room_id = original.get("room_id")
     replacement_room_id = replacement_event_source.get("room_id")
     if room_id is not None and (
-        (isinstance(original_room_id, str) and original_room_id != room_id)
-        or (isinstance(replacement_room_id, str) and replacement_room_id != room_id)
+        not event_source_matches_room(original, room_id)
+        or not event_source_matches_room(replacement_event_source, room_id)
     ):
         return False
     if (
@@ -313,8 +318,8 @@ async def bundled_replacement_body(
 ) -> str | None:
     """Return one canonical bundled replacement body using runtime-derived sender trust."""
     trusted_sender_ids = _resolved_trusted_sender_ids(config, runtime_paths, trusted_sender_ids)
-    for candidate in _bundled_replacement_candidates(event_source):
-        if not _is_valid_bundled_replacement(event_source, candidate, room_id=room_id):
+    for candidate in bundled_replacement_candidates(event_source):
+        if not is_valid_bundled_replacement(event_source, candidate, room_id=room_id):
             continue
         resolved_candidate = await resolve_event_source_content(
             candidate,
@@ -453,11 +458,10 @@ async def apply_latest_edits_to_messages(
             reverse=True,
         )
         for edit_event, edit_thread_id in ordered_candidates:
-            edit_room_id = edit_event.source.get("room_id")
             if (
                 edit_event.sender != existing_message.sender
-                or "state_key" in edit_event.source
-                or (room_id is not None and isinstance(edit_room_id, str) and edit_room_id != room_id)
+                or event_source_is_state_event(edit_event.source)
+                or (room_id is not None and not event_source_matches_room(edit_event.source, room_id))
             ):
                 continue
             edited_body, edited_content = await extract_edit_body(
@@ -532,8 +536,10 @@ __all__ = [
     "ThreadEditCandidatesByOriginalEventId",
     "apply_latest_edits_to_messages",
     "bundled_replacement_body",
+    "bundled_replacement_candidates",
     "extract_visible_edit_body",
     "extract_visible_message",
+    "is_valid_bundled_replacement",
     "message_preview",
     "record_thread_edit_candidate",
     "replace_visible_message",

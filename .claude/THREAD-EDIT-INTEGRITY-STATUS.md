@@ -30,14 +30,28 @@
 
 ## Required next work
 
-- Add deterministic full-history tests for state originals and dual bundled `event`/`latest_event` ordering.
-- Add SQLite and PostgreSQL cache regressions covering explicit other-room edits for direct latest-edit lookup, cached point projection, and latest-agent snapshots.
-- Add SQLite and PostgreSQL regressions ensuring state originals are not edited or returned as agent snapshots.
+- Shared `event_info` helpers now own state-event and authoritative-room evidence.
+- Cached latest-edit SQL rejects explicit other-room JSON on SQLite and PostgreSQL, including custom approval edits.
+- Cached point projection refuses state originals and explicit room mismatches.
+- Snapshot scope refuses state originals and explicit room mismatches.
+- Full-history parsing excludes state originals.
+- Full history and preview now share bundled candidate enumeration and validation.
+- Full history retains all valid bundled candidates for deterministic latest selection and fallback.
+- Deterministic full-history tests cover state originals and dual bundled `event`/`latest_event` ordering.
+- SQLite and PostgreSQL cache regressions cover explicit other-room edits for direct latest-edit lookup, cached point projection, latest-agent snapshots, and custom-event lookup.
+- SQLite and PostgreSQL regressions ensure state originals are not edited or returned as agent snapshots.
 - Run focused owning tests, relevant parametrized backend tests, full pytest, Tach, and all-file pre-commit.
 - Verify `Bas Nijholt <bas@nijho.lt>` before every commit.
 - Commit and push small follow-ups without amend or force-push.
 - Remove this handoff only after local validation is complete.
 - Restart fresh Codex, fresh Fable, CI/AI review, and real-Tuwunel validation on the next exact head.
+
+## Current validation
+
+- Exact reproduced probes now return no state original, the newer bundled `latest_event`, and the older valid in-room cached edit.
+- New focused regressions pass on both cache backends: `8 passed`.
+- Broad full/cache/backend/reuse focus passes: `471 passed`.
+- Explicit Tach dependency/interface validation passes.
 
 ## Preserved local files
 

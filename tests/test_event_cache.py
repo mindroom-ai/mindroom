@@ -2368,6 +2368,173 @@ async def test_latest_agent_message_snapshot_falls_back_from_empty_new_content(
 
 
 @pytest.mark.asyncio
+async def test_cached_edit_paths_ignore_explicit_other_room(
+    event_cache: ConversationEventCache,
+) -> None:
+    """Cached edit lookup, point projection, and snapshots must enforce the caller room."""
+    original_event = _make_text_event(
+        event_id="$reply",
+        sender="@agent:localhost",
+        body="Original reply",
+        server_timestamp=2000,
+        source_content={"body": "Original reply", "msgtype": "m.text"},
+    )
+    valid_edit = _make_text_event(
+        event_id="$valid_edit",
+        sender="@agent:localhost",
+        body="* Good",
+        server_timestamp=3000,
+        source_content={
+            "body": "* Good",
+            "m.new_content": {"body": "Good", "msgtype": "m.text"},
+            "m.relates_to": {"rel_type": "m.replace", "event_id": "$reply"},
+        },
+    )
+    wrong_room_edit = _make_text_event(
+        event_id="$wrong_room_edit",
+        sender="@agent:localhost",
+        body="* Wrong room",
+        server_timestamp=4000,
+        source_content={
+            "body": "* Wrong room",
+            "m.new_content": {"body": "Wrong room", "msgtype": "m.text"},
+            "m.relates_to": {"rel_type": "m.replace", "event_id": "$reply"},
+        },
+    )
+    wrong_room_source = _cache_source(wrong_room_edit)
+    wrong_room_source["room_id"] = "!other:localhost"
+    await event_cache.store_events_batch(
+        [
+            ("$reply", "!room:localhost", _cache_source(original_event)),
+            ("$valid_edit", "!room:localhost", _cache_source(valid_edit)),
+            ("$wrong_room_edit", "!room:localhost", wrong_room_source),
+        ],
+    )
+
+    latest_edit = await event_cache.get_latest_edit(
+        "!room:localhost",
+        "$reply",
+        sender="@agent:localhost",
+        event_type="m.room.message",
+    )
+    response, _ = await _cached_room_get_event(
+        AsyncMock(),
+        event_cache,
+        "!room:localhost",
+        "$reply",
+    )
+    snapshot = await event_cache.get_latest_agent_message_snapshot(
+        "!room:localhost",
+        None,
+        "@agent:localhost",
+        runtime_started_at=None,
+    )
+
+    assert latest_edit is not None
+    assert latest_edit["event_id"] == "$valid_edit"
+    assert isinstance(response, nio.RoomGetEventResponse)
+    assert response.event.body == "Good"
+    assert response.event.server_timestamp == 3000
+    assert snapshot is not None
+    assert snapshot.content["body"] == "Good"
+    assert snapshot.origin_server_ts == 3000
+
+
+@pytest.mark.asyncio
+async def test_cached_state_message_is_not_edited_or_returned_as_snapshot(
+    event_cache: ConversationEventCache,
+) -> None:
+    """Cached state messages must not be projected as visible edited messages."""
+    state_original = {
+        "event_id": "$state",
+        "sender": "@agent:localhost",
+        "origin_server_ts": 2000,
+        "type": "m.room.message",
+        "state_key": "",
+        "content": {"msgtype": "m.text", "body": "State"},
+    }
+    edit = {
+        "event_id": "$edit",
+        "sender": "@agent:localhost",
+        "origin_server_ts": 3000,
+        "type": "m.room.message",
+        "content": {
+            "msgtype": "m.text",
+            "body": "* Edited state",
+            "m.new_content": {"msgtype": "m.text", "body": "Edited state"},
+            "m.relates_to": {"rel_type": "m.replace", "event_id": "$state"},
+        },
+    }
+    await event_cache.store_events_batch(
+        [
+            ("$state", "!room:localhost", state_original),
+            ("$edit", "!room:localhost", edit),
+        ],
+    )
+
+    response, _ = await _cached_room_get_event(
+        AsyncMock(),
+        event_cache,
+        "!room:localhost",
+        "$state",
+    )
+    snapshot = await event_cache.get_latest_agent_message_snapshot(
+        "!room:localhost",
+        None,
+        "@agent:localhost",
+        runtime_started_at=None,
+    )
+
+    assert isinstance(response, nio.RoomGetEventResponse)
+    assert response.event.source["content"]["body"] == "State"
+    assert snapshot is None
+
+
+@pytest.mark.asyncio
+async def test_custom_edit_lookup_ignores_explicit_other_room(
+    event_cache: ConversationEventCache,
+) -> None:
+    """Custom approval edit lookup must enforce explicit room evidence too."""
+    valid_edit = {
+        "event_id": "$valid_edit",
+        "sender": "@bot:localhost",
+        "origin_server_ts": 2000,
+        "type": "io.mindroom.tool_approval",
+        "content": {
+            "m.new_content": {"status": "approved"},
+            "m.relates_to": {"rel_type": "m.replace", "event_id": "$approval"},
+        },
+    }
+    wrong_room_edit = {
+        "event_id": "$wrong_room_edit",
+        "room_id": "!other:localhost",
+        "sender": "@bot:localhost",
+        "origin_server_ts": 3000,
+        "type": "io.mindroom.tool_approval",
+        "content": {
+            "m.new_content": {"status": "denied"},
+            "m.relates_to": {"rel_type": "m.replace", "event_id": "$approval"},
+        },
+    }
+    await event_cache.store_events_batch(
+        [
+            ("$valid_edit", "!room:localhost", valid_edit),
+            ("$wrong_room_edit", "!room:localhost", wrong_room_edit),
+        ],
+    )
+
+    latest_edit = await event_cache.get_latest_edit(
+        "!room:localhost",
+        "$approval",
+        sender="@bot:localhost",
+        event_type="io.mindroom.tool_approval",
+    )
+
+    assert latest_edit is not None
+    assert latest_edit["event_id"] == "$valid_edit"
+
+
+@pytest.mark.asyncio
 async def test_edit_cache_row_indexes_io_mindroom_tool_approval_edits(
     event_cache: ConversationEventCache,
 ) -> None:
