@@ -609,10 +609,12 @@ class AgentBot:
         if self.agent_user.user_id == matrix_id_before_login.full_id:
             return
 
+        response_admission_lock = self.response_admission_lock
         self.agent_user.__dict__.pop("matrix_id", None)
         self.__dict__.pop("matrix_id", None)
         self.event_cache = self.event_cache.for_principal(self.matrix_id.full_id)
         self._init_runtime_components()
+        self.response_admission_lock = response_admission_lock
 
     @property
     def client(self) -> nio.AsyncClient | None:
@@ -734,6 +736,16 @@ class AgentBot:
     def in_flight_response_count(self, value: int) -> None:
         """Update the number of active response lifecycles."""
         self._response_runner.in_flight_response_count = value
+
+    @property
+    def response_admission_lock(self) -> asyncio.Lock:
+        """Return the gate protecting response admission during config apply."""
+        return self._response_runner.response_admission_lock
+
+    @response_admission_lock.setter
+    def response_admission_lock(self, value: asyncio.Lock) -> None:
+        """Bind the orchestrator-owned response-admission gate."""
+        self._response_runner.response_admission_lock = value
 
     @property
     def pending_sync_restart_retry_room_ids(self) -> frozenset[str]:

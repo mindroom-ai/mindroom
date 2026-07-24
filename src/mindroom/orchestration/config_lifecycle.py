@@ -32,7 +32,6 @@ _CONFIG_RELOAD_DEBOUNCE_SECONDS = 2.0
 _CONFIG_RELOAD_IDLE_POLL_SECONDS = 0.5
 _CONFIG_RELOAD_DRAIN_WARNING_AFTER_SECONDS = 30.0
 _CONFIG_RELOAD_DRAIN_WARNING_INTERVAL_SECONDS = 30.0
-_CONFIG_RELOAD_DRAIN_FORCE_AFTER_SECONDS = 120.0
 
 
 @dataclass
@@ -86,10 +85,6 @@ class _ConfigReloadDrainState:
         """Record the time a drain warning was logged."""
         self.last_warning_at = now
 
-    def should_force_reload(self, *, now: float, force_after_seconds: float) -> bool:
-        """Return whether the drain timeout has expired."""
-        return self.wait_started_at is not None and self.wait_seconds(now) >= force_after_seconds
-
 
 @dataclass
 class ConfigReloadLifecycle:
@@ -107,6 +102,7 @@ class ConfigReloadLifecycle:
     in_flight_response_count: Callable[[], int]
     load_initial_config: Callable[[Config], Awaitable[bool]]
     apply_update_plan: Callable[[Config, ConfigUpdatePlan, tuple[str, ...]], Awaitable[bool]]
+    response_admission_lock: asyncio.Lock
     # Shared with manual plugin reloads and MCP catalog-change handling so no
     # two publication flows can interleave their read-plan-apply sequences.
     config_update_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -204,18 +200,6 @@ class ConfigReloadLifecycle:
             )
             drain_state.mark_warning(now)
 
-        if drain_state.should_force_reload(
-            now=now,
-            force_after_seconds=_CONFIG_RELOAD_DRAIN_FORCE_AFTER_SECONDS,
-        ):
-            logger.error(
-                "Forcing configuration reload while responses are still active",
-                active_response_count=active_response_count,
-                drain_wait_seconds=round(drain_state.wait_seconds(now), 1),
-                timeout_seconds=_CONFIG_RELOAD_DRAIN_FORCE_AFTER_SECONDS,
-            )
-            return False
-
         await asyncio.sleep(_CONFIG_RELOAD_IDLE_POLL_SECONDS)
         return True
 
@@ -262,7 +246,15 @@ class ConfigReloadLifecycle:
                     drain_state.reset()
                     continue
 
-                active_response_count = self.in_flight_response_count()
+                async with self.response_admission_lock:
+                    active_response_count = self.in_flight_response_count()
+                    if active_response_count <= 0:
+                        if drain_state.waiting_for_idle:
+                            logger.info("Active responses finished; applying queued configuration reload")
+                            drain_state.reset()
+                        await self._apply_queued_config_reload()
+                        continue
+
                 if await self._should_defer_reload_for_active_responses(
                     drain_state=drain_state,
                     requested_at=requested_at,
@@ -270,13 +262,6 @@ class ConfigReloadLifecycle:
                     loop=loop,
                 ):
                     continue
-
-                if drain_state.waiting_for_idle and active_response_count == 0:
-                    logger.info("Active responses finished; applying queued configuration reload")
-                if drain_state.waiting_for_idle:
-                    drain_state.reset()
-
-                await self._apply_queued_config_reload()
         finally:
             if self._reload_task is current_task:
                 self._reload_task = None

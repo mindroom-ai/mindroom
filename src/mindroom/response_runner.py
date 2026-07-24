@@ -482,6 +482,7 @@ class ResponseRunner:
     """Run one response lifecycle while keeping bot seams patchable."""
 
     deps: ResponseRunnerDeps
+    _response_admission_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
     _lifecycle_coordinator: ResponseLifecycleCoordinator = field(
         default_factory=ResponseLifecycleCoordinator,
         init=False,
@@ -566,6 +567,16 @@ class ResponseRunner:
     def in_flight_response_count(self, value: int) -> None:
         """Update the number of active response lifecycles."""
         self._in_flight_response_count = value
+
+    @property
+    def response_admission_lock(self) -> asyncio.Lock:
+        """Return the gate protecting response admission during config apply."""
+        return self._response_admission_lock
+
+    @response_admission_lock.setter
+    def response_admission_lock(self, value: asyncio.Lock) -> None:
+        """Bind the orchestrator-owned response-admission gate."""
+        self._response_admission_lock = value
 
     def _show_tool_calls(self, agent_name: str | None = None) -> bool:
         """Return tool-call visibility for the current or target agent."""
@@ -787,40 +798,49 @@ class ResponseRunner:
         response_kind: str,
         locked_operation: Callable[[MessageTarget, _EarlyPlaceholderState], Awaitable[str | None]],
     ) -> str | None:
-        """Run one locked response operation with shared queued-message bookkeeping."""
-        resolved_target = request.response_envelope.target
-        early_placeholder = _EarlyPlaceholderState()
+        """Admit one response before lifecycle locking or visible placeholder work."""
+        async with self.response_admission_lock:
+            self.in_flight_response_count += 1
         try:
-            return await self._lifecycle_coordinator.run_locked_response(
-                target=resolved_target,
-                response_envelope=request.response_envelope,
-                queued_notice_reservation=request.queued_notice_reservation,
-                pipeline_timing=request.pipeline_timing,
-                locked_operation=lambda target: locked_operation(target, early_placeholder),
-                signal_queued_message=request.sync_restart_retry_source_event_id is None,
-            )
-        except asyncio.CancelledError as error:
-            if early_placeholder.placeholder_event_id is not None and not early_placeholder.settlement_started:
-                await self._finalize_early_placeholder_cancellation(
-                    early_placeholder,
-                    error,
-                    response_kind=response_kind,
+            resolved_target = request.response_envelope.target
+            early_placeholder = _EarlyPlaceholderState()
+            try:
+                return await self._lifecycle_coordinator.run_locked_response(
+                    target=resolved_target,
+                    response_envelope=request.response_envelope,
+                    queued_notice_reservation=request.queued_notice_reservation,
+                    pipeline_timing=request.pipeline_timing,
+                    locked_operation=lambda target: locked_operation(target, early_placeholder),
+                    signal_queued_message=request.sync_restart_retry_source_event_id is None,
                 )
-            raise
-        except Exception as error:
-            already_linked = (
-                isinstance(error, PostLockRequestPreparationError) and error.placeholder_event_id is not None
-            )
-            if early_placeholder.placeholder_event_id is None or early_placeholder.settlement_started or already_linked:
+            except asyncio.CancelledError as error:
+                if early_placeholder.placeholder_event_id is not None and not early_placeholder.settlement_started:
+                    await self._finalize_early_placeholder_cancellation(
+                        early_placeholder,
+                        error,
+                        response_kind=response_kind,
+                    )
                 raise
-            cause = (
-                error.__cause__
-                if isinstance(error, PostLockRequestPreparationError) and isinstance(error.__cause__, Exception)
-                else error
-            )
-            raise PostLockRequestPreparationError(
-                placeholder_event_id=early_placeholder.placeholder_event_id,
-            ) from cause
+            except Exception as error:
+                already_linked = (
+                    isinstance(error, PostLockRequestPreparationError) and error.placeholder_event_id is not None
+                )
+                if (
+                    early_placeholder.placeholder_event_id is None
+                    or early_placeholder.settlement_started
+                    or already_linked
+                ):
+                    raise
+                cause = (
+                    error.__cause__
+                    if isinstance(error, PostLockRequestPreparationError) and isinstance(error.__cause__, Exception)
+                    else error
+                )
+                raise PostLockRequestPreparationError(
+                    placeholder_event_id=early_placeholder.placeholder_event_id,
+                ) from cause
+        finally:
+            self.in_flight_response_count -= 1
 
     async def _finalize_early_placeholder_cancellation(
         self,
@@ -2062,36 +2082,30 @@ class ResponseRunner:
         pipeline_timing: DispatchPipelineTiming | None = None,
         on_cancelled: Callable[[str], None] | None = None,
     ) -> _MatrixEventId | None:
-        """Run one response generation function with cancellation support."""
-        try:
-            self.in_flight_response_count += 1
-            return await ResponseAttemptRunner(
-                ResponseAttemptDeps(
-                    client=self._client(),
-                    delivery_gateway=self.deps.delivery_gateway,
-                    stop_manager=self.deps.stop_manager,
-                    logger=self.deps.logger,
-                    show_stop_button=lambda: self.deps.runtime.config.defaults.show_stop_button,
-                    config=self.deps.runtime.config,
-                    notify_outbound_event=self.deps.resolver.deps.conversation_cache.notify_outbound_event,
-                    notify_outbound_redaction=(
-                        self.deps.post_response_effects.conversation_cache.notify_outbound_redaction
-                    ),
-                ),
-            ).run(
-                ResponseAttemptRequest(
-                    target=target,
-                    response_function=response_function,
-                    thinking_message=thinking_message,
-                    existing_event_id=existing_event_id,
-                    user_id=user_id,
-                    run_id=run_id,
-                    pipeline_timing=pipeline_timing,
-                    on_cancelled=on_cancelled,
-                ),
-            )
-        finally:
-            self.in_flight_response_count -= 1
+        """Run one response-generation attempt with cancellation support."""
+        return await ResponseAttemptRunner(
+            ResponseAttemptDeps(
+                client=self._client(),
+                delivery_gateway=self.deps.delivery_gateway,
+                stop_manager=self.deps.stop_manager,
+                logger=self.deps.logger,
+                show_stop_button=lambda: self.deps.runtime.config.defaults.show_stop_button,
+                config=self.deps.runtime.config,
+                notify_outbound_event=self.deps.resolver.deps.conversation_cache.notify_outbound_event,
+                notify_outbound_redaction=self.deps.post_response_effects.conversation_cache.notify_outbound_redaction,
+            ),
+        ).run(
+            ResponseAttemptRequest(
+                target=target,
+                response_function=response_function,
+                thinking_message=thinking_message,
+                existing_event_id=existing_event_id,
+                user_id=user_id,
+                run_id=run_id,
+                pipeline_timing=pipeline_timing,
+                on_cancelled=on_cancelled,
+            ),
+        )
 
     @timed("prepare_response_runtime")
     async def prepare_response_runtime(
