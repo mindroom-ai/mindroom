@@ -1003,16 +1003,6 @@ class DeliveryGateway:
             request.existing_event_id,
             caller_label="delivery_stream",
         )
-        # Every streaming delivery is nonterminal until the final edit, so the
-        # whole stream carries this bot generation's ownership stamp. Callers
-        # keep mutating this dict mid-stream (run metadata lands after the
-        # request is built), so stamp in place instead of copying.
-        extra_content = request.extra_content
-        if self.deps.runtime_generation is not None:
-            if extra_content is None:
-                extra_content = {constants.STREAM_GENERATION_KEY: self.deps.runtime_generation}
-            else:
-                extra_content[constants.STREAM_GENERATION_KEY] = self.deps.runtime_generation
         return await send_streaming_response(
             client,
             request.target,
@@ -1024,7 +1014,8 @@ class DeliveryGateway:
             show_tool_calls=request.show_tool_calls,
             existing_event_id=request.existing_event_id,
             adopt_existing_placeholder=request.adopt_existing_placeholder,
-            extra_content=extra_content,
+            extra_content=request.extra_content,
+            runtime_generation=self.deps.runtime_generation,
             tool_trace_collector=request.tool_trace_collector,
             pipeline_timing=request.pipeline_timing,
             visible_event_id_callback=request.visible_event_id_callback,

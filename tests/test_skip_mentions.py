@@ -495,11 +495,12 @@ async def test_delivery_gateway_does_not_stamp_terminal_or_plain_sends(tmp_path:
 
 
 @pytest.mark.asyncio
-async def test_delivery_gateway_stamps_runtime_generation_on_stream_base_content(tmp_path: Path) -> None:
-    """Every streaming delivery inherits the generation stamp through base extra content."""
+async def test_delivery_gateway_passes_runtime_generation_to_streaming(tmp_path: Path) -> None:
+    """Streaming delivery forwards the bot generation without touching the shared extra-content dict."""
     gateway, _, _ = _gateway_with_mocks(tmp_path)
     gateway = DeliveryGateway(replace(gateway.deps, runtime_generation="gen-1"))
     target = MessageTarget.resolve("!test:server", "$thread", "$root")
+    shared_collector: dict[str, object] = {}
 
     async def stream() -> AsyncIterator[str]:
         yield "hello"
@@ -512,10 +513,13 @@ async def test_delivery_gateway_stamps_runtime_generation_on_stream_base_content
             StreamingDeliveryRequest(
                 target=target,
                 response_stream=stream(),
+                extra_content=shared_collector,
             ),
         )
 
-    assert send_streaming.await_args.kwargs["extra_content"][STREAM_GENERATION_KEY] == "gen-1"
+    assert send_streaming.await_args.kwargs["runtime_generation"] == "gen-1"
+    assert send_streaming.await_args.kwargs["extra_content"] is shared_collector
+    assert shared_collector == {}
 
 
 @pytest.mark.asyncio

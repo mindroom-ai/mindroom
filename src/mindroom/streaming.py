@@ -14,6 +14,7 @@ from agno.run.agent import RunCompletedEvent, RunContentEvent, ToolCallCompleted
 
 from mindroom import interactive
 from mindroom.constants import (
+    STREAM_GENERATION_KEY,
     STREAM_STATUS_CANCELLED,
     STREAM_STATUS_COMPLETED,
     STREAM_STATUS_ERROR,
@@ -355,6 +356,7 @@ class _StreamingDeliverySnapshot:
     extra_content: dict[str, Any] | None
     warmup_suffix_lines: tuple[RenderedWarmupLine, ...]
     stream_status: str
+    runtime_generation: str | None
 
 
 def _prepare_delivery_from_snapshot(snapshot: _StreamingDeliverySnapshot) -> _PreparedStreamingDelivery:
@@ -369,6 +371,10 @@ def _prepare_delivery_from_snapshot(snapshot: _StreamingDeliverySnapshot) -> _Pr
     )
     extra_content = dict(snapshot.extra_content or {})
     extra_content[STREAM_STATUS_KEY] = snapshot.stream_status
+    # Ownership stamp lands in the per-delivery copy, never in the caller's
+    # shared extra-content dict (it doubles as the run-metadata collector).
+    if snapshot.runtime_generation is not None:
+        extra_content[STREAM_GENERATION_KEY] = snapshot.runtime_generation
     tool_trace = list(snapshot.tool_trace)
 
     content = format_message_with_mentions(
@@ -439,6 +445,7 @@ class StreamingResponse:
     show_tool_calls: bool = True  # When False, omit inline tool call text and tool-trace metadata
     tool_trace: list[ToolTraceEntry] = field(default_factory=list)
     extra_content: dict[str, Any] | None = None
+    runtime_generation: str | None = None
     stream_started_at: float | None = None
     chars_since_last_update: int = 0
     last_delta_at: float | None = None
@@ -962,6 +969,7 @@ class StreamingResponse:
             extra_content=deepcopy(self.extra_content) if self.extra_content is not None else None,
             warmup_suffix_lines=tuple(warmup_suffix_lines),
             stream_status=self._resolve_stream_status(is_final=is_final, stream_status=stream_status),
+            runtime_generation=self.runtime_generation,
         )
 
     async def _prepare_delivery_async(
@@ -1719,6 +1727,7 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
     latest_thread_event_id: str | None = None,
     conversation_cache: ConversationCacheProtocol | None = None,
     preserve_existing_visible_on_empty_terminal: bool = False,
+    runtime_generation: str | None = None,
 ) -> StreamTransportOutcome:
     """Stream chunks to a Matrix room and return the canonical transport outcome."""
     sc = config.defaults.streaming
@@ -1729,6 +1738,7 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
         latest_thread_event_id=latest_thread_event_id,
         show_tool_calls=show_tool_calls,
         extra_content=extra_content,
+        runtime_generation=runtime_generation,
         update_interval=sc.update_interval,
         min_update_interval=sc.min_update_interval,
         interval_ramp_seconds=sc.interval_ramp_seconds,
