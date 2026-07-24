@@ -676,7 +676,7 @@ class TestResolvedMessageExtraction:
             body="Original root",
             content={"msgtype": "m.text", "body": "Original root"},
             event_id="$thread-root",
-            sender="@user:example.com",
+            sender=f"@mindroom_general:{current_domain}",
         )
         event.source["unsigned"] = {
             "m.relations": {
@@ -707,6 +707,81 @@ class TestResolvedMessageExtraction:
         )
 
         assert preview == "Edited body"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "invalidity",
+        ["sender", "type", "target", "state-key", "room", "edit-of-edit"],
+    )
+    async def test_thread_root_body_preview_ignores_invalid_bundled_replacement(
+        self,
+        tmp_path: Path,
+        invalidity: str,
+    ) -> None:
+        """Thread previews must enforce Matrix replacement validity on bundled edits."""
+        config = bind_runtime_paths(
+            Config(agents={"general": AgentConfig(display_name="General Agent")}),
+            test_runtime_paths(tmp_path),
+        )
+        runtime_paths = runtime_paths_for(config)
+        event = _make_message_event(
+            body="Original root",
+            content={"msgtype": "m.text", "body": "Original root"},
+            event_id="$thread-root",
+            sender="@alice:example.com",
+        )
+        replacement_relation: dict[str, object] = {
+            "rel_type": "m.replace",
+            "event_id": "$thread-root",
+        }
+        replacement_content: dict[str, object] = {
+            "body": "* Forged body",
+            "msgtype": "m.text",
+            "m.new_content": {
+                "body": "Forged body",
+                "msgtype": "m.text",
+            },
+            "m.relates_to": replacement_relation,
+        }
+        replacement: dict[str, object] = {
+            "event_id": "$thread-root-edit",
+            "sender": "@alice:example.com",
+            "origin_server_ts": 2000,
+            "type": "m.room.message",
+            "content": replacement_content,
+        }
+        if invalidity == "sender":
+            replacement["sender"] = "@mallory:example.com"
+        elif invalidity == "type":
+            replacement["type"] = "io.mindroom.tool_approval"
+        elif invalidity == "target":
+            replacement_relation["event_id"] = "$other"
+        elif invalidity == "state-key":
+            replacement["state_key"] = ""
+        elif invalidity == "room":
+            event.source["room_id"] = "!room:example.com"
+            replacement["room_id"] = "!other:example.com"
+        elif invalidity == "edit-of-edit":
+            original_content = event.source["content"]
+            assert isinstance(original_content, dict)
+            original_content["m.relates_to"] = {
+                "rel_type": "m.replace",
+                "event_id": "$older",
+            }
+        event.source["unsigned"] = {
+            "m.relations": {
+                "m.replace": replacement,
+            },
+        }
+
+        preview = await thread_root_body_preview(
+            event,
+            client=_make_client(),
+            config=config,
+            runtime_paths=runtime_paths,
+        )
+
+        assert preview == "Original root"
 
     @pytest.mark.asyncio
     async def test_thread_root_body_preview_passes_precomputed_trusted_sender_ids_to_nested_helpers(

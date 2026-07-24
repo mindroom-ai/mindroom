@@ -22,7 +22,8 @@
 
 - Cached `m.room.message` selection now requires a string body in `m.new_content`, while custom approval-card edits remain supported.
 - SQLite and PostgreSQL point-event and snapshot fallback regressions pass for a newest empty-object replacement.
-- Validate bundled replacements at the shared thread-root preview seam and add sender/type/target/state/edit-of-edit regressions.
+- Bundled replacements are now validated at the shared thread-root preview seam for sender, type, target, state, room, and edit-of-edit rules.
+- Corrected bundled-preview fixtures now use same-sender originals and replacements.
 - Execute the production PostgreSQL query against an isolated ICU-collated edit-event-ID column and prove bytewise Matrix ordering.
 - Run targeted tests, backend suites, full pytest, Tach, and all-file pre-commit.
 - Commit and push small follow-ups with `Bas Nijholt <bas@nijho.lt>` verified before each commit.
@@ -33,6 +34,13 @@
 ## Current test evidence
 
 - Cache malformed-fallback and approval-card focus: `8 passed` across SQLite and PostgreSQL.
+- Shared preview and both Matrix tool owning files: all `188` tests passed.
+
+## Completed invalid-head reviews
+
+- Both native Codex reviews rejected `bf7a963dc629910583d6ce0c6920e532bd09b233`.
+- Fable rejected the same exact head after independently reproducing the empty-object cache fallback mismatch.
+- Fable treated bundled preview validation and the ICU query regression as pre-existing test-strength issues, but both remain required by the user's stricter final gate.
 
 ## Preserved local files
 

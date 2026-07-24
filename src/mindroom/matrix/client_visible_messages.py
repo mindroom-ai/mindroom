@@ -257,6 +257,43 @@ def _bundled_replacement_candidates(event_source: Mapping[str, Any]) -> list[dic
     return candidates
 
 
+def _is_valid_bundled_replacement(
+    original_event_source: Mapping[str, Any],
+    replacement_event_source: dict[str, Any],
+) -> bool:
+    """Return whether a bundled replacement satisfies Matrix edit validity."""
+    original = {key: value for key, value in original_event_source.items() if isinstance(key, str)}
+    original_event_id = original.get("event_id")
+    replacement_event_id = replacement_event_source.get("event_id")
+    if (
+        not isinstance(original_event_id, str)
+        or not original_event_id
+        or not isinstance(replacement_event_id, str)
+        or not replacement_event_id
+        or replacement_event_source.get("sender") != original.get("sender")
+        or replacement_event_source.get("type") != original.get("type")
+        or "state_key" in original
+        or "state_key" in replacement_event_source
+        or EventInfo.from_event(original).is_edit
+    ):
+        return False
+
+    original_room_id = original.get("room_id")
+    replacement_room_id = replacement_event_source.get("room_id")
+    if (
+        isinstance(original_room_id, str)
+        and isinstance(replacement_room_id, str)
+        and original_room_id != replacement_room_id
+    ):
+        return False
+
+    replacement_info = EventInfo.from_event(replacement_event_source)
+    if not replacement_info.is_edit or replacement_info.original_event_id != original_event_id:
+        return False
+    content = replacement_event_source.get("content")
+    return isinstance(content, Mapping) and isinstance(content.get("m.new_content"), Mapping)
+
+
 async def bundled_replacement_body(
     event_source: Mapping[str, Any],
     *,
@@ -270,6 +307,8 @@ async def bundled_replacement_body(
     """Return one canonical bundled replacement body using runtime-derived sender trust."""
     trusted_sender_ids = _resolved_trusted_sender_ids(config, runtime_paths, trusted_sender_ids)
     for candidate in _bundled_replacement_candidates(event_source):
+        if not _is_valid_bundled_replacement(event_source, candidate):
+            continue
         resolved_candidate = await resolve_event_source_content(
             candidate,
             client,

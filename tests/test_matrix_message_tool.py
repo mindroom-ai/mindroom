@@ -175,7 +175,7 @@ def _make_bundled_replacement(
     body: str,
     msgtype: str,
     bundle_key: str | None = None,
-    sender: str = "@editor:localhost",
+    sender: str = "@alice:localhost",
     visible_body: str | None = None,
     long_text: dict[str, object] | None = None,
     url: str | None = None,
@@ -1852,7 +1852,7 @@ async def test_matrix_message_room_threads_prefers_trusted_canonical_bundled_pre
     ctx = _make_context()
     thread_root = _make_room_thread_root(
         event_id="$thread-root",
-        sender="@alice:localhost",
+        sender="@mindroom_general:localhost",
         timestamp=1234,
         body="Thinking...",
         reply_count=4,
@@ -1898,6 +1898,7 @@ async def test_matrix_message_room_threads_uses_nested_bundled_replacement_previ
     ctx = _make_context()
     thread_root = nio.RoomMessageNotice.from_dict(
         {
+            "type": "m.room.message",
             "event_id": "$thread-notice",
             "sender": "@alice:localhost",
             "origin_server_ts": 1234,
@@ -2068,7 +2069,7 @@ async def test_matrix_message_room_threads_resolves_large_bundled_replacement_th
     )
     thread_root = _make_room_thread_root(
         event_id="$thread-root",
-        sender="@alice:localhost",
+        sender="@mindroom_general:localhost",
         timestamp=1234,
         body="Original root",
         reply_count=4,
