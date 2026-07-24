@@ -61,6 +61,7 @@ async def test_startup_maintenance_scans_rooms_joined_during_concurrent_setup() 
         setup_rooms_and_memberships=setup_rooms,
         sync_runtime_support=sync_runtime_support,
         mark_runtime_support_ready=mark_runtime_support_ready,
+        recency_recheck_delay_seconds=0.0,
     )
 
     controller.start(bots, config, startup_cutoff_ms=123456)
@@ -69,8 +70,9 @@ async def test_startup_maintenance_scans_rooms_joined_during_concurrent_setup() 
     assert recovery_waves == [
         {"!initial:example.com"},
         {"!joined-during-setup:example.com"},
+        {"!initial:example.com", "!joined-during-setup:example.com"},
     ]
-    assert call_order == ["recover-1", "setup", "recover-2", "support", "approval_ready"]
+    assert call_order == ["recover-1", "setup", "recover-2", "support", "approval_ready", "recover-3"]
 
 
 @pytest.mark.asyncio
@@ -99,12 +101,13 @@ async def test_startup_maintenance_continues_after_failed_recovery_and_room_setu
         setup_rooms_and_memberships=setup_rooms,
         sync_runtime_support=sync_runtime_support,
         mark_runtime_support_ready=mark_runtime_support_ready,
+        recency_recheck_delay_seconds=0.0,
     )
 
     controller.start([MagicMock()], MagicMock(), startup_cutoff_ms=123456)
     await _wait_for_controller(controller)
 
-    assert call_order == ["recover", "setup", "recover", "support", "approval_ready"]
+    assert call_order == ["recover", "setup", "recover", "support", "approval_ready", "recover"]
 
 
 @pytest.mark.asyncio
@@ -122,6 +125,7 @@ async def test_startup_maintenance_cancel_reports_unfinished_and_replays_with_ru
         setup_rooms_and_memberships=setup_rooms,
         sync_runtime_support=AsyncMock(),
         mark_runtime_support_ready=AsyncMock(),
+        recency_recheck_delay_seconds=0.0,
     )
 
     controller.start([MagicMock()], MagicMock(), startup_cutoff_ms=123456)
@@ -155,6 +159,7 @@ async def test_startup_maintenance_cancel_completed_task_returns_false() -> None
         setup_rooms_and_memberships=AsyncMock(),
         sync_runtime_support=AsyncMock(),
         mark_runtime_support_ready=AsyncMock(),
+        recency_recheck_delay_seconds=0.0,
     )
 
     controller.start([MagicMock()], MagicMock(), startup_cutoff_ms=123456)
@@ -183,6 +188,7 @@ async def test_startup_maintenance_runtime_support_failure_skips_approval_ready_
         setup_rooms_and_memberships=AsyncMock(),
         sync_runtime_support=sync_runtime_support,
         mark_runtime_support_ready=mark_runtime_support_ready,
+        recency_recheck_delay_seconds=0.0,
     )
 
     controller.start([MagicMock()], MagicMock(), startup_cutoff_ms=123456)

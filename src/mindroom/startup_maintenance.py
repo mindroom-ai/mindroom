@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from mindroom.logging_config import get_logger
+from mindroom.matrix.stale_stream_cleanup import STALE_STREAM_RECENCY_GUARD_MS
 from mindroom.orchestration.runtime import (
     cancel_logged_task,
     create_logged_task,
@@ -20,6 +21,11 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
 
 logger = get_logger(__name__)
+
+# Streams frozen moments before a fast restart are still inside the recency
+# guard when startup recovery scans, so one delayed recheck runs after the
+# guard window has provably elapsed.
+_DEFAULT_RECENCY_RECHECK_DELAY_SECONDS = STALE_STREAM_RECENCY_GUARD_MS / 1000 + 2.0
 
 type _StartupBot = AgentBot | TeamBot
 type _SetupRooms = Callable[[list[_StartupBot]], Awaitable[None]]
@@ -37,6 +43,7 @@ class StartupMaintenanceController:
     setup_rooms_and_memberships: _SetupRooms
     sync_runtime_support: _SyncRuntimeSupport
     mark_runtime_support_ready: _MarkRuntimeSupportReady
+    recency_recheck_delay_seconds: float = _DEFAULT_RECENCY_RECHECK_DELAY_SECONDS
     task: asyncio.Task[None] | None = field(default=None, init=False)
     startup_cutoff_ms: int | None = field(default=None, init=False)
 
@@ -114,6 +121,15 @@ class StartupMaintenanceController:
         )
         if runtime_support_ready:
             await self.mark_runtime_support_ready()
+        # Streams interrupted moments before this startup are hidden by the
+        # cleanup recency guard on the first scans; rescan every room once the
+        # guard window has elapsed so a fast restart cannot freeze them forever.
+        await asyncio.sleep(self.recency_recheck_delay_seconds)
+        await self._run_phase(
+            "startup_maintenance.stale_stream_recovery.recency_guard_recheck",
+            lambda: self.recover_stale_streams(bots, config, startup_cutoff_ms, set()),
+            failure_message="Recency-guard stale stream recovery recheck failed",
+        )
 
     async def _run_phase(
         self,

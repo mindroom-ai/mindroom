@@ -77,7 +77,7 @@ _ROOM_HISTORY_PAGE_SIZE = 100
 # process. The remaining race is another concurrently running instance cleaning
 # up a message during a long provider/tool stall where no new chunks arrive for
 # a while, so keep a generous recency guard here.
-_STALE_STREAM_RECENCY_GUARD_MS = 10_000
+STALE_STREAM_RECENCY_GUARD_MS = 10_000
 # Restart cleanup should only edit active-looking messages from the current
 # outage window. Explicit terminal interrupted notes may still be auto-resumed
 # later because they are already user-visible interrupted outcomes.
@@ -1792,7 +1792,7 @@ def _is_at_or_after_startup_cutoff(timestamp_ms: int, *, startup_cutoff_ms: int 
 def _is_recent_timestamp(timestamp_ms: int, *, now_ms: int | None = None) -> bool:
     """Return whether a timestamp is still within the startup recency guard."""
     current_time_ms = int(time.time() * 1000) if now_ms is None else now_ms
-    return current_time_ms - timestamp_ms < _STALE_STREAM_RECENCY_GUARD_MS
+    return current_time_ms - timestamp_ms < STALE_STREAM_RECENCY_GUARD_MS
 
 
 def _is_older_than_cleanup_window(timestamp_ms: int, *, now_ms: int | None = None) -> bool:
