@@ -1467,7 +1467,7 @@ class ExactReplyOracle:
         return [
             event_id
             for event_id in self.expected_sources
-            if event_id not in self.optional_sources and len(self.response_ids[event_id]) != 1
+            if event_id not in self.optional_sources and len(self.response_ids.get(event_id, ())) != 1
         ]
 
     async def pump(self, *, timeout_ms: int = 0) -> None:
@@ -1492,7 +1492,7 @@ class ExactReplyOracle:
                 if time.monotonic() >= settled_after:
                     return
         missing = {
-            self.expected_sources[event_id]: len(self.response_ids[event_id])
+            self.expected_sources[event_id]: len(self.response_ids.get(event_id, ()))
             for event_id in self.unsettled_required_sources()
         }
         msg = f"timed out waiting for exact agent replies: {missing}"
@@ -1566,7 +1566,7 @@ class ExactReplyOracle:
         unexpected = {
             source: sorted(event_ids)
             for source, event_ids in self.response_ids.items()
-            if source not in self.expected_sources and source not in self.internal_source_ids
+            if event_ids and source not in self.expected_sources and source not in self.internal_source_ids
         }
         if duplicates or unexpected:
             msg = f"agent reply invariant failed: duplicates={duplicates}, unexpected={unexpected}"
@@ -2333,7 +2333,7 @@ class LiveFuzzRunner:
         if operation.kind is LiveOperationKind.REDACTION:
             # A source redacted before its reply settles legitimately races the
             # in-flight response, so its exact cardinality becomes zero-or-one.
-            if len(self.oracle.response_ids[target_event_id]) != 1:
+            if len(self.oracle.response_ids.get(target_event_id, ())) != 1:
                 self.oracle.mark_source_optional(target_event_id)
             self.redacted_targets.add(target_event_id)
             event_id = await client.redact(target_event_id, txn_id, room_id=room_id)

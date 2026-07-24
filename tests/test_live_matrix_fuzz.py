@@ -521,3 +521,17 @@ def test_body_call_id_parses_only_canonical_prefixes() -> None:
     assert _body_call_id("LIVE-FUZZ call=17 segment-000 END call=17") == 17
     assert _body_call_id("[Response interrupted by service restart]") is None
     assert _body_call_id("LIVE-FUZZ call=x END") is None
+
+
+@pytest.mark.asyncio
+async def test_exact_reply_oracle_ignores_empty_defaultdict_entries() -> None:
+    """Stale empty reply sets from bookkeeping reads must not count as replies."""
+    client = LiveMatrixClient("http://matrix.invalid", "!room:example")
+    oracle = ExactReplyOracle(client, "@agent:example")
+    try:
+        oracle.expect("root:0", "$source")
+        assert oracle.unsettled_required_sources() == ["$source"]
+        oracle.response_ids["$untracked-redaction-target"]
+        oracle._assert_no_wrong_replies()
+    finally:
+        await client.close()
