@@ -52,6 +52,16 @@ def has_newer_unresponded_in_thread(
     if event_ts is None or not thread_history:
         return False
     for message in thread_history:
+        if is_visible_router_voice_echo(message.sender, message.content):
+            continue
+        if (
+            requester_user_id_for_event(
+                message.sender,
+                {"content": message.content},
+            )
+            != requester_user_id
+        ):
+            continue
         if message.timestamp is None or message.timestamp <= event_ts:
             continue
         # A sibling source of this very turn cannot supersede it: this turn is
@@ -59,13 +69,13 @@ def has_newer_unresponded_in_thread(
         # the whole coalesced batch with nothing left to respond.
         if message.event_id == event.event_id or message.event_id in current_turn_event_ids:
             continue
-        if not _is_unhandled_requester_message(
-            message,
-            requester_user_id=requester_user_id,
-            requester_user_id_for_event=requester_user_id_for_event,
-            is_visible_router_voice_echo=is_visible_router_voice_echo,
-            sender_is_trusted_for_ingress_metadata=sender_is_trusted_for_ingress_metadata,
-            is_handled=is_handled,
+        if is_handled(message.event_id):
+            continue
+        if (
+            message.body
+            and isinstance(message.body, str)
+            and not is_voice_event(message, sender_is_trusted=sender_is_trusted_for_ingress_metadata)
+            and command_parser.parse(message.body.strip()) is not None
         ):
             continue
         logger.info(
@@ -75,30 +85,6 @@ def has_newer_unresponded_in_thread(
         )
         return True
     return False
-
-
-def _is_unhandled_requester_message(
-    message: ResolvedVisibleMessage,
-    *,
-    requester_user_id: str,
-    requester_user_id_for_event: _RequesterResolver,
-    is_visible_router_voice_echo: _VisibleRouterVoiceEchoLookup,
-    sender_is_trusted_for_ingress_metadata: Callable[[str], bool],
-    is_handled: _HandledLookup,
-) -> bool:
-    """Return whether one history message is an unhandled non-command requester turn."""
-    if is_visible_router_voice_echo(message.sender, message.content):
-        return False
-    if requester_user_id_for_event(message.sender, {"content": message.content}) != requester_user_id:
-        return False
-    if is_handled(message.event_id):
-        return False
-    return not (
-        message.body
-        and isinstance(message.body, str)
-        and not is_voice_event(message, sender_is_trusted=sender_is_trusted_for_ingress_metadata)
-        and command_parser.parse(message.body.strip()) is not None
-    )
 
 
 async def _cached_event_is_in_thread(
