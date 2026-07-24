@@ -293,7 +293,9 @@ async def test_lifecycle_lock_callback_removes_stale_runs(tmp_path: Path) -> Non
 @pytest.mark.asyncio
 async def test_newer_same_source_edit_rejects_older_callback_during_generation(tmp_path: Path) -> None:
     """An older callback arriving during newer generation must never run or overwrite it."""
-    harness = _harness(tmp_path, turn_record=_turn_record())
+    record = _turn_record()
+    harness = _harness(tmp_path, turn_record=record)
+    harness.turn_store.try_claim_turn.return_value = True
     generation_started = asyncio.Event()
     release_generation = asyncio.Event()
 
@@ -316,6 +318,8 @@ async def test_newer_same_source_edit_rejects_older_callback_during_generation(t
 
     newer_task = asyncio.create_task(_handle_edit(harness, newer, newer_info))
     await generation_started.wait()
+    harness.turn_store.try_claim_turn.assert_called_once_with(record)
+    harness.turn_store.release_pending_turn_claim.assert_not_called()
     await _handle_edit(harness, older, older_info)
     release_generation.set()
     await newer_task
@@ -326,6 +330,7 @@ async def test_newer_same_source_edit_rejects_older_callback_during_generation(t
     assert recorded.source_event_revisions == {
         ORIGINAL_EVENT_ID: (1_000_010, "$edit-z:example.org"),
     }
+    harness.turn_store.release_pending_turn_claim.assert_called_once_with(record)
     assert harness.regenerator._mailboxes == {}
 
 
@@ -674,8 +679,7 @@ async def test_edit_waits_when_original_claim_precedes_pending_record(tmp_path: 
     release_wait.set()
     await task
 
-    assert harness.wait_for_turn_settled.await_count == 2
-    harness.wait_for_turn_settled.assert_awaited_with((ORIGINAL_EVENT_ID,))
+    harness.wait_for_turn_settled.assert_awaited_once_with((ORIGINAL_EVENT_ID,))
     request = harness.generate_response.await_args.args[0]
     assert request.prompt == "edit during pending registration"
     assert request.existing_event_id == RESPONSE_EVENT_ID
@@ -688,6 +692,7 @@ async def test_edit_waits_for_pending_original_response_then_reloads(tmp_path: P
     pending_record = _turn_record(response_event_id=None)
     completed_record = replace(pending_record, response_event_id=RESPONSE_EVENT_ID)
     harness = _harness(tmp_path, turn_record=pending_record)
+    harness.turn_store.try_claim_turn.side_effect = [False, True]
     original_settled = False
 
     def load_turn(**_kwargs: object) -> TurnRecord:
@@ -719,6 +724,7 @@ async def test_edit_waits_for_active_retry_then_uses_retried_response(tmp_path: 
     interrupted_record = _turn_record(response_event_id="$interrupted:example.org")
     retried_record = replace(interrupted_record, response_event_id="$retried:example.org")
     harness = _harness(tmp_path, turn_record=interrupted_record)
+    harness.turn_store.try_claim_turn.side_effect = [False, True]
     retry_settled = False
     wait_started = asyncio.Event()
     release_retry = asyncio.Event()
@@ -756,16 +762,13 @@ async def test_pending_original_failure_releases_wait_without_regeneration(tmp_p
     """A settled original with no response ID should end the drain without hanging."""
     pending_record = _turn_record(response_event_id=None)
     harness = _harness(tmp_path, turn_record=pending_record)
+    harness.turn_store.try_claim_turn.side_effect = [False, True]
     event, event_info = _edit_event()
 
     await _handle_edit(harness, event, event_info)
 
     harness.wait_for_turn_settled.assert_awaited_once_with((ORIGINAL_EVENT_ID,))
     harness.generate_response.assert_not_awaited()
-    harness.logger.debug.assert_any_call(
-        "Skipping edit regeneration after durable turn reload",
-        original_event_id=ORIGINAL_EVENT_ID,
-    )
     assert harness.regenerator._mailboxes == {}
 
 
@@ -773,6 +776,7 @@ async def test_pending_original_failure_releases_wait_without_regeneration(tmp_p
 async def test_cancellation_while_waiting_for_original_cleans_mailbox(tmp_path: Path) -> None:
     """Cancelling the edit waiter must not leave an event-loop task or mailbox behind."""
     harness = _harness(tmp_path, turn_record=_turn_record(response_event_id=None))
+    harness.turn_store.try_claim_turn.return_value = False
     wait_started = asyncio.Event()
     release_wait = asyncio.Event()
 

@@ -38,7 +38,7 @@ from mindroom.history.storage import (
 from mindroom.history.types import HistoryScope, HistoryScopeState
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
-from mindroom.text_ingress_dispatch import run_claimed_response
+from mindroom.text_ingress_dispatch import _run_claimed_response
 from mindroom.turn_store import TurnStore, TurnStoreDeps
 from tests.conftest import TEST_PASSWORD, bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
@@ -227,7 +227,7 @@ async def test_failed_claimed_response_releases_turn_for_replay(tmp_path: Path) 
 
     controller = SimpleNamespace(deps=SimpleNamespace(turn_store=store))
     with pytest.raises(RuntimeError, match="response failed"):
-        await run_claimed_response(controller, turn, fail())
+        await _run_claimed_response(controller, turn, fail())
 
     assert store.try_claim_turn(turn) is True
 
@@ -250,7 +250,7 @@ async def test_terminal_turn_keeps_claim_until_response_task_finishes(tmp_path: 
         await release_response.wait()
 
     controller = SimpleNamespace(deps=SimpleNamespace(turn_store=store))
-    response_task = asyncio.create_task(run_claimed_response(controller, turn, finish_response()))
+    response_task = asyncio.create_task(_run_claimed_response(controller, turn, finish_response()))
     await terminal_recorded.wait()
 
     assert store.try_claim_turn(turn) is False

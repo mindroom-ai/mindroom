@@ -134,9 +134,7 @@ class EditRegenerator:
             return
         original_event_id = event_info.original_event_id
         registry = entity_identity_registry(self.deps.runtime.config, self.deps.runtime_paths)
-        sender_agent_name = registry.current_entity_name_for_user_id(event.sender)
-        if sender_agent_name:
-            self._logger().debug("ignoring_edit_from_other_agent", agent=sender_agent_name)
+        if registry.current_entity_name_for_user_id(event.sender):
             return
 
         context = await self.deps.resolver.extract_message_context(
@@ -169,10 +167,7 @@ class EditRegenerator:
             or turn_record.history_scope is None
             or turn_record.response_owner is None
         ):
-            self._logger().warning(
-                "Skipping edited turn regeneration without persisted response context",
-                original_event_id=original_event_id,
-            )
+            self._logger().warning("Skipping edit without response context", original_event_id=original_event_id)
             return
         if turn_record.requester_id != requester_user_id:
             return
@@ -182,7 +177,6 @@ class EditRegenerator:
             conversation_target=turn_record.conversation_target,
         )
         if turn_record.response_owner != self.deps.agent_name:
-            self._logger().debug("Ignoring edit for turn owned by another entity", original_event_id=original_event_id)
             return
         if original_event_id in turn_record.redacted_source_event_ids:
             return
@@ -198,7 +192,6 @@ class EditRegenerator:
             runtime_paths=self.deps.runtime_paths,
         )
         if edited_content is None:
-            self._logger().debug("Edited message missing resolved body", event_id=event.event_id)
             return
         envelope = self.deps.resolver.build_message_envelope(
             event=event,
@@ -288,8 +281,7 @@ class EditRegenerator:
             prompt_parts = [prompt_map.get(source_event_id) for source_event_id in record.replay_source_event_ids]
             if record.source_event_prompts is None or any(part is None for part in prompt_parts):
                 self._logger().warning(
-                    "Skipping edited coalesced turn regeneration with incomplete prompt map",
-                    original_event_id=driving_edit.original_event_id,
+                    "Skipping coalesced edit without prompts",
                     anchor_event_id=record.anchor_event_id,
                 )
                 return None, None, applied
@@ -365,18 +357,20 @@ class EditRegenerator:
                 mailbox.pending.pop(source_event_id)
 
     async def _drain(self, room: nio.MatrixRoom, initial_record: TurnRecord, mailbox: _Mailbox) -> None:
-        assert initial_record.conversation_target is not None
-        await self.deps.wait_for_turn_settled(initial_record.indexed_event_ids)
+        while not self.deps.turn_store.try_claim_turn(initial_record):
+            await self.deps.wait_for_turn_settled(initial_record.indexed_event_ids)
+        try:
+            await self._drain_claimed(room, mailbox)
+        finally:
+            self.deps.turn_store.release_pending_turn_claim(initial_record)
+
+    async def _drain_claimed(self, room: nio.MatrixRoom, mailbox: _Mailbox) -> None:
         while mailbox.pending:
             latest = max(mailbox.pending.values(), key=lambda edit: edit.revision)
             request, record, applied = self._build_request(room, mailbox)
             if request is None or record is None:
                 self._discard(mailbox, applied)
                 if not applied:
-                    self._logger().debug(
-                        "Skipping edit regeneration after durable turn reload",
-                        original_event_id=latest.original_event_id,
-                    )
                     return
                 continue
             regenerated_event_id = await self.deps.generate_response(request)

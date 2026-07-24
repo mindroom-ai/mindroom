@@ -61,7 +61,7 @@ from mindroom.response_runner import (
     _ResponseGenerationOutcome,
 )
 from mindroom.teams import TeamIntent, TeamMode, TeamResolution
-from mindroom.text_ingress_dispatch import run_claimed_response
+from mindroom.text_ingress_dispatch import _run_claimed_response
 from mindroom.turn_controller import _IngressAdmissionOutcome, _PrecheckedEvent
 from mindroom.turn_policy import PreparedDispatch, ResponseAction, _DispatchPlan
 from tests.bot_helpers import (
@@ -181,7 +181,7 @@ class TestAgentBot(AgentBotTestBase):
 
         with patch.object(DeliveryGateway, "send_text", new=AsyncMock(side_effect=send_rejection)) as send_text:
             response_task = asyncio.create_task(
-                run_claimed_response(
+                _run_claimed_response(
                     controller,
                     handled_turn,
                     controller._execute_response_action(
@@ -1980,7 +1980,7 @@ class TestAgentBot(AgentBotTestBase):
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         _wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
-        _set_turn_store_tracker(bot, MagicMock())
+        tracker = _set_turn_store_tracker(bot, MagicMock())
         bot.logger = MagicMock()
         _replace_turn_policy_deps(bot, logger=bot.logger)
 
@@ -2053,6 +2053,10 @@ class TestAgentBot(AgentBotTestBase):
                 processing_log="processing",
                 dispatch_started_at=0.0,
                 handled_turn=TurnRecord.create([event.event_id]),
+            )
+            tracker.get_turn_record.return_value = TurnRecord.create(
+                [event.event_id],
+                response_event_id="$team-response",
             )
             await bot._restart_retry_queue.flush()
 

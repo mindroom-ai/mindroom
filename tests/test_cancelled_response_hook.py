@@ -418,6 +418,7 @@ async def test_team_edit_regeneration_empty_prompt_emits_cancelled_hook_once(tmp
         source_event_ids=("$original",),
         response_event_id="$response",
         response_owner="team_bot",
+        requester_id="@user:localhost",
         history_scope=HistoryScope(kind="team", scope_id="team_bot"),
         conversation_target=MessageTarget.resolve("!room:localhost", None, "$original"),
     )

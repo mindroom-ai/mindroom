@@ -17,7 +17,7 @@ from __future__ import annotations
 import asyncio
 import threading
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field, fields, replace
 from typing import TYPE_CHECKING, Any, cast
 
 import nio
@@ -1126,6 +1126,52 @@ async def test_deferred_sync_restart_records_handled_outcome_before_rethrow(
     retried_record = harness.turn_store.get_turn_record(event.event_id)
     assert retried_record is not None
     assert retried_record.response_event_id == "$retried-response:localhost"
+
+
+@pytest.mark.asyncio
+async def test_sync_restart_retry_skips_prompt_after_waiting_edit_commits(
+    config: Config,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A queued normal retry must not replay its stale prompt after an edit wins."""
+    harness = _build_harness(config, tmp_path)
+    harness.runner.deferred_sync_restart_error = asyncio.CancelledError("sync_restart")
+    room = _room_with_members(config, "general")
+    event = _text_event("stale original prompt")
+
+    with pytest.raises(asyncio.CancelledError, match="sync_restart"):
+        await harness.deliver(room, event)
+
+    record = harness.turn_store.get_turn_record(event.event_id)
+    assert record is not None
+    assert harness.turn_store.try_claim_turn(record)
+    wait_started = asyncio.Event()
+    wait_for_turn_settled = harness.turn_store.wait_for_turn_settled
+
+    async def wait_with_barrier(event_ids: tuple[str, ...]) -> None:
+        wait_started.set()
+        await wait_for_turn_settled(event_ids)
+
+    monkeypatch.setattr(harness.turn_store, "wait_for_turn_settled", wait_with_barrier)
+    harness.runner.deferred_sync_restart_error = None
+    retry = asyncio.create_task(harness.restart_retry.flush())
+    await wait_started.wait()
+    assert not retry.done()
+
+    edited_record = replace(
+        record,
+        response_event_id="$edited-response:localhost",
+        source_event_revisions={event.event_id: (event.server_timestamp + 1, "$edit:localhost")},
+    )
+    harness.turn_store.record_turn(edited_record)
+    harness.turn_store.release_pending_turn_claim(record)
+    await retry
+
+    assert len(harness.runner.requests) == 1
+    settled_record = harness.turn_store.get_turn_record(event.event_id)
+    assert settled_record is not None
+    assert settled_record.response_event_id == "$edited-response:localhost"
 
 
 @pytest.mark.asyncio

@@ -65,7 +65,7 @@ from mindroom.dispatch_source import (
 )
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.error_handling import get_user_friendly_error_message
-from mindroom.handled_turns import TurnRecord
+from mindroom.handled_turns import TurnRecord, same_turn_identity
 from mindroom.hooks import MessageEnvelope, build_hook_matrix_admin, hook_ingress_policy
 from mindroom.inbound_turn_normalizer import (
     DispatchPayloadWithAttachmentsRequest,
@@ -97,7 +97,7 @@ from mindroom.response_payload_preparation import (
 from mindroom.response_runner import PostLockRequestPreparationError, ResponseRequest
 from mindroom.routing import suggest_responder_for_message
 from mindroom.teams import TeamIntent, TeamMode, select_ad_hoc_team_mode
-from mindroom.text_ingress_dispatch import dispatch_text_message, run_claimed_response
+from mindroom.text_ingress_dispatch import dispatch_text_message
 from mindroom.thread_utils import (
     check_agent_mentioned,
     is_router_only_agent_mention,
@@ -1683,10 +1683,15 @@ class TurnController:
             async def retry() -> None:
                 while not self.deps.turn_store.try_claim_turn(handled_turn):
                     await self.deps.turn_store.wait_for_turn_settled(handled_turn.indexed_event_ids)
-                await run_claimed_response(
-                    self,
-                    handled_turn,
-                    self._execute_response_action(
+                try:
+                    current_record = self.deps.turn_store.get_turn_record(event.event_id)
+                    if (
+                        current_record is None
+                        or not same_turn_identity(current_record, handled_turn)
+                        or current_record.source_event_revisions != handled_turn.source_event_revisions
+                    ):
+                        return
+                    await self._execute_response_action(
                         room,
                         event,
                         dispatch,
@@ -1698,8 +1703,9 @@ class TurnController:
                         matrix_run_metadata=matrix_run_metadata,
                         retry_team_mode=retry_team_mode,
                         sync_restart_retry_source_event_id=event.event_id,
-                    ),
-                )
+                    )
+                finally:
+                    self.deps.turn_store.release_pending_turn_claim(handled_turn)
 
             self.deps.restart_retry.register(event.event_id, retry, room_id=room.room_id)
 
