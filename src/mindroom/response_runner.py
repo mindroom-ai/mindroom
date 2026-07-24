@@ -123,6 +123,7 @@ type _MatrixEventId = str
 _ToolContextResult = TypeVar("_ToolContextResult")
 _ToolStreamChunk = TypeVar("_ToolStreamChunk")
 _StateMutationResult = TypeVar("_StateMutationResult")
+_ResponseAdmissionResult = TypeVar("_ResponseAdmissionResult")
 
 
 async def _run_locked_source_preparation(
@@ -578,6 +579,18 @@ class ResponseRunner:
         """Bind the orchestrator-owned response-admission gate."""
         self._response_admission_lock = value
 
+    async def _run_with_response_admission(
+        self,
+        operation: Callable[[], Awaitable[_ResponseAdmissionResult]],
+    ) -> _ResponseAdmissionResult:
+        """Count one response from admission through its full lifecycle."""
+        async with self.response_admission_lock:
+            self.in_flight_response_count += 1
+        try:
+            return await operation()
+        finally:
+            self.in_flight_response_count -= 1
+
     def _show_tool_calls(self, agent_name: str | None = None) -> bool:
         """Return tool-call visibility for the current or target agent."""
         return show_tool_calls_for_agent(
@@ -798,7 +811,23 @@ class ResponseRunner:
         response_kind: str,
         locked_operation: Callable[[MessageTarget, _EarlyPlaceholderState], Awaitable[str | None]],
     ) -> str | None:
-        """Run one locked response operation with shared queued-message bookkeeping."""
+        """Admit one response before lifecycle locking or visible placeholder work."""
+        return await self._run_with_response_admission(
+            lambda: self._run_admitted_locked_response_lifecycle(
+                request,
+                response_kind=response_kind,
+                locked_operation=locked_operation,
+            ),
+        )
+
+    async def _run_admitted_locked_response_lifecycle(
+        self,
+        request: ResponseRequest,
+        *,
+        response_kind: str,
+        locked_operation: Callable[[MessageTarget, _EarlyPlaceholderState], Awaitable[str | None]],
+    ) -> str | None:
+        """Run one admitted response with shared queued-message bookkeeping."""
         resolved_target = request.response_envelope.target
         early_placeholder = _EarlyPlaceholderState()
         try:
@@ -1378,6 +1407,7 @@ class ResponseRunner:
                 run_id=run_id,
                 pipeline_timing=request.pipeline_timing,
                 on_cancelled=progress.note_task_cancelled,
+                _admission_already_counted=True,
             )
             if progress.tracked_event_id is None:
                 progress.track_event(run_message_id)
@@ -2072,38 +2102,69 @@ class ResponseRunner:
         run_id: str | None = None,
         pipeline_timing: DispatchPipelineTiming | None = None,
         on_cancelled: Callable[[str], None] | None = None,
+        _admission_already_counted: bool = False,
     ) -> _MatrixEventId | None:
-        """Run one response generation function with cancellation support."""
-        async with self.response_admission_lock:
-            self.in_flight_response_count += 1
-        try:
-            return await ResponseAttemptRunner(
-                ResponseAttemptDeps(
-                    client=self._client(),
-                    delivery_gateway=self.deps.delivery_gateway,
-                    stop_manager=self.deps.stop_manager,
-                    logger=self.deps.logger,
-                    show_stop_button=lambda: self.deps.runtime.config.defaults.show_stop_button,
-                    config=self.deps.runtime.config,
-                    notify_outbound_event=self.deps.resolver.deps.conversation_cache.notify_outbound_event,
-                    notify_outbound_redaction=(
-                        self.deps.post_response_effects.conversation_cache.notify_outbound_redaction
-                    ),
-                ),
-            ).run(
-                ResponseAttemptRequest(
-                    target=target,
-                    response_function=response_function,
-                    thinking_message=thinking_message,
-                    existing_event_id=existing_event_id,
-                    user_id=user_id,
-                    run_id=run_id,
-                    pipeline_timing=pipeline_timing,
-                    on_cancelled=on_cancelled,
-                ),
+        """Admit a direct lower-level response attempt for compatibility."""
+        if _admission_already_counted:
+            return await self._run_admitted_cancellable_response(
+                target=target,
+                response_function=response_function,
+                thinking_message=thinking_message,
+                existing_event_id=existing_event_id,
+                user_id=user_id,
+                run_id=run_id,
+                pipeline_timing=pipeline_timing,
+                on_cancelled=on_cancelled,
             )
-        finally:
-            self.in_flight_response_count -= 1
+        return await self._run_with_response_admission(
+            lambda: self._run_admitted_cancellable_response(
+                target=target,
+                response_function=response_function,
+                thinking_message=thinking_message,
+                existing_event_id=existing_event_id,
+                user_id=user_id,
+                run_id=run_id,
+                pipeline_timing=pipeline_timing,
+                on_cancelled=on_cancelled,
+            ),
+        )
+
+    async def _run_admitted_cancellable_response(
+        self,
+        *,
+        target: MessageTarget,
+        response_function: Callable[[str | None], Coroutine[Any, Any, None]],
+        thinking_message: str | None = None,
+        existing_event_id: str | None = None,
+        user_id: str | None = None,
+        run_id: str | None = None,
+        pipeline_timing: DispatchPipelineTiming | None = None,
+        on_cancelled: Callable[[str], None] | None = None,
+    ) -> _MatrixEventId | None:
+        """Run one already-admitted response attempt with cancellation support."""
+        return await ResponseAttemptRunner(
+            ResponseAttemptDeps(
+                client=self._client(),
+                delivery_gateway=self.deps.delivery_gateway,
+                stop_manager=self.deps.stop_manager,
+                logger=self.deps.logger,
+                show_stop_button=lambda: self.deps.runtime.config.defaults.show_stop_button,
+                config=self.deps.runtime.config,
+                notify_outbound_event=self.deps.resolver.deps.conversation_cache.notify_outbound_event,
+                notify_outbound_redaction=self.deps.post_response_effects.conversation_cache.notify_outbound_redaction,
+            ),
+        ).run(
+            ResponseAttemptRequest(
+                target=target,
+                response_function=response_function,
+                thinking_message=thinking_message,
+                existing_event_id=existing_event_id,
+                user_id=user_id,
+                run_id=run_id,
+                pipeline_timing=pipeline_timing,
+                on_cancelled=on_cancelled,
+            ),
+        )
 
     @timed("prepare_response_runtime")
     async def prepare_response_runtime(
