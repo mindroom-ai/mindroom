@@ -19,6 +19,7 @@ import hashlib
 import importlib.metadata
 import itertools
 import json
+import math
 import os
 import random
 import re
@@ -3520,6 +3521,14 @@ def _non_negative_int(value: str) -> int:
     return parsed
 
 
+def _non_negative_float(value: str) -> float:
+    parsed = float(value)
+    if not math.isfinite(parsed) or parsed < 0:
+        msg = "must be a finite non-negative number"
+        raise argparse.ArgumentTypeError(msg)
+    return parsed
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--profile", choices=("fuzz", "recovery", "saturation"), default="fuzz")
@@ -3533,12 +3542,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--restart-interval", type=_non_negative_int, default=100)
     parser.add_argument(
         "--reply-timeout",
-        type=float,
+        type=_non_negative_float,
         help="per-reply deadline (default: 60s fuzz, 180s saturation)",
     )
     parser.add_argument(
         "--settle-seconds",
-        type=float,
+        type=_non_negative_float,
         help="quiet-window duration (default: replay artifact value or 0.75s)",
     )
     parser.add_argument("--trace", type=Path)
@@ -3553,12 +3562,15 @@ def _load_trace(path: Path) -> tuple[LiveFuzzScenario, float | None, float | Non
     payload = json.loads(text)
     reply_timeout = payload.get("reply_timeout") if isinstance(payload, dict) else None
     settle_seconds = payload.get("settle_seconds") if isinstance(payload, dict) else None
-    if reply_timeout is not None and not isinstance(reply_timeout, int | float):
-        msg = "live Matrix fuzz trace reply_timeout must be numeric"
-        raise TypeError(msg)
-    if settle_seconds is not None and not isinstance(settle_seconds, int | float):
-        msg = "live Matrix fuzz trace settle_seconds must be numeric"
-        raise TypeError(msg)
+    for name, value in (("reply_timeout", reply_timeout), ("settle_seconds", settle_seconds)):
+        if value is None:
+            continue
+        if isinstance(value, bool) or not isinstance(value, int | float):
+            msg = f"live Matrix fuzz trace {name} must be numeric"
+            raise TypeError(msg)
+        if not math.isfinite(value) or value < 0:
+            msg = f"live Matrix fuzz trace {name} must be finite and non-negative"
+            raise ValueError(msg)
     return (
         LiveFuzzScenario.from_json(text),
         float(reply_timeout) if reply_timeout is not None else None,

@@ -163,6 +163,37 @@ def test_failure_artifact_includes_loaded_code_provenance(tmp_path: Path) -> Non
     assert settle_seconds == 1.25
 
 
+@pytest.mark.parametrize(
+    ("field", "value", "error"),
+    [
+        ("reply_timeout", True, TypeError),
+        ("settle_seconds", -1, ValueError),
+        ("reply_timeout", float("inf"), ValueError),
+    ],
+)
+def test_failure_artifact_rejects_invalid_timing(
+    tmp_path: Path,
+    field: str,
+    value: object,
+    error: type[Exception],
+) -> None:
+    """Replay deadlines must be real non-negative durations."""
+    scenario = LiveFuzzScenario(thread_count=1, batches=())
+    failure_log = tmp_path / "failure.json"
+    failure_log.write_text(
+        json.dumps(
+            {
+                "scenario": json.loads(scenario.to_json()),
+                field: value,
+            },
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(error, match=field):
+        fuzz_live_matrix._load_trace(failure_log)
+
+
 def test_live_campaign_fails_on_serious_runtime_diagnostics() -> None:
     """Timeout, degraded-read, and stall counters are correctness gate inputs."""
     clean = {
