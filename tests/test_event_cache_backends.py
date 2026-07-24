@@ -107,6 +107,38 @@ def _edit_event(
     }
 
 
+@pytest.mark.asyncio
+async def test_latest_edit_tie_breaks_by_event_id(
+    event_cache: ConversationEventCache,
+) -> None:
+    """Matrix selects the lexicographically greatest edit ID on timestamp ties."""
+    room_id = "!edit-tie:localhost"
+    sender = "@agent:localhost"
+    edit_z = _edit_event(
+        event_id="$z-edit",
+        sender=sender,
+        original_event_id="$original",
+        body="matrix winner",
+        origin_server_ts=2000,
+    )
+    edit_a = _edit_event(
+        event_id="$a-edit",
+        sender=sender,
+        original_event_id="$original",
+        body="later cache write",
+        origin_server_ts=2000,
+    )
+
+    await event_cache.store_events_batch(
+        [
+            ("$z-edit", room_id, edit_z),
+            ("$a-edit", room_id, edit_a),
+        ],
+    )
+
+    assert await event_cache.get_latest_edit(room_id, "$original") == edit_z
+
+
 def _postgres_schema_url(database_url: str, schema_name: str) -> str:
     """Return a disposable URL pinned to one isolated PostgreSQL schema."""
     separator = "&" if "?" in database_url else "?"
