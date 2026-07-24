@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, patch
+from weakref import WeakKeyDictionary
 
 import pytest
 
@@ -32,6 +34,17 @@ if TYPE_CHECKING:
 ROOM = "!room:localhost"
 THREAD = "$root"
 EPOCH = 1
+
+
+@dataclass(slots=True)
+class _SyntheticDurableState:
+    """Durable revision state used by the unit-test cache simulation."""
+
+    rows: list[dict[str, Any]] | None = None
+    write_seq: int = 0
+
+
+_SYNTHETIC_DURABLE_STATES: WeakKeyDictionary[ThreadResolutionReuseCache, _SyntheticDurableState] = WeakKeyDictionary()
 
 
 def _message_row(
@@ -106,8 +119,13 @@ async def _resolve(
     thread_id: str = THREAD,
 ) -> tuple[list[ResolvedVisibleMessage], str]:
     cache = event_cache if event_cache is not None else make_event_cache_mock()
-    previous_rows = getattr(reuse, "_test_rows", None) if reuse is not None else None
-    previous_write_seq = getattr(reuse, "_test_write_seq", 0) if reuse is not None else 0
+    synthetic_state = (
+        _SYNTHETIC_DURABLE_STATES.setdefault(reuse, _SyntheticDurableState())
+        if reuse is not None
+        else _SyntheticDurableState()
+    )
+    previous_rows = synthetic_state.rows
+    previous_write_seq = synthetic_state.write_seq
     if previous_rows == rows:
         max_write_seq = previous_write_seq
         suffix: list[dict[str, Any]] = []
@@ -122,8 +140,8 @@ async def _resolve(
         suffix = []
         max_write_seq = previous_write_seq + max(len(rows), 1)
     if reuse is not None:
-        reuse._test_rows = list(rows)  # type: ignore[attr-defined]
-        reuse._test_write_seq = max_write_seq  # type: ignore[attr-defined]
+        synthetic_state.rows = list(rows)
+        synthetic_state.write_seq = max_write_seq
 
     cache.room_membership_epoch.return_value = epoch
     cache.get_thread_cache_state.return_value = ThreadCacheState(
