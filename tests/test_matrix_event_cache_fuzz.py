@@ -256,6 +256,28 @@ async def test_concurrent_batch_uses_independent_cache_connections(tmp_path: Pat
 
 
 @pytest.mark.asyncio
+async def test_concurrent_runtime_initialization_does_not_deadlock(
+    event_cache_factory: Callable[[], ConversationEventCache],
+) -> None:
+    """New backend runtimes must initialize without inverting operation locks."""
+    await run_scenario(
+        event_cache_factory,
+        FuzzScenario(
+            batches=(
+                (
+                    FuzzOperation(OperationKind.THREADED_MESSAGE, 0, 0, 1, 0, 0),
+                    FuzzOperation(OperationKind.THREADED_MESSAGE, 0, 1, 1, 0, 0),
+                ),
+            ),
+            room_count=1,
+            thread_count=2,
+        ),
+        verify_restart=False,
+        max_batch_seconds=10,
+    )
+
+
+@pytest.mark.asyncio
 async def test_batch_timeout_emits_replayable_trace(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

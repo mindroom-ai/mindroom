@@ -180,6 +180,10 @@ async def _initialize_postgres_event_cache_db(
             (_POSTGRES_SCHEMA_LOCK_NAME,),
         )
         await db.execute(
+            "SELECT pg_advisory_xact_lock(hashtext(%s), hashtext(%s))",
+            (namespace, _PRINCIPAL_NAMESPACE_LOCK_SCOPE),
+        )
+        await db.execute(
             """
             CREATE TABLE IF NOT EXISTS mindroom_event_cache_metadata (
                 key TEXT PRIMARY KEY,
@@ -198,10 +202,6 @@ async def _initialize_postgres_event_cache_db(
         if current_schema_version in {1, 2}:
             await _migrate_postgres_event_cache_security_schema(db)
         await _create_postgres_event_cache_schema(db)
-        await db.execute(
-            "SELECT pg_advisory_xact_lock(hashtext(%s), hashtext(%s))",
-            (namespace, _PRINCIPAL_NAMESPACE_LOCK_SCOPE),
-        )
         migration_result = await migrate_postgres_schema(
             db,
             namespace=namespace,
