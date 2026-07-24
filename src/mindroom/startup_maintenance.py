@@ -78,6 +78,10 @@ class StartupMaintenanceController:
         await cancel_logged_task(task)
         return should_replay
 
+    def _task_running(self) -> bool:
+        """Return whether a live maintenance task is currently scheduled."""
+        return self.task is not None and not self.task.done()
+
     def restart_after_config_reload(
         self,
         *,
@@ -86,7 +90,7 @@ class StartupMaintenanceController:
     ) -> None:
         """Replay canceled startup maintenance after config reload completes."""
         startup_cutoff_ms = self.startup_cutoff_ms
-        if startup_cutoff_ms is None or self.task is not None:
+        if startup_cutoff_ms is None or self._task_running():
             return
         if self.recheck_pending:
             # Every earlier phase already completed before the cancel, and the
@@ -104,9 +108,12 @@ class StartupMaintenanceController:
 
         Called from reload replay and from background bot-start recovery, so a
         reload that completes with zero running bots cannot strand the recheck.
+        Only a live task blocks resume: after exhausted bounded retries the
+        completed task object remains recorded, and that parked debt must
+        stay resumable without an intervening cancel().
         """
         startup_cutoff_ms = self.startup_cutoff_ms
-        if not self.recheck_pending or self.task is not None or startup_cutoff_ms is None:
+        if not self.recheck_pending or self._task_running() or startup_cutoff_ms is None:
             return
         bots = running_bots()
         if not bots:

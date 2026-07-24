@@ -367,6 +367,29 @@ async def test_failed_recheck_retries_automatically_until_success() -> None:
 
 
 @pytest.mark.asyncio
+async def test_exhausted_recheck_debt_resumes_without_prior_cancel() -> None:
+    """Bot recovery resumes parked debt while the completed task is still recorded.
+
+    After exhausted bounded retries the finished task object remains stored;
+    only a live task may block resume, otherwise the debt stays parked until
+    an unrelated cancel() happens to clear it.
+    """
+    counts = {"recover": 0}
+    controller = _recheck_failure_controller(counts, failing_recheck_attempts={1}, recheck_max_attempts=1)
+
+    controller.start([MagicMock()], MagicMock(), startup_cutoff_ms=123456)
+    await _wait_for_controller(controller)
+    assert controller.recheck_pending is True
+    assert controller.task is not None
+
+    controller.resume_pending_recheck(config=MagicMock(), running_bots=lambda: [MagicMock()])
+    await _wait_for_controller(controller)
+
+    assert counts["recover"] == 4
+    assert controller.recheck_pending is False
+
+
+@pytest.mark.asyncio
 async def test_exhausted_recheck_retries_stay_pending_and_replay_on_next_reload() -> None:
     """Exhausting bounded retries keeps the debt replayable by a later reload."""
     counts = {"recover": 0}
