@@ -18,7 +18,9 @@ from scripts.testing.fuzz_matrix_event_cache import (
     FuzzOperation,
     FuzzScenario,
     OperationKind,
+    ciphertext_source,
     concurrent_fanout_scenario,
+    edit_source,
     message_id,
     model_based_scenario,
     reply_id,
@@ -26,6 +28,7 @@ from scripts.testing.fuzz_matrix_event_cache import (
     run_scenario,
     scenario_from_seed,
     thread_id,
+    threaded_message_source,
 )
 
 if TYPE_CHECKING:
@@ -48,7 +51,7 @@ def _operation_strategy(
         thread=st.integers(min_value=0, max_value=2),
         slot=st.integers(min_value=0, max_value=7),
         target=st.integers(min_value=0, max_value=7),
-        variant=st.integers(min_value=0, max_value=7),
+        variant=st.integers(min_value=0, max_value=15),
     )
 
 
@@ -148,6 +151,7 @@ async def test_model_trace_has_exact_semantics_and_backend_parity(
         room_count=2,
         thread_count=3,
         max_batch_seconds=5,
+        verify_reference_model=True,
     )
     postgres_state = await run_scenario(
         lambda: PostgresEventCache(
@@ -158,6 +162,7 @@ async def test_model_trace_has_exact_semantics_and_backend_parity(
         room_count=2,
         thread_count=3,
         max_batch_seconds=5,
+        verify_reference_model=True,
     )
 
     assert sqlite_state.backend_parity_projection() == postgres_state.backend_parity_projection()
@@ -166,10 +171,58 @@ async def test_model_trace_has_exact_semantics_and_backend_parity(
         for current_room_id, current_thread_id, event_ids in sqlite_state.threads
     }
     hot_thread = thread_events[(room_id(0), thread_id(0, 0))]
-    assert hot_thread.index(message_id(0, 0, 6)) < hot_thread.index(message_id(0, 0, 5))
-    assert reply_id(0, 0, 7) in hot_thread
+    assert hot_thread.index(message_id(0, 0, 6, 5, 8)) < hot_thread.index(message_id(0, 0, 5, 5, 8))
+    assert reply_id(0, 0, 7, 6, 0) in hot_thread
     assert thread_events[(room_id(1), thread_id(1, 0))] == (thread_id(1, 0),)
     assert message_id(1, 2, 3) in thread_events[(room_id(1), thread_id(1, 2))]
+
+
+def test_generated_event_ids_do_not_alias_different_matrix_events() -> None:
+    """All operation inputs produce immutable IDs except cleartext upgrades."""
+    operations = tuple(
+        FuzzOperation(
+            kind=kind,
+            room=0,
+            thread=1,
+            slot=3,
+            target=target,
+            variant=variant,
+        )
+        for kind in (
+            OperationKind.THREADED_MESSAGE,
+            OperationKind.PLAIN_REPLY,
+            OperationKind.EDIT,
+            OperationKind.REACTION,
+            OperationKind.REFERENCE,
+            OperationKind.REDACTION,
+        )
+        for target in range(2)
+        for variant in range(16)
+    )
+
+    FuzzScenario(batches=tuple((operation,) for operation in operations)).validate()
+
+    operation = FuzzOperation(OperationKind.THREADED_MESSAGE, 0, 1, 3, 1, 9)
+    clear = threaded_message_source(operation)
+    opaque = ciphertext_source(operation)
+    assert clear["event_id"] == opaque["event_id"]
+    assert clear["origin_server_ts"] == opaque["origin_server_ts"]
+    assert clear["sender"] == opaque["sender"]
+    assert clear["content"]["m.relates_to"] == opaque["content"]["m.relates_to"]
+
+
+@pytest.mark.parametrize("target_kind", range(4))
+def test_edit_variants_cover_wrong_sender_for_every_target_kind(target_kind: int) -> None:
+    """Wrong-sender edits cover messages, roots, replies, and prior edits."""
+    valid = edit_source(
+        FuzzOperation(OperationKind.EDIT, 0, 1, 9, 6, target_kind),
+    )
+    wrong_sender = edit_source(
+        FuzzOperation(OperationKind.EDIT, 0, 1, 9, 6, target_kind + 4),
+    )
+
+    assert valid["content"]["m.relates_to"]["event_id"] == wrong_sender["content"]["m.relates_to"]["event_id"]
+    assert valid["sender"] != wrong_sender["sender"]
 
 
 @pytest.mark.asyncio
