@@ -55,7 +55,9 @@ def _recovery_scenario_with_sources(
 def test_exact_nio_provenance_fails_closed() -> None:
     """An exact campaign may not run against unverifiable or different nio."""
     provenance = fuzz_live_matrix.RuntimeProvenance(
+        mindroom_module_path="/loaded/mindroom/__init__.py",
         mindroom_revision="mindroom-sha",
+        mindroom_expected_revision="mindroom-sha",
         nio_module_path="/loaded/nio/__init__.py",
         nio_version="1.0",
         nio_revision="loaded-sha",
@@ -69,11 +71,13 @@ def test_exact_nio_provenance_fails_closed() -> None:
 def test_exact_nio_provenance_rejects_unverified_or_dirty_source() -> None:
     """A clean commit label must not conceal unverifiable or modified imports."""
     unverified = fuzz_live_matrix.RuntimeProvenance(
+        mindroom_module_path="/loaded/mindroom/__init__.py",
         mindroom_revision="mindroom-sha",
+        mindroom_expected_revision="mindroom-sha",
         nio_module_path="/loaded/nio/__init__.py",
         nio_version="1.0",
         nio_revision="unverified",
-        nio_expected_revision="unspecified",
+        nio_expected_revision="nio-sha",
     )
     dirty = replace(
         unverified,
@@ -84,14 +88,33 @@ def test_exact_nio_provenance_rejects_unverified_or_dirty_source() -> None:
 
     with pytest.raises(RuntimeError, match="could not verify"):
         fuzz_live_matrix._validate_nio_provenance(unverified)
-    with pytest.raises(RuntimeError, match="clean loaded source"):
+    with pytest.raises(RuntimeError, match="clean loaded nio source"):
         fuzz_live_matrix._validate_nio_provenance(dirty)
+
+
+def test_non_exact_nio_provenance_accepts_wheel_hash() -> None:
+    """Ordinary fuzz runs may use an unhashed wheel while still recording its source hash."""
+    provenance = fuzz_live_matrix.RuntimeProvenance(
+        mindroom_module_path="/loaded/mindroom/__init__.py",
+        mindroom_revision="mindroom-sha",
+        mindroom_expected_revision="mindroom-sha",
+        nio_module_path="/site-packages/nio/__init__.py",
+        nio_version="1.0",
+        nio_revision="unverified",
+        nio_expected_revision="",
+        nio_dirty=True,
+        nio_source_hash="content-hash",
+    )
+
+    fuzz_live_matrix._validate_nio_provenance(provenance)
 
 
 def test_failure_artifact_includes_loaded_code_provenance(tmp_path: Path) -> None:
     """Failure JSON must identify both loaded repositories and exact trace."""
     provenance = fuzz_live_matrix.RuntimeProvenance(
+        mindroom_module_path="/loaded/mindroom/__init__.py",
         mindroom_revision="mindroom-sha",
+        mindroom_expected_revision="mindroom-sha",
         nio_module_path="/loaded/nio/__init__.py",
         nio_version="1.0",
         nio_revision="nio-sha",
@@ -116,6 +139,7 @@ def test_failure_artifact_includes_loaded_code_provenance(tmp_path: Path) -> Non
     )
 
     assert artifact["mindroom_revision"] == "mindroom-sha"
+    assert artifact["mindroom_module_path"] == "/loaded/mindroom/__init__.py"
     assert artifact["nio_module_path"] == "/loaded/nio/__init__.py"
     assert artifact["nio_version"] == "1.0"
     assert artifact["nio_revision"] == "nio-sha"
@@ -127,6 +151,50 @@ def test_failure_artifact_includes_loaded_code_provenance(tmp_path: Path) -> Non
         thread_count=1,
         restart_interval=0,
     )
+
+
+def test_runtime_attestation_retains_child_provenance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Startup failures after child import must still report the loaded runtime."""
+    expected = fuzz_live_matrix.RuntimeProvenance(
+        mindroom_module_path="/child/mindroom/__init__.py",
+        mindroom_revision="mindroom-sha",
+        mindroom_expected_revision="mindroom-sha",
+        nio_module_path="/child/nio/__init__.py",
+        nio_version="1.0",
+        nio_revision="nio-sha",
+        nio_expected_revision="nio-sha",
+    )
+    stack = object.__new__(fuzz_live_matrix.ManagedTuwunelStack)
+    stack.attestation_path = tmp_path / "runtime-attestation.json"
+    stack.attestation_path.write_text(
+        json.dumps(
+            {
+                "mindroom_module_path": expected.mindroom_module_path,
+                "nio_module_path": expected.nio_module_path,
+            },
+        ),
+        encoding="utf-8",
+    )
+    stack.runtime_provenance = None
+    stack._mindroom_process = None
+
+    def provenance(
+        *,
+        mindroom_module_path: Path,
+        nio_module_path: Path,
+    ) -> fuzz_live_matrix.RuntimeProvenance:
+        assert str(mindroom_module_path) == expected.mindroom_module_path
+        assert str(nio_module_path) == expected.nio_module_path
+        return expected
+
+    monkeypatch.setattr(fuzz_live_matrix, "_runtime_provenance", provenance)
+
+    stack._wait_for_runtime_attestation()
+
+    assert stack.runtime_provenance is expected
 
 
 @pytest.mark.asyncio
@@ -501,7 +569,11 @@ def test_saturation_rejects_unsupported_operations(kind: LiveOperationKind) -> N
     scenario = LiveFuzzScenario(
         thread_count=2,
         profile="saturation",
-        batches=((LiveOperation(0, kind, 0, target),),),
+        batches=(
+            (LiveOperation(0, LiveOperationKind.THREAD_MESSAGE, 0, "response:root:0"),),
+            (LiveOperation(1, kind, 0, target),),
+            (LiveOperation(2, LiveOperationKind.THREAD_MESSAGE, 1, "response:root:1"),),
+        ),
     )
 
     with pytest.raises(ValueError, match="saturation profile does not support"):
@@ -533,6 +605,46 @@ def test_saturation_rejects_incomplete_parallel_batches_and_wrong_targets() -> N
         incomplete.validate()
     with pytest.raises(ValueError, match="must target"):
         wrong_target.validate()
+
+
+@pytest.mark.parametrize(
+    "batches",
+    [
+        (),
+        ((LiveOperation(0, LiveOperationKind.THREAD_MESSAGE, 0, "response:root:0"),),),
+        ((LiveOperation(0, LiveOperationKind.THREAD_MESSAGE, 1, "response:root:1"),),),
+    ],
+)
+def test_saturation_requires_both_hot_and_parallel_phases(
+    batches: tuple[tuple[LiveOperation, ...], ...],
+) -> None:
+    """Degenerate saturation traces cannot satisfy the two-phase gate."""
+    scenario = LiveFuzzScenario(
+        thread_count=2,
+        profile="saturation",
+        batches=batches,
+    )
+
+    with pytest.raises(ValueError, match="one hot batch and one complete parallel batch"):
+        scenario.validate()
+
+
+@pytest.mark.parametrize(
+    ("hot_turns", "parallel_threads", "parallel_turns"),
+    [(0, 1, 1), (1, 0, 1), (1, 1, 0)],
+)
+def test_saturation_generator_requires_positive_dimensions(
+    hot_turns: int,
+    parallel_threads: int,
+    parallel_turns: int,
+) -> None:
+    """Generator cannot emit a degenerate saturation profile."""
+    with pytest.raises(ValueError, match="dimensions must all be positive"):
+        saturation_scenario(
+            hot_turns=hot_turns,
+            parallel_threads=parallel_threads,
+            parallel_turns=parallel_turns,
+        )
 
 
 @pytest.mark.asyncio
@@ -753,12 +865,15 @@ async def test_exact_reply_oracle_rejects_wrong_thread_root() -> None:
 
 
 def test_model_response_is_bound_to_source_and_ordered_history() -> None:
-    """Swapped sources and corrupted histories must not satisfy exact bodies."""
+    """Edits and duplicate history rows must change the independent identity."""
+    original = fuzz_live_matrix._source_identity("root:0", "original")
+    edited = fuzz_live_matrix._source_identity("root:0", "edited")
     source, history = fuzz_live_matrix._ModelHandler._request_identity(
         {
             "messages": [
-                {"content": "first LIVE-SOURCE[root:0]"},
-                {"content": "second LIVE-SOURCE[op:1]"},
+                {"content": f"first LIVE-SOURCE[{original}]"},
+                {"content": f"duplicate LIVE-SOURCE[{original}]"},
+                {"content": f"latest LIVE-SOURCE[{edited}]"},
             ],
         },
     )
@@ -768,22 +883,143 @@ def test_model_response_is_bound_to_source_and_ordered_history() -> None:
         history_fingerprint=history,
     )
 
-    assert source == "op:1"
+    assert source == edited
     assert ExactReplyOracle._is_complete_model_body(
         body,
-        expected_source_marker="op:1",
-        expected_history_fingerprint=fuzz_live_matrix._history_fingerprint(("root:0", "op:1")),
+        expected_source_marker=edited,
+        expected_history_fingerprint=fuzz_live_matrix._history_fingerprint((original, original, edited)),
     )
     assert not ExactReplyOracle._is_complete_model_body(
         body,
-        expected_source_marker="root:0",
+        expected_source_marker=original,
         expected_history_fingerprint=history,
     )
     assert not ExactReplyOracle._is_complete_model_body(
         body,
-        expected_source_marker="op:1",
-        expected_history_fingerprint=fuzz_live_matrix._history_fingerprint(("op:1",)),
+        expected_source_marker=edited,
+        expected_history_fingerprint=fuzz_live_matrix._history_fingerprint((original, edited)),
     )
+
+
+def test_live_model_tracks_edit_and_redaction_transitions() -> None:
+    """Edit redaction restores the prior revision; source redaction removes history."""
+
+    class Stack:
+        agent_id = "@agent:example"
+
+    client = cast("LiveMatrixClient", object())
+    runner = fuzz_live_matrix.LiveFuzzRunner(
+        cast("fuzz_live_matrix.ManagedTuwunelStack", Stack()),
+        (client,),
+        LiveFuzzScenario(thread_count=1, batches=()),
+        reply_timeout=1,
+        settle_seconds=0,
+    )
+    original_content = runner._message_content("Original", source_marker="root:0")
+    original_identity = fuzz_live_matrix._source_marker_from_content(original_content)
+    runner.event_ids["root:0"] = "$root"
+    runner._expect_source(
+        runner.oracle,
+        "root:0",
+        "$root",
+        root_event_id="$root",
+        room=0,
+        thread=0,
+        source_content=original_content,
+    )
+
+    edit = LiveOperation(1, LiveOperationKind.EDIT, 0, "root:0")
+    edited_content = runner._message_content("Edited", source_marker="root:0")
+    edited_identity = fuzz_live_matrix._source_marker_from_content(edited_content)
+    runner._record_edit_revision(edit, edited_content)
+
+    assert runner.oracle.expected_model_identity["$root"] == (
+        edited_identity,
+        fuzz_live_matrix._history_fingerprint((edited_identity,)),
+    )
+
+    runner._record_redaction(
+        LiveOperation(2, LiveOperationKind.REDACTION, 0, edit.event_ref),
+    )
+    assert runner.oracle.expected_model_identity["$root"] == (
+        original_identity,
+        fuzz_live_matrix._history_fingerprint((original_identity,)),
+    )
+
+    runner._record_redaction(
+        LiveOperation(3, LiveOperationKind.REDACTION, 0, "root:0"),
+    )
+    assert runner._history_identities((0, 0)) == ()
+
+
+def test_exact_reply_oracle_rejects_malformed_visible_agent_original() -> None:
+    """A visible non-threaded agent duplicate cannot disappear from the audit."""
+    oracle = ExactReplyOracle(cast("LiveMatrixClient", object()), "@agent:example")
+    oracle._ingest_event(
+        {
+            "event_id": "$malformed",
+            "sender": "@agent:example",
+            "type": "m.room.message",
+            "content": {
+                "m.relates_to": {
+                    "m.in_reply_to": {"event_id": "$source"},
+                },
+            },
+        },
+    )
+
+    with pytest.raises(AssertionError, match="malformed"):
+        oracle._assert_no_wrong_replies()
+
+
+def test_saturation_final_audit_rejects_late_corrupt_edit() -> None:
+    """A corrupt replacement arriving during quiescence must fail the gate."""
+    source_marker = fuzz_live_matrix._source_identity("op:1", "source")
+    history = fuzz_live_matrix._history_fingerprint((source_marker,))
+    original = _agent_reply_event(
+        "$source",
+        "$response",
+        fuzz_live_matrix._ModelHandler.response_text_for(
+            1,
+            source_marker=source_marker,
+            history_fingerprint=history,
+        ),
+    )
+    original["content"]["m.relates_to"]["event_id"] = "$root"
+    corrupt_edit = _agent_edit_event(
+        "$response",
+        "corrupt",
+        event_id="$edit",
+        timestamp=2,
+    )
+
+    class Client:
+        def __init__(self) -> None:
+            self.seen_events = {
+                "$response": original,
+                "$edit": corrupt_edit,
+            }
+
+    class Stack:
+        agent_id = "@agent:example"
+
+    runner = fuzz_live_matrix.LiveFuzzRunner(
+        cast("fuzz_live_matrix.ManagedTuwunelStack", Stack()),
+        (cast("LiveMatrixClient", Client()),),
+        LiveFuzzScenario(thread_count=2, batches=(), profile="saturation"),
+        reply_timeout=1,
+        settle_seconds=0,
+    )
+    expected = {
+        "$source": fuzz_live_matrix._ExpectedSaturationReply(
+            root_event_id="$root",
+            source_marker=source_marker,
+            history_fingerprint=history,
+        ),
+    }
+
+    with pytest.raises(AssertionError, match="corrupt_bodies"):
+        runner._assert_saturation_replies(expected)
 
 
 @pytest.mark.parametrize(
@@ -1293,21 +1529,17 @@ async def test_exact_reply_oracle_rejects_duplicate_canonical_replies() -> None:
 
 
 @pytest.mark.asyncio
-async def test_exact_reply_oracle_allows_response_to_internal_restart_relay() -> None:
-    """Restart recovery may validly answer a router-authored resume relay."""
+async def test_exact_reply_oracle_rejects_unexpected_router_source() -> None:
+    """Router-authored events cannot hide an otherwise unexpected agent reply."""
     client = LiveMatrixClient("http://matrix.invalid", "!room:example")
-    oracle = ExactReplyOracle(
-        client,
-        "@agent:example",
-        internal_relay_senders=("@router:example",),
-    )
+    oracle = ExactReplyOracle(client, "@agent:example")
     try:
         oracle._ingest_event(
             {
-                "event_id": "$resume-relay",
+                "event_id": "$router-source",
                 "sender": "@router:example",
                 "type": "m.room.message",
-                "content": {"body": "resume"},
+                "content": {"body": "arbitrary source"},
             },
         )
         oracle._ingest_event(
@@ -1319,11 +1551,12 @@ async def test_exact_reply_oracle_allows_response_to_internal_restart_relay() ->
                     "m.relates_to": {
                         "rel_type": "m.thread",
                         "event_id": "$root",
-                        "m.in_reply_to": {"event_id": "$resume-relay"},
+                        "m.in_reply_to": {"event_id": "$router-source"},
                     },
                 },
             },
         )
-        oracle._assert_no_wrong_replies()
+        with pytest.raises(AssertionError, match="unexpected"):
+            oracle._assert_no_wrong_replies()
     finally:
         await client.close()

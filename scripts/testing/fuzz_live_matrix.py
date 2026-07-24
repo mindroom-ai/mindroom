@@ -43,6 +43,7 @@ import httpx
 import nio
 import yaml
 
+import mindroom
 from mindroom.matrix.sync_tokens import load_sync_checkpoint
 
 if TYPE_CHECKING:
@@ -66,11 +67,28 @@ def _history_fingerprint(source_markers: Collection[str]) -> str:
     return hashlib.sha256(serialized).hexdigest()[:16]
 
 
+def _source_identity(logical_ref: str, body: str) -> str:
+    """Bind one logical source revision to its canonical visible body."""
+    return f"{logical_ref}.{hashlib.sha256(body.encode()).hexdigest()[:12]}"
+
+
+def _source_marker_from_content(content: Mapping[str, object]) -> str:
+    """Return the one source identity embedded in sent message content."""
+    body = content.get("body")
+    markers = SOURCE_MARKER_PATTERN.findall(body) if isinstance(body, str) else []
+    if len(markers) != 1:
+        msg = f"sent live-fuzz content must contain one source identity, got {markers}"
+        raise ValueError(msg)
+    return markers[0]
+
+
 @dataclass(frozen=True, slots=True)
 class RuntimeProvenance:
     """Exact code loaded by one live campaign."""
 
+    mindroom_module_path: str
     mindroom_revision: str
+    mindroom_expected_revision: str
     nio_module_path: str
     nio_version: str
     nio_revision: str
@@ -385,6 +403,17 @@ def _validate_live_batch_shape(batch: tuple[LiveOperation, ...]) -> None:
     if len(reply_threads) != len(set(reply_threads)):
         msg = "same-thread messages requiring replies must use separate batches"
         raise ValueError(msg)
+    history_mutation_threads = [
+        (operation.room, operation.thread)
+        for operation in batch
+        if operation.kind in {LiveOperationKind.EDIT, LiveOperationKind.REDACTION}
+    ]
+    history_mutation_lanes = set(history_mutation_threads)
+    if len(history_mutation_threads) != len(history_mutation_lanes) or history_mutation_lanes.intersection(
+        reply_threads,
+    ):
+        msg = "same-thread message, edit, and redaction history mutations must use separate batches"
+        raise ValueError(msg)
 
 
 def _validate_profile_operation(profile: str, operation: LiveOperation) -> None:
@@ -403,12 +432,17 @@ def _validate_saturation_shape(
 ) -> None:
     """Require the hot-then-complete-parallel schedule the runner executes."""
     parallel_started = False
+    hot_batch_count = 0
+    parallel_batch_count = 0
     parallel_threads = set(range(1, thread_count))
     expected_targets = {thread: f"response:root:{thread}" for thread in range(thread_count)}
     for batch in batches:
         batch_threads = [operation.thread for operation in batch]
-        if parallel_started or batch_threads != [0]:
+        if not parallel_started and batch_threads == [0]:
+            hot_batch_count += 1
+        else:
             parallel_started = True
+            parallel_batch_count += 1
             if len(batch_threads) != len(parallel_threads) or set(batch_threads) != parallel_threads:
                 msg = (
                     "saturation parallel batches require exactly one operation for "
@@ -423,6 +457,9 @@ def _validate_saturation_shape(
                 msg = f"saturation thread {operation.thread} must target {expected_target!r}, not {operation.target!r}"
                 raise ValueError(msg)
             expected_targets[operation.thread] = f"response:{operation.event_ref}"
+    if hot_batch_count == 0 or parallel_batch_count == 0:
+        msg = "saturation profile requires at least one hot batch and one complete parallel batch"
+        raise ValueError(msg)
 
 
 def _validate_live_operation(
@@ -633,6 +670,7 @@ def live_scenario_from_seed(
         batch_size = min(steps - generated, randomizer.randint(1, max_batch_size))
         operations: list[LiveOperation] = []
         reply_threads: set[int] = set()
+        history_mutation_threads: set[int] = set()
         for offset in range(batch_size):
             operation = _choose_operation(
                 randomizer,
@@ -644,7 +682,11 @@ def live_scenario_from_seed(
                 LiveOperationKind.THREAD_MESSAGE,
                 LiveOperationKind.PLAIN_REPLY,
             }
-            if needs_reply and operation.thread in reply_threads:
+            mutates_history = operation.kind in {
+                LiveOperationKind.EDIT,
+                LiveOperationKind.REDACTION,
+            }
+            if (needs_reply or mutates_history) and operation.thread in (reply_threads | history_mutation_threads):
                 operation = LiveOperation(
                     operation_id=operation.operation_id,
                     kind=LiveOperationKind.REACTION,
@@ -652,9 +694,12 @@ def live_scenario_from_seed(
                     target=randomizer.choice(state.reaction_targets[operation.thread]),
                 )
                 needs_reply = False
+                mutates_history = False
             operations.append(operation)
             if needs_reply:
                 reply_threads.add(operation.thread)
+            elif mutates_history:
+                history_mutation_threads.add(operation.thread)
         operation_id += batch_size
 
         batches.append(tuple(operations))
@@ -774,6 +819,9 @@ def saturation_scenario(
     parallel_turns: int = 8,
 ) -> LiveFuzzScenario:
     """Reproduce the long-thread plus 12-way saturation workload."""
+    if hot_turns < 1 or parallel_threads < 1 or parallel_turns < 1:
+        msg = "saturation workload dimensions must all be positive"
+        raise ValueError(msg)
     thread_count = parallel_threads + 1
     batches: list[tuple[LiveOperation, ...]] = []
     operation_id = 0
@@ -891,20 +939,26 @@ class _ModelHandler(BaseHTTPRequestHandler):
         """Bind deterministic output to the latest source and ordered source history."""
         markers: list[str] = []
 
-        def collect(value: object) -> None:
+        def collect(value: object, message_markers: list[str]) -> None:
             if isinstance(value, str):
-                markers.extend(SOURCE_MARKER_PATTERN.findall(value))
+                message_markers.extend(SOURCE_MARKER_PATTERN.findall(value))
             elif isinstance(value, list):
                 for item in value:
-                    collect(item)
+                    collect(item, message_markers)
             elif isinstance(value, dict):
                 for item in value.values():
-                    collect(item)
+                    collect(item, message_markers)
 
-        collect(payload.get("messages"))
-        ordered_unique = tuple(dict.fromkeys(markers))
-        source_marker = ordered_unique[-1] if ordered_unique else "unbound"
-        return source_marker, _history_fingerprint(ordered_unique)
+        messages = payload.get("messages")
+        if isinstance(messages, list):
+            for message in messages:
+                message_markers: list[str] = []
+                collect(message, message_markers)
+                markers.extend(dict.fromkeys(message_markers))
+        else:
+            collect(messages, markers)
+        source_marker = markers[-1] if markers else "unbound"
+        return source_marker, _history_fingerprint(markers)
 
     def _send_stream(self, call_id: int, content: str) -> None:
         self.send_response(HTTPStatus.OK)
@@ -1038,31 +1092,43 @@ def _source_hash(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def _runtime_provenance() -> RuntimeProvenance:
-    """Inspect the imported nio package instead of trusting an environment label."""
-    nio_file = nio.__file__
-    if nio_file is None:
-        msg = "imported nio module has no filesystem path"
+def _runtime_provenance(
+    *,
+    mindroom_module_path: Path | None = None,
+    nio_module_path: Path | None = None,
+) -> RuntimeProvenance:
+    """Resolve exact loaded package paths and compare MindRoom to this runner."""
+    loaded_mindroom_file = mindroom.__file__
+    loaded_nio_file = nio.__file__
+    if loaded_mindroom_file is None or loaded_nio_file is None:
+        msg = "imported MindRoom and nio modules must have filesystem paths"
         raise RuntimeError(msg)
-    nio_path = Path(nio_file).resolve()
+    mindroom_path = (mindroom_module_path or Path(loaded_mindroom_file)).resolve()
+    nio_path = (nio_module_path or Path(loaded_nio_file)).resolve()
     nio_revision, nio_dirty = _git_state_for_file(
         nio_path,
         scopes=(nio_path.parent,),
     )
     mindroom_revision, mindroom_dirty = _git_state_for_file(
+        mindroom_path,
+        scopes=(mindroom_path.parent, Path(__file__)),
+    )
+    expected_mindroom_revision, runner_dirty = _git_state_for_file(
         Path(__file__),
         scopes=(PROJECT_ROOT / "src" / "mindroom", Path(__file__)),
     )
-    if mindroom_revision is None:
+    if expected_mindroom_revision is None:
         msg = "could not resolve the MindRoom revision containing the live runner"
         raise RuntimeError(msg)
     return RuntimeProvenance(
-        mindroom_revision=mindroom_revision,
+        mindroom_module_path=str(mindroom_path),
+        mindroom_revision=mindroom_revision or "unverified",
+        mindroom_expected_revision=expected_mindroom_revision,
         nio_module_path=str(nio_path),
         nio_version=importlib.metadata.version("mindroom-nio"),
         nio_revision=nio_revision or "unverified",
-        nio_expected_revision=os.getenv("MINDROOM_NIO_FUZZ_COMMIT", "unspecified"),
-        mindroom_dirty=mindroom_dirty,
+        nio_expected_revision=os.getenv("MINDROOM_NIO_FUZZ_COMMIT", ""),
+        mindroom_dirty=mindroom_dirty or runner_dirty,
         nio_dirty=nio_dirty,
         nio_source_hash=_source_hash(
             nio_path.parent / "client" / "async_client.py"
@@ -1073,18 +1139,30 @@ def _runtime_provenance() -> RuntimeProvenance:
 
 
 def _validate_nio_provenance(provenance: RuntimeProvenance) -> None:
-    """Fail closed when a campaign requests an exact nio revision."""
-    if provenance.mindroom_dirty or provenance.nio_dirty:
+    """Fail closed unless child-attested MindRoom and nio match exact revisions."""
+    if provenance.mindroom_dirty:
+        msg = f"live fuzz exact provenance requires clean loaded source: mindroom_dirty={provenance.mindroom_dirty}"
+        raise RuntimeError(msg)
+    if provenance.mindroom_revision == "unverified":
+        msg = f"live fuzz exact provenance could not verify loaded MindRoom at {provenance.mindroom_module_path}"
+        raise RuntimeError(msg)
+    if provenance.mindroom_revision != provenance.mindroom_expected_revision:
         msg = (
-            "live fuzz exact provenance requires clean loaded source: "
-            f"mindroom_dirty={provenance.mindroom_dirty}, nio_dirty={provenance.nio_dirty}"
+            "loaded MindRoom revision does not match live runner: "
+            f"expected {provenance.mindroom_expected_revision}, loaded {provenance.mindroom_revision} "
+            f"from {provenance.mindroom_module_path}"
         )
+        raise RuntimeError(msg)
+    expected = provenance.nio_expected_revision
+    if not expected:
+        return
+    if provenance.nio_dirty:
+        msg = "live fuzz exact provenance requires clean loaded nio source: nio_dirty=True"
         raise RuntimeError(msg)
     if provenance.nio_revision == "unverified":
         msg = f"live fuzz exact provenance could not verify loaded mindroom-nio at {provenance.nio_module_path}"
         raise RuntimeError(msg)
-    expected = provenance.nio_expected_revision
-    if expected not in {"unspecified", provenance.nio_revision}:
+    if expected != provenance.nio_revision:
         msg = (
             "loaded mindroom-nio revision does not match campaign requirement: "
             f"expected {expected}, loaded {provenance.nio_revision} from {provenance.nio_module_path}"
@@ -1156,6 +1234,8 @@ class ManagedTuwunelStack:
         self.storage_path = self.root / "mindroom_data"
         self.config_path = self.root / "config.yaml"
         self.log_path = self.root / "mindroom.log"
+        self.attestation_path = self.root / "runtime-attestation.json"
+        self.runtime_provenance: RuntimeProvenance | None = None
         self.api_port = _available_port()
         self.homeserver = ""
         self.server_name = ""
@@ -1344,12 +1424,13 @@ class ManagedTuwunelStack:
 
     def _start_mindroom(self) -> None:
         assert self._log_handle is not None
+        self.attestation_path.unlink(missing_ok=True)
         self._mindroom_process = subprocess.Popen(
             [
-                "uv",
-                "run",
-                "--no-sync",
-                "mindroom",
+                sys.executable,
+                str(Path(__file__).resolve()),
+                "__mindroom_runtime_child__",
+                str(self.attestation_path),
                 "run",
                 "--api-port",
                 str(self.api_port),
@@ -1362,6 +1443,7 @@ class ManagedTuwunelStack:
             stderr=subprocess.STDOUT,
             text=True,
         )
+        self._wait_for_runtime_attestation()
         self._wait_for_url(f"http://127.0.0.1:{self.api_port}/api/health", timeout=60)
         state_path = self.storage_path / "matrix_state.yaml"
         deadline = time.monotonic() + 60
@@ -1385,6 +1467,37 @@ class ManagedTuwunelStack:
                     return
             time.sleep(0.2)
         msg = f"MindRoom did not create rooms {self.room_keys!r}:\n{self.log_tail()}"
+        raise TimeoutError(msg)
+
+    def runtime_module_paths(self) -> tuple[Path, Path]:
+        """Return child-attested package paths."""
+        payload = json.loads(self.attestation_path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            msg = "MindRoom runtime attestation must be a JSON object"
+            raise TypeError(msg)
+        mindroom_path = payload.get("mindroom_module_path")
+        nio_path = payload.get("nio_module_path")
+        if not isinstance(mindroom_path, str) or not isinstance(nio_path, str):
+            msg = "MindRoom runtime attestation omitted package paths"
+            raise TypeError(msg)
+        return Path(mindroom_path), Path(nio_path)
+
+    def _wait_for_runtime_attestation(self) -> None:
+        """Wait for child import attestation before accepting health."""
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            if self.attestation_path.exists():
+                mindroom_path, nio_path = self.runtime_module_paths()
+                self.runtime_provenance = _runtime_provenance(
+                    mindroom_module_path=mindroom_path,
+                    nio_module_path=nio_path,
+                )
+                return
+            if self._mindroom_process is not None and self._mindroom_process.poll() is not None:
+                msg = f"MindRoom exited before runtime attestation:\n{self.log_tail()}"
+                raise RuntimeError(msg)
+            time.sleep(0.05)
+        msg = "MindRoom child did not attest loaded runtime paths"
         raise TimeoutError(msg)
 
     def _stop_mindroom(self) -> None:
@@ -1420,6 +1533,13 @@ class _SentPayload:
     event_type: str
     txn_id: str
     content: dict[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
+class _ExpectedSaturationReply:
+    root_event_id: str
+    source_marker: str
+    history_fingerprint: str
 
 
 class LiveMatrixClient:
@@ -1660,19 +1780,16 @@ class ExactReplyOracle:
         self,
         client: LiveMatrixClient,
         agent_id: str,
-        *,
-        internal_relay_senders: Collection[str] = (),
     ) -> None:
         self.client = client
         self.agent_id = agent_id
-        self.internal_relay_senders = frozenset(internal_relay_senders)
-        self.internal_source_ids: set[str] = set()
         self.next_batch: str | None = None
         self.expected_sources: dict[str, str] = {}
         self.expected_thread_roots: dict[str, str] = {}
         self.expected_model_identity: dict[str, tuple[str, str]] = {}
         self.response_ids: dict[str, set[str]] = defaultdict(set)
         self.wrong_thread_roots: dict[str, set[tuple[str, str | None]]] = defaultdict(set)
+        self.malformed_response_ids: set[str] = set()
         self.response_event_by_ref: dict[str, str] = {}
         self.latest_reply_bodies: dict[str, tuple[int, str, str]] = {}
         self.reply_events_with_edits: set[str] = set()
@@ -1863,21 +1980,23 @@ class ExactReplyOracle:
         if not isinstance(event_id, str) or event_id in self.seen_event_ids:
             return
         self.seen_event_ids.add(event_id)
-        if event.get("sender") in self.internal_relay_senders:
-            self.internal_source_ids.add(event_id)
-            return
         if event.get("sender") != self.agent_id or event.get("type") != "m.room.message":
             return
         content = event.get("content")
         if not isinstance(content, dict):
+            self.malformed_response_ids.add(event_id)
             return
         relation = content.get("m.relates_to")
         self._track_reply_body(event_id, event, content, relation)
+        if isinstance(relation, dict) and relation.get("rel_type") == "m.replace":
+            return
         if not isinstance(relation, dict) or relation.get("rel_type") != "m.thread":
+            self.malformed_response_ids.add(event_id)
             return
         reply = relation.get("m.in_reply_to")
         source_event_id = reply.get("event_id") if isinstance(reply, dict) else None
         if not isinstance(source_event_id, str):
+            self.malformed_response_ids.add(event_id)
             return
         expected_root = self.expected_thread_roots.get(source_event_id)
         observed_root = relation.get("event_id")
@@ -1975,16 +2094,17 @@ class ExactReplyOracle:
         unexpected = {
             source: sorted(event_ids)
             for source, event_ids in self.response_ids.items()
-            if source not in self.expected_sources and source not in self.internal_source_ids
+            if source not in self.expected_sources
         }
         wrong_roots = {
             self.expected_sources.get(source, source): sorted(values)
             for source, values in self.wrong_thread_roots.items()
         }
-        if duplicates or unexpected or wrong_roots:
+        if duplicates or unexpected or wrong_roots or self.malformed_response_ids:
             msg = (
                 "agent reply invariant failed: "
-                f"duplicates={duplicates}, unexpected={unexpected}, wrong_thread_roots={wrong_roots}"
+                f"duplicates={duplicates}, unexpected={unexpected}, wrong_thread_roots={wrong_roots}, "
+                f"malformed={sorted(self.malformed_response_ids)}"
             )
             raise AssertionError(msg)
 
@@ -2007,11 +2127,7 @@ class LiveFuzzRunner:
         self.scenario = scenario
         self.reply_timeout = reply_timeout
         self.settle_seconds = settle_seconds
-        self.oracle = ExactReplyOracle(
-            self.client,
-            stack.agent_id,
-            internal_relay_senders=(stack.router_id,),
-        )
+        self.oracle = ExactReplyOracle(self.client, stack.agent_id)
         self.event_ids: dict[str, str] = {}
         self.response_event_ids: dict[str, str] = {}
         self.sent_payloads: dict[str, _SentPayload] = {}
@@ -2020,6 +2136,10 @@ class LiveFuzzRunner:
         self.executed_batches = 0
         self._history_markers: dict[tuple[int, int], list[str]] = defaultdict(list)
         self._latest_source_ref: dict[tuple[int, int, int], str] = {}
+        self._source_revisions: dict[str, list[tuple[str, str]]] = {}
+        self._source_lanes: dict[str, tuple[int, int]] = {}
+        self._edit_sources: dict[str, str] = {}
+        self._redacted_source_refs: set[str] = set()
 
     def _expect_source(
         self,
@@ -2031,18 +2151,68 @@ class LiveFuzzRunner:
         room: int,
         thread: int,
         client: int = 0,
+        source_content: Mapping[str, object],
     ) -> None:
         """Register exact reply, thread, source, and history expectations together."""
         lane = (room, thread)
         self._history_markers[lane].append(logical_ref)
+        source_identity = _source_marker_from_content(source_content)
+        self._source_revisions[logical_ref] = [(logical_ref, source_identity)]
+        self._source_lanes[logical_ref] = lane
         self._latest_source_ref[(room, client, thread)] = logical_ref
         oracle.expect(
             logical_ref,
             event_id,
             root_event_id=root_event_id,
-            source_marker=logical_ref,
-            history_markers=self._history_markers[lane],
+            source_marker=source_identity,
+            history_markers=self._history_identities(lane),
         )
+
+    def _history_identities(self, lane: tuple[int, int]) -> tuple[str, ...]:
+        """Return ordered canonical identities still visible in one lane."""
+        return tuple(
+            self._source_revisions[source_ref][-1][1]
+            for source_ref in self._history_markers[lane]
+            if source_ref not in self._redacted_source_refs
+        )
+
+    def _refresh_source_expectation(self, source_ref: str) -> None:
+        """Require regeneration against the source's current visible revision."""
+        source_event_id = self.event_ids[source_ref]
+        lane = self._source_lanes[source_ref]
+        self.oracle.expected_model_identity[source_event_id] = (
+            self._source_revisions[source_ref][-1][1],
+            _history_fingerprint(self._history_identities(lane)),
+        )
+
+    def _record_edit_revision(
+        self,
+        operation: LiveOperation,
+        source_content: Mapping[str, object],
+    ) -> None:
+        """Advance one source's canonical revision and response expectation."""
+        assert operation.target is not None
+        source_ref = operation.target.removeprefix("response:")
+        revisions = self._source_revisions.get(source_ref)
+        if revisions is None:
+            return
+        revisions.append((operation.event_ref, _source_marker_from_content(source_content)))
+        self._edit_sources[operation.event_ref] = source_ref
+        self._refresh_source_expectation(source_ref)
+
+    def _record_redaction(self, operation: LiveOperation) -> None:
+        """Apply source or edit redaction to future canonical histories."""
+        assert operation.target is not None
+        target_ref = operation.target
+        if target_ref in self._source_revisions:
+            self._redacted_source_refs.add(target_ref)
+            return
+        source_ref = self._edit_sources.get(target_ref)
+        if source_ref is None:
+            return
+        revisions = self._source_revisions[source_ref]
+        revisions[:] = [revision for revision in revisions if revision[0] != target_ref]
+        self._refresh_source_expectation(source_ref)
 
     async def run(self) -> dict[str, int | str]:
         """Execute every batch and enforce the reply invariant after each."""
@@ -2065,14 +2235,7 @@ class LiveFuzzRunner:
     async def _run_recovery(self) -> dict[str, int | str]:
         """Replay a bounded outage, limited sync, reconnect, and duplicate audit."""
         observers = tuple(self._recovery_client(room, 0) for room in range(self.scenario.room_count))
-        oracles = tuple(
-            ExactReplyOracle(
-                client,
-                self.stack.agent_id,
-                internal_relay_senders=(self.stack.router_id,),
-            )
-            for client in observers
-        )
+        oracles = tuple(ExactReplyOracle(client, self.stack.agent_id) for client in observers)
         await asyncio.gather(*(oracle.initialize() for oracle in oracles))
         await self._send_recovery_roots(oracles)
         await self._send_recovery_checkpoint_barrier(oracles)
@@ -2102,6 +2265,7 @@ class LiveFuzzRunner:
                     room=operation.room,
                     thread=operation.thread,
                     client=operation.client,
+                    source_content=payload.content,
                 )
             self.executed_batches += 1
 
@@ -2185,6 +2349,7 @@ class LiveFuzzRunner:
             root_event_id=root_event_id,
             room=room,
             thread=thread,
+            source_content=content,
         )
         await oracles[room].wait_until_exact(
             deadline_seconds=self.reply_timeout,
@@ -2212,7 +2377,11 @@ class LiveFuzzRunner:
         )
         checkpoint_before = self.stack.sync_checkpoint_token(AGENT_NAME)
 
-        async def send_barrier(room: int, client: int, thread: int) -> tuple[int, int, str, str]:
+        async def send_barrier(
+            room: int,
+            client: int,
+            thread: int,
+        ) -> tuple[int, int, str, str, dict[str, Any]]:
             logical_ref = f"restart-barrier:{room}:{client}:{thread}"
             root_ref = f"root:{room}:{thread}"
             root_event_id = self.event_ids[root_ref]
@@ -2233,9 +2402,9 @@ class LiveFuzzRunner:
                 f"live-recovery-{logical_ref}",
                 content,
             )
-            return room, thread, logical_ref, event_id
+            return room, thread, logical_ref, event_id, content
 
-        barriers: list[tuple[int, int, str, str]] = []
+        barriers: list[tuple[int, int, str, str, dict[str, Any]]] = []
         pending_lanes = list(lanes)
         while pending_lanes:
             used_conversations: set[tuple[int, int]] = set()
@@ -2250,7 +2419,7 @@ class LiveFuzzRunner:
                     wave.append(lane)
             wave_barriers = await asyncio.gather(*(send_barrier(*lane) for lane in wave))
             barriers.extend(wave_barriers)
-            for (room, client, thread), (_, _, logical_ref, event_id) in zip(
+            for (room, client, thread), (_, _, logical_ref, event_id, content) in zip(
                 wave,
                 wave_barriers,
                 strict=True,
@@ -2265,6 +2434,7 @@ class LiveFuzzRunner:
                     room=room,
                     thread=thread,
                     client=client,
+                    source_content=content,
                 )
             await asyncio.gather(
                 *(
@@ -2332,6 +2502,7 @@ class LiveFuzzRunner:
                 root_event_id=event_id,
                 room=room,
                 thread=int(logical_ref.rsplit(":", 1)[1]),
+                source_content=payload.content,
             )
         await asyncio.gather(
             *(
@@ -2395,7 +2566,7 @@ class LiveFuzzRunner:
     async def _run_saturation(self) -> dict[str, int | str]:
         """Run hot and parallel turns without cross-thread barriers."""
         parallel_start = self._saturation_parallel_start()
-        expected_sources: set[str] = set()
+        expected_sources: dict[str, _ExpectedSaturationReply] = {}
 
         hot_root, hot_response = await self._saturation_turn(
             self.clients[0],
@@ -2480,7 +2651,10 @@ class LiveFuzzRunner:
             "status": "PASS",
         }
 
-    async def _wait_for_saturation_quiescence(self, expected_sources: set[str]) -> None:
+    async def _wait_for_saturation_quiescence(
+        self,
+        expected_sources: Mapping[str, _ExpectedSaturationReply],
+    ) -> None:
         """Keep every observer open after all event-attached lane barriers."""
         quiet_deadline = time.monotonic() + max(self.settle_seconds, 1.0)
         while time.monotonic() < quiet_deadline:
@@ -2490,25 +2664,48 @@ class LiveFuzzRunner:
             self._assert_saturation_replies(expected_sources)
         self._assert_saturation_replies(expected_sources)
 
-    def _assert_saturation_replies(self, expected_sources: set[str]) -> None:
+    def _assert_saturation_replies(
+        self,
+        expected_sources: Mapping[str, _ExpectedSaturationReply],
+    ) -> None:
         """Audit the union of complete and paginated observer histories."""
         all_events = {event_id: event for client in self.clients for event_id, event in client.seen_events.items()}
         response_ids = self._canonical_response_ids(all_events.values())
+        response_roots = self._canonical_response_roots(all_events.values())
         duplicates = {
             source_event_id: sorted(event_ids)
             for source_event_id, event_ids in response_ids.items()
             if source_event_id in expected_sources and len(event_ids) != 1
         }
-        missing = sorted(expected_sources - response_ids.keys())
+        missing = sorted(expected_sources.keys() - response_ids.keys())
         unexpected = {
             source_event_id: sorted(event_ids)
             for source_event_id, event_ids in response_ids.items()
             if source_event_id not in expected_sources
         }
-        if duplicates or missing or unexpected:
+        malformed = sorted(self._malformed_agent_original_ids(all_events.values()))
+        wrong_roots: dict[str, str | None] = {}
+        corrupt_bodies: list[str] = []
+        for source_event_id, expectation in expected_sources.items():
+            event_ids = response_ids.get(source_event_id, set())
+            if len(event_ids) != 1:
+                continue
+            response_event_id = next(iter(event_ids))
+            observed_root = response_roots.get((source_event_id, response_event_id))
+            if observed_root != expectation.root_event_id:
+                wrong_roots[source_event_id] = observed_root
+            body = self._latest_event_body(all_events.values(), response_event_id)
+            if not ExactReplyOracle._is_complete_model_body(
+                body,
+                expected_source_marker=expectation.source_marker,
+                expected_history_fingerprint=expectation.history_fingerprint,
+            ):
+                corrupt_bodies.append(source_event_id)
+        if duplicates or missing or unexpected or malformed or wrong_roots or corrupt_bodies:
             msg = (
                 "saturation reply invariant failed: "
-                f"duplicates={duplicates}, missing={missing}, unexpected={unexpected}"
+                f"duplicates={duplicates}, missing={missing}, unexpected={unexpected}, "
+                f"malformed={malformed}, wrong_roots={wrong_roots}, corrupt_bodies={sorted(corrupt_bodies)}"
             )
             raise AssertionError(msg)
 
@@ -2520,7 +2717,7 @@ class LiveFuzzRunner:
         label: str,
         thread_root: str | None,
         reply_to: str | None,
-        expected_sources: set[str],
+        expected_sources: dict[str, _ExpectedSaturationReply],
     ) -> tuple[str, str]:
         """Send one old-harness turn and wait for its completed stream."""
         content = self._message_content(
@@ -2539,15 +2736,21 @@ class LiveFuzzRunner:
         )
         txn_id = f"live-saturation-{label}-{secrets.token_hex(4)}"
         source_event_id = await client.send_event("m.room.message", txn_id, content)
-        expected_sources.add(source_event_id)
         root_event_id = thread_root or source_event_id
         history_markers = self._history_markers[(0, thread)]
-        history_markers.append(label)
+        source_marker = _source_marker_from_content(content)
+        history_markers.append(source_marker)
+        history_fingerprint = _history_fingerprint(history_markers)
+        expected_sources[source_event_id] = _ExpectedSaturationReply(
+            root_event_id=root_event_id,
+            source_marker=source_marker,
+            history_fingerprint=history_fingerprint,
+        )
         response_event_id = await self._wait_for_completed_response(
             client,
             root_event_id=root_event_id,
             source_event_id=source_event_id,
-            source_marker=label,
+            source_marker=source_marker,
             history_markers=history_markers,
         )
         return root_event_id, response_event_id
@@ -2564,6 +2767,10 @@ class LiveFuzzRunner:
         """Wait until one source has exactly one fully streamed response."""
         deadline = time.monotonic() + self.reply_timeout
         while time.monotonic() < deadline:
+            malformed = self._malformed_agent_original_ids(client.seen_events.values())
+            if malformed:
+                msg = f"malformed visible agent replies: {sorted(malformed)}"
+                raise AssertionError(msg)
             response_ids = self._canonical_response_ids(
                 client.seen_events.values(),
                 root_event_id=root_event_id,
@@ -2600,6 +2807,8 @@ class LiveFuzzRunner:
             if not isinstance(event_id, str) or not isinstance(content, dict):
                 continue
             relation = content.get("m.relates_to")
+            if isinstance(relation, dict) and relation.get("rel_type") == "m.replace":
+                continue
             if not isinstance(relation, dict) or relation.get("rel_type") != "m.thread":
                 continue
             if root_event_id is not None and relation.get("event_id") != root_event_id:
@@ -2609,6 +2818,56 @@ class LiveFuzzRunner:
             if isinstance(source_event_id, str):
                 response_ids[source_event_id].add(event_id)
         return response_ids
+
+    def _malformed_agent_original_ids(
+        self,
+        events: Collection[Mapping[str, Any]],
+    ) -> set[str]:
+        """Return visible agent originals lacking one canonical thread/source relation."""
+        malformed: set[str] = set()
+        for event in events:
+            if event.get("type") != "m.room.message" or event.get("sender") != self.stack.agent_id:
+                continue
+            event_id = event.get("event_id")
+            if not isinstance(event_id, str):
+                continue
+            content = event.get("content")
+            relation = content.get("m.relates_to") if isinstance(content, dict) else None
+            if isinstance(relation, dict) and relation.get("rel_type") == "m.replace":
+                continue
+            in_reply_to = relation.get("m.in_reply_to") if isinstance(relation, dict) else None
+            if (
+                not isinstance(relation, dict)
+                or relation.get("rel_type") != "m.thread"
+                or not isinstance(relation.get("event_id"), str)
+                or not isinstance(in_reply_to, dict)
+                or not isinstance(in_reply_to.get("event_id"), str)
+            ):
+                malformed.add(event_id)
+        return malformed
+
+    def _canonical_response_roots(
+        self,
+        events: Collection[Mapping[str, Any]],
+    ) -> dict[tuple[str, str], str]:
+        """Index each canonical response's observed thread root."""
+        roots: dict[tuple[str, str], str] = {}
+        for event in events:
+            if event.get("type") != "m.room.message" or event.get("sender") != self.stack.agent_id:
+                continue
+            event_id = event.get("event_id")
+            content = event.get("content")
+            if not isinstance(event_id, str) or not isinstance(content, dict):
+                continue
+            relation = content.get("m.relates_to")
+            if not isinstance(relation, dict) or relation.get("rel_type") != "m.thread":
+                continue
+            in_reply_to = relation.get("m.in_reply_to")
+            source_event_id = in_reply_to.get("event_id") if isinstance(in_reply_to, dict) else None
+            root_event_id = relation.get("event_id")
+            if isinstance(source_event_id, str) and isinstance(root_event_id, str):
+                roots[(source_event_id, event_id)] = root_event_id
+        return roots
 
     @staticmethod
     def _latest_event_body(
@@ -2669,6 +2928,7 @@ class LiveFuzzRunner:
                         LiveOperationKind.PLAIN_REPLY,
                     }:
                         assert event_id is not None
+                        assert payload is not None
                         self._expect_source(
                             self.oracle,
                             operation.event_ref,
@@ -2676,7 +2936,13 @@ class LiveFuzzRunner:
                             root_event_id=self.event_ids[f"root:{operation.thread}"],
                             room=0,
                             thread=operation.thread,
+                            source_content=payload.content,
                         )
+                    elif operation.kind is LiveOperationKind.EDIT:
+                        assert payload is not None
+                        self._record_edit_revision(operation, payload.content)
+                    elif operation.kind is LiveOperationKind.REDACTION:
+                        self._record_redaction(operation)
             try:
                 await self.oracle.wait_until_exact(
                     deadline_seconds=self.reply_timeout,
@@ -2727,6 +2993,7 @@ class LiveFuzzRunner:
             root_event_id=root_event_id,
             room=0,
             thread=thread,
+            source_content=content,
         )
         await self.stack.wait_for_sync_checkpoint_advance(
             AGENT_NAME,
@@ -2779,6 +3046,7 @@ class LiveFuzzRunner:
                 root_event_id=event_id,
                 room=0,
                 thread=thread,
+                source_content=payload.content,
             )
         await self.oracle.wait_until_exact(
             deadline_seconds=self.reply_timeout,
@@ -2832,7 +3100,7 @@ class LiveFuzzRunner:
                 "m.relates_to": {"rel_type": "m.replace", "event_id": target_event_id},
             }
             event_id = await client.send_event("m.room.message", txn_id, content)
-            return operation, event_id, None
+            return operation, event_id, _SentPayload("m.room.message", txn_id, content)
 
         if operation.kind is LiveOperationKind.REACTION:
             content = {
@@ -2875,7 +3143,8 @@ class LiveFuzzRunner:
         relation: Mapping[str, Any] | None = None,
         source_marker: str | None = None,
     ) -> dict[str, Any]:
-        marker_suffix = f" LIVE-SOURCE[{source_marker}]" if source_marker is not None else ""
+        source_identity = _source_identity(source_marker, body) if source_marker is not None else None
+        marker_suffix = f" LIVE-SOURCE[{source_identity}]" if source_identity is not None else ""
         content: dict[str, Any] = {
             "msgtype": "m.text",
             "body": f"{body}{marker_suffix} {self.stack.agent_id}",
@@ -2982,6 +3251,26 @@ def _failure_artifact(
     }
 
 
+def _run_mindroom_runtime_child(attestation_path: Path, arguments: list[str]) -> None:
+    """Attest imported packages, then enter the real MindRoom CLI."""
+    from mindroom.cli.main import app  # noqa: PLC0415
+
+    mindroom_file = mindroom.__file__
+    nio_file = nio.__file__
+    if mindroom_file is None or nio_file is None:
+        msg = "runtime child imported packages without filesystem paths"
+        raise RuntimeError(msg)
+    payload = {
+        "mindroom_module_path": str(Path(mindroom_file).resolve()),
+        "nio_module_path": str(Path(nio_file).resolve()),
+    }
+    temporary_path = attestation_path.with_suffix(".tmp")
+    temporary_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+    temporary_path.replace(attestation_path)
+    sys.argv = ["mindroom", *arguments]
+    app()
+
+
 def main() -> None:
     """Run one trace against a fresh disposable real-server stack."""
     args = _parse_args()
@@ -3026,8 +3315,10 @@ def main() -> None:
     seed: int | str = args.seed if args.trace is None else "trace"
     started = time.monotonic()
     try:
-        _validate_nio_provenance(provenance)
         stack.start()
+        assert stack.runtime_provenance is not None
+        provenance = stack.runtime_provenance
+        _validate_nio_provenance(provenance)
         result = asyncio.run(
             _run_live(
                 stack,
@@ -3044,6 +3335,7 @@ def main() -> None:
         result.update(stack.diagnostic_counts())
         print(json.dumps(result, sort_keys=True))
     except Exception as error:
+        provenance = stack.runtime_provenance or provenance
         artifact = _failure_artifact(
             error=error,
             scenario=scenario,
@@ -3069,4 +3361,7 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) >= 3 and sys.argv[1] == "__mindroom_runtime_child__":
+        _run_mindroom_runtime_child(Path(sys.argv[2]), sys.argv[3:])
+    else:
+        main()
