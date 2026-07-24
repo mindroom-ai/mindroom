@@ -957,6 +957,12 @@ class _ModelHandler(BaseHTTPRequestHandler):
             return cls._observed_markers.get(call_id, frozenset())
 
     @classmethod
+    def observations_snapshot(cls) -> dict[int, list[str]]:
+        """Return every recorded call's markers for durable failure evidence."""
+        with cls._observation_lock:
+            return {call_id: sorted(markers) for call_id, markers in cls._observed_markers.items()}
+
+    @classmethod
     def _is_slow_call(cls, call_id: int) -> bool:
         """Decide slow vs fast purely from the call's observed marker fingerprint.
 
@@ -1287,6 +1293,27 @@ class ManagedTuwunelStack:
             "sync_certification_uncertain": log.count("matrix_sync_certification_uncertain"),
             "sync_restart_retries": log.count("sync_restart_retry_started"),
         }
+
+    def tuwunel_log(self, *, tail: int = 4000) -> str:
+        """Return the homeserver container log for durable failure evidence.
+
+        Captured before instance removal so a race-producing schedule keeps its
+        server-side view. Docker failures are folded into the returned text so a
+        missing log never masks the primary fuzz assertion.
+        """
+        if not self._created:
+            return ""
+        try:
+            completed = subprocess.run(
+                ["docker", "logs", "--tail", str(tail), f"{self.instance_name}-tuwunel"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            return f"<tuwunel log capture failed: {exc}>"
+        return completed.stdout + completed.stderr
 
     def _start_model_server(self) -> int:
         profile = self._stream_profile
@@ -2536,6 +2563,7 @@ class LiveFuzzRunner:
         reply_timeout: float,
         settle_seconds: float,
         pending_grace: float = 1.0,
+        journal: Callable[[Mapping[str, object]], None] | None = None,
     ) -> None:
         self.stack = stack
         self.clients = clients
@@ -2544,6 +2572,7 @@ class LiveFuzzRunner:
         self.reply_timeout = reply_timeout
         self.settle_seconds = settle_seconds
         self.pending_grace = pending_grace
+        self._journal = journal
         self.oracle = ExactReplyOracle(
             self.client,
             stack.agent_id,
@@ -2836,6 +2865,28 @@ class LiveFuzzRunner:
                 self.event_ids[operation.event_ref] = event_id
             if payload is not None:
                 self.sent_payloads[operation.event_ref] = payload
+            self._record_realized(operation, event_id)
+
+    def _record_realized(self, operation: LiveOperation, event_id: str | None) -> None:
+        """Append one realized operation to the failure bundle's journal.
+
+        Called in true completion order after a concurrent batch resolves, so a
+        nondeterministic race can be reconstructed from the durable trace even
+        though the logical scenario only records batches.
+        """
+        if self._journal is None:
+            return
+        self._journal(
+            {
+                "sequence": self.operation_count,
+                "kind": str(operation.kind),
+                "event_ref": operation.event_ref,
+                "thread": operation.thread,
+                "client": operation.client,
+                "event_id": event_id,
+                "mindroom_running": self._mindroom_running,
+            },
+        )
 
     async def _run_chaos(self) -> dict[str, object]:
         """Run sustained overlapping load, settling only at explicit checkpoints."""
@@ -3216,6 +3267,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--trace", type=Path)
     parser.add_argument("--save-trace", type=Path)
     parser.add_argument("--failure-log", type=Path)
+    parser.add_argument(
+        "--artifact-root",
+        type=Path,
+        default=DEFAULT_ARTIFACT_ROOT,
+        help="stable ignored directory holding one durable failure bundle per run",
+    )
     return parser.parse_args()
 
 
@@ -3226,6 +3283,8 @@ async def _run_live(
     reply_timeout: float,
     settle_seconds: float,
     pending_grace: float = 1.0,
+    runner_sink: Callable[[LiveFuzzRunner], None] | None = None,
+    journal: Callable[[Mapping[str, object]], None] | None = None,
 ) -> dict[str, object]:
     client_count = scenario.thread_count - 1 if scenario.profile == "saturation" else scenario.client_count
     room_ids = tuple(stack.room_ids.get(room_key, stack.room_id) for room_key in stack.room_keys)
@@ -3233,15 +3292,19 @@ async def _run_live(
     if scenario.profile == "chaos":
         for client in clients:
             client.transport_retry_seconds = 45.0
+    runner = LiveFuzzRunner(
+        stack,
+        clients,
+        scenario,
+        reply_timeout=reply_timeout,
+        settle_seconds=settle_seconds,
+        pending_grace=pending_grace,
+        journal=journal,
+    )
+    if runner_sink is not None:
+        runner_sink(runner)
     try:
-        return await LiveFuzzRunner(
-            stack,
-            clients,
-            scenario,
-            reply_timeout=reply_timeout,
-            settle_seconds=settle_seconds,
-            pending_grace=pending_grace,
-        ).run()
+        return await runner.run()
     finally:
         await asyncio.gather(*(client.close() for client in clients))
 
@@ -3297,6 +3360,166 @@ def _room_keys_for(scenario: LiveFuzzScenario) -> tuple[str, ...]:
     return (ROOM_KEY, *(f"chaos{index}" for index in range(1, scenario.room_count)))
 
 
+DEFAULT_ARTIFACT_ROOT = PROJECT_ROOT / "tmp" / "live-fuzz-artifacts"
+
+
+def _run_provenance() -> dict[str, object]:
+    """Capture the exact code that produced a run, for durable diagnosis.
+
+    Only inert build/version identity is recorded; no credentials, tokens, or
+    environment secrets are captured.
+    """
+    provenance: dict[str, object] = {
+        "python": sys.version.split()[0],
+        "platform": sys.platform,
+    }
+    try:
+        head = subprocess.run(
+            ["git", "-C", str(PROJECT_ROOT), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        provenance["mindroom_head"] = f"<unavailable: {exc}>"
+    else:
+        provenance["mindroom_head"] = head.stdout.strip() or f"<git error: {head.stderr.strip()}>"
+    try:
+        from importlib.metadata import PackageNotFoundError, version  # noqa: PLC0415
+
+        try:
+            provenance["nio_version"] = version("matrix-nio")
+        except PackageNotFoundError:
+            provenance["nio_version"] = "<not installed>"
+    except ImportError as exc:  # pragma: no cover - importlib.metadata is stdlib
+        provenance["nio_version"] = f"<unavailable: {exc}>"
+    return provenance
+
+
+def _sanitized_oracle_snapshot(oracle: ExactReplyOracle) -> dict[str, object]:
+    """Summarize oracle settlement state without any Matrix credentials.
+
+    Access tokens and raw ``/sync`` state (``next_batch`` and any sync-window
+    payload) are deliberately excluded; only opaque event IDs, logical
+    references, and settlement counters are retained for diagnosis.
+    """
+    return {
+        "expected_sources": dict(oracle.expected_sources),
+        "optional_sources": sorted(oracle.optional_sources),
+        "observed_sources": sorted(oracle.observed_sources),
+        "unsettled_required_sources": sorted(oracle.unsettled_required_sources()),
+        "response_ids": {source: sorted(ids) for source, ids in oracle.response_ids.items()},
+        "internal_source_ids": sorted(oracle.internal_source_ids),
+        "reply_latencies": {source: round(latency, 3) for source, latency in oracle.reply_latencies.items()},
+    }
+
+
+class FailureBundle:
+    """Durable, self-contained evidence for one live fuzz run.
+
+    Created before the disposable stack exists so a run killed mid-startup still
+    leaves a manifest. Realized concurrent activity is appended as it happens,
+    and on failure the full MindRoom log, ledger, sanitized oracle snapshot,
+    model observations, diagnostics, and Tuwunel log are copied into the same
+    stable directory before stack teardown removes their sources. Every artifact
+    write is isolated so a copy error can never replace the primary fuzz
+    assertion.
+    """
+
+    def __init__(self, directory: Path) -> None:
+        self.directory = directory
+        self.journal_path = directory / "realized_journal.jsonl"
+        self._cleanup_errors: list[str] = []
+
+    @classmethod
+    def create(
+        cls,
+        root: Path,
+        run_id: str,
+        *,
+        scenario: LiveFuzzScenario,
+        provenance: Mapping[str, object],
+    ) -> FailureBundle:
+        """Make the stable artifact directory and persist immutable run inputs."""
+        directory = root / run_id
+        directory.mkdir(parents=True, exist_ok=True)
+        bundle = cls(directory)
+        (directory / "scenario.json").write_text(scenario.to_json() + "\n", encoding="utf-8")
+        (directory / "provenance.json").write_text(
+            json.dumps(dict(provenance), indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        bundle.journal_path.touch()
+        return bundle
+
+    def record_realized(self, entry: Mapping[str, object]) -> None:
+        """Append one realized activity record in true completion order."""
+        with self.journal_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(dict(entry), sort_keys=True) + "\n")
+
+    def _write_isolated(self, name: str, writer: Callable[[Path], None]) -> None:
+        """Run one artifact writer, folding any failure into the transcript."""
+        try:
+            writer(self.directory / name)
+        except (OSError, ValueError, TypeError) as exc:
+            self._cleanup_errors.append(f"{name}: {exc}")
+
+    def finalize(
+        self,
+        *,
+        exception: BaseException,
+        log_path: Path,
+        ledger_path: Path,
+        oracle_snapshot: Mapping[str, object],
+        model_observations: Mapping[int, list[str]],
+        diagnostics: Mapping[str, int],
+        tuwunel_log: str,
+    ) -> Path:
+        """Copy every durable artifact before the stack is torn down."""
+
+        def copy_text(source: Path) -> Callable[[Path], None]:
+            def _copy(destination: Path) -> None:
+                if source.exists():
+                    destination.write_text(source.read_text(encoding="utf-8", errors="replace"), encoding="utf-8")
+                else:
+                    destination.write_text(f"<missing source: {source}>\n", encoding="utf-8")
+
+            return _copy
+
+        def write_json(payload: object) -> Callable[[Path], None]:
+            def _write(destination: Path) -> None:
+                destination.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+            return _write
+
+        self._write_isolated(
+            "exception.txt",
+            lambda destination: destination.write_text(
+                f"{type(exception).__name__}: {exception}\n",
+                encoding="utf-8",
+            ),
+        )
+        self._write_isolated("mindroom.log", copy_text(log_path))
+        self._write_isolated("handled_turns.json", copy_text(ledger_path))
+        self._write_isolated("oracle_snapshot.json", write_json(dict(oracle_snapshot)))
+        self._write_isolated(
+            "model_observations.json",
+            write_json({str(call_id): markers for call_id, markers in model_observations.items()}),
+        )
+        self._write_isolated("diagnostics.json", write_json(dict(diagnostics)))
+        self._write_isolated(
+            "tuwunel.log",
+            lambda destination: destination.write_text(tuwunel_log, encoding="utf-8"),
+        )
+        if self._cleanup_errors:
+            self._write_isolated(
+                "artifact_errors.txt",
+                lambda destination: destination.write_text("\n".join(self._cleanup_errors) + "\n", encoding="utf-8"),
+            )
+        return self.directory
+
+
 def main() -> None:
     """Run one trace against a fresh disposable real-server stack."""
     args = _parse_args()
@@ -3307,10 +3530,18 @@ def main() -> None:
     if reply_timeout is None:
         reply_timeout = _PROFILE_REPLY_TIMEOUTS[scenario.profile]
 
+    run_id = f"{time.strftime('%Y%m%dT%H%M%S')}-{secrets.token_hex(4)}"
+    bundle = FailureBundle.create(
+        args.artifact_root,
+        run_id,
+        scenario=scenario,
+        provenance=_run_provenance(),
+    )
     stack = ManagedTuwunelStack(
         stream_profile=_PROFILE_STREAMS[scenario.profile],
         room_keys=_room_keys_for(scenario),
     )
+    runner_holder: dict[str, LiveFuzzRunner] = {}
     try:
         stack.start()
         started_at = time.monotonic()
@@ -3321,28 +3552,57 @@ def main() -> None:
                 reply_timeout=reply_timeout,
                 settle_seconds=args.settle_seconds,
                 pending_grace=args.pending_grace,
+                runner_sink=lambda runner: runner_holder.__setitem__("runner", runner),
+                journal=bundle.record_realized,
             ),
         )
         result["seed"] = args.seed if args.trace is None else "trace"
         result["wall_seconds"] = round(time.monotonic() - started_at, 1)
         result.update(stack.diagnostic_counts())
         print(json.dumps(result, sort_keys=True))
-    except Exception:
-        print("Live Matrix fuzz trace:", file=sys.stderr)
-        print(args.trace or scenario.to_json(), file=sys.stderr)
-        print(json.dumps(stack.diagnostic_counts(), sort_keys=True), file=sys.stderr)
+    except Exception as exc:
+        _persist_failure_bundle(bundle, stack, runner_holder.get("runner"), exc)
         if args.failure_log is not None and stack.log_path.exists():
             args.failure_log.write_text(
                 stack.log_path.read_text(encoding="utf-8", errors="replace"),
                 encoding="utf-8",
             )
-        log_tail = stack.log_tail()
-        if log_tail:
-            print("MindRoom log tail:", file=sys.stderr)
-            print(log_tail, file=sys.stderr)
         raise
     finally:
         stack.close()
+
+
+def _persist_failure_bundle(
+    bundle: FailureBundle,
+    stack: ManagedTuwunelStack,
+    runner: LiveFuzzRunner | None,
+    exc: BaseException,
+) -> None:
+    """Copy durable evidence before teardown; never mask the primary failure.
+
+    MindRoom is stopped first so its log is complete, and the Tuwunel log is
+    captured while the container still exists. Any error assembling the bundle
+    is reported but does not replace the fuzz assertion, which ``main`` re-raises.
+    """
+    print("Live Matrix fuzz trace:", file=sys.stderr)
+    print(stack.log_tail(), file=sys.stderr)
+    try:
+        stack.stop_mindroom()
+        oracle_snapshot = _sanitized_oracle_snapshot(runner.oracle) if runner is not None else {}
+        ledger_path = stack.storage_path / "tracking" / f"{AGENT_NAME}_responded.json"
+        path = bundle.finalize(
+            exception=exc,
+            log_path=stack.log_path,
+            ledger_path=ledger_path,
+            oracle_snapshot=oracle_snapshot,
+            model_observations=_ModelHandler.observations_snapshot(),
+            diagnostics=stack.diagnostic_counts(),
+            tuwunel_log=stack.tuwunel_log(),
+        )
+        print(f"Live Matrix fuzz failure bundle: {path}", file=sys.stderr)
+    except Exception as bundle_exc:
+        # Evidence-capture errors must never replace the primary fuzz failure.
+        print(f"Failure bundle capture error (ignored): {bundle_exc}", file=sys.stderr)
 
 
 if __name__ == "__main__":

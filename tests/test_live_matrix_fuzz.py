@@ -17,7 +17,9 @@ from scripts.testing.fuzz_live_matrix import (
     ORIGINAL_REVISION,
     ChaosTuning,
     ExactReplyOracle,
+    FailureBundle,
     FinalStateAuditor,
+    LiveFuzzRunner,
     LiveFuzzScenario,
     LiveMatrixClient,
     LiveOperation,
@@ -25,6 +27,8 @@ from scripts.testing.fuzz_live_matrix import (
     _body_call_id,
     _ModelHandler,
     _parse_markers,
+    _persist_failure_bundle,
+    _sanitized_oracle_snapshot,
     _SentRecord,
     _source_marker,
     chaos_scenario_from_seed,
@@ -1330,3 +1334,217 @@ async def test_model_source_audit_ignores_no_response_supersession(tmp_path: Pat
         auditor._assert_model_saw_current_sources({})
     finally:
         await auditor.client.close()
+
+
+class _FakeStack:
+    """Minimal stand-in exposing the fields the failure-bundle path reads.
+
+    Records teardown ordering so tests can assert MindRoom stops before the
+    Tuwunel log is captured and before evidence is copied.
+    """
+
+    def __init__(self, storage_path: Path, log_path: Path, *, tuwunel_log: str = "tuwunel line\n") -> None:
+        self.storage_path = storage_path
+        self.log_path = log_path
+        self._tuwunel_log = tuwunel_log
+        self.events: list[str] = []
+
+    def log_tail(self, lines: int = 80) -> str:  # noqa: ARG002 - mirror the real stack signature
+        return "tail\n"
+
+    def stop_mindroom(self) -> None:
+        self.events.append("stop_mindroom")
+
+    def diagnostic_counts(self) -> dict[str, int]:
+        self.events.append("diagnostics")
+        return {"event_loop_stalls": 2, "sync_restart_retries": 1}
+
+    def tuwunel_log(self, *, tail: int = 4000) -> str:  # noqa: ARG002 - mirror the real stack signature
+        self.events.append("tuwunel_log")
+        return self._tuwunel_log
+
+
+def _bundle_scenario() -> LiveFuzzScenario:
+    """A tiny valid scenario used as durable logical evidence."""
+    return LiveFuzzScenario(
+        thread_count=1,
+        batches=((LiveOperation(0, LiveOperationKind.THREAD_MESSAGE, 0, None),),),
+    )
+
+
+def _prepared_stack(tmp_path: Path, *, log_text: str = "mindroom line\n") -> _FakeStack:
+    """Create a fake stack whose log and ledger already hold copyable evidence."""
+    storage = tmp_path / "mindroom_data"
+    (storage / "tracking").mkdir(parents=True)
+    ledger = storage / "tracking" / "general_responded.json"
+    ledger.write_text(json.dumps({"schema_version": TurnRecordCodec.schema_version(), "turns": {}}), encoding="utf-8")
+    log_path = tmp_path / "mindroom.log"
+    log_path.write_text(log_text, encoding="utf-8")
+    return _FakeStack(storage, log_path)
+
+
+def _snapshot_oracle() -> ExactReplyOracle:
+    """A settled-then-replied oracle whose snapshot carries diagnosable state."""
+    client = LiveMatrixClient("http://matrix.invalid", "!room:example")
+    oracle = ExactReplyOracle(client, "@agent:example")
+    oracle.next_batch = "s_secret_sync_token"
+    oracle.expect("op:1", "$source")
+    oracle._ingest_event(
+        {
+            "event_id": "$response",
+            "sender": "@agent:example",
+            "type": "m.room.message",
+            "content": {
+                "m.relates_to": {
+                    "rel_type": "m.thread",
+                    "event_id": "$source",
+                    "m.in_reply_to": {"event_id": "$source"},
+                },
+            },
+        },
+    )
+    return oracle
+
+
+@pytest.mark.asyncio
+async def test_failure_bundle_persists_evidence_and_survives_teardown(tmp_path: Path) -> None:
+    """A run failure leaves a complete bundle after the stack is destroyed."""
+    _ModelHandler.reset_observations()
+    _ModelHandler._record_observation(3, frozenset({_source_marker("op:1", ORIGINAL_REVISION)}))
+    artifact_root = tmp_path / "artifacts"
+    scenario = _bundle_scenario()
+    bundle = FailureBundle.create(artifact_root, "run-1", scenario=scenario, provenance={"mindroom_head": "abc123"})
+    bundle.record_realized({"sequence": 1, "event_ref": "op:0", "event_id": "$sent"})
+
+    stack = _prepared_stack(tmp_path)
+    oracle = _snapshot_oracle()
+    runner = object.__new__(LiveFuzzRunner)
+    runner.oracle = oracle
+
+    try:
+        _persist_failure_bundle(bundle, stack, runner, AssertionError("reply invariant failed"))
+    finally:
+        await oracle.client.close()
+
+    # Teardown deletes the stack's temp storage; the bundle must not point into it.
+    import shutil  # noqa: PLC0415 - local to this teardown-simulation test
+
+    shutil.rmtree(tmp_path / "mindroom_data")
+
+    directory = bundle.directory
+    assert directory.exists()
+    assert (directory / "scenario.json").read_text(encoding="utf-8").strip() == scenario.to_json()
+    assert (directory / "provenance.json").exists()
+    journal_lines = (directory / "realized_journal.jsonl").read_text(encoding="utf-8").splitlines()
+    assert json.loads(journal_lines[0])["event_id"] == "$sent"
+    assert "mindroom line" in (directory / "mindroom.log").read_text(encoding="utf-8")
+    assert (directory / "handled_turns.json").exists()
+    observations = json.loads((directory / "model_observations.json").read_text(encoding="utf-8"))
+    assert observations["3"] == [_source_marker("op:1", ORIGINAL_REVISION)]
+    diagnostics = json.loads((directory / "diagnostics.json").read_text(encoding="utf-8"))
+    assert diagnostics["event_loop_stalls"] == 2
+    assert "tuwunel line" in (directory / "tuwunel.log").read_text(encoding="utf-8")
+    exception_text = (directory / "exception.txt").read_text(encoding="utf-8")
+    assert "reply invariant failed" in exception_text
+    assert stack.events.index("stop_mindroom") < stack.events.index("tuwunel_log")
+
+
+def test_failure_bundle_records_realized_completion_order(tmp_path: Path) -> None:
+    """Out-of-order concurrent completions appear in true completion order."""
+    bundle = FailureBundle.create(
+        tmp_path / "artifacts",
+        "run-2",
+        scenario=_bundle_scenario(),
+        provenance={},
+    )
+    runner = object.__new__(LiveFuzzRunner)
+    runner.operation_count = 0
+    runner.event_ids = {}
+    runner.sent_payloads = {}
+    runner._mindroom_running = True
+    runner._journal = bundle.record_realized
+
+    # A concurrent batch resolves with thread 2 finishing before thread 0.
+    results = [
+        (LiveOperation(7, LiveOperationKind.THREAD_MESSAGE, 2, None, client=1), "$late-thread", None),
+        (LiveOperation(3, LiveOperationKind.THREAD_MESSAGE, 0, None, client=0), "$early-thread", None),
+    ]
+    runner._record_batch_results(results)
+
+    journal = [
+        json.loads(line)
+        for line in (bundle.directory / "realized_journal.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert [entry["event_id"] for entry in journal] == ["$late-thread", "$early-thread"]
+    assert [entry["thread"] for entry in journal] == [2, 0]
+    assert [entry["sequence"] for entry in journal] == [1, 2]
+
+
+@pytest.mark.asyncio
+async def test_failure_bundle_artifact_error_preserves_primary_failure(tmp_path: Path) -> None:
+    """A broken artifact writer must not raise over the primary fuzz error."""
+    bundle = FailureBundle.create(
+        tmp_path / "artifacts",
+        "run-3",
+        scenario=_bundle_scenario(),
+        provenance={},
+    )
+    # A directory where a log file is expected forces the copy to fail.
+    (bundle.directory / "mindroom.log").mkdir()
+    stack = _prepared_stack(tmp_path)
+    oracle = _snapshot_oracle()
+    runner = object.__new__(LiveFuzzRunner)
+    runner.oracle = oracle
+
+    try:
+        # Must not raise: the primary AssertionError is re-raised by main(), not here.
+        _persist_failure_bundle(bundle, stack, runner, AssertionError("primary invariant"))
+    finally:
+        await oracle.client.close()
+
+    errors = (bundle.directory / "artifact_errors.txt").read_text(encoding="utf-8")
+    assert "mindroom.log" in errors
+    # Other artifacts were still written despite the one failure.
+    assert (bundle.directory / "diagnostics.json").exists()
+    assert (bundle.directory / "tuwunel.log").exists()
+
+
+@pytest.mark.asyncio
+async def test_sanitized_oracle_snapshot_excludes_tokens_and_sync_state() -> None:
+    """The snapshot keeps opaque IDs but never sync tokens or access tokens."""
+    oracle = _snapshot_oracle()
+    try:
+        snapshot = _sanitized_oracle_snapshot(oracle)
+    finally:
+        await oracle.client.close()
+
+    serialized = json.dumps(snapshot)
+    assert "s_secret_sync_token" not in serialized
+    assert "next_batch" not in snapshot
+    assert "access_token" not in serialized
+    assert snapshot["expected_sources"] == {"$source": "op:1"}
+    assert snapshot["response_ids"] == {"$source": ["$response"]}
+
+
+@pytest.mark.asyncio
+async def test_failure_bundle_snapshot_omits_sync_state_end_to_end(tmp_path: Path) -> None:
+    """The persisted oracle snapshot carries no raw Matrix sync state."""
+    bundle = FailureBundle.create(
+        tmp_path / "artifacts",
+        "run-4",
+        scenario=_bundle_scenario(),
+        provenance={},
+    )
+    stack = _prepared_stack(tmp_path)
+    oracle = _snapshot_oracle()
+    runner = object.__new__(LiveFuzzRunner)
+    runner.oracle = oracle
+
+    try:
+        _persist_failure_bundle(bundle, stack, runner, AssertionError("boom"))
+    finally:
+        await oracle.client.close()
+
+    snapshot_text = (bundle.directory / "oracle_snapshot.json").read_text(encoding="utf-8")
+    assert "s_secret_sync_token" not in snapshot_text
+    assert "next_batch" not in snapshot_text
