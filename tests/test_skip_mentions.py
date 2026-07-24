@@ -450,7 +450,7 @@ async def test_delivery_gateway_edit_text_records_threaded_outbound_edit(tmp_pat
 async def test_delivery_gateway_stamps_runtime_generation_on_nonterminal_send(tmp_path: Path) -> None:
     """Pending placeholders must carry the bot generation's clock-free ownership stamp."""
     gateway, _, _ = _gateway_with_mocks(tmp_path)
-    gateway = DeliveryGateway(replace(gateway.deps, runtime_generation="gen-1"))
+    gateway = DeliveryGateway(replace(gateway.deps, runtime_generation=lambda: "gen-1"))
     target = MessageTarget.resolve("!test:server", None, None)
 
     with patch(
@@ -474,7 +474,7 @@ async def test_delivery_gateway_stamps_runtime_generation_on_nonterminal_send(tm
 async def test_delivery_gateway_does_not_stamp_terminal_or_plain_sends(tmp_path: Path) -> None:
     """Terminal statuses and plain sends stay unstamped."""
     gateway, _, _ = _gateway_with_mocks(tmp_path)
-    gateway = DeliveryGateway(replace(gateway.deps, runtime_generation="gen-1"))
+    gateway = DeliveryGateway(replace(gateway.deps, runtime_generation=lambda: "gen-1"))
     target = MessageTarget.resolve("!test:server", None, None)
 
     with patch(
@@ -495,10 +495,47 @@ async def test_delivery_gateway_does_not_stamp_terminal_or_plain_sends(tmp_path:
 
 
 @pytest.mark.asyncio
+async def test_delivery_gateway_reads_generation_live_per_delivery(tmp_path: Path) -> None:
+    """A rotated runtime generation reaches later deliveries without rebuilding the gateway.
+
+    The generation rotates on every runtime start of the same bot object, so
+    the gateway must read it through the live provider at delivery time — a
+    constructor-time snapshot would falsely protect prior-run streams.
+    """
+    gateway, _, _ = _gateway_with_mocks(tmp_path)
+    generation = {"value": "gen-1"}
+    gateway = DeliveryGateway(replace(gateway.deps, runtime_generation=lambda: generation["value"]))
+    target = MessageTarget.resolve("!test:server", None, None)
+
+    with patch(
+        "mindroom.delivery_gateway.send_message_result",
+        new=AsyncMock(side_effect=delivered_matrix_side_effect("$response")),
+    ) as send_result:
+        await gateway.send_text(
+            SendTextRequest(
+                target=target,
+                response_text="Thinking...",
+                extra_content={STREAM_STATUS_KEY: STREAM_STATUS_PENDING},
+            ),
+        )
+        generation["value"] = "gen-2"
+        await gateway.send_text(
+            SendTextRequest(
+                target=target,
+                response_text="Thinking again...",
+                extra_content={STREAM_STATUS_KEY: STREAM_STATUS_PENDING},
+            ),
+        )
+
+    stamped = [send_call.args[2][STREAM_GENERATION_KEY] for send_call in send_result.await_args_list]
+    assert stamped == ["gen-1", "gen-2"]
+
+
+@pytest.mark.asyncio
 async def test_delivery_gateway_passes_runtime_generation_to_streaming(tmp_path: Path) -> None:
     """Streaming delivery forwards the bot generation without touching the shared extra-content dict."""
     gateway, _, _ = _gateway_with_mocks(tmp_path)
-    gateway = DeliveryGateway(replace(gateway.deps, runtime_generation="gen-1"))
+    gateway = DeliveryGateway(replace(gateway.deps, runtime_generation=lambda: "gen-1"))
     target = MessageTarget.resolve("!test:server", "$thread", "$root")
     shared_collector: dict[str, object] = {}
 

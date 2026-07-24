@@ -5,6 +5,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol
+from uuid import uuid4
 
 if TYPE_CHECKING:
     import nio
@@ -47,6 +48,9 @@ class BotRuntimeView(Protocol):
     def runtime_started_at(self) -> float: ...  # noqa: D102
 
     @property
+    def runtime_generation(self) -> str: ...  # noqa: D102
+
+    @property
     def callback_failure_count(self) -> int: ...  # noqa: D102
 
     def mark_callback_failed(self) -> None: ...  # noqa: D102
@@ -65,11 +69,16 @@ class BotRuntimeState:
     event_cache_write_coordinator: EventCacheWriteCoordinator | None
     startup_thread_prewarm_registry: StartupThreadPrewarmRegistry | None = None
     runtime_started_at: float = field(default_factory=time.time)
+    # Clock-free ownership stamp for streams created by this bot start;
+    # rotated on every runtime start so a stopped-then-restarted bot object
+    # can still repair streams left behind by its previous run.
+    runtime_generation: str = field(default_factory=lambda: uuid4().hex)
     callback_failure_count: int = 0
 
     def mark_runtime_started(self) -> None:
-        """Record the runtime start time for this bot start."""
+        """Record the runtime start time and rotate the generation for this bot start."""
         self.runtime_started_at = time.time()
+        self.runtime_generation = uuid4().hex
 
     def mark_callback_failed(self) -> None:
         """Record that a Matrix callback failed after sync certification."""

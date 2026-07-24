@@ -309,9 +309,11 @@ class DeliveryGatewayDeps:
     redact_message_event: Callable[..., Awaitable[bool]]
     resolver: ConversationResolver
     response_hooks: ResponseHookService
-    # Clock-independent ownership stamp for nonterminal stream content, reset
-    # with every bot instance so startup cleanup never repairs live output.
-    runtime_generation: str | None = None
+    # Live provider of the bot's runtime-generation ownership stamp. Read at
+    # delivery time, never snapshotted here: the generation rotates on every
+    # runtime start (BotRuntimeState.mark_runtime_started), so a frozen copy
+    # would falsely protect streams from a previous run of the same bot.
+    runtime_generation: Callable[[], str] | None = None
 
 
 @dataclass(frozen=True)
@@ -467,9 +469,14 @@ class DeliveryGateway:
             extra_content=failure_extra_content,
         )
 
+    def _current_runtime_generation(self) -> str | None:
+        """Return the live runtime-generation stamp for this delivery."""
+        provider = self.deps.runtime_generation
+        return provider() if provider is not None else None
+
     def _stamp_runtime_generation(self, extra_content: dict[str, Any] | None) -> dict[str, Any] | None:
         """Stamp nonterminal stream content with this bot generation's ownership mark."""
-        generation = self.deps.runtime_generation
+        generation = self._current_runtime_generation()
         if generation is None or extra_content is None:
             return extra_content
         if extra_content.get(constants.STREAM_STATUS_KEY) not in {
@@ -1015,7 +1022,7 @@ class DeliveryGateway:
             existing_event_id=request.existing_event_id,
             adopt_existing_placeholder=request.adopt_existing_placeholder,
             extra_content=request.extra_content,
-            runtime_generation=self.deps.runtime_generation,
+            runtime_generation=self._current_runtime_generation(),
             tool_trace_collector=request.tool_trace_collector,
             pipeline_timing=request.pipeline_timing,
             visible_event_id_callback=request.visible_event_id_callback,

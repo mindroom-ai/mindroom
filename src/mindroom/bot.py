@@ -331,10 +331,6 @@ class AgentBot:
         self.config_path = config_path
         self.logger = logger.bind(agent=self.agent_name)
         self.stop_manager = StopManager()
-        # Fresh per bot instance, so restart and hot-reload replacements can
-        # distinguish their own live stream output from prior-generation
-        # leftovers without comparing local and Matrix clocks.
-        self.runtime_generation = uuid4().hex
         self._restart_retry_queue = SyncRestartRetryQueue()
         self.running = False
         self.last_sync_time = None
@@ -469,7 +465,7 @@ class AgentBot:
                 response_hooks=ResponseHookService(
                     hook_context=self._hook_context_support,
                 ),
-                runtime_generation=self.runtime_generation,
+                runtime_generation=lambda: self._runtime_view.runtime_generation,
             ),
         )
         self._tool_runtime_support = ToolRuntimeSupport(
@@ -618,6 +614,11 @@ class AgentBot:
         self.__dict__.pop("matrix_id", None)
         self.event_cache = self.event_cache.for_principal(self.matrix_id.full_id)
         self._init_runtime_components()
+
+    @property
+    def runtime_generation(self) -> str:
+        """Clock-free ownership stamp for streams created by this bot start."""
+        return self._runtime_view.runtime_generation
 
     @property
     def client(self) -> nio.AsyncClient | None:

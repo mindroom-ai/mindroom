@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, Mock, call, patch
 import nio
 import pytest
 
+from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.config.main import Config
 from mindroom.constants import (
     ORIGINAL_SENDER_KEY,
@@ -2275,6 +2276,29 @@ async def test_prior_generation_stamp_is_still_cleaned(tmp_path: Path) -> None:
 
     assert cleaned == 1
     edit_result.assert_awaited_once()
+
+
+def test_runtime_generation_rotates_on_same_object_restart() -> None:
+    """mark_runtime_started rotates the generation so prior-run streams stay repairable.
+
+    The orchestrator reuses bot objects across stop()/start(), so without
+    rotation an interrupted stream from the previous run would carry the
+    current generation and be falsely protected from cleanup forever.
+    """
+    state = BotRuntimeState(
+        client=None,
+        config=MagicMock(),
+        runtime_paths=MagicMock(),
+        enable_streaming=False,
+        orchestrator=None,
+        event_cache=None,
+        event_cache_write_coordinator=None,
+    )
+    first_generation = state.runtime_generation
+
+    state.mark_runtime_started()
+
+    assert state.runtime_generation != first_generation
 
 
 @pytest.mark.asyncio
