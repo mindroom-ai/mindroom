@@ -46,6 +46,17 @@ def test_live_scenario_is_deterministic_and_json_replayable() -> None:
     assert any(
         operation.kind is LiveOperationKind.RESTART_MINDROOM for batch in scenario.batches for operation in batch
     )
+    for batch in scenario.batches:
+        reply_threads = [
+            operation.thread
+            for operation in batch
+            if operation.kind
+            in {
+                LiveOperationKind.THREAD_MESSAGE,
+                LiveOperationKind.PLAIN_REPLY,
+            }
+        ]
+        assert len(reply_threads) == len(set(reply_threads))
 
 
 def test_live_scenario_generator_covers_every_matrix_mutation() -> None:
@@ -88,6 +99,22 @@ def test_live_scenario_rejects_same_batch_dependency() -> None:
     )
 
     with pytest.raises(ValueError, match="unknown or same-batch target"):
+        scenario.validate()
+
+
+def test_live_scenario_rejects_ambiguous_same_thread_reply_batch() -> None:
+    """The exact-reply oracle cannot distinguish a valid coalesced turn from loss."""
+    scenario = LiveFuzzScenario(
+        thread_count=1,
+        batches=(
+            (
+                LiveOperation(0, LiveOperationKind.THREAD_MESSAGE, 0, "root:0"),
+                LiveOperation(1, LiveOperationKind.PLAIN_REPLY, 0, "response:root:0"),
+            ),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="same-thread messages"):
         scenario.validate()
 
 

@@ -120,7 +120,6 @@ class TurnStore:
             )
 
         self._ledger.update_handled_turn(turn_record.indexed_event_ids, terminal_record)
-        self.release_pending_turn_claim(turn_record)
 
     def is_handled(self, event_id: str) -> bool:
         """Return whether one source event already has a terminal outcome."""

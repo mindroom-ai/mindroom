@@ -94,7 +94,7 @@ async def dispatch_text_message(
 ) -> None:
     """Run the normal text or command dispatch pipeline for a prepared text event."""
     turn_claim = handled_turn or TurnRecord.create([raw_event.event_id], completed=False)
-    if not controller.deps.turn_store.try_claim_turn(turn_claim):
+    if not _try_claim_turn(controller, turn_claim, queued_notice_reservation):
         return
     claim_transferred = False
 
@@ -154,6 +154,7 @@ async def dispatch_text_message(
             trusted_attachment_ids=trusted_attachment_ids,
             media_events=media_events,
             queued_notice_reservation=queued_notice_reservation,
+            turn_claim=turn_claim,
             mark_claim_transferred=mark_claim_transferred,
         )
     finally:
@@ -163,6 +164,19 @@ async def dispatch_text_message(
             queued_notice_reservation.cancel()
         if timing_scope_token is not None:
             timing_scope_context.reset(timing_scope_token)
+
+
+def _try_claim_turn(
+    controller: TurnController,
+    turn_claim: TurnRecord,
+    queued_notice_reservation: QueuedHumanNoticeReservation | None,
+) -> bool:
+    """Claim dispatch ownership or cancel the reservation that cannot be consumed."""
+    if controller.deps.turn_store.try_claim_turn(turn_claim):
+        return True
+    if queued_notice_reservation is not None:
+        queued_notice_reservation.cancel()
+    return False
 
 
 async def _prepare_text_dispatch(
@@ -373,6 +387,7 @@ async def _apply_turn_plan(
     trusted_attachment_ids: list[str],
     media_events: list[MediaDispatchEvent] | None,
     queued_notice_reservation: QueuedHumanNoticeReservation | None,
+    turn_claim: TurnRecord,
     mark_claim_transferred: Callable[[], None],
 ) -> None:
     if plan.kind == "ignore":
@@ -425,7 +440,7 @@ async def _apply_turn_plan(
     response_task = controller.deps.response_runner.track_inbox_response(
         _run_claimed_response(
             controller,
-            handled_turn,
+            turn_claim,
             controller._execute_response_action(
                 room,
                 prepared.event,
@@ -464,14 +479,14 @@ async def _apply_turn_plan(
 
 async def _run_claimed_response(
     controller: TurnController,
-    handled_turn: TurnRecord,
+    turn_claim: TurnRecord,
     response: Awaitable[None],
 ) -> None:
     """Release exclusive response ownership after every terminal path."""
     try:
         await response
     finally:
-        controller.deps.turn_store.release_pending_turn_claim(handled_turn)
+        controller.deps.turn_store.release_pending_turn_claim(turn_claim)
 
 
 async def _execute_route_plan(

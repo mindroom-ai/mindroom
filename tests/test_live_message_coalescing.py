@@ -240,6 +240,7 @@ async def test_duplicate_delivery_is_claimed_before_dispatch_resolution(tmp_path
     event = _text_event(event_id="$duplicate", body="@test_agent hello")
     resolution_started = asyncio.Event()
     release_resolution = asyncio.Event()
+    duplicate_reservation = MagicMock()
 
     async def slow_prepare(*_args: object, **_kwargs: object) -> None:
         resolution_started.set()
@@ -254,11 +255,17 @@ async def test_duplicate_delivery_is_claimed_before_dispatch_resolution(tmp_path
             bot._turn_controller._dispatch_text_message(room, event, "@user:localhost"),
         )
         await resolution_started.wait()
-        await bot._turn_controller._dispatch_text_message(room, event, "@user:localhost")
+        await bot._turn_controller._dispatch_text_message(
+            room,
+            event,
+            "@user:localhost",
+            queued_notice_reservation=duplicate_reservation,
+        )
         release_resolution.set()
         await first
 
     prepare.assert_awaited_once()
+    duplicate_reservation.cancel.assert_called_once_with()
 
 
 async def _wait_for(condition: Callable[[], bool], *, deadline_seconds: float = 0.5) -> None:

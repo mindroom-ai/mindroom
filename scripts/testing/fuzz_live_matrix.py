@@ -173,6 +173,18 @@ class LiveFuzzScenario:
             if restart_operations and len(batch) != 1:
                 msg = "MindRoom restart must be a singleton batch"
                 raise ValueError(msg)
+            reply_threads = [
+                operation.thread
+                for operation in batch
+                if operation.kind
+                in {
+                    LiveOperationKind.THREAD_MESSAGE,
+                    LiveOperationKind.PLAIN_REPLY,
+                }
+            ]
+            if len(reply_threads) != len(set(reply_threads)):
+                msg = "same-thread messages requiring replies must use separate batches"
+                raise ValueError(msg)
 
             new_events: set[str] = set()
             new_responses: set[str] = set()
@@ -358,15 +370,30 @@ def live_scenario_from_seed(
             next_restart += restart_interval
 
         batch_size = min(steps - generated, randomizer.randint(1, max_batch_size))
-        operations = [
-            _choose_operation(
+        operations: list[LiveOperation] = []
+        reply_threads: set[int] = set()
+        for offset in range(batch_size):
+            operation = _choose_operation(
                 randomizer,
                 state,
                 operation_id=operation_id + offset,
                 thread_count=thread_count,
             )
-            for offset in range(batch_size)
-        ]
+            needs_reply = operation.kind in {
+                LiveOperationKind.THREAD_MESSAGE,
+                LiveOperationKind.PLAIN_REPLY,
+            }
+            if needs_reply and operation.thread in reply_threads:
+                operation = LiveOperation(
+                    operation_id=operation.operation_id,
+                    kind=LiveOperationKind.REACTION,
+                    thread=operation.thread,
+                    target=randomizer.choice(state.reaction_targets[operation.thread]),
+                )
+                needs_reply = False
+            operations.append(operation)
+            if needs_reply:
+                reply_threads.add(operation.thread)
         operation_id += batch_size
 
         batches.append(tuple(operations))
@@ -920,7 +947,9 @@ class LiveMatrixClient:
             json=json_body,
             params=params,
         )
-        response.raise_for_status()
+        if response.is_error:
+            msg = f"Matrix {method} {path} failed with HTTP {response.status_code}: {response.text}"
+            raise RuntimeError(msg)
         data = response.json()
         if not isinstance(data, dict):
             msg = f"Matrix {method} {path} returned non-object JSON"
@@ -1415,7 +1444,7 @@ class LiveFuzzRunner:
                 "m.relates_to": {
                     "rel_type": "m.annotation",
                     "event_id": target_event_id,
-                    "key": f"fuzz-{operation.operation_id % 7}",
+                    "key": f"fuzz-{operation.operation_id}",
                 },
             }
             event_id = await client.send_event("m.reaction", txn_id, content)

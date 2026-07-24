@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import asyncio
 import threading
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -170,6 +171,34 @@ async def test_failed_claimed_response_releases_turn_for_replay(tmp_path: Path) 
         await _run_claimed_response(controller, turn, fail())
 
     assert store.try_claim_turn(turn) is True
+
+
+@pytest.mark.asyncio
+async def test_terminal_turn_keeps_claim_until_response_task_finishes(tmp_path: Path) -> None:
+    """Terminal persistence must not reopen a source before task cleanup completes."""
+    store = _store(tmp_path)
+    turn = TurnRecord.create(["$source"], completed=False)
+    other_turn = TurnRecord.create(["$discovery"], completed=False)
+    expanded_turn = replace(turn, discovery_event_ids=other_turn.source_event_ids)
+    terminal_recorded = asyncio.Event()
+    release_response = asyncio.Event()
+    assert store.try_claim_turn(turn) is True
+    assert store.try_claim_turn(other_turn) is True
+
+    async def finish_response() -> None:
+        store.record_turn(expanded_turn)
+        terminal_recorded.set()
+        await release_response.wait()
+
+    controller = SimpleNamespace(deps=SimpleNamespace(turn_store=store))
+    response_task = asyncio.create_task(_run_claimed_response(controller, turn, finish_response()))
+    await terminal_recorded.wait()
+
+    assert store.try_claim_turn(turn) is False
+    release_response.set()
+    await response_task
+    assert store.try_claim_turn(turn) is True
+    assert store.try_claim_turn(other_turn) is False
 
 
 def test_prepare_redaction_removes_causal_run_suffix(tmp_path: Path) -> None:
