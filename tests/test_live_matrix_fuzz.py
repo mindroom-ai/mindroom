@@ -434,6 +434,72 @@ async def test_exact_reply_oracle_requires_completed_streaming_body() -> None:
 
 
 @pytest.mark.asyncio
+async def test_restart_barrier_keeps_duplicate_audit_open(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A delayed old duplicate must be seen before the restart barrier settles."""
+    client = LiveMatrixClient("http://matrix.invalid", "!room:example")
+    oracle = ExactReplyOracle(client, "@agent:example")
+    oracle.expect("old", "$old-source")
+    oracle._ingest_event(
+        _agent_reply_event(
+            "$old-source",
+            "$old-response",
+            fuzz_live_matrix._ModelHandler.response_text_for(1),
+        ),
+    )
+    oracle.expect("restart-barrier:0", "$barrier-source")
+    responses = iter(
+        (
+            [],
+            [
+                _agent_reply_event(
+                    "$old-source",
+                    "$delayed-duplicate",
+                    fuzz_live_matrix._ModelHandler.response_text_for(2),
+                ),
+            ],
+            [
+                _agent_reply_event(
+                    "$barrier-source",
+                    "$barrier-response",
+                    fuzz_live_matrix._ModelHandler.response_text_for(3),
+                ),
+            ],
+        ),
+    )
+
+    async def sync(
+        _since: str | None,
+        *,
+        timeout_ms: int,
+        timeline_limit: int = 2000,
+    ) -> dict[str, Any]:
+        assert timeout_ms == 250
+        assert timeline_limit == 2000
+        return {
+            "next_batch": f"token-{len(oracle.seen_event_ids)}",
+            "rooms": {
+                "join": {
+                    "!room:example": {
+                        "timeline": {
+                            "limited": False,
+                            "events": next(responses),
+                        },
+                    },
+                },
+            },
+        }
+
+    monkeypatch.setattr(client, "sync", sync)
+    try:
+        with pytest.raises(AssertionError, match="duplicates"):
+            await oracle.wait_until_exact(deadline_seconds=1, settle_seconds=0)
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
 async def test_exact_reply_oracle_does_not_paginate_initial_limited_sync(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

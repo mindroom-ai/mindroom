@@ -1653,16 +1653,7 @@ class LiveFuzzRunner:
 
         self.stack.restart_mindroom()
         self.restart_count += 1
-        await asyncio.gather(
-            *(
-                oracle.wait_until_exact(
-                    deadline_seconds=self.reply_timeout,
-                    settle_seconds=max(self.settle_seconds, 1),
-                    allow_limited=True,
-                )
-                for oracle in oracles
-            ),
-        )
+        await self._send_recovery_restart_barriers(oracles)
         for oracle in oracles:
             oracle._assert_no_wrong_replies()
 
@@ -1678,6 +1669,7 @@ class LiveFuzzRunner:
             "oracle_gap_audit_pages": sum(oracle.gap_audit_page_count for oracle in oracles),
             "oracle_pagination_pages": sum(oracle.pagination_page_count for oracle in oracles),
             "recovery_runtime_ms": round(recovery_seconds * 1000),
+            "restart_barriers": len(oracles),
             "restarts": self.restart_count,
             "rooms": self.scenario.room_count,
             "roots": self.scenario.thread_count * self.scenario.room_count,
@@ -1685,6 +1677,47 @@ class LiveFuzzRunner:
             "threads": self.scenario.thread_count * self.scenario.room_count,
             "transaction_retries": retry_count,
         }
+
+    async def _send_recovery_restart_barriers(self, oracles: tuple[ExactReplyOracle, ...]) -> None:
+        """Prove the restarted sync loop processes new input before duplicate audit."""
+
+        async def send_barrier(room: int) -> tuple[int, str, str]:
+            logical_ref = f"restart-barrier:{room}"
+            root_ref = f"root:{room}:0"
+            root_event_id = self.event_ids[root_ref]
+            reply_event_id = self.response_event_ids[f"response:{root_ref}"]
+            content = self._message_content(
+                f"Live recovery restart barrier {room}",
+                relation={
+                    "rel_type": "m.thread",
+                    "event_id": root_event_id,
+                    "is_falling_back": True,
+                    "m.in_reply_to": {"event_id": reply_event_id},
+                },
+            )
+            event_id = await self._recovery_client(room, 0).send_event(
+                "m.room.message",
+                f"live-recovery-{logical_ref}",
+                content,
+            )
+            return room, logical_ref, event_id
+
+        barriers = await asyncio.gather(*(send_barrier(room) for room in range(self.scenario.room_count)))
+        for room, logical_ref, event_id in barriers:
+            self.event_ids[logical_ref] = event_id
+            oracles[room].expect(logical_ref, event_id)
+        await asyncio.gather(
+            *(
+                oracle.wait_until_exact(
+                    deadline_seconds=self.reply_timeout,
+                    settle_seconds=max(self.settle_seconds, 1),
+                    allow_limited=True,
+                )
+                for oracle in oracles
+            ),
+        )
+        for oracle in oracles:
+            self.response_event_ids.update(oracle.response_event_by_ref)
 
     async def _send_recovery_roots(self, oracles: tuple[ExactReplyOracle, ...]) -> None:
         """Create hot and cold thread roots in every room before the outage."""
