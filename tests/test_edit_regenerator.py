@@ -159,16 +159,6 @@ def _harness(tmp_path: Path, *, turn_record: TurnRecord | None) -> _Harness:
             source_kind=EDIT_SOURCE_KIND,
         ),
     )
-    resolver.build_ingress_envelope = MagicMock(
-        return_value=request_envelope(
-            room_id=ROOM_ID,
-            reply_to_event_id=ORIGINAL_EVENT_ID,
-            thread_id=THREAD_ID,
-            user_id=USER_ID,
-            agent_name=AGENT_NAME,
-            source_kind=EDIT_SOURCE_KIND,
-        ),
-    )
 
     turn_store = MagicMock(spec=TurnStore)
     current_turn_record = [turn_record]
@@ -712,11 +702,12 @@ async def test_cancellation_while_waiting_for_original_cleans_mailbox(tmp_path: 
     await asyncio.to_thread(wait_started.wait)
     task.cancel()
 
-    with pytest.raises(asyncio.CancelledError):
-        await task
-
-    assert harness.regenerator._mailboxes == {}
-    release_wait.set()
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert harness.regenerator._mailboxes == {}
+    finally:
+        release_wait.set()
 
 
 @pytest.mark.asyncio
