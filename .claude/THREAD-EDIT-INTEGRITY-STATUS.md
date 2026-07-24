@@ -24,7 +24,7 @@
 - SQLite and PostgreSQL point-event and snapshot fallback regressions pass for a newest empty-object replacement.
 - Bundled replacements are now validated at the shared thread-root preview seam for sender, type, target, state, room, and edit-of-edit rules.
 - Corrected bundled-preview fixtures now use same-sender originals and replacements.
-- Execute the production PostgreSQL query against an isolated ICU-collated edit-event-ID column and prove bytewise Matrix ordering.
+- The production PostgreSQL query now has an exact regression against an isolated ICU `und-x-icu` edit-event-ID column.
 - Run targeted tests, backend suites, full pytest, Tach, and all-file pre-commit.
 - Commit and push small follow-ups with `Bas Nijholt <bas@nijho.lt>` verified before each commit.
 - Update the PR body and both external campaign notes.
@@ -35,6 +35,7 @@
 
 - Cache malformed-fallback and approval-card focus: `8 passed` across SQLite and PostgreSQL.
 - Shared preview and both Matrix tool owning files: all `188` tests passed.
+- PostgreSQL C-collated index and ICU-discriminating production lookup: `2 passed`.
 
 ## Completed invalid-head reviews
 

@@ -1669,6 +1669,81 @@ async def test_postgres_latest_edit_index_uses_bytewise_event_id_collation(
 
 
 @pytest.mark.asyncio
+async def test_postgres_latest_edit_query_uses_bytewise_event_id_collation(
+    postgres_event_cache_url: str,
+) -> None:
+    """The production lookup must override a non-bytewise event-ID column collation."""
+    schema_name = f"collation_{uuid.uuid4().hex}"
+    admin = await psycopg.AsyncConnection.connect(postgres_event_cache_url)
+    await admin.execute(f'CREATE SCHEMA "{schema_name}"')
+    await admin.commit()
+    await admin.close()
+
+    room_id = "!room:localhost"
+    sender = "@alice:localhost"
+    namespace = f"tenant_{uuid.uuid4().hex}"
+    cache = PostgresEventCache(
+        database_url=_postgres_schema_url(postgres_event_cache_url, schema_name),
+        namespace=namespace,
+    )
+    await cache.initialize()
+    try:
+        assert cache._runtime.db is not None
+        await cache._runtime.db.execute(
+            """
+            ALTER TABLE mindroom_event_cache_event_edits
+            ALTER COLUMN edit_event_id TYPE TEXT COLLATE "und-x-icu"
+            """,
+        )
+        await cache._runtime.db.commit()
+        upper_edit = _edit_event(
+            event_id="$Z",
+            sender=sender,
+            original_event_id="$original",
+            body="Upper",
+            origin_server_ts=2000,
+        )
+        lower_edit = _edit_event(
+            event_id="$a",
+            sender=sender,
+            original_event_id="$original",
+            body="Lower",
+            origin_server_ts=2000,
+        )
+        await cache.store_events_batch(
+            [
+                ("$Z", room_id, upper_edit),
+                ("$a", room_id, lower_edit),
+            ],
+        )
+        cursor = await cache._runtime.db.execute(
+            """
+            SELECT edit_event_id
+            FROM mindroom_event_cache_event_edits
+            WHERE namespace = %s
+              AND room_id = %s
+              AND original_event_id = '$original'
+            ORDER BY origin_server_ts DESC, edit_event_id DESC
+            LIMIT 1
+            """,
+            (namespace, room_id),
+        )
+        locale_winner = await cursor.fetchone()
+        latest_edit = await cache.get_latest_edit(
+            room_id,
+            "$original",
+            sender=sender,
+            event_type="m.room.message",
+        )
+    finally:
+        await cache.close()
+
+    assert locale_winner == ("$Z",)
+    assert latest_edit is not None
+    assert latest_edit["event_id"] == "$a"
+
+
+@pytest.mark.asyncio
 async def test_postgres_event_cache_recovers_after_backend_connection_termination(
     postgres_event_cache_url: str,
 ) -> None:
