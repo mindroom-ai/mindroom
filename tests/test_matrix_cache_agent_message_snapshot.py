@@ -169,8 +169,9 @@ async def test_get_latest_agent_message_snapshot_returns_streaming_status_for_th
             "body": "Still working",
             "msgtype": "m.text",
             "io.mindroom.stream_status": "streaming",
+            "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread-root"},
         },
-        origin_server_ts=3000,
+        origin_server_ts=2000,
     )
 
 
@@ -230,8 +231,12 @@ async def test_get_latest_agent_message_snapshot_ignores_foreign_sender_edits(
     )
 
     assert snapshot == AgentMessageSnapshot(
-        content={"body": "Finished", "msgtype": "m.text"},
-        origin_server_ts=3000,
+        content={
+            "body": "Finished",
+            "msgtype": "m.text",
+            "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread-root"},
+        },
+        origin_server_ts=2000,
     )
 
 
@@ -440,7 +445,7 @@ async def test_room_scope_keeps_visible_edit_cached_in_current_runtime(
             "msgtype": "m.text",
             "io.mindroom.stream_status": "streaming",
         },
-        origin_server_ts=3000,
+        origin_server_ts=2000,
     )
 
 

@@ -257,10 +257,10 @@ async def test_non_message_event_with_media_extensions_keeps_event_type(
 
 
 @pytest.mark.asyncio
-async def test_malformed_encrypted_media_preserves_bad_event_diagnostic(
+async def test_malformed_encrypted_media_is_rejected_with_diagnostic(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Malformed encrypted media should retain nio's non-secret diagnostic object."""
+    """Malformed encrypted media should be rejected after nio logs a safe diagnostic."""
     event_source = {
         "type": "m.room.message",
         "event_id": "$harmless-invalid-encrypted:example.test",
@@ -286,17 +286,17 @@ async def test_malformed_encrypted_media_preserves_bad_event_diagnostic(
         )
 
     captured_logs = "\n".join(record.getMessage() for record in caplog.records)
-    assert isinstance(parsed_event, nio.BadEvent)
+    assert parsed_event is None
     assert isinstance(response, nio.RoomGetEventResponse)
     assert isinstance(response.event, nio.BadEvent)
     assert "'url' is a required property" in captured_logs
     assert "instance['content']['file']" in captured_logs
 
 
-def test_plain_media_validation_warning_keeps_harmless_diagnostic(
+def test_plain_media_validation_warning_rejects_bad_event(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """The encrypted-media exception should not erase useful warnings for malformed plaintext."""
+    """Malformed plaintext media should be rejected without erasing nio's warning."""
     event_source = {
         "type": "m.room.message",
         "event_id": "$harmless-invalid:example.test",
@@ -312,6 +312,6 @@ def test_plain_media_validation_warning_keeps_harmless_diagnostic(
         parsed_event = _parse_room_message_event(event_source)
 
     captured_logs = "\n".join(record.getMessage() for record in caplog.records)
-    assert isinstance(parsed_event, nio.BadEvent)
+    assert parsed_event is None
     assert "'url' is a required property" in captured_logs
     assert "harmless-missing-url.png" in captured_logs

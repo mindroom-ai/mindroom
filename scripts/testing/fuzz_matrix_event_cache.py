@@ -519,6 +519,8 @@ class CacheFuzzRunner:
         self.known_ids: set[tuple[str, str]] = set()
         self.redacted_ids: set[tuple[str, str]] = set()
         self.reaction_ids: set[tuple[str, str]] = set()
+        self.event_identities: dict[tuple[str, str], tuple[str, str]] = {}
+        self.edit_target_ids: set[tuple[str, str]] = set()
 
     async def seed(self) -> None:
         """Create authoritative roots so later operations can race realistically."""
@@ -528,7 +530,6 @@ class CacheFuzzRunner:
             assert membership_epoch is not None
             for thread in range(self.thread_count):
                 root = root_source(room, thread)
-                root_event_id = cast("str", root["event_id"])
                 replaced = await self.cache.replace_thread_if_not_newer(
                     current_room_id,
                     thread_id(room, thread),
@@ -538,7 +539,7 @@ class CacheFuzzRunner:
                     validated_at=time.time(),
                 )
                 assert replaced
-                self.known_ids.add((current_room_id, root_event_id))
+                self._remember_source(root)
 
     async def run(self) -> ObservableCacheState:
         """Execute all batches and return stable observable state."""
@@ -563,6 +564,13 @@ class CacheFuzzRunner:
         source_room_id = cast("str", source["room_id"])
         source_event_id = cast("str", source["event_id"])
         self.known_ids.add((source_room_id, source_event_id))
+        self.event_identities[(source_room_id, source_event_id)] = (
+            cast("str", source["sender"]),
+            cast("str", source["type"]),
+        )
+        edit_target_id = EventInfo.from_event(source).original_event_id
+        if edit_target_id is not None:
+            self.edit_target_ids.add((source_room_id, edit_target_id))
         if source["type"] == "m.reaction":
             self.reaction_ids.add((source_room_id, source_event_id))
 
@@ -733,8 +741,17 @@ class CacheFuzzRunner:
                     assert (current_room_id, event_id) not in self.reaction_ids
 
     async def _assert_latest_edit_invariants(self) -> None:
-        for current_room_id, event_id in sorted(self.known_ids):
-            latest_edit = await self.cache.get_latest_edit(current_room_id, event_id)
+        for current_room_id, event_id in sorted(self.edit_target_ids):
+            identity = self.event_identities.get((current_room_id, event_id))
+            if identity is None:
+                continue
+            sender, event_type = identity
+            latest_edit = await self.cache.get_latest_edit(
+                current_room_id,
+                event_id,
+                sender=sender,
+                event_type=event_type,
+            )
             if latest_edit is None:
                 continue
             latest_edit_id = cast("str", latest_edit["event_id"])
@@ -836,6 +853,8 @@ async def run_scenario(
         known_ids = set(runner.known_ids)
         redacted_ids = set(runner.redacted_ids)
         reaction_ids = set(runner.reaction_ids)
+        event_identities = dict(runner.event_identities)
+        edit_target_ids = set(runner.edit_target_ids)
     except Exception as exc:
         msg = f"{exc}\nMatrix cache fuzz trace:\n{scenario.to_json()}"
         raise AssertionError(msg) from exc
@@ -856,6 +875,8 @@ async def run_scenario(
     reopened.known_ids = known_ids
     reopened.redacted_ids = redacted_ids
     reopened.reaction_ids = reaction_ids
+    reopened.event_identities = event_identities
+    reopened.edit_target_ids = edit_target_ids
     try:
         await reopened.assert_invariants()
         restarted_result = await reopened.observe()

@@ -56,6 +56,14 @@ Current pushed implementation head is `b241f9874a7e001028fee6006d1895641390bd9c`
 
 Full pytest, a final Tach rerun, all-file pre-commit, fresh exact-head reviews, CI, and real-Tuwunel remain pending.
 
+The first full-suite rerun exposed thirteen stale test-contract failures and passed the other `11550` tests.
+
+Six snapshot cases now expect preserved original timestamps and relations, two media cases expect invalid full-history events to be rejected, and the cache fuzzer supplies the newly required sender/type lookup identity.
+
+The fuzzer tracks actual edit targets so its PostgreSQL fanout remains below the timeout while preserving the latest-edit invariant.
+
+All three affected files, including every exact CI failure, pass with `47 passed`.
+
 ## Verified blockers
 
 - Cold room scans admit explicit wrong-room and state events before root accounting, grouping, cache certification, and sidecar owner registration.
