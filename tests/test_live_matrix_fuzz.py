@@ -201,7 +201,7 @@ def test_runtime_attestation_retains_child_provenance(
 async def test_recovery_checkpoint_barrier_waits_for_durable_advance(
     tmp_path: Path,
 ) -> None:
-    """The outage cannot start from a stale or absent agent checkpoint."""
+    """A post-barrier durable rewrite counts even when the opaque token is equal."""
     stack = object.__new__(fuzz_live_matrix.ManagedTuwunelStack)
     stack.storage_path = tmp_path
     stack.log_path = tmp_path / "mindroom.log"
@@ -212,25 +212,27 @@ async def test_recovery_checkpoint_barrier_waits_for_durable_advance(
         "after-roots",
         cache_generation="generation",
     )
+    previous_state = stack.sync_checkpoint_state(fuzz_live_matrix.AGENT_NAME)
 
     async def advance() -> None:
-        await asyncio.sleep(0)
+        await asyncio.sleep(0.01)
         save_sync_token(
             tmp_path,
             fuzz_live_matrix.AGENT_NAME,
-            "post-root-barrier",
+            "after-roots",
             cache_generation="generation",
         )
 
     advance_task = asyncio.create_task(advance())
     checkpoint = await stack.wait_for_sync_checkpoint_advance(
         fuzz_live_matrix.AGENT_NAME,
-        "after-roots",
+        previous_state,
         deadline_seconds=1,
     )
     await advance_task
 
-    assert checkpoint == "post-root-barrier"
+    assert checkpoint.token == "after-roots"  # noqa: S105 - opaque sync token
+    assert checkpoint.mtime_ns != previous_state.mtime_ns
 
 
 def test_live_scenario_is_deterministic_and_json_replayable() -> None:
@@ -1263,24 +1265,25 @@ async def test_pre_outage_checkpoint_wait_is_attached_to_a_source(
     class BarrierStack:
         agent_id = "@agent:example"
         router_id = "@router:example"
+        reply_observed = False
         waited = False
 
-        @staticmethod
-        def sync_checkpoint_token(_agent_name: str) -> str:
-            return "before"
+        def sync_checkpoint_state(self, _agent_name: str) -> fuzz_live_matrix._SyncCheckpointState:
+            assert self.reply_observed
+            return fuzz_live_matrix._SyncCheckpointState("after-reply", 1)
 
         async def wait_for_sync_checkpoint_advance(
             self,
             _agent_name: str,
-            previous_token: str | None,
+            previous_state: fuzz_live_matrix._SyncCheckpointState,
             *,
             deadline_seconds: float,
-        ) -> str:
-            assert previous_token == "before"  # noqa: S105 - opaque sync token
+        ) -> fuzz_live_matrix._SyncCheckpointState:
+            assert previous_state == fuzz_live_matrix._SyncCheckpointState("after-reply", 1)
             assert deadline_seconds == 1
             assert client.sent
             self.waited = True
-            return "after"
+            return fuzz_live_matrix._SyncCheckpointState("after-reply", 2)
 
     stack = BarrierStack()
     runner = fuzz_live_matrix.LiveFuzzRunner(
@@ -1300,6 +1303,7 @@ async def test_pre_outage_checkpoint_wait_is_attached_to_a_source(
         allow_limited: bool = False,
     ) -> None:
         assert (deadline_seconds, settle_seconds, allow_limited) == (1, 0, False)
+        stack.reply_observed = True
 
     monkeypatch.setattr(runner.oracle, "wait_until_exact", wait_until_exact)
     await runner._send_recovery_checkpoint_barrier((runner.oracle,))
@@ -1385,27 +1389,31 @@ async def test_recovery_restart_fences_every_sender_thread_lane(
     class LaneStack:
         agent_id = "@agent:example"
         router_id = "@router:example"
+        advanced = False
 
         @staticmethod
-        def sync_checkpoint_token(_agent_name: str) -> str:
-            return "before"
+        def sync_checkpoint_state(_agent_name: str) -> fuzz_live_matrix._SyncCheckpointState:
+            return fuzz_live_matrix._SyncCheckpointState("after-replies", 1)
 
-        @staticmethod
         async def wait_for_sync_checkpoint_advance(
+            self,
             _agent_name: str,
-            _previous_token: str | None,
+            previous_state: fuzz_live_matrix._SyncCheckpointState,
             *,
             deadline_seconds: float,
-        ) -> str:
+        ) -> fuzz_live_matrix._SyncCheckpointState:
+            assert previous_state == fuzz_live_matrix._SyncCheckpointState("after-replies", 1)
             assert deadline_seconds == 1
-            return "after"
+            self.advanced = True
+            return fuzz_live_matrix._SyncCheckpointState("after-replies", 2)
 
     operations = (
         LiveOperation(0, LiveOperationKind.THREAD_MESSAGE, 0, "root:0:0", client=0),
         LiveOperation(1, LiveOperationKind.THREAD_MESSAGE, 0, "root:0:0", client=1),
     )
+    stack = LaneStack()
     runner = fuzz_live_matrix.LiveFuzzRunner(
-        cast("fuzz_live_matrix.ManagedTuwunelStack", LaneStack()),
+        cast("fuzz_live_matrix.ManagedTuwunelStack", stack),
         cast("tuple[LiveMatrixClient, ...]", clients),
         LiveFuzzScenario(
             thread_count=1,
@@ -1421,6 +1429,8 @@ async def test_recovery_restart_fences_every_sender_thread_lane(
         runner._latest_source_ref[(0, operation.client, 0)] = operation.event_ref
         runner.response_event_ids[f"response:{operation.event_ref}"] = f"$response-{operation.client}"
 
+    settle_calls: list[float] = []
+
     async def wait_until_exact(
         *,
         deadline_seconds: float,
@@ -1430,12 +1440,16 @@ async def test_recovery_restart_fences_every_sender_thread_lane(
         assert deadline_seconds == 1
         assert settle_seconds in {0, 1}
         assert allow_limited
+        settle_calls.append(settle_seconds)
+        if len(settle_calls) == 4:
+            assert stack.advanced
 
     monkeypatch.setattr(runner.oracle, "wait_until_exact", wait_until_exact)
     barrier_count = await runner._send_recovery_restart_barriers((runner.oracle,))
 
     assert barrier_count == 2
     assert all(len(client.sent) == 1 for client in clients)
+    assert settle_calls == [0, 0, 1, 1]
 
 
 @pytest.mark.asyncio

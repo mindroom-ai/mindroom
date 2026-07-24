@@ -102,6 +102,14 @@ class RuntimeProvenance:
         return asdict(self)
 
 
+@dataclass(frozen=True, slots=True)
+class _SyncCheckpointState:
+    """One observable durable checkpoint file state."""
+
+    token: str | None
+    mtime_ns: int | None
+
+
 def _required_int(value: Mapping[str, object], key: str) -> int:
     field = value.get(key)
     if not isinstance(field, int) or isinstance(field, bool):
@@ -1426,28 +1434,36 @@ class ManagedTuwunelStack:
             ),
         }
 
-    def sync_checkpoint_token(self, agent_name: str) -> str | None:
-        """Return one bot's current durable cache-certified sync token."""
+    def sync_checkpoint_state(self, agent_name: str) -> _SyncCheckpointState:
+        """Return one bot's durable token and checkpoint-file version."""
+        token_path = self.storage_path / "sync_tokens" / f"{agent_name}.token"
         checkpoint = load_sync_checkpoint(self.storage_path, agent_name)
-        return checkpoint.token if checkpoint is not None else None
+        try:
+            mtime_ns = token_path.stat().st_mtime_ns
+        except FileNotFoundError:
+            mtime_ns = None
+        return _SyncCheckpointState(
+            token=checkpoint.token if checkpoint is not None else None,
+            mtime_ns=mtime_ns,
+        )
 
     async def wait_for_sync_checkpoint_advance(
         self,
         agent_name: str,
-        previous_token: str | None,
+        previous_state: _SyncCheckpointState,
         *,
         deadline_seconds: float,
-    ) -> str:
-        """Wait until one bot durably checkpoints beyond a completed barrier."""
+    ) -> _SyncCheckpointState:
+        """Wait for a durable checkpoint write after a completed barrier."""
         deadline = time.monotonic() + deadline_seconds
         while time.monotonic() < deadline:
             process = self._mindroom_process
             if process is not None and process.poll() is not None:
                 msg = f"MindRoom exited while waiting for {agent_name} sync checkpoint:\n{self.log_tail()}"
                 raise RuntimeError(msg)
-            token = self.sync_checkpoint_token(agent_name)
-            if token is not None and token != previous_token:
-                return token
+            state = self.sync_checkpoint_state(agent_name)
+            if state.token is not None and state != previous_state:
+                return state
             await asyncio.sleep(0.05)
         msg = f"timed out waiting for {agent_name} durable sync checkpoint to advance"
         raise TimeoutError(msg)
@@ -2475,7 +2491,6 @@ class LiveFuzzRunner:
         oracles: tuple[ExactReplyOracle, ...],
     ) -> None:
         """Attach the pre-outage durable checkpoint wait to a concrete source."""
-        checkpoint_before = self.stack.sync_checkpoint_token(AGENT_NAME)
         room = 0
         thread = 0
         logical_ref = "pre-outage-checkpoint-barrier"
@@ -2512,9 +2527,10 @@ class LiveFuzzRunner:
             settle_seconds=self.settle_seconds,
         )
         self.response_event_ids.update(oracles[room].response_event_by_ref)
+        checkpoint_after_reply = self.stack.sync_checkpoint_state(AGENT_NAME)
         await self.stack.wait_for_sync_checkpoint_advance(
             AGENT_NAME,
-            checkpoint_before,
+            checkpoint_after_reply,
             deadline_seconds=self.reply_timeout,
         )
 
@@ -2531,7 +2547,6 @@ class LiveFuzzRunner:
                 if operation.kind is not LiveOperationKind.IDEMPOTENT_RETRY
             },
         )
-        checkpoint_before = self.stack.sync_checkpoint_token(AGENT_NAME)
 
         async def send_barrier(
             room: int,
@@ -2617,11 +2632,24 @@ class LiveFuzzRunner:
         )
         for oracle in oracles:
             self.response_event_ids.update(oracle.response_event_by_ref)
+        checkpoint_after_replies = self.stack.sync_checkpoint_state(AGENT_NAME)
         await self.stack.wait_for_sync_checkpoint_advance(
             AGENT_NAME,
-            checkpoint_before,
+            checkpoint_after_replies,
             deadline_seconds=self.reply_timeout,
         )
+        await asyncio.gather(
+            *(
+                oracle.wait_until_exact(
+                    deadline_seconds=self.reply_timeout,
+                    settle_seconds=max(self.settle_seconds, 1),
+                    allow_limited=True,
+                )
+                for oracle in oracles
+            ),
+        )
+        for oracle in oracles:
+            self.response_event_ids.update(oracle.response_event_by_ref)
         return len(barriers)
 
     async def _send_recovery_roots(self, oracles: tuple[ExactReplyOracle, ...]) -> None:
@@ -2777,7 +2805,6 @@ class LiveFuzzRunner:
         )
         self.executed_batches += len(parallel_batches)
 
-        checkpoint_before = self.stack.sync_checkpoint_token(AGENT_NAME)
         lane_states = ((0, self.clients[0], hot_root, hot_response), *parallel_lanes)
         # Hot thread 0 and parallel thread 1 intentionally share client 0.
         # Serialize fences so they cannot race that client's private sync cursor.
@@ -2790,9 +2817,10 @@ class LiveFuzzRunner:
                 reply_to=response,
                 expected_sources=expected_sources,
             )
+        checkpoint_after_replies = self.stack.sync_checkpoint_state(AGENT_NAME)
         await self.stack.wait_for_sync_checkpoint_advance(
             AGENT_NAME,
-            checkpoint_before,
+            checkpoint_after_replies,
             deadline_seconds=self.reply_timeout,
         )
         await self._wait_for_saturation_quiescence(expected_sources)
@@ -3121,7 +3149,6 @@ class LiveFuzzRunner:
 
     async def _send_generic_restart_barrier(self) -> None:
         """Require a concrete exact reply and durable sync after every restart."""
-        checkpoint_before = self.stack.sync_checkpoint_token(AGENT_NAME)
         thread = 0
         logical_ref = f"restart-barrier:{self.restart_count}"
         root_event_id = self.event_ids[f"root:{thread}"]
@@ -3152,9 +3179,15 @@ class LiveFuzzRunner:
             thread=thread,
             source_content=content,
         )
+        await self.oracle.wait_until_exact(
+            deadline_seconds=self.reply_timeout,
+            settle_seconds=self.settle_seconds,
+        )
+        self.response_event_ids.update(self.oracle.response_event_by_ref)
+        checkpoint_after_reply = self.stack.sync_checkpoint_state(AGENT_NAME)
         await self.stack.wait_for_sync_checkpoint_advance(
             AGENT_NAME,
-            checkpoint_before,
+            checkpoint_after_reply,
             deadline_seconds=self.reply_timeout,
         )
 
