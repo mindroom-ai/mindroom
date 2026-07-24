@@ -2132,6 +2132,8 @@ async def test_cached_room_get_event_cache_hit_returns_latest_visible_edit(
         server_timestamp=2000,
         source_content={
             "body": "Original reply",
+            "formatted_body": "<p>Original reply</p>",
+            "format": "org.matrix.custom.html",
             "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
         },
     )
@@ -2142,7 +2144,11 @@ async def test_cached_room_get_event_cache_hit_returns_latest_visible_edit(
         server_timestamp=3000,
         source_content={
             "body": "* Final reply",
-            "m.new_content": {"body": "Final reply", "msgtype": "m.text"},
+            "m.new_content": {
+                "body": "Final reply",
+                "msgtype": "m.text",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": "$other_thread"},
+            },
             "m.relates_to": {"rel_type": "m.replace", "event_id": "$reply"},
         },
     )
@@ -2165,6 +2171,11 @@ async def test_cached_room_get_event_cache_hit_returns_latest_visible_edit(
     assert response.event.body == "Final reply"
     assert response.event.server_timestamp == 2000
     assert EventInfo.from_event(response.event.source).thread_id == "$thread_root"
+    assert response.event.source["content"] == {
+        "body": "Final reply",
+        "msgtype": "m.text",
+        "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
+    }
     client.room_get_event.assert_not_awaited()
 
 
@@ -2311,6 +2322,102 @@ async def test_cached_room_get_event_falls_back_from_malformed_newest_edit(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "invalidity",
+    ["missing-sender", "wrong-type", "missing-body", "missing-msgtype", "wrong-event-id", "wrong-target"],
+)
+async def test_cached_edit_paths_fall_back_from_invalid_newest_event_envelope(
+    event_cache: ConversationEventCache,
+    invalidity: str,
+) -> None:
+    """Direct lookup, point reads, and snapshots must skip malformed cached event envelopes."""
+    original_event = _make_text_event(
+        event_id="$reply",
+        sender="@alice:localhost",
+        body="Original",
+        server_timestamp=2000,
+        source_content={"body": "Original", "msgtype": "m.text"},
+    )
+    older_edit = _make_text_event(
+        event_id="$older_edit",
+        sender="@alice:localhost",
+        body="* Older valid",
+        server_timestamp=3000,
+        source_content={
+            "body": "* Older valid",
+            "m.new_content": {"body": "Older valid", "msgtype": "m.text"},
+            "m.relates_to": {"rel_type": "m.replace", "event_id": "$reply"},
+        },
+    )
+    newest_edit = _make_text_event(
+        event_id="$newest_edit",
+        sender="@alice:localhost",
+        body="* Invalid newest",
+        server_timestamp=4000,
+        source_content={
+            "body": "* Invalid newest",
+            "m.new_content": {"body": "Invalid newest", "msgtype": "m.text"},
+            "m.relates_to": {"rel_type": "m.replace", "event_id": "$reply"},
+        },
+    )
+    newest_source = _cache_source(newest_edit)
+    await event_cache.store_events_batch(
+        [
+            ("$reply", "!room:localhost", _cache_source(original_event)),
+            ("$older_edit", "!room:localhost", _cache_source(older_edit)),
+            ("$newest_edit", "!room:localhost", newest_source),
+        ],
+    )
+    malformed_source = json.loads(json.dumps(newest_source))
+    malformed_content = malformed_source["content"]
+    if invalidity == "missing-sender":
+        malformed_source.pop("sender")
+    elif invalidity == "wrong-type":
+        malformed_source["type"] = "io.mindroom.tool_approval"
+    elif invalidity == "missing-body":
+        malformed_content.pop("body")
+    elif invalidity == "missing-msgtype":
+        malformed_content.pop("msgtype")
+    elif invalidity == "wrong-event-id":
+        malformed_source["event_id"] = "$different"
+    else:
+        malformed_content["m.relates_to"]["event_id"] = "$different"
+    await event_cache.store_event(
+        "$newest_edit",
+        "!room:localhost",
+        malformed_source,
+    )
+
+    latest_edit = await event_cache.get_latest_edit(
+        "!room:localhost",
+        "$reply",
+        sender="@alice:localhost",
+        event_type="m.room.message",
+    )
+    response, _ = await _cached_room_get_event(
+        AsyncMock(),
+        event_cache,
+        "!room:localhost",
+        "$reply",
+    )
+    snapshot = await event_cache.get_latest_agent_message_snapshot(
+        "!room:localhost",
+        None,
+        "@alice:localhost",
+        runtime_started_at=None,
+    )
+
+    assert latest_edit is not None
+    assert latest_edit["event_id"] == "$older_edit"
+    assert isinstance(response, nio.RoomGetEventResponse)
+    assert response.event.body == "Older valid"
+    assert response.event.server_timestamp == 2000
+    assert snapshot is not None
+    assert snapshot.content["body"] == "Older valid"
+    assert snapshot.origin_server_ts == 2000
+
+
+@pytest.mark.asyncio
 async def test_latest_agent_message_snapshot_falls_back_from_empty_new_content(
     event_cache: ConversationEventCache,
 ) -> None:
@@ -2320,7 +2427,13 @@ async def test_latest_agent_message_snapshot_falls_back_from_empty_new_content(
         sender="@agent:localhost",
         body="Original reply",
         server_timestamp=2000,
-        source_content={"body": "Original reply", "msgtype": "m.text"},
+        source_content={
+            "body": "Original reply",
+            "formatted_body": "<p>Original reply</p>",
+            "format": "org.matrix.custom.html",
+            "msgtype": "m.text",
+            "m.relates_to": {"m.in_reply_to": {"event_id": "$question"}},
+        },
     )
     valid_edit = _make_text_event(
         event_id="$valid_edit",
@@ -2329,7 +2442,14 @@ async def test_latest_agent_message_snapshot_falls_back_from_empty_new_content(
         server_timestamp=3000,
         source_content={
             "body": "* Good",
-            "m.new_content": {"body": "Good", "msgtype": "m.text"},
+            "m.new_content": {
+                "body": "Good",
+                "msgtype": "m.text",
+                "m.relates_to": {
+                    "rel_type": "m.thread",
+                    "event_id": "$other_thread",
+                },
+            },
             "m.relates_to": {"rel_type": "m.replace", "event_id": "$reply"},
         },
     )
@@ -2368,7 +2488,11 @@ async def test_latest_agent_message_snapshot_falls_back_from_empty_new_content(
     assert latest_edit is not None
     assert latest_edit["event_id"] == "$valid_edit"
     assert snapshot is not None
-    assert snapshot.content["body"] == "Good"
+    assert snapshot.content == {
+        "body": "Good",
+        "msgtype": "m.text",
+        "m.relates_to": {"m.in_reply_to": {"event_id": "$question"}},
+    }
     assert snapshot.origin_server_ts == 2000
 
 

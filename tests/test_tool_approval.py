@@ -14,7 +14,7 @@ import pytest
 from pydantic import ValidationError
 
 import mindroom.tool_approval as approval_module
-from mindroom.approval_events import parse_approval_datetime
+from mindroom.approval_events import is_original_approval_card, parse_approval_datetime
 from mindroom.approval_inbound import handle_tool_approval_action
 from mindroom.approval_manager import (
     _MAX_REMEMBERED_TERMINAL_CARD_IDS,
@@ -2752,6 +2752,16 @@ def test_pending_approval_from_card_event_requires_approver_user_id() -> None:
     card["content"].pop("approver_user_id")
 
     with pytest.raises(ValueError, match="missing required approval fields"):
+        PendingApproval.from_card_event(card, room_id="!room:localhost")
+
+
+def test_state_approval_card_is_not_an_original_timeline_card() -> None:
+    """Approval parsing must reject state events before any cached edit is applied."""
+    card = _approval_card()
+    card["state_key"] = ""
+
+    assert is_original_approval_card(card) is False
+    with pytest.raises(ValueError, match="timeline event"):
         PendingApproval.from_card_event(card, room_id="!room:localhost")
 
 

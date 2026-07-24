@@ -711,7 +711,18 @@ class TestResolvedMessageExtraction:
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
         "invalidity",
-        ["sender", "type", "target", "state-key", "room", "caller-room", "edit-of-edit"],
+        [
+            "sender",
+            "type",
+            "missing-sender",
+            "missing-type",
+            "missing-timestamp",
+            "target",
+            "state-key",
+            "room",
+            "caller-room",
+            "edit-of-edit",
+        ],
     )
     async def test_thread_root_body_preview_ignores_invalid_bundled_replacement(
         self,
@@ -754,6 +765,9 @@ class TestResolvedMessageExtraction:
             replacement["sender"] = "@mallory:example.com"
         elif invalidity == "type":
             replacement["type"] = "io.mindroom.tool_approval"
+        elif invalidity.startswith("missing-"):
+            field = invalidity.removeprefix("missing-").replace("timestamp", "origin_server_ts")
+            replacement.pop(field)
         elif invalidity == "target":
             replacement_relation["event_id"] = "$other"
         elif invalidity == "state-key":
@@ -785,6 +799,75 @@ class TestResolvedMessageExtraction:
         )
 
         assert preview == "Original root"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("latest_event_id", "latest_event_ts", "event_id", "event_ts", "expected_body"),
+        [
+            ("$structural-first", 2000, "$timestamp-winner", 3000, "Timestamp winner"),
+            ("$a", 3000, "$z", 3000, "Event ID winner"),
+        ],
+    )
+    async def test_thread_root_preview_uses_matrix_latest_replacement_order(
+        self,
+        tmp_path: Path,
+        latest_event_id: str,
+        latest_event_ts: int,
+        event_id: str,
+        event_ts: int,
+        expected_body: str,
+    ) -> None:
+        """Bundled preview selection must match full-history timestamp/event-ID ordering."""
+        config = bind_runtime_paths(
+            Config(agents={"general": AgentConfig(display_name="General Agent")}),
+            test_runtime_paths(tmp_path),
+        )
+        runtime_paths = runtime_paths_for(config)
+        root = _make_message_event(
+            body="Original root",
+            content={"body": "Original root", "msgtype": "m.text"},
+            event_id="$thread-root",
+            sender="@alice:example.com",
+        )
+
+        def replacement(candidate_event_id: str, timestamp: int, body: str) -> dict[str, object]:
+            return {
+                "event_id": candidate_event_id,
+                "sender": "@alice:example.com",
+                "origin_server_ts": timestamp,
+                "type": "m.room.message",
+                "content": {
+                    "body": f"* {body}",
+                    "msgtype": "m.text",
+                    "m.new_content": {"body": body, "msgtype": "m.text"},
+                    "m.relates_to": {
+                        "rel_type": "m.replace",
+                        "event_id": "$thread-root",
+                    },
+                },
+            }
+
+        root.source["unsigned"] = {
+            "m.relations": {
+                "m.replace": {
+                    "latest_event": replacement(
+                        latest_event_id,
+                        latest_event_ts,
+                        "Structural first",
+                    ),
+                    "event": replacement(event_id, event_ts, expected_body),
+                },
+            },
+        }
+
+        preview = await thread_root_body_preview(
+            root,
+            client=_make_client(),
+            config=config,
+            runtime_paths=runtime_paths,
+        )
+
+        assert preview == expected_body
 
     @pytest.mark.asyncio
     async def test_thread_root_body_preview_passes_precomputed_trusted_sender_ids_to_nested_helpers(

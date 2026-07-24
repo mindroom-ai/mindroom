@@ -29,7 +29,22 @@ The real-Tuwunel gate has not run.
 
 The reproduced failure subset passes on SQLite and PostgreSQL.
 
-Exact new adversarial regressions, broad targeted tests, and final gates remain pending.
+Exact new regressions now cover:
+
+- Full projection preserves original timestamp, thread/reply relation, and order while dropping stale rich fields.
+- Cached point and SQLite/PostgreSQL snapshot projection preserve original relation/timestamp and drop stale fields.
+- Bundled preview and full resolution share timestamp/event-ID winner selection.
+- Bundled candidates missing sender, type, or timestamp are rejected by preview and full resolution.
+- Cold state/wrong-room roots remain missing and cannot write cache snapshots.
+- Poisoned state/wrong-room cached roots force authoritative refill.
+- Wrong-room originals cannot enter sidecar owner registration.
+- SQLite/PostgreSQL lookup, point, and snapshot paths fall back past newest envelopes with missing sender, wrong type, missing body/msgtype, mismatched event ID, or wrong relation target.
+- Generic visible resolution rejects state and cross-room originals.
+- Approval state originals fail both original-card detection and typed parsing.
+
+The focused new regression selection passes.
+
+Broad targeted tests and final gates remain pending.
 
 ## Verified blockers
 

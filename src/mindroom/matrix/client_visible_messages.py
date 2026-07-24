@@ -268,6 +268,7 @@ def is_valid_bundled_replacement(
     replacement_event_id = replacement_event_source.get("event_id")
     original_sender = original.get("sender")
     original_type = original.get("type")
+    replacement_timestamp = origin_server_ts_from_event_source(replacement_event_source)
     identities_are_valid = (
         isinstance(original_event_id, str)
         and bool(original_event_id)
@@ -281,7 +282,8 @@ def is_valid_bundled_replacement(
         and replacement_event_source.get("type") == original_type
     )
     if not identities_are_valid or (
-        origin_server_ts_from_event_source(replacement_event_source) is None
+        not isinstance(replacement_timestamp, int)
+        or isinstance(replacement_timestamp, bool)
         or event_source_is_state_event(original)
         or event_source_is_state_event(replacement_event_source)
         or EventInfo.from_event(original).is_edit
