@@ -1808,6 +1808,24 @@ def test_failure_bundle_records_realized_completion_order(tmp_path: Path) -> Non
     assert [entry["sequence"] for entry in journal] == [1, 2]
 
 
+def test_successful_run_discards_its_failure_bundle(tmp_path: Path) -> None:
+    """Codex #7: a passing run leaves no failure bundle behind.
+
+    The bundle directory is created before the run so a mid-startup kill still
+    leaves a manifest, but a run that passes must remove it rather than
+    accumulate a stale scenario/provenance/journal per successful run.
+    """
+    root = tmp_path / "artifacts"
+    bundle = FailureBundle.create(root, "run-ok", scenario=_bundle_scenario(), provenance={})
+    assert bundle.directory.exists()
+
+    bundle.discard()
+
+    assert not bundle.directory.exists()
+    # A second discard is a no-op, not an error, so success cleanup is idempotent.
+    bundle.discard()
+
+
 def test_failure_bundle_interleaves_lifecycle_boundaries(tmp_path: Path) -> None:
     """Codex #5: restarts and outages appear in the realized sequence.
 
