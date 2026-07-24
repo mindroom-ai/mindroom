@@ -1,0 +1,46 @@
+# Thread Edit Integrity Status
+
+## Current candidate
+
+- PR: `https://github.com/mindroom-ai/mindroom/pull/1641`
+- Branch: `fix/thread-edit-integrity`
+- Invalidated head: `6b6b43e8f68916a04224d3c6b5ff5fd77c88dc80`
+- Base: `origin/main` at `66dd4f4a68bcfd1a5e43b2cac20a1b464f306ab1`
+- Never merge this PR from the agent workflow.
+
+## Third review-round blockers
+
+- Cached latest-edit SQL scopes the cache row to the caller room but ignores an explicit conflicting `room_id` inside edit JSON.
+- A wrong-room edit stored under the authoritative room wins `get_latest_edit`, cached point reconstruction, and latest-agent snapshot selection on SQLite; PostgreSQL has the same query shape.
+- A state event with type `m.room.message` can be inserted as a full-history original and then edited because original state validity is not checked.
+- Cached point reads also apply edits to state originals, and agent snapshots treat state originals as visible messages.
+- Full-history bundled replacement extraction returns the first `event` candidate before `latest_event`, while preview extraction enumerates `latest_event` first.
+- A bundled payload containing an older valid `event` plus a newer valid `latest_event` therefore resolves to the older body.
+- The exact probes at `6b6b43e8f` reproduced all three classes.
+
+## Design reconsideration
+
+- This is the third review round with new semantic gaps, so do not add another isolated workaround.
+- Put state-event and explicit-room checks in shared event metadata helpers.
+- Make cache edit indexing reject explicit other-room and state-event replacements at the backend-neutral owning seam.
+- Keep read-time SQL room checks for previously persisted or malformed rows.
+- Make cached point projection and snapshot scope use the shared state/room rules.
+- Export one bundled candidate enumerator and validator from the visible-message seam.
+- Delete the duplicate single-candidate full-history extractor and let full history validate and retain every bundled candidate before deterministic latest selection.
+
+## Required next work
+
+- Add deterministic full-history tests for state originals and dual bundled `event`/`latest_event` ordering.
+- Add SQLite and PostgreSQL cache regressions covering explicit other-room edits for direct latest-edit lookup, cached point projection, and latest-agent snapshots.
+- Add SQLite and PostgreSQL regressions ensuring state originals are not edited or returned as agent snapshots.
+- Run focused owning tests, relevant parametrized backend tests, full pytest, Tach, and all-file pre-commit.
+- Verify `Bas Nijholt <bas@nijho.lt>` before every commit.
+- Commit and push small follow-ups without amend or force-push.
+- Remove this handoff only after local validation is complete.
+- Restart fresh Codex, fresh Fable, CI/AI review, and real-Tuwunel validation on the next exact head.
+
+## Preserved local files
+
+- `.claude/TASK-1784907055-a461.md`
+- `.claude/TASK-1784912547-27b4.md`
+- `.claude/TASK-1784915037-90d6.md`
