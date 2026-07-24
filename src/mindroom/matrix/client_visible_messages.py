@@ -400,6 +400,8 @@ async def apply_latest_edits_to_messages(
     """Apply latest edits to message records and synthesize missing originals when allowed."""
     for original_event_id, (edit_event, edit_thread_id) in latest_edits_by_original_event_id.items():
         existing_message = messages_by_event_id.get(original_event_id)
+        if existing_message is not None and edit_event.sender != existing_message.sender:
+            continue
 
         # Ignore missing originals unrelated to this thread before resolving
         # potentially large edit payloads from sidecar storage.

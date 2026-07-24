@@ -18,6 +18,7 @@ from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from mindroom.matrix.client_visible_messages import (
     extract_visible_edit_body,
     message_preview,
+    resolve_latest_visible_messages,
     resolve_visible_event_source,
     thread_root_body_preview,
 )
@@ -77,6 +78,36 @@ def _make_client() -> AsyncMock:
 
 class TestResolvedMessageExtraction:
     """Tests for coherent visible message extraction."""
+
+    @pytest.mark.asyncio
+    async def test_visible_message_ignores_replacement_from_different_sender(self) -> None:
+        """Matrix replacements cannot change another sender's visible message."""
+        original = _make_message_event(
+            body="Original",
+            content={"body": "Original", "msgtype": "m.text"},
+            event_id="$original",
+            sender="@alice:example.com",
+        )
+        forged_edit = _make_message_event(
+            body="* Forged",
+            content={
+                "body": "* Forged",
+                "msgtype": "m.text",
+                "m.new_content": {"body": "Forged", "msgtype": "m.text"},
+                "m.relates_to": {"event_id": "$original", "rel_type": "m.replace"},
+            },
+            event_id="$forged-edit",
+            sender="@mallory:example.com",
+            timestamp_ms=1234567891,
+        )
+
+        messages = await resolve_latest_visible_messages(
+            [original, forged_edit],
+            _make_client(),
+        )
+
+        assert messages["$original"].body == "Original"
+        assert messages["$original"].latest_event_id == "$original"
 
     def test_download_and_durable_ownership_share_sidecar_url_validation(self) -> None:
         """Hydration and reference tracking must choose the same valid MXC URL."""
