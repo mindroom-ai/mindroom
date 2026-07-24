@@ -1,6 +1,6 @@
 # Thread edit integrity follow-up status
 
-Updated: 2026-07-24 08:43 America/Los_Angeles.
+Updated: 2026-07-24 08:51 America/Los_Angeles.
 
 ## Goal
 
@@ -71,15 +71,19 @@ A backend-parametrized regression stores `$z-edit` before `$a-edit` at equal tim
 - Pyright spot check: unavailable because the executable is not installed by the project environment.
 - Targeted tests: passed.
 - Relevant backend tests: passed.
-- Full pytest: pending.
-- Tach: pending boundary check.
-- All-file pre-commit: pending.
+- Full pytest: `11499 passed, 54 skipped, 78 warnings` in 181.80 seconds.
+- Tach: passed after the full-suite run, with no boundary-file change required.
+- All-file pre-commit: passed on the second run.
+- The first all-file pre-commit run exposed pre-existing Prettier drift in seven unrelated frontend files.
+- The hook-created frontend formatting was deliberately excluded from this narrow branch after the passing second run.
 
 ## Git and PR ledger
 
 Sender-integrity commit `543f08094` was pushed to `origin/fix/thread-edit-integrity`.
 
 Cache tie-break commit `00bd54304` was pushed to `origin/fix/thread-edit-integrity`.
+
+Validation handoff commit `7bdc33950` was pushed to `origin/fix/thread-edit-integrity`.
 
 Remote branch exists.
 
