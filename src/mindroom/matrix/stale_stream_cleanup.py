@@ -63,7 +63,7 @@ from mindroom.streaming import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Iterable, Sequence
+    from collections.abc import AsyncIterator, Callable, Iterable, Sequence
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -155,6 +155,12 @@ class _CleanupScanPolicy:
     collect_terminal_interrupted_for_resume: bool
     terminal_interrupted_only: bool
     max_extra_old_pages: int
+    is_live_process_stream: Callable[[str], bool]
+
+
+def _no_live_process_streams(_event_id: str) -> bool:
+    """Default live-ownership probe for callers without in-process stream state."""
+    return False
 
 
 def _cleanup_scan_policy(
@@ -162,6 +168,7 @@ def _cleanup_scan_policy(
     *,
     startup_cutoff_ms: int | None,
     terminal_interrupted_only: bool = False,
+    is_live_process_stream: Callable[[str], bool] | None = None,
 ) -> _CleanupScanPolicy:
     """Return history scan policy for one stale-stream cleanup run."""
     collect_terminal_interrupted_for_resume = config.defaults.auto_resume_after_restart
@@ -170,6 +177,7 @@ def _cleanup_scan_policy(
         collect_terminal_interrupted_for_resume=collect_terminal_interrupted_for_resume,
         terminal_interrupted_only=terminal_interrupted_only,
         max_extra_old_pages=(_MAX_EXTRA_INTERRUPTED_HISTORY_PAGES if collect_terminal_interrupted_for_resume else 0),
+        is_live_process_stream=is_live_process_stream or _no_live_process_streams,
     )
 
 
@@ -206,6 +214,7 @@ async def recover_stale_streaming_messages(
     scanned_room_ids: set[str],
     target_room_ids: set[str] | None = None,
     room_concurrency: int = _RECOVERY_ROOM_CONCURRENCY,
+    is_live_process_stream: Callable[[str], bool] | None = None,
 ) -> _StaleStreamRecoveryResult:
     """Recover stale streams through one concurrent Matrix-history path."""
     room_actors = {
@@ -239,6 +248,7 @@ async def recover_stale_streaming_messages(
                     runtime_paths=runtime_paths,
                     startup_cutoff_ms=startup_cutoff_ms,
                     terminal_interrupted_only=target_room_ids is not None,
+                    is_live_process_stream=is_live_process_stream,
                 )
             except Exception:
                 scanned_room_ids.discard(room_id)
@@ -498,6 +508,7 @@ async def _cleanup_stale_streaming_room(
     runtime_paths: RuntimePaths,
     startup_cutoff_ms: int | None = None,
     terminal_interrupted_only: bool = False,
+    is_live_process_stream: Callable[[str], bool] | None = None,
 ) -> tuple[int, list[_InterruptedThread]]:
     """Scan one room once and let each bot account repair its own messages."""
     if not actors:
@@ -507,6 +518,7 @@ async def _cleanup_stale_streaming_room(
         config,
         startup_cutoff_ms=startup_cutoff_ms,
         terminal_interrupted_only=terminal_interrupted_only,
+        is_live_process_stream=is_live_process_stream,
     )
     scanned_state = await _scan_room_message_states(
         scan_client,
@@ -582,6 +594,12 @@ async def _process_stale_room_candidate(
         now_ms=current_time_ms,
         scan_policy=scan_policy,
     ):
+        return False, None
+    # Local and Matrix clocks are not comparable, so the startup cutoff can
+    # misclassify a current-generation stream as pre-startup when the
+    # homeserver clock lags. Live in-process ownership is clock-free proof
+    # that this stream must never be repaired from history.
+    if scan_policy.is_live_process_stream(target_event_id):
         return False, None
     if scan_policy.terminal_interrupted_only and not _has_resumable_interrupted_note(state):
         return False, None

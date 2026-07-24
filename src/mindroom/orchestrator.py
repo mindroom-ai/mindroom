@@ -1076,6 +1076,14 @@ class _MultiAgentOrchestrator:
             return
         router_bot = self._router_bot()
 
+        def is_live_process_stream(event_id: str) -> bool:
+            # Clock-free ownership proof: local startup cutoffs and Matrix
+            # server timestamps are not comparable, so a current-generation
+            # stream can look pre-startup under homeserver clock skew. A
+            # stream tracked by any live bot's stop manager was created by
+            # this process and must never be repaired from history.
+            return any(event_id in bot.stop_manager.tracked_messages for bot in self.agent_bots.values())
+
         result = await recover_stale_streaming_messages(
             actors,
             resume_client=router_bot.client if router_bot is not None else None,
@@ -1085,6 +1093,7 @@ class _MultiAgentOrchestrator:
             startup_cutoff_ms=startup_cutoff_ms,
             scanned_room_ids=scanned_room_ids,
             target_room_ids=target_room_ids,
+            is_live_process_stream=is_live_process_stream,
         )
         logger.info(
             "Completed stale stream recovery",

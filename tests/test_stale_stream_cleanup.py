@@ -59,7 +59,7 @@ from tests.conftest import (
 from tests.identity_helpers import entity_ids, persist_entity_accounts
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Callable
 
 BOT_USER_ID = "@actual_test_agent:localhost"
 OTHER_BOT_USER_ID = "@actual_other:localhost"
@@ -252,6 +252,7 @@ async def _run_cleanup(
     now_ms: int = NOW_MS,
     startup_cutoff_ms: int | None = None,
     terminal_interrupted_only: bool = False,
+    is_live_process_stream: Callable[[str], bool] | None = None,
 ) -> tuple[int, list[InterruptedThread]]:
     client.user_id = BOT_USER_ID
     assert joined_rooms == [ROOM_ID]
@@ -265,6 +266,7 @@ async def _run_cleanup(
             runtime_paths=runtime_paths_for(config),
             startup_cutoff_ms=startup_cutoff_ms,
             terminal_interrupted_only=terminal_interrupted_only,
+            is_live_process_stream=is_live_process_stream,
         )
 
 
@@ -2121,6 +2123,77 @@ async def test_targeted_recovery_does_not_clobber_live_replacement_stream(tmp_pa
     assert cleaned == 0
     assert interrupted == []
     client.room_send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_skewed_clock_does_not_clobber_live_current_generation_stream(tmp_path: Path) -> None:
+    """A live in-process stream survives cleanup even when clock skew hides its generation.
+
+    Local startup cutoffs and Matrix server timestamps are not comparable:
+    with the homeserver clock behind, a current-generation stream carries
+    server timestamps below the local cutoff and outside the recency guard,
+    so the delayed recheck would interrupt a still-live response. Live
+    in-process ownership must protect it regardless of clocks.
+    """
+    config = _make_config(tmp_path)
+    client = _make_client()
+    client.rooms = _joined_room_cache()
+    skewed_ts = NOW_MS - (stale_stream_cleanup_module.STALE_STREAM_RECENCY_GUARD_MS + 5_000)
+    client.room_messages.return_value = _room_messages_response(
+        _make_message_event(
+            event_id="$live-current",
+            body="Working ⋯",
+            timestamp_ms=skewed_ts,
+            extra_content={STREAM_STATUS_KEY: "streaming"},
+        ),
+    )
+
+    with patch(
+        "mindroom.matrix.stale_stream_cleanup.edit_message_result",
+        new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit")),
+    ) as edit_result:
+        cleaned, interrupted = await _run_cleanup(
+            client,
+            config,
+            joined_rooms=[ROOM_ID],
+            startup_cutoff_ms=NOW_MS - 5_000,
+            is_live_process_stream=lambda event_id: event_id == "$live-current",
+        )
+
+    assert cleaned == 0
+    assert interrupted == []
+    edit_result.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_skewed_clock_stream_without_live_owner_is_still_cleaned(tmp_path: Path) -> None:
+    """Control: the same pre-cutoff stale stream is repaired when no live owner claims it."""
+    config = _make_config(tmp_path)
+    client = _make_client()
+    client.rooms = _joined_room_cache()
+    skewed_ts = NOW_MS - (stale_stream_cleanup_module.STALE_STREAM_RECENCY_GUARD_MS + 5_000)
+    client.room_messages.return_value = _room_messages_response(
+        _make_message_event(
+            event_id="$live-current",
+            body="Working ⋯",
+            timestamp_ms=skewed_ts,
+            extra_content={STREAM_STATUS_KEY: "streaming"},
+        ),
+    )
+
+    with patch(
+        "mindroom.matrix.stale_stream_cleanup.edit_message_result",
+        new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit")),
+    ) as edit_result:
+        cleaned, _interrupted = await _run_cleanup(
+            client,
+            config,
+            joined_rooms=[ROOM_ID],
+            startup_cutoff_ms=NOW_MS - 5_000,
+        )
+
+    assert cleaned == 1
+    edit_result.assert_awaited_once()
 
 
 @pytest.mark.asyncio
