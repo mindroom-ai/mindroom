@@ -1,6 +1,6 @@
 # Thread edit integrity follow-up status
 
-Updated: 2026-07-24 08:41 America/Los_Angeles.
+Updated: 2026-07-24 08:43 America/Los_Angeles.
 
 ## Goal
 
@@ -65,10 +65,12 @@ A backend-parametrized regression stores `$z-edit` before `$a-edit` at equal tim
 - New equal-timestamp SQLite regression before implementation: failed with `$a-edit`.
 - Sender-integrity targeted tests after implementation: 4 passed.
 - Equal-timestamp backend regression after implementation: 2 passed, including SQLite and PostgreSQL.
+- Sender-scoped plus equal-timestamp backend regressions: 4 passed across SQLite and PostgreSQL.
+- Affected suite across `test_thread_history.py`, `test_event_cache.py`, `test_event_cache_backends.py`, `test_event_cache_contract.py`, `test_matrix_cache_interaction_contract.py`, and `test_thread_resolution_reuse.py`: passed.
 - Ruff on touched source and test files: passed.
 - Pyright spot check: unavailable because the executable is not installed by the project environment.
-- Targeted tests: passed for currently implemented seams.
-- Relevant backend tests: pending.
+- Targeted tests: passed.
+- Relevant backend tests: passed.
 - Full pytest: pending.
 - Tach: pending boundary check.
 - All-file pre-commit: pending.
@@ -77,7 +79,7 @@ A backend-parametrized regression stores `$z-edit` before `$a-edit` at equal tim
 
 Sender-integrity commit `543f08094` was pushed to `origin/fix/thread-edit-integrity`.
 
-The cache tie-break commit is being prepared.
+Cache tie-break commit `00bd54304` was pushed to `origin/fix/thread-edit-integrity`.
 
 Remote branch exists.
 
