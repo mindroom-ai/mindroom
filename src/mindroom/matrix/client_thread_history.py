@@ -54,6 +54,7 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.cache import (
     ThreadCacheState,
     ThreadHistoryResult,
+    ThreadRevision,
     is_opaque_encrypted_event_source,
     normalize_nio_event_for_cache,
     thread_cache_rejection_reason,
@@ -105,7 +106,6 @@ from mindroom.matrix.thread_projection import (
 from mindroom.matrix.thread_resolution_reuse import (
     ThreadResolutionReuseCache,
     ThreadResolutionSnapshot,
-    ThreadRevision,
     build_thread_resolution_snapshot,
     reusable_event_source_suffix,
     snapshot_matches_revision,
@@ -577,7 +577,7 @@ async def _resolve_cached_thread_history(
     expected_membership_epoch: int,
     trusted_sender_ids: Collection[str] = (),
     resolution_reuse: ThreadResolutionReuseCache | None = None,
-    cache_state: ThreadCacheState | None = None,
+    revision: ThreadRevision | None = None,
 ) -> tuple[list[ResolvedVisibleMessage] | None, float]:
     """Resolve cached thread history or invalidate the cache entry on corruption."""
     try:
@@ -591,7 +591,7 @@ async def _resolve_cached_thread_history(
             expected_membership_epoch=expected_membership_epoch,
             trusted_sender_ids=trusted_sender_ids,
             resolution_reuse=resolution_reuse,
-            cache_state=cache_state,
+            revision=revision,
         )
     except Exception as exc:
         logger.warning(
@@ -617,7 +617,7 @@ async def _resolve_cached_thread_history_with_reuse(
     expected_membership_epoch: int,
     trusted_sender_ids: Collection[str],
     resolution_reuse: ThreadResolutionReuseCache | None,
-    cache_state: ThreadCacheState | None,
+    revision: ThreadRevision | None,
 ) -> tuple[list[ResolvedVisibleMessage], float]:
     """Fully resolve one durable-cache read and retain its reusable projection."""
     resolved = await _resolve_thread_history_from_event_sources_timed(
@@ -630,7 +630,9 @@ async def _resolve_cached_thread_history_with_reuse(
         expected_membership_epoch=expected_membership_epoch,
         trusted_sender_ids=trusted_sender_ids,
     )
-    revision = _thread_cache_state_revision(cache_state)
+    # The revision may predate the rows just resolved. Sequences are monotonic, so a stale
+    # revision can never produce a false exact match later, and the known-ID suffix guard
+    # rejects any delta row the snapshot already contains; the race costs one full re-resolve.
     if resolution_reuse is not None and resolved.hydration_complete and revision is not None:
         resolution_reuse.store(
             room_id,
@@ -730,41 +732,19 @@ def _cache_reject_diagnostics(
     return diagnostics
 
 
-def _thread_cache_state_revision(cache_state: ThreadCacheState | None) -> ThreadRevision | None:
-    """Return the durable revision when state identifies one non-empty thread snapshot."""
-    if (
-        cache_state is None
-        or cache_state.event_count <= 0
-        or cache_state.max_write_seq is None
-        or cache_state.max_thread_write_seq is None
-        or cache_state.max_origin_server_ts is None
-    ):
-        return None
-    return ThreadRevision(
-        event_count=cache_state.event_count,
-        max_write_seq=cache_state.max_write_seq,
-        max_thread_write_seq=cache_state.max_thread_write_seq,
-        max_origin_server_ts=cache_state.max_origin_server_ts,
-    )
-
-
 async def _try_reuse_cached_thread_resolution(
     client: nio.AsyncClient,
     *,
     room_id: str,
     thread_id: str,
     event_cache: ConversationEventCache,
-    cache_state: ThreadCacheState | None,
+    revision: ThreadRevision | None,
     membership_epoch: int,
     trusted_sender_ids: Collection[str],
     resolution_reuse: ThreadResolutionReuseCache | None,
 ) -> tuple[list[ResolvedVisibleMessage], float, str] | None:
     """Reuse an exact projection or merge a complete append-only durable delta."""
-    if (
-        resolution_reuse is None
-        or (revision := _thread_cache_state_revision(cache_state)) is None
-        or (snapshot := resolution_reuse.get(room_id, thread_id)) is None
-    ):
+    if resolution_reuse is None or revision is None or (snapshot := resolution_reuse.get(room_id, thread_id)) is None:
         return None
     snapshot_trusted_sender_ids = frozenset(trusted_sender_ids)
     if snapshot_matches_revision(
@@ -932,12 +912,13 @@ async def _load_cached_thread_history_if_usable(
     # Reuse only applies to fully hydrated reads: snapshot-mode bodies are intentionally degraded
     # and must never be frozen into (or served from) a reusable resolution.
     reuse_cache = resolution_reuse if hydrate_sidecars else None
+    revision = None if reuse_cache is None else await event_cache.get_thread_revision(room_id, thread_id)
     reused = await _try_reuse_cached_thread_resolution(
         client,
         room_id=room_id,
         thread_id=thread_id,
         event_cache=event_cache,
-        cache_state=cache_state,
+        revision=revision,
         membership_epoch=cached_membership_epoch,
         trusted_sender_ids=trusted_sender_ids,
         resolution_reuse=reuse_cache,
@@ -978,7 +959,7 @@ async def _load_cached_thread_history_if_usable(
             expected_membership_epoch=cached_membership_epoch,
             trusted_sender_ids=trusted_sender_ids,
             resolution_reuse=reuse_cache,
-            cache_state=cache_state,
+            revision=revision,
         )
     if resolved_history is None:
         return None, {

@@ -33,15 +33,7 @@ from mindroom.matrix.event_info import EventInfo
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
 
-
-@dataclass(frozen=True, slots=True)
-class ThreadRevision:
-    """Durable revision identity of one non-empty thread's raw rows."""
-
-    event_count: int
-    max_write_seq: int
-    max_thread_write_seq: int
-    max_origin_server_ts: int
+    from mindroom.matrix.cache import ThreadRevision
 
 
 @dataclass(slots=True)
@@ -233,7 +225,6 @@ def _bundled_edit_target_ids(event_source: Mapping[str, Any]) -> Iterable[str]:
 __all__ = [
     "ThreadResolutionReuseCache",
     "ThreadResolutionSnapshot",
-    "ThreadRevision",
     "build_thread_resolution_snapshot",
     "clone_resolved_visible_message",
     "reusable_event_source_suffix",

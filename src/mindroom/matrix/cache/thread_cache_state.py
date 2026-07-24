@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from .event_cache import ThreadCacheState
+from .event_cache import ThreadCacheState, ThreadRevision
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -53,10 +53,6 @@ class ThreadCacheStateRow:
     invalidation_reason: str | None
     room_invalidated_at: float | None
     room_invalidation_reason: str | None
-    event_count: int
-    max_write_seq: int | None
-    max_thread_write_seq: int | None
-    max_origin_server_ts: int | None
 
     def as_public_state(self) -> ThreadCacheState:
         """Return the public cache-state value."""
@@ -66,10 +62,6 @@ class ThreadCacheStateRow:
             invalidation_reason=self.invalidation_reason,
             room_invalidated_at=self.room_invalidated_at,
             room_invalidation_reason=self.room_invalidation_reason,
-            event_count=self.event_count,
-            max_write_seq=self.max_write_seq,
-            max_thread_write_seq=self.max_thread_write_seq,
-            max_origin_server_ts=self.max_origin_server_ts,
         )
 
 
@@ -77,10 +69,10 @@ def thread_cache_state_row(values: Sequence[float | str | None] | None) -> Threa
     """Normalize one backend storage row into backend-neutral cache-state values."""
     if values is None:
         return None
-    if len(values) != 9:
-        msg = f"Thread cache-state row must contain exactly 9 values, got {len(values)}"
+    if len(values) != 5:
+        msg = f"Thread cache-state row must contain exactly 5 values, got {len(values)}"
         raise ValueError(msg)
-    if all(value is None for value in values[:5]):
+    if all(value is None for value in values):
         return None
     return ThreadCacheStateRow(
         validated_at=None if values[0] is None else float(values[0]),
@@ -88,10 +80,24 @@ def thread_cache_state_row(values: Sequence[float | str | None] | None) -> Threa
         invalidation_reason=values[2] if isinstance(values[2], str) else None,
         room_invalidated_at=None if values[3] is None else float(values[3]),
         room_invalidation_reason=values[4] if isinstance(values[4], str) else None,
-        event_count=0 if values[5] is None else int(values[5]),
-        max_write_seq=None if values[6] is None else int(values[6]),
-        max_thread_write_seq=None if values[7] is None else int(values[7]),
-        max_origin_server_ts=None if values[8] is None else int(values[8]),
+    )
+
+
+def thread_revision_row(values: Sequence[float | int | None] | None) -> ThreadRevision | None:
+    """Normalize one backend aggregate row into a revision, absent for empty threads."""
+    if values is None:
+        return None
+    if len(values) != 4:
+        msg = f"Thread revision row must contain exactly 4 values, got {len(values)}"
+        raise ValueError(msg)
+    event_count = 0 if values[0] is None else int(values[0])
+    if event_count <= 0 or values[1] is None or values[2] is None or values[3] is None:
+        return None
+    return ThreadRevision(
+        event_count=event_count,
+        max_write_seq=int(values[1]),
+        max_thread_write_seq=int(values[2]),
+        max_origin_server_ts=int(values[3]),
     )
 
 

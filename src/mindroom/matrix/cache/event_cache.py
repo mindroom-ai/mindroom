@@ -20,10 +20,16 @@ class ThreadCacheState:
     invalidation_reason: str | None
     room_invalidated_at: float | None
     room_invalidation_reason: str | None
-    event_count: int = 0
-    max_write_seq: int | None = None
-    max_thread_write_seq: int | None = None
-    max_origin_server_ts: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ThreadRevision:
+    """Durable revision identity of one non-empty thread's raw rows."""
+
+    event_count: int
+    max_write_seq: int
+    max_thread_write_seq: int
+    max_origin_server_ts: int
 
 
 class EventCacheBackendUnavailableError(RuntimeError):
@@ -99,6 +105,9 @@ class ConversationEventCache(Protocol):
 
     async def get_thread_cache_state(self, room_id: str, thread_id: str) -> ThreadCacheState | None:
         """Return durable freshness metadata for one cached thread."""
+
+    async def get_thread_revision(self, room_id: str, thread_id: str) -> ThreadRevision | None:
+        """Return the durable revision identity of one non-empty cached thread."""
 
     async def get_event(self, room_id: str, event_id: str) -> dict[str, Any] | None:
         """Return one cached event payload by event ID."""

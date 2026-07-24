@@ -3004,10 +3004,10 @@ async def test_mxc_text_cache_round_trips_across_event_cache_reopen(
 
 
 @pytest.mark.asyncio
-async def test_thread_cache_revision_tracks_point_payload_updates(
+async def test_thread_revision_tracks_point_payload_updates(
     event_cache_factory: Callable[[], ConversationEventCache],
 ) -> None:
-    """Thread revision metadata and delta reads include changed lookup payloads."""
+    """Thread revisions and delta reads include changed lookup payloads."""
     cache = event_cache_factory()
     await cache.initialize()
     root = {
@@ -3019,16 +3019,12 @@ async def test_thread_cache_revision_tracks_point_payload_updates(
     }
     try:
         await _replace_thread(cache, "!room:localhost", "$thread_root", [root])
-        before = await cache.get_thread_cache_state("!room:localhost", "$thread_root")
+        before = await cache.get_thread_revision("!room:localhost", "$thread_root")
         updated = {**root, "content": {"msgtype": "m.text", "body": "updated"}}
         await cache.store_event("$thread_root", "!room:localhost", updated)
-        after = await cache.get_thread_cache_state("!room:localhost", "$thread_root")
+        after = await cache.get_thread_revision("!room:localhost", "$thread_root")
         assert before is not None
-        assert before.max_write_seq is not None
-        assert before.max_thread_write_seq is not None
         assert after is not None
-        assert after.max_write_seq is not None
-        assert after.max_thread_write_seq is not None
         changed_rows = await cache.get_thread_events_written_between(
             "!room:localhost",
             "$thread_root",
@@ -3047,10 +3043,10 @@ async def test_thread_cache_revision_tracks_point_payload_updates(
 
 
 @pytest.mark.asyncio
-async def test_thread_cache_revision_tracks_index_replacements(
+async def test_thread_revision_tracks_index_replacements(
     event_cache_factory: Callable[[], ConversationEventCache],
 ) -> None:
-    """Thread revision metadata detects membership changes when payload writes are refused."""
+    """Thread revisions detect membership changes when payload writes are refused."""
     cache = event_cache_factory()
     await cache.initialize()
     room_id = "!room:localhost"
@@ -3077,20 +3073,16 @@ async def test_thread_cache_revision_tracks_index_replacements(
     try:
         await cache.store_event("$new", room_id, new_reply)
         await _replace_thread(cache, room_id, thread_id, [root, old_reply, shared_reply])
-        before = await cache.get_thread_cache_state(room_id, thread_id)
+        before = await cache.get_thread_revision(room_id, thread_id)
         replacement = [
             _opaque_payload(thread_id, origin_server_ts=1000),
             _opaque_payload("$new", thread_root_id=thread_id, origin_server_ts=2000),
             _opaque_payload("$shared", thread_root_id=thread_id, origin_server_ts=3000),
         ]
         await _replace_thread(cache, room_id, thread_id, replacement)
-        after = await cache.get_thread_cache_state(room_id, thread_id)
+        after = await cache.get_thread_revision(room_id, thread_id)
         assert before is not None
-        assert before.max_write_seq is not None
-        assert before.max_thread_write_seq is not None
         assert after is not None
-        assert after.max_write_seq is not None
-        assert after.max_thread_write_seq is not None
         changed_rows = await cache.get_thread_events_written_between(
             room_id,
             thread_id,

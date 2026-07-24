@@ -2410,6 +2410,7 @@ visibility = [
 [[modules]]
 path = "mindroom.matrix.thread_resolution_reuse"
 depends_on = [
+    "mindroom.matrix.cache",
     "mindroom.matrix.client_visible_messages",
     "mindroom.matrix.event_info",
 ]
@@ -3764,6 +3765,7 @@ expose = [
     "SharedConversationEventCache",
     "ThreadCacheState",
     "ThreadHistoryResult",
+    "ThreadRevision",
     "is_opaque_encrypted_event_source",
     "normalize_nio_event_for_cache",
     "thread_cache_rejection_reason",
@@ -3778,6 +3780,7 @@ expose = [
     "EventCacheBackendUnavailableError",
     "SharedConversationEventCache",
     "ThreadCacheState",
+    "ThreadRevision",
 ]
 from = ["mindroom.matrix.cache.event_cache"]
 visibility = ["mindroom.matrix.cache"]

@@ -35,7 +35,7 @@ if TYPE_CHECKING:
 
     from .agent_message_snapshot import AgentMessageSnapshot
     from .cache_maintenance import CacheMaintenanceReport
-    from .event_cache import ThreadCacheState
+    from .event_cache import ThreadCacheState, ThreadRevision
 
 
 _POSTGRES_EVENT_CACHE_SCHEMA_VERSION = 3
@@ -1276,6 +1276,20 @@ class PostgresEventCache:
                 through_write_seq=through_write_seq,
                 after_thread_write_seq=after_thread_write_seq,
                 through_thread_write_seq=through_thread_write_seq,
+            ),
+        )
+
+    async def get_thread_revision(self, room_id: str, thread_id: str) -> ThreadRevision | None:
+        """Return the durable revision identity of one non-empty cached thread."""
+        return await self._operation(
+            room_id,
+            operation="get_thread_revision",
+            disabled_result=None,
+            callback=lambda db: postgres_event_cache_threads.load_thread_revision(
+                db,
+                namespace=self._runtime.namespace,
+                room_id=room_id,
+                thread_id=thread_id,
             ),
         )
 

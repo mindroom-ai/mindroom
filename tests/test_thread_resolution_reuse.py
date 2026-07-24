@@ -12,11 +12,10 @@ from weakref import WeakKeyDictionary
 import pytest
 
 import mindroom.matrix.client_thread_history as matrix_client_module
-from mindroom.matrix.cache import ThreadCacheState
+from mindroom.matrix.cache import ThreadCacheState, ThreadRevision
 from mindroom.matrix.client_thread_history import fetch_thread_history
 from mindroom.matrix.thread_resolution_reuse import (
     ThreadResolutionReuseCache,
-    ThreadRevision,
     build_thread_resolution_snapshot,
     reusable_event_source_suffix,
 )
@@ -151,6 +150,8 @@ async def _resolve(
         invalidation_reason=None,
         room_invalidated_at=None,
         room_invalidation_reason=None,
+    )
+    cache.get_thread_revision.return_value = ThreadRevision(
         event_count=len(rows),
         max_write_seq=max_write_seq,
         max_thread_write_seq=max_write_seq,
@@ -433,12 +434,7 @@ class TestSnapshotReuse:
                 expected_membership_epoch=EPOCH + 1,
                 trusted_sender_ids=(),
                 resolution_reuse=reuse,
-                cache_state=ThreadCacheState(
-                    validated_at=1.0,
-                    invalidated_at=None,
-                    invalidation_reason=None,
-                    room_invalidated_at=None,
-                    room_invalidation_reason=None,
+                revision=ThreadRevision(
                     event_count=1,
                     max_write_seq=2,
                     max_thread_write_seq=2,
@@ -749,7 +745,7 @@ class TestFetchPathIntegration:
         reuse = ThreadResolutionReuseCache()
         try:
             await fetch_thread_history(client, ROOM, THREAD, event_cache=cache, resolution_reuse=reuse)
-            before = await cache.get_thread_cache_state(ROOM, THREAD)
+            before = await cache.get_thread_revision(ROOM, THREAD)
             opaque_rows = [
                 {
                     "event_id": row["event_id"],
@@ -761,7 +757,7 @@ class TestFetchPathIntegration:
                 for row in (root, new_reply, shared_reply)
             ]
             await replace_thread_unconditionally(cache, ROOM, THREAD, opaque_rows)
-            after = await cache.get_thread_cache_state(ROOM, THREAD)
+            after = await cache.get_thread_revision(ROOM, THREAD)
             second = await fetch_thread_history(
                 client,
                 ROOM,
@@ -776,8 +772,6 @@ class TestFetchPathIntegration:
         assert after is not None
         assert before.event_count == after.event_count == 3
         assert before.max_write_seq == after.max_write_seq
-        assert before.max_thread_write_seq is not None
-        assert after.max_thread_write_seq is not None
         assert after.max_thread_write_seq > before.max_thread_write_seq
         assert [message.event_id for message in second] == [THREAD, "$new", "$shared"]
         assert second.diagnostics["thread_resolution_reuse"] == "full"
