@@ -14,6 +14,7 @@ from mindroom.authorization import get_effective_sender_id_for_reply_permissions
 from mindroom.constants import (
     ORIGINAL_SENDER_KEY,
     SOURCE_KIND_KEY,
+    STREAM_GENERATION_KEY,
     STREAM_STATUS_CANCELLED,
     STREAM_STATUS_COMPLETED,
     STREAM_STATUS_ERROR,
@@ -112,6 +113,10 @@ class StaleStreamCleanupActor:
 
     client: nio.AsyncClient
     conversation_cache: ConversationCacheProtocol | None
+    # Current runtime generation of the owning bot instance. Candidates whose
+    # latest content carries this stamp are live current-generation output and
+    # must never be repaired, regardless of clocks or live-task snapshots.
+    runtime_generation: str | None = None
 
 
 @dataclass(frozen=True)
@@ -589,17 +594,20 @@ async def _process_stale_room_candidate(
     """Repair or classify one bot-owned candidate from a shared room scan."""
     assert state.latest_body is not None
     agent_name = _agent_name_for_bot_user_id(bot_user_id, config, runtime_paths)
-    if agent_name is None or _should_skip_for_startup_cleanup_window(
-        state,
-        now_ms=current_time_ms,
-        scan_policy=scan_policy,
+    if (
+        agent_name is None
+        or _should_skip_for_startup_cleanup_window(
+            state,
+            now_ms=current_time_ms,
+            scan_policy=scan_policy,
+        )
+        or _is_protected_current_process_stream(
+            state,
+            target_event_id=target_event_id,
+            actor=actor,
+            scan_policy=scan_policy,
+        )
     ):
-        return False, None
-    # Local and Matrix clocks are not comparable, so the startup cutoff can
-    # misclassify a current-generation stream as pre-startup when the
-    # homeserver clock lags. Live in-process ownership is clock-free proof
-    # that this stream must never be repaired from history.
-    if scan_policy.is_live_process_stream(target_event_id):
         return False, None
     if scan_policy.terminal_interrupted_only and not _has_resumable_interrupted_note(state):
         return False, None
@@ -1768,6 +1776,28 @@ def _interrupted_thread_from_terminal_state(
         original_sender_id=state.requester_user_id,
         timestamp_ms=state.latest_timestamp,
     )
+
+
+def _is_protected_current_process_stream(
+    state: _MessageState,
+    *,
+    target_event_id: str,
+    actor: StaleStreamCleanupActor,
+    scan_policy: _CleanupScanPolicy,
+) -> bool:
+    """Return whether clock-free ownership proves this process owns the stream.
+
+    Local and Matrix clocks are not comparable, so the startup cutoff can
+    misclassify a current-generation stream as pre-startup when the homeserver
+    clock lags. The generation stamp read from the same content snapshot is
+    race-free: even when the live response finalizes between scan and this
+    check, the stamped snapshot still names the current generation. The
+    live-task probe stays as defense in depth for unstamped content.
+    """
+    latest_generation = (state.latest_content or {}).get(STREAM_GENERATION_KEY)
+    if actor.runtime_generation is not None and latest_generation == actor.runtime_generation:
+        return True
+    return scan_policy.is_live_process_stream(target_event_id)
 
 
 def _is_cleanup_candidate(state: _MessageState) -> bool:

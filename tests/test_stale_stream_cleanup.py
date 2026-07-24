@@ -253,6 +253,7 @@ async def _run_cleanup(
     startup_cutoff_ms: int | None = None,
     terminal_interrupted_only: bool = False,
     is_live_process_stream: Callable[[str], bool] | None = None,
+    runtime_generation: str | None = None,
 ) -> tuple[int, list[InterruptedThread]]:
     client.user_id = BOT_USER_ID
     assert joined_rooms == [ROOM_ID]
@@ -260,7 +261,7 @@ async def _run_cleanup(
         return await cleanup_stale_streaming_room(
             client,
             room_id=ROOM_ID,
-            actors={BOT_USER_ID: StaleStreamCleanupActor(client, None)},
+            actors={BOT_USER_ID: StaleStreamCleanupActor(client, None, runtime_generation=runtime_generation)},
             bot_user_ids={BOT_USER_ID} if bot_user_ids is None else bot_user_ids,
             config=config,
             runtime_paths=runtime_paths_for(config),
@@ -2190,6 +2191,86 @@ async def test_skewed_clock_stream_without_live_owner_is_still_cleaned(tmp_path:
             config,
             joined_rooms=[ROOM_ID],
             startup_cutoff_ms=NOW_MS - 5_000,
+        )
+
+    assert cleaned == 1
+    edit_result.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_generation_stamp_protects_stream_that_finalizes_after_snapshot(tmp_path: Path) -> None:
+    """The generation stamp closes the finalize-after-snapshot TOCTOU.
+
+    The scan snapshots a nonterminal state, then the live response finalizes
+    and drops its stop-manager entry before candidate processing, so the
+    live-task probe reports no owner. The generation stamp read from the same
+    snapshot still proves current-generation ownership — even with clock skew
+    placing the stream before the local cutoff and outside the recency guard.
+    """
+    config = _make_config(tmp_path)
+    client = _make_client()
+    client.rooms = _joined_room_cache()
+    generation = "gen-current"
+    skewed_ts = NOW_MS - (stale_stream_cleanup_module.STALE_STREAM_RECENCY_GUARD_MS + 5_000)
+    client.room_messages.return_value = _room_messages_response(
+        _make_message_event(
+            event_id="$finalizing",
+            body="Almost done ⋯",
+            timestamp_ms=skewed_ts,
+            extra_content={
+                STREAM_STATUS_KEY: "streaming",
+                stale_stream_cleanup_module.STREAM_GENERATION_KEY: generation,
+            },
+        ),
+    )
+
+    with patch(
+        "mindroom.matrix.stale_stream_cleanup.edit_message_result",
+        new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit")),
+    ) as edit_result:
+        cleaned, interrupted = await _run_cleanup(
+            client,
+            config,
+            joined_rooms=[ROOM_ID],
+            startup_cutoff_ms=NOW_MS - 5_000,
+            runtime_generation=generation,
+            is_live_process_stream=lambda _event_id: False,
+        )
+
+    assert cleaned == 0
+    assert interrupted == []
+    edit_result.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_prior_generation_stamp_is_still_cleaned(tmp_path: Path) -> None:
+    """Control: a stream stamped by a previous bot generation stays repairable."""
+    config = _make_config(tmp_path)
+    client = _make_client()
+    client.rooms = _joined_room_cache()
+    skewed_ts = NOW_MS - (stale_stream_cleanup_module.STALE_STREAM_RECENCY_GUARD_MS + 5_000)
+    client.room_messages.return_value = _room_messages_response(
+        _make_message_event(
+            event_id="$leftover",
+            body="Working ⋯",
+            timestamp_ms=skewed_ts,
+            extra_content={
+                STREAM_STATUS_KEY: "streaming",
+                stale_stream_cleanup_module.STREAM_GENERATION_KEY: "gen-previous",
+            },
+        ),
+    )
+
+    with patch(
+        "mindroom.matrix.stale_stream_cleanup.edit_message_result",
+        new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit")),
+    ) as edit_result:
+        cleaned, _interrupted = await _run_cleanup(
+            client,
+            config,
+            joined_rooms=[ROOM_ID],
+            startup_cutoff_ms=NOW_MS - 5_000,
+            runtime_generation="gen-current",
         )
 
     assert cleaned == 1

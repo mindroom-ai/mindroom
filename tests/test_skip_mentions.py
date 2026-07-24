@@ -14,7 +14,13 @@ import pytest
 from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.constants import SKIP_MENTIONS_KEY
+from mindroom.constants import (
+    SKIP_MENTIONS_KEY,
+    STREAM_GENERATION_KEY,
+    STREAM_STATUS_COMPLETED,
+    STREAM_STATUS_KEY,
+    STREAM_STATUS_PENDING,
+)
 from mindroom.conversation_resolver import _should_skip_mentions
 from mindroom.delivery_gateway import (
     DeliveryGateway,
@@ -438,6 +444,78 @@ async def test_delivery_gateway_edit_text_records_threaded_outbound_edit(tmp_pat
         "$thread",
         caller_label="delivery_edit_text",
     )
+
+
+@pytest.mark.asyncio
+async def test_delivery_gateway_stamps_runtime_generation_on_nonterminal_send(tmp_path: Path) -> None:
+    """Pending placeholders must carry the bot generation's clock-free ownership stamp."""
+    gateway, _, _ = _gateway_with_mocks(tmp_path)
+    gateway = DeliveryGateway(replace(gateway.deps, runtime_generation="gen-1"))
+    target = MessageTarget.resolve("!test:server", None, None)
+
+    with patch(
+        "mindroom.delivery_gateway.send_message_result",
+        new=AsyncMock(side_effect=delivered_matrix_side_effect("$response")),
+    ) as send_result:
+        await gateway.send_text(
+            SendTextRequest(
+                target=target,
+                response_text="Thinking...",
+                extra_content={STREAM_STATUS_KEY: STREAM_STATUS_PENDING},
+            ),
+        )
+
+    content = send_result.await_args.args[2]
+    assert content[STREAM_GENERATION_KEY] == "gen-1"
+    assert content[STREAM_STATUS_KEY] == STREAM_STATUS_PENDING
+
+
+@pytest.mark.asyncio
+async def test_delivery_gateway_does_not_stamp_terminal_or_plain_sends(tmp_path: Path) -> None:
+    """Terminal statuses and plain sends stay unstamped."""
+    gateway, _, _ = _gateway_with_mocks(tmp_path)
+    gateway = DeliveryGateway(replace(gateway.deps, runtime_generation="gen-1"))
+    target = MessageTarget.resolve("!test:server", None, None)
+
+    with patch(
+        "mindroom.delivery_gateway.send_message_result",
+        new=AsyncMock(side_effect=delivered_matrix_side_effect("$response")),
+    ) as send_result:
+        await gateway.send_text(
+            SendTextRequest(
+                target=target,
+                response_text="done",
+                extra_content={STREAM_STATUS_KEY: STREAM_STATUS_COMPLETED},
+            ),
+        )
+        await gateway.send_text(SendTextRequest(target=target, response_text="plain"))
+
+    for send_call in send_result.await_args_list:
+        assert STREAM_GENERATION_KEY not in send_call.args[2]
+
+
+@pytest.mark.asyncio
+async def test_delivery_gateway_stamps_runtime_generation_on_stream_base_content(tmp_path: Path) -> None:
+    """Every streaming delivery inherits the generation stamp through base extra content."""
+    gateway, _, _ = _gateway_with_mocks(tmp_path)
+    gateway = DeliveryGateway(replace(gateway.deps, runtime_generation="gen-1"))
+    target = MessageTarget.resolve("!test:server", "$thread", "$root")
+
+    async def stream() -> AsyncIterator[str]:
+        yield "hello"
+
+    with patch(
+        "mindroom.delivery_gateway.send_streaming_response",
+        new=AsyncMock(return_value=SimpleNamespace(event_id="$stream", final_visible_body="hello")),
+    ) as send_streaming:
+        await gateway.deliver_stream(
+            StreamingDeliveryRequest(
+                target=target,
+                response_stream=stream(),
+            ),
+        )
+
+    assert send_streaming.await_args.kwargs["extra_content"][STREAM_GENERATION_KEY] == "gen-1"
 
 
 @pytest.mark.asyncio
