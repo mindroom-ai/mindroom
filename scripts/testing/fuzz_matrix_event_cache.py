@@ -9,7 +9,7 @@ For longer deterministic runs:
 
     uv run python scripts/testing/fuzz_matrix_event_cache.py --seed 42 --steps 500
 
-On failure the complete JSON trace is printed and can be replayed with:
+On failure the backend-independent workload trace is printed and can be rerun with:
 
     uv run python scripts/testing/fuzz_matrix_event_cache.py --trace trace.json
 """
@@ -129,7 +129,7 @@ class FuzzScenario:
     verify_reference_model: bool = False
 
     def to_json(self) -> str:
-        """Serialize the complete trace for exact replay."""
+        """Serialize workload operations, dimensions, and batch boundaries."""
         payload = {
             "version": 2,
             "batches": [[asdict(operation) for operation in batch] for batch in self.batches],
@@ -143,6 +143,9 @@ class FuzzScenario:
         """Reject lifecycle operations that cannot safely race storage users."""
         if self.room_count < 1 or self.thread_count < 1:
             msg = "Matrix cache fuzz room and thread counts must be positive"
+            raise ValueError(msg)
+        if self.verify_reference_model and any(len(batch) != 1 for batch in self.batches):
+            msg = "Matrix cache reference-model workloads require singleton batches"
             raise ValueError(msg)
         for batch in self.batches:
             if not batch:
@@ -1004,7 +1007,7 @@ def _operation_sources(operation: FuzzOperation) -> list[dict[str, Any]]:
     if builder is not None:
         return [builder(operation)]
     if operation.kind is OperationKind.REDACTION:
-        return [cast("dict[str, Any]", _redaction_event(operation).source)]
+        return [_redaction_event(operation).source]
     if operation.kind is OperationKind.REPLACE_THREAD:
         return [
             root_source(operation.room, operation.thread),
@@ -1520,7 +1523,7 @@ async def run_scenario(
     verify_restart: bool = True,
     max_batch_seconds: float | None = None,
 ) -> ObservableCacheState:
-    """Run one scenario, emitting its exact trace on failure."""
+    """Run one scenario, emitting its backend-independent workload on failure."""
     root_cache = cache_factory()
     await root_cache.initialize()
     runner = CacheFuzzRunner(
@@ -1623,7 +1626,7 @@ def scenario_from_seed(
             )
             remaining -= 1
             continue
-        batch_size = min(remaining, randomizer.randint(1, max_batch_size))
+        batch_size = 1 if verify_reference_model else min(remaining, randomizer.randint(1, max_batch_size))
         batch_operations: list[FuzzOperation] = []
         for _ in range(batch_size):
             operation_kind = randomizer.choice(_WEIGHTED_KINDS)
@@ -1670,11 +1673,9 @@ def model_based_scenario() -> FuzzScenario:
             (operation(OperationKind.CIPHERTEXT_REPLAY, 0, 0, 4, 0, 0),),
             (operation(OperationKind.THREADED_MESSAGE, 0, 0, 4, 0, 0),),
             (operation(OperationKind.REOPEN_CACHE, 0, 0, 0, 0, 0),),
-            (
-                operation(OperationKind.THREADED_MESSAGE, 0, 1, 1, 0, 0),
-                operation(OperationKind.THREADED_MESSAGE, 1, 1, 1, 0, 0),
-                operation(OperationKind.REFERENCE, 1, 2, 2, 0, 1),
-            ),
+            (operation(OperationKind.THREADED_MESSAGE, 0, 1, 1, 0, 0),),
+            (operation(OperationKind.THREADED_MESSAGE, 1, 1, 1, 0, 0),),
+            (operation(OperationKind.REFERENCE, 1, 2, 2, 0, 1),),
             (operation(OperationKind.LIMITED_SYNC, 1, 0, 0, 0, 0),),
             (operation(OperationKind.REJOIN_ROOM, 1, 0, 0, 0, 0),),
             (operation(OperationKind.THREADED_MESSAGE, 1, 2, 3, 0, 0),),
@@ -1748,10 +1749,18 @@ def _parse_args() -> argparse.Namespace:
         "--verify-reference-model",
         action=argparse.BooleanOptionalAction,
         default=False,
-        help="Verify generated traces against the independent model; replay uses the saved setting.",
+        help="Verify a sequential workload against the independent model; replay uses the saved setting.",
     )
-    parser.add_argument("--trace", type=Path)
-    parser.add_argument("--save-trace", type=Path)
+    parser.add_argument(
+        "--trace",
+        type=Path,
+        help="Rerun a saved backend-independent workload on SQLite.",
+    )
+    parser.add_argument(
+        "--save-trace",
+        type=Path,
+        help="Save workload operations and batches; backend and scheduler interleaving are not recorded.",
+    )
     return parser.parse_args()
 
 

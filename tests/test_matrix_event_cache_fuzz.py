@@ -15,6 +15,7 @@ from hypothesis import strategies as st
 from mindroom.matrix.cache.postgres_event_cache import PostgresEventCache
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from scripts.testing.fuzz_matrix_event_cache import (
+    CacheFuzzRunner,
     FuzzOperation,
     FuzzScenario,
     OperationKind,
@@ -77,6 +78,30 @@ def _scenario_strategy() -> st.SearchStrategy[FuzzScenario]:
     )
 
 
+def _semantic_scenario_strategy() -> st.SearchStrategy[FuzzScenario]:
+    semantic_operation = st.builds(
+        FuzzOperation,
+        kind=st.sampled_from(_EVENT_KINDS),
+        room=st.just(0),
+        thread=st.integers(min_value=0, max_value=1),
+        slot=st.integers(min_value=0, max_value=7),
+        target=st.integers(min_value=0, max_value=7),
+        variant=st.integers(min_value=0, max_value=15),
+    )
+    return st.lists(
+        semantic_operation.map(lambda operation: (operation,)),
+        min_size=1,
+        max_size=5,
+    ).map(
+        lambda batches: FuzzScenario(
+            batches=tuple(batches),
+            room_count=1,
+            thread_count=2,
+            verify_reference_model=True,
+        ),
+    )
+
+
 _CONCURRENT_REDACTION_REPLAY = FuzzScenario(
     batches=(
         (
@@ -114,6 +139,29 @@ def test_hypothesis_matrix_cache_traces_preserve_sqlite_invariants(
 ) -> None:
     """Shrunk concurrent mutation traces preserve public cache invariants."""
     with tempfile.TemporaryDirectory(prefix="mindroom-hypothesis-cache-") as temp_dir:
+        db_path = Path(temp_dir) / "event_cache.db"
+        asyncio.run(
+            run_scenario(
+                lambda: SqliteEventCache(db_path),
+                scenario,
+                verify_restart=False,
+            ),
+        )
+
+
+@settings(
+    deadline=None,
+    derandomize=True,
+    max_examples=6,
+    print_blob=True,
+    suppress_health_check=(HealthCheck.too_slow,),
+)
+@given(scenario=_semantic_scenario_strategy())
+def test_hypothesis_sequential_traces_match_reference_model(
+    scenario: FuzzScenario,
+) -> None:
+    """Generated sequential operations must match the independent semantic model."""
+    with tempfile.TemporaryDirectory(prefix="mindroom-hypothesis-model-") as temp_dir:
         db_path = Path(temp_dir) / "event_cache.db"
         asyncio.run(
             run_scenario(
@@ -226,6 +274,7 @@ def test_edit_variants_cover_wrong_sender_for_every_target_kind(target_kind: int
 
 
 @pytest.mark.asyncio
+@pytest.mark.timeout(180)
 async def test_forty_five_thread_fanout_matches_every_cache_backend(
     event_cache_factory: Callable[[], ConversationEventCache],
 ) -> None:
@@ -237,8 +286,8 @@ async def test_forty_five_thread_fanout_matches_every_cache_backend(
     )
 
 
-def test_fuzz_trace_json_round_trip_is_exact() -> None:
-    """Failure traces remain portable across local runs and CI."""
+def test_fuzz_workload_json_round_trip_preserves_semantic_inputs() -> None:
+    """Workload operations and dimensions remain portable across runs."""
     scenario = scenario_from_seed(
         42,
         steps=25,
@@ -260,6 +309,56 @@ def test_fuzz_trace_json_round_trip_is_exact() -> None:
         )
         == scenario
     )
+
+
+def test_reference_model_rejects_concurrent_batches() -> None:
+    """Reference-model mode cannot invent an unrecorded concurrent ordering."""
+    scenario = FuzzScenario(
+        batches=(
+            (
+                FuzzOperation(OperationKind.THREADED_MESSAGE, 0, 0, 0, 0, 0),
+                FuzzOperation(OperationKind.INVALIDATE_THREAD, 0, 0, 0, 0, 0),
+            ),
+        ),
+        room_count=1,
+        thread_count=1,
+        verify_reference_model=True,
+    )
+
+    with pytest.raises(ValueError, match="singleton batches"):
+        scenario.validate()
+
+
+@pytest.mark.asyncio
+async def test_reference_model_detects_silently_dropped_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Semantic mode must reject a cache that silently drops a requested write."""
+    scenario = FuzzScenario(
+        batches=((FuzzOperation(OperationKind.THREADED_MESSAGE, 0, 0, 0, 0, 0),),),
+        room_count=1,
+        thread_count=1,
+        verify_reference_model=True,
+    )
+    original_apply = CacheFuzzRunner._apply_operation
+
+    async def drop_threaded_message(
+        runner: CacheFuzzRunner,
+        operation: FuzzOperation,
+    ) -> None:
+        if operation.kind is OperationKind.THREADED_MESSAGE:
+            return
+        await original_apply(runner, operation)
+
+    monkeypatch.setattr(CacheFuzzRunner, "_apply_operation", drop_threaded_message)
+
+    with pytest.raises(AssertionError, match="reference point payload mismatch"):
+        await run_scenario(
+            lambda: SqliteEventCache(tmp_path / "dropped-write.db"),
+            scenario,
+            verify_restart=False,
+        )
 
 
 @pytest.mark.parametrize(

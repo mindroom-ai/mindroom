@@ -122,7 +122,7 @@ async def test_latest_edit_tie_breaks_by_event_id(
         origin_server_ts=2000,
     )
     edit_a = _edit_event(
-        event_id="$a-edit",
+        event_id="$A-edit",
         sender=sender,
         original_event_id="$original",
         body="later cache write",
