@@ -4,15 +4,13 @@
 > Update it after every material finding, fix, campaign result, review result, push, or PR state change.
 > Do not include it in a product PR unless the user explicitly requests that.
 
-Last updated: 2026-07-24 07:34 PDT.
+Last updated: 2026-07-24 07:35 PDT.
 
 ## Merge recommendation for PR #1638
 
-PR #1638 itself is complete and merge-ready.
-The two extension branches are separate worktrees based on its head and are not modifying PR #1638.
-The newly found product bugs are follow-up findings and do not block the base harness PR.
-The user may merge PR #1638 now.
-After PR #1638 merges, retarget both extension branches and their eventual PRs from `test/matrix-cache-fuzz` to `main`.
+PR #1638 was squash-merged at `66dd4f4a68bcfd1a5e43b2cac20a1b464f306ab1`.
+Both extension branches were rebased onto current `origin/main` before their first push.
+Their follow-up PRs now target `main`.
 
 ## Objective
 
@@ -42,7 +40,7 @@ Keep all work unmerged until review, CI, and user approval are complete.
 - URL: https://github.com/mindroom-ai/mindroom/pull/1638
 - Branch: `test/matrix-cache-fuzz`
 - Head: `82711554dc470623e25833b0d1a6c01b13e0fbf4`
-- Current GitHub state at this update: open, non-draft, clean merge state.
+- Current GitHub state at this update: merged at `66dd4f4a68bcfd1a5e43b2cac20a1b464f306ab1`.
 - Worktree: `/Users/bas.nijholt/.codex/worktrees/fd26/mindroom`
 - PR scope: direct cache fuzzing, real-Tuwunel fuzzing, deterministic trace replay, saturation profile, and duplicate-turn hardening.
 - CI and Greptile were green on this exact head before the extension campaign began.
@@ -64,6 +62,29 @@ Keep all work unmerged until review, CI, and user approval are complete.
 - The full mindroom-nio suite passed with 519 tests passed and three skipped before this extension campaign.
 - These results belong to the exact base heads above and must not be silently attributed to later extension commits.
 
+## Open follow-up PRs
+
+### MindRoom PR #1639
+
+- URL: https://github.com/mindroom-ai/mindroom/pull/1639
+- Branch: `test/fuzz-live-chaos-expansion`
+- Base: `main`
+- Pushed head at creation: `1acaac8b58342241df7ca31c42570ac329889691`
+- State at this update: open and non-draft.
+- Scope: live chaos harness, three current MindRoom fixes, regression tests, and this living handoff.
+- Merge status: active investigation and not merge-ready.
+- This living handoff must be removed before PR #1639 is merge-ready.
+
+### MindRoom PR #1640
+
+- URL: https://github.com/mindroom-ai/mindroom/pull/1640
+- Branch: `test/fuzz-state-machine-expansion`
+- Base: `main`
+- Pushed head at creation: `0564386e50ac696b1065a349f2a5070573a5caf2`
+- State at this update: open and non-draft.
+- Scope: model-based cache fuzzing and limited-sync recovery fuzzing.
+- Merge status: active investigation and not merge-ready.
+
 ## Agent-cli sessions
 
 ### Codex state-machine session
@@ -73,11 +94,11 @@ Keep all work unmerged until review, CI, and user approval are complete.
 - Worktree: `/Users/bas.nijholt/.codex/worktrees/fd26/mindroom-worktrees/test-fuzz-state-machine-expansion`
 - Local task file: `.claude/TASK-1784887160-8027.md`
 - Primary emphasis: model-based cache state, SQLite/Postgres parity, lifecycle resets, delayed relations, exact limited-sync recovery, and strict live reply cardinality.
-- Current commits:
-  - `40f677cd4cf984f171a795fa2723da48dfe55e3d` — `test: add model-based Matrix cache fuzzing`
-  - `f8fc835d02bacdc78a5bbb0aeaef351d2940031c` — `test: add live limited-sync recovery fuzzing`
-  - `a1d6c073973369ff4e40c8585dde9ba300965b3c` — `test: harden limited sync live oracle`
-- Current working tree contains only the agent-cli task file.
+- Current commits after rebasing onto `main`:
+  - `ca84e05ec90c3c5d4f9a8d77f09db43834d108ff` — `test: add model-based Matrix cache fuzzing`
+  - `6bc6ce076e6ddfa212da870cb0bc0e3f3b168411` — `test: add live limited-sync recovery fuzzing`
+  - `0564386e50ac696b1065a349f2a5070573a5caf2` — `test: harden limited sync live oracle`
+- Current working tree has an in-progress fixture rename, matching test edits, and the agent-cli task file.
 - The latest tracked recovery replay passed `51/51` sources with 57 operations, six retries, two restarts, seven degraded thread reads, zero dispatch read timeouts, 31.167 seconds internal runtime, and 33.524 seconds wall time.
 - The same logical trace previously lost `op:2` in three runs, while an independent bounded `/messages?dir=b&to=since` audit saw the source and MindRoom's callback did not.
 - Because the latest replay passed, the source-loss candidate is currently a nondeterministic hypothesis rather than an accepted new mindroom-nio bug.
@@ -94,19 +115,20 @@ Keep all work unmerged until review, CI, and user approval are complete.
 - Local task file: `.claude/TASK-1784887170-88f8.md`
 - Agent report: `.claude/REPORT.md`
 - Primary emphasis: real-Tuwunel multi-room/multi-client chaos, streaming overlap, lifecycle disruptions, exact final-state audit, latency summaries, and durable ledger attribution.
-- Current working tree contains only the agent-cli task file.
-- Current commits:
-  - `74e9f57e91975510eb41e38f47491b374b468333` — `Add composable live chaos profile with lifecycle disruptions`
-  - `0b4f554712a6d4d15c828c437c67a77d1ea5899c` — `Keep oracle reply index clean across bookkeeping reads`
-  - `68315282423bcdb72ecaeebf5e53533673bfc4d7` — `Register reply expectations at send time`
-  - `0099e73fe21513e6af8058b06320c298f999d37a` — `Never await responses suppressed by source redaction`
-  - `cdb332b763b0cb47391259154c898b8d926eb453` — `Model active-follow-up coalescing in the chaos oracle`
-  - `a4fa5a36025025a00c8faf68129a4811feb1777f` — `Settle coalesced sources from the durable turn ledger`
-  - `ad8fb814cfdf2e85fbd65a5e38407e30c925f84d` — `Honor same-sender supersede policy in chaos settlement`
-  - `4a68007c13cf0ac4dc3c18ba3a5d569bf11f4a4d` — `Never let a coalesced sibling source supersede its own turn`
-  - `78e676151a9836308a3ea084be9d78681915d42c` — `Recheck stale streams after the startup recency guard elapses`
-  - `3fc214e88ab2e9a7915ebc7d28a4ce4df764a6a4` — `Accept recovered interruptions in the final body audit`
-  - `8f16f5c6231ebc4bbc6c3707a1298b28365c9639` — `Drop replayed delivery of an in-flight-claimed source event`
+- Current working tree has in-progress live harness and test edits plus the agent-cli task file.
+- Current commits after rebasing onto `main`:
+  - `35e860eae4f1d1c67cc4a79a072f8401330d4089` — `Add composable live chaos profile with lifecycle disruptions`
+  - `11e82d07638432015bb68fdcac31466be38455b7` — `Keep oracle reply index clean across bookkeeping reads`
+  - `fb2375b14c3b7380bf9f2c802867b22dd28a6689` — `Register reply expectations at send time`
+  - `c4234f3c8a8a683725d324831f941498a1eea5bd` — `Never await responses suppressed by source redaction`
+  - `c9743e92ea6fcc62f9ae985668e57d477775e9f4` — `Model active-follow-up coalescing in the chaos oracle`
+  - `2e4b17d3f4502a543ee4257859db15102d4b2f51` — `Settle coalesced sources from the durable turn ledger`
+  - `0d97ac2858486381c51327d83ee21c5a37e4463c` — `Honor same-sender supersede policy in chaos settlement`
+  - `3096abd6815b5027acc14b65125de2771ad3bcdb` — `Never let a coalesced sibling source supersede its own turn`
+  - `7f4a38fe5bf9b2520245db37a4f3e30a665dbf02` — `Recheck stale streams after the startup recency guard elapses`
+  - `98d7acd409664dabccf7db11661824a382f0bd66` — `Accept recovered interruptions in the final body audit`
+  - `fcbcfaca43893933cac592701b26f67ffc2ca4cf` — `Drop replayed delivery of an in-flight-claimed source event`
+  - `1acaac8b58342241df7ca31c42570ac329889691` — `docs: add living fuzz campaign handoff`
 - Claude is running post-fix verification campaigns over the original failing seeds and additional seeds.
 - The branch's focused live-fuzz test suite reported 25 passed before the third product fix.
 - Commit hooks passed for the committed changes, but the complete final suite and all-files pre-commit gate are still pending.
@@ -115,7 +137,7 @@ Keep all work unmerged until review, CI, and user approval are complete.
 
 ### Finding 1: coalesced sibling falsely supersedes its own turn
 
-Status: fixed in `4a68007c13cf0ac4dc3c18ba3a5d569bf11f4a4d`, with deterministic live reproduction and focused regression.
+Status: fixed in `3096abd6815b5027acc14b65125de2771ad3bcdb`, with deterministic live reproduction and focused regression.
 
 An edit can bump a source event's visible timestamp above the coalesced turn anchor.
 The replay guard then mistakes that sibling source from the same current turn for a newer unresponded requester message.
@@ -128,7 +150,7 @@ Review risk: both full-history and degraded-cache paths must have equivalent exc
 
 ### Finding 2: fast restart permanently freezes recent interrupted streams
 
-Status: fixed in `78e676151a9836308a3ea084be9d78681915d42c`, with focused startup-maintenance regressions and live reproduction.
+Status: fixed in `7f4a38fe5bf9b2520245db37a4f3e30a665dbf02`, with focused startup-maintenance regressions and live reproduction.
 
 Startup stale-stream recovery deliberately ignores events younger than the ten-second recency guard.
 A fast restart performs all startup scans inside that guard and never revisits skipped streams.
@@ -141,7 +163,7 @@ If that lifecycle is awkward, extract the delayed recheck into an owned backgrou
 
 ### Finding 3: replayed delivery of an already in-flight source starves an innocent coalesced source
 
-Status: fixed in `8f16f5c6231ebc4bbc6c3707a1298b28365c9639`, with repeated live fingerprint and focused ingress/turn-store regressions.
+Status: fixed in `fcbcfaca43893933cac592701b26f67ffc2ca4cf`, with repeated live fingerprint and focused ingress/turn-store regressions.
 
 The same source event can re-enter ingress while an earlier delivery already owns an in-flight turn claim.
 The replayed source can then be folded into a later active-follow-up batch containing a new source.
