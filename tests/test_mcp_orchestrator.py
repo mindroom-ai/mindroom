@@ -1060,6 +1060,7 @@ async def test_delayed_replacement_start_retries_pending_room_recovery(tmp_path:
     orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path))
     config = _config_with_code_agent(tmp_path)
     orchestrator.config = config
+    orchestrator.running = True
     orchestrator._router_principal_id = "@mindroom_router:localhost"
     replacement_bot = MagicMock(spec=AgentBot)
     replacement_bot.running = False
