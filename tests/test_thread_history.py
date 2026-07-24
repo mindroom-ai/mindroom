@@ -1092,6 +1092,48 @@ class TestThreadHistory:
         ]
 
     @pytest.mark.asyncio
+    async def test_thread_resolution_ignores_edit_from_explicit_other_room(self) -> None:
+        """The authoritative room must reject an edit carrying another room ID."""
+        root_event = self._make_text_event(
+            event_id="$thread_root",
+            sender="@alice:localhost",
+            body="Root",
+            server_timestamp=1000,
+            source_content={"body": "Root"},
+        )
+        edit_event = self._make_text_event(
+            event_id="$edit",
+            sender="@alice:localhost",
+            body="* Forged",
+            server_timestamp=2000,
+            source_content={
+                "body": "* Forged",
+                "m.new_content": {"body": "Forged"},
+                "m.relates_to": {
+                    "rel_type": "m.replace",
+                    "event_id": "$thread_root",
+                },
+            },
+        )
+        edit_source = _event_source_for_cache(edit_event)
+        edit_source["room_id"] = "!other:localhost"
+
+        resolution = await _resolve_thread_history_from_event_sources_timed(
+            AsyncMock(),
+            room_id="!room:localhost",
+            thread_id="$thread_root",
+            event_sources=[
+                _event_source_for_cache(root_event),
+                edit_source,
+            ],
+            event_cache=_event_cache(),
+        )
+
+        assert [(message.event_id, message.body, message.latest_event_id) for message in resolution.messages] == [
+            ("$thread_root", "Root", "$thread_root"),
+        ]
+
+    @pytest.mark.asyncio
     async def test_thread_resolution_ignores_wrong_sender_edit_of_edit(self) -> None:
         """A wrong-sender replacement of an edit must not create or change visible content."""
         root_event = self._make_text_event(

@@ -260,6 +260,8 @@ def _bundled_replacement_candidates(event_source: Mapping[str, Any]) -> list[dic
 def _is_valid_bundled_replacement(
     original_event_source: Mapping[str, Any],
     replacement_event_source: dict[str, Any],
+    *,
+    room_id: str | None = None,
 ) -> bool:
     """Return whether a bundled replacement satisfies Matrix edit validity."""
     original = {key: value for key, value in original_event_source.items() if isinstance(key, str)}
@@ -280,6 +282,11 @@ def _is_valid_bundled_replacement(
 
     original_room_id = original.get("room_id")
     replacement_room_id = replacement_event_source.get("room_id")
+    if room_id is not None and (
+        (isinstance(original_room_id, str) and original_room_id != room_id)
+        or (isinstance(replacement_room_id, str) and replacement_room_id != room_id)
+    ):
+        return False
     if (
         isinstance(original_room_id, str)
         and isinstance(replacement_room_id, str)
@@ -307,7 +314,7 @@ async def bundled_replacement_body(
     """Return one canonical bundled replacement body using runtime-derived sender trust."""
     trusted_sender_ids = _resolved_trusted_sender_ids(config, runtime_paths, trusted_sender_ids)
     for candidate in _bundled_replacement_candidates(event_source):
-        if not _is_valid_bundled_replacement(event_source, candidate):
+        if not _is_valid_bundled_replacement(event_source, candidate, room_id=room_id):
             continue
         resolved_candidate = await resolve_event_source_content(
             candidate,
@@ -446,7 +453,12 @@ async def apply_latest_edits_to_messages(
             reverse=True,
         )
         for edit_event, edit_thread_id in ordered_candidates:
-            if edit_event.sender != existing_message.sender or "state_key" in edit_event.source:
+            edit_room_id = edit_event.source.get("room_id")
+            if (
+                edit_event.sender != existing_message.sender
+                or "state_key" in edit_event.source
+                or (room_id is not None and isinstance(edit_room_id, str) and edit_room_id != room_id)
+            ):
                 continue
             edited_body, edited_content = await extract_edit_body(
                 edit_event.source,

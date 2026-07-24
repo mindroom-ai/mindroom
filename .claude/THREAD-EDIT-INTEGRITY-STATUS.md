@@ -19,9 +19,9 @@
 
 ## Required next work
 
-- Reject an edit whose explicit room ID differs from the authoritative caller room, even when the original payload omits `room_id`.
-- Pass the caller room into bundled replacement validation and cover the missing-original-room shape.
-- Make the approval test fake use `(origin_server_ts, event_id)` ordering.
+- Full-history application now rejects an edit whose explicit room ID differs from the authoritative caller room, even when the original payload omits `room_id`.
+- Bundled replacement validation now receives the caller room and covers the missing-original-room shape.
+- The approval test fake now uses `(origin_server_ts, event_id)` ordering.
 - Run focused owning tests, relevant SQLite/PostgreSQL backend tests, full pytest, Tach, and all-file pre-commit.
 - Verify `Bas Nijholt <bas@nijho.lt>` before every commit; commit and push follow-ups without amend or force-push.
 - Refresh the PR body and all campaign evidence if behavior or validation text changes.
@@ -34,6 +34,8 @@
 - `18a863399` passed explicit Tach and all-file pre-commit.
 - Those local results remain historical evidence only; the next code commit requires new exact-head validation.
 - The real-Tuwunel gate did not run at `18a863399`.
+- The direct production-seam reproduction changed from forged output to the original body, and bundled validation changed from `True` to `False`.
+- New focused regressions plus all approval-manager tests pass: `115 passed`.
 
 ## Preserved local files
 

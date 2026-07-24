@@ -711,7 +711,7 @@ class TestResolvedMessageExtraction:
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
         "invalidity",
-        ["sender", "type", "target", "state-key", "room", "edit-of-edit"],
+        ["sender", "type", "target", "state-key", "room", "caller-room", "edit-of-edit"],
     )
     async def test_thread_root_body_preview_ignores_invalid_bundled_replacement(
         self,
@@ -761,6 +761,8 @@ class TestResolvedMessageExtraction:
         elif invalidity == "room":
             event.source["room_id"] = "!room:example.com"
             replacement["room_id"] = "!other:example.com"
+        elif invalidity == "caller-room":
+            replacement["room_id"] = "!other:example.com"
         elif invalidity == "edit-of-edit":
             original_content = event.source["content"]
             assert isinstance(original_content, dict)
@@ -779,6 +781,7 @@ class TestResolvedMessageExtraction:
             client=_make_client(),
             config=config,
             runtime_paths=runtime_paths,
+            room_id="!room:example.com" if invalidity == "caller-room" else None,
         )
 
         assert preview == "Original root"

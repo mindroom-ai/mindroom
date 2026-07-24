@@ -90,7 +90,13 @@ class FakeEventCache:
                 edits.append(event)
         if not edits:
             return None
-        return max(edits, key=lambda event: int(event.get("origin_server_ts", 0)))
+        return max(
+            edits,
+            key=lambda event: (
+                int(event.get("origin_server_ts", 0)),
+                str(event.get("event_id", "")),
+            ),
+        )
 
     async def get_recent_room_events(
         self,
