@@ -1,4 +1,4 @@
-"""Concurrent pre-model preparation for Mem0-backed agent turns."""
+"""Concurrent pre-model preparation for agent turns."""
 
 from __future__ import annotations
 
@@ -88,7 +88,18 @@ def _discard_unreturned_agent_result(
         _close_unreturned_agent(result[1], shared_scope_storage, caller_owned_agent)
 
 
-async def prepare_mem0_prompt_branches(
+def _cancel_pending_memory(
+    memory_task: asyncio.Task[MemoryPromptParts | Exception],
+    *,
+    enabled: bool,
+) -> bool:
+    if not enabled or memory_task.done():
+        return False
+    memory_task.cancel()
+    return True
+
+
+async def prepare_prompt_branches(
     *,
     prepare_memory: Callable[[], Awaitable[MemoryPromptParts]],
     build_agent: Callable[[], tuple[ResolvedRuntimeModel, Agent]],
@@ -96,8 +107,9 @@ async def prepare_mem0_prompt_branches(
     shared_scope_storage: BaseDb | None,
     pipeline_timing: DispatchPipelineTiming | None,
     caller_owned_agent: Agent | None = None,
+    cancel_memory_on_agent_failure: bool = False,
 ) -> tuple[MemoryPromptParts, ResolvedRuntimeModel, Agent]:
-    """Overlap Mem0 preparation with agent construction and join both safely."""
+    """Overlap memory preparation with agent construction and join both safely."""
 
     async def _memory_branch() -> MemoryPromptParts | Exception:
         _mark_pipeline_timing(pipeline_timing, "memory_prepare_start")
@@ -115,21 +127,29 @@ async def prepare_mem0_prompt_branches(
         lambda _future: _mark_pipeline_timing(pipeline_timing, "agent_build_ready"),
     )
 
+    memory_cancelled_for_agent_failure = False
+    memory_task: asyncio.Task[MemoryPromptParts | Exception]
+
     async def _agent_branch() -> tuple[ResolvedRuntimeModel, Agent] | Exception:
+        nonlocal memory_cancelled_for_agent_failure
         try:
             return await asyncio.shield(build_future)
         except Exception as error:
+            memory_cancelled_for_agent_failure = _cancel_pending_memory(
+                memory_task,
+                enabled=cancel_memory_on_agent_failure,
+            )
             return error
 
     try:
         async with asyncio.TaskGroup() as task_group:
-            agent_task = task_group.create_task(
-                _agent_branch(),
-                name=f"agent_prepare:{agent_name}",
-            )
             memory_task = task_group.create_task(
                 _memory_branch(),
                 name=f"memory_prepare:{agent_name}",
+            )
+            agent_task = task_group.create_task(
+                _agent_branch(),
+                name=f"agent_prepare:{agent_name}",
             )
     except BaseException:
         await _drain_unreturned_agent_build(
@@ -141,6 +161,9 @@ async def prepare_mem0_prompt_branches(
         raise
 
     agent_result = agent_task.result()
+    if memory_cancelled_for_agent_failure:
+        assert isinstance(agent_result, Exception)
+        raise agent_result
     try:
         memory_result = memory_task.result()
     except BaseException:

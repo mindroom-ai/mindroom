@@ -3568,14 +3568,15 @@ from = ["mindroom.history.summary_call"]
 
 [[interfaces]]
 expose = [
+    "agent_build_can_overlap_file_memory",
+    "build_agent_toolkit",
     "create_agent",
     "describe_agent",
     "enable_all_history_replay",
     "ensure_default_agent_workspaces",
-    "show_tool_calls_for_agent",
-    "build_agent_toolkit",
     "get_agent_toolkit_names",
     "remove_run_by_event_id",
+    "show_tool_calls_for_agent",
 ]
 from = ["mindroom.agents"]
 
