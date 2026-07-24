@@ -8,7 +8,8 @@ import threading
 from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import ANY, MagicMock, patch
+from typing import TYPE_CHECKING, cast
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 from agno.db.base import SessionType
@@ -22,6 +23,7 @@ from mindroom import constants
 from mindroom.bot import AgentBot
 from mindroom.config.main import Config
 from mindroom.conversation_state_writer import ConversationStateWriter, ConversationStateWriterDeps
+from mindroom.dispatch_handoff import PreparedTextEvent
 from mindroom.handled_turns import (
     SourceEventMetadata,
     TurnRecord,
@@ -37,9 +39,12 @@ from mindroom.history.storage import (
 from mindroom.history.types import HistoryScope, HistoryScopeState
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
-from mindroom.text_ingress_dispatch import _run_claimed_response
+from mindroom.text_ingress_dispatch import _run_claimed_response, dispatch_text_message
 from mindroom.turn_store import TurnStore, TurnStoreDeps
 from tests.conftest import TEST_PASSWORD, bind_runtime_paths, runtime_paths_for, test_runtime_paths
+
+if TYPE_CHECKING:
+    from mindroom.turn_controller import TurnController
 
 
 def _store(tmp_path: Path) -> TurnStore:
@@ -52,6 +57,69 @@ def _store(tmp_path: Path) -> TurnStore:
             tool_runtime=MagicMock(),
         ),
     )
+
+
+def test_expand_pending_turn_claim_adds_only_new_aliases(tmp_path: Path) -> None:
+    """Expansion folds newly discovered aliases into the live claim set."""
+    store = _store(tmp_path)
+    claimed_turn = TurnRecord.create(["$relay"], completed=False)
+    assert store.try_claim_turn(claimed_turn)
+    expanded_turn = replace(claimed_turn, discovery_event_ids=("$routed",))
+
+    store.expand_pending_turn_claim(claimed_turn, expanded_turn)
+
+    assert store.is_claimed_in_flight("$routed") is True
+    store.release_pending_turn_claim(expanded_turn)
+    assert store.is_claimed_in_flight("$routed") is False
+    assert store.is_claimed_in_flight("$relay") is False
+
+
+@pytest.mark.asyncio
+async def test_dispatch_expands_claim_with_prepared_discovery_aliases(tmp_path: Path) -> None:
+    """Aliases discovered during preparation join the live claim and its release scope.
+
+    The claim is acquired before preparation, but a trusted router relay only
+    learns the routed human event id while preparing. Without mid-flight
+    expansion, an alias-addressed replay passed is_claimed_in_flight while
+    the canonical relay response was live.
+    """
+    store = _store(tmp_path)
+    controller = cast("TurnController", SimpleNamespace(deps=SimpleNamespace(turn_store=store)))
+    raw_event = PreparedTextEvent(
+        sender="@user:example.org",
+        event_id="$relay",
+        body="relayed",
+        source={},
+        server_timestamp=1_000,
+    )
+    expanded_turn = replace(TurnRecord.create(["$relay"], completed=False), discovery_event_ids=("$routed",))
+    prepared = SimpleNamespace(handled_turn=expanded_turn, event=raw_event)
+    observed: dict[str, bool] = {}
+
+    async def blocked(*_args: object, **_kwargs: object) -> bool:
+        observed["routed_in_flight"] = store.is_claimed_in_flight("$routed")
+        return True
+
+    with (
+        patch(
+            "mindroom.text_ingress_dispatch._prepare_text_dispatch",
+            new=AsyncMock(return_value=prepared),
+        ),
+        patch(
+            "mindroom.text_ingress_dispatch._blocked_before_plan",
+            new=AsyncMock(side_effect=blocked),
+        ),
+    ):
+        await dispatch_text_message(
+            controller,
+            MagicMock(room_id="!room:example.org"),
+            raw_event,
+            "@user:example.org",
+        )
+
+    assert observed["routed_in_flight"] is True
+    assert store.is_claimed_in_flight("$routed") is False
+    assert store.is_claimed_in_flight("$relay") is False
 
 
 def test_try_claim_turn_subset_claims_only_unowned_sources(tmp_path: Path) -> None:

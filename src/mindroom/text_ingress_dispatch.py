@@ -121,6 +121,7 @@ async def dispatch_text_message(
         )
         if prepared is None:
             return
+        turn_claim = _expand_turn_claim_with_prepared_aliases(controller, turn_claim, prepared.handled_turn)
         timing_scope_token = timing_scope_context.set(event_timing_scope(prepared.event.event_id))
         if await _blocked_before_plan(controller, room, prepared, requester_user_id=requester_user_id):
             return
@@ -165,6 +166,24 @@ async def dispatch_text_message(
             queued_notice_reservation.cancel()
         if timing_scope_token is not None:
             timing_scope_context.reset(timing_scope_token)
+
+
+def _expand_turn_claim_with_prepared_aliases(
+    controller: TurnController,
+    turn_claim: TurnRecord,
+    prepared_turn: TurnRecord,
+) -> TurnRecord:
+    """Fold preparation-discovered identity aliases into the live claim.
+
+    A trusted router relay learns the routed human event id only while
+    preparing its prompt; expanding here keeps alias-addressed replays
+    dropped for exactly as long as this turn owns the response, and rebinding
+    the claim record makes the transfer and finally releases cover the alias.
+    """
+    if prepared_turn.indexed_event_ids == turn_claim.indexed_event_ids:
+        return turn_claim
+    controller.deps.turn_store.expand_pending_turn_claim(turn_claim, prepared_turn)
+    return prepared_turn
 
 
 def _try_claim_turn(

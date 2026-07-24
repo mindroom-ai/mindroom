@@ -223,6 +223,20 @@ class TurnStore:
         with self._pending_claim_lock:
             return event_id in self._pending_claimed_event_ids
 
+    def expand_pending_turn_claim(self, claimed_turn: TurnRecord, expanded_turn: TurnRecord) -> None:
+        """Fold identity aliases discovered during preparation into a live claim.
+
+        A trusted router relay learns the routed human event id only while
+        preparing its prompt. Without expansion, a replay addressed through
+        that alias passes is_claimed_in_flight while the canonical relay
+        response is still live.
+        """
+        new_event_ids = set(expanded_turn.indexed_event_ids) - set(claimed_turn.indexed_event_ids)
+        if not new_event_ids:
+            return
+        with self._pending_claim_lock:
+            self._pending_claimed_event_ids.update(new_event_ids)
+
     def try_claim_turn_subset(self, event_ids: Sequence[str]) -> tuple[str, ...]:
         """Atomically claim whichever of these sources no live or finished turn owns.
 
