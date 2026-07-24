@@ -46,10 +46,12 @@ class StartupMaintenanceController:
     recency_recheck_delay_seconds: float = _DEFAULT_RECENCY_RECHECK_DELAY_SECONDS
     task: asyncio.Task[None] | None = field(default=None, init=False)
     startup_cutoff_ms: int | None = field(default=None, init=False)
+    recheck_pending: bool = field(default=False, init=False)
 
     def start(self, bots: list[_StartupBot], config: Config, *, startup_cutoff_ms: int) -> None:
         """Schedule detached startup maintenance for one startup generation."""
         self.startup_cutoff_ms = startup_cutoff_ms
+        self.recheck_pending = False
         self.task = create_logged_task(
             self._run(bots, config, startup_cutoff_ms),
             name="startup_maintenance",
@@ -71,12 +73,23 @@ class StartupMaintenanceController:
         running_bots: _RunningBots,
     ) -> None:
         """Replay canceled startup maintenance after config reload completes."""
-        if self.startup_cutoff_ms is None or self.task is not None:
+        startup_cutoff_ms = self.startup_cutoff_ms
+        if startup_cutoff_ms is None or self.task is not None:
             return
         bots = running_bots()
         if not bots:
             return
-        self.start(bots, config, startup_cutoff_ms=self.startup_cutoff_ms)
+        if self.recheck_pending:
+            # Every earlier phase already completed before the cancel, and the
+            # reload itself re-syncs runtime support, so only the outstanding
+            # recency-guard recheck replays.
+            self.task = create_logged_task(
+                self._recheck_after_recency_guard(bots, config, startup_cutoff_ms),
+                name="startup_maintenance_recheck",
+                failure_message="Startup maintenance recheck task failed",
+            )
+            return
+        self.start(bots, config, startup_cutoff_ms=startup_cutoff_ms)
 
     async def _run(self, bots: list[_StartupBot], config: Config, startup_cutoff_ms: int) -> None:
         scanned_room_ids: set[str] = set()
@@ -121,6 +134,15 @@ class StartupMaintenanceController:
         )
         if runtime_support_ready:
             await self.mark_runtime_support_ready()
+        self.recheck_pending = True
+        await self._recheck_after_recency_guard(bots, config, startup_cutoff_ms)
+
+    async def _recheck_after_recency_guard(
+        self,
+        bots: list[_StartupBot],
+        config: Config,
+        startup_cutoff_ms: int,
+    ) -> None:
         # Streams interrupted moments before this startup are hidden by the
         # cleanup recency guard on the first scans; rescan every room once the
         # guard window has elapsed so a fast restart cannot freeze them forever.
@@ -130,6 +152,7 @@ class StartupMaintenanceController:
             lambda: self.recover_stale_streams(bots, config, startup_cutoff_ms, set()),
             failure_message="Recency-guard stale stream recovery recheck failed",
         )
+        self.recheck_pending = False
 
     async def _run_phase(
         self,
