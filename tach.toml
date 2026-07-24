@@ -100,8 +100,12 @@ path = "mindroom.report_access_policy"
 depends_on = []
 
 [[modules]]
-path = "mindroom.report_viewer_auth"
+path = "mindroom.email_to_matrix_mapping"
 depends_on = []
+
+[[modules]]
+path = "mindroom.report_viewer_auth"
+depends_on = ["mindroom.email_to_matrix_mapping"]
 
 # Keep memory consumers explicit so imports are enforced rather than merely
 # interface-checked.
@@ -501,6 +505,7 @@ path = "mindroom.api.auth"
 depends_on = [
     "mindroom.api.config_lifecycle",
     "mindroom.constants",
+    "mindroom.email_to_matrix_mapping",
     "mindroom.tool_system.dependencies",
 ]
 

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Protocol
 
+from mindroom.email_to_matrix_mapping import email_to_matrix_template_error
+
 
 class _RuntimeEnvironment(Protocol):
     def env_flag(self, name: str, *, default: bool = False) -> bool: ...
@@ -31,20 +33,26 @@ def report_viewer_auth_configuration_error(runtime_paths: _RuntimeEnvironment) -
         )
         if missing_setting is not None:
             error = f"{missing_setting} is not set"
-        elif not (
-            _env_text(runtime_paths, "MINDROOM_TRUSTED_UPSTREAM_JWT_MATRIX_USER_ID_CLAIM")
-            or _env_text(runtime_paths, "MINDROOM_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE")
-        ):
-            error = "strict trusted upstream auth has no verified Matrix identity claim or email mapping"
-    else:
+        elif not _env_text(runtime_paths, "MINDROOM_TRUSTED_UPSTREAM_JWT_MATRIX_USER_ID_CLAIM"):
+            email_template = _env_text(
+                runtime_paths,
+                "MINDROOM_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE",
+            )
+            if email_template is None:
+                error = "strict trusted upstream auth has no verified Matrix identity claim or email mapping"
+            else:
+                error = email_to_matrix_template_error(email_template)
+    elif not _env_text(runtime_paths, "MINDROOM_TRUSTED_UPSTREAM_MATRIX_USER_ID_HEADER"):
         email_template = _env_text(
             runtime_paths,
             "MINDROOM_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE",
         )
-        if email_template and not _env_text(runtime_paths, "MINDROOM_TRUSTED_UPSTREAM_EMAIL_HEADER"):
-            error = "MINDROOM_TRUSTED_UPSTREAM_EMAIL_HEADER is required by the email-to-Matrix mapping"
-        elif not (_env_text(runtime_paths, "MINDROOM_TRUSTED_UPSTREAM_MATRIX_USER_ID_HEADER") or email_template):
+        if email_template is None:
             error = "trusted upstream auth has no Matrix identity header or email mapping"
+        else:
+            error = email_to_matrix_template_error(email_template)
+            if error is None and not _env_text(runtime_paths, "MINDROOM_TRUSTED_UPSTREAM_EMAIL_HEADER"):
+                error = "MINDROOM_TRUSTED_UPSTREAM_EMAIL_HEADER is required by the email-to-Matrix mapping"
     return error
 
 

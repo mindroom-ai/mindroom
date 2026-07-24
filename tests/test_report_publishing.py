@@ -80,6 +80,7 @@ def _make_context(
     public_url: str = "https://acme.mindroom.chat",
     agent_memory_backend: Literal["file"] | None = None,
     trusted_auth: bool = False,
+    trusted_auth_env: dict[str, str] | None = None,
     report_publishing: ReportPublishingConfig | None = None,
 ) -> ToolRuntimeContext:
     runtime_paths = test_runtime_paths(tmp_path)
@@ -92,7 +93,8 @@ def _make_context(
             **dict(runtime_paths.process_env),
             "MINDROOM_PUBLIC_URL": public_url,
             **(
-                {
+                trusted_auth_env
+                or {
                     "MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED": "true",
                     "MINDROOM_TRUSTED_UPSTREAM_USER_ID_HEADER": "X-Trusted-User",
                     "MINDROOM_TRUSTED_UPSTREAM_MATRIX_USER_ID_HEADER": "X-Trusted-Matrix-User",
@@ -790,6 +792,34 @@ def test_report_publishing_tool_rejects_origin_room_without_browser_auth(tmp_pat
 
     assert rejected["status"] == "error"
     assert "trusted browser authentication" in rejected["message"]
+
+
+def test_report_publishing_tool_rejects_origin_room_with_malformed_email_mapping(tmp_path: Path) -> None:
+    """Protected creation should fail before copying when its Matrix mapping is invalid."""
+    report_tool = ReportPublishingTools()
+    context = _make_context(
+        tmp_path,
+        trusted_auth=True,
+        trusted_auth_env={
+            "MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED": "true",
+            "MINDROOM_TRUSTED_UPSTREAM_USER_ID_HEADER": "X-Trusted-User",
+            "MINDROOM_TRUSTED_UPSTREAM_EMAIL_HEADER": "X-Trusted-Email",
+            "MINDROOM_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE": "@static:example.org",
+        },
+    )
+
+    with tool_runtime_context(context):
+        rejected = _tool_payload(
+            report_tool.publish_report(
+                source_type="static_site",
+                source={"path": "missing.html", "title": "Protected"},
+                confirm_public=False,
+                access_policy="origin_room",
+            ),
+        )
+
+    assert rejected["status"] == "error"
+    assert "exactly one {localpart} placeholder" in rejected["message"]
 
 
 def test_report_publishing_tool_rejects_unknown_policy_and_publisher(tmp_path: Path) -> None:

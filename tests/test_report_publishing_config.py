@@ -102,3 +102,35 @@ def test_origin_room_default_accepts_trusted_browser_auth_runtime(tmp_path) -> N
     )
 
     assert config.report_publishing.default_access_policy is ReportAccessPolicy.ORIGIN_ROOM
+
+
+@pytest.mark.parametrize(
+    "template",
+    ["@alice:example.org", "@{localpart}-{localpart}:example.org"],
+)
+def test_origin_room_default_rejects_malformed_email_mapping(tmp_path, template: str) -> None:  # noqa: ANN001
+    """Protected defaults should reject mappings that runtime auth cannot use."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    trusted_runtime_paths = runtime_paths.__class__(
+        config_path=runtime_paths.config_path,
+        config_dir=runtime_paths.config_dir,
+        env_path=runtime_paths.env_path,
+        storage_root=runtime_paths.storage_root,
+        process_env={
+            **dict(runtime_paths.process_env),
+            "MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED": "true",
+            "MINDROOM_TRUSTED_UPSTREAM_USER_ID_HEADER": "X-Trusted-User",
+            "MINDROOM_TRUSTED_UPSTREAM_EMAIL_HEADER": "X-Trusted-Email",
+            "MINDROOM_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE": template,
+        },
+        env_file_values=runtime_paths.env_file_values,
+    )
+
+    with pytest.raises(ValueError, match=r"exactly one \{localpart\} placeholder"):
+        Config.validate_with_runtime(
+            {
+                **_base_config(),
+                "report_publishing": {"default_access_policy": "origin_room"},
+            },
+            trusted_runtime_paths,
+        )

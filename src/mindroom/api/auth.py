@@ -20,6 +20,7 @@ from mindroom.api import config_lifecycle
 from mindroom.api.config_lifecycle import ApiSnapshot
 from mindroom.api.config_lifecycle import request_snapshot as request_api_snapshot
 from mindroom.api.config_lifecycle import store_request_snapshot as store_request_api_snapshot
+from mindroom.email_to_matrix_mapping import email_to_matrix_template_error
 from mindroom.matrix.identity import try_parse_historical_matrix_user_id
 from mindroom.tool_system.dependencies import auto_install_enabled, auto_install_optional_extra_for_import_retry
 
@@ -300,11 +301,9 @@ def _validated_trusted_upstream_email_to_matrix_template(
                 "Trusted upstream email-to-Matrix template is set but MINDROOM_TRUSTED_UPSTREAM_EMAIL_HEADER is not set"
             ),
         )
-    if template.count("{localpart}") != 1:
-        raise HTTPException(
-            status_code=500,
-            detail=("Trusted upstream email-to-Matrix template must contain exactly one {localpart} placeholder"),
-        )
+    template_error = email_to_matrix_template_error(template)
+    if template_error is not None:
+        raise HTTPException(status_code=500, detail=template_error)
     return template
 
 
