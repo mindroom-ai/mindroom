@@ -16,6 +16,7 @@ from mindroom.matrix.cache import ThreadCacheState
 from mindroom.matrix.client_thread_history import fetch_thread_history
 from mindroom.matrix.thread_resolution_reuse import (
     ThreadResolutionReuseCache,
+    ThreadRevision,
     build_thread_resolution_snapshot,
     reusable_event_source_suffix,
 )
@@ -193,12 +194,14 @@ def _guard_suffix(
         suffix,
         trusted_sender_ids=frozenset(),
         membership_epoch=EPOCH,
-        event_count=snapshot.event_count + len(suffix),
-        max_write_seq=snapshot.max_write_seq + len(suffix),
-        max_thread_write_seq=snapshot.max_thread_write_seq + len(suffix),
-        max_origin_server_ts=max(
-            snapshot.max_origin_server_ts,
-            *(int(row["origin_server_ts"]) for row in suffix),
+        revision=ThreadRevision(
+            event_count=snapshot.revision.event_count + len(suffix),
+            max_write_seq=snapshot.revision.max_write_seq + len(suffix),
+            max_thread_write_seq=snapshot.revision.max_thread_write_seq + len(suffix),
+            max_origin_server_ts=max(
+                snapshot.revision.max_origin_server_ts,
+                *(int(row["origin_server_ts"]) for row in suffix),
+            ),
         ),
     )
 
@@ -420,7 +423,7 @@ class TestSnapshotReuse:
             "_resolve_thread_history_from_event_sources_timed",
             AsyncMock(side_effect=ValueError("corrupt cached payload")),
         ):
-            messages, _sidecar_ms, kind = await matrix_client_module._resolve_cached_thread_history(
+            messages, _sidecar_ms = await matrix_client_module._resolve_cached_thread_history(
                 AsyncMock(),
                 room_id=ROOM,
                 thread_id=THREAD,
@@ -444,7 +447,6 @@ class TestSnapshotReuse:
             )
 
         assert messages is None
-        assert kind == "full"
         assert reuse.get(ROOM, THREAD) is None
         event_cache.invalidate_thread.assert_awaited_with(ROOM, THREAD)
 
@@ -588,10 +590,12 @@ class TestSuffixSafetyGuards:
             related_event_id_by_event_id={},
             trusted_sender_ids=frozenset(),
             membership_epoch=EPOCH,
-            event_count=0,
-            max_write_seq=0,
-            max_thread_write_seq=0,
-            max_origin_server_ts=0,
+            revision=ThreadRevision(
+                event_count=0,
+                max_write_seq=0,
+                max_thread_write_seq=0,
+                max_origin_server_ts=0,
+            ),
             sidecar_texts={},
         )
         missing_id = {"origin_server_ts": 1000, "type": "m.room.message", "content": {}}
@@ -611,10 +615,12 @@ class TestReuseCacheBounds:
             related_event_id_by_event_id={},
             trusted_sender_ids=frozenset(),
             membership_epoch=EPOCH,
-            event_count=1,
-            max_write_seq=1,
-            max_thread_write_seq=1,
-            max_origin_server_ts=1,
+            revision=ThreadRevision(
+                event_count=1,
+                max_write_seq=1,
+                max_thread_write_seq=1,
+                max_origin_server_ts=1,
+            ),
             sidecar_texts={},
         )
 

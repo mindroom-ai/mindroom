@@ -105,6 +105,7 @@ from mindroom.matrix.thread_projection import (
 from mindroom.matrix.thread_resolution_reuse import (
     ThreadResolutionReuseCache,
     ThreadResolutionSnapshot,
+    ThreadRevision,
     build_thread_resolution_snapshot,
     reusable_event_source_suffix,
     snapshot_matches_revision,
@@ -529,7 +530,7 @@ async def _load_stale_cached_thread_history(
         return None
 
     resolution_started = time.perf_counter()
-    resolved_history, sidecar_hydration_ms, _reuse_kind = await _resolve_cached_thread_history(
+    resolved_history, sidecar_hydration_ms = await _resolve_cached_thread_history(
         client,
         room_id=room_id,
         thread_id=thread_id,
@@ -577,7 +578,7 @@ async def _resolve_cached_thread_history(
     trusted_sender_ids: Collection[str] = (),
     resolution_reuse: ThreadResolutionReuseCache | None = None,
     cache_state: ThreadCacheState | None = None,
-) -> tuple[list[ResolvedVisibleMessage] | None, float, str]:
+) -> tuple[list[ResolvedVisibleMessage] | None, float]:
     """Resolve cached thread history or invalidate the cache entry on corruption."""
     try:
         return await _resolve_cached_thread_history_with_reuse(
@@ -602,7 +603,7 @@ async def _resolve_cached_thread_history(
         if resolution_reuse is not None:
             resolution_reuse.discard(room_id, thread_id)
         await _invalidate_thread_cache_entry(event_cache, room_id=room_id, thread_id=thread_id)
-        return None, 0.0, "full"
+        return None, 0.0
 
 
 async def _resolve_cached_thread_history_with_reuse(
@@ -617,12 +618,8 @@ async def _resolve_cached_thread_history_with_reuse(
     trusted_sender_ids: Collection[str],
     resolution_reuse: ThreadResolutionReuseCache | None,
     cache_state: ThreadCacheState | None,
-) -> tuple[list[ResolvedVisibleMessage], float, str]:
+) -> tuple[list[ResolvedVisibleMessage], float]:
     """Fully resolve one durable-cache read and retain its reusable projection."""
-    # Reuse only applies to fully hydrated reads: snapshot-mode bodies are intentionally degraded
-    # and must never be frozen into (or served from) a reusable resolution.
-    reuse_cache = resolution_reuse if hydrate_sidecars else None
-    snapshot_trusted_sender_ids = frozenset(trusted_sender_ids)
     resolved = await _resolve_thread_history_from_event_sources_timed(
         client,
         room_id=room_id,
@@ -633,12 +630,9 @@ async def _resolve_cached_thread_history_with_reuse(
         expected_membership_epoch=expected_membership_epoch,
         trusted_sender_ids=trusted_sender_ids,
     )
-    if reuse_cache is not None and resolved.hydration_complete and _thread_cache_state_has_revision(cache_state):
-        assert cache_state is not None
-        assert cache_state.max_write_seq is not None
-        assert cache_state.max_thread_write_seq is not None
-        assert cache_state.max_origin_server_ts is not None
-        reuse_cache.store(
+    revision = _thread_cache_state_revision(cache_state)
+    if resolution_reuse is not None and resolved.hydration_complete and revision is not None:
+        resolution_reuse.store(
             room_id,
             thread_id,
             build_thread_resolution_snapshot(
@@ -646,16 +640,13 @@ async def _resolve_cached_thread_history_with_reuse(
                 messages=resolved.messages,
                 input_order_by_event_id=resolved.input_order_by_event_id,
                 related_event_id_by_event_id=resolved.related_event_id_by_event_id,
-                trusted_sender_ids=snapshot_trusted_sender_ids,
+                trusted_sender_ids=frozenset(trusted_sender_ids),
                 membership_epoch=expected_membership_epoch,
-                event_count=cache_state.event_count,
-                max_write_seq=cache_state.max_write_seq,
-                max_thread_write_seq=cache_state.max_thread_write_seq,
-                max_origin_server_ts=cache_state.max_origin_server_ts,
+                revision=revision,
                 sidecar_texts=resolved.sidecar_texts,
             ),
         )
-    return resolved.messages, resolved.sidecar_hydration_ms, "full"
+    return resolved.messages, resolved.sidecar_hydration_ms
 
 
 async def _resolve_reused_thread_suffix(
@@ -666,7 +657,7 @@ async def _resolve_reused_thread_suffix(
     event_cache: ConversationEventCache,
     snapshot: ThreadResolutionSnapshot,
     suffix: list[dict[str, Any]],
-    cache_state: ThreadCacheState,
+    revision: ThreadRevision,
     expected_membership_epoch: int,
     trusted_sender_ids: Collection[str],
     resolution_reuse: ThreadResolutionReuseCache,
@@ -684,10 +675,7 @@ async def _resolve_reused_thread_suffix(
     )
     if not suffix_resolution.hydration_complete:
         return None
-    assert cache_state.max_write_seq is not None
-    assert cache_state.max_thread_write_seq is not None
-    assert cache_state.max_origin_server_ts is not None
-    prefix_length = snapshot.event_count
+    prefix_length = snapshot.revision.event_count
     input_order_by_event_id = dict(snapshot.input_order_by_event_id)
     for event_id, suffix_index in suffix_resolution.input_order_by_event_id.items():
         input_order_by_event_id[event_id] = prefix_length + suffix_index
@@ -710,10 +698,7 @@ async def _resolve_reused_thread_suffix(
             related_event_id_by_event_id=related_event_id_by_event_id,
             trusted_sender_ids=snapshot.trusted_sender_ids,
             membership_epoch=expected_membership_epoch,
-            event_count=cache_state.event_count,
-            max_write_seq=cache_state.max_write_seq,
-            max_thread_write_seq=cache_state.max_thread_write_seq,
-            max_origin_server_ts=cache_state.max_origin_server_ts,
+            revision=revision,
             sidecar_texts={**snapshot.sidecar_texts, **suffix_resolution.sidecar_texts},
             prior_known_event_ids=snapshot.known_event_ids,
         ),
@@ -745,14 +730,21 @@ def _cache_reject_diagnostics(
     return diagnostics
 
 
-def _thread_cache_state_has_revision(cache_state: ThreadCacheState | None) -> bool:
-    """Return whether durable state can identify one non-empty thread snapshot."""
-    return (
-        cache_state is not None
-        and cache_state.event_count > 0
-        and cache_state.max_write_seq is not None
-        and cache_state.max_thread_write_seq is not None
-        and cache_state.max_origin_server_ts is not None
+def _thread_cache_state_revision(cache_state: ThreadCacheState | None) -> ThreadRevision | None:
+    """Return the durable revision when state identifies one non-empty thread snapshot."""
+    if (
+        cache_state is None
+        or cache_state.event_count <= 0
+        or cache_state.max_write_seq is None
+        or cache_state.max_thread_write_seq is None
+        or cache_state.max_origin_server_ts is None
+    ):
+        return None
+    return ThreadRevision(
+        event_count=cache_state.event_count,
+        max_write_seq=cache_state.max_write_seq,
+        max_thread_write_seq=cache_state.max_thread_write_seq,
+        max_origin_server_ts=cache_state.max_origin_server_ts,
     )
 
 
@@ -768,26 +760,18 @@ async def _try_reuse_cached_thread_resolution(
     resolution_reuse: ThreadResolutionReuseCache | None,
 ) -> tuple[list[ResolvedVisibleMessage], float, str] | None:
     """Reuse an exact projection or merge a complete append-only durable delta."""
-    snapshot = (
-        None
-        if resolution_reuse is None or not _thread_cache_state_has_revision(cache_state)
-        else resolution_reuse.get(room_id, thread_id)
-    )
-    if snapshot is None:
+    if (
+        resolution_reuse is None
+        or (revision := _thread_cache_state_revision(cache_state)) is None
+        or (snapshot := resolution_reuse.get(room_id, thread_id)) is None
+    ):
         return None
-    assert resolution_reuse is not None
-    assert cache_state is not None
-    assert cache_state.max_write_seq is not None
-    assert cache_state.max_thread_write_seq is not None
-    assert cache_state.max_origin_server_ts is not None
     snapshot_trusted_sender_ids = frozenset(trusted_sender_ids)
     if snapshot_matches_revision(
         snapshot,
         trusted_sender_ids=snapshot_trusted_sender_ids,
         membership_epoch=membership_epoch,
-        event_count=cache_state.event_count,
-        max_write_seq=cache_state.max_write_seq,
-        max_thread_write_seq=cache_state.max_thread_write_seq,
+        revision=revision,
     ):
         if not await _snapshot_sidecars_unchanged(
             event_cache,
@@ -801,7 +785,7 @@ async def _try_reuse_cached_thread_resolution(
     if (
         snapshot.trusted_sender_ids != snapshot_trusted_sender_ids
         or snapshot.membership_epoch != membership_epoch
-        or cache_state.event_count <= snapshot.event_count
+        or revision.event_count <= snapshot.revision.event_count
     ):
         return None
     if not await _snapshot_sidecars_unchanged(
@@ -817,7 +801,7 @@ async def _try_reuse_cached_thread_resolution(
         room_id=room_id,
         thread_id=thread_id,
         event_cache=event_cache,
-        cache_state=cache_state,
+        revision=revision,
         membership_epoch=membership_epoch,
         trusted_sender_ids=trusted_sender_ids,
         resolution_reuse=resolution_reuse,
@@ -860,7 +844,7 @@ async def _try_merge_cached_thread_delta(
     room_id: str,
     thread_id: str,
     event_cache: ConversationEventCache,
-    cache_state: ThreadCacheState,
+    revision: ThreadRevision,
     membership_epoch: int,
     trusted_sender_ids: Collection[str],
     resolution_reuse: ThreadResolutionReuseCache,
@@ -868,22 +852,19 @@ async def _try_merge_cached_thread_delta(
     snapshot_trusted_sender_ids: frozenset[str],
 ) -> tuple[list[ResolvedVisibleMessage], float, str] | None:
     """Load and merge one complete append-only durable delta."""
-    assert cache_state.max_write_seq is not None
-    assert cache_state.max_thread_write_seq is not None
-    assert cache_state.max_origin_server_ts is not None
     if (
-        cache_state.max_write_seq <= snapshot.max_write_seq
-        and cache_state.max_thread_write_seq <= snapshot.max_thread_write_seq
+        revision.max_write_seq <= snapshot.revision.max_write_seq
+        and revision.max_thread_write_seq <= snapshot.revision.max_thread_write_seq
     ):
         return None
     try:
         candidate_suffix = await event_cache.get_thread_events_written_between(
             room_id,
             thread_id,
-            after_write_seq=snapshot.max_write_seq,
-            through_write_seq=cache_state.max_write_seq,
-            after_thread_write_seq=snapshot.max_thread_write_seq,
-            through_thread_write_seq=cache_state.max_thread_write_seq,
+            after_write_seq=snapshot.revision.max_write_seq,
+            through_write_seq=revision.max_write_seq,
+            after_thread_write_seq=snapshot.revision.max_thread_write_seq,
+            through_thread_write_seq=revision.max_thread_write_seq,
         )
     except Exception as exc:
         logger.debug(
@@ -898,10 +879,7 @@ async def _try_merge_cached_thread_delta(
         candidate_suffix,
         trusted_sender_ids=snapshot_trusted_sender_ids,
         membership_epoch=membership_epoch,
-        event_count=cache_state.event_count,
-        max_write_seq=cache_state.max_write_seq,
-        max_thread_write_seq=cache_state.max_thread_write_seq,
-        max_origin_server_ts=cache_state.max_origin_server_ts,
+        revision=revision,
     )
     if suffix is None:
         return None
@@ -912,7 +890,7 @@ async def _try_merge_cached_thread_delta(
         event_cache=event_cache,
         snapshot=snapshot,
         suffix=suffix,
-        cache_state=cache_state,
+        revision=revision,
         expected_membership_epoch=membership_epoch,
         trusted_sender_ids=trusted_sender_ids,
         resolution_reuse=resolution_reuse,
@@ -946,11 +924,13 @@ async def _load_cached_thread_history_if_usable(
         )
         return None, cache_reject_diagnostics
 
-    cache_read_started = time.perf_counter()
     resolution_started = time.perf_counter()
+    cache_read_ms = 0.0
     resolved_history: list[ResolvedVisibleMessage] | None = None
     sidecar_hydration_ms = 0.0
     resolution_reuse_kind = "full"
+    # Reuse only applies to fully hydrated reads: snapshot-mode bodies are intentionally degraded
+    # and must never be frozen into (or served from) a reusable resolution.
     reuse_cache = resolution_reuse if hydrate_sidecars else None
     reused = await _try_reuse_cached_thread_resolution(
         client,
@@ -966,7 +946,9 @@ async def _load_cached_thread_history_if_usable(
         resolved_history, sidecar_hydration_ms, resolution_reuse_kind = reused
 
     if resolved_history is None:
+        cache_read_started = time.perf_counter()
         cached_event_sources = await event_cache.get_thread_events(room_id, thread_id)
+        cache_read_ms = elapsed_ms_since(cache_read_started, clock=time.perf_counter)
         if cached_event_sources is None:
             cache_reject_diagnostics: dict[str, str | int | float | bool] = {
                 THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC: "cache_rows_missing",
@@ -986,7 +968,7 @@ async def _load_cached_thread_history_if_usable(
             )
             return None, payload_reject_diagnostics
 
-        resolved_history, sidecar_hydration_ms, resolution_reuse_kind = await _resolve_cached_thread_history(
+        resolved_history, sidecar_hydration_ms = await _resolve_cached_thread_history(
             client,
             room_id=room_id,
             thread_id=thread_id,
@@ -995,7 +977,7 @@ async def _load_cached_thread_history_if_usable(
             hydrate_sidecars=hydrate_sidecars,
             expected_membership_epoch=cached_membership_epoch,
             trusted_sender_ids=trusted_sender_ids,
-            resolution_reuse=resolution_reuse,
+            resolution_reuse=reuse_cache,
             cache_state=cache_state,
         )
     if resolved_history is None:
@@ -1007,7 +989,7 @@ async def _load_cached_thread_history_if_usable(
         resolved_history,
         is_full_history=hydrate_sidecars,
         diagnostics={
-            "cache_read_ms": elapsed_ms_since(cache_read_started, clock=time.perf_counter),
+            "cache_read_ms": cache_read_ms,
             "resolution_ms": elapsed_ms_since(resolution_started, clock=time.perf_counter),
             "sidecar_hydration_ms": sidecar_hydration_ms,
             "thread_resolution_reuse": resolution_reuse_kind,

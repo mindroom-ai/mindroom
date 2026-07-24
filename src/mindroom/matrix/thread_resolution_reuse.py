@@ -34,6 +34,16 @@ if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
 
 
+@dataclass(frozen=True, slots=True)
+class ThreadRevision:
+    """Durable revision identity of one non-empty thread's raw rows."""
+
+    event_count: int
+    max_write_seq: int
+    max_thread_write_seq: int
+    max_origin_server_ts: int
+
+
 @dataclass(slots=True)
 class ThreadResolutionSnapshot:
     """One complete thread resolution keyed by its durable row revision."""
@@ -44,10 +54,7 @@ class ThreadResolutionSnapshot:
     known_event_ids: frozenset[str]
     trusted_sender_ids: frozenset[str]
     membership_epoch: int
-    event_count: int
-    max_write_seq: int
-    max_thread_write_seq: int
-    max_origin_server_ts: int
+    revision: ThreadRevision
     sidecar_texts: dict[tuple[str, str], str]
 
     def cloned_messages(self) -> list[ResolvedVisibleMessage]:
@@ -77,10 +84,7 @@ def build_thread_resolution_snapshot(
     related_event_id_by_event_id: dict[str, str],
     trusted_sender_ids: frozenset[str],
     membership_epoch: int,
-    event_count: int,
-    max_write_seq: int,
-    max_thread_write_seq: int,
-    max_origin_server_ts: int,
+    revision: ThreadRevision,
     sidecar_texts: Mapping[tuple[str, str], str],
     prior_known_event_ids: frozenset[str] = frozenset(),
 ) -> ThreadResolutionSnapshot:
@@ -104,10 +108,7 @@ def build_thread_resolution_snapshot(
         known_event_ids=frozenset(known_event_ids),
         trusted_sender_ids=trusted_sender_ids,
         membership_epoch=membership_epoch,
-        event_count=event_count,
-        max_write_seq=max_write_seq,
-        max_thread_write_seq=max_thread_write_seq,
-        max_origin_server_ts=max_origin_server_ts,
+        revision=revision,
         sidecar_texts=dict(sidecar_texts),
     )
 
@@ -142,25 +143,25 @@ def reusable_event_source_suffix(
     *,
     trusted_sender_ids: frozenset[str],
     membership_epoch: int,
-    event_count: int,
-    max_write_seq: int,
-    max_thread_write_seq: int,
-    max_origin_server_ts: int,
+    revision: ThreadRevision,
 ) -> list[dict[str, Any]] | None:
     """Return a complete append-only delta when it is safe to merge, else None."""
     unsafe_timestamp = any(
         not isinstance(origin_server_ts := event_source.get("origin_server_ts"), int)
         or isinstance(origin_server_ts, bool)
-        or origin_server_ts < snapshot.max_origin_server_ts
+        or origin_server_ts < snapshot.revision.max_origin_server_ts
         for event_source in suffix
     )
     if (
         snapshot.trusted_sender_ids != trusted_sender_ids
         or snapshot.membership_epoch != membership_epoch
-        or event_count <= snapshot.event_count
-        or (max_write_seq <= snapshot.max_write_seq and max_thread_write_seq <= snapshot.max_thread_write_seq)
-        or len(suffix) != event_count - snapshot.event_count
-        or max_origin_server_ts < snapshot.max_origin_server_ts
+        or revision.event_count <= snapshot.revision.event_count
+        or (
+            revision.max_write_seq <= snapshot.revision.max_write_seq
+            and revision.max_thread_write_seq <= snapshot.revision.max_thread_write_seq
+        )
+        or len(suffix) != revision.event_count - snapshot.revision.event_count
+        or revision.max_origin_server_ts < snapshot.revision.max_origin_server_ts
         or unsafe_timestamp
     ):
         return None
@@ -175,17 +176,13 @@ def snapshot_matches_revision(
     *,
     trusted_sender_ids: frozenset[str],
     membership_epoch: int,
-    event_count: int,
-    max_write_seq: int,
-    max_thread_write_seq: int,
+    revision: ThreadRevision,
 ) -> bool:
     """Return whether durable state still names the snapshot's exact raw rows."""
     return (
         snapshot.trusted_sender_ids == trusted_sender_ids
         and snapshot.membership_epoch == membership_epoch
-        and snapshot.event_count == event_count
-        and snapshot.max_write_seq == max_write_seq
-        and snapshot.max_thread_write_seq == max_thread_write_seq
+        and snapshot.revision == revision
     )
 
 
@@ -236,6 +233,7 @@ def _bundled_edit_target_ids(event_source: Mapping[str, Any]) -> Iterable[str]:
 __all__ = [
     "ThreadResolutionReuseCache",
     "ThreadResolutionSnapshot",
+    "ThreadRevision",
     "build_thread_resolution_snapshot",
     "clone_resolved_visible_message",
     "reusable_event_source_suffix",
