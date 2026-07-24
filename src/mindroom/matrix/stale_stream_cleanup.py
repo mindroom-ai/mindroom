@@ -14,6 +14,7 @@ from mindroom.authorization import get_effective_sender_id_for_reply_permissions
 from mindroom.constants import (
     ORIGINAL_SENDER_KEY,
     SOURCE_KIND_KEY,
+    STREAM_GENERATION_KEY,
     STREAM_STATUS_CANCELLED,
     STREAM_STATUS_COMPLETED,
     STREAM_STATUS_ERROR,
@@ -72,12 +73,6 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _ROOM_HISTORY_PAGE_SIZE = 100
-# Startup cleanup receives a pre-sync cutoff and ignores messages at or after
-# that timestamp, so post-sync cleanup cannot clobber streams created by this
-# process. The remaining race is another concurrently running instance cleaning
-# up a message during a long provider/tool stall where no new chunks arrive for
-# a while, so keep a generous recency guard here.
-_STALE_STREAM_RECENCY_GUARD_MS = 10_000
 # Restart cleanup should only edit active-looking messages from the current
 # outage window. Explicit terminal interrupted notes may still be auto-resumed
 # later because they are already user-visible interrupted outcomes.
@@ -112,6 +107,10 @@ class StaleStreamCleanupActor:
 
     client: nio.AsyncClient
     conversation_cache: ConversationCacheProtocol | None
+    # Current runtime generation of the owning bot instance. Candidates whose
+    # latest content carries this stamp are live current-generation output and
+    # must never be repaired, regardless of clocks or live-task snapshots.
+    runtime_generation: str | None = None
 
 
 @dataclass(frozen=True)
@@ -151,7 +150,6 @@ class _ScannedRoomMessageStates:
 class _CleanupScanPolicy:
     """History scan bounds for one startup stale-stream cleanup run."""
 
-    startup_cutoff_ms: int | None
     collect_terminal_interrupted_for_resume: bool
     terminal_interrupted_only: bool
     max_extra_old_pages: int
@@ -160,13 +158,11 @@ class _CleanupScanPolicy:
 def _cleanup_scan_policy(
     config: Config,
     *,
-    startup_cutoff_ms: int | None,
     terminal_interrupted_only: bool = False,
 ) -> _CleanupScanPolicy:
     """Return history scan policy for one stale-stream cleanup run."""
     collect_terminal_interrupted_for_resume = config.defaults.auto_resume_after_restart
     return _CleanupScanPolicy(
-        startup_cutoff_ms=startup_cutoff_ms,
         collect_terminal_interrupted_for_resume=collect_terminal_interrupted_for_resume,
         terminal_interrupted_only=terminal_interrupted_only,
         max_extra_old_pages=(_MAX_EXTRA_INTERRUPTED_HISTORY_PAGES if collect_terminal_interrupted_for_resume else 0),
@@ -202,7 +198,6 @@ async def recover_stale_streaming_messages(
     resume_conversation_cache: ConversationCacheProtocol | None,
     config: Config,
     runtime_paths: RuntimePaths,
-    startup_cutoff_ms: int | None,
     scanned_room_ids: set[str],
     target_room_ids: set[str] | None = None,
     room_concurrency: int = _RECOVERY_ROOM_CONCURRENCY,
@@ -237,7 +232,6 @@ async def recover_stale_streaming_messages(
                     bot_user_ids=all_bot_user_ids,
                     config=config,
                     runtime_paths=runtime_paths,
-                    startup_cutoff_ms=startup_cutoff_ms,
                     terminal_interrupted_only=target_room_ids is not None,
                 )
             except Exception:
@@ -496,7 +490,6 @@ async def _cleanup_stale_streaming_room(
     bot_user_ids: set[str],
     config: Config,
     runtime_paths: RuntimePaths,
-    startup_cutoff_ms: int | None = None,
     terminal_interrupted_only: bool = False,
 ) -> tuple[int, list[_InterruptedThread]]:
     """Scan one room once and let each bot account repair its own messages."""
@@ -505,7 +498,6 @@ async def _cleanup_stale_streaming_room(
     current_time_ms = int(time.time() * 1000)
     scan_policy = _cleanup_scan_policy(
         config,
-        startup_cutoff_ms=startup_cutoff_ms,
         terminal_interrupted_only=terminal_interrupted_only,
     )
     scanned_state = await _scan_room_message_states(
@@ -584,6 +576,8 @@ async def _process_stale_room_candidate(
     ):
         return False, None
     if scan_policy.terminal_interrupted_only and not _has_resumable_interrupted_note(state):
+        return False, None
+    if _is_current_generation_stream(state, actor=actor):
         return False, None
     if _is_cleanup_candidate(state):
         return await _cleanup_candidate_message(
@@ -1752,6 +1746,21 @@ def _interrupted_thread_from_terminal_state(
     )
 
 
+def _is_current_generation_stream(state: _MessageState, *, actor: StaleStreamCleanupActor) -> bool:
+    """Return whether the scanned stamp proves this runtime owns the stream.
+
+    The generation stamp read from the same content snapshot is the clock-free
+    source of truth under the single-runtime-per-Matrix-principal invariant.
+    Even when the live response finalizes between scan and this check, the
+    stamped snapshot still names the current generation, so a current-run
+    stream is never repaired from history regardless of homeserver clock skew.
+    """
+    if actor.runtime_generation is None:
+        return False
+    latest_generation = (state.latest_content or {}).get(STREAM_GENERATION_KEY)
+    return latest_generation == actor.runtime_generation
+
+
 def _is_cleanup_candidate(state: _MessageState) -> bool:
     """Return whether the latest visible state represents stale in-progress output."""
     assert state.latest_body is not None
@@ -1768,31 +1777,15 @@ def _should_skip_for_startup_cleanup_window(
     now_ms: int,
     scan_policy: _CleanupScanPolicy,
 ) -> bool:
-    """Return whether startup cleanup should ignore one candidate by age."""
-    timestamp_ms = state.latest_timestamp
-    if _is_at_or_after_startup_cutoff(timestamp_ms, startup_cutoff_ms=scan_policy.startup_cutoff_ms):
-        return True
-    # A terminal interruption cannot still be receiving chunks. Targeted
-    # replacement recovery passes no cutoff because local and Matrix clocks
-    # are not comparable.
-    if _is_recent_timestamp(timestamp_ms, now_ms=now_ms) and not (
-        scan_policy.collect_terminal_interrupted_for_resume and _has_resumable_interrupted_note(state)
-    ):
-        return True
-    if _is_older_than_cleanup_window(timestamp_ms, now_ms=now_ms):
+    """Return whether startup cleanup should ignore one candidate by age.
+
+    Current-run ownership is proven by the generation stamp, not by clocks, so
+    the only age bound left here is the history lookback window that stops old
+    messages from being mutated.
+    """
+    if _is_older_than_cleanup_window(state.latest_timestamp, now_ms=now_ms):
         return not (scan_policy.collect_terminal_interrupted_for_resume and _has_resumable_interrupted_note(state))
     return False
-
-
-def _is_at_or_after_startup_cutoff(timestamp_ms: int, *, startup_cutoff_ms: int | None) -> bool:
-    """Return whether a message may have been created by the current process."""
-    return startup_cutoff_ms is not None and timestamp_ms >= startup_cutoff_ms
-
-
-def _is_recent_timestamp(timestamp_ms: int, *, now_ms: int | None = None) -> bool:
-    """Return whether a timestamp is still within the startup recency guard."""
-    current_time_ms = int(time.time() * 1000) if now_ms is None else now_ms
-    return current_time_ms - timestamp_ms < _STALE_STREAM_RECENCY_GUARD_MS
 
 
 def _is_older_than_cleanup_window(timestamp_ms: int, *, now_ms: int | None = None) -> bool:

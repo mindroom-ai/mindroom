@@ -49,9 +49,15 @@ uv run python scripts/testing/benchmark_tool_call_overhead.py --iterations 1000 
 uv run python scripts/testing/fuzz_matrix_event_cache.py --seed 42 --steps 500
 uv run python scripts/testing/fuzz_live_matrix.py --seed 42 --steps 200 --threads 45
 uv run python scripts/testing/fuzz_live_matrix.py --profile saturation
+uv run python scripts/testing/fuzz_live_matrix.py --profile chaos --seed 42 --steps 200 --clients 4 --rooms 2
 ```
 
 The saturation profile uses a 180-second per-reply deadline because its slow 12-way stream workload intentionally queues much more work than normal fuzz runs.
+
+The chaos profile runs sustained multi-sender multi-room load that only settles at generated checkpoints, mixing hot-thread floods, in-flight edits and redactions, MindRoom warm/kill/cold restarts, Tuwunel restarts, and full outage windows with recovery gaps.
+Every failure persists the exact logical workload as `scenario.json` in the failure bundle and prints its path for replay with `--trace`.
+Replay preserves operation batches and inputs, but external scheduling and runtime output can differ.
+Set `MINDROOM_LIVE_FUZZ_UV_WITH=/path/to/checkout` to overlay one dependency (for example a pinned `mindroom-nio`) onto the spawned MindRoom without touching the lockfile.
 
 ### Generate and sync managed avatars
 Run MindRoom at least once before syncing so the router account exists in Matrix state.

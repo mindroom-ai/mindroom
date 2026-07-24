@@ -2038,6 +2038,7 @@ class TestMultiAgentOrchestrator:
         """Recovered background starts should not retry permanent room setup failures forever."""
         orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
         orchestrator.config = MagicMock()
+        orchestrator.running = True
         orchestrator._router_principal_id = "@mindroom_router:localhost"
 
         bot = MagicMock()
@@ -2055,6 +2056,70 @@ class TestMultiAgentOrchestrator:
             pytest.raises(PermanentStartupError, match="bad ADC"),
         ):
             await orchestrator._run_bot_start_retry("general")
+
+    @pytest.mark.asyncio
+    async def test_bot_recovery_mid_shutdown_does_not_resume_maintenance_debt(self, tmp_path: Path) -> None:
+        """A recovery finishing after stop() must not resume maintenance debt.
+
+        stop() flips self.running first, cancels startup maintenance, and only
+        later cancels bot-start retry tasks; a recovery landing in that window
+        would otherwise resume deferred maintenance against a closing client.
+        """
+        orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
+        orchestrator.config = MagicMock()
+        bot = MagicMock()
+        bot.agent_name = "general"
+        orchestrator.agent_bots = {"general": bot}
+
+        external_trigger_runtime = MagicMock()
+        with (
+            patch.object(orchestrator, "_bots_to_setup_after_background_start", return_value=[]),
+            patch.object(orchestrator, "_bind_started_runtime_support_services") as bind_support,
+            patch.object(orchestrator, "_resolve_bot_room_aliases"),
+            patch.object(orchestrator, "_start_sync_task") as start_sync,
+            patch.object(orchestrator, "_recover_pending_replacement_rooms", new=AsyncMock()) as recover_rooms,
+            patch.object(orchestrator, "_external_trigger_runtime", new=external_trigger_runtime),
+            patch.object(orchestrator._startup_maintenance, "resume_pending_maintenance") as resume,
+        ):
+            orchestrator.running = False
+            await orchestrator._finish_recovered_bot_start("general", bot)
+            # The early guard must skip every finish step, not only the
+            # maintenance resume: binding support or starting sync here
+            # would leak work past stop()'s teardown passes.
+            bind_support.assert_not_called()
+            start_sync.assert_not_called()
+            recover_rooms.assert_not_awaited()
+            external_trigger_runtime.bind_if_ready.assert_not_called()
+            resume.assert_not_called()
+
+            orchestrator.running = True
+            await orchestrator._finish_recovered_bot_start("general", bot)
+            bind_support.assert_called_once()
+            start_sync.assert_called_once()
+            recover_rooms.assert_awaited_once()
+            external_trigger_runtime.bind_if_ready.assert_called_once()
+            resume.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_bot_start_retry_scheduling_fails_closed_after_shutdown(self, tmp_path: Path) -> None:
+        """A reload racing shutdown must not spawn a retry that survives stop().
+
+        stop() cancels the reload producer and then the retry tasks; a reload
+        already past cancellation could still call the scheduler, and the
+        retry loop itself must also exit once shutdown is visible.
+        """
+        orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
+        orchestrator.config = MagicMock()
+        orchestrator.running = False
+        bot = MagicMock()
+        bot.try_start = AsyncMock()
+        orchestrator.agent_bots = {"general": bot}
+
+        await orchestrator._schedule_bot_start_retry("general")
+        assert orchestrator._bot_start_tasks == {}
+
+        await orchestrator._run_bot_start_retry("general")
+        bot.try_start.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_shutdown_expires_in_flight_approval_send_after_event_id_arrives(  # noqa: PLR0915

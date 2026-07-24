@@ -615,6 +615,11 @@ class AgentBot:
         self._init_runtime_components()
 
     @property
+    def runtime_generation(self) -> str:
+        """Clock-free ownership stamp for streams created by this bot start."""
+        return self._runtime_view.runtime_generation
+
+    @property
     def client(self) -> nio.AsyncClient | None:
         """Return the current Matrix client."""
         return self._runtime_view.client

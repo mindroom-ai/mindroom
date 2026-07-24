@@ -676,7 +676,7 @@ async def test_mcp_catalog_replacement_recovers_interrupted_rooms(tmp_path: Path
         await orchestrator._handle_mcp_catalog_change("demo")
 
     mock_recover.assert_awaited_once()
-    assert mock_recover.await_args.args[:3] == ([new_code_bot], config, None)
+    assert mock_recover.await_args.args[:3] == ([new_code_bot], config, set())
     assert mock_recover.await_args.kwargs["target_room_ids"] == {"!interrupted:example.org"}
 
 
@@ -851,7 +851,6 @@ async def test_entity_replacement_recovers_rooms_after_old_bot_is_removed(
     async def recover_rooms(
         _bots: object,
         _config: object,
-        _cutoff: object,
         scanned_room_ids: set[str],
         *,
         target_room_ids: set[str],
@@ -882,8 +881,7 @@ async def test_entity_replacement_recovers_rooms_after_old_bot_is_removed(
     mock_recover.assert_awaited_once()
     assert mock_recover.await_args.args[0] == [new_bot]
     assert mock_recover.await_args.args[1] is config
-    assert mock_recover.await_args.args[2] is None
-    assert mock_recover.await_args.args[3] == {"!interrupted:example.org"}
+    assert mock_recover.await_args.args[2] == {"!interrupted:example.org"}
     assert mock_recover.await_args.kwargs["target_room_ids"] == {"!interrupted:example.org"}
     assert orchestrator._pending_replacement_recovery_room_ids == {}
 
@@ -937,7 +935,6 @@ async def test_mcp_prestop_captures_rooms_before_old_bot_is_removed(tmp_path: Pa
     async def recover_rooms(
         _bots: object,
         _config: object,
-        _cutoff: object,
         scanned_room_ids: set[str],
         *,
         target_room_ids: set[str],
@@ -1031,7 +1028,6 @@ async def test_pending_replacement_recovery_claims_once_and_requeues_failed_room
     async def recover_rooms(
         _bots: object,
         _config: object,
-        _cutoff: object,
         scanned_room_ids: set[str],
         *,
         target_room_ids: set[str],
@@ -1060,6 +1056,7 @@ async def test_delayed_replacement_start_retries_pending_room_recovery(tmp_path:
     orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path))
     config = _config_with_code_agent(tmp_path)
     orchestrator.config = config
+    orchestrator.running = True
     orchestrator._router_principal_id = "@mindroom_router:localhost"
     replacement_bot = MagicMock(spec=AgentBot)
     replacement_bot.running = False

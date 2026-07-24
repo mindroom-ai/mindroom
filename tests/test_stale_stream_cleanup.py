@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, Mock, call, patch
 import nio
 import pytest
 
+from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.config.main import Config
 from mindroom.constants import (
     ORIGINAL_SENDER_KEY,
@@ -65,7 +66,7 @@ BOT_USER_ID = "@actual_test_agent:localhost"
 OTHER_BOT_USER_ID = "@actual_other:localhost"
 ROOM_ID = "!room:example.com"
 NOW_MS = 1_000_000
-STALE_AGE_MS = stale_stream_cleanup_module._STALE_STREAM_RECENCY_GUARD_MS + 60_000
+STALE_AGE_MS = 70_000
 OLD_STALE_AGE_MS = stale_stream_cleanup_module._STALE_STREAM_LOOKBACK_MS + 60_000
 USER_ID = "@user:example.com"
 OTHER_USER_ID = "@other-user:example.com"
@@ -250,8 +251,8 @@ async def _run_cleanup(
     joined_rooms: list[str],
     bot_user_ids: set[str] | None = None,
     now_ms: int = NOW_MS,
-    startup_cutoff_ms: int | None = None,
     terminal_interrupted_only: bool = False,
+    runtime_generation: str | None = None,
 ) -> tuple[int, list[InterruptedThread]]:
     client.user_id = BOT_USER_ID
     assert joined_rooms == [ROOM_ID]
@@ -259,11 +260,10 @@ async def _run_cleanup(
         return await cleanup_stale_streaming_room(
             client,
             room_id=ROOM_ID,
-            actors={BOT_USER_ID: StaleStreamCleanupActor(client, None)},
+            actors={BOT_USER_ID: StaleStreamCleanupActor(client, None, runtime_generation=runtime_generation)},
             bot_user_ids={BOT_USER_ID} if bot_user_ids is None else bot_user_ids,
             config=config,
             runtime_paths=runtime_paths_for(config),
-            startup_cutoff_ms=startup_cutoff_ms,
             terminal_interrupted_only=terminal_interrupted_only,
         )
 
@@ -581,54 +581,6 @@ async def test_cleanup_skips_messages_older_than_restart_window(tmp_path: Path) 
     assert cleaned == 0
     assert interrupted == []
     mock_edit.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_cleanup_skips_streaming_messages_at_or_after_startup_cutoff(tmp_path: Path) -> None:
-    """Post-sync cleanup must ignore messages that could have been created by this process."""
-    config = _make_config(tmp_path)
-    client = AsyncMock(spec=nio.AsyncClient)
-    startup_cutoff_ms = NOW_MS - 120_000
-    before_cutoff_message = _make_message_event(
-        event_id="$before-cutoff",
-        body="Previous process partial",
-        timestamp_ms=startup_cutoff_ms - 1,
-        extra_content={STREAM_STATUS_KEY: "streaming"},
-    )
-    at_cutoff_message = _make_message_event(
-        event_id="$at-cutoff",
-        body="Current process partial",
-        timestamp_ms=startup_cutoff_ms,
-        extra_content={STREAM_STATUS_KEY: "streaming"},
-    )
-    after_cutoff_message = _make_message_event(
-        event_id="$after-cutoff",
-        body="Current process newer partial",
-        timestamp_ms=startup_cutoff_ms + 1,
-        extra_content={STREAM_STATUS_KEY: "streaming"},
-    )
-    client.room_messages.return_value = _room_messages_response(
-        before_cutoff_message,
-        at_cutoff_message,
-        after_cutoff_message,
-    )
-    client.room_get_event_relations = MagicMock(return_value=_aiter())
-
-    with patch(
-        "mindroom.matrix.stale_stream_cleanup.edit_message_result",
-        new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit")),
-    ) as mock_edit:
-        cleaned, interrupted = await _run_cleanup(
-            client,
-            config,
-            joined_rooms=[ROOM_ID],
-            startup_cutoff_ms=startup_cutoff_ms,
-        )
-
-    assert cleaned == 1
-    assert interrupted == []
-    assert mock_edit.await_count == 1
-    assert mock_edit.await_args.args[2] == "$before-cutoff"
 
 
 @pytest.mark.asyncio
@@ -1112,7 +1064,7 @@ def test_deep_history_scan_limit_is_independent_of_resume_count(tmp_path: Path) 
     config = _make_config(tmp_path)
     config.defaults.auto_resume_after_restart = True
 
-    scan_policy = stale_stream_cleanup_module._cleanup_scan_policy(config, startup_cutoff_ms=NOW_MS)
+    scan_policy = stale_stream_cleanup_module._cleanup_scan_policy(config)
 
     assert scan_policy.max_extra_old_pages == 10
 
@@ -1232,42 +1184,6 @@ async def test_edit_stale_message_records_outbound_edit_when_successful(tmp_path
     assert record_args[:2] == (ROOM_ID, "$cleanup-edit")
     assert record_args[2]["m.relates_to"]["rel_type"] == "m.replace"
     assert record_args[2]["m.relates_to"]["event_id"] == "$target"
-
-
-@pytest.mark.asyncio
-async def test_cleanup_skips_recent_in_progress_message_on_startup(tmp_path: Path) -> None:
-    """Startup cleanup should skip fresh in-progress messages to avoid cross-instance clobbering."""
-    config = _make_config(tmp_path)
-    client = AsyncMock(spec=nio.AsyncClient)
-    client.room_messages.return_value = _room_messages_response(
-        _make_message_event(
-            event_id="$thread-root",
-            body="Start here",
-            sender=USER_ID,
-            timestamp_ms=NOW_MS - 2_000,
-        ),
-        _make_message_event(
-            event_id="$message",
-            body="Needs cleanup",
-            timestamp_ms=NOW_MS - 1_000,
-            relates_to={"rel_type": "m.thread", "event_id": "$thread-root"},
-            extra_content={STREAM_STATUS_KEY: "streaming"},
-        ),
-    )
-    client.room_get_event_relations = MagicMock(return_value=_aiter())
-
-    with (
-        patch(
-            "mindroom.matrix.stale_stream_cleanup.edit_message_result",
-            new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit")),
-        ) as mock_edit,
-        patch("mindroom.matrix.stale_stream_cleanup.time.time", return_value=NOW_MS / 1000),
-    ):
-        cleaned, interrupted = await _run_cleanup(client, config, joined_rooms=[ROOM_ID])
-
-    assert cleaned == 0
-    assert interrupted == []
-    mock_edit.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -2014,7 +1930,6 @@ async def test_recent_mid_tool_shutdown_marker_resumes_only_without_newer_human_
         client,
         config,
         joined_rooms=[ROOM_ID],
-        startup_cutoff_ms=None,
     )
 
     assert cleaned == 0
@@ -2075,7 +1990,6 @@ async def test_targeted_recovery_scans_only_handoff_rooms_without_a_clock_cutoff
             resume_conversation_cache=None,
             config=config,
             runtime_paths=runtime_paths_for(config),
-            startup_cutoff_ms=None,
             scanned_room_ids=scanned_room_ids,
             target_room_ids={ROOM_ID},
         )
@@ -2083,7 +1997,6 @@ async def test_targeted_recovery_scans_only_handoff_rooms_without_a_clock_cutoff
     assert result == StaleStreamRecoveryResult(room_count=1, cleaned_count=0, resumed_count=0)
     cleanup_room.assert_awaited_once()
     assert cleanup_room.await_args.kwargs["room_id"] == ROOM_ID
-    assert cleanup_room.await_args.kwargs["startup_cutoff_ms"] is None
     assert cleanup_room.await_args.kwargs["terminal_interrupted_only"] is True
     assert scanned_room_ids == {ROOM_ID}
 
@@ -2124,6 +2037,105 @@ async def test_targeted_recovery_does_not_clobber_live_replacement_stream(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_generation_stamp_protects_stream_that_finalizes_after_snapshot(tmp_path: Path) -> None:
+    """The generation stamp closes the finalize-after-snapshot TOCTOU.
+
+    The scan snapshots a nonterminal state, then the live response finalizes
+    before candidate processing. The generation stamp read from the same
+    snapshot still proves current-generation ownership, so the stream is
+    protected from cleanup.
+    """
+    config = _make_config(tmp_path)
+    client = _make_client()
+    client.rooms = _joined_room_cache()
+    generation = "gen-current"
+    skewed_ts = NOW_MS - (STALE_AGE_MS + 5_000)
+    client.room_messages.return_value = _room_messages_response(
+        _make_message_event(
+            event_id="$finalizing",
+            body="Almost done ⋯",
+            timestamp_ms=skewed_ts,
+            extra_content={
+                STREAM_STATUS_KEY: "streaming",
+                stale_stream_cleanup_module.STREAM_GENERATION_KEY: generation,
+            },
+        ),
+    )
+
+    with patch(
+        "mindroom.matrix.stale_stream_cleanup.edit_message_result",
+        new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit")),
+    ) as edit_result:
+        cleaned, interrupted = await _run_cleanup(
+            client,
+            config,
+            joined_rooms=[ROOM_ID],
+            runtime_generation=generation,
+        )
+
+    assert cleaned == 0
+    assert interrupted == []
+    edit_result.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_prior_generation_stamp_is_still_cleaned(tmp_path: Path) -> None:
+    """Control: a stream stamped by a previous bot generation stays repairable."""
+    config = _make_config(tmp_path)
+    client = _make_client()
+    client.rooms = _joined_room_cache()
+    skewed_ts = NOW_MS - (STALE_AGE_MS + 5_000)
+    client.room_messages.return_value = _room_messages_response(
+        _make_message_event(
+            event_id="$leftover",
+            body="Working ⋯",
+            timestamp_ms=skewed_ts,
+            extra_content={
+                STREAM_STATUS_KEY: "streaming",
+                stale_stream_cleanup_module.STREAM_GENERATION_KEY: "gen-previous",
+            },
+        ),
+    )
+
+    with patch(
+        "mindroom.matrix.stale_stream_cleanup.edit_message_result",
+        new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit")),
+    ) as edit_result:
+        cleaned, _interrupted = await _run_cleanup(
+            client,
+            config,
+            joined_rooms=[ROOM_ID],
+            runtime_generation="gen-current",
+        )
+
+    assert cleaned == 1
+    edit_result.assert_awaited_once()
+
+
+def test_runtime_generation_rotates_on_same_object_restart() -> None:
+    """mark_runtime_started rotates the generation so prior-run streams stay repairable.
+
+    The orchestrator reuses bot objects across stop()/start(), so without
+    rotation an interrupted stream from the previous run would carry the
+    current generation and be falsely protected from cleanup forever.
+    """
+    state = BotRuntimeState(
+        client=None,
+        config=MagicMock(),
+        runtime_paths=MagicMock(),
+        enable_streaming=False,
+        orchestrator=None,
+        event_cache=None,
+        event_cache_write_coordinator=None,
+    )
+    first_generation = state.runtime_generation
+
+    state.mark_runtime_started()
+
+    assert state.runtime_generation != first_generation
+
+
+@pytest.mark.asyncio
 async def test_failed_targeted_room_scan_remains_unscanned_for_retry(tmp_path: Path) -> None:
     """A transient room-history failure must leave the claimed handoff retryable."""
     config = _make_config(tmp_path)
@@ -2147,7 +2159,6 @@ async def test_failed_targeted_room_scan_remains_unscanned_for_retry(tmp_path: P
             resume_conversation_cache=None,
             config=config,
             runtime_paths=runtime_paths_for(config),
-            startup_cutoff_ms=None,
             scanned_room_ids=scanned_room_ids,
             target_room_ids={ROOM_ID},
         )
@@ -2237,6 +2248,44 @@ async def test_cleanup_returns_old_terminal_interrupted_thread_for_auto_resume(t
             timestamp_ms=NOW_MS - OLD_STALE_AGE_MS,
         ),
     ]
+
+
+@pytest.mark.asyncio
+async def test_cleanup_skips_same_generation_terminal_interruption(tmp_path: Path) -> None:
+    """In-memory sync-restart retry owns a terminal note from the current generation."""
+    config = _make_config(tmp_path)
+    config.defaults.auto_resume_after_restart = True
+    client = _make_client()
+    client.rooms = _joined_room_cache()
+    client.room_messages.return_value = _room_messages_response(
+        _make_message_event(
+            event_id="$thread-root",
+            body="Question",
+            sender=USER_ID,
+            timestamp_ms=NOW_MS - (STALE_AGE_MS + 20_000),
+        ),
+        _make_message_event(
+            event_id="$current-interrupted",
+            body="Partial answer\n\n**[Response interrupted]**",
+            timestamp_ms=NOW_MS - STALE_AGE_MS,
+            relates_to=_thread_reply_relation("$thread-root", "$thread-root"),
+            extra_content={
+                STREAM_STATUS_KEY: STREAM_STATUS_INTERRUPTED,
+                stale_stream_cleanup_module.STREAM_GENERATION_KEY: "gen-current",
+            },
+        ),
+    )
+    client.room_get_event_relations = MagicMock(return_value=_aiter())
+
+    cleaned, interrupted = await _run_cleanup(
+        client,
+        config,
+        joined_rooms=[ROOM_ID],
+        runtime_generation="gen-current",
+    )
+
+    assert cleaned == 0
+    assert interrupted == []
 
 
 @pytest.mark.asyncio
@@ -3074,7 +3123,6 @@ async def test_recovery_scans_unique_rooms_and_resumes_before_slow_rooms_finish(
                 resume_conversation_cache=actors[router_user_id].conversation_cache,
                 config=config,
                 runtime_paths=runtime_paths_for(config),
-                startup_cutoff_ms=NOW_MS,
                 scanned_room_ids=scanned_room_ids,
             ),
         )
@@ -3090,7 +3138,6 @@ async def test_recovery_scans_unique_rooms_and_resumes_before_slow_rooms_finish(
             resume_conversation_cache=actors[router_user_id].conversation_cache,
             config=config,
             runtime_paths=runtime_paths_for(config),
-            startup_cutoff_ms=NOW_MS,
             scanned_room_ids=scanned_room_ids,
         )
 
@@ -3161,7 +3208,6 @@ async def test_recovery_resumes_all_51_rooms_even_when_newest_room_finishes_last
                 resume_conversation_cache=actors["@actual_router:localhost"].conversation_cache,
                 config=config,
                 runtime_paths=runtime_paths_for(config),
-                startup_cutoff_ms=NOW_MS,
                 scanned_room_ids=scanned_room_ids,
                 room_concurrency=51,
             ),
@@ -3211,7 +3257,6 @@ async def test_recovery_without_resume_client_still_cleans_rooms(tmp_path: Path)
             resume_conversation_cache=None,
             config=config,
             runtime_paths=runtime_paths_for(config),
-            startup_cutoff_ms=NOW_MS,
             scanned_room_ids=scanned_room_ids,
         )
 
@@ -3268,7 +3313,6 @@ async def test_shared_room_cleanup_routes_edits_through_each_message_owner(tmp_p
             bot_user_ids=set(actors),
             config=config,
             runtime_paths=runtime_paths_for(config),
-            startup_cutoff_ms=NOW_MS,
         )
 
     assert cleaned_count == 2
@@ -3305,10 +3349,8 @@ async def test_orchestrator_runs_two_recovery_waves_around_room_setup(tmp_path: 
     async def _recover(
         _: list[object],
         __: Config,
-        startup_cutoff_ms: int,
         scanned_room_ids: set[str],
     ) -> None:
-        assert startup_cutoff_ms > 0
         call_order.append("recover")
         if scanned_room_ids:
             recovery_finished.set()
@@ -3360,12 +3402,14 @@ async def test_orchestrator_recovery_uses_router_for_resume_and_all_started_bots
     router_bot.client = router_client
     router_bot.agent_user = MagicMock(user_id="@mindroom_router:example.com")
     router_bot._conversation_cache = MagicMock()
+    router_bot.runtime_generation = "router-generation"
     agent_client = AsyncMock(spec=nio.AsyncClient)
     agent_bot = MagicMock()
     agent_bot.agent_name = "test_agent"
     agent_bot.client = agent_client
     agent_bot.agent_user = MagicMock(user_id=BOT_USER_ID)
     agent_bot._conversation_cache = MagicMock()
+    agent_bot.runtime_generation = "agent-generation"
     orchestrator.agent_bots = {ROUTER_AGENT_NAME: router_bot, "test_agent": agent_bot}
 
     with patch(
@@ -3376,7 +3420,6 @@ async def test_orchestrator_recovery_uses_router_for_resume_and_all_started_bots
         await orchestrator._recover_stale_streams_after_restart(
             [router_bot, agent_bot],
             config,
-            NOW_MS,
             scanned_room_ids,
         )
 
@@ -3384,11 +3427,12 @@ async def test_orchestrator_recovery_uses_router_for_resume_and_all_started_bots
     actors = mock_recover.await_args.args[0]
     assert set(actors) == {"@mindroom_router:example.com", BOT_USER_ID}
     assert actors[BOT_USER_ID].client is agent_client
+    assert actors["@mindroom_router:example.com"].runtime_generation == "router-generation"
+    assert actors[BOT_USER_ID].runtime_generation == "agent-generation"
     assert mock_recover.await_args.kwargs["resume_client"] is router_client
     assert mock_recover.await_args.kwargs["resume_conversation_cache"] is router_bot._conversation_cache
     assert mock_recover.await_args.kwargs["config"] == config
     assert mock_recover.await_args.kwargs["runtime_paths"] == runtime_paths_for(config)
-    assert mock_recover.await_args.kwargs["startup_cutoff_ms"] == NOW_MS
     assert mock_recover.await_args.kwargs["scanned_room_ids"] is scanned_room_ids
 
 
@@ -3411,7 +3455,7 @@ async def test_orchestrator_recovery_still_cleans_when_router_is_unavailable(tmp
         "mindroom.orchestrator.recover_stale_streaming_messages",
         new=AsyncMock(return_value=StaleStreamRecoveryResult(room_count=1, cleaned_count=1, resumed_count=0)),
     ) as mock_recover:
-        await orchestrator._recover_stale_streams_after_restart([agent_bot], config, NOW_MS, set())
+        await orchestrator._recover_stale_streams_after_restart([agent_bot], config, set())
 
     mock_recover.assert_awaited_once()
     assert mock_recover.await_args.kwargs["resume_client"] is None

@@ -28,12 +28,10 @@ async def test_startup_maintenance_scans_rooms_joined_during_concurrent_setup() 
     async def recover_stale(
         started_bots: list[object],
         recovery_config: object,
-        startup_cutoff_ms: int,
         scanned_room_ids: set[str],
     ) -> None:
         assert started_bots == bots
         assert recovery_config is config
-        assert startup_cutoff_ms == 123456
         newly_joined_room_ids = joined_room_ids - scanned_room_ids
         scanned_room_ids.update(newly_joined_room_ids)
         recovery_waves.append(newly_joined_room_ids)
@@ -63,7 +61,7 @@ async def test_startup_maintenance_scans_rooms_joined_during_concurrent_setup() 
         mark_runtime_support_ready=mark_runtime_support_ready,
     )
 
-    controller.start(bots, config, startup_cutoff_ms=123456)
+    controller.start(bots, config)
     await _wait_for_controller(controller)
 
     assert recovery_waves == [
@@ -78,7 +76,7 @@ async def test_startup_maintenance_continues_after_failed_recovery_and_room_setu
     """Later phases still run after stale recovery and room setup fail."""
     call_order: list[str] = []
 
-    async def recover_stale(_: list[object], __: object, ___: int, ____: set[str]) -> None:
+    async def recover_stale(_: list[object], __: object, ___: set[str]) -> None:
         call_order.append("recover")
         msg = "recovery failed"
         raise RuntimeError(msg)
@@ -101,7 +99,7 @@ async def test_startup_maintenance_continues_after_failed_recovery_and_room_setu
         mark_runtime_support_ready=mark_runtime_support_ready,
     )
 
-    controller.start([MagicMock()], MagicMock(), startup_cutoff_ms=123456)
+    controller.start([MagicMock()], MagicMock())
     await _wait_for_controller(controller)
 
     assert call_order == ["recover", "setup", "recover", "support", "approval_ready"]
@@ -124,7 +122,7 @@ async def test_startup_maintenance_cancel_reports_unfinished_and_replays_with_ru
         mark_runtime_support_ready=AsyncMock(),
     )
 
-    controller.start([MagicMock()], MagicMock(), startup_cutoff_ms=123456)
+    controller.start([MagicMock()], MagicMock())
     await asyncio.wait_for(started.wait(), timeout=1.0)
 
     should_replay = await controller.cancel()
@@ -143,7 +141,7 @@ async def test_startup_maintenance_cancel_reports_unfinished_and_replays_with_ru
             running_bots=running_bots,
         )
 
-    start.assert_called_once_with([running_bot], replay_config, startup_cutoff_ms=123456)
+    start.assert_called_once_with([running_bot], replay_config)
     release.set()
 
 
@@ -157,7 +155,7 @@ async def test_startup_maintenance_cancel_completed_task_returns_false() -> None
         mark_runtime_support_ready=AsyncMock(),
     )
 
-    controller.start([MagicMock()], MagicMock(), startup_cutoff_ms=123456)
+    controller.start([MagicMock()], MagicMock())
     await _wait_for_controller(controller)
 
     should_replay = await controller.cancel()
@@ -167,6 +165,195 @@ async def test_startup_maintenance_cancel_completed_task_returns_false() -> None
         if should_replay:
             controller.restart_after_config_reload(config=MagicMock(), running_bots=lambda: [MagicMock()])
     start.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_config_reload_suspension_blocks_background_resume_until_finalization() -> None:
+    """A recovered bot cannot resurrect parked maintenance in the middle of reload."""
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def setup_rooms(_: list[object]) -> None:
+        started.set()
+        await release.wait()
+
+    controller = StartupMaintenanceController(
+        recover_stale_streams=AsyncMock(),
+        setup_rooms_and_memberships=setup_rooms,
+        sync_runtime_support=AsyncMock(),
+        mark_runtime_support_ready=AsyncMock(),
+    )
+    controller.start([MagicMock()], MagicMock())
+    await asyncio.wait_for(started.wait(), timeout=1.0)
+
+    should_replay = await controller.suspend_for_config_reload()
+    assert should_replay is True
+    controller.replay_pending = True
+    with patch.object(controller, "start") as start:
+        controller.resume_pending_maintenance(
+            config=MagicMock(),
+            running_bots=lambda: [MagicMock()],
+        )
+        start.assert_not_called()
+
+        replay_config = MagicMock()
+        running_bot = MagicMock()
+        controller.restart_after_config_reload(
+            config=replay_config,
+            running_bots=lambda: [running_bot],
+            replay=should_replay,
+        )
+        start.assert_called_once_with([running_bot], replay_config)
+
+    release.set()
+
+
+def _counting_controller() -> tuple[StartupMaintenanceController, dict[str, int]]:
+    counts = {"recover": 0, "setup": 0, "support": 0, "ready": 0}
+
+    async def recover_stale(_: list[object], __: object, ___: set[str]) -> None:
+        counts["recover"] += 1
+
+    async def setup_rooms(_: list[object]) -> None:
+        counts["setup"] += 1
+
+    async def sync_runtime_support(_: object) -> None:
+        counts["support"] += 1
+
+    async def mark_runtime_support_ready() -> None:
+        counts["ready"] += 1
+
+    controller = StartupMaintenanceController(
+        recover_stale_streams=recover_stale,
+        setup_rooms_and_memberships=setup_rooms,
+        sync_runtime_support=sync_runtime_support,
+        mark_runtime_support_ready=mark_runtime_support_ready,
+    )
+    return controller, counts
+
+
+@pytest.mark.asyncio
+async def test_config_reload_replays_full_maintenance_sequence() -> None:
+    """A reload that cancels an unfinished run replays the whole sequence."""
+    controller, counts = _counting_controller()
+    release = asyncio.Event()
+    setup_started = asyncio.Event()
+
+    async def blocking_setup(_: list[object]) -> None:
+        counts["setup"] += 1
+        setup_started.set()
+        await release.wait()
+
+    controller.setup_rooms_and_memberships = blocking_setup
+
+    controller.start([MagicMock()], MagicMock())
+    await asyncio.wait_for(setup_started.wait(), timeout=5.0)
+    assert await controller.cancel() is True
+
+    release.set()
+
+    async def instant_setup(_: list[object]) -> None:
+        counts["setup"] += 1
+
+    controller.setup_rooms_and_memberships = instant_setup
+    controller.restart_after_config_reload(config=MagicMock(), running_bots=lambda: [MagicMock()])
+    await _wait_for_controller(controller)
+
+    assert counts["support"] == 1
+    assert counts["ready"] == 1
+    assert controller.replay_pending is False
+
+
+@pytest.mark.asyncio
+async def test_empty_bot_reload_keeps_full_maintenance_debt_replayable() -> None:
+    """A cancel during the main phases plus an empty-bot reload must not lose the sequence.
+
+    A reload can cancel before any phase completes and then finish with zero
+    running bots; the full-maintenance debt flag is the only record that
+    initial recovery, room setup, and runtime support are still owed.
+    """
+    counts = {"recover": 0, "setup": 0, "support": 0, "ready": 0}
+    setup_started = asyncio.Event()
+    release_setup = asyncio.Event()
+
+    async def recover_stale(_: list[object], __: object, ___: set[str]) -> None:
+        counts["recover"] += 1
+
+    async def setup_rooms(_: list[object]) -> None:
+        counts["setup"] += 1
+        setup_started.set()
+        await release_setup.wait()
+
+    async def sync_runtime_support(_: object) -> None:
+        counts["support"] += 1
+
+    async def mark_runtime_support_ready() -> None:
+        counts["ready"] += 1
+
+    controller = StartupMaintenanceController(
+        recover_stale_streams=recover_stale,
+        setup_rooms_and_memberships=setup_rooms,
+        sync_runtime_support=sync_runtime_support,
+        mark_runtime_support_ready=mark_runtime_support_ready,
+    )
+
+    controller.start([MagicMock()], MagicMock())
+    await asyncio.wait_for(setup_started.wait(), timeout=5.0)
+    assert await controller.cancel() is True
+
+    controller.restart_after_config_reload(config=MagicMock(), running_bots=list)
+    assert controller.task is None
+    assert controller.replay_pending is True
+
+    # Debt survives a later cancel with no live task.
+    assert await controller.cancel() is True
+
+    release_setup.set()
+    controller.resume_pending_maintenance(config=MagicMock(), running_bots=lambda: [MagicMock()])
+    await _wait_for_controller(controller)
+
+    assert counts["support"] == 1
+    assert counts["ready"] == 1
+    assert controller.replay_pending is False
+
+
+@pytest.mark.asyncio
+async def test_bot_start_recovery_resumes_stranded_full_maintenance() -> None:
+    """Background bot-start recovery schedules stranded full-maintenance debt."""
+    controller, counts = _counting_controller()
+    release = asyncio.Event()
+    setup_started = asyncio.Event()
+
+    async def blocking_setup(_: list[object]) -> None:
+        counts["setup"] += 1
+        setup_started.set()
+        await release.wait()
+
+    controller.setup_rooms_and_memberships = blocking_setup
+    controller.start([MagicMock()], MagicMock())
+    await asyncio.wait_for(setup_started.wait(), timeout=5.0)
+    assert await controller.cancel() is True
+
+    controller.restart_after_config_reload(config=MagicMock(), running_bots=list)
+    assert controller.task is None
+    assert controller.replay_pending is True
+
+    release.set()
+
+    async def instant_setup(_: list[object]) -> None:
+        counts["setup"] += 1
+
+    controller.setup_rooms_and_memberships = instant_setup
+    controller.resume_pending_maintenance(config=MagicMock(), running_bots=lambda: [MagicMock()])
+    await _wait_for_controller(controller)
+
+    assert counts["support"] == 1
+    assert controller.replay_pending is False
+
+    # Without pending debt or with a live task, resume is a no-op.
+    resumed_task = controller.task
+    controller.resume_pending_maintenance(config=MagicMock(), running_bots=lambda: [MagicMock()])
+    assert controller.task is resumed_task
 
 
 @pytest.mark.asyncio
@@ -185,7 +372,7 @@ async def test_startup_maintenance_runtime_support_failure_skips_approval_ready_
         mark_runtime_support_ready=mark_runtime_support_ready,
     )
 
-    controller.start([MagicMock()], MagicMock(), startup_cutoff_ms=123456)
+    controller.start([MagicMock()], MagicMock())
     await _wait_for_controller(controller)
 
     mark_runtime_support_ready.assert_not_awaited()

@@ -19,7 +19,7 @@ from mindroom.history.storage import invalidate_compacted_replay, read_scope_see
 from mindroom.session_ids import create_session_id
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Mapping, Sequence
 
     import nio
 
@@ -212,6 +212,54 @@ class TurnStore:
         """Release a response claim after terminal settlement or failure."""
         with self._pending_claim_lock:
             self._pending_claimed_event_ids.difference_update(turn_record.indexed_event_ids)
+
+    def is_claimed_in_flight(self, event_id: str) -> bool:
+        """Return whether one source event is already claimed by a live turn.
+
+        A replayed sync delivery of an event whose first delivery is still
+        being answered would otherwise re-enter coalescing and, once folded
+        into a follow-up batch, poison the whole batch's all-or-nothing claim.
+        """
+        with self._pending_claim_lock:
+            return event_id in self._pending_claimed_event_ids
+
+    def try_claim_turn_alias(self, event_id: str) -> bool:
+        """Atomically claim one identity alias only when no live turn owns it.
+
+        A trusted router relay knows the routed human event id it replies to
+        before it starts preparing, so the relay claims that alias up front to
+        keep alias-addressed replays dropped while the response is live.
+
+        The claim is collision-aware: if another live turn already owns the
+        alias, this returns ``False`` and leaves that owner untouched. A router
+        relay can legitimately overlap the original routed turn, so the caller
+        folds the alias into its own claim record only when it acquired it and
+        never releases a claim it did not take.
+        """
+        with self._pending_claim_lock:
+            if event_id in self._pending_claimed_event_ids:
+                return False
+            self._pending_claimed_event_ids.add(event_id)
+            return True
+
+    def try_claim_turn_subset(self, event_ids: Sequence[str]) -> tuple[str, ...]:
+        """Atomically claim whichever of these sources no live or finished turn owns.
+
+        The ingress in-flight precheck is only a fast path: a replayed source
+        can pass it before its original delivery claims, stall, and join a
+        later coalesced batch. The batch's all-or-nothing claim then collided
+        and silently starved innocent co-batched sources. Claiming the exact
+        still-unowned subset in one lock acquisition lets the flush drop only
+        the stale duplicates and keep the rest of the batch's turn.
+        """
+        with self._pending_claim_lock:
+            claimable = tuple(
+                event_id
+                for event_id in dict.fromkeys(event_ids)
+                if event_id not in self._pending_claimed_event_ids and not self.is_handled(event_id)
+            )
+            self._pending_claimed_event_ids.update(claimable)
+        return claimable
 
     def mark_source_redacted(
         self,

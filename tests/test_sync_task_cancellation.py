@@ -1550,11 +1550,11 @@ async def test_update_config_replays_cancelled_startup_maintenance_and_runs_appr
     orchestrator.agent_bots = {"router": router_bot}
     orchestrator.config = current_config
     orchestrator.running = True
-    orchestrator._startup_maintenance.startup_cutoff_ms = 123456
+    orchestrator._startup_maintenance._started = True
 
     maintenance_started = asyncio.Event()
     maintenance_released = asyncio.Event()
-    replayed: list[tuple[list[object], object, int]] = []
+    replayed: list[tuple[list[object], object]] = []
 
     async def blocked_startup_maintenance() -> None:
         maintenance_started.set()
@@ -1565,8 +1565,8 @@ async def test_update_config_replays_cancelled_startup_maintenance_and_runs_appr
         orchestrator._startup_maintenance.task = old_maintenance_task
         await asyncio.wait_for(maintenance_started.wait(), timeout=1.0)
 
-        def replay_startup_maintenance(bots: list[object], config: object, *, startup_cutoff_ms: int) -> None:
-            replayed.append((bots, config, startup_cutoff_ms))
+        def replay_startup_maintenance(bots: list[object], config: object) -> None:
+            replayed.append((bots, config))
 
         with (
             patch("mindroom.orchestration.config_lifecycle.load_config", return_value=new_config),
@@ -1588,7 +1588,7 @@ async def test_update_config_replays_cancelled_startup_maintenance_and_runs_appr
 
         assert updated is False
         assert old_maintenance_task.cancelled()
-        assert replayed == [([router_bot], new_config, 123456)]
+        assert replayed == [([router_bot], new_config)]
         mark_startup_runtime_support_ready.assert_awaited_once()
     finally:
         maintenance_released.set()

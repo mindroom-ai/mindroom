@@ -32,7 +32,6 @@ from mindroom.hooks import (
 from mindroom.matrix.client_delivery import build_threaded_edit_content, edit_message_result, send_message_result
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import build_message_content
-from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
 from mindroom.streaming import (
     StreamingResponse,
     build_cancelled_response_update,
@@ -48,6 +47,7 @@ if TYPE_CHECKING:
     import nio
     import structlog
 
+    from mindroom.bot_runtime_view import BotRuntimeView
     from mindroom.constants import RuntimePaths
     from mindroom.conversation_resolver import ConversationResolver
     from mindroom.history.types import (
@@ -302,7 +302,7 @@ class StreamingDeliveryRequest:
 class DeliveryGatewayDeps:
     """Explicit dependencies needed for Matrix delivery."""
 
-    runtime: SupportsClientConfig
+    runtime: BotRuntimeView
     runtime_paths: RuntimePaths
     agent_name: str
     logger: structlog.stdlib.BoundLogger
@@ -464,12 +464,24 @@ class DeliveryGateway:
             extra_content=failure_extra_content,
         )
 
+    def _stamp_runtime_generation(self, extra_content: dict[str, Any] | None) -> dict[str, Any] | None:
+        """Stamp nonterminal stream content with this bot generation's ownership mark."""
+        if extra_content is None:
+            return extra_content
+        if extra_content.get(constants.STREAM_STATUS_KEY) not in {
+            constants.STREAM_STATUS_PENDING,
+            constants.STREAM_STATUS_STREAMING,
+        }:
+            return extra_content
+        return {**extra_content, constants.STREAM_GENERATION_KEY: self.deps.runtime.runtime_generation}
+
     async def send_text(self, request: SendTextRequest) -> str | None:
         """Send one response message to a room."""
         client = self._client()
         config = self.deps.runtime.config
         resolved_target = request.target
         effective_thread_id = resolved_target.resolved_thread_id
+        extra_content = self._stamp_runtime_generation(request.extra_content)
 
         if effective_thread_id is None:
             content = format_message_with_mentions(
@@ -480,7 +492,7 @@ class DeliveryGateway:
                 reply_to_event_id=resolved_target.reply_to_event_id,
                 latest_thread_event_id=None,
                 tool_trace=request.tool_trace,
-                extra_content=request.extra_content,
+                extra_content=extra_content,
             )
         else:
             latest_thread_event_id = (
@@ -499,7 +511,7 @@ class DeliveryGateway:
                 reply_to_event_id=resolved_target.reply_to_event_id,
                 latest_thread_event_id=latest_thread_event_id,
                 tool_trace=request.tool_trace,
-                extra_content=request.extra_content,
+                extra_content=extra_content,
             )
         if request.skip_mentions:
             content[SKIP_MENTIONS_KEY] = True
@@ -999,6 +1011,7 @@ class DeliveryGateway:
             existing_event_id=request.existing_event_id,
             adopt_existing_placeholder=request.adopt_existing_placeholder,
             extra_content=request.extra_content,
+            runtime_generation=self.deps.runtime.runtime_generation,
             tool_trace_collector=request.tool_trace_collector,
             pipeline_timing=request.pipeline_timing,
             visible_event_id_callback=request.visible_event_id_callback,

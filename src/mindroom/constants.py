@@ -1048,6 +1048,10 @@ MINDROOM_COMPACTION_METADATA_KEY = "mindroom_compaction"
 MINDROOM_MATRIX_HISTORY_METADATA_KEY = "mindroom_matrix_history"
 COMPACTION_NOTICE_CONTENT_KEY = "io.mindroom.compaction"
 STREAM_STATUS_KEY = "io.mindroom.stream_status"
+# Per-bot runtime-generation stamp on nonterminal placeholders and stream
+# edits. Startup cleanup skips candidates from its own live generation, which
+# is clock-independent proof of current-process ownership.
+STREAM_GENERATION_KEY = "io.mindroom.stream_generation"
 STREAM_VISIBLE_BODY_KEY = "io.mindroom.visible_body"
 STREAM_WARMUP_SUFFIX_KEY = "io.mindroom.warmup_suffix"
 TOOL_TRACE_CONTENT_KEY = "io.mindroom.tool_trace"

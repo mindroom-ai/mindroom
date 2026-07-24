@@ -943,10 +943,10 @@ depends_on = [
 [[modules]]
 path = "mindroom.delivery_gateway"
 depends_on = [
+    "mindroom.bot_runtime_view",
     "mindroom.constants",
     "mindroom.hooks",
     "mindroom.matrix.client_delivery",
-    "mindroom.runtime_protocols",
     "mindroom.streaming",
 ]
 
@@ -1985,6 +1985,7 @@ path = "mindroom.bot_runtime_view"
 depends_on = ["mindroom.matrix.cache"]
 visibility = [
     "mindroom.bot",
+    "mindroom.delivery_gateway",
     "mindroom.matrix.cache.thread_reads",
     "mindroom.matrix.cache.thread_write_cache_ops",
     "mindroom.matrix.conversation_cache",
@@ -2001,7 +2002,6 @@ visibility = [
     "mindroom.bot_room_lifecycle",
     "mindroom.conversation_resolver",
     "mindroom.conversation_state_writer",
-    "mindroom.delivery_gateway",
     "mindroom.edit_regenerator",
     "mindroom.hooks.context",
     "mindroom.inbound_turn_normalizer",

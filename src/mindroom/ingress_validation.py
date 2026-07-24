@@ -276,6 +276,13 @@ class IngressValidator:
         if not is_edit and self.deps.turn_store.is_handled(event.event_id):
             return None
 
+        # A replayed sync delivery of an event whose first delivery is still in
+        # flight must be dropped idempotently. Otherwise the duplicate re-enters
+        # coalescing and, folded into a follow-up batch, makes that batch's
+        # all-or-nothing turn claim collide and drop innocent co-batched sources.
+        if not is_edit and self.deps.turn_store.is_claimed_in_flight(event.event_id):
+            return None
+
         if not is_authorized_sender(
             requester_user_id,
             self.deps.runtime.config,

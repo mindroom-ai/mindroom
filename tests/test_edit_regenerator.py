@@ -109,6 +109,8 @@ def _edit_event(
     new_body: str = "what is 3+3?",
     sender: str = USER_ID,
     include_new_content: bool = True,
+    event_id: str = EDIT_EVENT_ID,
+    server_timestamp: int = 1_000_001,
 ) -> tuple[nio.RoomMessageText, EventInfo]:
     content: dict[str, object] = {
         "body": f"* {new_body}",
@@ -120,9 +122,9 @@ def _edit_event(
         content["m.new_content"] = {"body": new_body, "msgtype": "m.text"}
     source = {
         "content": content,
-        "event_id": EDIT_EVENT_ID,
+        "event_id": event_id,
         "sender": sender,
-        "origin_server_ts": 1_000_001,
+        "origin_server_ts": server_timestamp,
         "type": "m.room.message",
         "room_id": ROOM_ID,
     }

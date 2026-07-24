@@ -866,6 +866,215 @@ async def test_different_senders_dispatch_separately(tmp_path: Path) -> None:
     assert sorted(calls) == [["$m1"], ["$m2"]]
 
 
+@pytest.mark.asyncio
+async def test_flushed_batch_salvages_innocent_source_when_duplicate_is_claimed(tmp_path: Path) -> None:
+    """A stale duplicate in a batch must not starve innocent co-batched sources.
+
+    A replayed source can pass the ingress in-flight precheck before its
+    original delivery claims, stall, and join a follow-up batch with a fresh
+    source. The previous all-or-nothing claim collided on the duplicate and
+    silently dropped the whole batch, permanently starving the fresh source.
+    """
+    bot = _make_bot(tmp_path)
+    room = _make_room()
+    controller = bot._turn_controller
+    assert bot._turn_store.try_claim_turn(TurnRecord.create(["$dup"], completed=False))
+
+    dup_event = _text_event(event_id="$dup", body="duplicate text", server_timestamp=1_712_350_001_000)
+    fresh_event = _text_event(event_id="$fresh", body="innocent text", server_timestamp=1_712_350_002_000)
+    batch = build_coalesced_batch(
+        CoalescingKey("!room:localhost", None, "@user:localhost"),
+        [
+            PendingEvent(event=dup_event, room=room, source_kind="message"),
+            PendingEvent(event=fresh_event, room=room, source_kind="message"),
+        ],
+    )
+
+    with patch.object(controller, "_dispatch_handoff", new=AsyncMock()) as dispatch:
+        await controller.handle_coalesced_batch(batch)
+
+    dispatch.assert_awaited_once()
+    handoff = dispatch.await_args.args[0]
+    assert dispatch.await_args.kwargs["handled_turn"].source_event_ids == ("$fresh",)
+    assert dispatch.await_args.kwargs["turn_claim_held"] is True
+    assert "duplicate text" not in handoff.event.body
+    assert "innocent text" in handoff.event.body
+    assert bot._turn_store.is_claimed_in_flight("$fresh")
+    assert bot._turn_store.is_claimed_in_flight("$dup")
+
+
+@pytest.mark.asyncio
+async def test_fully_owned_flushed_batch_drops_without_dispatch(tmp_path: Path) -> None:
+    """A batch whose every source is already owned drops idempotently."""
+    bot = _make_bot(tmp_path)
+    room = _make_room()
+    controller = bot._turn_controller
+    assert bot._turn_store.try_claim_turn(TurnRecord.create(["$dup1", "$dup2"], completed=False))
+
+    batch = build_coalesced_batch(
+        CoalescingKey("!room:localhost", None, "@user:localhost"),
+        [
+            PendingEvent(
+                event=_text_event(event_id="$dup1", body="one", server_timestamp=1_712_350_001_000),
+                room=room,
+                source_kind="message",
+            ),
+            PendingEvent(
+                event=_text_event(event_id="$dup2", body="two", server_timestamp=1_712_350_002_000),
+                room=room,
+                source_kind="message",
+            ),
+        ],
+    )
+
+    with patch.object(controller, "_dispatch_handoff", new=AsyncMock()) as dispatch:
+        await controller.handle_coalesced_batch(batch)
+
+    dispatch.assert_not_awaited()
+    assert bot._turn_store.is_claimed_in_flight("$dup1")
+    assert bot._turn_store.is_claimed_in_flight("$dup2")
+
+
+@pytest.mark.asyncio
+async def test_flushed_batch_claim_released_when_handoff_build_fails(tmp_path: Path) -> None:
+    """A pre-dispatch failure must release the flush-time claim for later replay."""
+    bot = _make_bot(tmp_path)
+    room = _make_room()
+    controller = bot._turn_controller
+    batch = build_coalesced_batch(
+        CoalescingKey("!room:localhost", None, "@user:localhost"),
+        [
+            PendingEvent(
+                event=_text_event(event_id="$fresh", body="text", server_timestamp=1_712_350_001_000),
+                room=room,
+                source_kind="message",
+            ),
+        ],
+    )
+
+    with (
+        patch(
+            "mindroom.turn_controller.build_dispatch_handoff",
+            side_effect=RuntimeError("handoff build failed"),
+        ),
+        pytest.raises(RuntimeError, match="handoff build failed"),
+    ):
+        await controller.handle_coalesced_batch(batch)
+
+    assert not bot._turn_store.is_claimed_in_flight("$fresh")
+
+
+@pytest.mark.asyncio
+async def test_flushed_batch_claim_released_when_survivor_rebuild_fails(tmp_path: Path) -> None:
+    """A survivor-batch rebuild failure must release every newly claimed source."""
+    bot = _make_bot(tmp_path)
+    room = _make_room()
+    controller = bot._turn_controller
+    assert bot._turn_store.try_claim_turn(TurnRecord.create(["$dup"], completed=False))
+    batch = build_coalesced_batch(
+        CoalescingKey("!room:localhost", None, "@user:localhost"),
+        [
+            PendingEvent(
+                event=_text_event(event_id="$dup", body="duplicate", server_timestamp=1_712_350_001_000),
+                room=room,
+                source_kind="message",
+            ),
+            PendingEvent(
+                event=_text_event(event_id="$fresh", body="fresh", server_timestamp=1_712_350_002_000),
+                room=room,
+                source_kind="message",
+            ),
+        ],
+    )
+
+    with (
+        patch(
+            "mindroom.turn_controller.build_coalesced_batch",
+            side_effect=RuntimeError("survivor rebuild failed"),
+        ),
+        pytest.raises(RuntimeError, match="survivor rebuild failed"),
+    ):
+        await controller.handle_coalesced_batch(batch)
+
+    assert bot._turn_store.is_claimed_in_flight("$dup")
+    assert not bot._turn_store.is_claimed_in_flight("$fresh")
+
+
+@pytest.mark.asyncio
+async def test_flushed_batch_deduplicates_same_event_id_and_closes_duplicate_metadata(tmp_path: Path) -> None:
+    """Two stalled copies of one source must contribute one prompt and one survivor."""
+    bot = _make_bot(tmp_path)
+    room = _make_room()
+    controller = bot._turn_controller
+    close_first = MagicMock()
+    close_duplicate = MagicMock()
+    batch = build_coalesced_batch(
+        CoalescingKey("!room:localhost", None, "@user:localhost"),
+        [
+            PendingEvent(
+                event=_text_event(event_id="$same", body="first", server_timestamp=1_712_350_001_000),
+                room=room,
+                source_kind="message",
+                dispatch_metadata=(PendingDispatchMetadata("test", object(), close_first),),
+            ),
+            PendingEvent(
+                event=_text_event(event_id="$same", body="duplicate", server_timestamp=1_712_350_002_000),
+                room=room,
+                source_kind="message",
+                dispatch_metadata=(PendingDispatchMetadata("test", object(), close_duplicate),),
+            ),
+        ],
+    )
+
+    with patch.object(controller, "_dispatch_handoff", new=AsyncMock()) as dispatch:
+        await controller.handle_coalesced_batch(batch)
+
+    handoff = dispatch.await_args.args[0]
+    assert handoff.source_event_ids == ("$same",)
+    assert handoff.event.body == "first"
+    close_first.assert_not_called()
+    close_duplicate.assert_called_once_with()
+
+
+@pytest.mark.asyncio
+async def test_thread_normalization_preserves_router_relay_alias_in_handoff(tmp_path: Path) -> None:
+    """A threaded handoff must carry the routed human ID before replacing its reply relation."""
+    bot = _make_bot(tmp_path)
+    room = _make_room()
+    controller = bot._turn_controller
+    relay_event = _reply_event(
+        event_id="$relay",
+        body="router relay",
+        sender="@mindroom_router:localhost",
+        reply_to_event_id="$routed-human",
+    )
+    relay_content = cast("dict[str, object]", relay_event.source["content"])
+    relay_content[ORIGINAL_SENDER_KEY] = "@external:example.org"
+    relay_content[SOURCE_KIND_KEY] = TRUSTED_INTERNAL_RELAY_SOURCE_KIND
+    batch = build_coalesced_batch(
+        CoalescingKey(room.room_id, "$thread", "@external:example.org"),
+        [
+            PendingEvent(
+                event=relay_event,
+                room=room,
+                requester_user_id="@external:example.org",
+                source_kind=TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+                trust_internal_payload_metadata=True,
+            ),
+        ],
+    )
+
+    with patch.object(controller, "_dispatch_handoff", new=AsyncMock()) as dispatch:
+        await controller.handle_coalesced_batch(batch)
+
+    handoff = dispatch.await_args.args[0]
+    assert handoff.ingress.router_relay_original_event_id == "$routed-human"
+    assert handoff.event.source["content"]["m.relates_to"] == {
+        "rel_type": "m.thread",
+        "event_id": "$thread",
+    }
+
+
 def test_build_coalesced_batch_keeps_normalized_voice_out_of_media_events() -> None:
     """Voice messages should enter coalescing as synthetic text, not raw media."""
     room = _make_room()

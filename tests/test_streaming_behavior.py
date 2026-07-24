@@ -25,10 +25,12 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig, StreamingConfig
 from mindroom.constants import (
+    STREAM_GENERATION_KEY,
     STREAM_STATUS_CANCELLED,
     STREAM_STATUS_COMPLETED,
     STREAM_STATUS_ERROR,
     STREAM_STATUS_KEY,
+    STREAM_STATUS_PENDING,
     STREAM_STATUS_STREAMING,
     STREAM_VISIBLE_BODY_KEY,
 )
@@ -1873,6 +1875,61 @@ class TestStreamingBehavior:
         assert final_content["body"] == _PROGRESS_PLACEHOLDER
         assert final_content[STREAM_STATUS_KEY] == STREAM_STATUS_COMPLETED
         assert final_content["m.relates_to"] == {"m.in_reply_to": {"event_id": "$original_123"}}
+
+    @pytest.mark.asyncio
+    async def test_send_streaming_response_stamps_runtime_generation_per_delivery(self) -> None:
+        """Every payload carries the generation that owns its recovery."""
+        mock_client = _make_matrix_client_mock()
+        delivered_contents: list[dict[str, object]] = []
+
+        async def record_send(
+            _client: object,
+            _room_id: str,
+            content: dict[str, object],
+        ) -> DeliveredMatrixEvent:
+            delivered_contents.append(dict(content))
+            return DeliveredMatrixEvent(event_id="$sent", content_sent=dict(content))
+
+        async def record_edit(
+            _client: object,
+            _room_id: str,
+            _event_id: str,
+            new_content: dict[str, object],
+            _new_text: str,
+        ) -> DeliveredMatrixEvent:
+            delivered_contents.append(dict(new_content))
+            return DeliveredMatrixEvent(event_id="$edit", content_sent=dict(new_content))
+
+        async def one_chunk() -> AsyncIterator[str]:
+            yield "hello"
+
+        shared_collector: dict[str, object] = {}
+        with (
+            patch("mindroom.streaming.send_message_result", new=AsyncMock(side_effect=record_send)),
+            patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=record_edit)),
+        ):
+            await send_streaming_response(
+                client=mock_client,
+                target=MessageTarget.resolve("!test:localhost", None, "$original", room_mode=True),
+                config=self.config,
+                runtime_paths=runtime_paths_for(self.config),
+                response_stream=one_chunk(),
+                extra_content=shared_collector,
+                runtime_generation="gen-1",
+            )
+
+        assert delivered_contents
+        for content in delivered_contents:
+            assert content[STREAM_GENERATION_KEY] == "gen-1"
+        assert any(
+            content[STREAM_STATUS_KEY] in {STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING}
+            for content in delivered_contents
+        )
+        assert any(
+            content[STREAM_STATUS_KEY] not in {STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING}
+            for content in delivered_contents
+        )
+        assert shared_collector == {}
 
     @pytest.mark.asyncio
     async def test_send_streaming_response_records_outbound_send_and_edit(self) -> None:
