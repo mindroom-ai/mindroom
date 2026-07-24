@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import threading
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -65,6 +66,8 @@ class TurnStore:
 
     deps: TurnStoreDeps
     _ledger: HandledTurnLedger = field(init=False, repr=False)
+    _pending_claim_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
+    _pending_claimed_event_ids: set[str] = field(default_factory=set, init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Construct the private handled-turn ledger for this runtime entity."""
@@ -193,6 +196,22 @@ class TurnStore:
             merge_pending,
             wait_for_persist=True,
         )
+
+    def try_claim_turn(self, turn_record: TurnRecord) -> bool:
+        """Claim source processing before any expensive dispatch resolution."""
+        event_ids = turn_record.indexed_event_ids
+        if not turn_record.source_event_ids:
+            return False
+        with self._pending_claim_lock:
+            if self._pending_claimed_event_ids.intersection(event_ids):
+                return False
+            self._pending_claimed_event_ids.update(event_ids)
+        return True
+
+    def release_pending_turn_claim(self, turn_record: TurnRecord) -> None:
+        """Release a response claim after terminal settlement or failure."""
+        with self._pending_claim_lock:
+            self._pending_claimed_event_ids.difference_update(turn_record.indexed_event_ids)
 
     def mark_source_redacted(
         self,

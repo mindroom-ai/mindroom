@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import asyncio
 import threading
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -36,6 +37,7 @@ from mindroom.history.storage import (
 from mindroom.history.types import HistoryScope, HistoryScopeState
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
+from mindroom.text_ingress_dispatch import _run_claimed_response
 from mindroom.turn_store import TurnStore, TurnStoreDeps
 from tests.conftest import TEST_PASSWORD, bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
@@ -129,6 +131,74 @@ def _prepare_redaction(
         target=target,
         source_event_ids=("$later",),
     )
+
+
+def test_pending_turn_claim_allows_only_one_concurrent_owner(tmp_path: Path) -> None:
+    """Overlapping delivery of one source event must start one response."""
+    store = _store(tmp_path)
+    turn = TurnRecord.create(["$source"], completed=False)
+    barrier = threading.Barrier(8)
+    claims = [False] * barrier.parties
+
+    def claim(index: int) -> None:
+        barrier.wait()
+        claims[index] = store.try_claim_turn(turn)
+
+    threads = [threading.Thread(target=claim, args=(index,)) for index in range(barrier.parties)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert sum(claims) == 1
+    store.release_pending_turn_claim(turn)
+    assert store.try_claim_turn(turn) is True
+
+
+@pytest.mark.asyncio
+async def test_failed_claimed_response_releases_turn_for_replay(tmp_path: Path) -> None:
+    """A failed owner must not permanently suppress a later delivery."""
+    store = _store(tmp_path)
+    turn = TurnRecord.create(["$source"], completed=False)
+    assert store.try_claim_turn(turn) is True
+
+    async def fail() -> None:
+        msg = "response failed"
+        raise RuntimeError(msg)
+
+    controller = SimpleNamespace(deps=SimpleNamespace(turn_store=store))
+    with pytest.raises(RuntimeError, match="response failed"):
+        await _run_claimed_response(controller, turn, fail())
+
+    assert store.try_claim_turn(turn) is True
+
+
+@pytest.mark.asyncio
+async def test_terminal_turn_keeps_claim_until_response_task_finishes(tmp_path: Path) -> None:
+    """Terminal persistence must not reopen a source before task cleanup completes."""
+    store = _store(tmp_path)
+    turn = TurnRecord.create(["$source"], completed=False)
+    other_turn = TurnRecord.create(["$discovery"], completed=False)
+    expanded_turn = replace(turn, discovery_event_ids=other_turn.source_event_ids)
+    terminal_recorded = asyncio.Event()
+    release_response = asyncio.Event()
+    assert store.try_claim_turn(turn) is True
+    assert store.try_claim_turn(other_turn) is True
+
+    async def finish_response() -> None:
+        store.record_turn(expanded_turn)
+        terminal_recorded.set()
+        await release_response.wait()
+
+    controller = SimpleNamespace(deps=SimpleNamespace(turn_store=store))
+    response_task = asyncio.create_task(_run_claimed_response(controller, turn, finish_response()))
+    await terminal_recorded.wait()
+
+    assert store.try_claim_turn(turn) is False
+    release_response.set()
+    await response_task
+    assert store.try_claim_turn(turn) is True
+    assert store.try_claim_turn(other_turn) is False
 
 
 def test_prepare_redaction_removes_causal_run_suffix(tmp_path: Path) -> None:

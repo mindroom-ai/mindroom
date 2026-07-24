@@ -808,6 +808,40 @@ async def test_redacting_last_thread_child_removes_orphan_root_mapping(
 
 
 @pytest.mark.asyncio
+async def test_replacing_thread_without_old_children_preserves_root_mapping(
+    event_cache_factory: Callable[[], ConversationEventCache],
+) -> None:
+    """Removing stale children must not erase the replacement snapshot's root self-mapping."""
+    root = _shared_cache(event_cache_factory)
+    await root.initialize()
+    cache = root.for_principal("@alice:localhost")
+    room_id = "!room:localhost"
+    root_event_id = "$thread-root"
+    root_event = _event(root_event_id, 1)
+    child_event = _event("$old-child", 2)
+    try:
+        await replace_thread_unconditionally(
+            cache,
+            room_id,
+            root_event_id,
+            [root_event, child_event],
+        )
+
+        await replace_thread_unconditionally(
+            cache,
+            room_id,
+            root_event_id,
+            [root_event],
+        )
+
+        assert await cache.get_thread_events(room_id, root_event_id) == [root_event]
+        assert await cache.get_thread_id_for_event(room_id, root_event_id) == root_event_id
+        assert await cache.get_thread_id_for_event(room_id, "$old-child") is None
+    finally:
+        await root.close()
+
+
+@pytest.mark.asyncio
 async def test_principal_purge_removes_only_that_principals_rows(
     event_cache_factory: Callable[[], ConversationEventCache],
 ) -> None:

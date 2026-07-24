@@ -699,8 +699,9 @@ async def delete_event_thread_rows(
     room_id: str,
     *,
     event_ids: list[str],
+    current_self_root_ids: Collection[str] = (),
 ) -> int:
-    """Delete event mappings and unsupported roots whose proof was removed."""
+    """Delete event mappings while preserving roots proven by the current snapshot."""
     if not event_ids:
         return 0
     affected_thread_ids = await _thread_ids_for_events(
@@ -722,7 +723,7 @@ async def delete_event_thread_rows(
         namespace,
         room_id,
         candidate_root_ids=affected_thread_ids,
-        current_self_root_ids=set(),
+        current_self_root_ids=set(current_self_root_ids),
     )
     return deleted_rows
 

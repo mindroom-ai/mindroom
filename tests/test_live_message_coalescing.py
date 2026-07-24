@@ -232,6 +232,40 @@ def _make_room(room_id: str = "!room:localhost") -> MagicMock:
     return room
 
 
+@pytest.mark.asyncio
+async def test_duplicate_delivery_is_claimed_before_dispatch_resolution(tmp_path: Path) -> None:
+    """A replay arriving during cache resolution must not repeat that work."""
+    bot = _make_bot(tmp_path, debounce_ms=0)
+    room = _make_room()
+    event = _text_event(event_id="$duplicate", body="@test_agent hello")
+    resolution_started = asyncio.Event()
+    duplicate_reservation = MagicMock()
+
+    async def slow_normalize(*_args: object, **_kwargs: object) -> None:
+        resolution_started.set()
+        await asyncio.Event().wait()
+
+    normalizer = MagicMock()
+    normalizer.resolve_text_event = AsyncMock(side_effect=slow_normalize)
+    controller = replace_turn_controller_deps(bot, normalizer=normalizer)
+    first = asyncio.create_task(
+        controller._dispatch_text_message(room, event, "@user:localhost"),
+    )
+    await resolution_started.wait()
+    await controller._dispatch_text_message(
+        room,
+        event,
+        "@user:localhost",
+        queued_notice_reservation=duplicate_reservation,
+    )
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+
+    normalizer.resolve_text_event.assert_awaited_once()
+    duplicate_reservation.cancel.assert_called_once_with()
+
+
 async def _wait_for(condition: Callable[[], bool], *, deadline_seconds: float = 0.5) -> None:
     """Poll until a test condition becomes true."""
     ready = asyncio.Event()

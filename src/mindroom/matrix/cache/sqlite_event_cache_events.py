@@ -721,8 +721,9 @@ async def delete_event_thread_rows(
     room_id: str,
     *,
     event_ids: list[str],
+    current_self_root_ids: Collection[str] = (),
 ) -> int:
-    """Delete event-to-thread rows within one owner and room."""
+    """Delete event mappings while preserving roots proven by the current snapshot."""
     affected_thread_ids = await _thread_ids_for_events(
         db,
         principal_id,
@@ -742,7 +743,7 @@ async def delete_event_thread_rows(
         principal_id,
         room_id,
         candidate_root_ids=affected_thread_ids,
-        current_self_root_ids=set(),
+        current_self_root_ids=set(current_self_root_ids),
     )
     return deleted_rows
 
