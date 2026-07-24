@@ -298,6 +298,13 @@ class TestThreadHistory:
         client = AsyncMock()
         event_cache = make_event_cache_mock()
         expected_history = [{"event_id": "$thread_root", "body": "root"}]
+        root_source = {
+            "content": {"body": "root", "msgtype": "m.text"},
+            "event_id": "$thread_root",
+            "origin_server_ts": 1,
+            "sender": "@user:localhost",
+            "type": "m.room.message",
+        }
 
         with (
             patch(
@@ -305,7 +312,7 @@ class TestThreadHistory:
                 new=AsyncMock(
                     return_value=MagicMock(
                         history=expected_history,
-                        event_sources=[{"event_id": "$thread_root"}],
+                        event_sources=[root_source],
                         resolution_ms=0.0,
                         sidecar_hydration_ms=0.0,
                     ),
@@ -334,7 +341,7 @@ class TestThreadHistory:
             event_cache,
             room_id="!room:localhost",
             thread_id="$thread_root",
-            event_sources=[{"event_id": "$thread_root"}],
+            event_sources=[root_source],
             expected_membership_epoch=0,
             fetch_started_at=ANY,
         )
@@ -3864,6 +3871,13 @@ class TestThreadHistoryCache:
                 content={"body": "refreshed"},
             ),
         ]
+        root_source = {
+            "content": {"body": "refreshed", "msgtype": "m.text"},
+            "event_id": "$thread_root",
+            "origin_server_ts": 1,
+            "sender": "@user:localhost",
+            "type": "m.room.message",
+        }
 
         with (
             patch.object(matrix_client_module, "logger", logger),
@@ -3883,7 +3897,7 @@ class TestThreadHistoryCache:
                 new=AsyncMock(
                     return_value=MagicMock(
                         history=refreshed_history,
-                        event_sources=[{"event_id": "$thread_root"}],
+                        event_sources=[root_source],
                         fetch_ms=91.2,
                         room_scan_pages=7,
                         scanned_event_count=42,
@@ -4569,6 +4583,13 @@ class TestThreadHistoryCache:
         event_cache = _event_cache()
         event_cache.room_membership_epoch.side_effect = RuntimeError("cache unavailable")
         event_cache.replace_thread_if_not_newer.return_value = False
+        root_source = {
+            "content": {"body": "fresh", "msgtype": "m.text"},
+            "event_id": "$thread_root",
+            "origin_server_ts": 1,
+            "sender": "@user:localhost",
+            "type": "m.room.message",
+        }
         fetch_result = matrix_client_module._ThreadHistoryFetchResult(
             history=[
                 ResolvedVisibleMessage.synthetic(
@@ -4578,7 +4599,7 @@ class TestThreadHistoryCache:
                     content={"body": "fresh"},
                 ),
             ],
-            event_sources=[{"event_id": "$thread_root"}],
+            event_sources=[root_source],
             fetch_ms=1.0,
             room_scan_pages=1,
             scanned_event_count=1,

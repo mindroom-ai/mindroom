@@ -51,13 +51,6 @@ async def migrate_postgres_schema(
             ALTER COLUMN event_json DROP NOT NULL
             """,
         )
-    if current_schema_version in {1, 2, 3} and current_schema_version != target_schema_version:
-        await db.execute(
-            """
-            DROP INDEX IF EXISTS idx_mindroom_event_cache_event_edits_room_original_ts
-            """,
-        )
-
     normalized_legacy_thread_payload_rows = await rowcount(
         db,
         """

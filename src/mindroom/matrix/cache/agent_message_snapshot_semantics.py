@@ -5,7 +5,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from mindroom.matrix.event_info import EventInfo, event_source_is_state_event, event_source_matches_room
+from mindroom.matrix.event_info import (
+    EventInfo,
+    event_source_is_state_event,
+    event_source_matches_room,
+    replacement_content_for_original,
+)
 from mindroom.matrix.visible_body import visible_content_from_content
 
 from .agent_message_snapshot import AgentMessageSnapshot, AgentMessageSnapshotUnavailable
@@ -73,7 +78,6 @@ def snapshot_lookup_result(
     runtime_started_at: float | None,
 ) -> SnapshotLookupResult:
     """Resolve one cached event and optional edit into a visible snapshot outcome."""
-    latest_event = latest_edit.event if latest_edit is not None else event
     visible_cached_at = latest_edit.cached_at if latest_edit is not None else cached_at
     if (
         thread_id is None
@@ -82,11 +86,16 @@ def snapshot_lookup_result(
     ):
         return SnapshotLookupResult(snapshot=None, stop_scanning=True)
 
-    timestamp = latest_event.get("origin_server_ts")
+    timestamp = event.get("origin_server_ts")
     if not isinstance(timestamp, int) or isinstance(timestamp, bool):
         return SnapshotLookupResult(snapshot=None)
-    content = latest_event.get("content")
-    visible_content = visible_content_from_content(content) if isinstance(content, dict) else {}
+    original_content = event.get("content")
+    visible_content = visible_content_from_content(original_content) if isinstance(original_content, dict) else {}
+    if latest_edit is not None:
+        edit_content = latest_edit.event.get("content")
+        new_content = edit_content.get("m.new_content") if isinstance(edit_content, dict) else None
+        if isinstance(new_content, dict):
+            visible_content = replacement_content_for_original(visible_content, new_content)
     return SnapshotLookupResult(
         snapshot=AgentMessageSnapshot(
             content=visible_content,

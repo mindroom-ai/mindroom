@@ -508,6 +508,7 @@ class MatrixMessageOperations:
             client=context.client,
             config=context.config,
             runtime_paths=context.runtime_paths,
+            room_id=context.room_id,
             trusted_sender_ids=trusted_sender_ids,
         )
 

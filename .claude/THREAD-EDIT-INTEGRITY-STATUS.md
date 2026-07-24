@@ -8,9 +8,28 @@ Exact candidate `c8f31fc332b2febcf9f2e3aa1652b0cf06be5faa` is rejected by fresh 
 
 Current CI for that rejected head is green, but all review and live gates are invalid.
 
-The isolated Claude Fable 5 xhigh review of the rejected head is still running and its result must be retained as non-gating evidence.
+The isolated Claude Fable 5 xhigh review approved rejected head `c8f31fc332b2febcf9f2e3aa1652b0cf06be5faa`.
+
+That approval is retained as non-gating evidence because it missed blockers reproduced by the independent Codex and source-minimality audits.
 
 The real-Tuwunel gate has not run.
+
+## Follow-up implementation in progress
+
+- Shared replacement projection now replaces content wholesale, drops replacement `m.relates_to`, preserves the original relation, and preserves the original timestamp and thread membership.
+- Bundled replacements now require non-empty sender/type/event IDs, a timestamp, a valid replacement envelope, and renderable message content.
+- Bundled candidates now use canonical `(origin_server_ts, event_id)` newest-first ordering for previews and full history.
+- Cold scans reject state and explicit wrong-room rows before root accounting; sidecar hydration rejects them before owner registration.
+- Cache certification rejects explicit wrong-room rows and requires a parseable non-state, non-edit root.
+- Generic visible resolution and both thread-preview tools now receive authoritative room scope.
+- Approval parsing rejects state events and explicit room mismatches.
+- Latest-edit APIs now require sender and event type; SQLite and PostgreSQL reject malformed event envelopes before ordering.
+- PostgreSQL remains schema v3 with one legacy narrowing index.
+- Query-level `edit_event_id COLLATE "C" DESC` is the correctness owner for bytewise equal-timestamp ties, so no second collation-specific index is created.
+
+The reproduced failure subset passes on SQLite and PostgreSQL.
+
+Exact new adversarial regressions, broad targeted tests, and final gates remain pending.
 
 ## Verified blockers
 

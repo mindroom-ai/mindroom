@@ -342,7 +342,7 @@ async def _seed_postgres_v2_schema(database_url: str, schema_name: str) -> str:
 
 
 async def _seed_postgres_v3_schema(database_url: str, schema_name: str) -> str:
-    """Create the prior schema with its locale-dependent latest-edit index."""
+    """Create schema v3 with its existing narrowing latest-edit index."""
     admin = await psycopg.AsyncConnection.connect(database_url)
     await admin.execute(f'CREATE SCHEMA "{schema_name}"')
     await admin.commit()
@@ -358,19 +358,6 @@ async def _seed_postgres_v3_schema(database_url: str, schema_name: str) -> str:
         """,
     )
     await _create_postgres_event_cache_schema(db)
-    await db.execute("DROP INDEX idx_mindroom_event_cache_event_edits_room_original_ts_c")
-    await db.execute(
-        """
-        CREATE INDEX idx_mindroom_event_cache_event_edits_room_original_ts
-        ON mindroom_event_cache_event_edits(
-            namespace,
-            room_id,
-            original_event_id,
-            origin_server_ts DESC,
-            edit_event_id DESC
-        )
-        """,
-    )
     await db.execute(
         """
         INSERT INTO mindroom_event_cache_metadata(key, value)
@@ -441,7 +428,15 @@ async def _assert_edit_snapshot_and_mxc_behavior(
             ("$edit-latest", room_id, latest_edit),
         ],
     )
-    assert await cache.get_latest_edit(room_id, "$reply") == latest_edit
+    assert (
+        await cache.get_latest_edit(
+            room_id,
+            "$reply",
+            sender=sender,
+            event_type="m.room.message",
+        )
+        == latest_edit
+    )
     snapshot = await cache.get_latest_agent_message_snapshot(
         room_id,
         thread_id,
@@ -450,7 +445,7 @@ async def _assert_edit_snapshot_and_mxc_behavior(
     )
     assert snapshot is not None
     assert snapshot.content["body"] == "latest edit"
-    assert snapshot.origin_server_ts == 1030
+    assert snapshot.origin_server_ts == 1010
 
     mxc_owner = _message_event(
         event_id="$mxc-owner",
@@ -482,6 +477,7 @@ async def _assert_staleness_and_redaction_behavior(
     *,
     room_id: str,
     thread_id: str,
+    sender: str,
     latest_edit: dict[str, object],
 ) -> None:
     await cache.mark_thread_stale(room_id, thread_id, reason="live_thread_mutation")
@@ -497,13 +493,29 @@ async def _assert_staleness_and_redaction_behavior(
 
     assert await cache.redact_event(room_id, "$reply") is True
     assert await cache.get_event(room_id, "$reply") is None
-    assert await cache.get_latest_edit(room_id, "$reply") is None
+    assert (
+        await cache.get_latest_edit(
+            room_id,
+            "$reply",
+            sender=sender,
+            event_type="m.room.message",
+        )
+        is None
+    )
     redacted_thread = await cache.get_thread_events(room_id, thread_id)
     assert redacted_thread is not None
     assert [event["event_id"] for event in redacted_thread] == [thread_id]
 
     await cache.store_event("$edit-latest", room_id, latest_edit)
-    assert await cache.get_latest_edit(room_id, "$reply") is None
+    assert (
+        await cache.get_latest_edit(
+            room_id,
+            "$reply",
+            sender=sender,
+            event_type="m.room.message",
+        )
+        is None
+    )
 
 
 def test_cache_config_resolves_postgres_url_and_namespace_from_runtime_env(tmp_path: Path) -> None:
@@ -994,7 +1006,7 @@ async def test_postgres_v1_migration_is_concurrent_and_namespace_preserving(
             )
         ).fetchall()
         await db.close()
-        assert version == ("4",)
+        assert version == ("3",)
         assert namespaces == [("legacy_a",), ("legacy_b",)]
         assert legacy_plaintext == []
         assert membership_columns == [("membership_epoch",), ("membership_state",)]
@@ -1143,7 +1155,7 @@ async def test_postgres_v2_migration_is_namespace_preserving(
         await db.rollback()
         await db.close()
 
-        assert version == ("4",)
+        assert version == ("3",)
         assert namespaces == [("legacy_a",), ("legacy_b",)]
         assert plaintext == []
         assert generations == [
@@ -1674,6 +1686,7 @@ async def test_postgres_event_cache_round_trips_core_conversation_cache_behavior
             cache,
             room_id=room_id,
             thread_id=thread_id,
+            sender=sender,
             latest_edit=latest_edit,
         )
     finally:
@@ -1683,43 +1696,16 @@ async def test_postgres_event_cache_round_trips_core_conversation_cache_behavior
 
 
 @pytest.mark.asyncio
-async def test_postgres_latest_edit_index_uses_bytewise_event_id_collation(
+async def test_postgres_v3_startup_retains_single_latest_edit_index(
     postgres_event_cache_url: str,
 ) -> None:
-    """The Postgres latest-edit index must match Matrix's bytewise event-ID ordering."""
-    cache = PostgresEventCache(
-        database_url=postgres_event_cache_url,
-        namespace=f"tenant_{uuid.uuid4().hex}",
-    )
-    await cache.initialize()
-    try:
-        assert cache._runtime.db is not None
-        cursor = await cache._runtime.db.execute(
-            """
-            SELECT indexdef
-            FROM pg_indexes
-            WHERE indexname = 'idx_mindroom_event_cache_event_edits_room_original_ts_c'
-            """,
-        )
-        row = await cursor.fetchone()
-    finally:
-        await cache.close()
-
-    assert row is not None
-    assert 'edit_event_id COLLATE "C" DESC' in str(row[0])
-
-
-@pytest.mark.asyncio
-async def test_postgres_v3_migration_replaces_locale_dependent_edit_index(
-    postgres_event_cache_url: str,
-) -> None:
-    """Schema v4 must replace the legacy latest-edit index exactly once."""
+    """Schema v3 keeps one narrowing index while query collation owns correctness."""
     schema_name = f"cache_migration_v3_{uuid.uuid4().hex}"
     isolated_url = await _seed_postgres_v3_schema(postgres_event_cache_url, schema_name)
     cache = PostgresEventCache(database_url=isolated_url, namespace="runtime")
     await cache.initialize()
     try:
-        assert cache.runtime_diagnostics()["cache_schema_migrated_from"] == 3
+        assert "cache_schema_migrated_from" not in cache.runtime_diagnostics()
         assert cache._runtime.db is not None
         version_cursor = await cache._runtime.db.execute(
             "SELECT value FROM mindroom_event_cache_metadata WHERE key = 'schema_version'",
@@ -1738,8 +1724,8 @@ async def test_postgres_v3_migration_replaces_locale_dependent_edit_index(
     finally:
         await cache.close()
 
-    assert version == ("4",)
-    assert indexes == [("idx_mindroom_event_cache_event_edits_room_original_ts_c",)]
+    assert version == ("3",)
+    assert indexes == [("idx_mindroom_event_cache_event_edits_room_original_ts",)]
 
 
 @pytest.mark.asyncio

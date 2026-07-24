@@ -1777,7 +1777,12 @@ async def test_refused_opaque_write_keeps_latest_edit_join_readable(
 
     await event_cache.store_event(edit_event_id, room_id, _opaque_payload(edit_event_id, origin_server_ts=2000))
 
-    latest_edit = await event_cache.get_latest_edit(room_id, original_event_id)
+    latest_edit = await event_cache.get_latest_edit(
+        room_id,
+        original_event_id,
+        sender="@user:localhost",
+        event_type="m.room.message",
+    )
     assert latest_edit is not None
     assert latest_edit["type"] == "m.room.message"
     assert latest_edit["content"]["m.new_content"]["body"] == "edited"
@@ -2158,7 +2163,7 @@ async def test_cached_room_get_event_cache_hit_returns_latest_visible_edit(
     assert isinstance(response, nio.RoomGetEventResponse)
     assert response.event.event_id == "$reply"
     assert response.event.body == "Final reply"
-    assert response.event.server_timestamp == 3000
+    assert response.event.server_timestamp == 2000
     assert EventInfo.from_event(response.event.source).thread_id == "$thread_root"
     client.room_get_event.assert_not_awaited()
 
@@ -2301,7 +2306,7 @@ async def test_cached_room_get_event_falls_back_from_malformed_newest_edit(
 
     assert isinstance(response, nio.RoomGetEventResponse)
     assert response.event.body == "Good"
-    assert response.event.server_timestamp == 3000
+    assert response.event.server_timestamp == 2000
     client.room_get_event.assert_not_awaited()
 
 
@@ -2364,7 +2369,7 @@ async def test_latest_agent_message_snapshot_falls_back_from_empty_new_content(
     assert latest_edit["event_id"] == "$valid_edit"
     assert snapshot is not None
     assert snapshot.content["body"] == "Good"
-    assert snapshot.origin_server_ts == 3000
+    assert snapshot.origin_server_ts == 2000
 
 
 @pytest.mark.asyncio
@@ -2434,10 +2439,10 @@ async def test_cached_edit_paths_ignore_explicit_other_room(
     assert latest_edit["event_id"] == "$valid_edit"
     assert isinstance(response, nio.RoomGetEventResponse)
     assert response.event.body == "Good"
-    assert response.event.server_timestamp == 3000
+    assert response.event.server_timestamp == 2000
     assert snapshot is not None
     assert snapshot.content["body"] == "Good"
-    assert snapshot.origin_server_ts == 3000
+    assert snapshot.origin_server_ts == 2000
 
 
 @pytest.mark.asyncio
@@ -2580,7 +2585,12 @@ async def test_edit_cache_row_indexes_io_mindroom_tool_approval_edits(
                 ("$approval_edit", "!room:localhost", approval_edit),
             ],
         )
-        latest_edit = await cache.get_latest_edit("!room:localhost", "$approval")
+        latest_edit = await cache.get_latest_edit(
+            "!room:localhost",
+            "$approval",
+            sender="@bot:localhost",
+            event_type="io.mindroom.tool_approval",
+        )
     finally:
         await cache.close()
 
@@ -2628,14 +2638,19 @@ async def test_latest_edit_equal_timestamp_uses_greatest_event_id(
     await event_cache.store_event(lowercase_edit.event_id, room_id, _cache_source(lowercase_edit))
     await event_cache.store_event(uppercase_edit.event_id, room_id, _cache_source(uppercase_edit))
 
-    latest_edit = await event_cache.get_latest_edit(room_id, original_event_id)
+    latest_edit = await event_cache.get_latest_edit(
+        room_id,
+        original_event_id,
+        sender="@alice:localhost",
+        event_type="m.room.message",
+    )
 
     assert latest_edit is not None
     assert latest_edit["event_id"] == "$a-edit"
 
 
 @pytest.mark.asyncio
-async def test_latest_edit_can_be_scoped_to_sender_when_newer_edit_is_untrusted(
+async def test_latest_edit_requires_sender_scope_when_newer_edit_is_untrusted(
     event_cache: ConversationEventCache,
 ) -> None:
     """Approval lookup should be able to ignore newer edits from other senders."""
@@ -2700,13 +2715,23 @@ async def test_latest_edit_can_be_scoped_to_sender_when_newer_edit_is_untrusted(
                 ("$untrusted_edit", "!room:localhost", untrusted_edit),
             ],
         )
-        latest_edit = await cache.get_latest_edit("!room:localhost", "$approval")
-        latest_trusted_edit = await cache.get_latest_edit("!room:localhost", "$approval", sender="@bot:localhost")
+        latest_untrusted_edit = await cache.get_latest_edit(
+            "!room:localhost",
+            "$approval",
+            sender="@attacker:localhost",
+            event_type="io.mindroom.tool_approval",
+        )
+        latest_trusted_edit = await cache.get_latest_edit(
+            "!room:localhost",
+            "$approval",
+            sender="@bot:localhost",
+            event_type="io.mindroom.tool_approval",
+        )
     finally:
         await cache.close()
 
-    assert latest_edit is not None
-    assert latest_edit["event_id"] == "$untrusted_edit"
+    assert latest_untrusted_edit is not None
+    assert latest_untrusted_edit["event_id"] == "$untrusted_edit"
     assert latest_trusted_edit is not None
     assert latest_trusted_edit["event_id"] == "$trusted_edit"
 
@@ -2903,7 +2928,12 @@ async def test_redacting_original_removes_dependent_cached_edits_from_thread_his
         history_before = await fetch_thread_history(client, "!room:localhost", "$thread_root", event_cache=cache)
 
         redacted = await cache.redact_event("!room:localhost", "$reply")
-        latest_edit = await cache.get_latest_edit("!room:localhost", "$reply")
+        latest_edit = await cache.get_latest_edit(
+            "!room:localhost",
+            "$reply",
+            sender="@agent:localhost",
+            event_type="m.room.message",
+        )
         cached_edit = await cache.get_event("!room:localhost", "$reply_edit")
         history_after = await fetch_thread_history(client, "!room:localhost", "$thread_root", event_cache=cache)
     finally:
@@ -2969,7 +2999,12 @@ async def test_invalidate_thread_preserves_separately_cached_latest_edit(
         await cache.store_event("$reply_edit", "!room:localhost", _cache_source(edit_event))
         await cache.invalidate_thread("!room:localhost", "$thread_root")
 
-        latest_edit = await cache.get_latest_edit("!room:localhost", "$reply")
+        latest_edit = await cache.get_latest_edit(
+            "!room:localhost",
+            "$reply",
+            sender="@agent:localhost",
+            event_type="m.room.message",
+        )
         response, _ = await _cached_room_get_event(client, cache, "!room:localhost", "$reply")
     finally:
         await cache.close()
@@ -3231,7 +3266,12 @@ async def test_initialize_resets_stale_old_cache_schema(tmp_path: Path) -> None:
     cache = SqliteEventCache(db_path)
     await cache.initialize()
     try:
-        latest_edit = await cache.get_latest_edit("!room:localhost", "$reply")
+        latest_edit = await cache.get_latest_edit(
+            "!room:localhost",
+            "$reply",
+            sender="@agent:localhost",
+            event_type="m.room.message",
+        )
         cached_original = await cache.get_event("!room:localhost", "$reply")
     finally:
         await cache.close()

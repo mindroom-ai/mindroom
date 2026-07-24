@@ -38,6 +38,19 @@ def origin_server_ts_from_event_source(event_source: object) -> int | float | No
     return None
 
 
+def replacement_content_for_original(
+    original_content: Mapping[str, object],
+    new_content: Mapping[str, object],
+) -> dict[str, object]:
+    """Apply Matrix replacement content while preserving the original relation."""
+    replacement_content = {
+        key: value for key, value in new_content.items() if isinstance(key, str) and key != "m.relates_to"
+    }
+    if "m.relates_to" in original_content:
+        replacement_content["m.relates_to"] = original_content["m.relates_to"]
+    return replacement_content
+
+
 def reply_to_event_id_from_content(content: Mapping[str, object] | None) -> str | None:
     """Return the explicit reply target encoded on one Matrix content payload."""
     if content is None:

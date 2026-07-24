@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal, cast
 
-from mindroom.matrix.event_info import EventInfo
+from mindroom.matrix.event_info import EventInfo, event_source_is_state_event, event_source_matches_room
 from mindroom.matrix.large_messages import sidecar_upload_is_usable
 from mindroom.matrix.visible_body import visible_content_from_content
 
@@ -43,6 +43,9 @@ class PendingApproval:
         """Parse one Matrix approval card event into a typed read-only view."""
         if event.get("type") != "io.mindroom.tool_approval":
             msg = "Approval card event has the wrong event type."
+            raise ValueError(msg)
+        if event_source_is_state_event(event) or not event_source_matches_room(event, room_id):
+            msg = "Approval card event is not a room-scoped timeline event."
             raise ValueError(msg)
         content = event.get("content")
         if not isinstance(content, dict):
@@ -141,6 +144,7 @@ def is_original_approval_card(event: dict[str, Any]) -> bool:
     return (
         event.get("type") == "io.mindroom.tool_approval"
         and isinstance(content, dict)
+        and not event_source_is_state_event(event)
         and not _is_replace_content(content)
     )
 

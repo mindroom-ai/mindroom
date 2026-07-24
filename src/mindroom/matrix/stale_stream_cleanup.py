@@ -818,6 +818,7 @@ async def _scan_room_message_states(
     resolved_messages = await resolve_latest_visible_messages(
         bot_message_events,
         client,
+        room_id=room_id,
         trusted_sender_ids=trusted_sender_ids,
     )
     bot_resolved_messages = {

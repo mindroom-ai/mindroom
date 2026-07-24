@@ -890,9 +890,33 @@ async def test_joined_timeline_thread_relations_indexes_edits_and_visible_histor
     }:
         assert await event_cache.get_thread_id_for_event(_ROOM_ID, event_id) == _THREAD_ID
     assert await event_cache.get_thread_id_for_event(_ROOM_ID, "$reaction") is None
-    assert await event_cache.get_latest_edit(_ROOM_ID, _THREAD_ID) == root_edit
-    assert await event_cache.get_latest_edit(_ROOM_ID, "$explicit-child") == child_edit
-    assert await event_cache.get_latest_edit(_ROOM_ID, "$plain-reply") == reply_edit
+    assert (
+        await event_cache.get_latest_edit(
+            _ROOM_ID,
+            _THREAD_ID,
+            sender=_SENDER,
+            event_type="m.room.message",
+        )
+        == root_edit
+    )
+    assert (
+        await event_cache.get_latest_edit(
+            _ROOM_ID,
+            "$explicit-child",
+            sender=_SENDER,
+            event_type="m.room.message",
+        )
+        == child_edit
+    )
+    assert (
+        await event_cache.get_latest_edit(
+            _ROOM_ID,
+            "$plain-reply",
+            sender=_SENDER,
+            event_type="m.room.message",
+        )
+        == reply_edit
+    )
 
     cached_sources = await event_cache.get_thread_events(_ROOM_ID, _THREAD_ID)
     assert cached_sources is not None
@@ -1427,7 +1451,15 @@ async def test_sync_categories_outside_joined_timeline_are_deliberately_excluded
     assert await event_cache.get_thread_cache_state("!invite:localhost", "$invite-root") is None
     assert await event_cache.get_thread_events(leave_room_id, "$leave-root") is None
     assert await event_cache.get_thread_cache_state(leave_room_id, "$leave-root") is None
-    assert await event_cache.get_latest_edit(leave_room_id, "$leave-original") is None
+    assert (
+        await event_cache.get_latest_edit(
+            leave_room_id,
+            "$leave-original",
+            sender=_SENDER,
+            event_type="m.room.message",
+        )
+        is None
+    )
     assert await event_cache.get_thread_events(_ROOM_ID, _THREAD_ID) == before_events
     assert await event_cache.get_thread_cache_state(_ROOM_ID, _THREAD_ID) == before_state
     assert event_cache.room_departure_epoch(leave_room_id) == 0
@@ -1727,4 +1759,12 @@ async def test_message_and_edit_redaction_contract(
             child_edit,
         )
         assert await event_cache.get_event(_ROOM_ID, "$child-edit-to-redact") is None
-    assert await event_cache.get_latest_edit(_ROOM_ID, _THREAD_CHILD_ID) is None
+    assert (
+        await event_cache.get_latest_edit(
+            _ROOM_ID,
+            _THREAD_CHILD_ID,
+            sender=_SENDER,
+            event_type="m.room.message",
+        )
+        is None
+    )

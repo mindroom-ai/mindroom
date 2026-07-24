@@ -137,11 +137,11 @@ async def load_latest_edit(
     namespace: str,
     room_id: str,
     original_event_id: str,
-    sender: str | None = None,
-    event_type: str | None = None,
+    sender: str,
+    event_type: str,
 ) -> dict[str, Any] | None:
     """Return the latest cached edit event for one original event."""
-    row = await _load_latest_edit_row(
+    row = await load_latest_edit_row(
         db,
         namespace=namespace,
         room_id=room_id,
@@ -162,38 +162,18 @@ async def load_latest_edit_row(
     event_type: str,
 ) -> CachedEventRow | None:
     """Return the latest cached edit event plus its lookup-row write time."""
-    return await _load_latest_edit_row(
-        db,
-        namespace=namespace,
-        room_id=room_id,
-        original_event_id=original_event_id,
-        sender=sender,
-        event_type=event_type,
-    )
-
-
-async def _load_latest_edit_row(
-    db: AsyncConnection,
-    *,
-    namespace: str,
-    room_id: str,
-    original_event_id: str,
-    sender: str | None,
-    event_type: str | None,
-) -> CachedEventRow | None:
-    sender_predicate = "" if sender is None else "AND events.event_json::jsonb ->> 'sender' = %s"
-    event_type_predicate = "" if event_type is None else "AND events.event_json::jsonb ->> 'type' = %s"
     parameters = (
         namespace,
         room_id,
         original_event_id,
-        *((sender,) if sender is not None else ()),
-        *((event_type,) if event_type is not None else ()),
+        sender,
+        event_type,
         room_id,
+        original_event_id,
     )
     row = await fetchone(
         db,
-        f"""
+        """
         SELECT events.event_json, events.cached_at
         FROM mindroom_event_cache_event_edits AS edits
         JOIN mindroom_event_cache_events AS events
@@ -203,21 +183,37 @@ async def _load_latest_edit_row(
         WHERE edits.namespace = %s
             AND edits.room_id = %s
             AND edits.original_event_id = %s
-            {sender_predicate}
-            {event_type_predicate}
+            AND events.event_json::jsonb ->> 'sender' = %s
+            AND events.event_json::jsonb ->> 'type' = %s
             AND (
                 NOT (events.event_json::jsonb ? 'room_id')
                 OR events.event_json::jsonb ->> 'room_id' = %s
             )
             AND NOT (events.event_json::jsonb ? 'state_key')
+            AND jsonb_typeof(events.event_json::jsonb -> 'event_id') = 'string'
+            AND events.event_json::jsonb ->> 'event_id' = edits.edit_event_id
+            AND jsonb_typeof(events.event_json::jsonb -> 'origin_server_ts') = 'number'
+            AND events.event_json::jsonb ->> 'origin_server_ts' ~ '^-?[0-9]+$'
+            AND jsonb_typeof(events.event_json::jsonb -> 'content') = 'object'
+            AND events.event_json::jsonb -> 'content' -> 'm.relates_to' ->> 'rel_type' = 'm.replace'
+            AND events.event_json::jsonb -> 'content' -> 'm.relates_to' ->> 'event_id' = %s
             AND jsonb_typeof(events.event_json::jsonb -> 'content' -> 'm.new_content') = 'object'
             AND (
                 events.event_json::jsonb ->> 'type' != 'm.room.message'
-                OR jsonb_typeof(events.event_json::jsonb -> 'content' -> 'm.new_content' -> 'body') = 'string'
+                OR (
+                    jsonb_typeof(events.event_json::jsonb -> 'content' -> 'body') = 'string'
+                    AND jsonb_typeof(events.event_json::jsonb -> 'content' -> 'msgtype') = 'string'
+                    AND jsonb_typeof(
+                        events.event_json::jsonb -> 'content' -> 'm.new_content' -> 'body'
+                    ) = 'string'
+                    AND jsonb_typeof(
+                        events.event_json::jsonb -> 'content' -> 'm.new_content' -> 'msgtype'
+                    ) = 'string'
+                )
             )
         ORDER BY edits.origin_server_ts DESC, edits.edit_event_id COLLATE "C" DESC
         LIMIT 1
-        """,  # noqa: S608
+        """,
         parameters,
     )
     if row is None:

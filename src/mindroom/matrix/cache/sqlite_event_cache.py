@@ -969,8 +969,8 @@ class SqliteEventCache:
         room_id: str,
         original_event_id: str,
         *,
-        sender: str | None = None,
-        event_type: str | None = None,
+        sender: str,
+        event_type: str,
     ) -> dict[str, Any] | None:
         """Return the latest cached edit event for one original event."""
         return await self._read_operation(

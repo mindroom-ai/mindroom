@@ -3881,6 +3881,7 @@ expose = [
     "event_type_supports_thread_relations",
     "is_thread_affecting_relation",
     "origin_server_ts_from_event_source",
+    "replacement_content_for_original",
     "reply_to_event_id_from_content",
 ]
 from = ["mindroom.matrix.event_info"]
@@ -3994,6 +3995,7 @@ expose = [
     "extract_visible_message",
     "message_preview",
     "is_valid_bundled_replacement",
+    "ordered_valid_bundled_replacements",
     "record_thread_edit_candidate",
     "replace_visible_message",
     "resolve_visible_event_source",

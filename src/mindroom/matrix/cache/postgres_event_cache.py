@@ -38,7 +38,7 @@ if TYPE_CHECKING:
     from .event_cache import ThreadCacheState, ThreadRevision
 
 
-_POSTGRES_EVENT_CACHE_SCHEMA_VERSION = 4
+_POSTGRES_EVENT_CACHE_SCHEMA_VERSION = 3
 _DEFAULT_PRINCIPAL_ID = "__mindroom_default_principal__"
 _POSTGRES_SCHEMA_LOCK_NAME = "mindroom_event_cache_schema"
 _MAX_TRANSIENT_OPERATION_ATTEMPTS = 2
@@ -315,13 +315,13 @@ async def _create_postgres_event_cache_schema(db: AsyncConnection) -> None:
     )
     await db.execute(
         """
-        CREATE INDEX IF NOT EXISTS idx_mindroom_event_cache_event_edits_room_original_ts_c
+        CREATE INDEX IF NOT EXISTS idx_mindroom_event_cache_event_edits_room_original_ts
         ON mindroom_event_cache_event_edits(
             namespace,
             room_id,
             original_event_id,
             origin_server_ts DESC,
-            edit_event_id COLLATE "C" DESC
+            edit_event_id DESC
         )
         """,
     )
@@ -1363,8 +1363,8 @@ class PostgresEventCache:
         room_id: str,
         original_event_id: str,
         *,
-        sender: str | None = None,
-        event_type: str | None = None,
+        sender: str,
+        event_type: str,
     ) -> dict[str, Any] | None:
         """Return the latest cached edit event for one original event."""
         return await self._operation(

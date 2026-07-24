@@ -499,11 +499,13 @@ async def test_threads_precompute_trusted_sender_ids_once_for_previews() -> None
         client: nio.AsyncClient,
         config: Config,
         runtime_paths: object,
+        room_id: str,
         trusted_sender_ids: frozenset[str],
     ) -> str:
         assert client is ctx.client
         assert config is ctx.config
         assert runtime_paths == ctx.runtime_paths
+        assert room_id == ctx.room_id
         assert trusted_sender_ids is trusted_sender_ids_for_assertion
         return event.body
 

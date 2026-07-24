@@ -43,7 +43,7 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 import nio
 from aiohttp import ClientError
@@ -67,8 +67,7 @@ from mindroom.matrix.client_visible_messages import (
     ResolvedVisibleMessage,
     ThreadEditCandidatesByOriginalEventId,
     apply_latest_edits_to_messages,
-    bundled_replacement_candidates,
-    is_valid_bundled_replacement,
+    ordered_valid_bundled_replacements,
     record_thread_edit_candidate,
 )
 from mindroom.matrix.event_info import (
@@ -133,6 +132,7 @@ _MAX_THREAD_ENUMERATION_PAGES = 100
 _OPAQUE_ENCRYPTED_THREAD_HISTORY_REASON = "thread_history_opaque_encrypted_event"
 _OPAQUE_ENCRYPTED_EVENT_REJECTION = "opaque_encrypted_event"
 _MISSING_THREAD_ROOT_REJECTION = "missing_thread_root"
+_INVALID_EVENT_SCOPE_REJECTION = "invalid_event_scope"
 type _ThreadHistoryDiagnosticValue = str | int | float | bool | None
 
 
@@ -312,11 +312,9 @@ def _parse_room_message_event(event_source: dict[str, Any]) -> nio.Event | None:
             parsed_event = nio.Event.parse_event(event_source)
         except Exception:
             return None
-    if parsed_event is None:
+    if not isinstance(parsed_event, nio.Event):
         return None
-    # nio's parser returns BadEvent even though its public return type is Event.
-    event = cast("nio.Event", parsed_event)
-    return event if _is_room_message_event(event) else None
+    return parsed_event if _is_room_message_event(parsed_event) else None
 
 
 def _parse_visible_text_message_event(
@@ -347,11 +345,9 @@ def _sidecar_hydration_sources(
     """Return sources whose sidecars this resolution pass may hydrate."""
     hydration_sources: list[dict[str, Any]] = []
     for event_source in event_sources:
-        hydration_sources.extend(
-            candidate
-            for candidate in bundled_replacement_candidates(event_source)
-            if is_valid_bundled_replacement(event_source, candidate, room_id=room_id)
-        )
+        if event_source_is_state_event(event_source) or not event_source_matches_room(event_source, room_id):
+            continue
+        hydration_sources.extend(ordered_valid_bundled_replacements(event_source, room_id=room_id))
         if hydrate_sidecars or EventInfo.from_event(event_source).is_edit:
             hydration_sources.append(event_source)
     return hydration_sources
@@ -376,9 +372,7 @@ def _record_bundled_thread_edit_candidates(
     edit_candidates_by_original_event_id: ThreadEditCandidatesByOriginalEventId,
 ) -> None:
     """Record every valid bundled replacement for deterministic latest selection."""
-    for replacement_source in bundled_replacement_candidates(event.source):
-        if not is_valid_bundled_replacement(event.source, replacement_source, room_id=room_id):
-            continue
+    for replacement_source in ordered_valid_bundled_replacements(event.source, room_id=room_id):
         replacement = _parse_visible_text_message_event(replacement_source)
         if not isinstance(replacement, _VISIBLE_ROOM_MESSAGE_EVENT_TYPES):
             continue
@@ -519,7 +513,11 @@ async def _load_stale_cached_thread_history(
         return None
     if cached_event_sources is None:
         return None
-    cached_rejection_reason = _thread_history_cache_rejection_reason(cached_event_sources, thread_id=thread_id)
+    cached_rejection_reason = _thread_history_cache_rejection_reason(
+        cached_event_sources,
+        room_id=room_id,
+        thread_id=thread_id,
+    )
     if cached_rejection_reason is not None:
         logger.warning(
             "Stale thread cache is incomplete; refusing degraded history",
@@ -937,7 +935,11 @@ async def _load_cached_thread_history_if_usable(
                 THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC: "cache_rows_missing",
             }
             return None, cache_reject_diagnostics
-        cached_rejection_reason = _thread_history_cache_rejection_reason(cached_event_sources, thread_id=thread_id)
+        cached_rejection_reason = _thread_history_cache_rejection_reason(
+            cached_event_sources,
+            room_id=room_id,
+            thread_id=thread_id,
+        )
         if cached_rejection_reason is not None:
             await _invalidate_thread_cache_entry(event_cache, room_id=room_id, thread_id=thread_id)
             payload_reject_diagnostics: dict[str, str | int | float | bool] = {
@@ -1075,6 +1077,7 @@ async def refresh_thread_history_from_source(
         raise
     fetch_rejection_reason = _thread_history_cache_rejection_reason(
         fetch_result.event_sources,
+        room_id=room_id,
         thread_id=thread_id,
     )
     if fetch_rejection_reason == _OPAQUE_ENCRYPTED_EVENT_REJECTION:
@@ -1176,12 +1179,23 @@ async def _store_thread_history_cache(
 def _thread_history_cache_rejection_reason(
     event_sources: Sequence[dict[str, Any]],
     *,
+    room_id: str,
     thread_id: str,
 ) -> str | None:
     """Return why one thread event payload cannot become an authoritative snapshot."""
+    if any(not event_source_matches_room(event_source, room_id) for event_source in event_sources):
+        return _INVALID_EVENT_SCOPE_REJECTION
     if any(is_opaque_encrypted_event_source(event_source) for event_source in event_sources):
         return _OPAQUE_ENCRYPTED_EVENT_REJECTION
-    if not any(_event_id_from_source(event_source) == thread_id for event_source in event_sources):
+    root_source = next(
+        (event_source for event_source in event_sources if _event_id_from_source(event_source) == thread_id),
+        None,
+    )
+    if (
+        root_source is None
+        or EventInfo.from_event(root_source).is_edit
+        or _parse_room_message_event(root_source) is None
+    ):
         return _MISSING_THREAD_ROOT_REJECTION
     return None
 
@@ -1487,11 +1501,14 @@ def _is_opaque_thread_affecting_event_source(event_source: Mapping[str, Any]) ->
 def _record_scanned_room_message_source(
     event: nio.Event,
     *,
+    room_id: str,
     edit_candidates_by_original_event_id: ThreadEditCandidatesByOriginalEventId,
     scanned_message_sources: dict[str, dict[str, Any]],
 ) -> str | None:
     """Record one scanned room-message source and return the recorded event ID."""
     event_source = event.source if isinstance(event.source, dict) else {}
+    if event_source_is_state_event(event_source) or not event_source_matches_room(event_source, room_id):
+        return None
     if _is_opaque_thread_affecting_event_source(event_source):
         # Undecryptable relation-bearing ciphertext is recorded as fail-closed evidence: it resolves
         # thread membership through its exposed relation and poisons only that reconstruction.
@@ -1637,10 +1654,10 @@ async def _group_scanned_sources_by_thread(
 
     edits_by_root: dict[str, list[dict[str, Any]]] = {}
     for original_event_id, edit_candidates in edit_candidates_by_original_event_id.items():
-        for edit_event, edit_thread_id in edit_candidates:
+        for edit_event in edit_candidates:
             target_roots = {
                 root_id
-                for root_id in (original_event_id, resolved_thread_ids.get(original_event_id), edit_thread_id)
+                for root_id in (original_event_id, resolved_thread_ids.get(original_event_id))
                 if root_id in grouped
             }
             for root_id in target_roots:
@@ -1691,6 +1708,7 @@ async def _bulk_scan_thread_event_sources(
             scanned_event_count += 1
             recorded_event_id = _record_scanned_room_message_source(
                 event,
+                room_id=room_id,
                 edit_candidates_by_original_event_id=edit_candidates_by_original_event_id,
                 scanned_message_sources=scanned_message_sources,
             )
@@ -1750,7 +1768,11 @@ async def bulk_refresh_room_thread_histories(
         opaque_stale_threads = len(set(thread_root_ids))
     else:
         for thread_id, event_sources in scan_result.thread_event_sources.items():
-            rejection_reason = _thread_history_cache_rejection_reason(event_sources, thread_id=thread_id)
+            rejection_reason = _thread_history_cache_rejection_reason(
+                event_sources,
+                room_id=room_id,
+                thread_id=thread_id,
+            )
             if rejection_reason == _OPAQUE_ENCRYPTED_EVENT_REJECTION:
                 await _mark_thread_stale_for_opaque_history(event_cache, room_id=room_id, thread_id=thread_id)
                 opaque_stale_threads += 1

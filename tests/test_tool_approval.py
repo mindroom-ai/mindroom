@@ -69,16 +69,12 @@ class FakeEventCache:
         room_id: str,
         original_event_id: str,
         *,
-        sender: str | None = None,
-        event_type: str | None = None,
+        sender: str,
+        event_type: str,
     ) -> dict[str, Any] | None:
         edits: list[dict[str, Any]] = []
         for (event_room_id, _), event in self.events.items():
-            if (
-                event_room_id != room_id
-                or (sender is not None and event.get("sender") != sender)
-                or (event_type is not None and event.get("type") != event_type)
-            ):
+            if event_room_id != room_id or event.get("sender") != sender or event.get("type") != event_type:
                 continue
             content = event.get("content")
             if not isinstance(content, dict):
@@ -2572,7 +2568,12 @@ async def test_discard_pending_on_startup_emits_replace_for_each_unresolved_card
 
     assert await store.discard_pending_on_startup() == 1
     assert await store.discard_pending_on_startup() == 0
-    latest_edit = await cache.get_latest_edit("!room:localhost", "$approval")
+    latest_edit = await cache.get_latest_edit(
+        "!room:localhost",
+        "$approval",
+        sender="@mindroom_router:localhost",
+        event_type="io.mindroom.tool_approval",
+    )
     assert latest_edit is not None
     assert latest_edit["content"]["m.new_content"]["status"] == "expired"
     assert latest_edit["content"]["m.new_content"]["resolution_reason"] == (

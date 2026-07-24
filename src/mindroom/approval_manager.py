@@ -894,7 +894,7 @@ class _ApprovalManager:
         *,
         room_id: str,
         card_event_id: str,
-        sender: str | None = None,
+        sender: str,
     ) -> dict[str, Any] | None:
         if self._event_cache is None:
             return None

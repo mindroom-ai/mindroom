@@ -138,11 +138,11 @@ async def load_latest_edit(
     principal_id: str,
     room_id: str,
     original_event_id: str,
-    sender: str | None = None,
-    event_type: str | None = None,
+    sender: str,
+    event_type: str,
 ) -> dict[str, Any] | None:
     """Return the latest principal- and room-scoped edit."""
-    row = await _load_latest_edit_row(
+    row = await load_latest_edit_row(
         db,
         principal_id=principal_id,
         room_id=room_id,
@@ -163,37 +163,17 @@ async def load_latest_edit_row(
     event_type: str,
 ) -> CachedEventRow | None:
     """Return the latest edit and its write time within one ownership scope."""
-    return await _load_latest_edit_row(
-        db,
-        principal_id=principal_id,
-        room_id=room_id,
-        original_event_id=original_event_id,
-        sender=sender,
-        event_type=event_type,
-    )
-
-
-async def _load_latest_edit_row(
-    db: aiosqlite.Connection,
-    *,
-    principal_id: str,
-    room_id: str,
-    original_event_id: str,
-    sender: str | None,
-    event_type: str | None,
-) -> CachedEventRow | None:
-    sender_predicate = "" if sender is None else "AND json_extract(events.event_json, '$.sender') = ?"
-    event_type_predicate = "" if event_type is None else "AND json_extract(events.event_json, '$.type') = ?"
     parameters = (
         principal_id,
         room_id,
         original_event_id,
-        *((sender,) if sender is not None else ()),
-        *((event_type,) if event_type is not None else ()),
+        sender,
+        event_type,
         room_id,
+        original_event_id,
     )
     cursor = await db.execute(
-        f"""
+        """
         SELECT events.event_json, events.cached_at
         FROM event_edits
         JOIN events
@@ -203,21 +183,32 @@ async def _load_latest_edit_row(
         WHERE event_edits.principal_id = ?
           AND event_edits.room_id = ?
           AND event_edits.original_event_id = ?
-          {sender_predicate}
-          {event_type_predicate}
+          AND json_extract(events.event_json, '$.sender') = ?
+          AND json_extract(events.event_json, '$.type') = ?
           AND (
               json_type(events.event_json, '$.room_id') IS NULL
               OR json_extract(events.event_json, '$.room_id') = ?
           )
           AND json_type(events.event_json, '$.state_key') IS NULL
+          AND json_type(events.event_json, '$.event_id') = 'text'
+          AND json_extract(events.event_json, '$.event_id') = event_edits.edit_event_id
+          AND json_type(events.event_json, '$.origin_server_ts') = 'integer'
+          AND json_type(events.event_json, '$.content') = 'object'
+          AND json_extract(events.event_json, '$.content."m.relates_to".rel_type') = 'm.replace'
+          AND json_extract(events.event_json, '$.content."m.relates_to".event_id') = ?
           AND json_type(events.event_json, '$.content."m.new_content"') = 'object'
           AND (
               json_extract(events.event_json, '$.type') != 'm.room.message'
-              OR json_type(events.event_json, '$.content."m.new_content".body') = 'text'
+              OR (
+                  json_type(events.event_json, '$.content.body') = 'text'
+                  AND json_type(events.event_json, '$.content.msgtype') = 'text'
+                  AND json_type(events.event_json, '$.content."m.new_content".body') = 'text'
+                  AND json_type(events.event_json, '$.content."m.new_content".msgtype') = 'text'
+              )
           )
         ORDER BY event_edits.origin_server_ts DESC, event_edits.edit_event_id DESC
         LIMIT 1
-        """,  # noqa: S608
+        """,
         parameters,
     )
     row = await cursor.fetchone()
