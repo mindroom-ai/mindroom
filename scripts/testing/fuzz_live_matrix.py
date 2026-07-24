@@ -1613,7 +1613,7 @@ class ExactReplyOracle:
         self.event_summaries: dict[str, dict[str, Any]] = {}
         self.sent_at: dict[str, float] = {}
         self.reply_latencies: dict[str, float] = {}
-        self._last_response_at = time.monotonic()
+        self._last_response_activity_at = time.monotonic()
         self._sync_lock = asyncio.Lock()
 
     async def initialize(self) -> None:
@@ -1738,7 +1738,7 @@ class ExactReplyOracle:
             self._assert_no_wrong_replies()
             self.refresh_ledger_attributions()
             if not self.unsettled_required_sources() and not self.incomplete_streaming_sources():
-                settled_after = max(settled_after, self._last_response_at + settle_seconds)
+                settled_after = max(settled_after, self._last_response_activity_at + settle_seconds)
                 if time.monotonic() >= settled_after:
                     return
         streaming = set(self.incomplete_streaming_sources())
@@ -1851,10 +1851,17 @@ class ExactReplyOracle:
         if event.get("sender") != self.agent_id or event.get("type") != "m.room.message":
             return
         content = event.get("content")
-        if not isinstance(content, dict):
-            return
+        if isinstance(content, dict):
+            self._ingest_agent_message(event_id, content)
+
+    def _ingest_agent_message(self, event_id: str, content: Mapping[str, Any]) -> None:
+        """Fold one agent `m.room.message` into reply bodies and thread attributions."""
         relation = content.get("m.relates_to")
-        self._track_reply_body(event_id, content, relation)
+        # A canonical original reply or an edit of a tracked reply is streaming
+        # activity, so it extends the quiet window even when the original event
+        # is already older than the settle interval.
+        if self._track_reply_body(event_id, content, relation):
+            self._last_response_activity_at = time.monotonic()
         if not isinstance(relation, dict) or relation.get("rel_type") != "m.thread":
             return
         reply = relation.get("m.in_reply_to")
@@ -1868,29 +1875,37 @@ class ExactReplyOracle:
         sent_at = self.sent_at.get(source_event_id)
         if sent_at is not None and source_event_id not in self.reply_latencies:
             self.reply_latencies[source_event_id] = time.monotonic() - sent_at
-        self._last_response_at = time.monotonic()
 
     def _track_reply_body(
         self,
         event_id: str,
         content: Mapping[str, Any],
         relation: Any,  # noqa: ANN401
-    ) -> None:
-        """Fold one agent message (original reply or `m.replace` edit) into latest bodies."""
+    ) -> bool:
+        """Fold one agent message (original reply or `m.replace` edit) into latest bodies.
+
+        Return whether this observation was a canonical original reply or an edit
+        of an already-tracked canonical reply. An edit of an unknown target is
+        neither folded nor reported, so it never extends the quiet window.
+        """
         is_edit = isinstance(relation, dict) and relation.get("rel_type") == "m.replace"
         reply_event_id = relation.get("event_id") if is_edit else event_id
         if not isinstance(reply_event_id, str):
-            return
+            return False
+        # An edit only counts when it targets a canonical reply we already track.
+        if is_edit and reply_event_id not in self.latest_reply_bodies:
+            return False
         new_content = content.get("m.new_content")
         body_source = new_content if isinstance(new_content, dict) else content
         body = body_source.get("body")
         if not isinstance(body, str):
-            return
+            return False
         timestamp = self.event_summaries.get(event_id, {}).get("origin_server_ts")
         ordinal = timestamp if isinstance(timestamp, int) else len(self.seen_event_ids)
         current = self.latest_reply_bodies.get(reply_event_id)
         if current is None or ordinal >= current[0]:
             self.latest_reply_bodies[reply_event_id] = (ordinal, body)
+        return True
 
     def _reply_body_complete(self, body: str) -> bool:
         """Return whether one reply body is a settled terminal state.

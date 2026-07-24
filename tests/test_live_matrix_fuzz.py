@@ -1083,3 +1083,81 @@ async def test_interrupted_note_reply_does_not_block_settlement() -> None:
         assert oracle.incomplete_streaming_sources() == []
     finally:
         await oracle.client.close()
+
+
+@pytest.mark.asyncio
+async def test_late_final_edit_resets_quiet_window() -> None:
+    """A late final `m.replace` advances the tracked-response activity clock."""
+    oracle = _streaming_oracle()
+    try:
+        oracle._ingest_event(_agent_reply_event("$source", "$reply", "Thinking..."))
+        before = oracle._last_response_activity_at
+        oracle._ingest_event(_agent_edit_event("$reply", "$edit", _short_body_for(1), ts=200))
+
+        assert oracle._last_response_activity_at > before
+        assert oracle.incomplete_streaming_sources() == []
+    finally:
+        await oracle.client.close()
+
+
+@pytest.mark.asyncio
+async def test_late_partial_edit_resets_quiet_window_and_keeps_streaming() -> None:
+    """A late partial `m.replace` advances the clock but keeps the stream open."""
+    oracle = _streaming_oracle()
+    try:
+        oracle._ingest_event(_agent_reply_event("$source", "$reply", "Thinking..."))
+        before = oracle._last_response_activity_at
+        oracle._ingest_event(_agent_edit_event("$reply", "$edit", "still streaming", ts=200))
+
+        assert oracle._last_response_activity_at > before
+        assert oracle.incomplete_streaming_sources() == ["$source"]
+    finally:
+        await oracle.client.close()
+
+
+@pytest.mark.asyncio
+async def test_unrelated_agent_message_does_not_reset_quiet_window() -> None:
+    """An edit of an untracked target must not extend the tracked-response window."""
+    oracle = _streaming_oracle()
+    try:
+        oracle._ingest_event(_agent_reply_event("$source", "$reply", _short_body_for(1)))
+        before = oracle._last_response_activity_at
+        # An edit whose target was never tracked as a canonical reply.
+        oracle._ingest_event(_agent_edit_event("$unknown", "$stray-edit", "noise", ts=300))
+
+        assert oracle._last_response_activity_at == before
+    finally:
+        await oracle.client.close()
+
+
+@pytest.mark.asyncio
+async def test_duplicate_edit_delivery_does_not_reset_clock_twice() -> None:
+    """A re-delivered, already-seen edit event must not advance the clock again."""
+    oracle = _streaming_oracle()
+    try:
+        oracle._ingest_event(_agent_reply_event("$source", "$reply", "Thinking..."))
+        edit = _agent_edit_event("$reply", "$edit", _short_body_for(1), ts=200)
+        oracle._ingest_event(edit)
+        after_first = oracle._last_response_activity_at
+        # The same edit event id arrives a second time via a duplicate sync.
+        oracle._ingest_event(edit)
+
+        assert oracle._last_response_activity_at == after_first
+    finally:
+        await oracle.client.close()
+
+
+@pytest.mark.asyncio
+async def test_duplicate_canonical_reply_inside_edit_window_is_detected() -> None:
+    """A second distinct canonical reply is caught even after an edit extends the window."""
+    oracle = _streaming_oracle()
+    try:
+        oracle._ingest_event(_agent_reply_event("$source", "$reply", "Thinking..."))
+        oracle._ingest_event(_agent_edit_event("$reply", "$edit", _short_body_for(1), ts=200))
+        # A second, distinct canonical reply to the same source is a wrong reply.
+        oracle._ingest_event(_agent_reply_event("$source", "$reply-two", _short_body_for(2)))
+
+        with pytest.raises(AssertionError, match="duplicates"):
+            oracle._assert_no_wrong_replies()
+    finally:
+        await oracle.client.close()
