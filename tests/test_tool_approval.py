@@ -34,6 +34,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.entity_resolution import entity_identity_registry, mindroom_user_id
 from mindroom.logging_config import get_logger
+from mindroom.matrix.event_info import event_source_is_state_event, event_source_matches_room
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.tool_approval import (
     MatrixApprovalAction,
@@ -74,7 +75,13 @@ class FakeEventCache:
     ) -> dict[str, Any] | None:
         edits: list[dict[str, Any]] = []
         for (event_room_id, _), event in self.events.items():
-            if event_room_id != room_id or event.get("sender") != sender or event.get("type") != event_type:
+            if (
+                event_room_id != room_id
+                or event.get("sender") != sender
+                or event.get("type") != event_type
+                or event_source_is_state_event(event)
+                or not event_source_matches_room(event, room_id)
+            ):
                 continue
             content = event.get("content")
             if not isinstance(content, dict):
@@ -2155,6 +2162,35 @@ async def test_startup_discard_ignores_cached_terminal_edit_from_different_sende
     fake_edit = _approval_edit(card, sender="@attacker:localhost", status="approved")
     await cache.store_event("$approval", "!room:localhost", card)
     await cache.store_event("$fake-edit", "!room:localhost", fake_edit)
+    editor = AsyncMock(return_value=True)
+    store = _ApprovalManager(
+        test_runtime_paths(tmp_path),
+        editor=editor,
+        event_cache=cache,
+        approval_room_ids=lambda: {"!room:localhost"},
+        transport_sender=lambda: "@mindroom_router:localhost",
+    )
+
+    assert await store.discard_pending_on_startup() == 1
+    assert editor.await_args.args[:2] == ("!room:localhost", "$approval")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalid_scope", ["state", "wrong-room"])
+async def test_startup_discard_ignores_cached_terminal_edit_with_invalid_scope(
+    tmp_path: Path,
+    invalid_scope: str,
+) -> None:
+    """The approval-cache fake must match production room and timeline scope."""
+    cache = FakeEventCache()
+    card = _approval_card(sender="@mindroom_router:localhost")
+    invalid_edit = _approval_edit(card, status="approved")
+    if invalid_scope == "state":
+        invalid_edit["state_key"] = ""
+    else:
+        invalid_edit["room_id"] = "!other:localhost"
+    await cache.store_event("$approval", "!room:localhost", card)
+    await cache.store_event("$invalid-edit", "!room:localhost", invalid_edit)
     editor = AsyncMock(return_value=True)
     store = _ApprovalManager(
         test_runtime_paths(tmp_path),

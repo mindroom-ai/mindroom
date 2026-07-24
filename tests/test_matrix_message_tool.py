@@ -1740,6 +1740,43 @@ async def test_matrix_message_room_threads_returns_paginated_thread_roots() -> N
 
 
 @pytest.mark.asyncio
+async def test_matrix_message_room_threads_previews_the_requested_room() -> None:
+    """Cross-room thread previews must resolve edits within the requested room."""
+    tool = MatrixMessageTools()
+    ctx = _make_context()
+    requested_room_id = "!other:localhost"
+    thread_root = _make_room_thread_root(
+        event_id="$thread-root",
+        sender="@alice:localhost",
+        timestamp=1234,
+        body="Root",
+    )
+
+    with (
+        patch("mindroom.custom_tools.matrix_message.room_access_allowed", return_value=True),
+        patch(
+            "mindroom.custom_tools.matrix_conversation_operations.get_room_threads_page",
+            new=AsyncMock(return_value=([thread_root], None)),
+        ),
+        patch(
+            "mindroom.custom_tools.matrix_conversation_operations.thread_root_body_preview",
+            new=AsyncMock(return_value="Resolved"),
+        ) as mock_preview,
+        tool_runtime_context(ctx),
+    ):
+        payload = json.loads(
+            await tool.matrix_message(
+                action="room-threads",
+                room_id=requested_room_id,
+            ),
+        )
+
+    assert payload["status"] == "ok"
+    assert payload["room_id"] == requested_room_id
+    assert mock_preview.await_args.kwargs["room_id"] == requested_room_id
+
+
+@pytest.mark.asyncio
 async def test_matrix_message_room_threads_includes_latest_activity_ts() -> None:
     """room-threads should expose latest activity separately from root creation time."""
     tool = MatrixMessageTools()

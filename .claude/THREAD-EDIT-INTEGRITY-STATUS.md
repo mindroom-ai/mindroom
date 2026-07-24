@@ -6,7 +6,7 @@
 - Pull request: https://github.com/mindroom-ai/mindroom/pull/1641.
 - Base: `origin/main` at `66dd4f4a68bcfd1a5e43b2cac20a1b464f306ab1`.
 - Rejected frozen head: `abb8d4292672c91c4cb551772d214cdca54378e0`.
-- Current pushed head before the active test-only slice: `474dedd68d377604e160fa2d00c245d2cad26ec0`.
+- Current pushed head before the active review-fix slice: `62a9e64c9f226dfc74003305115b58a5acdf31fe`.
 - Never merge this pull request.
 - Never amend or force-push.
 
@@ -42,6 +42,10 @@
 - Focused full-history and SQLite cache regressions pass `44` tests, focused file hooks pass, and Tach passes.
 - Deterministic raw-storage regressions now cover poisoned thread and recent-room payload identities on both cache backends.
 - The new SQLite poison regression passes, while its PostgreSQL twin remains queued behind the heavy resource owner.
+- Current CodeRabbit comments were verified against source rather than accepted automatically.
+- Cross-room thread previews now use the requested room, URL-safe JWK keys reject standard Base64 characters, and the approval test fake matches production room and timeline scope.
+- The suggested general thread-event ID tie-break is rejected because only replacement selection uses that Matrix rule, while cached thread order preserves authoritative equal-timestamp input order.
+- The review-fix regression selection passes `18` tests and focused hooks pass.
 - Current production source diff is `+898/-388`, net `+510` against the exact merge base.
 - Add deterministic full-resolution, point, snapshot, recent-room, SQLite, and PostgreSQL regressions at the owning seams.
 - Keep full correctness validation in shared Python helpers and use only narrow SQL sender/type prefilters for bounded edit lookup.

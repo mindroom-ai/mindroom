@@ -188,6 +188,7 @@ def test_encrypted_media_file_v2_is_renderable() -> None:
         (("key", "key_ops"), ["decrypt"]),
         (("key", "kty"), "RSA"),
         (("key", "k"), "not-base64"),
+        (("key", "k"), "+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/s"),
         (("iv",), "not-base64"),
         (("hashes",), {}),
         (("hashes", "sha256"), "not-base64"),

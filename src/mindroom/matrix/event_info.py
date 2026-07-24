@@ -98,7 +98,7 @@ def _unpadded_base64_has_decoded_size(
     urlsafe: bool = False,
 ) -> bool:
     """Return whether one unpadded base64 value decodes to the expected byte size."""
-    if not isinstance(value, str) or not value or "=" in value:
+    if not isinstance(value, str) or not value or "=" in value or (urlsafe and ("+" in value or "/" in value)):
         return False
     padded_value = value + "=" * (-len(value) % 4)
     try:
