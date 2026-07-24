@@ -82,7 +82,7 @@ main() entry
 Config changes are detected via polling (`watch_paths()` checks watched source-file mtimes every second and fires after one quiet scan):
 
 1. On change, `ConfigReloadLifecycle.request_reload()` queues a debounced reload that waits until no responses are in flight, logging periodic warnings while it waits
-2. The file watcher never bypasses that drain; `ConfigReloadLifecycle.force_reload()` is an explicit operator escape hatch that may interrupt active responses
+2. After the final idle check, a shared response-admission gate stays closed through config loading and plan application, so a new response cannot race an entity restart
 3. `ConfigReloadLifecycle.update_config()` loads the new config and `_identify_entities_to_restart()` computes the diff using `model_dump(exclude_none=True)`
 4. The orchestrator applies the resulting plan: affected entities are stopped, recreated, and restarted
 5. Removed entities run `cleanup()` (leave rooms, stop bot)

@@ -2778,6 +2778,56 @@ async def test_in_flight_response_count_nonzero_during_send_response(
 
 
 @pytest.mark.asyncio
+async def test_run_cancellable_response_waits_for_admission(
+    tmp_path: Path,
+    mock_agent_users: dict[str, AgentMatrixUser],
+) -> None:
+    """Response tracking should start only after the shared admission gate opens."""
+    config = _runtime_bound_config(
+        Config(
+            agents={"agent1": AgentConfig(display_name="Agent 1")},
+            router=RouterConfig(model="default"),
+        ),
+        tmp_path,
+    )
+    bot = AgentBot(
+        agent_user=mock_agent_users["agent1"],
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+    )
+    setup_test_bot(bot, AsyncMock())
+    admission_lock = asyncio.Lock()
+    bot.response_admission_lock = admission_lock
+    response_started = asyncio.Event()
+
+    async def response_function(message_id: str | None) -> None:
+        assert message_id is None
+        response_started.set()
+
+    await admission_lock.acquire()
+    task = asyncio.create_task(
+        bot._response_runner.run_cancellable_response(
+            target=MessageTarget.resolve("!room:localhost", None, "$reply"),
+            response_function=response_function,
+        ),
+    )
+    try:
+        await asyncio.sleep(0)
+        assert bot.in_flight_response_count == 0
+        assert not response_started.is_set()
+
+        admission_lock.release()
+        await asyncio.wait_for(task, timeout=1)
+        assert response_started.is_set()
+    finally:
+        if admission_lock.locked():
+            admission_lock.release()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
 async def test_run_cancellable_response_does_not_depend_on_current_task_lookup(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

@@ -482,6 +482,7 @@ class ResponseRunner:
     """Run one response lifecycle while keeping bot seams patchable."""
 
     deps: ResponseRunnerDeps
+    _response_admission_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
     _lifecycle_coordinator: ResponseLifecycleCoordinator = field(
         default_factory=ResponseLifecycleCoordinator,
         init=False,
@@ -566,6 +567,16 @@ class ResponseRunner:
     def in_flight_response_count(self, value: int) -> None:
         """Update the number of active response lifecycles."""
         self._in_flight_response_count = value
+
+    @property
+    def response_admission_lock(self) -> asyncio.Lock:
+        """Return the gate protecting response admission during config apply."""
+        return self._response_admission_lock
+
+    @response_admission_lock.setter
+    def response_admission_lock(self, value: asyncio.Lock) -> None:
+        """Bind the orchestrator-owned response-admission gate."""
+        self._response_admission_lock = value
 
     def _show_tool_calls(self, agent_name: str | None = None) -> bool:
         """Return tool-call visibility for the current or target agent."""
@@ -2063,8 +2074,9 @@ class ResponseRunner:
         on_cancelled: Callable[[str], None] | None = None,
     ) -> _MatrixEventId | None:
         """Run one response generation function with cancellation support."""
-        try:
+        async with self.response_admission_lock:
             self.in_flight_response_count += 1
+        try:
             return await ResponseAttemptRunner(
                 ResponseAttemptDeps(
                     client=self._client(),

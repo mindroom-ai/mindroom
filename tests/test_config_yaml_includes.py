@@ -656,6 +656,7 @@ def _reload_lifecycle(config_path: Path) -> ConfigReloadLifecycle:
         in_flight_response_count=lambda: 0,
         load_initial_config=_load_initial,
         apply_update_plan=_apply_plan,
+        response_admission_lock=asyncio.Lock(),
     )
 
 
