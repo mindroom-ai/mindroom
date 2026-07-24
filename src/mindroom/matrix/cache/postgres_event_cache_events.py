@@ -484,17 +484,25 @@ async def _reconcile_thread_root_self_rows(
 ) -> None:
     """Keep root self-mappings exactly while a current row still proves them."""
     for root_id in candidate_root_ids:
-        surviving_child = await fetchone(
+        support_row = await fetchone(
             db,
             """
-            SELECT 1
-            FROM mindroom_event_cache_event_threads
-            WHERE namespace = %s AND room_id = %s AND thread_id = %s AND event_id <> %s
-            LIMIT 1
+            SELECT
+                EXISTS(
+                    SELECT 1
+                    FROM mindroom_event_cache_events
+                    WHERE namespace = %s AND room_id = %s AND event_id = %s
+                )
+                OR EXISTS(
+                    SELECT 1
+                    FROM mindroom_event_cache_event_threads
+                    WHERE namespace = %s AND room_id = %s AND thread_id = %s AND event_id <> %s
+                )
             """,
-            (namespace, room_id, root_id, root_id),
+            (namespace, room_id, root_id, namespace, room_id, root_id, root_id),
         )
-        if surviving_child is not None or root_id in current_self_root_ids:
+        assert support_row is not None
+        if bool(support_row[0]) or root_id in current_self_root_ids:
             await db.execute(
                 """
                 INSERT INTO mindroom_event_cache_event_threads(namespace, room_id, event_id, thread_id)

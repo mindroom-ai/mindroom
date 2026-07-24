@@ -505,16 +505,32 @@ async def _reconcile_thread_root_self_rows(
     for root_id in candidate_root_ids:
         cursor = await db.execute(
             """
-            SELECT 1
-            FROM event_threads
-            WHERE principal_id = ? AND room_id = ? AND thread_id = ? AND event_id <> ?
-            LIMIT 1
+            SELECT
+                EXISTS(
+                    SELECT 1
+                    FROM events
+                    WHERE principal_id = ? AND room_id = ? AND event_id = ?
+                )
+                OR EXISTS(
+                    SELECT 1
+                    FROM event_threads
+                    WHERE principal_id = ? AND room_id = ? AND thread_id = ? AND event_id <> ?
+                )
             """,
-            (principal_id, room_id, root_id, root_id),
+            (
+                principal_id,
+                room_id,
+                root_id,
+                principal_id,
+                room_id,
+                root_id,
+                root_id,
+            ),
         )
-        has_surviving_child = await cursor.fetchone() is not None
+        support_row = await cursor.fetchone()
         await cursor.close()
-        if has_surviving_child or root_id in current_self_root_ids:
+        assert support_row is not None
+        if bool(support_row[0]) or root_id in current_self_root_ids:
             await db.execute(
                 """
                 INSERT OR IGNORE INTO event_threads(principal_id, room_id, event_id, thread_id)

@@ -742,6 +742,34 @@ async def test_restoring_event_without_thread_relation_removes_stale_mapping(
 
 
 @pytest.mark.asyncio
+async def test_removing_last_child_relation_preserves_cached_root_mapping(
+    event_cache_factory: Callable[[], ConversationEventCache],
+) -> None:
+    """A cached root remains sufficient proof after its last child loses the thread relation."""
+    root = _shared_cache(event_cache_factory)
+    await root.initialize()
+    cache = root.for_principal("@alice:localhost")
+    room_id = "!room:localhost"
+    root_event_id = "$thread-root"
+    child_event_id = "$child"
+    threaded_child = _event(child_event_id, 2)
+    threaded_child["content"]["m.relates_to"] = {
+        "rel_type": "m.thread",
+        "event_id": root_event_id,
+    }
+    try:
+        await cache.store_event(root_event_id, room_id, _event(root_event_id, 1))
+        await cache.store_event(child_event_id, room_id, threaded_child)
+
+        await cache.store_event(child_event_id, room_id, _event(child_event_id, 3))
+
+        assert await cache.get_thread_id_for_event(room_id, child_event_id) is None
+        assert await cache.get_thread_id_for_event(room_id, root_event_id) == root_event_id
+    finally:
+        await root.close()
+
+
+@pytest.mark.asyncio
 async def test_storing_thread_root_preserves_child_proven_self_mapping(
     event_cache_factory: Callable[[], ConversationEventCache],
 ) -> None:
@@ -803,6 +831,40 @@ async def test_redacting_last_thread_child_removes_orphan_root_mapping(
         assert await cache.redact_event(room_id, "$second-child")
         assert await cache.get_thread_id_for_event(room_id, "$second-child") is None
         assert await cache.get_thread_id_for_event(room_id, root_event_id) is None
+    finally:
+        await root.close()
+
+
+@pytest.mark.asyncio
+async def test_replacing_thread_without_old_children_preserves_root_mapping(
+    event_cache_factory: Callable[[], ConversationEventCache],
+) -> None:
+    """Removing stale children must not erase the replacement snapshot's root self-mapping."""
+    root = _shared_cache(event_cache_factory)
+    await root.initialize()
+    cache = root.for_principal("@alice:localhost")
+    room_id = "!room:localhost"
+    root_event_id = "$thread-root"
+    root_event = _event(root_event_id, 1)
+    child_event = _event("$old-child", 2)
+    try:
+        await replace_thread_unconditionally(
+            cache,
+            room_id,
+            root_event_id,
+            [root_event, child_event],
+        )
+
+        await replace_thread_unconditionally(
+            cache,
+            room_id,
+            root_event_id,
+            [root_event],
+        )
+
+        assert await cache.get_thread_events(room_id, root_event_id) == [root_event]
+        assert await cache.get_thread_id_for_event(room_id, root_event_id) == root_event_id
+        assert await cache.get_thread_id_for_event(room_id, "$old-child") is None
     finally:
         await root.close()
 
