@@ -259,6 +259,8 @@ class _LiveValidationState:
     known_responses: set[str]
     event_rooms: dict[str, int]
     event_lanes: dict[str, tuple[int, int, int]]
+    effective_sources: dict[str, str]
+    redacted_events: set[str]
     message_events: set[str]
     operation_ids: set[int]
     recovery_message_lanes: set[tuple[int, int, int]]
@@ -299,11 +301,15 @@ def _initial_validation_state(scenario: LiveFuzzScenario) -> _LiveValidationStat
         event_lanes = {f"root:{thread}": (0, 0, thread) for thread in range(scenario.thread_count)}
     known_responses = {f"response:{event_ref}" for event_ref in known_events}
     event_lanes.update({f"response:{event_ref}": event_lanes[event_ref] for event_ref in known_events})
+    effective_sources = {event_ref: event_ref for event_ref in known_events}
+    effective_sources.update({f"response:{event_ref}": event_ref for event_ref in known_events})
     return _LiveValidationState(
         known_events=known_events,
         known_responses=known_responses,
         event_rooms={event_ref: (_logical_ref_room(event_ref) or 0) for event_ref in known_events | known_responses},
         event_lanes=event_lanes,
+        effective_sources=effective_sources,
+        redacted_events=set(),
         message_events=set(known_events),
         operation_ids=set(),
         recovery_message_lanes=set(),
@@ -321,6 +327,7 @@ def _validate_scenario_batch(
     new_events: set[str] = set()
     new_responses: set[str] = set()
     new_messages: set[str] = set()
+    new_redactions: set[str] = set()
     for operation in batch:
         _validate_profile_operation(scenario.profile, operation)
         _validate_live_operation(
@@ -330,17 +337,28 @@ def _validate_scenario_batch(
             allowed_targets=state.known_events | state.known_responses,
             event_rooms=state.event_rooms,
             event_lanes=state.event_lanes,
+            effective_sources=state.effective_sources,
+            redacted_events=state.redacted_events,
             message_events=state.message_events,
             room_count=scenario.room_count,
             client_count=scenario.client_count,
             profile=scenario.profile,
         )
-        if operation.kind is not LiveOperationKind.IDEMPOTENT_RETRY:
+        if operation.kind not in {
+            LiveOperationKind.IDEMPOTENT_RETRY,
+            LiveOperationKind.RESTART_MINDROOM,
+        }:
             new_events.add(operation.event_ref)
             state.event_rooms[operation.event_ref] = operation.room
             state.event_lanes[operation.event_ref] = (operation.room, operation.client, operation.thread)
+            assert operation.target is not None
+            state.effective_sources[operation.event_ref] = state.effective_sources[operation.target]
+        if operation.kind is LiveOperationKind.REDACTION:
+            assert operation.target is not None
+            new_redactions.add(operation.target)
         if operation.kind not in {LiveOperationKind.THREAD_MESSAGE, LiveOperationKind.PLAIN_REPLY}:
             continue
+        state.effective_sources[operation.event_ref] = operation.event_ref
         if scenario.profile == "recovery":
             lane = (operation.room, operation.client, operation.thread)
             if lane in state.recovery_message_lanes:
@@ -356,11 +374,13 @@ def _validate_scenario_batch(
         new_responses.add(response_ref)
         state.event_rooms[response_ref] = operation.room
         state.event_lanes[response_ref] = (operation.room, operation.client, operation.thread)
+        state.effective_sources[response_ref] = operation.event_ref
 
     state.known_events.update(new_events)
     if scenario.profile != "recovery":
         state.known_responses.update(new_responses)
     state.message_events.update(new_messages)
+    state.redacted_events.update(new_redactions)
 
 
 def _validate_recovery_size(
@@ -470,6 +490,8 @@ def _validate_live_operation(
     allowed_targets: set[str],
     event_rooms: Mapping[str, int],
     event_lanes: Mapping[str, tuple[int, int, int]],
+    effective_sources: Mapping[str, str],
+    redacted_events: set[str],
     message_events: set[str],
     room_count: int,
     client_count: int,
@@ -490,19 +512,16 @@ def _validate_live_operation(
             msg = "MindRoom restart must not have a target"
             raise ValueError(msg)
         return
-    if operation.target is None:
-        msg = f"{operation.kind} requires a target"
-        raise ValueError(msg)
-    if operation.target not in allowed_targets:
-        msg = f"unknown or same-batch target {operation.target!r}"
-        raise ValueError(msg)
-    if event_rooms[operation.target] != operation.room:
-        msg = f"cross-room target {operation.target!r} from room {operation.room}"
-        raise ValueError(msg)
-    target_room, target_client, target_thread = event_lanes[operation.target]
-    if profile == "recovery" and target_thread != operation.thread:
-        msg = f"recovery target {operation.target!r} belongs to thread {target_thread}, not thread {operation.thread}"
-        raise ValueError(msg)
+    target_room, target_client, target_thread = _validate_live_target(
+        operation,
+        allowed_targets=allowed_targets,
+        event_rooms=event_rooms,
+        event_lanes=event_lanes,
+        effective_sources=effective_sources,
+        redacted_events=redacted_events,
+        profile=profile,
+    )
+    assert operation.target is not None
     if operation.kind is LiveOperationKind.IDEMPOTENT_RETRY and operation.target not in message_events:
         msg = "idempotent retries may only target messages"
         raise ValueError(msg)
@@ -511,6 +530,40 @@ def _validate_live_operation(
     ):
         msg = "idempotent retries must preserve the original room, client, and thread ownership"
         raise ValueError(msg)
+
+
+def _validate_live_target(
+    operation: LiveOperation,
+    *,
+    allowed_targets: set[str],
+    event_rooms: Mapping[str, int],
+    event_lanes: Mapping[str, tuple[int, int, int]],
+    effective_sources: Mapping[str, str],
+    redacted_events: set[str],
+    profile: str,
+) -> tuple[int, int, int]:
+    """Validate one relation target against the completed logical state."""
+    target = operation.target
+    if target is None:
+        msg = f"{operation.kind} requires a target"
+        raise ValueError(msg)
+    if target not in allowed_targets:
+        msg = f"unknown or same-batch target {target!r}"
+        raise ValueError(msg)
+    if target in redacted_events or effective_sources[target] in redacted_events:
+        msg = f"{operation.kind} targets redacted event or source {target!r}"
+        raise ValueError(msg)
+    if operation.kind is LiveOperationKind.REDACTION and target.startswith("response:"):
+        msg = "live fuzz clients may not redact agent responses"
+        raise ValueError(msg)
+    if event_rooms[target] != operation.room:
+        msg = f"cross-room target {target!r} from room {operation.room}"
+        raise ValueError(msg)
+    target_lane = event_lanes[target]
+    if profile == "recovery" and target_lane[2] != operation.thread:
+        msg = f"recovery target {target!r} belongs to thread {target_lane[2]}, not thread {operation.thread}"
+        raise ValueError(msg)
+    return target_lane
 
 
 def _validate_operation_location(
@@ -563,18 +616,29 @@ class _ScenarioGenerationState:
     editable: dict[int, list[str]]
     reaction_targets: dict[int, list[str]]
     redactable: dict[int, list[str]]
+    effective_sources: dict[str, str]
     redacted: set[str]
 
 
 def _initial_generation_state(thread_count: int) -> _ScenarioGenerationState:
+    roots = {f"root:{thread}" for thread in range(thread_count)}
     return _ScenarioGenerationState(
         messages={thread: [f"root:{thread}"] for thread in range(thread_count)},
         responses={thread: [f"response:root:{thread}"] for thread in range(thread_count)},
-        editable={thread: [f"root:{thread}"] for thread in range(thread_count)},
+        editable={thread: [f"root:{thread}", f"response:root:{thread}"] for thread in range(thread_count)},
         reaction_targets={thread: [f"root:{thread}", f"response:root:{thread}"] for thread in range(thread_count)},
-        redactable={thread: [f"root:{thread}"] for thread in range(thread_count)},
+        redactable={thread: [] for thread in range(thread_count)},
+        effective_sources={
+            **{root: root for root in roots},
+            **{f"response:{root}": root for root in roots},
+        },
         redacted=set(),
     )
+
+
+def _generation_target_is_active(state: _ScenarioGenerationState, target: str) -> bool:
+    """Return whether a generated relation can still target this event."""
+    return target not in state.redacted and state.effective_sources[target] not in state.redacted
 
 
 def _choose_operation(
@@ -586,25 +650,32 @@ def _choose_operation(
 ) -> LiveOperation:
     thread = randomizer.randrange(thread_count)
     kind = randomizer.choice(_WEIGHTED_KINDS)
-    available_edits = [target for target in state.editable[thread] if target not in state.redacted]
-    available_redactions = [target for target in state.redactable[thread] if target not in state.redacted]
-    available_retries = [target for target in state.messages[thread] if target not in state.redacted]
+    available_messages = [target for target in state.messages[thread] if _generation_target_is_active(state, target)]
+    available_responses = [target for target in state.responses[thread] if _generation_target_is_active(state, target)]
+    available_edits = [target for target in state.editable[thread] if _generation_target_is_active(state, target)]
+    available_reactions = [
+        target for target in state.reaction_targets[thread] if _generation_target_is_active(state, target)
+    ]
+    available_redactions = [
+        target for target in state.redactable[thread] if _generation_target_is_active(state, target)
+    ]
+    available_retries = [target for target in state.messages[thread] if _generation_target_is_active(state, target)]
 
     if kind is LiveOperationKind.THREAD_MESSAGE:
-        target = randomizer.choice(state.messages[thread])
+        target = randomizer.choice(available_messages)
     elif kind is LiveOperationKind.PLAIN_REPLY:
-        target = randomizer.choice(state.responses[thread])
+        target = randomizer.choice(available_responses)
     elif kind is LiveOperationKind.EDIT:
-        target = randomizer.choice(available_edits or state.messages[thread])
+        target = randomizer.choice(available_edits)
     elif kind is LiveOperationKind.REACTION:
-        target = randomizer.choice(state.reaction_targets[thread])
+        target = randomizer.choice(available_reactions)
     elif kind is LiveOperationKind.REDACTION and available_redactions:
         target = randomizer.choice(available_redactions)
     elif kind is LiveOperationKind.IDEMPOTENT_RETRY and available_retries:
         target = randomizer.choice(available_retries)
     else:
         kind = LiveOperationKind.REACTION
-        target = randomizer.choice(state.reaction_targets[thread])
+        target = randomizer.choice(available_reactions)
     return LiveOperation(operation_id=operation_id, kind=kind, thread=thread, target=target)
 
 
@@ -619,14 +690,18 @@ def _update_generation_state(
         }:
             state.messages[operation.thread].append(operation.event_ref)
             state.responses[operation.thread].append(f"response:{operation.event_ref}")
-            state.editable[operation.thread].append(operation.event_ref)
+            state.editable[operation.thread].extend((operation.event_ref, f"response:{operation.event_ref}"))
             state.reaction_targets[operation.thread].extend(
                 (operation.event_ref, f"response:{operation.event_ref}"),
             )
             state.redactable[operation.thread].append(operation.event_ref)
+            state.effective_sources[operation.event_ref] = operation.event_ref
+            state.effective_sources[f"response:{operation.event_ref}"] = operation.event_ref
         elif operation.kind in {LiveOperationKind.EDIT, LiveOperationKind.REACTION}:
             state.reaction_targets[operation.thread].append(operation.event_ref)
             state.redactable[operation.thread].append(operation.event_ref)
+            assert operation.target is not None
+            state.effective_sources[operation.event_ref] = state.effective_sources[operation.target]
         elif operation.kind is LiveOperationKind.REDACTION:
             assert operation.target is not None
             state.redacted.add(operation.target)
@@ -691,7 +766,13 @@ def live_scenario_from_seed(
                     operation_id=operation.operation_id,
                     kind=LiveOperationKind.REACTION,
                     thread=operation.thread,
-                    target=randomizer.choice(state.reaction_targets[operation.thread]),
+                    target=randomizer.choice(
+                        [
+                            target
+                            for target in state.reaction_targets[operation.thread]
+                            if _generation_target_is_active(state, target)
+                        ],
+                    ),
                 )
                 needs_reply = False
                 mutates_history = False
@@ -1793,6 +1874,7 @@ class ExactReplyOracle:
         self.response_event_by_ref: dict[str, str] = {}
         self.latest_reply_bodies: dict[str, tuple[int, str, str]] = {}
         self.reply_events_with_edits: set[str] = set()
+        self.response_edit_targets: dict[str, str] = {}
         self.seen_event_ids: set[str] = set()
         self.limited_timeline_count = 0
         self.pagination_page_count = 0
@@ -1987,9 +2069,10 @@ class ExactReplyOracle:
             self.malformed_response_ids.add(event_id)
             return
         relation = content.get("m.relates_to")
-        self._track_reply_body(event_id, event, content, relation)
         if isinstance(relation, dict) and relation.get("rel_type") == "m.replace":
+            self._ingest_agent_edit(event_id, event, content, relation)
             return
+        self._track_reply_body(event_id, event, content, relation)
         if not isinstance(relation, dict) or relation.get("rel_type") != "m.thread":
             self.malformed_response_ids.add(event_id)
             return
@@ -2009,6 +2092,28 @@ class ExactReplyOracle:
         if logical_ref is not None:
             self.response_event_by_ref[f"response:{logical_ref}"] = event_id
         self._last_response_at = time.monotonic()
+
+    def _ingest_agent_edit(
+        self,
+        event_id: str,
+        event: Mapping[str, Any],
+        content: Mapping[str, Any],
+        relation: Mapping[str, Any],
+    ) -> None:
+        """Track one well-formed replacement for later target validation."""
+        target_event_id = relation.get("event_id")
+        new_content = content.get("m.new_content")
+        if (
+            not isinstance(target_event_id, str)
+            or not target_event_id
+            or not isinstance(new_content, dict)
+            or not isinstance(new_content.get("body"), str)
+            or not isinstance(new_content.get("msgtype"), str)
+        ):
+            self.malformed_response_ids.add(event_id)
+            return
+        self.response_edit_targets[event_id] = target_event_id
+        self._track_reply_body(event_id, event, content, relation)
 
     def _track_reply_body(
         self,
@@ -2100,11 +2205,17 @@ class ExactReplyOracle:
             self.expected_sources.get(source, source): sorted(values)
             for source, values in self.wrong_thread_roots.items()
         }
-        if duplicates or unexpected or wrong_roots or self.malformed_response_ids:
+        canonical_response_ids = set(self.response_event_by_ref.values())
+        orphan_edits = {
+            event_id: target_event_id
+            for event_id, target_event_id in self.response_edit_targets.items()
+            if target_event_id not in canonical_response_ids
+        }
+        if duplicates or unexpected or wrong_roots or orphan_edits or self.malformed_response_ids:
             msg = (
                 "agent reply invariant failed: "
                 f"duplicates={duplicates}, unexpected={unexpected}, wrong_thread_roots={wrong_roots}, "
-                f"malformed={sorted(self.malformed_response_ids)}"
+                f"orphan_edits={orphan_edits}, malformed={sorted(self.malformed_response_ids)}"
             )
             raise AssertionError(msg)
 
@@ -2193,7 +2304,7 @@ class LiveFuzzRunner:
     ) -> None:
         """Advance one source's canonical revision and response expectation."""
         assert operation.target is not None
-        source_ref = operation.target.removeprefix("response:")
+        source_ref = operation.target
         revisions = self._source_revisions.get(source_ref)
         if revisions is None:
             return

@@ -277,8 +277,8 @@ def test_live_scenario_is_deterministic_and_json_replayable() -> None:
 
 def test_live_scenario_generator_covers_every_matrix_mutation() -> None:
     """The weighted generator must reach every supported live operation."""
-    seen = {
-        operation.kind
+    operations = [
+        operation
         for seed in range(5)
         for batch in live_scenario_from_seed(
             seed,
@@ -287,9 +287,15 @@ def test_live_scenario_generator_covers_every_matrix_mutation() -> None:
             restart_interval=50,
         ).batches
         for operation in batch
-    }
+    ]
 
-    assert seen == set(LiveOperationKind)
+    assert {operation.kind for operation in operations} == set(LiveOperationKind)
+    assert any(
+        operation.kind is LiveOperationKind.EDIT
+        and operation.target is not None
+        and operation.target.startswith("response:")
+        for operation in operations
+    )
 
 
 def test_instance_registry_read_retries_a_partial_write(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -453,6 +459,32 @@ def test_live_scenario_rejects_cross_room_dependencies() -> None:
     )
 
     with pytest.raises(ValueError, match="cross-room target"):
+        scenario.validate()
+
+
+@pytest.mark.parametrize("target", ["root:0", "response:root:0"])
+def test_live_scenario_rejects_relations_to_redacted_sources(target: str) -> None:
+    """Later operations may not target a redacted event or its agent response."""
+    scenario = LiveFuzzScenario(
+        thread_count=1,
+        batches=(
+            (LiveOperation(0, LiveOperationKind.REDACTION, 0, "root:0"),),
+            (LiveOperation(1, LiveOperationKind.REACTION, 0, target),),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="redacted event or source"):
+        scenario.validate()
+
+
+def test_live_scenario_rejects_client_redaction_of_agent_response() -> None:
+    """The unprivileged fuzz client cannot redact the agent's event."""
+    scenario = LiveFuzzScenario(
+        thread_count=1,
+        batches=((LiveOperation(0, LiveOperationKind.REDACTION, 0, "response:root:0"),),),
+    )
+
+    with pytest.raises(ValueError, match="may not redact agent responses"):
         scenario.validate()
 
 
@@ -673,6 +705,7 @@ async def test_exact_reply_oracle_counts_only_canonical_agent_thread_replies() -
             **canonical,
             "event_id": "$edit",
             "content": {
+                "m.new_content": {"body": "final", "msgtype": "m.text"},
                 "m.relates_to": {
                     "rel_type": "m.replace",
                     "event_id": "$response",
@@ -792,6 +825,25 @@ def _agent_edit_event(
             "m.relates_to": {"rel_type": "m.replace", "event_id": response_event_id},
         },
     }
+
+
+def test_exact_reply_oracle_rejects_malformed_or_orphan_agent_edits() -> None:
+    """Every agent replacement must have a valid body and canonical response target."""
+    oracle = ExactReplyOracle(cast("LiveMatrixClient", object()), "@agent:example")
+    oracle.expect("root:0", "$source")
+    oracle._ingest_event(_agent_reply_event("$source", "$response", "Thinking..."))
+    oracle._ingest_event(
+        {
+            **_agent_edit_event("$response", "ignored", event_id="$malformed-edit"),
+            "content": {
+                "m.relates_to": {"rel_type": "m.replace", "event_id": "$response"},
+            },
+        },
+    )
+    oracle._ingest_event(_agent_edit_event("$missing", "orphan", event_id="$orphan-edit"))
+
+    with pytest.raises(AssertionError, match=r"orphan_edits=.*\$orphan-edit.*malformed=.*\$malformed-edit"):
+        oracle._assert_no_wrong_replies()
 
 
 @pytest.mark.asyncio
@@ -933,6 +985,13 @@ def test_live_model_tracks_edit_and_redaction_transitions() -> None:
     edited_identity = fuzz_live_matrix._source_marker_from_content(edited_content)
     runner._record_edit_revision(edit, edited_content)
 
+    assert runner.oracle.expected_model_identity["$root"] == (
+        edited_identity,
+        fuzz_live_matrix._history_fingerprint((edited_identity,)),
+    )
+
+    wrong_sender_edit = LiveOperation(4, LiveOperationKind.EDIT, 0, "response:root:0")
+    runner._record_edit_revision(wrong_sender_edit, runner._message_content("Wrong sender"))
     assert runner.oracle.expected_model_identity["$root"] == (
         edited_identity,
         fuzz_live_matrix._history_fingerprint((edited_identity,)),
