@@ -42,6 +42,8 @@ import httpx
 import nio
 import yaml
 
+from mindroom.matrix.sync_tokens import load_sync_checkpoint
+
 if TYPE_CHECKING:
     from collections.abc import Collection, Mapping
     from io import TextIOWrapper
@@ -1035,6 +1037,32 @@ class ManagedTuwunelStack:
             ),
         }
 
+    def sync_checkpoint_token(self, agent_name: str) -> str | None:
+        """Return one bot's current durable cache-certified sync token."""
+        checkpoint = load_sync_checkpoint(self.storage_path, agent_name)
+        return checkpoint.token if checkpoint is not None else None
+
+    async def wait_for_sync_checkpoint_advance(
+        self,
+        agent_name: str,
+        previous_token: str | None,
+        *,
+        deadline_seconds: float,
+    ) -> str:
+        """Wait until one bot durably checkpoints beyond a completed barrier."""
+        deadline = time.monotonic() + deadline_seconds
+        while time.monotonic() < deadline:
+            process = self._mindroom_process
+            if process is not None and process.poll() is not None:
+                msg = f"MindRoom exited while waiting for {agent_name} sync checkpoint:\n{self.log_tail()}"
+                raise RuntimeError(msg)
+            token = self.sync_checkpoint_token(agent_name)
+            if token is not None and token != previous_token:
+                return token
+            await asyncio.sleep(0.05)
+        msg = f"timed out waiting for {agent_name} durable sync checkpoint to advance"
+        raise TimeoutError(msg)
+
     def _start_model_server(self) -> int:
         _ModelHandler.stream_segments = self._stream_segments
         _ModelHandler.stream_delay = self._stream_delay
@@ -1695,6 +1723,12 @@ class LiveFuzzRunner:
         )
         await asyncio.gather(*(oracle.initialize() for oracle in oracles))
         await self._send_recovery_roots(oracles)
+        checkpoint_after_roots = self.stack.sync_checkpoint_token(AGENT_NAME)
+        await self.stack.wait_for_sync_checkpoint_advance(
+            AGENT_NAME,
+            checkpoint_after_roots,
+            deadline_seconds=self.reply_timeout,
+        )
 
         for oracle in oracles:
             oracle.arm_gap_audit()
@@ -1749,6 +1783,7 @@ class LiveFuzzRunner:
             "oracle_limited_timelines": sum(oracle.limited_timeline_count for oracle in oracles),
             "oracle_gap_audit_pages": sum(oracle.gap_audit_page_count for oracle in oracles),
             "oracle_pagination_pages": sum(oracle.pagination_page_count for oracle in oracles),
+            "pre_outage_checkpoint_barriers": 1,
             "recovery_runtime_ms": round(recovery_seconds * 1000),
             "restart_barriers": len(oracles),
             "restarts": self.restart_count,

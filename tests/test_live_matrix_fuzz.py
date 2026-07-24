@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Any, cast
 
 import pytest
 
+from mindroom.matrix.sync_tokens import save_sync_token
 from scripts.testing import fuzz_live_matrix
 from scripts.testing.fuzz_live_matrix import (
     ExactReplyOracle,
@@ -69,6 +71,42 @@ def test_failure_artifact_includes_loaded_code_provenance(tmp_path: Path) -> Non
     assert artifact["nio_revision"] == "nio-sha"
     assert artifact["scenario"]["version"] == 1
     assert artifact["mindroom_log"] == "runtime output"
+
+
+@pytest.mark.asyncio
+async def test_recovery_checkpoint_barrier_waits_for_durable_advance(
+    tmp_path: Path,
+) -> None:
+    """The outage cannot start from a stale or absent agent checkpoint."""
+    stack = object.__new__(fuzz_live_matrix.ManagedTuwunelStack)
+    stack.storage_path = tmp_path
+    stack.log_path = tmp_path / "mindroom.log"
+    stack._mindroom_process = None
+    save_sync_token(
+        tmp_path,
+        fuzz_live_matrix.AGENT_NAME,
+        "after-roots",
+        cache_generation="generation",
+    )
+
+    async def advance() -> None:
+        await asyncio.sleep(0)
+        save_sync_token(
+            tmp_path,
+            fuzz_live_matrix.AGENT_NAME,
+            "post-root-barrier",
+            cache_generation="generation",
+        )
+
+    advance_task = asyncio.create_task(advance())
+    checkpoint = await stack.wait_for_sync_checkpoint_advance(
+        fuzz_live_matrix.AGENT_NAME,
+        "after-roots",
+        deadline_seconds=1,
+    )
+    await advance_task
+
+    assert checkpoint == "post-root-barrier"
 
 
 def test_live_scenario_is_deterministic_and_json_replayable() -> None:
