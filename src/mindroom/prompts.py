@@ -316,10 +316,12 @@ Your job is to produce one merged handoff summary as plain text.
 Return only the summary text.
 
 Rules:
+- Keep the merged summary under roughly 2,000 words. This budget outranks every preservation rule below: a summary that grows without bound eventually cannot be regenerated within the compaction time budget, and compaction then fails on every attempt.
+- When merging would exceed the budget, condense instead of growing — starting with the oldest and least load-bearing material from <previous_summary>. Collapse finished work into one-line outcomes; drop superseded plans, resolved errors, and exploratory dead ends entirely.
 - Preserve all still-relevant information from <previous_summary>.
 - Add only the new information from <new_conversation>.
-- Keep unchanged wording verbatim when it is still correct so future prompt prefixes remain stable.
-- Never paraphrase away exact technical details such as file paths, function names, class names, commands, Matrix IDs, model names, config keys, numeric thresholds, ports, URLs, or error text.
+- Within the budget, keep unchanged wording verbatim when it is still correct so future prompt prefixes remain stable.
+- Never paraphrase away exact technical details that are still load-bearing, such as file paths, function names, class names, commands, Matrix IDs, model names, config keys, numeric thresholds, ports, URLs, or error text.
 - Preserve tool activity when it matters to current state, especially file edits, commands, and tool results.
 - Do not invent facts.
 - If a section has no content, write `None.`

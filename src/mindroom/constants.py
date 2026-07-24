@@ -22,6 +22,14 @@ ROUTER_AGENT_NAME = "router"
 VISIBLE_ROUTER_VOICE_ECHO_KEY = "com.mindroom.visible_router_voice_echo"
 DEFAULT_MINDROOM_URL = "http://127.0.0.1:8765"
 MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS = 180.0
+# Compaction summary output must stay generable inside the chunk timeout above:
+# observed Vertex Claude throughput bottoms out around 35-40 output tokens/s, so
+# an uncapped summary (model max_tokens, e.g. 32K) that outgrows ~7K tokens turns
+# into a guaranteed wall-clock timeout instead of a typed truncation error the
+# retry policy can act on. 4096 tokens finishes in ~100-120s at the observed
+# floor, leaving prefill headroom, and sits above the ~2,000-word budget that
+# COMPACTION_SUMMARY_PROMPT asks the model to stay within.
+MINDROOM_COMPACTION_SUMMARY_MAX_OUTPUT_TOKENS = 4096
 DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES = 50 * 1024
 _MINDROOM_DISPATCH_THREAD_READ_TIMEOUT_SECONDS = 1.0
 _STANDARD_HISTORY_ROLES = frozenset({"user", "assistant", "tool"})
