@@ -1,6 +1,6 @@
 # Thread edit integrity follow-up status
 
-Updated: 2026-07-24 08:51 America/Los_Angeles.
+Updated: 2026-07-24 08:52 America/Los_Angeles.
 
 ## Goal
 
@@ -87,7 +87,17 @@ Validation handoff commit `7bdc33950` was pushed to `origin/fix/thread-edit-inte
 
 Remote branch exists.
 
-No PR yet.
+PR: `https://github.com/mindroom-ai/mindroom/pull/1641`.
+
+PR is open, normal, and not a draft.
+
+PR head at creation: `349cee5cc17bb7d7a309afe3ea10d343fc73ed1c`.
+
+GitHub reports the branch mergeable with checks queued or running.
+
+Greptile and CodeRabbit reviews are pending.
+
+Sourcery hit its weekly rate limit, Gemini review is sunset, and Qodo initially reported paused or busy states.
 
 Before every commit, verify `git var GIT_AUTHOR_IDENT` resolves to `Bas Nijholt <bas@nijho.lt>`.
 
