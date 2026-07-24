@@ -4,7 +4,7 @@
 > Update it after every material finding, fix, campaign result, review result, push, or PR state change.
 > Remove it before merge, then revalidate the final documentation-only head.
 
-Last updated: 2026-07-24 (campaign-wide exact-head refresh; no active PR is merge-ready).
+Last updated: 2026-07-24 (source-minimality restructure through Batch E at `d6907cba0`, net src +259; no active PR is merge-ready).
 
 ## CAMPAIGN-WIDE CURRENT STATE
 
@@ -18,7 +18,8 @@ Last updated: 2026-07-24 (campaign-wide exact-head refresh; no active PR is merg
 
 ## STABLE HEAD REPORT (read this first)
 
-- STABLE CODE HEAD: `5646c1173` (`Type-narrow model payload parsing in the live fuzz harness`). Every commit after it is documentation-only; per MERGE-GATES.md, reviewers may confirm the tip diff is doc-only and review code at this head.
+- ⚠️ SUPERSEDED: the `5646c1173` stable-head report below predates the source-minimality restructure (Batches A–E). The current code head is `d6907cba0`; review code there, not at `5646c1173`. See "Source-minimality simplification restructure" for the current accounting, suite line, and gate status.
+- STABLE CODE HEAD (historical, superseded): `5646c1173` (`Type-narrow model payload parsing in the live fuzz harness`). Every commit after it is documentation-only; per MERGE-GATES.md, reviewers may confirm the tip diff is doc-only and review code at this head.
 - Definitive full suite AT `5646c1173`: `11573 passed, 54 skipped, 69 warnings in 113.38s (0:01:53)`. Zero failures. (One earlier xdist run flaked on `test_toolkit_routes_through_supervisor_across_instances` — zero branch diff in shell-supervisor files, passes solo; same pre-existing flake class as the plugin-install one.)
 - Pre-commit all-files at this head: every hook passes except `prettier` reformatting 7 `frontend/src` files that are byte-identical to `origin/main` (main-side drift, out of scope, never committed).
 - MERGE GATES (per `/Users/bas.nijholt/.codex/campaigns/mindroom-fuzz-2026-07-24/MERGE-GATES.md`): CLOSED until, on this same head: (1) fresh independent Codex review APPROVE; (2) fresh independent Fable review APPROVE (the implementer session does not count); (3) real-Tuwunel live validation PASS with exact provenance and retained evidence. Any later code commit invalidates all three. The live campaign should include at least one seed with coalescing, an edit regeneration, a restart interruption, and a slow-stream collision (oracle design doc final gate), run against the NEW strict oracle.
@@ -36,6 +37,24 @@ Last updated: 2026-07-24 (campaign-wide exact-head refresh; no active PR is merg
 Known deferred follow-ups (NOT #1639 gates): harness_resources_v2.md full lifecycle hardening (O5 deviation 1, flagged by the oracle subagent); cache-SQL `write_seq` ordering fuzz (fuzz_reactions_edits_design.md); plugin-install and shell-supervisor test-robustness flakes.
 
 7. Live-gate triage + Codex-eb1 fix batch (2026-07-24, this session). Executed the real-Tuwunel live gate at `eb1c181c2` → ❌ FAIL. Corrected classification (verified against retained bundles under `pr1639_eb1_evidence/`): `root:41` (seed 4) and `root:44` (seed 7) are BOTH harness O3 false positives of two distinct shapes — redacted **source** vs redacted **edit event**; `root:3` (seed 4) is a REAL pre-existing EditRegenerator newest-wins race. Commits: `a492d2946` (provenance nio dist name + module-scope import, Codex #10), `4b0e5c1f5` (O3 oracle: replay_source_event_ids + per-source revision stack for edit-event redaction, closes both false positives), `66ddeab77` (alias-claim collision, Codex #1). Remaining accepted work: EditRegenerator newest-wins race (root:3, own product fix), Codex #2-#5/#7/#8. Then restart all three gates on the final head.
+
+## Source-minimality simplification restructure (2026-07-24, supervised)
+
+Goal: shrink #1639's net source addition from +459 toward the +235..286 target (hard ceiling +300) without weakening any oracle, by removing complexity that reviews flagged as speculative and restoring base shapes where the extra code earned nothing. Authoritative per-file plan: `/Users/bas.nijholt/.codex/campaigns/mindroom-fuzz-2026-07-24/pr1639_simplification_verify.md`. Batches A–E:
+
+- Batch A (prior session): removed the broken edit **watermark** entirely. Its correct newest-wins behavior is now owed by a **dependent per-source edit-mailbox PR** (verify doc's 10-behavior spec + 7 required tests) that must merge **before** #1639's final rebase and live gate. Do NOT substitute `event_cache.get_latest_edit()`.
+- Batch B (prior session): replaced late alias expansion with a scalar raw-alias claim.
+- Batch C (`3942b5fa1`): generation-only stale-stream ownership. `BotRuntimeState.runtime_generation` (UUID rotated in `mark_runtime_started`) is the sole clock-free ownership proof. Stamp (`io.mindroom.stream_generation`) is written ONLY into pending/streaming (nonterminal) content; cleanup reads it from the scanned snapshot (race-free vs finalize-after-snapshot). Terminal deliveries stay UNSTAMPED so terminal-interrupted notes remain auto-resume-eligible. Deleted: `STALE_STREAM_RECENCY_GUARD_MS`, `_is_recent_timestamp`, `_is_at_or_after_startup_cutoff`, all `startup_cutoff_ms` args, `is_live_process_stream` plumbing, recheck constants/state. Retained: `_STALE_STREAM_LOOKBACK_MS`, pagination, two-wave/targeted recovery, auto-resume, `replay_pending`, shutdown fences. Orchestrator recover callback signature is now `(bots, config, scanned_room_ids)` + `target_room_ids` kwarg — no cutoff positional.
+- Batch D (`4c27c65c9`): restored `dispatch_replay_guard.py` to base's inline predicate shape; ONLY additions are the `Collection` import + `current_turn_event_ids` params + sibling-ID exclusions (a sibling source of this same coalesced turn cannot supersede it). File diff vs base: +17/-3.
+- Batch E (`d6907cba0` + validation, this session): aligned the four `test_mcp_orchestrator.py` replacement-recovery fake callbacks + arg asserts to the cutoff-free signature, and rewrote the streaming per-delivery stamp test to the tighter invariant (nonterminal stamped / terminal unstamped / both kinds present — this is a STRONGER oracle, not a weakening).
+
+Final accounting at `d6907cba0`:
+- Net source vs base (`66dd4f4a68bcfd1a5e43b2cac20a1b464f306ab1`): **+259** (390 added / 131 deleted) — inside the +235..286 target, under the +300 ceiling. Per-file: stale_stream_cleanup −9, startup_maintenance +20, orchestrator +22, streaming +16, delivery_gateway +24, dispatch_replay_guard +14, bot +6, bot_runtime_view +9, constants +4, ingress_validation +7, text_ingress_dispatch +34, turn_controller +64, turn_store +48.
+- Full suite (`-n auto`): **2 failed / 11576 passed / 54 skipped** in 454s. Both failures are `tests/api/test_knowledge_api.py` (`test_knowledge_files_use_managed_file_filters`, `test_git_backed_file_counts_use_tracked_semantic_files`) — pre-existing xdist flakes: both pass solo, zero branch diff on the test and its owning src. All five earlier this-session-owned failures (4 orchestrator signature regressions + streaming stamp) are fixed and gone; the shell_async/shell_supervisor flakes did not recur.
+- `uv run tach check --dependencies --interfaces` → All modules validated.
+- Pre-commit all-files: every Python hook passes; only `prettier` reformats the 7 main-owned `frontend/src` files (byte-identical to origin/main, out of scope, stashed and never committed).
+
+Gate status after this batch: any code commit invalidates all three #1639 gates, so **fresh independent Codex review, fresh independent Fable review, and a real-Tuwunel live gate must all be re-run on the final head**. The dependent edit-mailbox PR (Batch A's replacement) is still owed and must merge before #1639's final rebase/live gate. Do not merge.
 
 ## Historical fresh-session TL;DR (superseded by campaign-wide current state)
 
