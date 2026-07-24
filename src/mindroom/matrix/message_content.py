@@ -83,6 +83,11 @@ def _sidecar_reference(event_source: Mapping[str, Any]) -> tuple[str, str] | Non
     return event_id, mxc_url
 
 
+def has_sidecar_references(event_sources: Sequence[dict[str, Any]]) -> bool:
+    """Return whether any event source carries a durable long-text sidecar reference."""
+    return any(_sidecar_reference(event_source) is not None for event_source in event_sources)
+
+
 async def prepare_sidecar_hydration_batch(
     event_sources: Sequence[dict[str, Any]],
     *,

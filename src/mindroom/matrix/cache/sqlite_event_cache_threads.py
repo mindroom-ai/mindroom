@@ -50,12 +50,13 @@ from .thread_cache_state import (
     is_incremental_thread_revalidation_reason,
     thread_cache_state_changed_after,
     thread_cache_state_row,
+    thread_revision_row,
 )
 
 if TYPE_CHECKING:
     import aiosqlite
 
-    from .event_cache import ThreadCacheState
+    from .event_cache import ThreadCacheState, ThreadRevision
 
 
 async def load_thread_events(
@@ -86,6 +87,81 @@ async def load_thread_events(
     if not rows:
         return None
     return [json.loads(row[2]) for row in rows]
+
+
+async def load_thread_events_written_between(
+    db: aiosqlite.Connection,
+    *,
+    principal_id: str,
+    room_id: str,
+    thread_id: str,
+    after_write_seq: int,
+    through_write_seq: int,
+    after_thread_write_seq: int,
+    through_thread_write_seq: int,
+) -> list[dict[str, Any]]:
+    """Return cached thread events changed in bounded durable revision intervals."""
+    cursor = await db.execute(
+        """
+        SELECT thread_events.origin_server_ts, thread_events.write_seq, events.event_json
+        FROM thread_events
+        JOIN events
+            ON events.principal_id = thread_events.principal_id
+            AND events.room_id = thread_events.room_id
+            AND events.event_id = thread_events.event_id
+        WHERE thread_events.principal_id = ?
+            AND thread_events.room_id = ?
+            AND thread_events.thread_id = ?
+            AND (
+                (events.write_seq > ? AND events.write_seq <= ?)
+                OR (thread_events.write_seq > ? AND thread_events.write_seq <= ?)
+            )
+        ORDER BY thread_events.origin_server_ts ASC, thread_events.write_seq ASC
+        """,
+        (
+            principal_id,
+            room_id,
+            thread_id,
+            after_write_seq,
+            through_write_seq,
+            after_thread_write_seq,
+            through_thread_write_seq,
+        ),
+    )
+    rows = await cursor.fetchall()
+    await cursor.close()
+    return [json.loads(row[2]) for row in rows]
+
+
+async def load_thread_revision(
+    db: aiosqlite.Connection,
+    *,
+    principal_id: str,
+    room_id: str,
+    thread_id: str,
+) -> ThreadRevision | None:
+    """Return the durable revision identity of one non-empty cached thread."""
+    cursor = await db.execute(
+        """
+        SELECT
+            COUNT(*),
+            MAX(events.write_seq),
+            MAX(thread_events.write_seq),
+            MAX(thread_events.origin_server_ts)
+        FROM thread_events
+        JOIN events
+            ON events.principal_id = thread_events.principal_id
+            AND events.room_id = thread_events.room_id
+            AND events.event_id = thread_events.event_id
+        WHERE thread_events.principal_id = ?
+            AND thread_events.room_id = ?
+            AND thread_events.thread_id = ?
+        """,
+        (principal_id, room_id, thread_id),
+    )
+    row = await cursor.fetchone()
+    await cursor.close()
+    return thread_revision_row(row)
 
 
 async def load_recent_room_thread_ids(

@@ -133,7 +133,7 @@ class TestThreadHistory:
         }
         client = AsyncMock()
 
-        history, _sidecar_hydration_ms = await _resolve_thread_history_from_event_sources_timed(
+        resolution = await _resolve_thread_history_from_event_sources_timed(
             client,
             room_id="!room:localhost",
             thread_id="$event-0",
@@ -141,6 +141,7 @@ class TestThreadHistory:
             event_cache=event_cache,
             expected_membership_epoch=0,
         )
+        history = resolution.messages
 
         assert len(history) == sidecar_count
         event_cache.get_mxc_texts.assert_awaited_once()
@@ -1523,7 +1524,7 @@ class TestThreadHistory:
         """Same-timestamp reference descendants should sort after their related parent."""
         client = AsyncMock()
 
-        history, _sidecar_ms = await _resolve_thread_history_from_event_sources_timed(
+        resolution = await _resolve_thread_history_from_event_sources_timed(
             client,
             room_id="!room:localhost",
             thread_id="$root",
@@ -1561,6 +1562,7 @@ class TestThreadHistory:
             hydrate_sidecars=True,
             event_cache=_event_cache(),
         )
+        history = resolution.messages
 
         assert [message.event_id for message in history] == ["$root", "$zzz_parent", "$aaa_child"]
 
@@ -1721,13 +1723,14 @@ class TestThreadHistory:
             },
         )
 
-        history, _sidecar_hydration_ms = await _resolve_thread_history_from_event_sources_timed(
+        resolution = await _resolve_thread_history_from_event_sources_timed(
             client,
             room_id="!room:localhost",
             thread_id="$thread_root",
             event_sources=[_event_source_for_cache(root_event), _event_source_for_cache(edit_only_event)],
             event_cache=_event_cache(),
         )
+        history = resolution.messages
 
         assert [message.event_id for message in history] == ["$thread_root"]
 
@@ -1764,13 +1767,14 @@ class TestThreadHistory:
             "mindroom.matrix.client_visible_messages.extract_edit_body",
             new_callable=AsyncMock,
         ) as mock_extract_edit_body:
-            history, _sidecar_hydration_ms = await _resolve_thread_history_from_event_sources_timed(
+            resolution = await _resolve_thread_history_from_event_sources_timed(
                 client,
                 room_id="!room:localhost",
                 thread_id="$thread_root",
                 event_sources=[_event_source_for_cache(root_event), _event_source_for_cache(unrelated_edit)],
                 event_cache=_event_cache(),
             )
+        history = resolution.messages
 
         assert [message.event_id for message in history] == ["$thread_root"]
         mock_extract_edit_body.assert_not_awaited()
@@ -1808,13 +1812,14 @@ class TestThreadHistory:
             },
         )
 
-        history, _sidecar_hydration_ms = await _resolve_thread_history_from_event_sources_timed(
+        resolution = await _resolve_thread_history_from_event_sources_timed(
             client,
             room_id="!room:localhost",
             thread_id="$thread_root",
             event_sources=[_event_source_for_cache(root_event), _event_source_for_cache(edit_only_event)],
             event_cache=_event_cache(),
         )
+        history = resolution.messages
 
         assert [message.event_id for message in history] == ["$thread_root", "$missing_original"]
         assert history[1].body == "Final answer"

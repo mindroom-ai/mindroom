@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from .event_cache import ThreadCacheState
+from .event_cache import ThreadCacheState, ThreadRevision
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -80,6 +80,24 @@ def thread_cache_state_row(values: Sequence[float | str | None] | None) -> Threa
         invalidation_reason=values[2] if isinstance(values[2], str) else None,
         room_invalidated_at=None if values[3] is None else float(values[3]),
         room_invalidation_reason=values[4] if isinstance(values[4], str) else None,
+    )
+
+
+def thread_revision_row(values: Sequence[float | int | None] | None) -> ThreadRevision | None:
+    """Normalize one backend aggregate row into a revision, absent for empty threads."""
+    if values is None:
+        return None
+    if len(values) != 4:
+        msg = f"Thread revision row must contain exactly 4 values, got {len(values)}"
+        raise ValueError(msg)
+    event_count = 0 if values[0] is None else int(values[0])
+    if event_count <= 0 or values[1] is None or values[2] is None or values[3] is None:
+        return None
+    return ThreadRevision(
+        event_count=event_count,
+        max_write_seq=int(values[1]),
+        max_thread_write_seq=int(values[2]),
+        max_origin_server_ts=int(values[3]),
     )
 
 

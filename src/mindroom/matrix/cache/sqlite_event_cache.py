@@ -35,7 +35,7 @@ if TYPE_CHECKING:
 
     from .agent_message_snapshot import AgentMessageSnapshot
     from .cache_maintenance import CacheMaintenanceReport
-    from .event_cache import ThreadCacheState
+    from .event_cache import ThreadCacheState, ThreadRevision
 
 _EVENT_CACHE_SCHEMA_VERSION = 12
 _EVENT_CACHE_TABLES = (
@@ -851,6 +851,47 @@ class SqliteEventCache:
             operation="get_thread_events",
             disabled_result=None,
             reader=lambda db: sqlite_event_cache_threads.load_thread_events(
+                db,
+                principal_id=self.principal_id,
+                room_id=room_id,
+                thread_id=thread_id,
+            ),
+        )
+
+    async def get_thread_events_written_between(
+        self,
+        room_id: str,
+        thread_id: str,
+        *,
+        after_write_seq: int,
+        through_write_seq: int,
+        after_thread_write_seq: int,
+        through_thread_write_seq: int,
+    ) -> list[dict[str, Any]]:
+        """Return thread events changed in bounded payload or thread-index intervals."""
+        return await self._read_operation(
+            room_id,
+            operation="get_thread_events_written_between",
+            disabled_result=[],
+            reader=lambda db: sqlite_event_cache_threads.load_thread_events_written_between(
+                db,
+                principal_id=self.principal_id,
+                room_id=room_id,
+                thread_id=thread_id,
+                after_write_seq=after_write_seq,
+                through_write_seq=through_write_seq,
+                after_thread_write_seq=after_thread_write_seq,
+                through_thread_write_seq=through_thread_write_seq,
+            ),
+        )
+
+    async def get_thread_revision(self, room_id: str, thread_id: str) -> ThreadRevision | None:
+        """Return the durable revision identity of one non-empty cached thread."""
+        return await self._read_operation(
+            room_id,
+            operation="get_thread_revision",
+            disabled_result=None,
+            reader=lambda db: sqlite_event_cache_threads.load_thread_revision(
                 db,
                 principal_id=self.principal_id,
                 room_id=room_id,
