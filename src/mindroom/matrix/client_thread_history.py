@@ -781,13 +781,6 @@ async def _try_reuse_cached_thread_resolution(
     assert cache_state.max_thread_write_seq is not None
     assert cache_state.max_origin_server_ts is not None
     snapshot_trusted_sender_ids = frozenset(trusted_sender_ids)
-    if not await _snapshot_sidecars_unchanged(
-        event_cache,
-        room_id=room_id,
-        membership_epoch=membership_epoch,
-        snapshot=snapshot,
-    ):
-        return None
     if snapshot_matches_revision(
         snapshot,
         trusted_sender_ids=snapshot_trusted_sender_ids,
@@ -796,7 +789,29 @@ async def _try_reuse_cached_thread_resolution(
         max_write_seq=cache_state.max_write_seq,
         max_thread_write_seq=cache_state.max_thread_write_seq,
     ):
+        if not await _snapshot_sidecars_unchanged(
+            event_cache,
+            room_id=room_id,
+            thread_id=thread_id,
+            membership_epoch=membership_epoch,
+            snapshot=snapshot,
+        ):
+            return None
         return snapshot.cloned_messages(), 0.0, "reuse"
+    if (
+        snapshot.trusted_sender_ids != snapshot_trusted_sender_ids
+        or snapshot.membership_epoch != membership_epoch
+        or cache_state.event_count <= snapshot.event_count
+    ):
+        return None
+    if not await _snapshot_sidecars_unchanged(
+        event_cache,
+        room_id=room_id,
+        thread_id=thread_id,
+        membership_epoch=membership_epoch,
+        snapshot=snapshot,
+    ):
+        return None
     return await _try_merge_cached_thread_delta(
         client,
         room_id=room_id,
@@ -815,6 +830,7 @@ async def _snapshot_sidecars_unchanged(
     event_cache: ConversationEventCache,
     *,
     room_id: str,
+    thread_id: str,
     membership_epoch: int,
     snapshot: ThreadResolutionSnapshot,
 ) -> bool:
@@ -831,6 +847,7 @@ async def _snapshot_sidecars_unchanged(
         logger.debug(
             "Thread resolution sidecar check failed; falling back to full resolution",
             room_id=room_id,
+            thread_id=thread_id,
             error=str(exc),
         )
         return False

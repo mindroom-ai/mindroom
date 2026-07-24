@@ -386,6 +386,26 @@ class TestSnapshotReuse:
         assert second_kind == "full"
 
     @pytest.mark.asyncio
+    async def test_non_growing_revision_skips_preliminary_sidecar_check(self) -> None:
+        """A known full fallback should hydrate sidecars only during full resolution."""
+        rows = [_message_row(THREAD, 1000, "root"), _sidecar_row("$m1", 2000)]
+        changed = [_message_row(THREAD, 1000, "rewritten"), rows[1]]
+        reuse = ThreadResolutionReuseCache()
+        event_cache = make_event_cache_mock()
+        reference = ("$m1", "mxc://server/sidecar-m1")
+        event_cache.get_mxc_texts.return_value = {
+            reference: json.dumps({"msgtype": "m.text", "body": "sidecar body"}),
+        }
+
+        await _resolve(rows, reuse=reuse, event_cache=event_cache)
+        event_cache.get_mxc_texts.reset_mock()
+        second, second_kind = await _resolve(changed, reuse=reuse, event_cache=event_cache)
+
+        assert second_kind == "full"
+        assert second[0].body == "rewritten"
+        event_cache.get_mxc_texts.assert_awaited_once()
+
+    @pytest.mark.asyncio
     async def test_resolution_failure_discards_snapshot_and_invalidates(self) -> None:
         """A resolution failure drops the snapshot alongside the durable cache entry."""
         rows = [_message_row(THREAD, 1000, "root")]
