@@ -122,7 +122,7 @@ class IndexingSettings:
         if mode not in _INDEXING_MODES:
             return None
 
-        def _optional_filter_key(name: str, *, empty_value: str = "()") -> str:
+        def _optional_filter_key(name: str, *, empty_value: str = _EMPTY_FILTER_KEY) -> str:
             return settings.get(name, "") or empty_value
 
         return cls(
@@ -148,7 +148,7 @@ class IndexingSettings:
             exclude_extensions=settings["exclude_extensions"],
             extra_extensions=_optional_filter_key(
                 "extra_extensions",
-                empty_value="()" if mode == "semantic" else "",
+                empty_value=_EMPTY_FILTER_KEY if mode == "semantic" else "",
             ),
             skip_hidden=settings.get("skip_hidden", ""),
         )
@@ -264,6 +264,9 @@ def storage_key_for_base(base_id: str, knowledge_path: Path) -> str:
 
 def _filter_settings_key(values: Iterable[str]) -> str:
     return str(tuple(sorted(values)))
+
+
+_EMPTY_FILTER_KEY = _filter_settings_key(())
 
 
 def indexing_settings_key(config: Config, storage_path: Path, base_id: str, knowledge_path: Path) -> IndexingSettings:
