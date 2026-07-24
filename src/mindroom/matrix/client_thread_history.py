@@ -849,6 +849,7 @@ async def _try_merge_cached_thread_delta(
     suffix = reusable_event_source_suffix(
         snapshot,
         candidate_suffix,
+        room_id=room_id,
         trusted_sender_ids=snapshot_trusted_sender_ids,
         membership_epoch=membership_epoch,
         revision=revision,

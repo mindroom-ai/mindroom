@@ -193,6 +193,7 @@ def _guard_suffix(
     return reusable_event_source_suffix(
         snapshot,
         suffix,
+        room_id=ROOM,
         trusted_sender_ids=frozenset(),
         membership_epoch=EPOCH,
         revision=ThreadRevision(
@@ -275,6 +276,28 @@ class TestSnapshotReuse:
         assert kind == "full"
         assert edited == full
         assert [message.body for message in edited] == ["root", "final"]
+
+    @pytest.mark.asyncio
+    async def test_non_spec_top_level_bundle_matches_incremental_and_full_resolution(self) -> None:
+        """Top-level ``m.relations`` must not create a reuse/full-history divergence."""
+        rows = [_message_row(THREAD, 1000, "root"), _message_row("$m1", 2000, "draft")]
+        reuse = ThreadResolutionReuseCache()
+        await _resolve(rows, reuse=reuse)
+
+        appended = _message_row("$m2", 3000, "new message")
+        appended["m.relations"] = {
+            "m.replace": {
+                "event": _edit_row("$bundled-edit", 3100, target="$m1", body="non-spec edit"),
+            },
+        }
+        grown = [*rows, appended]
+
+        incremental, kind = await _resolve(grown, reuse=reuse)
+        full, _ = await _resolve(grown, reuse=None)
+
+        assert kind == "incremental"
+        assert incremental == full
+        assert [message.body for message in incremental] == ["root", "draft", "new message"]
 
     @pytest.mark.asyncio
     async def test_redaction_pruned_row_forces_full(self) -> None:
@@ -522,6 +545,19 @@ class TestSuffixSafetyGuards:
 
         suffix = _guard_suffix(snapshot, [redaction])
         assert suffix is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("invalidity", ["state", "other-room"])
+    async def test_rejects_invalid_scope_suffix_row(self, invalidity: str) -> None:
+        """State or explicitly cross-room suffix rows must not enter incremental reuse."""
+        snapshot = await self._snapshot([_message_row(THREAD, 1000, "root")])
+        poisoned = _message_row("$m1", 2000, "poisoned")
+        if invalidity == "state":
+            poisoned["state_key"] = ""
+        else:
+            poisoned["room_id"] = "!other:localhost"
+
+        assert _guard_suffix(snapshot, [poisoned]) is None
 
     @pytest.mark.asyncio
     async def test_rejects_duplicate_and_known_suffix_event_ids(self) -> None:
