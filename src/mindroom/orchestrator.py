@@ -538,6 +538,8 @@ class _MultiAgentOrchestrator:
         attempt = 0
         try:
             while True:
+                if not self.running:
+                    return
                 bot = self.agent_bots.get(entity_name)
                 if bot is None:
                     return
@@ -601,13 +603,17 @@ class _MultiAgentOrchestrator:
         # (after stop() cancelled maintenance but before retry tasks die)
         # must not schedule a detached recheck against a closing client.
         if config is not None and self.running:
-            self._startup_maintenance.resume_pending_recheck(
+            self._startup_maintenance.resume_pending_maintenance(
                 config=config,
                 running_bots=self._running_startup_maintenance_bots,
             )
 
     async def _schedule_bot_start_retry(self, entity_name: str) -> None:
         """Schedule background retries for one failed bot startup."""
+        if not self.running:
+            # A reload racing shutdown must not spawn a retry that survives
+            # the stop() cancellation pass.
+            return
         await self._cancel_bot_start_task(entity_name)
         self._bot_start_tasks[entity_name] = create_logged_task(
             self._run_bot_start_retry(entity_name),
@@ -1852,12 +1858,15 @@ class _MultiAgentOrchestrator:
         if self._runtime_shutdown_event is not None:
             self._runtime_shutdown_event.set()
         self._external_trigger_runtime.unbind()
-        # Cancel bot-start retries before any other awaited teardown: a retry
-        # completing mid-shutdown would otherwise rebind runtime support and
-        # start sync tasks the passes below have already torn down.
+        # Cancel the retry producer (config reload) before the retry tasks
+        # themselves, then the retries before any other awaited teardown: a
+        # reload finishing after the retry-cancel pass could otherwise spawn
+        # a fresh retry that survives shutdown, and a retry completing
+        # mid-shutdown would rebind runtime support and start sync tasks the
+        # passes below have already torn down.
+        await self.config_reload.cancel()
         await self._cancel_bot_start_tasks()
         await shutdown_approval_runtime()
-        await self.config_reload.cancel()
         await self._startup_maintenance.cancel()
         await self._todo_poke_runtime.stop()
         await self._stop_memory_auto_flush_worker()

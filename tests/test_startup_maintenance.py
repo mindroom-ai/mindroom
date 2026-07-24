@@ -314,14 +314,14 @@ async def test_bot_start_recovery_resumes_stranded_recheck() -> None:
     assert controller.task is None
 
     controller.recency_recheck_delay_seconds = 0.0
-    controller.resume_pending_recheck(config=MagicMock(), running_bots=lambda: [MagicMock()])
+    controller.resume_pending_maintenance(config=MagicMock(), running_bots=lambda: [MagicMock()])
     await _wait_for_controller(controller)
 
     assert counts == {"recover": 3, "setup": 1, "support": 1, "ready": 1}
     assert controller.recheck_pending is False
 
     # Without pending work or with a live task, resume is a no-op.
-    controller.resume_pending_recheck(config=MagicMock(), running_bots=lambda: [MagicMock()])
+    controller.resume_pending_maintenance(config=MagicMock(), running_bots=lambda: [MagicMock()])
     assert controller.task is not None
     assert counts["recover"] == 3
 
@@ -382,7 +382,7 @@ async def test_exhausted_recheck_debt_resumes_without_prior_cancel() -> None:
     assert controller.recheck_pending is True
     assert controller.task is not None
 
-    controller.resume_pending_recheck(config=MagicMock(), running_bots=lambda: [MagicMock()])
+    controller.resume_pending_maintenance(config=MagicMock(), running_bots=lambda: [MagicMock()])
     await _wait_for_controller(controller)
 
     assert counts["recover"] == 4
@@ -406,6 +406,60 @@ async def test_exhausted_recheck_retries_stay_pending_and_replay_on_next_reload(
     await _wait_for_controller(controller)
 
     assert counts["recover"] == 6
+    assert controller.recheck_pending is False
+
+
+@pytest.mark.asyncio
+async def test_empty_bot_reload_keeps_full_maintenance_debt_replayable() -> None:
+    """A cancel during the main phases plus an empty-bot reload must not lose the full sequence.
+
+    Previously only recheck-only debt survived: a reload canceling before
+    recheck_pending was set, then finishing with zero running bots, left no
+    record that initial recovery, room setup, and runtime support were still
+    owed, and every later cancel() reported nothing to replay.
+    """
+    counts = {"recover": 0, "setup": 0, "support": 0, "ready": 0}
+    setup_started = asyncio.Event()
+    release_setup = asyncio.Event()
+
+    async def recover_stale(_: list[object], __: object, ___: int, ____: set[str]) -> None:
+        counts["recover"] += 1
+
+    async def setup_rooms(_: list[object]) -> None:
+        counts["setup"] += 1
+        setup_started.set()
+        await release_setup.wait()
+
+    async def sync_runtime_support(_: object) -> None:
+        counts["support"] += 1
+
+    async def mark_runtime_support_ready() -> None:
+        counts["ready"] += 1
+
+    controller = StartupMaintenanceController(
+        recover_stale_streams=recover_stale,
+        setup_rooms_and_memberships=setup_rooms,
+        sync_runtime_support=sync_runtime_support,
+        mark_runtime_support_ready=mark_runtime_support_ready,
+        recency_recheck_delay_seconds=0.0,
+    )
+
+    controller.start([MagicMock()], MagicMock(), startup_cutoff_ms=123456)
+    await asyncio.wait_for(setup_started.wait(), timeout=5.0)
+    assert await controller.cancel() is True
+
+    controller.restart_after_config_reload(config=MagicMock(), running_bots=list)
+    assert controller.task is None
+    assert controller.full_replay_pending is True
+
+    assert await controller.cancel() is True
+
+    release_setup.set()
+    controller.resume_pending_maintenance(config=MagicMock(), running_bots=lambda: [MagicMock()])
+    await _wait_for_controller(controller)
+
+    assert counts == {"recover": 4, "setup": 2, "support": 1, "ready": 1}
+    assert controller.full_replay_pending is False
     assert controller.recheck_pending is False
 
 

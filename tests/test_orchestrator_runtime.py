@@ -2079,7 +2079,7 @@ class TestMultiAgentOrchestrator:
             patch.object(orchestrator, "_start_sync_task") as start_sync,
             patch.object(orchestrator, "_recover_pending_replacement_rooms", new=AsyncMock()) as recover_rooms,
             patch.object(orchestrator, "_external_trigger_runtime", new=external_trigger_runtime),
-            patch.object(orchestrator._startup_maintenance, "resume_pending_recheck") as resume,
+            patch.object(orchestrator._startup_maintenance, "resume_pending_maintenance") as resume,
         ):
             orchestrator.running = False
             await orchestrator._finish_recovered_bot_start("general", bot)
@@ -2099,6 +2099,27 @@ class TestMultiAgentOrchestrator:
             recover_rooms.assert_awaited_once()
             external_trigger_runtime.bind_if_ready.assert_called_once()
             resume.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_bot_start_retry_scheduling_fails_closed_after_shutdown(self, tmp_path: Path) -> None:
+        """A reload racing shutdown must not spawn a retry that survives stop().
+
+        stop() cancels the reload producer and then the retry tasks; a reload
+        already past cancellation could still call the scheduler, and the
+        retry loop itself must also exit once shutdown is visible.
+        """
+        orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
+        orchestrator.config = MagicMock()
+        orchestrator.running = False
+        bot = MagicMock()
+        bot.try_start = AsyncMock()
+        orchestrator.agent_bots = {"general": bot}
+
+        await orchestrator._schedule_bot_start_retry("general")
+        assert orchestrator._bot_start_tasks == {}
+
+        await orchestrator._run_bot_start_retry("general")
+        bot.try_start.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_shutdown_expires_in_flight_approval_send_after_event_id_arrives(  # noqa: PLR0915

@@ -54,11 +54,16 @@ class StartupMaintenanceController:
     task: asyncio.Task[None] | None = field(default=None, init=False)
     startup_cutoff_ms: int | None = field(default=None, init=False)
     recheck_pending: bool = field(default=False, init=False)
+    # A reload can cancel maintenance before any phase completes and then
+    # finish with zero running bots; this records that the FULL sequence is
+    # still owed, distinct from the recheck-only debt above.
+    full_replay_pending: bool = field(default=False, init=False)
 
     def start(self, bots: list[_StartupBot], config: Config, *, startup_cutoff_ms: int) -> None:
         """Schedule detached startup maintenance for one startup generation."""
         self.startup_cutoff_ms = startup_cutoff_ms
         self.recheck_pending = False
+        self.full_replay_pending = False
         self.task = create_logged_task(
             self._run(bots, config, startup_cutoff_ms),
             name="startup_maintenance",
@@ -68,13 +73,13 @@ class StartupMaintenanceController:
     async def cancel(self) -> bool:
         """Cancel detached startup maintenance and report whether unfinished work was interrupted.
 
-        A pending recency recheck counts as unfinished even when no task is
-        alive: a prior replay may have found zero running bots or a failed
-        recheck phase, and the pending flag is the only record of that debt.
+        Parked debt counts as unfinished even when no task is alive: a prior
+        replay may have found zero running bots or a failed recheck phase, and
+        the pending flags are the only record of that debt.
         """
         task = self.task
         self.task = None
-        should_replay = (task is not None and not task.done()) or self.recheck_pending
+        should_replay = (task is not None and not task.done()) or self.recheck_pending or self.full_replay_pending
         await cancel_logged_task(task)
         return should_replay
 
@@ -89,34 +94,36 @@ class StartupMaintenanceController:
         running_bots: _RunningBots,
     ) -> None:
         """Replay canceled startup maintenance after config reload completes."""
-        startup_cutoff_ms = self.startup_cutoff_ms
-        if startup_cutoff_ms is None or self._task_running():
+        if self.startup_cutoff_ms is None or self._task_running():
             return
-        if self.recheck_pending:
-            # Every earlier phase already completed before the cancel, and the
-            # reload itself re-syncs runtime support, so only the outstanding
-            # recency-guard recheck replays.
-            self.resume_pending_recheck(config=config, running_bots=running_bots)
-            return
-        bots = running_bots()
-        if not bots:
-            return
-        self.start(bots, config, startup_cutoff_ms=startup_cutoff_ms)
+        if not self.recheck_pending:
+            # The cancel interrupted the main phases, so the FULL sequence is
+            # owed. Record the debt before attempting resume: a reload that
+            # finishes with zero running bots must stay replayable by a later
+            # reload or by background bot recovery.
+            self.full_replay_pending = True
+        self.resume_pending_maintenance(config=config, running_bots=running_bots)
 
-    def resume_pending_recheck(self, *, config: Config, running_bots: _RunningBots) -> None:
-        """Schedule the outstanding recency recheck once running bots exist.
+    def resume_pending_maintenance(self, *, config: Config, running_bots: _RunningBots) -> None:
+        """Resume parked maintenance debt once running bots exist.
 
-        Called from reload replay and from background bot-start recovery, so a
-        reload that completes with zero running bots cannot strand the recheck.
-        Only a live task blocks resume: after exhausted bounded retries the
-        completed task object remains recorded, and that parked debt must
-        stay resumable without an intervening cancel().
+        Called from reload replay and from background bot-start recovery. A
+        full-sequence debt replays every phase; a recheck-only debt replays
+        just the outstanding recency recheck. Only a live task blocks resume:
+        after exhausted bounded retries the completed task object remains
+        recorded, and that parked debt must stay resumable without an
+        intervening cancel().
         """
         startup_cutoff_ms = self.startup_cutoff_ms
-        if not self.recheck_pending or self._task_running() or startup_cutoff_ms is None:
+        if self._task_running() or startup_cutoff_ms is None:
+            return
+        if not (self.full_replay_pending or self.recheck_pending):
             return
         bots = running_bots()
         if not bots:
+            return
+        if self.full_replay_pending:
+            self.start(bots, config, startup_cutoff_ms=startup_cutoff_ms)
             return
         self.task = create_logged_task(
             self._recheck_after_recency_guard(bots, config, startup_cutoff_ms),
