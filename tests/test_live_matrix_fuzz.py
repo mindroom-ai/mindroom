@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
 
@@ -24,6 +26,32 @@ from scripts.testing.fuzz_live_matrix import (
 LIMITED_SYNC_REPRODUCER = Path(__file__).parent / "fixtures" / "matrix_fuzz" / "limited_sync_concurrent_branch.json"
 
 
+def _recovery_scenario_with_sources(
+    source_count: int,
+    *,
+    client_count: int = 1,
+) -> LiveFuzzScenario:
+    return LiveFuzzScenario(
+        thread_count=max(source_count, 1),
+        room_count=1,
+        client_count=client_count,
+        profile="recovery",
+        batches=tuple(
+            (
+                LiveOperation(
+                    operation_id,
+                    LiveOperationKind.THREAD_MESSAGE,
+                    operation_id,
+                    f"root:0:{operation_id}",
+                    room=0,
+                    client=0,
+                ),
+            )
+            for operation_id in range(source_count)
+        ),
+    )
+
+
 def test_exact_nio_provenance_fails_closed() -> None:
     """An exact campaign may not run against unverifiable or different nio."""
     provenance = fuzz_live_matrix.RuntimeProvenance(
@@ -36,6 +64,28 @@ def test_exact_nio_provenance_fails_closed() -> None:
 
     with pytest.raises(RuntimeError, match=r"required-sha.*loaded-sha"):
         fuzz_live_matrix._validate_nio_provenance(provenance)
+
+
+def test_exact_nio_provenance_rejects_unverified_or_dirty_source() -> None:
+    """A clean commit label must not conceal unverifiable or modified imports."""
+    unverified = fuzz_live_matrix.RuntimeProvenance(
+        mindroom_revision="mindroom-sha",
+        nio_module_path="/loaded/nio/__init__.py",
+        nio_version="1.0",
+        nio_revision="unverified",
+        nio_expected_revision="unspecified",
+    )
+    dirty = replace(
+        unverified,
+        nio_revision="nio-sha",
+        nio_expected_revision="nio-sha",
+        nio_dirty=True,
+    )
+
+    with pytest.raises(RuntimeError, match="could not verify"):
+        fuzz_live_matrix._validate_nio_provenance(unverified)
+    with pytest.raises(RuntimeError, match="clean loaded source"):
+        fuzz_live_matrix._validate_nio_provenance(dirty)
 
 
 def test_failure_artifact_includes_loaded_code_provenance(tmp_path: Path) -> None:
@@ -71,6 +121,12 @@ def test_failure_artifact_includes_loaded_code_provenance(tmp_path: Path) -> Non
     assert artifact["nio_revision"] == "nio-sha"
     assert artifact["scenario"]["version"] == 1
     assert artifact["mindroom_log"] == "runtime output"
+    assert LiveFuzzScenario.from_json(json.dumps(artifact)) == live_scenario_from_seed(
+        1,
+        steps=1,
+        thread_count=1,
+        restart_interval=0,
+    )
 
 
 @pytest.mark.asyncio
@@ -361,6 +417,124 @@ def test_recovery_scenario_rejects_operation_the_runner_cannot_execute() -> None
         scenario.validate()
 
 
+@pytest.mark.parametrize("missing_field", ["room", "client"])
+def test_recovery_json_requires_explicit_ownership(missing_field: str) -> None:
+    """Recovery replay may not silently change room or access-token ownership."""
+    payload = json.loads(_recovery_scenario_with_sources(51).to_json())
+    del payload["batches"][0][0][missing_field]
+
+    with pytest.raises(TypeError, match=missing_field):
+        LiveFuzzScenario.from_json(json.dumps(payload))
+
+
+def test_non_recovery_profiles_reject_ignored_clients() -> None:
+    """Generic and saturation runs may not declare clients the runner ignores."""
+    scenario = LiveFuzzScenario(
+        thread_count=1,
+        client_count=2,
+        batches=((LiveOperation(0, LiveOperationKind.THREAD_MESSAGE, 0, "root:0", client=1),),),
+    )
+
+    with pytest.raises(ValueError, match="exactly one declared room and client"):
+        scenario.validate()
+
+
+def test_recovery_requires_more_than_the_limited_timeline_per_room() -> None:
+    """Loaded recovery traces must preserve the limited-sync precondition."""
+    with pytest.raises(ValueError, match="more than 50"):
+        _recovery_scenario_with_sources(50).validate()
+
+    _recovery_scenario_with_sources(51).validate()
+
+
+def test_recovery_retry_preserves_client_and_thread_ownership() -> None:
+    """Transaction replay is scoped to the original access token and lane."""
+    scenario = _recovery_scenario_with_sources(51, client_count=2)
+    retry = LiveOperation(
+        51,
+        LiveOperationKind.IDEMPOTENT_RETRY,
+        0,
+        "op:0",
+        room=0,
+        client=1,
+    )
+    scenario = replace(scenario, batches=(*scenario.batches, (retry,)))
+
+    with pytest.raises(ValueError, match="preserve the original"):
+        scenario.validate()
+
+
+def test_recovery_rejects_cross_thread_and_offline_response_targets() -> None:
+    """Recovery relations must stay in-lane and target events available during outage."""
+    scenario = _recovery_scenario_with_sources(51)
+    cross_thread = replace(scenario.batches[1][0], target="root:0:0")
+    invalid_cross_thread = replace(
+        scenario,
+        batches=(scenario.batches[0], (cross_thread,), *scenario.batches[2:]),
+    )
+    offline_response = replace(scenario.batches[1][0], target="response:op:0")
+    invalid_offline_response = replace(
+        scenario,
+        batches=(scenario.batches[0], (offline_response,), *scenario.batches[2:]),
+    )
+
+    with pytest.raises(ValueError, match="belongs to thread"):
+        invalid_cross_thread.validate()
+    with pytest.raises(ValueError, match="unknown or same-batch target"):
+        invalid_offline_response.validate()
+
+
+@pytest.mark.parametrize(
+    "kind",
+    [
+        LiveOperationKind.PLAIN_REPLY,
+        LiveOperationKind.EDIT,
+        LiveOperationKind.REACTION,
+        LiveOperationKind.REDACTION,
+        LiveOperationKind.IDEMPOTENT_RETRY,
+        LiveOperationKind.RESTART_MINDROOM,
+    ],
+)
+def test_saturation_rejects_unsupported_operations(kind: LiveOperationKind) -> None:
+    """Saturation traces may contain only the turns the runner executes."""
+    target = None if kind is LiveOperationKind.RESTART_MINDROOM else "response:root:0"
+    scenario = LiveFuzzScenario(
+        thread_count=2,
+        profile="saturation",
+        batches=((LiveOperation(0, kind, 0, target),),),
+    )
+
+    with pytest.raises(ValueError, match="saturation profile does not support"):
+        scenario.validate()
+
+
+def test_saturation_rejects_incomplete_parallel_batches_and_wrong_targets() -> None:
+    """Every parallel phase must cover all lanes and follow its serialized chain."""
+    incomplete = LiveFuzzScenario(
+        thread_count=3,
+        profile="saturation",
+        batches=(
+            (LiveOperation(0, LiveOperationKind.THREAD_MESSAGE, 0, "response:root:0"),),
+            (LiveOperation(1, LiveOperationKind.THREAD_MESSAGE, 1, "response:root:1"),),
+        ),
+    )
+    wrong_target = replace(
+        saturation_scenario(hot_turns=1, parallel_threads=2, parallel_turns=1),
+        batches=(
+            (LiveOperation(0, LiveOperationKind.THREAD_MESSAGE, 0, "response:root:0"),),
+            (
+                LiveOperation(1, LiveOperationKind.THREAD_MESSAGE, 1, "response:root:1"),
+                LiveOperation(2, LiveOperationKind.THREAD_MESSAGE, 2, "response:op:999"),
+            ),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="every nonzero thread"):
+        incomplete.validate()
+    with pytest.raises(ValueError, match="must target"):
+        wrong_target.validate()
+
+
 @pytest.mark.asyncio
 async def test_exact_reply_oracle_counts_only_canonical_agent_thread_replies() -> None:
     """Edits and duplicate sync delivery must not inflate canonical counts."""
@@ -488,12 +662,18 @@ def _agent_reply_event(source_event_id: str, response_event_id: str, body: str) 
     }
 
 
-def _agent_edit_event(response_event_id: str, body: str) -> dict[str, Any]:
+def _agent_edit_event(
+    response_event_id: str,
+    body: str,
+    *,
+    event_id: str = "$edit",
+    timestamp: int = 101,
+) -> dict[str, Any]:
     return {
-        "event_id": "$edit",
+        "event_id": event_id,
         "sender": "@agent:example",
         "type": "m.room.message",
-        "origin_server_ts": 101,
+        "origin_server_ts": timestamp,
         "content": {
             "body": f" * {body}",
             "m.new_content": {"body": body, "msgtype": "m.text"},
@@ -518,6 +698,105 @@ async def test_exact_reply_oracle_requires_completed_streaming_body() -> None:
         assert oracle._incomplete_streaming_sources() == set()
     finally:
         await client.close()
+
+
+@pytest.mark.asyncio
+async def test_equal_timestamp_edits_use_event_id_not_ingestion_order() -> None:
+    """Backward pagination order must not change Matrix edit selection."""
+    client = LiveMatrixClient("http://matrix.invalid", "!room:example")
+    oracle = ExactReplyOracle(client, "@agent:example")
+    try:
+        original = _agent_reply_event("$source", "$response", "Thinking...")
+        original["origin_server_ts"] = 101
+        oracle._ingest_event(original)
+        oracle._ingest_event(
+            _agent_edit_event("$response", "newer", event_id="$edit-z", timestamp=101),
+        )
+        oracle._ingest_event(
+            _agent_edit_event("$response", "older", event_id="$edit-a", timestamp=101),
+        )
+
+        assert oracle.latest_reply_bodies["$response"][2] == "newer"
+        assert (
+            fuzz_live_matrix.LiveFuzzRunner._latest_event_body(
+                (
+                    original,
+                    _agent_edit_event("$response", "newer", event_id="$edit-z", timestamp=101),
+                    _agent_edit_event("$response", "older", event_id="$edit-a", timestamp=101),
+                ),
+                "$response",
+            )
+            == "newer"
+        )
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_exact_reply_oracle_rejects_wrong_thread_root() -> None:
+    """A direct reply match cannot conceal attachment to another thread."""
+    client = LiveMatrixClient("http://matrix.invalid", "!room:example")
+    oracle = ExactReplyOracle(client, "@agent:example")
+    oracle.expect("op:1", "$source", root_event_id="$expected-root")
+    event = _agent_reply_event(
+        "$source",
+        "$response",
+        fuzz_live_matrix._ModelHandler.response_text_for(1),
+    )
+    event["content"]["m.relates_to"]["event_id"] = "$wrong-root"
+    try:
+        oracle._ingest_event(event)
+        with pytest.raises(AssertionError, match="wrong_thread_roots"):
+            oracle._assert_no_wrong_replies()
+    finally:
+        await client.close()
+
+
+def test_model_response_is_bound_to_source_and_ordered_history() -> None:
+    """Swapped sources and corrupted histories must not satisfy exact bodies."""
+    source, history = fuzz_live_matrix._ModelHandler._request_identity(
+        {
+            "messages": [
+                {"content": "first LIVE-SOURCE[root:0]"},
+                {"content": "second LIVE-SOURCE[op:1]"},
+            ],
+        },
+    )
+    body = fuzz_live_matrix._ModelHandler.response_text_for(
+        7,
+        source_marker=source,
+        history_fingerprint=history,
+    )
+
+    assert source == "op:1"
+    assert ExactReplyOracle._is_complete_model_body(
+        body,
+        expected_source_marker="op:1",
+        expected_history_fingerprint=fuzz_live_matrix._history_fingerprint(("root:0", "op:1")),
+    )
+    assert not ExactReplyOracle._is_complete_model_body(
+        body,
+        expected_source_marker="root:0",
+        expected_history_fingerprint=history,
+    )
+    assert not ExactReplyOracle._is_complete_model_body(
+        body,
+        expected_source_marker="op:1",
+        expected_history_fingerprint=fuzz_live_matrix._history_fingerprint(("op:1",)),
+    )
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "LIVE-FUZZ call=1 source=op:1 history=0000000000000000 END call=1",
+        "LIVE-FUZZ call=1 source=op:1 history=0000000000000000 segment-000 END call=2",
+        ("LIVE-FUZZ call=1 source=op:1 history=0000000000000000 segment-000 END call=1 END call=1"),
+    ],
+)
+def test_exact_model_body_rejects_corrupt_saturation_suffixes(body: str) -> None:
+    """Terminator substrings alone cannot complete a saturation turn."""
+    assert not ExactReplyOracle._is_complete_model_body(body)
 
 
 @pytest.mark.asyncio
@@ -584,6 +863,207 @@ async def test_restart_barrier_keeps_duplicate_audit_open(
             await oracle.wait_until_exact(deadline_seconds=1, settle_seconds=0)
     finally:
         await client.close()
+
+
+@pytest.mark.asyncio
+async def test_pre_outage_checkpoint_wait_is_attached_to_a_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The durable checkpoint wait starts before and finishes after a concrete event."""
+
+    class BarrierClient:
+        room_slot = 0
+        client_slot = 0
+        room_id = "!room:example"
+        sent = False
+
+        async def send_event(
+            self,
+            _event_type: str,
+            _txn_id: str,
+            _content: dict[str, Any],
+        ) -> str:
+            self.sent = True
+            return "$barrier"
+
+    client = BarrierClient()
+
+    class BarrierStack:
+        agent_id = "@agent:example"
+        router_id = "@router:example"
+        waited = False
+
+        @staticmethod
+        def sync_checkpoint_token(_agent_name: str) -> str:
+            return "before"
+
+        async def wait_for_sync_checkpoint_advance(
+            self,
+            _agent_name: str,
+            previous_token: str | None,
+            *,
+            deadline_seconds: float,
+        ) -> str:
+            assert previous_token == "before"  # noqa: S105 - opaque sync token
+            assert deadline_seconds == 1
+            assert client.sent
+            self.waited = True
+            return "after"
+
+    stack = BarrierStack()
+    runner = fuzz_live_matrix.LiveFuzzRunner(
+        cast("fuzz_live_matrix.ManagedTuwunelStack", stack),
+        (cast("LiveMatrixClient", client),),
+        LiveFuzzScenario(thread_count=1, batches=(), profile="recovery"),
+        reply_timeout=1,
+        settle_seconds=0,
+    )
+    runner.event_ids["root:0:0"] = "$root"
+    runner.response_event_ids["response:root:0:0"] = "$root-response"
+
+    async def wait_until_exact(
+        *,
+        deadline_seconds: float,
+        settle_seconds: float,
+        allow_limited: bool = False,
+    ) -> None:
+        assert (deadline_seconds, settle_seconds, allow_limited) == (1, 0, False)
+
+    monkeypatch.setattr(runner.oracle, "wait_until_exact", wait_until_exact)
+    await runner._send_recovery_checkpoint_barrier((runner.oracle,))
+
+    assert stack.waited
+    assert runner.oracle.expected_sources["$barrier"] == "pre-outage-checkpoint-barrier"
+
+
+@pytest.mark.asyncio
+async def test_final_generic_restart_runs_a_liveness_barrier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A trace ending in restart cannot pass from already-satisfied expectations."""
+
+    class RestartStack:
+        agent_id = "@agent:example"
+        router_id = "@router:example"
+        restarts = 0
+
+        def restart_mindroom(self) -> None:
+            self.restarts += 1
+
+    stack = RestartStack()
+    client = LiveMatrixClient("http://matrix.invalid", "!room:example")
+    restart = LiveOperation(0, LiveOperationKind.RESTART_MINDROOM, 0, None)
+    runner = fuzz_live_matrix.LiveFuzzRunner(
+        cast("fuzz_live_matrix.ManagedTuwunelStack", stack),
+        (client,),
+        LiveFuzzScenario(thread_count=1, batches=((restart,),)),
+        reply_timeout=1,
+        settle_seconds=0,
+    )
+    barriers = 0
+
+    async def send_barrier() -> None:
+        nonlocal barriers
+        barriers += 1
+
+    async def wait_until_exact(
+        *,
+        deadline_seconds: float,
+        settle_seconds: float,
+        allow_limited: bool = False,
+    ) -> None:
+        assert (deadline_seconds, settle_seconds, allow_limited) == (1, 0, False)
+
+    monkeypatch.setattr(runner, "_send_generic_restart_barrier", send_barrier)
+    monkeypatch.setattr(runner.oracle, "wait_until_exact", wait_until_exact)
+    try:
+        await runner._run_batches(((restart,),))
+    finally:
+        await client.close()
+
+    assert stack.restarts == 1
+    assert barriers == 1
+
+
+@pytest.mark.asyncio
+async def test_recovery_restart_fences_every_sender_thread_lane(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A room-level sentinel cannot replace per-sender conversation fences."""
+
+    class LaneClient:
+        room_slot = 0
+        room_id = "!room:example"
+
+        def __init__(self, client_slot: int) -> None:
+            self.client_slot = client_slot
+            self.sent: list[str] = []
+
+        async def send_event(
+            self,
+            _event_type: str,
+            txn_id: str,
+            _content: dict[str, Any],
+        ) -> str:
+            self.sent.append(txn_id)
+            return f"$barrier-{self.client_slot}"
+
+    clients = (LaneClient(0), LaneClient(1))
+
+    class LaneStack:
+        agent_id = "@agent:example"
+        router_id = "@router:example"
+
+        @staticmethod
+        def sync_checkpoint_token(_agent_name: str) -> str:
+            return "before"
+
+        @staticmethod
+        async def wait_for_sync_checkpoint_advance(
+            _agent_name: str,
+            _previous_token: str | None,
+            *,
+            deadline_seconds: float,
+        ) -> str:
+            assert deadline_seconds == 1
+            return "after"
+
+    operations = (
+        LiveOperation(0, LiveOperationKind.THREAD_MESSAGE, 0, "root:0:0", client=0),
+        LiveOperation(1, LiveOperationKind.THREAD_MESSAGE, 0, "root:0:0", client=1),
+    )
+    runner = fuzz_live_matrix.LiveFuzzRunner(
+        cast("fuzz_live_matrix.ManagedTuwunelStack", LaneStack()),
+        cast("tuple[LiveMatrixClient, ...]", clients),
+        LiveFuzzScenario(
+            thread_count=1,
+            client_count=2,
+            profile="recovery",
+            batches=tuple((operation,) for operation in operations),
+        ),
+        reply_timeout=1,
+        settle_seconds=0,
+    )
+    runner.event_ids["root:0:0"] = "$root"
+    for operation in operations:
+        runner._latest_source_ref[(0, operation.client, 0)] = operation.event_ref
+        runner.response_event_ids[f"response:{operation.event_ref}"] = f"$response-{operation.client}"
+
+    async def wait_until_exact(
+        *,
+        deadline_seconds: float,
+        settle_seconds: float,
+        allow_limited: bool = False,
+    ) -> None:
+        assert deadline_seconds == 1
+        assert settle_seconds in {0, 1}
+        assert allow_limited
+
+    monkeypatch.setattr(runner.oracle, "wait_until_exact", wait_until_exact)
+    barrier_count = await runner._send_recovery_restart_barriers((runner.oracle,))
+
+    assert barrier_count == 2
+    assert all(len(client.sent) == 1 for client in clients)
 
 
 @pytest.mark.asyncio
@@ -691,6 +1171,98 @@ async def test_exact_reply_oracle_audits_bounded_limited_gap(
     assert oracle.gap_audit_missing_sources == {"$source"}
     assert oracle.gap_audit_page_count == 1
     assert oracle.pagination_page_count == 1
+
+
+@pytest.mark.asyncio
+async def test_bounded_gap_missing_source_blocks_exact_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One exact reply cannot hide a source omitted by bounded pagination."""
+    client = LiveMatrixClient("http://matrix.invalid", "!room:example")
+    oracle = ExactReplyOracle(client, "@agent:example")
+    oracle.next_batch = "since"
+    oracle.arm_gap_audit()
+    oracle.expect("op:1", "$source")
+    oracle.gap_audit_missing_sources.add("$source")
+    oracle._gap_audit_completed = True
+    oracle._ingest_event(
+        _agent_reply_event(
+            "$source",
+            "$response",
+            fuzz_live_matrix._ModelHandler.response_text_for(1),
+        ),
+    )
+
+    async def sync_once(
+        *,
+        timeout_ms: int,
+        allow_limited: bool = False,
+        timeline_limit: int = 2000,
+    ) -> None:
+        assert (timeout_ms, allow_limited, timeline_limit) == (250, False, 2000)
+
+    monkeypatch.setattr(oracle, "_sync_once", sync_once)
+    try:
+        with pytest.raises(AssertionError, match=r"bounded_gap_missing=.*op:1"):
+            await oracle.wait_until_exact(deadline_seconds=0.01, settle_seconds=0)
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_saturation_client_hydrates_every_limited_gap_page(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A hidden duplicate remains visible to the saturation union audit."""
+    client = LiveMatrixClient("http://matrix.invalid", "!room:example")
+    client.next_batch = "since"
+    visible = {"event_id": "$visible"}
+    hidden = {"event_id": "$hidden-duplicate"}
+
+    async def sync(
+        since: str | None,
+        *,
+        timeout_ms: int,
+        timeline_limit: int = 2000,
+    ) -> dict[str, Any]:
+        assert (since, timeout_ms, timeline_limit) == ("since", 0, 2000)
+        return {
+            "next_batch": "next",
+            "rooms": {
+                "join": {
+                    "!room:example": {
+                        "timeline": {
+                            "limited": True,
+                            "prev_batch": "page-1",
+                            "events": [visible],
+                        },
+                    },
+                },
+            },
+        }
+
+    async def messages_before(
+        from_token: str,
+        *,
+        to_token: str | None = None,
+        limit: int = 1000,
+    ) -> tuple[list[dict[str, Any]], str | None]:
+        assert to_token == "since"  # noqa: S105 - opaque sync token
+        assert limit == 1000
+        if from_token == "page-1":  # noqa: S105 - opaque pagination token
+            return [], "page-2"
+        assert from_token == "page-2"  # noqa: S105 - opaque pagination token
+        return [hidden], None
+
+    monkeypatch.setattr(client, "sync", sync)
+    monkeypatch.setattr(client, "messages_before", messages_before)
+    try:
+        await client.sync_incremental(timeout_ms=0, allow_limited=True)
+    finally:
+        await client.close()
+
+    assert set(client.seen_events) == {"$visible", "$hidden-duplicate"}
+    assert client.pagination_page_count == 2
 
 
 @pytest.mark.asyncio

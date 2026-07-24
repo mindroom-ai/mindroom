@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import importlib.metadata
 import itertools
 import json
@@ -56,6 +57,13 @@ ROOM_KEY = "lobby"
 RECOVERY_TIMELINE_LIMIT = 50
 REGISTRY_READ_ATTEMPTS = 3
 REGISTRY_READ_RETRY_SECONDS = 0.05
+SOURCE_MARKER_PATTERN = re.compile(r"LIVE-SOURCE\[([A-Za-z0-9_.:-]+)\]")
+
+
+def _history_fingerprint(source_markers: Collection[str]) -> str:
+    """Return a stable short digest for one model-visible source history."""
+    serialized = "\0".join(source_markers).encode()
+    return hashlib.sha256(serialized).hexdigest()[:16]
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,8 +75,11 @@ class RuntimeProvenance:
     nio_version: str
     nio_revision: str
     nio_expected_revision: str
+    mindroom_dirty: bool = False
+    nio_dirty: bool = False
+    nio_source_hash: str = ""
 
-    def as_dict(self) -> dict[str, str]:
+    def as_dict(self) -> dict[str, str | bool]:
         """Return JSON-ready provenance fields."""
         return asdict(self)
 
@@ -114,6 +125,7 @@ _RECOVERY_OPERATION_KINDS = {
     LiveOperationKind.PLAIN_REPLY,
     LiveOperationKind.IDEMPOTENT_RETRY,
 }
+_SATURATION_OPERATION_KINDS = {LiveOperationKind.THREAD_MESSAGE}
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,19 +145,26 @@ class LiveOperation:
         return f"op:{self.operation_id}"
 
     @classmethod
-    def from_dict(cls, value: Mapping[str, object]) -> LiveOperation:
+    def from_dict(
+        cls,
+        value: Mapping[str, object],
+        *,
+        require_ownership: bool = False,
+    ) -> LiveOperation:
         """Parse one serialized operation."""
         raw_target = value.get("target")
         if raw_target is not None and not isinstance(raw_target, str):
             msg = "Live Matrix fuzz operation target must be a string or null"
             raise TypeError(msg)
+        room = _required_int(value, "room") if require_ownership else _optional_int(value, "room", 0)
+        client = _required_int(value, "client") if require_ownership else _optional_int(value, "client", 0)
         return cls(
             operation_id=_required_int(value, "operation_id"),
             kind=LiveOperationKind(_required_string(value, "kind")),
             thread=_required_int(value, "thread"),
             target=raw_target,
-            room=_optional_int(value, "room", 0),
-            client=_optional_int(value, "client", 0),
+            room=room,
+            client=client,
         )
 
 
@@ -178,9 +197,12 @@ class LiveFuzzScenario:
     def from_json(cls, value: str) -> LiveFuzzScenario:
         """Load a trace emitted by :meth:`to_json`."""
         payload = json.loads(value)
+        if isinstance(payload, dict) and "scenario" in payload:
+            payload = payload["scenario"]
         if not isinstance(payload, dict) or payload.get("version") != 1:
             msg = "unsupported live Matrix fuzz trace"
             raise ValueError(msg)
+        profile = _required_string(payload, "profile")
         raw_batches = payload.get("batches")
         if not isinstance(raw_batches, list):
             msg = "live Matrix fuzz trace is missing batches"
@@ -188,10 +210,16 @@ class LiveFuzzScenario:
         scenario = cls(
             thread_count=_required_int(payload, "thread_count"),
             batches=tuple(
-                tuple(LiveOperation.from_dict(cast("dict[str, object]", operation)) for operation in batch)
+                tuple(
+                    LiveOperation.from_dict(
+                        cast("dict[str, object]", operation),
+                        require_ownership=profile == "recovery",
+                    )
+                    for operation in batch
+                )
                 for batch in raw_batches
             ),
-            profile=_required_string(payload, "profile"),
+            profile=profile,
             room_count=_optional_int(payload, "room_count", 1),
             client_count=_optional_int(payload, "client_count", 1),
         )
@@ -200,64 +228,141 @@ class LiveFuzzScenario:
 
     def validate(self) -> None:
         """Reject traces with impossible same-batch or forward dependencies."""
-        if self.thread_count < 1 or self.room_count < 1 or self.client_count < 1:
-            msg = "live Matrix fuzz trace must contain at least one room, client, and thread"
-            raise ValueError(msg)
-        if self.profile not in {"fuzz", "recovery", "saturation"}:
-            msg = f"unsupported live Matrix fuzz profile {self.profile!r}"
-            raise ValueError(msg)
-        if self.profile == "recovery":
-            known_events = {
-                f"root:{room}:{thread}" for room in range(self.room_count) for thread in range(self.thread_count)
-            }
-        else:
-            known_events = {f"root:{thread}" for thread in range(self.thread_count)}
-        known_responses = {f"response:{event_ref}" for event_ref in known_events}
-        event_rooms = {event_ref: (_logical_ref_room(event_ref) or 0) for event_ref in known_events | known_responses}
-        message_events = set(known_events)
-        operation_ids: set[int] = set()
-        recovery_message_lanes: set[tuple[int, int, int]] = set()
-
+        _validate_scenario_dimensions(self)
+        state = _initial_validation_state(self)
         for batch in self.batches:
-            _validate_live_batch_shape(batch)
-            new_events: set[str] = set()
-            new_responses: set[str] = set()
-            new_messages: set[str] = set()
-            for operation in batch:
-                _validate_profile_operation(self.profile, operation)
-                _validate_live_operation(
-                    operation,
-                    thread_count=self.thread_count,
-                    operation_ids=operation_ids,
-                    allowed_targets=known_events | known_responses,
-                    event_rooms=event_rooms,
-                    message_events=message_events,
-                    room_count=self.room_count,
-                    client_count=self.client_count,
-                )
-                if operation.kind is not LiveOperationKind.IDEMPOTENT_RETRY:
-                    new_events.add(operation.event_ref)
-                    event_rooms[operation.event_ref] = operation.room
-                if operation.kind in {
-                    LiveOperationKind.THREAD_MESSAGE,
-                    LiveOperationKind.PLAIN_REPLY,
-                }:
-                    if self.profile == "recovery":
-                        lane = (operation.room, operation.client, operation.thread)
-                        if lane in recovery_message_lanes:
-                            msg = (
-                                "recovery messages must use unique room, client, and thread lanes "
-                                "so intentional coalescing does not weaken the exact-reply oracle"
-                            )
-                            raise ValueError(msg)
-                        recovery_message_lanes.add(lane)
-                    new_messages.add(operation.event_ref)
-                    new_responses.add(f"response:{operation.event_ref}")
-                    event_rooms[f"response:{operation.event_ref}"] = operation.room
+            _validate_scenario_batch(self, batch, state)
+        _validate_recovery_size(self, state.recovery_sources_by_room)
 
-            known_events.update(new_events)
-            known_responses.update(new_responses)
-            message_events.update(new_messages)
+
+@dataclass(slots=True)
+class _LiveValidationState:
+    known_events: set[str]
+    known_responses: set[str]
+    event_rooms: dict[str, int]
+    event_lanes: dict[str, tuple[int, int, int]]
+    message_events: set[str]
+    operation_ids: set[int]
+    recovery_message_lanes: set[tuple[int, int, int]]
+    recovery_sources_by_room: dict[int, int]
+
+
+def _validate_scenario_dimensions(scenario: LiveFuzzScenario) -> None:
+    """Validate profile dimensions before inspecting operations."""
+    if scenario.thread_count < 1 or scenario.room_count < 1 or scenario.client_count < 1:
+        msg = "live Matrix fuzz trace must contain at least one room, client, and thread"
+        raise ValueError(msg)
+    if scenario.profile not in {"fuzz", "recovery", "saturation"}:
+        msg = f"unsupported live Matrix fuzz profile {scenario.profile!r}"
+        raise ValueError(msg)
+    if scenario.profile != "recovery" and (scenario.room_count != 1 or scenario.client_count != 1):
+        msg = f"{scenario.profile} profile requires exactly one declared room and client"
+        raise ValueError(msg)
+    if scenario.profile == "saturation":
+        if scenario.thread_count < 2:
+            msg = "saturation profile requires at least one hot and one parallel thread"
+            raise ValueError(msg)
+        _validate_saturation_shape(scenario.batches, thread_count=scenario.thread_count)
+
+
+def _initial_validation_state(scenario: LiveFuzzScenario) -> _LiveValidationState:
+    """Build logical roots and their ownership metadata."""
+    if scenario.profile == "recovery":
+        known_events = {
+            f"root:{room}:{thread}" for room in range(scenario.room_count) for thread in range(scenario.thread_count)
+        }
+        event_lanes = {
+            f"root:{room}:{thread}": (room, 0, thread)
+            for room in range(scenario.room_count)
+            for thread in range(scenario.thread_count)
+        }
+    else:
+        known_events = {f"root:{thread}" for thread in range(scenario.thread_count)}
+        event_lanes = {f"root:{thread}": (0, 0, thread) for thread in range(scenario.thread_count)}
+    known_responses = {f"response:{event_ref}" for event_ref in known_events}
+    event_lanes.update({f"response:{event_ref}": event_lanes[event_ref] for event_ref in known_events})
+    return _LiveValidationState(
+        known_events=known_events,
+        known_responses=known_responses,
+        event_rooms={event_ref: (_logical_ref_room(event_ref) or 0) for event_ref in known_events | known_responses},
+        event_lanes=event_lanes,
+        message_events=set(known_events),
+        operation_ids=set(),
+        recovery_message_lanes=set(),
+        recovery_sources_by_room=defaultdict(int),
+    )
+
+
+def _validate_scenario_batch(
+    scenario: LiveFuzzScenario,
+    batch: tuple[LiveOperation, ...],
+    state: _LiveValidationState,
+) -> None:
+    """Validate one concurrent batch and publish its completed references."""
+    _validate_live_batch_shape(batch)
+    new_events: set[str] = set()
+    new_responses: set[str] = set()
+    new_messages: set[str] = set()
+    for operation in batch:
+        _validate_profile_operation(scenario.profile, operation)
+        _validate_live_operation(
+            operation,
+            thread_count=scenario.thread_count,
+            operation_ids=state.operation_ids,
+            allowed_targets=state.known_events | state.known_responses,
+            event_rooms=state.event_rooms,
+            event_lanes=state.event_lanes,
+            message_events=state.message_events,
+            room_count=scenario.room_count,
+            client_count=scenario.client_count,
+            profile=scenario.profile,
+        )
+        if operation.kind is not LiveOperationKind.IDEMPOTENT_RETRY:
+            new_events.add(operation.event_ref)
+            state.event_rooms[operation.event_ref] = operation.room
+            state.event_lanes[operation.event_ref] = (operation.room, operation.client, operation.thread)
+        if operation.kind not in {LiveOperationKind.THREAD_MESSAGE, LiveOperationKind.PLAIN_REPLY}:
+            continue
+        if scenario.profile == "recovery":
+            lane = (operation.room, operation.client, operation.thread)
+            if lane in state.recovery_message_lanes:
+                msg = (
+                    "recovery messages must use unique room, client, and thread lanes "
+                    "so intentional coalescing does not weaken the exact-reply oracle"
+                )
+                raise ValueError(msg)
+            state.recovery_message_lanes.add(lane)
+            state.recovery_sources_by_room[operation.room] += 1
+        new_messages.add(operation.event_ref)
+        response_ref = f"response:{operation.event_ref}"
+        new_responses.add(response_ref)
+        state.event_rooms[response_ref] = operation.room
+        state.event_lanes[response_ref] = (operation.room, operation.client, operation.thread)
+
+    state.known_events.update(new_events)
+    if scenario.profile != "recovery":
+        state.known_responses.update(new_responses)
+    state.message_events.update(new_messages)
+
+
+def _validate_recovery_size(
+    scenario: LiveFuzzScenario,
+    sources_by_room: Mapping[int, int],
+) -> None:
+    """Preserve the limited-sync precondition in loaded recovery traces."""
+    if scenario.profile != "recovery":
+        return
+    undersized_rooms = {
+        room: sources_by_room[room]
+        for room in range(scenario.room_count)
+        if sources_by_room[room] <= RECOVERY_TIMELINE_LIMIT
+    }
+    if undersized_rooms:
+        msg = (
+            f"recovery profile requires more than {RECOVERY_TIMELINE_LIMIT} "
+            f"non-retry sources per room: {undersized_rooms}"
+        )
+        raise ValueError(msg)
 
 
 def _validate_live_batch_shape(batch: tuple[LiveOperation, ...]) -> None:
@@ -286,6 +391,38 @@ def _validate_profile_operation(profile: str, operation: LiveOperation) -> None:
     if profile == "recovery" and operation.kind not in _RECOVERY_OPERATION_KINDS:
         msg = f"recovery profile does not support {operation.kind}"
         raise ValueError(msg)
+    if profile == "saturation" and operation.kind not in _SATURATION_OPERATION_KINDS:
+        msg = f"saturation profile does not support {operation.kind}"
+        raise ValueError(msg)
+
+
+def _validate_saturation_shape(
+    batches: tuple[tuple[LiveOperation, ...], ...],
+    *,
+    thread_count: int,
+) -> None:
+    """Require the hot-then-complete-parallel schedule the runner executes."""
+    parallel_started = False
+    parallel_threads = set(range(1, thread_count))
+    expected_targets = {thread: f"response:root:{thread}" for thread in range(thread_count)}
+    for batch in batches:
+        batch_threads = [operation.thread for operation in batch]
+        if parallel_started or batch_threads != [0]:
+            parallel_started = True
+            if len(batch_threads) != len(parallel_threads) or set(batch_threads) != parallel_threads:
+                msg = (
+                    "saturation parallel batches require exactly one operation for "
+                    f"every nonzero thread; got {batch_threads}"
+                )
+                raise ValueError(msg)
+        for operation in batch:
+            if operation.kind is not LiveOperationKind.THREAD_MESSAGE:
+                continue
+            expected_target = expected_targets[operation.thread]
+            if operation.target != expected_target:
+                msg = f"saturation thread {operation.thread} must target {expected_target!r}, not {operation.target!r}"
+                raise ValueError(msg)
+            expected_targets[operation.thread] = f"response:{operation.event_ref}"
 
 
 def _validate_live_operation(
@@ -295,9 +432,11 @@ def _validate_live_operation(
     operation_ids: set[int],
     allowed_targets: set[str],
     event_rooms: Mapping[str, int],
+    event_lanes: Mapping[str, tuple[int, int, int]],
     message_events: set[str],
     room_count: int,
     client_count: int,
+    profile: str,
 ) -> None:
     if operation.operation_id in operation_ids:
         msg = f"duplicate live Matrix fuzz operation ID {operation.operation_id}"
@@ -323,8 +462,17 @@ def _validate_live_operation(
     if event_rooms[operation.target] != operation.room:
         msg = f"cross-room target {operation.target!r} from room {operation.room}"
         raise ValueError(msg)
+    target_room, target_client, target_thread = event_lanes[operation.target]
+    if profile == "recovery" and target_thread != operation.thread:
+        msg = f"recovery target {operation.target!r} belongs to thread {target_thread}, not thread {operation.thread}"
+        raise ValueError(msg)
     if operation.kind is LiveOperationKind.IDEMPOTENT_RETRY and operation.target not in message_events:
         msg = "idempotent retries may only target messages"
+        raise ValueError(msg)
+    if operation.kind is LiveOperationKind.IDEMPOTENT_RETRY and (
+        (target_room, target_client, target_thread) != (operation.room, operation.client, operation.thread)
+    ):
+        msg = "idempotent retries must preserve the original room, client, and thread ownership"
         raise ValueError(msg)
 
 
@@ -699,7 +847,12 @@ class _ModelHandler(BaseHTTPRequestHandler):
         content_length = int(self.headers.get("Content-Length", "0"))
         payload = json.loads(self.rfile.read(content_length))
         call_id = next(self.call_ids)
-        content = self.response_text_for(call_id)
+        source_marker, history_fingerprint = self._request_identity(payload)
+        content = self.response_text_for(
+            call_id,
+            source_marker=source_marker,
+            history_fingerprint=history_fingerprint,
+        )
         if payload.get("stream") is True:
             self._send_stream(call_id, content)
             return
@@ -721,10 +874,37 @@ class _ModelHandler(BaseHTTPRequestHandler):
         )
 
     @classmethod
-    def response_text_for(cls, call_id: int) -> str:
+    def response_text_for(
+        cls,
+        call_id: int,
+        *,
+        source_marker: str = "unbound",
+        history_fingerprint: str | None = None,
+    ) -> str:
         """Return the only complete body accepted for one model call."""
+        fingerprint = history_fingerprint or _history_fingerprint(())
         segments = " ".join(f"segment-{index:03d}" for index in range(cls.stream_segments))
-        return f"LIVE-FUZZ call={call_id} {segments} END call={call_id}"
+        return f"LIVE-FUZZ call={call_id} source={source_marker} history={fingerprint} {segments} END call={call_id}"
+
+    @staticmethod
+    def _request_identity(payload: Mapping[str, object]) -> tuple[str, str]:
+        """Bind deterministic output to the latest source and ordered source history."""
+        markers: list[str] = []
+
+        def collect(value: object) -> None:
+            if isinstance(value, str):
+                markers.extend(SOURCE_MARKER_PATTERN.findall(value))
+            elif isinstance(value, list):
+                for item in value:
+                    collect(item)
+            elif isinstance(value, dict):
+                for item in value.values():
+                    collect(item)
+
+        collect(payload.get("messages"))
+        ordered_unique = tuple(dict.fromkeys(markers))
+        source_marker = ordered_unique[-1] if ordered_unique else "unbound"
+        return source_marker, _history_fingerprint(ordered_unique)
 
     def _send_stream(self, call_id: int, content: str) -> None:
         self.send_response(HTTPStatus.OK)
@@ -800,8 +980,12 @@ def _run_command(*command: str) -> str:
     return result.stdout
 
 
-def _git_revision_for_file(path: Path) -> str | None:
-    """Return HEAD only when `path` is tracked by the containing worktree."""
+def _git_state_for_file(
+    path: Path,
+    *,
+    scopes: Collection[Path] = (),
+) -> tuple[str | None, bool]:
+    """Return the containing revision and whether relevant loaded source is dirty."""
     root_result = subprocess.run(
         ("git", "-C", str(path.parent), "rev-parse", "--show-toplevel"),
         check=False,
@@ -809,11 +993,11 @@ def _git_revision_for_file(path: Path) -> str | None:
         text=True,
     )
     if root_result.returncode:
-        return None
+        return None, False
     root = Path(root_result.stdout.strip()).resolve()
     resolved_path = path.resolve()
     if not resolved_path.is_relative_to(root):
-        return None
+        return None, False
     relative_path = resolved_path.relative_to(root)
     tracked_result = subprocess.run(
         ("git", "-C", str(root), "ls-files", "--error-unmatch", str(relative_path)),
@@ -822,14 +1006,36 @@ def _git_revision_for_file(path: Path) -> str | None:
         text=True,
     )
     if tracked_result.returncode:
-        return None
+        return None, True
+    relative_scopes = [
+        str(scope.resolve().relative_to(root)) for scope in scopes or (path,) if scope.resolve().is_relative_to(root)
+    ]
+    status_result = subprocess.run(
+        ("git", "-C", str(root), "status", "--short", "--untracked-files=all", "--", *relative_scopes),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    dirty = status_result.returncode != 0 or bool(status_result.stdout.strip())
     revision_result = subprocess.run(
         ("git", "-C", str(root), "rev-parse", "HEAD"),
         check=False,
         capture_output=True,
         text=True,
     )
-    return revision_result.stdout.strip() if revision_result.returncode == 0 else None
+    revision = revision_result.stdout.strip() if revision_result.returncode == 0 else None
+    return revision, dirty
+
+
+def _git_revision_for_file(path: Path) -> str | None:
+    """Return HEAD only when the loaded file is tracked and clean."""
+    revision, dirty = _git_state_for_file(path)
+    return revision if not dirty else None
+
+
+def _source_hash(path: Path) -> str:
+    """Hash one loaded source file for wheel and checkout provenance."""
+    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def _runtime_provenance() -> RuntimeProvenance:
@@ -839,8 +1045,14 @@ def _runtime_provenance() -> RuntimeProvenance:
         msg = "imported nio module has no filesystem path"
         raise RuntimeError(msg)
     nio_path = Path(nio_file).resolve()
-    nio_revision = _git_revision_for_file(nio_path)
-    mindroom_revision = _git_revision_for_file(PROJECT_ROOT / "pyproject.toml")
+    nio_revision, nio_dirty = _git_state_for_file(
+        nio_path,
+        scopes=(nio_path.parent,),
+    )
+    mindroom_revision, mindroom_dirty = _git_state_for_file(
+        Path(__file__),
+        scopes=(PROJECT_ROOT / "src" / "mindroom", Path(__file__)),
+    )
     if mindroom_revision is None:
         msg = "could not resolve the MindRoom revision containing the live runner"
         raise RuntimeError(msg)
@@ -850,11 +1062,27 @@ def _runtime_provenance() -> RuntimeProvenance:
         nio_version=importlib.metadata.version("mindroom-nio"),
         nio_revision=nio_revision or "unverified",
         nio_expected_revision=os.getenv("MINDROOM_NIO_FUZZ_COMMIT", "unspecified"),
+        mindroom_dirty=mindroom_dirty,
+        nio_dirty=nio_dirty,
+        nio_source_hash=_source_hash(
+            nio_path.parent / "client" / "async_client.py"
+            if (nio_path.parent / "client" / "async_client.py").exists()
+            else nio_path,
+        ),
     )
 
 
 def _validate_nio_provenance(provenance: RuntimeProvenance) -> None:
     """Fail closed when a campaign requests an exact nio revision."""
+    if provenance.mindroom_dirty or provenance.nio_dirty:
+        msg = (
+            "live fuzz exact provenance requires clean loaded source: "
+            f"mindroom_dirty={provenance.mindroom_dirty}, nio_dirty={provenance.nio_dirty}"
+        )
+        raise RuntimeError(msg)
+    if provenance.nio_revision == "unverified":
+        msg = f"live fuzz exact provenance could not verify loaded mindroom-nio at {provenance.nio_module_path}"
+        raise RuntimeError(msg)
     expected = provenance.nio_expected_revision
     if expected not in {"unspecified", provenance.nio_revision}:
         msg = (
@@ -1213,6 +1441,7 @@ class LiveMatrixClient:
         self.access_token = ""
         self.next_batch: str | None = None
         self.seen_events: dict[str, dict[str, Any]] = {}
+        self.pagination_page_count = 0
 
     async def close(self) -> None:
         """Close the underlying HTTP connection pool."""
@@ -1311,7 +1540,8 @@ class LiveMatrixClient:
         allow_limited: bool = False,
     ) -> None:
         """Advance this client's private sync cursor and retain room events."""
-        data = await self.sync(self.next_batch, timeout_ms=timeout_ms)
+        since = self.next_batch
+        data = await self.sync(since, timeout_ms=timeout_ms)
         next_batch = data.get("next_batch")
         if not isinstance(next_batch, str):
             msg = "Matrix sync omitted next_batch"
@@ -1322,10 +1552,17 @@ class LiveMatrixClient:
         if timeline.get("limited") is True and not allow_limited:
             msg = "incremental Matrix fuzz sync unexpectedly returned a limited timeline"
             raise AssertionError(msg)
+        if timeline.get("limited") is True and since is not None:
+            await self._hydrate_limited_gap(timeline, since)
         events = timeline.get("events", [])
         if not isinstance(events, list):
             msg = "Matrix sync room timeline events must be a list"
             raise TypeError(msg)
+        self._ingest_events(events)
+        self.next_batch = next_batch
+
+    def _ingest_events(self, events: Collection[object]) -> None:
+        """Retain event-id-addressable timeline events."""
         for raw_event in events:
             if not isinstance(raw_event, dict):
                 continue
@@ -1333,7 +1570,31 @@ class LiveMatrixClient:
             event_id = event.get("event_id")
             if isinstance(event_id, str):
                 self.seen_events[event_id] = event
-        self.next_batch = next_batch
+
+    async def _hydrate_limited_gap(
+        self,
+        timeline: Mapping[str, Any],
+        since: str,
+    ) -> None:
+        """Hydrate every page hidden between an incremental cursor and limited tail."""
+        token = timeline.get("prev_batch")
+        if not isinstance(token, str):
+            msg = "limited Matrix timeline omitted prev_batch"
+            raise TypeError(msg)
+        seen_tokens: set[str] = set()
+        for _ in range(20):
+            if token in seen_tokens:
+                msg = f"bounded Matrix pagination repeated token {token!r}"
+                raise AssertionError(msg)
+            seen_tokens.add(token)
+            events, next_token = await self.messages_before(token, to_token=since)
+            self.pagination_page_count += 1
+            self._ingest_events(events)
+            if next_token is None:
+                return
+            token = next_token
+        msg = "bounded Matrix client pagination exceeded 20 pages"
+        raise AssertionError(msg)
 
     async def messages_before(
         self,
@@ -1408,11 +1669,14 @@ class ExactReplyOracle:
         self.internal_source_ids: set[str] = set()
         self.next_batch: str | None = None
         self.expected_sources: dict[str, str] = {}
+        self.expected_thread_roots: dict[str, str] = {}
+        self.expected_model_identity: dict[str, tuple[str, str]] = {}
         self.response_ids: dict[str, set[str]] = defaultdict(set)
+        self.wrong_thread_roots: dict[str, set[tuple[str, str | None]]] = defaultdict(set)
         self.response_event_by_ref: dict[str, str] = {}
-        self.latest_reply_bodies: dict[str, tuple[int, int, str]] = {}
+        self.latest_reply_bodies: dict[str, tuple[int, str, str]] = {}
+        self.reply_events_with_edits: set[str] = set()
         self.seen_event_ids: set[str] = set()
-        self._ingest_ordinal = 0
         self.limited_timeline_count = 0
         self.pagination_page_count = 0
         self.gap_audit_page_count = 0
@@ -1425,9 +1689,23 @@ class ExactReplyOracle:
         """Establish a sync token before the fuzz traffic starts."""
         await self._sync_once(timeout_ms=0, allow_limited=True)
 
-    def expect(self, logical_ref: str, event_id: str) -> None:
+    def expect(
+        self,
+        logical_ref: str,
+        event_id: str,
+        *,
+        root_event_id: str | None = None,
+        source_marker: str | None = None,
+        history_markers: Collection[str] = (),
+    ) -> None:
         """Require exactly one canonical agent reply to a source event."""
         self.expected_sources[event_id] = logical_ref
+        self.expected_thread_roots[event_id] = root_event_id or event_id
+        if source_marker is not None:
+            self.expected_model_identity[event_id] = (
+                source_marker,
+                _history_fingerprint(history_markers),
+            )
         if self._gap_audit_sources is not None and not self._gap_audit_completed:
             self._gap_audit_sources.add(event_id)
 
@@ -1468,7 +1746,14 @@ class ExactReplyOracle:
             await self._sync_once(timeout_ms=250, allow_limited=allow_limited)
             self._assert_no_wrong_replies()
             incomplete_streams = self._incomplete_streaming_sources()
-            if all(len(self.response_ids[source]) == 1 for source in self.expected_sources) and not incomplete_streams:
+            gap_complete = self._gap_audit_sources is None or (
+                self._gap_audit_completed and not self.gap_audit_missing_sources
+            )
+            if (
+                all(len(self.response_ids[source]) == 1 for source in self.expected_sources)
+                and not incomplete_streams
+                and gap_complete
+            ):
                 settled_after = max(settled_after, self._last_response_at + settle_seconds)
                 if time.monotonic() >= settled_after:
                     return
@@ -1578,7 +1863,6 @@ class ExactReplyOracle:
         if not isinstance(event_id, str) or event_id in self.seen_event_ids:
             return
         self.seen_event_ids.add(event_id)
-        self._ingest_ordinal += 1
         if event.get("sender") in self.internal_relay_senders:
             self.internal_source_ids.add(event_id)
             return
@@ -1595,6 +1879,12 @@ class ExactReplyOracle:
         source_event_id = reply.get("event_id") if isinstance(reply, dict) else None
         if not isinstance(source_event_id, str):
             return
+        expected_root = self.expected_thread_roots.get(source_event_id)
+        observed_root = relation.get("event_id")
+        if expected_root is not None and observed_root != expected_root:
+            self.wrong_thread_roots[source_event_id].add(
+                (event_id, observed_root if isinstance(observed_root, str) else None),
+            )
         self.response_ids[source_event_id].add(event_id)
         logical_ref = self.expected_sources.get(source_event_id)
         if logical_ref is not None:
@@ -1609,8 +1899,9 @@ class ExactReplyOracle:
         relation: object,
     ) -> None:
         """Fold originals and `m.replace` edits into one visible reply body."""
-        is_edit = isinstance(relation, dict) and relation.get("rel_type") == "m.replace"
-        response_event_id = relation.get("event_id") if is_edit else event_id
+        edit_relation = cast("dict[str, object]", relation) if isinstance(relation, dict) else None
+        is_edit = edit_relation is not None and edit_relation.get("rel_type") == "m.replace"
+        response_event_id = edit_relation.get("event_id") if is_edit and edit_relation is not None else event_id
         if not isinstance(response_event_id, str):
             return
         new_content = content.get("m.new_content")
@@ -1620,11 +1911,17 @@ class ExactReplyOracle:
             return
         raw_timestamp = event.get("origin_server_ts")
         timestamp = raw_timestamp if isinstance(raw_timestamp, int) else 0
-        candidate = (timestamp, self._ingest_ordinal, body)
+        candidate = (timestamp, event_id, body)
         current = self.latest_reply_bodies.get(response_event_id)
-        if current is None or candidate[:2] >= current[:2]:
+        if is_edit:
+            if response_event_id not in self.reply_events_with_edits or current is None or candidate[:2] >= current[:2]:
+                self.latest_reply_bodies[response_event_id] = candidate
+            self.reply_events_with_edits.add(response_event_id)
+        elif response_event_id not in self.reply_events_with_edits and (
+            current is None or candidate[:2] >= current[:2]
+        ):
             self.latest_reply_bodies[response_event_id] = candidate
-            self._last_response_at = time.monotonic()
+        self._last_response_at = time.monotonic()
 
     def _incomplete_streaming_sources(self) -> set[str]:
         """Return sources whose one reply is still a placeholder or partial edit."""
@@ -1635,16 +1932,39 @@ class ExactReplyOracle:
                 continue
             response_event_id = next(iter(response_event_ids))
             latest = self.latest_reply_bodies.get(response_event_id)
-            if latest is None or not self._is_complete_model_body(latest[2]):
+            expected_identity = self.expected_model_identity.get(source_event_id)
+            if latest is None or not self._is_complete_model_body(
+                latest[2],
+                expected_source_marker=expected_identity[0] if expected_identity is not None else None,
+                expected_history_fingerprint=expected_identity[1] if expected_identity is not None else None,
+            ):
                 incomplete.add(source_event_id)
         return incomplete
 
     @staticmethod
-    def _is_complete_model_body(body: str) -> bool:
-        match = re.fullmatch(r"LIVE-FUZZ call=(\d+) .* END call=(\d+)", body)
-        if match is None or match.group(1) != match.group(2):
+    def _is_complete_model_body(
+        body: str,
+        *,
+        expected_source_marker: str | None = None,
+        expected_history_fingerprint: str | None = None,
+    ) -> bool:
+        match = re.fullmatch(
+            r"LIVE-FUZZ call=(\d+) source=([A-Za-z0-9_.:-]+) history=([0-9a-f]{16}) .* END call=(\d+)",
+            body,
+        )
+        if match is None or match.group(1) != match.group(4):
             return False
-        return body == _ModelHandler.response_text_for(int(match.group(1)))
+        source_marker = match.group(2)
+        history_fingerprint = match.group(3)
+        if expected_source_marker is not None and source_marker != expected_source_marker:
+            return False
+        if expected_history_fingerprint is not None and history_fingerprint != expected_history_fingerprint:
+            return False
+        return body == _ModelHandler.response_text_for(
+            int(match.group(1)),
+            source_marker=source_marker,
+            history_fingerprint=history_fingerprint,
+        )
 
     def _assert_no_wrong_replies(self) -> None:
         duplicates = {
@@ -1657,8 +1977,15 @@ class ExactReplyOracle:
             for source, event_ids in self.response_ids.items()
             if source not in self.expected_sources and source not in self.internal_source_ids
         }
-        if duplicates or unexpected:
-            msg = f"agent reply invariant failed: duplicates={duplicates}, unexpected={unexpected}"
+        wrong_roots = {
+            self.expected_sources.get(source, source): sorted(values)
+            for source, values in self.wrong_thread_roots.items()
+        }
+        if duplicates or unexpected or wrong_roots:
+            msg = (
+                "agent reply invariant failed: "
+                f"duplicates={duplicates}, unexpected={unexpected}, wrong_thread_roots={wrong_roots}"
+            )
             raise AssertionError(msg)
 
 
@@ -1691,6 +2018,31 @@ class LiveFuzzRunner:
         self.operation_count = 0
         self.restart_count = 0
         self.executed_batches = 0
+        self._history_markers: dict[tuple[int, int], list[str]] = defaultdict(list)
+        self._latest_source_ref: dict[tuple[int, int, int], str] = {}
+
+    def _expect_source(
+        self,
+        oracle: ExactReplyOracle,
+        logical_ref: str,
+        event_id: str,
+        *,
+        root_event_id: str,
+        room: int,
+        thread: int,
+        client: int = 0,
+    ) -> None:
+        """Register exact reply, thread, source, and history expectations together."""
+        lane = (room, thread)
+        self._history_markers[lane].append(logical_ref)
+        self._latest_source_ref[(room, client, thread)] = logical_ref
+        oracle.expect(
+            logical_ref,
+            event_id,
+            root_event_id=root_event_id,
+            source_marker=logical_ref,
+            history_markers=self._history_markers[lane],
+        )
 
     async def run(self) -> dict[str, int | str]:
         """Execute every batch and enforce the reply invariant after each."""
@@ -1723,12 +2075,7 @@ class LiveFuzzRunner:
         )
         await asyncio.gather(*(oracle.initialize() for oracle in oracles))
         await self._send_recovery_roots(oracles)
-        checkpoint_after_roots = self.stack.sync_checkpoint_token(AGENT_NAME)
-        await self.stack.wait_for_sync_checkpoint_advance(
-            AGENT_NAME,
-            checkpoint_after_roots,
-            deadline_seconds=self.reply_timeout,
-        )
+        await self._send_recovery_checkpoint_barrier(oracles)
 
         for oracle in oracles:
             oracle.arm_gap_audit()
@@ -1746,7 +2093,16 @@ class LiveFuzzRunner:
                 message_count += 1
                 self.event_ids[operation.event_ref] = event_id
                 self.sent_payloads[operation.event_ref] = payload
-                oracles[operation.room].expect(operation.event_ref, event_id)
+                root_event_id = self.event_ids[f"root:{operation.room}:{operation.thread}"]
+                self._expect_source(
+                    oracles[operation.room],
+                    operation.event_ref,
+                    event_id,
+                    root_event_id=root_event_id,
+                    room=operation.room,
+                    thread=operation.thread,
+                    client=operation.client,
+                )
             self.executed_batches += 1
 
         await asyncio.gather(*(oracle.audit_armed_limited_gap() for oracle in oracles))
@@ -1768,7 +2124,7 @@ class LiveFuzzRunner:
 
         self.stack.restart_mindroom()
         self.restart_count += 1
-        await self._send_recovery_restart_barriers(oracles)
+        restart_barrier_count = await self._send_recovery_restart_barriers(oracles)
         for oracle in oracles:
             oracle._assert_no_wrong_replies()
 
@@ -1785,7 +2141,7 @@ class LiveFuzzRunner:
             "oracle_pagination_pages": sum(oracle.pagination_page_count for oracle in oracles),
             "pre_outage_checkpoint_barriers": 1,
             "recovery_runtime_ms": round(recovery_seconds * 1000),
-            "restart_barriers": len(oracles),
+            "restart_barriers": restart_barrier_count,
             "restarts": self.restart_count,
             "rooms": self.scenario.room_count,
             "roots": self.scenario.thread_count * self.scenario.room_count,
@@ -1794,34 +2150,135 @@ class LiveFuzzRunner:
             "transaction_retries": retry_count,
         }
 
-    async def _send_recovery_restart_barriers(self, oracles: tuple[ExactReplyOracle, ...]) -> None:
-        """Prove the restarted sync loop processes new input before duplicate audit."""
+    async def _send_recovery_checkpoint_barrier(
+        self,
+        oracles: tuple[ExactReplyOracle, ...],
+    ) -> None:
+        """Attach the pre-outage durable checkpoint wait to a concrete source."""
+        checkpoint_before = self.stack.sync_checkpoint_token(AGENT_NAME)
+        room = 0
+        thread = 0
+        logical_ref = "pre-outage-checkpoint-barrier"
+        root_ref = f"root:{room}:{thread}"
+        root_event_id = self.event_ids[root_ref]
+        reply_event_id = self.response_event_ids[f"response:{root_ref}"]
+        content = self._message_content(
+            "Live recovery pre-outage checkpoint barrier",
+            relation={
+                "rel_type": "m.thread",
+                "event_id": root_event_id,
+                "is_falling_back": True,
+                "m.in_reply_to": {"event_id": reply_event_id},
+            },
+            source_marker=logical_ref,
+        )
+        event_id = await self._recovery_client(room, 0).send_event(
+            "m.room.message",
+            f"live-recovery-{logical_ref}",
+            content,
+        )
+        self.event_ids[logical_ref] = event_id
+        self._expect_source(
+            oracles[room],
+            logical_ref,
+            event_id,
+            root_event_id=root_event_id,
+            room=room,
+            thread=thread,
+        )
+        await oracles[room].wait_until_exact(
+            deadline_seconds=self.reply_timeout,
+            settle_seconds=self.settle_seconds,
+        )
+        self.response_event_ids.update(oracles[room].response_event_by_ref)
+        await self.stack.wait_for_sync_checkpoint_advance(
+            AGENT_NAME,
+            checkpoint_before,
+            deadline_seconds=self.reply_timeout,
+        )
 
-        async def send_barrier(room: int) -> tuple[int, str, str]:
-            logical_ref = f"restart-barrier:{room}"
-            root_ref = f"root:{room}:0"
+    async def _send_recovery_restart_barriers(
+        self,
+        oracles: tuple[ExactReplyOracle, ...],
+    ) -> int:
+        """Fence every sender/thread lane before the final duplicate audit."""
+        lanes = sorted(
+            {
+                (operation.room, operation.client, operation.thread)
+                for batch in self.scenario.batches
+                for operation in batch
+                if operation.kind is not LiveOperationKind.IDEMPOTENT_RETRY
+            },
+        )
+        checkpoint_before = self.stack.sync_checkpoint_token(AGENT_NAME)
+
+        async def send_barrier(room: int, client: int, thread: int) -> tuple[int, int, str, str]:
+            logical_ref = f"restart-barrier:{room}:{client}:{thread}"
+            root_ref = f"root:{room}:{thread}"
             root_event_id = self.event_ids[root_ref]
-            reply_event_id = self.response_event_ids[f"response:{root_ref}"]
+            latest_source_ref = self._latest_source_ref[(room, client, thread)]
+            reply_event_id = self.response_event_ids[f"response:{latest_source_ref}"]
             content = self._message_content(
-                f"Live recovery restart barrier {room}",
+                f"Live recovery restart barrier {room}:{client}:{thread}",
                 relation={
                     "rel_type": "m.thread",
                     "event_id": root_event_id,
                     "is_falling_back": True,
                     "m.in_reply_to": {"event_id": reply_event_id},
                 },
+                source_marker=logical_ref,
             )
-            event_id = await self._recovery_client(room, 0).send_event(
+            event_id = await self._recovery_client(room, client).send_event(
                 "m.room.message",
                 f"live-recovery-{logical_ref}",
                 content,
             )
-            return room, logical_ref, event_id
+            return room, thread, logical_ref, event_id
 
-        barriers = await asyncio.gather(*(send_barrier(room) for room in range(self.scenario.room_count)))
-        for room, logical_ref, event_id in barriers:
-            self.event_ids[logical_ref] = event_id
-            oracles[room].expect(logical_ref, event_id)
+        barriers: list[tuple[int, int, str, str]] = []
+        pending_lanes = list(lanes)
+        while pending_lanes:
+            used_conversations: set[tuple[int, int]] = set()
+            wave: list[tuple[int, int, int]] = []
+            remaining: list[tuple[int, int, int]] = []
+            for lane in pending_lanes:
+                conversation = (lane[0], lane[2])
+                if conversation in used_conversations:
+                    remaining.append(lane)
+                else:
+                    used_conversations.add(conversation)
+                    wave.append(lane)
+            wave_barriers = await asyncio.gather(*(send_barrier(*lane) for lane in wave))
+            barriers.extend(wave_barriers)
+            for (room, client, thread), (_, _, logical_ref, event_id) in zip(
+                wave,
+                wave_barriers,
+                strict=True,
+            ):
+                self.event_ids[logical_ref] = event_id
+                root_event_id = self.event_ids[f"root:{room}:{thread}"]
+                self._expect_source(
+                    oracles[room],
+                    logical_ref,
+                    event_id,
+                    root_event_id=root_event_id,
+                    room=room,
+                    thread=thread,
+                    client=client,
+                )
+            await asyncio.gather(
+                *(
+                    oracle.wait_until_exact(
+                        deadline_seconds=self.reply_timeout,
+                        settle_seconds=0,
+                        allow_limited=True,
+                    )
+                    for oracle in oracles
+                ),
+            )
+            for oracle in oracles:
+                self.response_event_ids.update(oracle.response_event_by_ref)
+            pending_lanes = remaining
         await asyncio.gather(
             *(
                 oracle.wait_until_exact(
@@ -1834,13 +2291,22 @@ class LiveFuzzRunner:
         )
         for oracle in oracles:
             self.response_event_ids.update(oracle.response_event_by_ref)
+        await self.stack.wait_for_sync_checkpoint_advance(
+            AGENT_NAME,
+            checkpoint_before,
+            deadline_seconds=self.reply_timeout,
+        )
+        return len(barriers)
 
     async def _send_recovery_roots(self, oracles: tuple[ExactReplyOracle, ...]) -> None:
         """Create hot and cold thread roots in every room before the outage."""
 
         async def send_root(room: int, thread: int) -> tuple[int, str, str, _SentPayload]:
             logical_ref = f"root:{room}:{thread}"
-            content = self._message_content(f"Live recovery root {room}:{thread}")
+            content = self._message_content(
+                f"Live recovery root {room}:{thread}",
+                source_marker=logical_ref,
+            )
             payload = _SentPayload("m.room.message", f"live-recovery-{logical_ref}", content)
             event_id = await self._recovery_client(room, 0).send_event(
                 payload.event_type,
@@ -1859,7 +2325,14 @@ class LiveFuzzRunner:
         for room, logical_ref, event_id, payload in roots:
             self.event_ids[logical_ref] = event_id
             self.sent_payloads[logical_ref] = payload
-            oracles[room].expect(logical_ref, event_id)
+            self._expect_source(
+                oracles[room],
+                logical_ref,
+                event_id,
+                root_event_id=event_id,
+                room=room,
+                thread=int(logical_ref.rsplit(":", 1)[1]),
+            )
         await asyncio.gather(
             *(
                 oracle.wait_until_exact(
@@ -1905,6 +2378,7 @@ class LiveFuzzRunner:
         content = self._message_content(
             f"Live recovery message {operation.operation_id}",
             relation=relation,
+            source_marker=operation.event_ref,
         )
         payload = _SentPayload(
             "m.room.message",
@@ -1925,6 +2399,7 @@ class LiveFuzzRunner:
 
         hot_root, hot_response = await self._saturation_turn(
             self.clients[0],
+            thread=0,
             label="hot-root",
             thread_root=None,
             reply_to=None,
@@ -1934,6 +2409,7 @@ class LiveFuzzRunner:
             operation = batch[0]
             _, hot_response = await self._saturation_turn(
                 self.clients[0],
+                thread=0,
                 label=operation.event_ref,
                 thread_root=hot_root,
                 reply_to=hot_response,
@@ -1944,10 +2420,13 @@ class LiveFuzzRunner:
 
         parallel_batches = self.scenario.batches[parallel_start:]
 
-        async def run_parallel_thread(thread: int) -> None:
+        async def run_parallel_thread(
+            thread: int,
+        ) -> tuple[int, LiveMatrixClient, str, str]:
             client = self._client_for_thread(thread)
             root, response = await self._saturation_turn(
                 client,
+                thread=thread,
                 label=f"root:{thread}",
                 thread_root=None,
                 reply_to=None,
@@ -1957,24 +2436,64 @@ class LiveFuzzRunner:
                 operation = next(item for item in batch if item.thread == thread)
                 _, response = await self._saturation_turn(
                     client,
+                    thread=thread,
                     label=operation.event_ref,
                     thread_root=root,
                     reply_to=response,
                     expected_sources=expected_sources,
                 )
                 self.operation_count += 1
+            return thread, client, root, response
 
-        await asyncio.gather(
+        parallel_lanes = await asyncio.gather(
             *(run_parallel_thread(thread) for thread in range(1, self.scenario.thread_count)),
         )
         self.executed_batches += len(parallel_batches)
 
-        # A duplicate response may finish just after its twin. Let all model
-        # streams settle, then audit the union of every sender's sync history.
-        await asyncio.sleep(max(self.settle_seconds, 1.0))
+        checkpoint_before = self.stack.sync_checkpoint_token(AGENT_NAME)
+        lane_states = ((0, self.clients[0], hot_root, hot_response), *parallel_lanes)
         await asyncio.gather(
-            *(client.sync_incremental(timeout_ms=0, allow_limited=True) for client in self.clients),
+            *(
+                self._saturation_turn(
+                    client,
+                    thread=thread,
+                    label=f"saturation-barrier:{thread}",
+                    thread_root=root,
+                    reply_to=response,
+                    expected_sources=expected_sources,
+                )
+                for thread, client, root, response in lane_states
+            ),
         )
+        await self.stack.wait_for_sync_checkpoint_advance(
+            AGENT_NAME,
+            checkpoint_before,
+            deadline_seconds=self.reply_timeout,
+        )
+        await self._wait_for_saturation_quiescence(expected_sources)
+
+        return {
+            "batches": self.executed_batches,
+            "canonical_agent_replies": len(expected_sources),
+            "operations": self.operation_count,
+            "restarts": 0,
+            "roots": self.scenario.thread_count,
+            "saturation_barriers": len(lane_states),
+            "status": "PASS",
+        }
+
+    async def _wait_for_saturation_quiescence(self, expected_sources: set[str]) -> None:
+        """Keep every observer open after all event-attached lane barriers."""
+        quiet_deadline = time.monotonic() + max(self.settle_seconds, 1.0)
+        while time.monotonic() < quiet_deadline:
+            await asyncio.gather(
+                *(client.sync_incremental(timeout_ms=250, allow_limited=True) for client in self.clients),
+            )
+            self._assert_saturation_replies(expected_sources)
+        self._assert_saturation_replies(expected_sources)
+
+    def _assert_saturation_replies(self, expected_sources: set[str]) -> None:
+        """Audit the union of complete and paginated observer histories."""
         all_events = {event_id: event for client in self.clients for event_id, event in client.seen_events.items()}
         response_ids = self._canonical_response_ids(all_events.values())
         duplicates = {
@@ -1995,19 +2514,11 @@ class LiveFuzzRunner:
             )
             raise AssertionError(msg)
 
-        return {
-            "batches": self.executed_batches,
-            "canonical_agent_replies": len(expected_sources),
-            "operations": self.operation_count,
-            "restarts": 0,
-            "roots": self.scenario.thread_count,
-            "status": "PASS",
-        }
-
     async def _saturation_turn(
         self,
         client: LiveMatrixClient,
         *,
+        thread: int,
         label: str,
         thread_root: str | None,
         reply_to: str | None,
@@ -2026,15 +2537,20 @@ class LiveFuzzRunner:
                 if thread_root is not None and reply_to is not None
                 else None
             ),
+            source_marker=label,
         )
         txn_id = f"live-saturation-{label}-{secrets.token_hex(4)}"
         source_event_id = await client.send_event("m.room.message", txn_id, content)
         expected_sources.add(source_event_id)
         root_event_id = thread_root or source_event_id
+        history_markers = self._history_markers[(0, thread)]
+        history_markers.append(label)
         response_event_id = await self._wait_for_completed_response(
             client,
             root_event_id=root_event_id,
             source_event_id=source_event_id,
+            source_marker=label,
+            history_markers=history_markers,
         )
         return root_event_id, response_event_id
 
@@ -2044,6 +2560,8 @@ class LiveFuzzRunner:
         *,
         root_event_id: str,
         source_event_id: str,
+        source_marker: str,
+        history_markers: Collection[str],
     ) -> str:
         """Wait until one source has exactly one fully streamed response."""
         deadline = time.monotonic() + self.reply_timeout
@@ -2057,7 +2575,12 @@ class LiveFuzzRunner:
                 raise AssertionError(msg)
             if len(response_ids) == 1:
                 response_event_id = next(iter(response_ids))
-                if "END call=" in self._latest_event_body(client.seen_events.values(), response_event_id):
+                body = self._latest_event_body(client.seen_events.values(), response_event_id)
+                if ExactReplyOracle._is_complete_model_body(
+                    body,
+                    expected_source_marker=source_marker,
+                    expected_history_fingerprint=_history_fingerprint(history_markers),
+                ):
                     return response_event_id
             await client.sync_incremental(timeout_ms=1000, allow_limited=True)
         msg = f"agent response timeout for {source_event_id}"
@@ -2095,7 +2618,8 @@ class LiveFuzzRunner:
         response_event_id: str,
     ) -> str:
         """Return the newest original or edit body for one response."""
-        candidates: list[tuple[int, str]] = []
+        original_body = ""
+        edit_candidates: list[tuple[int, str, str]] = []
         for event in events:
             event_id = event.get("event_id")
             content = event.get("content")
@@ -2115,8 +2639,11 @@ class LiveFuzzRunner:
             body = body_source.get("body")
             if isinstance(body, str):
                 timestamp = event.get("origin_server_ts")
-                candidates.append((timestamp if isinstance(timestamp, int) else 0, body))
-        return max(candidates, default=(0, ""))[1]
+                if is_edit:
+                    edit_candidates.append((timestamp if isinstance(timestamp, int) else 0, event_id, body))
+                else:
+                    original_body = body
+        return max(edit_candidates, default=(0, "", original_body))[2]
 
     async def _run_batches(
         self,
@@ -2130,6 +2657,7 @@ class LiveFuzzRunner:
             if batch[0].kind is LiveOperationKind.RESTART_MINDROOM:
                 self.stack.restart_mindroom()
                 self.restart_count += 1
+                await self._send_generic_restart_barrier()
             else:
                 results = await asyncio.gather(*(self._apply(operation) for operation in batch))
                 for operation, event_id, payload in results:
@@ -2143,7 +2671,14 @@ class LiveFuzzRunner:
                         LiveOperationKind.PLAIN_REPLY,
                     }:
                         assert event_id is not None
-                        self.oracle.expect(operation.event_ref, event_id)
+                        self._expect_source(
+                            self.oracle,
+                            operation.event_ref,
+                            event_id,
+                            root_event_id=self.event_ids[f"root:{operation.thread}"],
+                            room=0,
+                            thread=operation.thread,
+                        )
             try:
                 await self.oracle.wait_until_exact(
                     deadline_seconds=self.reply_timeout,
@@ -2162,6 +2697,44 @@ class LiveFuzzRunner:
             "roots": self.scenario.thread_count,
             "status": "PASS",
         }
+
+    async def _send_generic_restart_barrier(self) -> None:
+        """Require a concrete exact reply and durable sync after every restart."""
+        checkpoint_before = self.stack.sync_checkpoint_token(AGENT_NAME)
+        thread = 0
+        logical_ref = f"restart-barrier:{self.restart_count}"
+        root_event_id = self.event_ids[f"root:{thread}"]
+        latest_source_ref = self._latest_source_ref[(0, 0, thread)]
+        reply_event_id = self.oracle.resolve_response_ref(f"response:{latest_source_ref}")
+        content = self._message_content(
+            f"Live fuzz restart barrier {self.restart_count}",
+            relation={
+                "rel_type": "m.thread",
+                "event_id": root_event_id,
+                "is_falling_back": True,
+                "m.in_reply_to": {"event_id": reply_event_id},
+            },
+            source_marker=logical_ref,
+        )
+        event_id = await self.client.send_event(
+            "m.room.message",
+            f"live-fuzz-{logical_ref}",
+            content,
+        )
+        self.event_ids[logical_ref] = event_id
+        self._expect_source(
+            self.oracle,
+            logical_ref,
+            event_id,
+            root_event_id=root_event_id,
+            room=0,
+            thread=thread,
+        )
+        await self.stack.wait_for_sync_checkpoint_advance(
+            AGENT_NAME,
+            checkpoint_before,
+            deadline_seconds=self.reply_timeout,
+        )
 
     def _saturation_parallel_start(self) -> int:
         """Return the first batch belonging to the parallel saturation phase."""
@@ -2184,7 +2757,10 @@ class LiveFuzzRunner:
     async def _send_roots(self, threads: Collection[int]) -> None:
         async def send_root(thread: int) -> tuple[int, str, _SentPayload]:
             logical_ref = f"root:{thread}"
-            content = self._message_content(f"Live fuzz root {thread}")
+            content = self._message_content(
+                f"Live fuzz root {thread}",
+                source_marker=logical_ref,
+            )
             payload = _SentPayload("m.room.message", f"live-fuzz-{logical_ref}", content)
             event_id = await self._client_for_thread(thread).send_event(
                 payload.event_type,
@@ -2198,7 +2774,14 @@ class LiveFuzzRunner:
             logical_ref = f"root:{thread}"
             self.event_ids[logical_ref] = event_id
             self.sent_payloads[logical_ref] = payload
-            self.oracle.expect(logical_ref, event_id)
+            self._expect_source(
+                self.oracle,
+                logical_ref,
+                event_id,
+                root_event_id=event_id,
+                room=0,
+                thread=thread,
+            )
         await self.oracle.wait_until_exact(
             deadline_seconds=self.reply_timeout,
             settle_seconds=self.settle_seconds,
@@ -2223,6 +2806,7 @@ class LiveFuzzRunner:
                     "is_falling_back": True,
                     "m.in_reply_to": {"event_id": target_event_id},
                 },
+                source_marker=operation.event_ref,
             )
             payload = _SentPayload("m.room.message", txn_id, content)
             event_id = await client.send_event(payload.event_type, txn_id, content)
@@ -2232,13 +2816,18 @@ class LiveFuzzRunner:
             content = self._message_content(
                 f"Live fuzz plain reply {operation.operation_id}",
                 relation={"m.in_reply_to": {"event_id": target_event_id}},
+                source_marker=operation.event_ref,
             )
             payload = _SentPayload("m.room.message", txn_id, content)
             event_id = await client.send_event(payload.event_type, txn_id, content)
             return operation, event_id, payload
 
         if operation.kind is LiveOperationKind.EDIT:
-            new_content = self._message_content(f"Live fuzz edited message {operation.operation_id}")
+            source_marker = operation.target.removeprefix("response:")
+            new_content = self._message_content(
+                f"Live fuzz edited message {operation.operation_id}",
+                source_marker=source_marker,
+            )
             content = {
                 **new_content,
                 "m.new_content": new_content,
@@ -2286,10 +2875,12 @@ class LiveFuzzRunner:
         body: str,
         *,
         relation: Mapping[str, Any] | None = None,
+        source_marker: str | None = None,
     ) -> dict[str, Any]:
+        marker_suffix = f" LIVE-SOURCE[{source_marker}]" if source_marker is not None else ""
         content: dict[str, Any] = {
             "msgtype": "m.text",
-            "body": f"{body} {self.stack.agent_id}",
+            "body": f"{body}{marker_suffix} {self.stack.agent_id}",
             "m.mentions": {"user_ids": [self.stack.agent_id]},
         }
         if relation is not None:
