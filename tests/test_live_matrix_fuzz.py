@@ -7,6 +7,7 @@ from typing import Any
 
 import pytest
 
+from scripts.testing import fuzz_live_matrix
 from scripts.testing.fuzz_live_matrix import (
     ExactReplyOracle,
     LiveFuzzScenario,
@@ -78,6 +79,43 @@ def test_live_scenario_generator_covers_every_matrix_mutation() -> None:
     }
 
     assert seen == set(LiveOperationKind)
+
+
+def test_instance_registry_read_retries_a_partial_write(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The live-server probe must tolerate the deployer's non-atomic write window."""
+
+    class PartialRegistry:
+        reads = 0
+
+        @staticmethod
+        def exists() -> bool:
+            return True
+
+        @classmethod
+        def read_text(cls, *, encoding: str) -> str:
+            assert encoding == "utf-8"
+            cls.reads += 1
+            return "{" if cls.reads == 1 else '{"instances": {}}'
+
+    monkeypatch.setattr(fuzz_live_matrix, "INSTANCE_REGISTRY", PartialRegistry())
+    monkeypatch.setattr(fuzz_live_matrix, "REGISTRY_READ_RETRY_SECONDS", 0)
+
+    assert fuzz_live_matrix._active_fuzz_instances() == ()
+    assert PartialRegistry.reads == 2
+
+
+def test_instance_registry_read_fails_closed_when_malformed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A persistently malformed registry must not permit a duplicate fuzz stack."""
+    registry = tmp_path / "instances.json"
+    registry.write_text("{", encoding="utf-8")
+    monkeypatch.setattr(fuzz_live_matrix, "INSTANCE_REGISTRY", registry)
+    monkeypatch.setattr(fuzz_live_matrix, "REGISTRY_READ_RETRY_SECONDS", 0)
+
+    with pytest.raises(RuntimeError, match="refusing to start"):
+        fuzz_live_matrix._active_fuzz_instances()
 
 
 def test_saturation_scenario_matches_original_two_phase_workload() -> None:
@@ -283,6 +321,7 @@ async def test_exact_reply_oracle_hydrates_limited_sync_from_pagination(
     """A truncated observer sync must hydrate history without weakening exact counts."""
     client = LiveMatrixClient("http://matrix.invalid", "!room:example")
     oracle = ExactReplyOracle(client, "@agent:example")
+    oracle.next_batch = "since-position"
     oracle.expect("root:0", "$source")
     canonical: dict[str, Any] = {
         "event_id": "$response",
@@ -312,7 +351,8 @@ async def test_exact_reply_oracle_hydrates_limited_sync_from_pagination(
                     "!room:example": {
                         "timeline": {
                             "limited": True,
-                            "events": [canonical],
+                            "prev_batch": "gap-position",
+                            "events": [],
                         },
                     },
                 },
@@ -325,8 +365,8 @@ async def test_exact_reply_oracle_hydrates_limited_sync_from_pagination(
         to_token: str | None = None,
         limit: int = 1000,
     ) -> tuple[list[dict[str, Any]], str | None]:
-        assert from_position == "sync-token"
-        assert to_token is None
+        assert from_position == "gap-position"
+        assert to_token == "since-position"  # noqa: S105 - opaque sync token
         assert limit == 1000
         return [canonical], None
 
@@ -340,6 +380,56 @@ async def test_exact_reply_oracle_hydrates_limited_sync_from_pagination(
     assert oracle.response_ids == {"$source": {"$response"}}
     assert oracle.limited_timeline_count == 1
     assert oracle.pagination_page_count == 1
+
+
+@pytest.mark.asyncio
+async def test_exact_reply_oracle_does_not_paginate_initial_limited_sync(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Initialization has no expected sources and must not walk all room history."""
+    client = LiveMatrixClient("http://matrix.invalid", "!room:example")
+    oracle = ExactReplyOracle(client, "@agent:example")
+
+    async def sync(
+        _since: str | None,
+        *,
+        timeout_ms: int,
+        timeline_limit: int = 2000,
+    ) -> dict[str, Any]:
+        assert timeout_ms == 0
+        assert timeline_limit == 2000
+        return {
+            "next_batch": "sync-position",
+            "rooms": {
+                "join": {
+                    "!room:example": {
+                        "timeline": {
+                            "limited": True,
+                            "prev_batch": "gap-position",
+                            "events": [],
+                        },
+                    },
+                },
+            },
+        }
+
+    async def messages_before(
+        _from_position: str,
+        *,
+        to_token: str | None = None,
+        limit: int = 1000,
+    ) -> tuple[list[dict[str, Any]], str | None]:
+        pytest.fail(f"unexpected pagination to {to_token=} with {limit=}")
+
+    monkeypatch.setattr(client, "sync", sync)
+    monkeypatch.setattr(client, "messages_before", messages_before)
+    try:
+        await oracle.initialize()
+    finally:
+        await client.close()
+
+    assert oracle.limited_timeline_count == 1
+    assert oracle.pagination_page_count == 0
 
 
 @pytest.mark.asyncio
@@ -384,18 +474,8 @@ async def test_exact_reply_oracle_audits_bounded_limited_gap(
         limit: int = 1000,
     ) -> tuple[list[dict[str, Any]], str | None]:
         assert limit == 1000
-        if to_token is not None:
-            assert (from_position, to_token) == ("gap-position", "since-position")
-            return [], None
-        assert from_position == "sync-position"
-        return [
-            {
-                "event_id": "$source",
-                "sender": "@user:example",
-                "type": "m.room.message",
-                "content": {},
-            },
-        ], None
+        assert (from_position, to_token) == ("gap-position", "since-position")
+        return [], None
 
     monkeypatch.setattr(client, "sync", sync)
     monkeypatch.setattr(client, "messages_before", messages_before)

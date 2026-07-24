@@ -49,6 +49,8 @@ MODEL_ID = "mindroom-live-fuzz"
 AGENT_NAME = "general"
 ROOM_KEY = "lobby"
 RECOVERY_TIMELINE_LIMIT = 50
+REGISTRY_READ_ATTEMPTS = 3
+REGISTRY_READ_RETRY_SECONDS = 0.05
 
 
 def _required_int(value: Mapping[str, object], key: str) -> int:
@@ -777,11 +779,30 @@ def _run_command(*command: str) -> str:
     return result.stdout
 
 
+def _read_instance_registry() -> dict[str, Any]:
+    """Read the non-atomic deploy registry without trusting a partial write."""
+    for attempt in range(REGISTRY_READ_ATTEMPTS):
+        if not INSTANCE_REGISTRY.exists():
+            return {}
+        try:
+            registry = json.loads(INSTANCE_REGISTRY.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError) as error:
+            if attempt == REGISTRY_READ_ATTEMPTS - 1:
+                msg = "instance registry remained unreadable; refusing to start a fuzz stack"
+                raise RuntimeError(msg) from error
+            time.sleep(REGISTRY_READ_RETRY_SECONDS)
+            continue
+        if not isinstance(registry, dict):
+            msg = "instance registry must contain a JSON object"
+            raise TypeError(msg)
+        return registry
+    msg = "unreachable registry retry state"
+    raise AssertionError(msg)
+
+
 def _active_fuzz_instances() -> tuple[str, ...]:
     """Probe the registry and return fuzz stacks whose real homeserver is alive."""
-    if not INSTANCE_REGISTRY.exists():
-        return ()
-    registry = json.loads(INSTANCE_REGISTRY.read_text(encoding="utf-8"))
+    registry = _read_instance_registry()
     instances = registry.get("instances", {})
     if not isinstance(instances, dict):
         return ()
@@ -849,7 +870,7 @@ class ManagedTuwunelStack:
             raise RuntimeError(msg)
         _run_command("just", "local-instances-create", self.instance_name, "tuwunel")
         self._created = True
-        registry = json.loads(INSTANCE_REGISTRY.read_text(encoding="utf-8"))
+        registry = _read_instance_registry()
         instance = registry["instances"][self.instance_name]
         matrix_port = int(instance["matrix_port"])
         domain = str(instance["domain"])
@@ -1386,9 +1407,8 @@ class ExactReplyOracle:
             raise AssertionError(msg)
         if timeline.get("limited") is True:
             self.limited_timeline_count += 1
-            if since is not None and self._gap_audit_sources is not None and not self._gap_audit_completed:
-                await self._audit_limited_gap(timeline, since)
-            await self._ingest_paginated_history(next_batch)
+            if since is not None:
+                await self._ingest_limited_gap(timeline, since)
         events = timeline.get("events", [])
         if not isinstance(events, list):
             return
@@ -1396,12 +1416,12 @@ class ExactReplyOracle:
             if isinstance(raw_event, dict):
                 self._ingest_event(raw_event)
 
-    async def _audit_limited_gap(
+    async def _ingest_limited_gap(
         self,
         timeline: Mapping[str, Any],
         since: str,
     ) -> None:
-        """Check whether the server-bounded recovery walk exposes every source."""
+        """Ingest only the bounded incremental gap hidden by a limited sync."""
         prev_batch = timeline.get("prev_batch")
         if not isinstance(prev_batch, str):
             msg = "limited Matrix timeline omitted prev_batch"
@@ -1423,36 +1443,21 @@ class ExactReplyOracle:
                 token,
                 to_token=since,
             )
-            self.gap_audit_page_count += 1
+            self.pagination_page_count += 1
+            if self._gap_audit_sources is not None and not self._gap_audit_completed:
+                self.gap_audit_page_count += 1
             observed_ids.update(event_id for event in events if isinstance((event_id := event.get("event_id")), str))
+            for event in reversed(events):
+                self._ingest_event(event)
             if not events or next_token is None:
                 break
             token = next_token
         else:
             msg = "bounded Matrix oracle pagination exceeded 20 pages"
             raise AssertionError(msg)
-        assert self._gap_audit_sources is not None
-        self.gap_audit_missing_sources.update(self._gap_audit_sources - observed_ids)
-        self._gap_audit_completed = True
-
-    async def _ingest_paginated_history(self, from_token: str) -> None:
-        """Hydrate all observable room history when the oracle's own sync is limited."""
-        token = from_token
-        seen_tokens: set[str] = set()
-        for _ in range(20):
-            if token in seen_tokens:
-                msg = f"Matrix pagination repeated token {token!r}"
-                raise AssertionError(msg)
-            seen_tokens.add(token)
-            events, next_token = await self.client.messages_before(token)
-            self.pagination_page_count += 1
-            for event in reversed(events):
-                self._ingest_event(event)
-            if not events or next_token is None:
-                return
-            token = next_token
-        msg = "Matrix oracle pagination exceeded 20 pages"
-        raise AssertionError(msg)
+        if self._gap_audit_sources is not None and not self._gap_audit_completed:
+            self.gap_audit_missing_sources.update(self._gap_audit_sources - observed_ids)
+            self._gap_audit_completed = True
 
     def _ingest_event(self, event: Mapping[str, Any]) -> None:
         event_id = event.get("event_id")
