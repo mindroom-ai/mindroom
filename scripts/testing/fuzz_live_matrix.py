@@ -39,7 +39,7 @@ from urllib.parse import quote
 import httpx
 import yaml
 
-from mindroom.handled_turns import TurnRecordCodec
+from mindroom.handled_turns import TurnRecord, TurnRecordCodec
 from mindroom.streaming import INTERRUPTED_RESPONSE_NOTE, RESTART_INTERRUPTED_RESPONSE_NOTE
 
 if TYPE_CHECKING:
@@ -1533,8 +1533,16 @@ class LiveMatrixClient:
         return data
 
 
-def read_ledger_attributions(ledger_path: Path) -> dict[str, str]:
-    """Read completed source-to-response attributions from a handled-turn ledger."""
+def read_ledger_records(ledger_path: Path) -> dict[str, TurnRecord]:
+    """Read every completed handled-turn record keyed by its source event.
+
+    A completed record with a visible ``response_event_id`` proves that source
+    was answered. A completed record with ``response_event_id`` set to ``None``
+    is production's exact durable proof that the source was legitimately
+    skipped as a superseded replay. Missing, malformed, or ``completed=False``
+    records are omitted, so the oracle can require proof of a terminal outcome
+    rather than inferring supersession from chronology alone.
+    """
     if not ledger_path.exists():
         return {}
     try:
@@ -1546,14 +1554,14 @@ def read_ledger_attributions(ledger_path: Path) -> dict[str, str]:
     raw_records = payload.get("records")
     if not isinstance(raw_records, dict):
         return {}
-    attributions: dict[str, str] = {}
+    records: dict[str, TurnRecord] = {}
     for event_id, raw_record in raw_records.items():
         if not isinstance(event_id, str):
             continue
         record = TurnRecordCodec.from_ledger_record(event_id, raw_record)
-        if record is not None and record.completed and record.response_event_id is not None:
-            attributions[event_id] = record.response_event_id
-    return attributions
+        if record is not None and record.completed:
+            records[event_id] = record
+    return records
 
 
 class ExactReplyOracle:
@@ -1586,7 +1594,7 @@ class ExactReplyOracle:
         self.coalescing_threads = coalescing_threads
         self.ledger_path = ledger_path
         self.expected_body_for = expected_body_for
-        self._ledger_attributions: dict[str, str] = {}
+        self._ledger_records: dict[str, TurnRecord] = {}
         self._ledger_read_at = 0.0
         self.internal_source_ids: set[str] = set()
         self.next_batch: str | None = None
@@ -1638,27 +1646,46 @@ class ExactReplyOracle:
             self.optional_sources.add(event_id)
 
     def refresh_ledger_attributions(self, *, min_interval: float = 0.5) -> None:
-        """Re-read MindRoom's durable per-source reply attributions."""
+        """Re-read MindRoom's durable per-source terminal turn records."""
         if self.ledger_path is None:
             return
         now = time.monotonic()
         if now - self._ledger_read_at < min_interval:
             return
         self._ledger_read_at = now
-        self._ledger_attributions = read_ledger_attributions(self.ledger_path)
+        self._ledger_records = read_ledger_records(self.ledger_path)
+
+    def ledger_response(self, event_id: str) -> str | None:
+        """Return the durable response one source's completed record attributes."""
+        record = self._ledger_records.get(event_id)
+        return record.response_event_id if record is not None else None
+
+    def _supersession_proven(self, event_id: str) -> bool:
+        """Return whether a completed no-response record proves supersession.
+
+        Production's replay guard records a skipped superseded turn as a
+        completed record with ``response_event_id=None``. That exact durable
+        record is the only acceptable supersession proof; chronology alone
+        never counts.
+        """
+        record = self._ledger_records.get(event_id)
+        return record is not None and record.response_event_id is None
 
     def directly_settled(self, event_id: str) -> bool:
-        """Return whether one source has its own reply or ledger attribution."""
-        return len(self.response_ids.get(event_id, ())) == 1 or event_id in self._ledger_attributions
+        """Return whether one source has its own reply or response-backed record."""
+        return len(self.response_ids.get(event_id, ())) == 1 or self.ledger_response(event_id) is not None
 
     def settled_sources(self) -> set[str]:
         """Return sources settled under per-(thread, sender) chain semantics.
 
         MindRoom may supersede an older unresponded message once the same
-        requester sends a newer one in the same thread, so a chain settles
-        from its newest required member backwards: the newest must be
-        directly replied or ledger-attributed, and every older member is
-        then either individually attributed or legitimately superseded.
+        requester sends a newer one in the same thread. A chain settles from
+        its newest required member backwards: the newest must be directly
+        replied or response-backed in the ledger, and every older member must
+        then present its own durable terminal record -- either its own
+        response-backed attribution, or the completed no-response record that
+        proves it was legitimately superseded once a later member anchored.
+        A missing, incomplete, or malformed record never settles.
         """
         settled: set[str] = set()
         for chain in self.chains.values():
@@ -1668,8 +1695,12 @@ class ExactReplyOracle:
                     if anchored:
                         settled.add(event_id)
                     continue
-                if anchored or self.directly_settled(event_id):
-                    anchored = True
+                if not anchored:
+                    if self.directly_settled(event_id):
+                        anchored = True
+                        settled.add(event_id)
+                    continue
+                if self.directly_settled(event_id) or self._supersession_proven(event_id):
                     settled.add(event_id)
         return settled
 
@@ -1714,7 +1745,8 @@ class ExactReplyOracle:
         missing = {
             f"{self.expected_sources[event_id]} ({event_id})": {
                 "direct_replies": len(self.response_ids.get(event_id, ())),
-                "ledger_attributed": event_id in self._ledger_attributions,
+                "ledger_attributed": self.ledger_response(event_id) is not None,
+                "ledger_superseded": self._supersession_proven(event_id),
                 "observed": event_id in self.observed_sources,
                 "reply_streaming_incomplete": event_id in streaming,
             }
@@ -1750,15 +1782,24 @@ class ExactReplyOracle:
         raise KeyError(msg)
 
     def _covering_response(self, source_event_id: str) -> str | None:
-        """Return the reply covering one coalesced or superseded source."""
-        attribution = self._ledger_attributions.get(source_event_id)
-        if attribution is not None:
-            return attribution
+        """Return the reply covering one coalesced or superseded source.
+
+        A source is covered only through proven chain state: its own
+        response-backed record, or -- when its completed record proves it was
+        superseded -- the response-backed reply of a later chain member. An
+        older source with no durable terminal record of its own is never
+        treated as covered.
+        """
+        own_attribution = self.ledger_response(source_event_id)
+        if own_attribution is not None:
+            return own_attribution
+        if not self._supersession_proven(source_event_id):
+            return None
         chain = next((chain for chain in self.chains.values() if source_event_id in chain), None)
         if chain is None:
             return None
         for later_source in chain[chain.index(source_event_id) + 1 :]:
-            attribution = self._ledger_attributions.get(later_source)
+            attribution = self.ledger_response(later_source)
             if attribution is not None:
                 return attribution
             replies = self.response_ids.get(later_source, set())
@@ -2076,27 +2117,23 @@ class FinalStateAuditor:
             raise AssertionError(msg)
 
     def _assert_ledger_attribution(self, replies: Mapping[str, set[str]]) -> dict[str, int]:
-        """Every required source must be durably attributed or superseded.
+        """Every required source must present its own durable terminal record.
 
         Matrix relations cannot expose which sources one coalesced reply
         covered, so exact per-source attribution comes from MindRoom's
         handled-turn ledger, walked per (thread, sender) chain to honor the
         supersede policy, and cross-checked against the `/messages` view in
-        both directions.
+        both directions. The same terminal-proof loader backs both live
+        settlement and this final audit so the two can never drift: an older
+        chain source counts as superseded only when its own completed
+        no-response record exists, never from chronology alone.
         """
         assert self.ledger_path is not None
         oracle = self.oracle
         if not self.ledger_path.exists():
             msg = f"handled-turn ledger missing at {self.ledger_path}"
             raise AssertionError(msg)
-        payload = json.loads(self.ledger_path.read_text(encoding="utf-8"))
-        if payload.get("schema_version") != TurnRecordCodec.schema_version():
-            msg = f"unsupported handled-turn ledger schema in {self.ledger_path}"
-            raise AssertionError(msg)
-        raw_records = payload.get("records")
-        if not isinstance(raw_records, dict):
-            msg = f"handled-turn ledger has no records mapping in {self.ledger_path}"
-            raise TypeError(msg)
+        records = read_ledger_records(self.ledger_path)
 
         problems: list[str] = []
         ledger_response_ids: set[str] = set()
@@ -2108,15 +2145,21 @@ class FinalStateAuditor:
                 if source_event_id in oracle.optional_sources:
                     continue
                 logical_ref = oracle.expected_sources[source_event_id]
-                record = TurnRecordCodec.from_ledger_record(source_event_id, raw_records.get(source_event_id))
-                if record is not None and record.completed and record.response_event_id is not None:
+                record = records.get(source_event_id)
+                if record is not None and record.response_event_id is not None:
                     ledger_response_ids.add(record.response_event_id)
                     attributed += 1
                     anchored = True
-                elif anchored:
-                    # An older unresponded message legitimately superseded by a
-                    # newer settled message from the same sender in this thread.
+                elif anchored and record is not None and record.response_event_id is None:
+                    # An older message legitimately superseded by a newer settled
+                    # message from the same sender, proven by production's own
+                    # completed no-response record for this exact source.
                     superseded += 1
+                elif anchored:
+                    problems.append(
+                        f"superseded chain source {logical_ref} ({source_event_id}) "
+                        "has no completed no-response supersession record",
+                    )
                 else:
                     problems.append(
                         f"newest chain source {logical_ref} ({source_event_id}) has no durable attribution",

@@ -587,9 +587,27 @@ def test_chaos_validation_blocks_targets_of_redacted_unsettled_responses() -> No
     settled_first.validate()
 
 
+def _write_ledger(ledger_path: Path, records: dict[str, TurnRecord]) -> None:
+    """Serialize handled-turn records into the versioned ledger file."""
+    ledger_path.write_text(
+        json.dumps(
+            {
+                "schema_version": TurnRecordCodec.schema_version(),
+                "records": {event_id: TurnRecordCodec.to_ledger_record(record) for event_id, record in records.items()},
+            },
+        ),
+        encoding="utf-8",
+    )
+
+
 @pytest.mark.asyncio
 async def test_coalescing_oracle_settles_via_ledger_attribution(tmp_path: Path) -> None:
-    """Sources swallowed into a combined follow-up turn settle via the durable ledger."""
+    """Sources swallowed into a combined follow-up turn settle via the durable ledger.
+
+    A newer source anchors on its own visible combined reply, but an older
+    superseded source only settles once its own completed no-response record
+    proves supersession. A direct visible reply is never enough on its own.
+    """
     client = LiveMatrixClient("http://matrix.invalid", "!room:example")
     ledger_path = tmp_path / "general_responded.json"
     oracle = ExactReplyOracle(
@@ -605,28 +623,72 @@ async def test_coalescing_oracle_settles_via_ledger_attribution(tmp_path: Path) 
             oracle._ingest_event({"event_id": source, "sender": "@user:example", "type": "m.room.message"})
         assert set(oracle.unsettled_required_sources()) == {"$first", "$second"}
 
+        # The combined reply anchors the newest source, but the older source
+        # has no durable terminal record of its own yet, so it stays unsettled.
         oracle._ingest_event(_agent_reply_event("$second", "$combined-reply", "LIVE-FUZZ call=2 END call=2"))
-        assert oracle.unsettled_required_sources() == []
+        assert oracle.unsettled_required_sources() == ["$first"]
         assert oracle.resolve_response_ref("response:op:2") == "$combined-reply"
+        with pytest.raises(KeyError, match="response event not observed"):
+            oracle.resolve_response_ref("response:op:1")
+
+        # A completed no-response supersession record proves the older source was
+        # legitimately skipped; it now settles and its cover is the combined reply.
+        second_record = TurnRecord(
+            source_event_ids=("$second",),
+            response_event_id="$combined-reply",
+            completed=True,
+        )
+        superseded_record = TurnRecord(source_event_ids=("$first",), response_event_id=None, completed=True)
+        _write_ledger(ledger_path, {"$first": superseded_record, "$second": second_record})
+        oracle.refresh_ledger_attributions(min_interval=0.0)
+        assert oracle.unsettled_required_sources() == []
         assert oracle.resolve_response_ref("response:op:1") == "$combined-reply"
 
-        record = TurnRecord(
+        # A dedicated response-backed record instead attributes the older source
+        # directly to its own reply.
+        dedicated_record = TurnRecord(
             source_event_ids=("$first",),
             response_event_id="$dedicated-reply",
             completed=True,
         )
-        ledger_path.write_text(
-            json.dumps(
-                {
-                    "schema_version": TurnRecordCodec.schema_version(),
-                    "records": {"$first": TurnRecordCodec.to_ledger_record(record)},
-                },
-            ),
-            encoding="utf-8",
-        )
+        _write_ledger(ledger_path, {"$first": dedicated_record, "$second": second_record})
         oracle.refresh_ledger_attributions(min_interval=0.0)
         assert oracle.resolve_response_ref("response:op:1") == "$dedicated-reply"
         oracle._assert_no_wrong_replies()
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_coalescing_oracle_requires_own_record_for_incomplete_supersession(tmp_path: Path) -> None:
+    """A missing or incomplete older record blocks settlement even once anchored."""
+    client = LiveMatrixClient("http://matrix.invalid", "!room:example")
+    ledger_path = tmp_path / "general_responded.json"
+    oracle = ExactReplyOracle(
+        client,
+        "@agent:example",
+        coalescing_threads=True,
+        ledger_path=ledger_path,
+    )
+    try:
+        oracle.expect("op:1", "$first", thread=3, client=1)
+        oracle.expect("op:2", "$second", thread=3, client=1)
+        for source in ("$first", "$second"):
+            oracle._ingest_event({"event_id": source, "sender": "@user:example", "type": "m.room.message"})
+        oracle._ingest_event(_agent_reply_event("$second", "$combined-reply", "LIVE-FUZZ call=2 END call=2"))
+
+        second_record = TurnRecord(
+            source_event_ids=("$second",),
+            response_event_id="$combined-reply",
+            completed=True,
+        )
+        # An incomplete older record never proves supersession.
+        incomplete = TurnRecord(source_event_ids=("$first",), response_event_id=None, completed=False)
+        _write_ledger(ledger_path, {"$first": incomplete, "$second": second_record})
+        oracle.refresh_ledger_attributions(min_interval=0.0)
+        assert oracle.unsettled_required_sources() == ["$first"]
+        with pytest.raises(KeyError, match="response event not observed"):
+            oracle.resolve_response_ref("response:op:1")
     finally:
         await client.close()
 
@@ -649,7 +711,12 @@ async def test_coalescing_oracle_requires_every_source_observed() -> None:
 
 @pytest.mark.asyncio
 async def test_ledger_attribution_flags_missing_and_orphaned_turns(tmp_path: Path) -> None:
-    """Durable attribution must cover every required source and every visible reply."""
+    """Durable attribution must cover every required source and every visible reply.
+
+    An older source with no completed record of its own can never be inferred
+    superseded from chronology; only production's own completed no-response
+    record settles it.
+    """
     client = LiveMatrixClient("http://matrix.invalid", "!room:example")
     oracle = ExactReplyOracle(client, "@agent:example", coalescing_threads=True)
     ledger_path = tmp_path / "general_responded.json"
@@ -665,54 +732,53 @@ async def test_ledger_attribution_flags_missing_and_orphaned_turns(tmp_path: Pat
         oracle.expect("op:2", "$second", thread=0)
         replies = {"$second": {"$combined-reply"}}
 
-        record = TurnRecord(
+        coalesced_record = TurnRecord(
             source_event_ids=("$first", "$second"),
             response_event_id="$combined-reply",
             completed=True,
         )
-        full_ledger = json.dumps(
-            {
-                "schema_version": TurnRecordCodec.schema_version(),
-                "records": {
-                    "$first": TurnRecordCodec.to_ledger_record(record),
-                    "$second": TurnRecordCodec.to_ledger_record(record),
-                },
-            },
-        )
-        ledger_path.write_text(full_ledger, encoding="utf-8")
+        # One coalesced record attributing both sources to one visible reply passes.
+        _write_ledger(ledger_path, {"$first": coalesced_record, "$second": coalesced_record})
         assert auditor._assert_ledger_attribution(replies) == {
             "ledger_attributed_sources": 2,
             "ledger_superseded_sources": 0,
         }
 
-        ledger_path.write_text(
-            json.dumps(
-                {
-                    "schema_version": TurnRecordCodec.schema_version(),
-                    "records": {"$first": TurnRecordCodec.to_ledger_record(record)},
-                },
-            ),
-            encoding="utf-8",
-        )
-        with pytest.raises(AssertionError, match="newest chain source"):
+        # The newest source alone with the older one absent fails: the older
+        # source has no durable terminal record at all.
+        _write_ledger(ledger_path, {"$second": coalesced_record})
+        with pytest.raises(AssertionError, match="superseded chain source"):
             auditor._assert_ledger_attribution(replies)
 
-        superseded_ledger = json.dumps(
-            {
-                "schema_version": TurnRecordCodec.schema_version(),
-                "records": {"$second": TurnRecordCodec.to_ledger_record(record)},
-            },
+        # An incomplete older record is dropped by the loader, so it also fails.
+        incomplete_first = TurnRecord(source_event_ids=("$first",), response_event_id=None, completed=False)
+        anchor_second = TurnRecord(
+            source_event_ids=("$second",),
+            response_event_id="$combined-reply",
+            completed=True,
         )
-        ledger_path.write_text(superseded_ledger, encoding="utf-8")
+        _write_ledger(ledger_path, {"$first": incomplete_first, "$second": anchor_second})
+        with pytest.raises(AssertionError, match="superseded chain source"):
+            auditor._assert_ledger_attribution(replies)
+
+        # A completed no-response record for the older source proves supersession.
+        superseded_first = TurnRecord(source_event_ids=("$first",), response_event_id=None, completed=True)
+        _write_ledger(ledger_path, {"$first": superseded_first, "$second": anchor_second})
         assert auditor._assert_ledger_attribution(replies) == {
             "ledger_attributed_sources": 1,
             "ledger_superseded_sources": 1,
         }
 
+        # A visible reply with no durable record attributing it is an orphan.
         orphan = {"$second": {"$combined-reply"}, "$first": {"$rogue-reply"}}
-        ledger_path.write_text(full_ledger, encoding="utf-8")
+        _write_ledger(ledger_path, {"$first": coalesced_record, "$second": coalesced_record})
         with pytest.raises(AssertionError, match="not attributed by any durable turn record"):
             auditor._assert_ledger_attribution(orphan)
+
+        # The newest chain source itself missing a record fails distinctly.
+        _write_ledger(ledger_path, {"$first": superseded_first})
+        with pytest.raises(AssertionError, match="newest chain source"):
+            auditor._assert_ledger_attribution(replies)
     finally:
         await client.close()
 
