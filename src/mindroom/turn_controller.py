@@ -143,6 +143,7 @@ if TYPE_CHECKING:
 
 
 _QUEUED_NOTICE_METADATA_KIND = "queued_notice_reservation"
+_PENDING_TURN_CLAIM_METADATA_KIND = "pending_turn_claim"
 
 
 def _room_level_context_event(event: TextDispatchEvent) -> TextDispatchEvent:
@@ -773,6 +774,9 @@ class TurnController:
                 )
                 return _IngressAdmissionOutcome.CONSUMED
         if self.deps.ingress.command_control_input(prepared_event, source_kind=envelope.source_kind) is not None:
+            if (turn_claim := reservation_owner.pending_turn_claim) is not None:
+                self.deps.turn_store.release_pending_turn_claim(turn_claim)
+                reservation_owner.pending_turn_claim = None
             await self._dispatch_command_control_input(
                 room=room,
                 dispatch_event=dispatch_event,
@@ -933,6 +937,15 @@ class TurnController:
             timing_scope=timing_scope,
         )
         gate_enqueue_start = time.monotonic()
+        dispatch_metadata = _queued_notice_dispatch_metadata(queued_notice_reservation, queued_notice_target)
+        if (turn_claim := reservation_owner.pending_turn_claim) is not None:
+            dispatch_metadata += (
+                PendingDispatchMetadata(
+                    kind=_PENDING_TURN_CLAIM_METADATA_KIND,
+                    payload=turn_claim,
+                    close=lambda: self.deps.turn_store.release_pending_turn_claim(turn_claim),
+                ),
+            )
         pending_event = PendingEvent(
             event=event,
             room=room,
@@ -942,7 +955,7 @@ class TurnController:
             hook_source=hook_source,
             message_received_depth=message_received_depth,
             trust_internal_payload_metadata=resolved_trust_internal_payload_metadata,
-            dispatch_metadata=_queued_notice_dispatch_metadata(queued_notice_reservation, queued_notice_target),
+            dispatch_metadata=dispatch_metadata,
         )
         await reservation_owner.admit(
             resolved_key,
@@ -1888,6 +1901,13 @@ class TurnController:
                 if len(handoff.source_event_ids) > 1
                 else None,
             )
+            for pending_event in batch.pending_events:
+                for item in pending_event.dispatch_metadata:
+                    if item.kind == _PENDING_TURN_CLAIM_METADATA_KIND:
+                        item.close()
+                pending_event.dispatch_metadata = tuple(
+                    item for item in pending_event.dispatch_metadata if item.kind != _PENDING_TURN_CLAIM_METADATA_KIND
+                )
             await self._dispatch_handoff(
                 handoff,
                 handled_turn=handled_turn,
@@ -1984,12 +2004,14 @@ class TurnController:
             )
         try:
             if event_info.is_edit:
-                # An edit never enters the gate, and its regeneration runs
-                # behind the conversation's response lock; the sender's lane
-                # slot must settle now, not at response completion.
+                # Edits bypass coalescing and wait behind the conversation response lock.
                 await reservation_owner.release()
                 await self._handle_edit_event(room, prechecked_event, event_info, dispatch_timing)
                 return
+            turn_claim = TurnRecord.create([event.event_id], completed=False)
+            if not self.deps.turn_store.try_claim_turn(turn_claim):
+                return
+            reservation_owner.pending_turn_claim = turn_claim
             await self._ingest_live_text_event(
                 room,
                 prechecked_event,
@@ -2004,6 +2026,8 @@ class TurnController:
                 room_id=room.room_id,
             )
         finally:
+            if reservation_owner.pending_turn_claim is not None and not reservation_owner.admitted:
+                self.deps.turn_store.release_pending_turn_claim(reservation_owner.pending_turn_claim)
             if owns_reservation:
                 await reservation_owner.release()
 

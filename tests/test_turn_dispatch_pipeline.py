@@ -1300,6 +1300,53 @@ class TestAgentBot(AgentBotTestBase):
         assert generate_kwargs["response_envelope"].requester_id == "@mallory:localhost"
 
     @pytest.mark.asyncio
+    async def test_text_ingress_claims_source_before_first_async_preparation(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """An edit must see source ownership before normal ingress can yield."""
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = _make_matrix_client_mock()
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!room:localhost"
+        event = nio.RoomMessageText.from_dict(
+            {
+                "event_id": "$source",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567890,
+                "room_id": room.room_id,
+                "type": "m.room.message",
+                "content": {"msgtype": "m.text", "body": "before edit"},
+            },
+        )
+        ingress_started = asyncio.Event()
+        release_ingress = asyncio.Event()
+
+        async def hold_ingress(*_args: object, **_kwargs: object) -> None:
+            ingress_started.set()
+            await release_ingress.wait()
+
+        with (
+            patch.object(
+                bot._turn_controller,
+                "_precheck_dispatch_event",
+                return_value=_PrecheckedEvent(event=event, requester_user_id="@user:localhost"),
+            ),
+            patch.object(bot._turn_controller, "_ingest_live_text_event", side_effect=hold_ingress),
+        ):
+            task = asyncio.create_task(bot._on_message(room, event))
+            await ingress_started.wait()
+            competing_claim = TurnRecord.create([event.event_id], completed=False)
+            assert bot._turn_store.try_claim_turn(competing_claim) is False
+            release_ingress.set()
+            await task
+
+        assert bot._turn_store.try_claim_turn(competing_claim) is True
+        bot._turn_store.release_pending_turn_claim(competing_claim)
+
+    @pytest.mark.asyncio
     async def test_handle_message_inner_enqueues_active_thread_follow_up_as_coalescible_gate_event(
         self,
         mock_agent_user: AgentMatrixUser,
@@ -1410,8 +1457,11 @@ class TestAgentBot(AgentBotTestBase):
         assert pending_event.event is event
         assert pending_event.source_kind == MESSAGE_SOURCE_KIND
         assert pending_event.dispatch_policy_source_kind is None
-        assert len(pending_event.dispatch_metadata) == 1
-        metadata = pending_event.dispatch_metadata[0]
+        assert {item.kind for item in pending_event.dispatch_metadata} == {
+            "pending_turn_claim",
+            "queued_notice_reservation",
+        }
+        metadata = next(item for item in pending_event.dispatch_metadata if item.kind == "queued_notice_reservation")
         assert metadata.kind == "queued_notice_reservation"
         assert metadata.payload is mock_reserve_waiting_human_message.return_value
         assert metadata.requires_solo_batch is False
