@@ -53,7 +53,7 @@ from mindroom.dispatch_source import (
     TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
     VOICE_SOURCE_KIND,
 )
-from mindroom.handled_turns import TurnRecord
+from mindroom.handled_turns import SourceEventMetadata, TurnRecord
 from mindroom.hooks import MessageEnvelope
 from mindroom.inbound_turn_normalizer import (
     BatchMediaAttachmentRequest,
@@ -4198,6 +4198,58 @@ async def test_backlog_replay_skips_older_message_when_newer_exists(tmp_path: Pa
     # Older message should be skipped — resolve_dispatch_action never called
     action_mock.assert_not_awaited()
     assert bot._turn_store.is_handled("$m1")
+
+
+@pytest.mark.asyncio
+async def test_backlog_replay_keeps_mixed_requester_coalesced_turn(tmp_path: Path) -> None:
+    """A newer primary-requester message must not settle another requester's source."""
+    bot = _make_bot(tmp_path)
+    room = _make_room()
+    primary_event = PreparedTextEvent(
+        sender="@bob:localhost",
+        event_id="$bob",
+        body="bob",
+        source={"content": {"msgtype": "m.text", "body": "bob"}},
+        server_timestamp=2000,
+    )
+    dispatch = _prepared_dispatch(event_id="$bob", requester_user_id="@bob:localhost", body="bob")
+    newer_bob_message = ResolvedVisibleMessage(
+        sender="@bob:localhost",
+        body="newer bob",
+        timestamp=3000,
+        event_id="$newer-bob",
+        content={"body": "newer bob"},
+        thread_id=None,
+        latest_event_id="$newer-bob",
+    )
+    _set_context_histories(dispatch, [newer_bob_message])
+    handled_turn = TurnRecord.create(
+        ["$alice", "$bob"],
+        source_event_metadata={
+            "$alice": SourceEventMetadata(sender="@alice:localhost", timestamp_ms=1000),
+            "$bob": SourceEventMetadata(sender="@bob:localhost", timestamp_ms=2000),
+        },
+    )
+
+    action_mock = AsyncMock(return_value=_DispatchPlan(kind="ignore"))
+    with (
+        patch.object(
+            bot._turn_controller,
+            "_prepare_dispatch",
+            new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
+        ),
+        patch.object(bot._turn_policy, "plan_turn", new=action_mock),
+    ):
+        await bot._turn_controller._dispatch_text_message(
+            room,
+            primary_event,
+            "@bob:localhost",
+            handled_turn=handled_turn,
+        )
+
+    action_mock.assert_awaited_once()
+    assert not bot._turn_store.is_handled("$alice")
+    assert not bot._turn_store.is_handled("$bob")
 
 
 @pytest.mark.asyncio

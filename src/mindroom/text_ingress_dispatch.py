@@ -315,7 +315,10 @@ async def _blocked_before_plan(
     ):
         return True
 
-    may_be_superseded = prepared.dispatch.envelope.origin.may_be_superseded_by_newer_requester_turn
+    may_be_superseded = (
+        prepared.dispatch.envelope.origin.may_be_superseded_by_newer_requester_turn
+        and _all_sources_belong_to_requester(prepared.handled_turn, requester_user_id)
+    )
     if prepared.replay_guard.degraded:
         skips_turn = await controller._has_newer_unresponded_cached_thread_event(
             room_id=room.room_id,
@@ -342,6 +345,17 @@ async def _blocked_before_plan(
     if skips_turn:
         controller._mark_source_events_responded(prepared.handled_turn)
     return skips_turn
+
+
+def _all_sources_belong_to_requester(handled_turn: TurnRecord, requester_user_id: str) -> bool:
+    """Return whether one newer requester turn may safely supersede the full batch."""
+    if len(handled_turn.source_event_ids) < 2:
+        return True
+    source_metadata = handled_turn.source_event_metadata
+    return source_metadata is not None and all(
+        (metadata := source_metadata.get(event_id)) is not None and metadata.sender == requester_user_id
+        for event_id in handled_turn.source_event_ids
+    )
 
 
 def _attachment_parts(
