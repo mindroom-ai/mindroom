@@ -1106,7 +1106,7 @@ async def test_generate_response_failure_propagates_without_recording(tmp_path: 
 
 @pytest.mark.asyncio
 async def test_sync_restart_cancellation_retries_without_committing_interrupted_edit(tmp_path: Path) -> None:
-    """A sync-restart interruption leaves the revision uncommitted and retries it once."""
+    """A sync-restart interruption retains its run until retry lock acquisition."""
     record = _turn_record()
     harness = _harness(tmp_path, turn_record=record)
     attempts = 0
@@ -1114,6 +1114,8 @@ async def test_sync_restart_cancellation_retries_without_committing_interrupted_
     async def interrupt_then_succeed(request: ResponseRequest) -> str:
         nonlocal attempts
         attempts += 1
+        assert request.on_lifecycle_lock_acquired is not None
+        request.on_lifecycle_lock_acquired()
         if attempts == 1:
             assert request.on_sync_restart_cancelled is not None
             assert request.on_deferred_outcome_handled is not None
@@ -1130,6 +1132,7 @@ async def test_sync_restart_cancellation_retries_without_committing_interrupted_
 
     assert harness.restart_retry.has_pending is True
     harness.turn_store.record_turn.assert_not_called()
+    assert harness.turn_store.remove_stale_runs_for_edit.call_count == 1
     assert harness.regenerator._mailboxes == {}
 
     await harness.restart_retry.flush()
@@ -1142,15 +1145,17 @@ async def test_sync_restart_cancellation_retries_without_committing_interrupted_
     assert recorded.source_event_revisions == {
         ORIGINAL_EVENT_ID: (event.server_timestamp, event.event_id),
     }
-    harness.turn_store.remove_stale_runs_for_edit.assert_called_once_with(
-        turn_record=replace(
-            record,
-            source_event_prompts={ORIGINAL_EVENT_ID: "latest after restart"},
-            source_event_revisions={
-                ORIGINAL_EVENT_ID: (event.server_timestamp, event.event_id),
-            },
-        ),
-        requester_user_id=USER_ID,
+    assert harness.turn_store.remove_stale_runs_for_edit.call_count == 2
+    expected_record = replace(
+        record,
+        source_event_prompts={ORIGINAL_EVENT_ID: "latest after restart"},
+        source_event_revisions={
+            ORIGINAL_EVENT_ID: (event.server_timestamp, event.event_id),
+        },
+    )
+    assert all(
+        removal.kwargs == {"turn_record": expected_record, "requester_user_id": USER_ID}
+        for removal in harness.turn_store.remove_stale_runs_for_edit.call_args_list
     )
 
 

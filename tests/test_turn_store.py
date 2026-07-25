@@ -173,15 +173,34 @@ def test_discovery_alias_allows_original_but_excludes_second_relay(tmp_path: Pat
     store.release_pending_turn_claim(original)
 
 
-def test_completed_turn_can_reclaim_its_handled_alias_for_edit(tmp_path: Path) -> None:
-    """A completed relay turn must remain claimable for its own edit drain."""
+@pytest.mark.parametrize("completed_claim", [False, True])
+def test_same_turn_can_reclaim_its_handled_alias(tmp_path: Path, *, completed_claim: bool) -> None:
+    """A relay turn must remain claimable for its own edit or restart drain."""
     store = _store(tmp_path)
     completed = TurnRecord.create(["$relay"], discovery_event_ids=["$human"])
     store.record_turn(completed)
+    claim = replace(completed, completed=completed_claim)
 
-    assert store.try_claim_turn(completed) is True
+    assert store.try_claim_turn(claim) is True
 
-    store.release_pending_turn_claim(completed)
+    store.release_pending_turn_claim(claim)
+
+
+def test_pending_coalesced_turn_can_reclaim_tombstoned_alias(tmp_path: Path) -> None:
+    """A sibling edit remains claimable after another alias is tombstoned."""
+    store = _store(tmp_path)
+    pending = TurnRecord.create(
+        ["$relay-one", "$relay-two"],
+        discovery_event_ids=["$human-one", "$human-two"],
+        redacted_source_event_ids=["$human-two"],
+        completed=False,
+    )
+    store.record_pending_turn(pending)
+
+    assert store.is_handled("$human-two") is True
+    assert store.try_claim_turn(pending) is True
+
+    store.release_pending_turn_claim(pending)
 
 
 @pytest.mark.asyncio

@@ -201,8 +201,10 @@ class TurnStore:
 
     def try_claim_turn(self, turn_record: TurnRecord) -> bool:
         """Claim exclusive physical sources while aliases remain advisory."""
-        if not turn_record.source_event_ids or (
-            not turn_record.completed and any(map(self.is_handled, turn_record.discovery_event_ids))
+        alias_owners = map(self.get_turn_record, turn_record.discovery_event_ids)
+        if not turn_record.source_event_ids or any(
+            owner is not None and owner.completed and not same_turn_identity(owner, turn_record)
+            for owner in alias_owners
         ):
             return False
         source_ids, discovery_ids = set(turn_record.source_event_ids), set(turn_record.discovery_event_ids)
