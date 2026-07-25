@@ -1113,6 +1113,34 @@ async def test_hook_suppressed_edit_replay_stays_suppressed(tmp_path: Path) -> N
 
 
 @pytest.mark.asyncio
+async def test_concurrent_duplicate_edit_runs_ingress_hook_once(tmp_path: Path) -> None:
+    """Mailbox reservation must deduplicate an edit before its async hook runs."""
+    harness = _harness(tmp_path, turn_record=_turn_record())
+    hook_started = asyncio.Event()
+    release_hook = asyncio.Event()
+
+    async def hook(**_kwargs: object) -> bool:
+        hook_started.set()
+        await release_hook.wait()
+        return False
+
+    harness.ingress_hook_runner.emit_message_received_hooks.side_effect = hook
+    event, event_info = _edit_event()
+
+    first = asyncio.create_task(_handle_edit(harness, event, event_info))
+    await hook_started.wait()
+    second = asyncio.create_task(_handle_edit(harness, event, event_info))
+    await asyncio.sleep(0)
+    harness.ingress_hook_runner.emit_message_received_hooks.assert_awaited_once()
+
+    release_hook.set()
+    await asyncio.gather(first, second)
+
+    harness.ingress_hook_runner.emit_message_received_hooks.assert_awaited_once()
+    harness.generate_response.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_generate_response_failure_propagates_without_recording(tmp_path: Path) -> None:
     """A raising generate_response propagates and leaves the turn record untouched."""
     harness = _harness(tmp_path, turn_record=_turn_record())

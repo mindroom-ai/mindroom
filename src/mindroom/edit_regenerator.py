@@ -62,6 +62,7 @@ class _Edit:
 class _Mailbox:
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     pending: dict[str, _Edit] = field(default_factory=dict)
+    reserved_revisions: dict[str, SourceEventRevision] = field(default_factory=dict)
     participants: int = 0
 
 
@@ -182,31 +183,35 @@ class EditRegenerator:
             body=edited_content,
             source_kind=EDIT_SOURCE_KIND,
         )
-        edit = _Edit(
-            original_event_id=original_event_id,
-            body=edited_content,
-            context=context,
-            envelope=envelope,
-            revision=revision,
-            suppressed=revision == (turn_record.suppressed_source_event_revisions or {}).get(original_event_id)
-            or (
+        assert turn_record.anchor_event_id is not None
+        key = (turn_record.conversation_target.room_id, turn_record.anchor_event_id, envelope.requester_id)
+        mailbox = self._mailboxes.setdefault(key, _Mailbox())
+        reserved_revision = mailbox.reserved_revisions.get(original_event_id)
+        if reserved_revision is not None and revision <= reserved_revision:
+            return
+        mailbox.reserved_revisions[original_event_id] = revision
+        mailbox.participants += 1
+        try:
+            suppressed = revision == (turn_record.suppressed_source_event_revisions or {}).get(
+                original_event_id,
+            ) or (
                 revision != committed
                 and await self.deps.ingress_hook_runner.emit_message_received_hooks(
                     envelope=envelope,
                     correlation_id=event.event_id,
                     policy=hook_ingress_policy(envelope),
                 )
-            ),
-        )
-        assert turn_record.anchor_event_id is not None
-        key = (turn_record.conversation_target.room_id, turn_record.anchor_event_id, envelope.requester_id)
-        mailbox = self._mailboxes.setdefault(key, _Mailbox())
-        queued = mailbox.pending.get(original_event_id)
-        if queued is not None and revision <= queued.revision:
-            return
-        mailbox.pending[original_event_id] = edit
-        mailbox.participants += 1
-        try:
+            )
+            if mailbox.reserved_revisions.get(original_event_id) != revision:
+                return
+            mailbox.pending[original_event_id] = _Edit(
+                original_event_id=original_event_id,
+                body=edited_content,
+                context=context,
+                envelope=envelope,
+                revision=revision,
+                suppressed=suppressed,
+            )
             async with mailbox.lock:
                 await self._drain(room, turn_record, mailbox)
         finally:
