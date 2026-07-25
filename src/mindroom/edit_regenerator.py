@@ -367,13 +367,23 @@ class EditRegenerator:
 
     async def _drain(self, room: nio.MatrixRoom, initial_record: TurnRecord, mailbox: _Mailbox) -> None:
         claimed_record = initial_record
-        while not self.deps.turn_store.try_claim_turn(claimed_record):
+        while True:
+            if self.deps.turn_store.try_claim_turn(claimed_record):
+                break
             await self.deps.wait_for_turn_settled(claimed_record.indexed_event_ids)
             latest = max(mailbox.pending.values(), key=lambda edit: edit.revision)
             refreshed_record = self.deps.turn_store.get_turn_record(latest.original_event_id)
             if refreshed_record is None:
                 return
+            same_identity = (
+                refreshed_record.source_event_ids == claimed_record.source_event_ids
+                and refreshed_record.anchor_event_id == claimed_record.anchor_event_id
+            )
             claimed_record = refreshed_record
+            if same_identity:
+                if not self.deps.turn_store.try_claim_turn(claimed_record):
+                    return
+                break
         try:
             await self._drain_claimed(room, mailbox)
         finally:

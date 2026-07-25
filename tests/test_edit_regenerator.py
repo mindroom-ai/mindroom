@@ -871,6 +871,80 @@ async def test_edit_reloads_canonical_alias_owner_after_concurrent_claim(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_edit_aborts_when_physical_record_loses_discovery_alias(tmp_path: Path) -> None:
+    """A stale physical record with a reassigned alias must terminate without spinning."""
+    physical_event_id = ORIGINAL_EVENT_ID
+    discovery_event_id = "$human-alias:example.org"
+    replacement_relay_event_id = "$replacement-relay:example.org"
+    stale_record = _turn_record(
+        source_event_ids=(physical_event_id,),
+        discovery_event_ids=(discovery_event_id,),
+        source_event_prompts={physical_event_id: "stale prompt"},
+        source_event_metadata={
+            physical_event_id: SourceEventMetadata(sender=USER_ID, discovery_event_id=discovery_event_id),
+        },
+    )
+    replacement_record = _turn_record(
+        source_event_ids=(replacement_relay_event_id,),
+        discovery_event_ids=(discovery_event_id,),
+        source_event_prompts={replacement_relay_event_id: "replacement prompt"},
+        source_event_metadata={
+            replacement_relay_event_id: SourceEventMetadata(
+                sender=USER_ID,
+                discovery_event_id=discovery_event_id,
+            ),
+        },
+    )
+    harness = _harness(tmp_path, turn_record=None)
+    state_writer = MagicMock()
+    state_writer.supports_run_recovery.return_value = False
+    real_store = TurnStore(
+        TurnStoreDeps(
+            agent_name=AGENT_NAME,
+            tracking_base_path=tmp_path,
+            state_writer=state_writer,
+            resolver=harness.resolver,
+            tool_runtime=MagicMock(),
+        ),
+    )
+    real_store.record_pending_turn(stale_record)
+    wait_calls = 0
+
+    async def replace_alias_owner(**_kwargs: object) -> bool:
+        real_store.record_turn(replacement_record)
+        return False
+
+    async def wait_for_turn_settled(event_ids: tuple[str, ...]) -> None:
+        nonlocal wait_calls
+        wait_calls += 1
+        if wait_calls > 1:
+            pytest.fail("stale physical claim retried without progress")
+        await real_store.wait_for_turn_settled(event_ids)
+
+    harness.ingress_hook_runner.emit_message_received_hooks.side_effect = replace_alias_owner
+    harness.regenerator.deps = replace(
+        harness.regenerator.deps,
+        turn_store=real_store,
+        wait_for_turn_settled=wait_for_turn_settled,
+    )
+    event, event_info = _edit_event(
+        original_event_id=physical_event_id,
+        new_body="must not apply",
+    )
+
+    await asyncio.wait_for(_handle_edit(harness, event, event_info), timeout=1)
+
+    assert wait_calls == 1
+    _assert_no_regeneration(harness)
+    assert harness.regenerator._mailboxes == {}
+    replacement = real_store.get_turn_record(discovery_event_id)
+    assert replacement is not None
+    assert replacement.source_event_ids == (replacement_relay_event_id,)
+    assert real_store.try_claim_turn(replacement) is True
+    real_store.release_pending_turn_claim(replacement)
+
+
+@pytest.mark.asyncio
 async def test_pending_original_failure_releases_wait_without_regeneration(tmp_path: Path) -> None:
     """A settled original with no response ID should end the drain without hanging."""
     pending_record = _turn_record(response_event_id=None)
