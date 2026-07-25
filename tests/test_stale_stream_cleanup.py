@@ -430,6 +430,52 @@ def test_latest_visible_thread_event_id_by_thread_uses_edit_timestamp() -> None:
     }
 
 
+def test_latest_visible_thread_event_id_by_thread_maps_edited_parent_relation() -> None:
+    """An equal-time child should remain after its parent's visible edit state."""
+    root = ResolvedVisibleMessage.synthetic(
+        sender=USER_ID,
+        body="root",
+        event_id="$thread-root",
+        timestamp=NOW_MS - 3_000,
+        content={"body": "root", "msgtype": "m.text"},
+        thread_id="$thread-root",
+    )
+    parent = ResolvedVisibleMessage.synthetic(
+        sender=USER_ID,
+        body="parent",
+        event_id="$z-parent",
+        timestamp=NOW_MS - 2_000,
+        content={
+            "body": "parent",
+            "msgtype": "m.text",
+            "m.relates_to": _thread_reply_relation("$thread-root", "$thread-root"),
+        },
+        thread_id="$thread-root",
+    )
+    parent.apply_edit(
+        body="edited parent",
+        latest_event_id="$zz-parent-edit",
+        latest_event_timestamp=NOW_MS - 1_000,
+        content={"body": "edited parent", "msgtype": "m.text"},
+    )
+    child = ResolvedVisibleMessage.synthetic(
+        sender=USER_ID,
+        body="child",
+        event_id="$a-child",
+        timestamp=NOW_MS - 1_000,
+        content={
+            "body": "child",
+            "msgtype": "m.text",
+            "m.relates_to": {"m.in_reply_to": {"event_id": "$z-parent"}},
+        },
+        thread_id="$thread-root",
+    )
+
+    assert latest_visible_thread_event_id_by_thread([root, child, parent]) == {
+        "$thread-root": "$a-child",
+    }
+
+
 @pytest.mark.asyncio
 async def test_relations_api_filters_reactions_and_unions_history_ids(tmp_path: Path) -> None:
     """Cleanup should redact valid relation hits plus any history-scanned stop reactions."""

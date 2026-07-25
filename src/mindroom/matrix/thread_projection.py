@@ -306,13 +306,24 @@ def _related_event_id_by_visible_event_id(
     messages: Sequence[SupportsVisibleThreadMessage],
 ) -> dict[str, str]:
     """Return same-thread relation edges keyed by the visible event state."""
+    best_message_by_event_id: dict[str, SupportsVisibleThreadMessage] = {}
+    for message in messages:
+        current = best_message_by_event_id.get(message.event_id)
+        if current is None or _visible_thread_message_is_better_candidate(message, current):
+            best_message_by_event_id[message.event_id] = message
+    visible_event_id_by_event_id = {
+        event_id: message.visible_event_id for event_id, message in best_message_by_event_id.items()
+    }
     related_event_id_by_event_id: dict[str, str] = {}
     for message in messages:
         related_event_id = EventInfo.from_event({"content": dict(message.content)}).next_related_event_id(
             message.visible_event_id,
         )
         if isinstance(related_event_id, str):
-            related_event_id_by_event_id[message.visible_event_id] = related_event_id
+            related_event_id_by_event_id[message.visible_event_id] = visible_event_id_by_event_id.get(
+                related_event_id,
+                related_event_id,
+            )
     return related_event_id_by_event_id
 
 
