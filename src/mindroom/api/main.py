@@ -46,6 +46,7 @@ from mindroom.matrix.health import get_matrix_sync_health_snapshot
 from mindroom.orchestration.runtime import matrix_sync_startup_timeout_seconds
 from mindroom.runtime_state import get_runtime_state
 from mindroom.tool_system.sandbox_proxy import sandbox_proxy_config
+from mindroom.workers.backend import maintain_workers
 from mindroom.workers.runtime import (
     get_primary_worker_manager,
     primary_worker_backend_available,
@@ -222,7 +223,7 @@ def _cleanup_workers_once(
         kubernetes_tool_validation_snapshot=kubernetes_tool_validation_snapshot,
         worker_grantable_credentials=worker_grantable_credentials,
     )
-    maintenance = worker_manager.maintain_workers()
+    maintenance = maintain_workers(worker_manager)
     if maintenance.cleaned:
         logger.info(
             "Cleaned idle workers",

@@ -1156,7 +1156,8 @@ def test_worker_cleanup_once_cleans_workers(monkeypatch: pytest.MonkeyPatch) -> 
                 ),
             ]
 
-        def maintain_workers(self) -> WorkerMaintenanceResult:
+        def maintain_workers(self, *, now: float | None = None) -> WorkerMaintenanceResult:
+            assert now is None
             return WorkerMaintenanceResult(cleaned=tuple(self.cleanup_idle_workers()), reconciled=())
 
     monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "kubernetes")
@@ -1196,7 +1197,8 @@ def test_worker_cleanup_once_reconciles_drifted_worker_templates(monkeypatch: py
         def cleanup_idle_workers(self) -> list[WorkerHandle]:
             return []
 
-        def maintain_workers(self) -> WorkerMaintenanceResult:
+        def maintain_workers(self, *, now: float | None = None) -> WorkerMaintenanceResult:
+            assert now is None
             maintained_managers.append(self)
             return WorkerMaintenanceResult(cleaned=(), reconciled=())
 

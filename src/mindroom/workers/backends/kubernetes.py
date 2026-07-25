@@ -13,7 +13,6 @@ from mindroom.credentials import get_runtime_credentials_manager, sync_shared_cr
 from mindroom.runtime_env_policy import CREDENTIALS_ENCRYPTION_KEY_ENV, credentials_encryption_key_value
 from mindroom.tool_system.worker_routing import resolved_worker_key_scope, worker_dir_name, worker_id_for_key
 from mindroom.workers.backend import (
-    WorkerBackend,
     WorkerBackendError,
     effective_idle_status,
     filter_and_sort_worker_handles,
@@ -267,7 +266,7 @@ def _build_progress_reporter(
     return on_poll_tick, finalize
 
 
-class KubernetesWorkerBackend(WorkerBackend):
+class KubernetesWorkerBackend:
     """Kubernetes-backed worker provider for dedicated worker pods."""
 
     backend_name = "kubernetes"
