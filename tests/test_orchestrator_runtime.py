@@ -2122,6 +2122,37 @@ class TestMultiAgentOrchestrator:
         bot.try_start.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_shutdown_cancels_retry_producers_before_remaining_teardown(self, tmp_path: Path) -> None:
+        """Shutdown must close reload and retry races before any other awaited cleanup."""
+        orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
+        calls: list[str] = []
+
+        async def cancel_config_reload() -> None:
+            calls.append("config_reload")
+
+        async def cancel_bot_start_tasks() -> None:
+            calls.append("bot_start_tasks")
+
+        async def shutdown_approvals() -> None:
+            calls.append("approvals")
+
+        async def stop_after_startup_maintenance() -> None:
+            calls.append("startup_maintenance")
+            msg = "stop after ordering boundary"
+            raise RuntimeError(msg)
+
+        with (
+            patch.object(orchestrator.config_reload, "cancel", new=cancel_config_reload),
+            patch.object(orchestrator, "_cancel_bot_start_tasks", new=cancel_bot_start_tasks),
+            patch("mindroom.orchestrator.shutdown_approval_runtime", new=shutdown_approvals),
+            patch.object(orchestrator._startup_maintenance, "cancel", new=stop_after_startup_maintenance),
+            pytest.raises(RuntimeError, match="stop after ordering boundary"),
+        ):
+            await orchestrator.stop()
+
+        assert calls == ["config_reload", "bot_start_tasks", "approvals", "startup_maintenance"]
+
+    @pytest.mark.asyncio
     async def test_shutdown_expires_in_flight_approval_send_after_event_id_arrives(  # noqa: PLR0915
         self,
         tmp_path: Path,

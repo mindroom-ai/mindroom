@@ -39,12 +39,19 @@ from mindroom.history.storage import (
 from mindroom.history.types import HistoryScope, HistoryScopeState
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
-from mindroom.text_ingress_dispatch import _run_claimed_response, dispatch_text_message
+from mindroom.text_ingress_dispatch import (
+    _blocked_before_plan,
+    _PreparedTextDispatch,
+    _run_claimed_response,
+    dispatch_text_message,
+)
 from mindroom.turn_store import TurnStore, TurnStoreDeps
 from tests.conftest import TEST_PASSWORD, bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 if TYPE_CHECKING:
+    from mindroom.text_ingress_dispatch import _ReplayGuard
     from mindroom.turn_controller import TurnController
+    from mindroom.turn_policy import PreparedDispatch
 
 
 def _store(tmp_path: Path) -> TurnStore:
@@ -95,6 +102,43 @@ def test_try_claim_turn_alias_leaves_another_live_turns_alias_untouched(tmp_path
 
     # A's claim on the shared source survives B's release.
     assert store.is_claimed_in_flight("$shared") is True
+    assert store.is_claimed_in_flight("$relay") is False
+
+
+@pytest.mark.asyncio
+async def test_dispatch_releases_claim_when_router_alias_discovery_fails(tmp_path: Path) -> None:
+    """Every failure after the primary claim must leave the source replayable."""
+    store = _store(tmp_path)
+
+    def fail_alias_discovery(_event: object) -> str:
+        msg = "alias discovery failed"
+        raise RuntimeError(msg)
+
+    controller = cast(
+        "TurnController",
+        SimpleNamespace(
+            deps=SimpleNamespace(
+                turn_store=store,
+                ingress=SimpleNamespace(router_relay_original_event_id=fail_alias_discovery),
+            ),
+        ),
+    )
+    raw_event = PreparedTextEvent(
+        sender="@router:example.org",
+        event_id="$relay",
+        body="relayed",
+        source={},
+        server_timestamp=1_000,
+    )
+
+    with pytest.raises(RuntimeError, match="alias discovery failed"):
+        await dispatch_text_message(
+            controller,
+            MagicMock(room_id="!room:example.org"),
+            raw_event,
+            "@user:example.org",
+        )
+
     assert store.is_claimed_in_flight("$relay") is False
 
 
@@ -211,6 +255,95 @@ async def test_dispatch_leaves_alias_owned_by_another_live_turn(tmp_path: Path) 
     assert prepared_claims == [None]
     assert store.is_claimed_in_flight("$routed") is True
     assert store.is_claimed_in_flight("$relay") is False
+
+
+def _prepared_replay_guard_dispatch(*, degraded: bool) -> tuple[_PreparedTextDispatch, TurnRecord]:
+    event = PreparedTextEvent(
+        sender="@user:example.org",
+        event_id="$current",
+        body="current",
+        source={},
+        server_timestamp=1_000,
+    )
+    handled_turn = TurnRecord.create(["$current", "$coalesced-sibling"], completed=False)
+    prepared = _PreparedTextDispatch(
+        command=None,
+        event=event,
+        handled_turn=handled_turn,
+        payload_metadata=None,
+        dispatch=cast(
+            "PreparedDispatch",
+            SimpleNamespace(
+                envelope=SimpleNamespace(
+                    origin=SimpleNamespace(may_be_superseded_by_newer_requester_turn=True),
+                ),
+            ),
+        ),
+        replay_guard=cast(
+            "_ReplayGuard",
+            SimpleNamespace(
+                degraded=degraded,
+                history=[],
+                thread_id="$thread",
+            ),
+        ),
+        dispatch_started_at=0.0,
+    )
+    return prepared, handled_turn
+
+
+@pytest.mark.asyncio
+async def test_full_replay_guard_receives_every_current_turn_event_id() -> None:
+    """The full-history seam must not treat a coalesced sibling as newer work."""
+    prepared, handled_turn = _prepared_replay_guard_dispatch(degraded=False)
+    full_guard = MagicMock(return_value=False)
+    controller = cast(
+        "TurnController",
+        SimpleNamespace(
+            deps=SimpleNamespace(logger=MagicMock()),
+            _should_skip_deep_synthetic_full_dispatch=MagicMock(return_value=False),
+            _has_newer_unresponded_in_thread=full_guard,
+            _mark_source_events_responded=MagicMock(),
+        ),
+    )
+
+    assert (
+        await _blocked_before_plan(
+            controller,
+            MagicMock(room_id="!room:example.org"),
+            prepared,
+            requester_user_id="@user:example.org",
+        )
+        is False
+    )
+    assert full_guard.call_args.kwargs["current_turn_event_ids"] == handled_turn.indexed_event_ids
+
+
+@pytest.mark.asyncio
+async def test_degraded_replay_guard_receives_every_current_turn_event_id() -> None:
+    """The cache fallback seam must not treat a coalesced sibling as newer work."""
+    prepared, handled_turn = _prepared_replay_guard_dispatch(degraded=True)
+    cached_guard = AsyncMock(return_value=False)
+    controller = cast(
+        "TurnController",
+        SimpleNamespace(
+            deps=SimpleNamespace(logger=MagicMock()),
+            _should_skip_deep_synthetic_full_dispatch=MagicMock(return_value=False),
+            _has_newer_unresponded_cached_thread_event=cached_guard,
+            _mark_source_events_responded=MagicMock(),
+        ),
+    )
+
+    assert (
+        await _blocked_before_plan(
+            controller,
+            MagicMock(room_id="!room:example.org"),
+            prepared,
+            requester_user_id="@user:example.org",
+        )
+        is False
+    )
+    assert cached_guard.await_args.kwargs["current_turn_event_ids"] == handled_turn.indexed_event_ids
 
 
 def test_try_claim_turn_subset_claims_only_unowned_sources(tmp_path: Path) -> None:

@@ -97,13 +97,6 @@ async def dispatch_text_message(
     turn_claim = handled_turn or TurnRecord.create([raw_event.event_id], completed=False)
     if not turn_claim_held and not _try_claim_turn(controller, turn_claim, queued_notice_reservation):
         return
-    turn_claim = _claim_router_relay_alias(
-        controller,
-        raw_event,
-        turn_claim,
-        ingress_metadata=ingress_metadata,
-    )
-    terminal_handled_turn = _terminal_turn(raw_event.event_id, handled_turn, turn_claim)
     claim_transferred = False
 
     def mark_claim_transferred() -> None:
@@ -112,6 +105,13 @@ async def dispatch_text_message(
 
     timing_scope_token = None
     try:
+        turn_claim = _claim_router_relay_alias(
+            controller,
+            raw_event,
+            turn_claim,
+            ingress_metadata=ingress_metadata,
+        )
+        terminal_handled_turn = _terminal_turn(raw_event.event_id, handled_turn, turn_claim)
         dispatch_timing = get_dispatch_pipeline_timing(raw_event.source)
         prepared = await _prepare_text_dispatch(
             controller,
@@ -201,12 +201,13 @@ def _claim_router_relay_alias(
     )
     if alias_event_id is None or alias_event_id in turn_claim.indexed_event_ids:
         return turn_claim
-    if not controller.deps.turn_store.try_claim_turn_alias(alias_event_id):
-        return turn_claim
-    return replace(
+    claimed_turn = replace(
         turn_claim,
         discovery_event_ids=(*turn_claim.discovery_event_ids, alias_event_id),
     )
+    if not controller.deps.turn_store.try_claim_turn_alias(alias_event_id):
+        return turn_claim
+    return claimed_turn
 
 
 def _terminal_turn(

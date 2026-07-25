@@ -110,7 +110,7 @@ class StaleStreamCleanupActor:
     # Current runtime generation of the owning bot instance. Candidates whose
     # latest content carries this stamp are live current-generation output and
     # must never be repaired, regardless of clocks or live-task snapshots.
-    runtime_generation: str | None = None
+    runtime_generation: str
 
 
 @dataclass(frozen=True)
@@ -1755,8 +1755,6 @@ def _is_current_generation_stream(state: _MessageState, *, actor: StaleStreamCle
     stamped snapshot still names the current generation, so a current-run
     stream is never repaired from history regardless of homeserver clock skew.
     """
-    if actor.runtime_generation is None:
-        return False
     latest_generation = (state.latest_content or {}).get(STREAM_GENERATION_KEY)
     return latest_generation == actor.runtime_generation
 
