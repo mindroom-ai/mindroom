@@ -349,7 +349,7 @@ def test_log_metrics_aggregate_cache_write_and_health_signals() -> None:
             json.dumps(
                 {
                     "event": "Thread history cache store completed",
-                    "outcome": "not_replaced",
+                    "cache_store_outcome": "not_replaced",
                 },
             ),
             json.dumps(

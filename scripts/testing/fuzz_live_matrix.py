@@ -5028,6 +5028,8 @@ class _StressWaveAudit:
     source_to_placeholder_ms: tuple[float, ...]
     source_to_first_content_ms: tuple[float, ...]
     source_to_final_ms: tuple[float, ...]
+    source_event_timestamps_ms: tuple[int, ...]
+    final_event_timestamps_ms: tuple[int, ...]
     matrix_edit_count: int
     streaming_status_counts: Mapping[str, int]
 
@@ -5119,8 +5121,14 @@ class LiveMatrixStressRunner:
         complete_log_metrics.assert_healthy(check_duplicate_repairs=False)
         self._assert_reservation_telemetry(complete_log_metrics)
         source_to_final = [latency for audit in audits for latency in audit.source_to_final_ms]
-        first_sent = min(turn.sent_at for turns in turns_by_wave for turn in turns)
-        wall_seconds = max(0.001, time.monotonic() - first_sent)
+        wall_seconds = max(
+            0.001,
+            (
+                max(timestamp for audit in audits for timestamp in audit.final_event_timestamps_ms)
+                - min(timestamp for audit in audits for timestamp in audit.source_event_timestamps_ms)
+            )
+            / 1000,
+        )
         performance_sample = BaselineSample(
             source_to_final_p95_ms=percentile(source_to_final, 95),
             source_to_final_p99_ms=percentile(source_to_final, 99),
@@ -5355,15 +5363,19 @@ class LiveMatrixStressRunner:
         placeholder_latencies: list[float] = []
         content_latencies: list[float] = []
         final_latencies: list[float] = []
+        source_timestamps: list[int] = []
+        final_timestamps: list[int] = []
         status_counts: Counter[str] = Counter()
         matrix_edit_count = 0
         for turn in turns:
-            metric, edit_timestamps, statuses = self._audit_turn(events, turn)
+            metric, edit_timestamps, statuses, source_ts, final_ts = self._audit_turn(events, turn)
             thread_metrics.append(metric)
             edits_by_stream[f"wave-{wave:02d}/thread-{turn.thread:03d}"] = edit_timestamps
             placeholder_latencies.append(cast("float", metric["source_to_placeholder_ms"]))
             content_latencies.append(cast("float", metric["source_to_first_content_ms"]))
             final_latencies.append(cast("float", metric["source_to_final_ms"]))
+            source_timestamps.append(source_ts)
+            final_timestamps.append(final_ts)
             matrix_edit_count += len(edit_timestamps)
             status_counts.update(statuses)
         return _StressWaveAudit(
@@ -5373,6 +5385,8 @@ class LiveMatrixStressRunner:
             source_to_placeholder_ms=tuple(placeholder_latencies),
             source_to_first_content_ms=tuple(content_latencies),
             source_to_final_ms=tuple(final_latencies),
+            source_event_timestamps_ms=tuple(source_timestamps),
+            final_event_timestamps_ms=tuple(final_timestamps),
             matrix_edit_count=matrix_edit_count,
             streaming_status_counts=dict(status_counts),
         )
@@ -5381,7 +5395,7 @@ class LiveMatrixStressRunner:
         self,
         events: Mapping[str, Mapping[str, Any]],
         turn: _StressTurn,
-    ) -> tuple[dict[str, object], tuple[float, ...], Counter[str]]:
+    ) -> tuple[dict[str, object], tuple[float, ...], Counter[str], int, int]:
         response_event_id = self._one_response_event(turn.event_id)
         response = events.get(response_event_id)
         source = events.get(turn.event_id)
@@ -5455,7 +5469,7 @@ class LiveMatrixStressRunner:
                 f"COMPLETE[wave={turn.wave};thread={turn.thread:03d};pulses={self.config.pulses_per_stream}]"
             ),
         }
-        return metric, edit_timestamps, statuses
+        return metric, edit_timestamps, statuses, source_ts, final_ts
 
     def _wave_log_texts(self) -> tuple[str, ...]:
         payload = self.stack.log_path.read_bytes()

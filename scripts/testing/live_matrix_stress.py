@@ -542,7 +542,7 @@ class StressLogMetrics:
             if isinstance(reject_reason, str) and reject_reason:
                 self.cache_invalidated_reasons[reject_reason] += 1
         if message == "Thread history cache store completed":
-            outcome = str(event.get("outcome", "unknown"))
+            outcome = str(event.get("cache_store_outcome", event.get("outcome", "unknown")))
             self.snapshot_store_outcomes[outcome] += 1
             if outcome in {"writes_unavailable", "error", "failed"}:
                 self.cache_store_failures += 1

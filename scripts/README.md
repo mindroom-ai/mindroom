@@ -72,6 +72,8 @@ Use `--write-baseline scripts/testing/baselines/live-matrix-stress-50x45x2.json`
 The first two baseline runs retain a sample collection, and the third run writes the versioned median-of-three baseline only when dispersion is within the configured 25 percent allowance.
 Use `--mindroom-runtime` to drive a separate clean exact MindRoom checkout with the current harness, which lets three exact-main runs establish a same-machine baseline before the candidate run.
 Use `--fault-mode serialize-streams` without baseline flags to prove the synchronized concurrency gate rejects deliberately serialized model streams.
+The external API-health probe has an absolute five-second ceiling matching MindRoom's native event-loop stall detector.
+The sync-age probe has an absolute 120-second ceiling matching the production sync-watchdog restart threshold.
 
 ### Generate and sync managed avatars
 Run MindRoom at least once before syncing so the router account exists in Matrix state.
