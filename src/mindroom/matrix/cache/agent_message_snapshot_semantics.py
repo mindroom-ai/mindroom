@@ -10,6 +10,7 @@ import nio
 from mindroom.matrix.event_info import EventInfo, event_source_is_state_event
 from mindroom.matrix.media import parse_room_message_event_source, valid_room_message_replacement
 from mindroom.matrix.replacements import ordered_replacements, replacement_content
+from mindroom.matrix.thread_membership import event_info_proves_thread_membership
 
 from .agent_message_snapshot import AgentMessageSnapshot, AgentMessageSnapshotUnavailable
 from .thread_cache_helpers import thread_cache_rejection_reason
@@ -17,8 +18,6 @@ from .thread_cache_helpers import thread_cache_rejection_reason
 if TYPE_CHECKING:
     from .event_cache import ThreadCacheState
     from .event_cache_events import CachedEventRow
-
-_THREAD_CACHE_REJECTION_NONE_REASONS = frozenset({"no_cache_state", "cache_never_validated"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,7 +31,7 @@ class SnapshotLookupResult:
 def thread_cache_has_no_snapshot(cache_state: ThreadCacheState | None) -> bool:
     """Return whether a thread has no snapshot, raising when cached state is unsafe."""
     rejection_reason = thread_cache_rejection_reason(cache_state)
-    if rejection_reason in _THREAD_CACHE_REJECTION_NONE_REASONS:
+    if rejection_reason in {"no_cache_state", "cache_never_validated"}:
         return True
     if rejection_reason is not None:
         msg = f"Thread cache snapshot is not usable: {rejection_reason}"
@@ -54,8 +53,17 @@ def event_matches_snapshot_scope(
         or not isinstance(parse_room_message_event_source(event), nio.RoomMessage)
     ):
         return False
-    relation_type = EventInfo.from_event(event).relation_type
-    return relation_type != "m.replace" and not (thread_id is None and relation_type == "m.thread")
+    event_info = EventInfo.from_event(event)
+    if event_info.relation_type == "m.replace" or (thread_id is None and event_info.relation_type == "m.thread"):
+        return False
+    if thread_id is None:
+        return True
+    event_id = event.get("event_id")
+    return (
+        isinstance(event_id, str)
+        and bool(event_id)
+        and event_info_proves_thread_membership(event_info, event_id, thread_id)
+    )
 
 
 def snapshot_lookup_result(

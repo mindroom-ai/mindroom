@@ -1726,6 +1726,7 @@ depends_on = [
     "mindroom.matrix.event_info",
     "mindroom.matrix.media",
     "mindroom.matrix.replacements",
+    "mindroom.matrix.thread_membership",
     "mindroom.matrix.visible_body",
 ]
 visibility = [
@@ -2461,6 +2462,7 @@ depends_on = [
     "mindroom.matrix.client_visible_messages",
     "mindroom.matrix.event_info",
     "mindroom.matrix.replacements",
+    "mindroom.matrix.thread_membership",
 ]
 visibility = [
     "mindroom.matrix.client_thread_history",

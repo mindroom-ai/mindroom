@@ -194,6 +194,7 @@ def _guard_suffix(
         snapshot,
         suffix,
         room_id=ROOM,
+        thread_id=THREAD,
         trusted_sender_ids=frozenset(),
         membership_epoch=EPOCH,
         revision=ThreadRevision(
@@ -558,6 +559,15 @@ class TestSuffixSafetyGuards:
             poisoned["room_id"] = "!other:localhost"
 
         assert _guard_suffix(snapshot, [poisoned]) is None
+
+    @pytest.mark.asyncio
+    async def test_rejects_suffix_row_from_another_thread(self) -> None:
+        """Incremental reuse must match full-history thread membership."""
+        snapshot = await self._snapshot([_message_row(THREAD, 1000, "root")])
+        wrong_thread = _message_row("$wrong", 2000, "wrong thread")
+        wrong_thread["content"]["m.relates_to"]["event_id"] = "$other-root"
+
+        assert _guard_suffix(snapshot, [wrong_thread]) is None
 
     @pytest.mark.asyncio
     async def test_rejects_duplicate_and_known_suffix_event_ids(self) -> None:
