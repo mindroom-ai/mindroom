@@ -10,7 +10,12 @@ import nio
 
 from mindroom.constants import STREAM_STATUS_KEY
 from mindroom.entity_resolution import current_internal_sender_ids
-from mindroom.matrix.event_info import EventInfo, reply_to_event_id_from_content
+from mindroom.matrix.event_info import (
+    EventInfo,
+    has_valid_message_replacement,
+    project_message_replacement_content,
+    reply_to_event_id_from_content,
+)
 from mindroom.matrix.message_content import extract_and_resolve_message, extract_edit_body, resolve_event_source_content
 from mindroom.matrix.visible_body import bundled_visible_body_preview, visible_body_from_event_source
 
@@ -21,6 +26,10 @@ if TYPE_CHECKING:
     from mindroom.matrix.message_content import SidecarHydrationBatch
 
 _VISIBLE_ROOM_MESSAGE_EVENT_TYPES = (nio.RoomMessageText, nio.RoomMessageNotice)
+type LatestThreadEdits = dict[
+    tuple[str, str],
+    tuple[nio.RoomMessageText | nio.RoomMessageNotice, str | None],
+]
 
 
 @dataclass(slots=True)
@@ -89,19 +98,13 @@ class ResolvedVisibleMessage:
         self,
         *,
         body: str,
-        timestamp: int,
         latest_event_id: str,
-        thread_id: str | None,
-        content: dict[str, Any] | None,
+        content: dict[str, Any],
     ) -> None:
         """Apply the newest visible edit state to this message."""
         self.body = body
-        self.timestamp = timestamp
         self.latest_event_id = latest_event_id
-        if thread_id is not None:
-            self.thread_id = thread_id
-        if content is not None:
-            self.content = content
+        self.content = project_message_replacement_content(self.content, content)
         self.refresh_stream_status()
 
     @property
@@ -368,20 +371,23 @@ def record_latest_thread_edit(
     event: nio.RoomMessageText | nio.RoomMessageNotice,
     *,
     event_info: EventInfo,
-    latest_edits_by_original_event_id: dict[str, tuple[nio.RoomMessageText | nio.RoomMessageNotice, str | None]],
+    latest_edits_by_original_event_id: LatestThreadEdits,
 ) -> bool:
-    """Track latest edit candidate, returning True if event is an edit."""
+    """Track the latest edit from each sender, returning True if event is an edit."""
     if not (event_info.is_edit and event_info.original_event_id):
         return False
+    if not has_valid_message_replacement(event.source):
+        return True
 
     original_event_id = event_info.original_event_id
-    current_latest_edit_data = latest_edits_by_original_event_id.get(original_event_id)
+    edit_key = (original_event_id, event.sender)
+    current_latest_edit_data = latest_edits_by_original_event_id.get(edit_key)
     current_latest_edit = current_latest_edit_data[0] if current_latest_edit_data else None
     if current_latest_edit is None or (event.server_timestamp, event.event_id) > (
         current_latest_edit.server_timestamp,
         current_latest_edit.event_id,
     ):
-        latest_edits_by_original_event_id[original_event_id] = (event, event_info.thread_id_from_edit)
+        latest_edits_by_original_event_id[edit_key] = (event, event_info.thread_id_from_edit)
     return True
 
 
@@ -389,23 +395,18 @@ async def apply_latest_edits_to_messages(
     client: nio.AsyncClient,
     *,
     messages_by_event_id: dict[str, ResolvedVisibleMessage],
-    latest_edits_by_original_event_id: dict[str, tuple[nio.RoomMessageText | nio.RoomMessageNotice, str | None]],
-    required_thread_id: str | None = None,
+    latest_edits_by_original_event_id: LatestThreadEdits,
     event_cache: ConversationEventCache | None = None,
     room_id: str | None = None,
     expected_membership_epoch: int | None = None,
     hydration_batch: SidecarHydrationBatch | None = None,
     trusted_sender_ids: Collection[str] = (),
 ) -> None:
-    """Apply latest edits to message records and synthesize missing originals when allowed."""
-    for original_event_id, (edit_event, edit_thread_id) in latest_edits_by_original_event_id.items():
+    """Apply the newest valid same-sender edit to each existing message."""
+    for (original_event_id, edit_sender), (edit_event, _edit_thread_id) in latest_edits_by_original_event_id.items():
         existing_message = messages_by_event_id.get(original_event_id)
-
-        # Ignore missing originals unrelated to this thread before resolving
-        # potentially large edit payloads from sidecar storage.
-        if existing_message is None and required_thread_id is not None and edit_thread_id != required_thread_id:
+        if existing_message is None or edit_sender != existing_message.sender:
             continue
-
         edited_body, edited_content = await extract_edit_body(
             edit_event.source,
             client,
@@ -415,30 +416,13 @@ async def apply_latest_edits_to_messages(
             hydration_batch=hydration_batch,
             trusted_sender_ids=trusted_sender_ids,
         )
-        if edited_body is None:
+        if edited_body is None or edited_content is None:
             continue
-
-        if existing_message is not None:
-            existing_message.apply_edit(
-                body=edited_body,
-                timestamp=edit_event.server_timestamp,
-                latest_event_id=edit_event.event_id,
-                thread_id=edit_thread_id,
-                content=edited_content,
-            )
-            continue
-
-        synthesized_message = ResolvedVisibleMessage(
-            sender=edit_event.sender,
+        existing_message.apply_edit(
             body=edited_body,
-            timestamp=edit_event.server_timestamp,
-            event_id=original_event_id,
-            content=edited_content if edited_content is not None else {},
-            thread_id=edit_thread_id,
             latest_event_id=edit_event.event_id,
+            content=edited_content,
         )
-        synthesized_message.refresh_stream_status()
-        messages_by_event_id[original_event_id] = synthesized_message
 
 
 async def resolve_latest_visible_messages(
@@ -450,7 +434,7 @@ async def resolve_latest_visible_messages(
 ) -> dict[str, ResolvedVisibleMessage]:
     """Resolve the latest visible message state by original event ID for a set of message events."""
     messages_by_event_id: dict[str, ResolvedVisibleMessage] = {}
-    latest_edits_by_original_event_id: dict[str, tuple[nio.RoomMessageText | nio.RoomMessageNotice, str | None]] = {}
+    latest_edits_by_original_event_id: LatestThreadEdits = {}
 
     for event in events:
         if sender is not None and event.sender != sender:
@@ -488,6 +472,7 @@ async def resolve_latest_visible_messages(
 
 
 __all__ = [
+    "LatestThreadEdits",
     "ResolvedVisibleMessage",
     "apply_latest_edits_to_messages",
     "bundled_replacement_body",

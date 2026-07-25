@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import stat
 import subprocess
 from pathlib import Path
 from typing import Any, cast
+from unittest.mock import patch
 
 import pytest
 
@@ -154,12 +156,17 @@ def test_mint_callback_prefers_explicit_mindroom_url(tmp_path: Path) -> None:
 
 def test_generated_script_posts_summary_and_deletes_itself(tmp_path: Path) -> None:
     """The Bash-only script posts a safe summary then removes itself."""
-    with tool_runtime_context(_context(tmp_path)):
+    with (
+        patch(
+            "mindroom.custom_tools.callback_manager.mint_trigger_capability",
+            return_value=("mrt_jq_token", "0" * 64),
+        ),
+        tool_runtime_context(_context(tmp_path)),
+    ):
         payload = _payload(CallbackManagerTools().mint_callback("quote-safe callback"))
     script_path = Path(payload["script_path"])
     script_text = script_path.read_text(encoding="utf-8")
-    assert "python3" not in script_text
-    assert "jq" not in script_text
+    assert re.search(r"(?<![A-Za-z0-9_])(?:jq|python3)(?![A-Za-z0-9_])", script_text) is None
 
     fake_bin = tmp_path / "fake-bin"
     fake_bin.mkdir()

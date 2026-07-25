@@ -191,7 +191,7 @@ async def _load_latest_edit_row(
           AND event_edits.room_id = ?
           AND event_edits.original_event_id = ?
           {sender_predicate}
-        ORDER BY event_edits.origin_server_ts DESC, events.write_seq DESC
+        ORDER BY event_edits.origin_server_ts DESC, event_edits.edit_event_id DESC
         LIMIT 1
         """,  # noqa: S608
         parameters,

@@ -44,6 +44,35 @@ def reply_to_event_id_from_content(content: Mapping[str, object] | None) -> str 
     return reply_to_event_id if isinstance(reply_to_event_id, str) else None
 
 
+def has_valid_message_replacement(event_source: Mapping[str, object]) -> bool:
+    """Return whether one room-message edit carries usable replacement content."""
+    if event_source.get("type") != "m.room.message":
+        return False
+    content = event_source.get("content")
+    if not isinstance(content, Mapping):
+        return False
+    new_content = cast("Mapping[str, object]", content).get("m.new_content")
+    return (
+        isinstance(new_content, Mapping)
+        and isinstance(cast("Mapping[str, object]", new_content).get("body"), str)
+        and isinstance(cast("Mapping[str, object]", new_content).get("msgtype"), str)
+    )
+
+
+def project_message_replacement_content(
+    original_content: Mapping[str, object],
+    replacement_content: Mapping[str, object],
+) -> dict[str, object]:
+    """Project replacement fields while preserving the original relation."""
+    projected = {key: value for key, value in replacement_content.items() if isinstance(key, str)}
+    original_relation = original_content.get("m.relates_to")
+    if isinstance(original_relation, Mapping):
+        projected["m.relates_to"] = {key: value for key, value in original_relation.items() if isinstance(key, str)}
+    else:
+        projected.pop("m.relates_to", None)
+    return projected
+
+
 @dataclass
 class EventInfo:
     """Comprehensive analysis of Matrix event relations."""
