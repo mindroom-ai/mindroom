@@ -4,8 +4,8 @@
 
 - PR: `https://github.com/mindroom-ai/mindroom/pull/1641`.
 - Branch: `fix/thread-edit-integrity`.
-- Exact local, remote, and PR head before the active correction: `8aca4563c3e1d520276335ada6bb26b090fd7cb6`.
-- Production source remains `+786/-608`, net `+178`.
+- Exact local and remote head: `6dbf6fbf555026708feb2182297087d659d73f27`.
+- Production source is `+960/-763`, net `+197` against exact `origin/main` `5f062224a1f490a91a72c555bf2fa0ca59c096b3`.
 - Git author and committer must resolve to `Bas Nijholt <bas@nijho.lt>` before every commit.
 - Never amend, force-push, merge, or open the PR as draft.
 - Preserve the three untracked `.claude/TASK-*.md` files.
@@ -31,7 +31,7 @@
 - Pass the authoritative room through direct extraction and reject conflicting explicit room evidence.
 - Any production correction must remain under the hard net `+200` source ceiling.
 
-## Current GitHub conflict
+## Resolved current-main conflict
 
 - Merge commit `8a384affc9fb577d732cb4987b5aed12f0885680` incorporates exact `origin/main` head `5f062224a1f490a91a72c555bf2fa0ca59c096b3`.
 - The only content conflict was `_bulk_scan_thread_event_sources`.
@@ -54,7 +54,7 @@
 
 - Fresh exact-head native Codex `gpt-5.6-sol` xhigh review.
 - Green exact-head GitHub CI.
-- Serialized PostgreSQL focused coverage, full pytest, Tach, and all-file pre-commit only after PR #1639 explicitly releases the heavy slot.
+- Serialized PostgreSQL focused coverage, full pytest, Tach, and all-file pre-commit only after PR #1646 explicitly releases the heavy slot.
 - Exact-head real-Tuwunel gate from `/tmp/pr1641-live-tuwunel.md` only while owning the heavy slot.
 - Remove this tracked handoff only at the next stable freeze.
 - Never merge.
@@ -77,4 +77,23 @@
 - Production source is `+813/-613`, net `+200` against merge base `5f062224a1f490a91a72c555bf2fa0ca59c096b3`.
 - The exact-`dfceccb29` native review and CI became stale when this correction moved the head.
 - Fresh exact-head native Codex and GitHub CI are required after this status commit is pushed.
-- PostgreSQL, full pytest, all-file hooks, Docker, and real-Tuwunel remain closed behind PR #1639.
+- PostgreSQL, full pytest, all-file hooks, Docker, and real-Tuwunel remain closed behind PR #1646.
+
+## Exact-6db requester and relation-ownership correction
+
+- Fresh exact-`b6f7d4a25` Codex review independently reproduced two blockers.
+- State and explicit wrong-room message-shaped events entered sync thread handling, page-local relation ownership, event-to-thread indexes, edit indexes, and redaction dependencies.
+- A late original carrying a tombstoned bundled replacement was dropped instead of retained unedited.
+- The superseded exact-`dfceccb29` review also independently reproduced cross-requester edit regeneration, relation-bearing cached roots, and live resurrection of tombstoned bundled edits.
+- Commit `cb3a21515610711f0390d70bc9ac050519c13b5c` binds regeneration to the durable requester.
+- Commit `6dbf6fbf555026708feb2182297087d659d73f27` centralizes non-state room scope, rejects invalid relation ownership at every derived-index seam, sanitizes bundled replacements without dropping the original, and filters durable tombstones during live projection.
+- Page-local invalid message-shaped events retain only sanitized room-level metadata, so same-page redactions cannot invalidate a thread.
+- Five exact SQLite and sync regressions failed before the correction and pass after it.
+- The requester, poisoned-root, live bundled-redaction, invalid-index, and page-local redaction regressions pass.
+- All `159` focused replacement, reuse, edit-regenerator, message-content, and media parsing tests pass.
+- The non-PostgreSQL `tests/test_event_cache.py` selection and `21` focused approval tests pass.
+- Ruff, formatting, `ty`, Tach dependency/interface checks, module privacy, diff checks, and both commit hook runs pass.
+- PostgreSQL was not run locally because PR #1646 owns the serialized heavy slot.
+- Every approval, CI result, and live result before exact `6dbf6fbf5` is stale.
+- Fresh exact-head Codex review, GitHub CI, PostgreSQL fanout, full pytest, all-file hooks, and real-Tuwunel remain required.
+- Merge gate: CLOSED.
