@@ -2151,7 +2151,36 @@ async def _cancel_task_if_pending(task: asyncio.Task | None) -> None:
         await task
 
 
-async def main(  # noqa: C901, PLR0912, PLR0915
+async def _finish_runtime_shutdown(
+    *,
+    shutdown_wait_task: asyncio.Task[bool] | None,
+    api_task: asyncio.Task[None] | None,
+    orchestrator_task: asyncio.Task[None] | None,
+    auxiliary_tasks: list[asyncio.Task],
+    orchestrator: _MultiAgentOrchestrator | None,
+    stall_detector: EventLoopStallDetector | None,
+) -> None:
+    """Finish one runtime cleanup sequence without duplicating partial teardown."""
+    await _cancel_task_if_pending(shutdown_wait_task)
+    await _cancel_task_if_pending(api_task)
+    await _cancel_task_if_pending(orchestrator_task)
+    for task in auxiliary_tasks:
+        task.cancel()
+    for task in auxiliary_tasks:
+        with suppress(asyncio.CancelledError):
+            await task
+    try:
+        if orchestrator is not None:
+            await orchestrator.stop()
+    finally:
+        if stall_detector is not None:
+            stall_detector.stop()
+        reset_matrix_sync_health()
+        reset_runtime_state()
+        shutdown_primary_worker_manager()
+
+
+async def main(  # noqa: PLR0915
     log_level: str,
     runtime_paths: RuntimePaths,
     *,
@@ -2249,22 +2278,26 @@ async def main(  # noqa: C901, PLR0912, PLR0915
         logger.exception("Error in MindRoom runtime")
         raise
     finally:
+        shutdown_was_requested = shutdown_requested.is_set()
         shutdown_requested.set()
-        await _cancel_task_if_pending(shutdown_wait_task)
-        await _cancel_task_if_pending(api_task)
-        await _cancel_task_if_pending(orchestrator_task)
-        # Cancel auxiliary supervisors before shutting down the orchestrator itself.
-        for task in auxiliary_tasks:
-            task.cancel()
-        for task in auxiliary_tasks:
-            with suppress(asyncio.CancelledError):
-                await task
+        cleanup_task = asyncio.create_task(
+            _finish_runtime_shutdown(
+                shutdown_wait_task=shutdown_wait_task,
+                api_task=api_task,
+                orchestrator_task=orchestrator_task,
+                auxiliary_tasks=auxiliary_tasks,
+                orchestrator=orchestrator,
+                stall_detector=stall_detector,
+            ),
+            name="runtime_shutdown",
+        )
         try:
-            if orchestrator is not None:
-                await orchestrator.stop()
-        finally:
-            if stall_detector is not None:
-                stall_detector.stop()
-            reset_matrix_sync_health()
-            reset_runtime_state()
-            shutdown_primary_worker_manager()
+            await asyncio.shield(cleanup_task)
+        except asyncio.CancelledError:
+            if not shutdown_was_requested:
+                cleanup_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await cleanup_task
+                raise
+            logger.info("Ignoring duplicate signal cancellation during runtime cleanup")
+            await cleanup_task

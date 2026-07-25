@@ -577,21 +577,22 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """A second SIGINT cancellation must not abort cleanup started by the first signal."""
         reset_runtime_state()
-        start_released = asyncio.Event()
+        stop_started = asyncio.Event()
+        stop_released = asyncio.Event()
         mock_orchestrator = MagicMock()
         mock_orchestrator.knowledge_refresh_scheduler = None
 
         async def _start() -> None:
-            await start_released.wait()
+            await asyncio.Event().wait()
 
         async def _stop() -> None:
-            start_released.set()
+            stop_started.set()
+            await stop_released.wait()
 
-        async def _cancel_after_requested_shutdown(**kwargs: object) -> None:
+        async def _request_shutdown(**kwargs: object) -> None:
             shutdown_requested = kwargs["shutdown_requested"]
             assert isinstance(shutdown_requested, asyncio.Event)
             shutdown_requested.set()
-            raise asyncio.CancelledError
 
         async def _blocked_auxiliary_task(*_args: object, **_kwargs: object) -> None:
             await asyncio.Event().wait()
@@ -606,10 +607,16 @@ class TestAgentBot(AgentBotTestBase):
             patch("mindroom.orchestrator._run_auxiliary_task_forever", new=_blocked_auxiliary_task),
             patch(
                 "mindroom.orchestrator._wait_for_runtime_completion",
-                side_effect=_cancel_after_requested_shutdown,
+                side_effect=_request_shutdown,
             ),
         ):
-            await main(log_level="INFO", runtime_paths=self._runtime_paths(tmp_path), api=False)
+            main_task = asyncio.create_task(
+                main(log_level="INFO", runtime_paths=self._runtime_paths(tmp_path), api=False),
+            )
+            await asyncio.wait_for(stop_started.wait(), timeout=1)
+            main_task.cancel()
+            stop_released.set()
+            await asyncio.wait_for(main_task, timeout=1)
 
         mock_orchestrator.stop.assert_awaited_once()
         mock_orchestrator.start.assert_awaited_once()
