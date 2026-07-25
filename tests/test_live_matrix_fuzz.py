@@ -2448,6 +2448,69 @@ def test_reversed_model_arrival_preserves_slow_fast_profile() -> None:
         _ModelHandler.reset_observations()
 
 
+@pytest.mark.asyncio
+async def test_ledger_free_final_audit_binds_direct_reply_to_exact_source_marker() -> None:
+    """Wrong, missing, and exact current-turn markers fail, fail, and pass."""
+    client = LiveMatrixClient("http://matrix.invalid", "!room:example")
+    oracle = ExactReplyOracle(client, "@agent:example")
+    marker_a = _source_marker("op:1", ORIGINAL_REVISION)
+    marker_b = _source_marker("op:2", ORIGINAL_REVISION)
+    source_content = {"body": f"source {marker_a}", "msgtype": "m.text"}
+    source = {
+        "event_id": "$source",
+        "sender": "@user:example",
+        "type": "m.room.message",
+        "origin_server_ts": 50,
+        "content": source_content,
+    }
+    reply = _agent_reply_event("$source", "$reply", _short_body_for(7))
+
+    async def paginate_room(_room_id: str) -> list[dict[str, Any]]:
+        return [source, reply]
+
+    client.paginate_room = paginate_room  # type: ignore[method-assign]
+    oracle.expect("op:1", "$source")
+    oracle._ingest_event(source)
+    oracle._ingest_event(reply)
+    observed = frozenset({marker_b})
+    auditor = FinalStateAuditor(
+        client,
+        oracle,
+        agent_id="@agent:example",
+        expected_body_for=_short_body_for,
+        source_current_markers={"$source": marker_a},
+        observed_markers_for=lambda _call_id: observed,
+    )
+    sent_records = [
+        _SentRecord(
+            "$source",
+            "!room:example",
+            "m.room.message",
+            sender="@user:example",
+            content=source_content,
+        ),
+    ]
+    try:
+        for observed_markers in (frozenset({marker_b}), frozenset()):
+            observed = observed_markers
+            with pytest.raises(AssertionError, match="direct-reply model source audit failed"):
+                await auditor.audit(
+                    room_ids=("!room:example",),
+                    sent_records=sent_records,
+                    redacted_targets={},
+                )
+
+        observed = frozenset({marker_a})
+        result = await auditor.audit(
+            room_ids=("!room:example",),
+            sent_records=sent_records,
+            redacted_targets={},
+        )
+        assert result["completed_final_bodies"] == 1
+    finally:
+        await client.close()
+
+
 def _model_source_auditor(
     *,
     ledger_path: Path,
@@ -4446,8 +4509,10 @@ async def test_saturation_turn_registers_exact_sent_source_for_final_audit() -> 
     runner.scenario = LiveFuzzScenario(thread_count=4, batches=(), profile="saturation")
     runner.oracle = FakeOracle()
     runner.sent_records = []
+    runner.source_current_markers = {}
     runner._wait_for_completed_response = completed_response  # type: ignore[method-assign]
     expected_sources: set[str] = set()
+    marker = _source_marker("op:9", ORIGINAL_REVISION)
 
     result = await runner._saturation_turn(
         FakeClient(),  # type: ignore[arg-type]
@@ -4461,6 +4526,7 @@ async def test_saturation_turn_registers_exact_sent_source_for_final_audit() -> 
 
     assert result == ("$root", "$response-from-server")
     assert expected_sources == {"$source-from-server"}
+    assert runner.source_current_markers == {"$source-from-server": marker}
     assert expected == [
         ("begin", "", -1, -1),
         ("op:9", "$source-from-server", 3, 2),
@@ -4475,6 +4541,8 @@ async def test_saturation_turn_registers_exact_sent_source_for_final_audit() -> 
             content=runner.sent_records[0].content,
         ),
     ]
+    assert runner.sent_records[0].content is not None
+    assert runner.sent_records[0].content["body"].endswith(marker)
 
 
 def test_failure_bundle_interleaves_lifecycle_boundaries(tmp_path: Path) -> None:
@@ -4626,6 +4694,104 @@ async def test_apply_batch_records_success_when_failure_is_observed_first() -> N
         await runner._apply_batch_in_completion_order(batch, on_complete=record)
 
     assert recorded == ["$landed"]
+
+
+def _redaction_accounting_runner(
+    *,
+    pump: Callable[..., Any],
+) -> tuple[LiveFuzzRunner, SimpleNamespace, list[dict[str, object]]]:
+    """Build a bare redaction runner with durable in-memory accounting."""
+
+    class RedactionClient:
+        user_id = "@user:example"
+
+        @staticmethod
+        async def redact(
+            target_event_id: str,
+            _txn_id: str,
+            *,
+            room_id: str,
+        ) -> str:
+            assert target_event_id == "$source"
+            assert room_id == "!room:example"
+            return "$redaction"
+
+    oracle = SimpleNamespace(
+        pump=pump,
+        refresh_ledger_attributions=lambda **_kwargs: None,
+        settled_sources=lambda: set(),
+        optional_sources=set(),
+    )
+    oracle.mark_source_optional = oracle.optional_sources.add
+    runner = object.__new__(LiveFuzzRunner)
+    runner.oracle = oracle
+    runner.redacted_targets = {}
+    runner.sent_records = []
+    runner._edit_event_source = {}
+    runner.operation_count = 0
+    runner._realized_sequence = 0
+    runner.event_ids = {}
+    runner.sent_payloads = {}
+    runner._mindroom_running = True
+    journal: list[dict[str, object]] = []
+    runner._journal = journal.append
+    runner._resolve_target = lambda _logical_ref: asyncio.sleep(0, result="$source")  # type: ignore[method-assign]
+    runner._client_for_operation = lambda _operation: RedactionClient()  # type: ignore[method-assign]
+    runner._room_for_thread = lambda _thread: "!room:example"  # type: ignore[method-assign]
+    return runner, oracle, journal
+
+
+@pytest.mark.asyncio
+async def test_redaction_success_journals_once_before_optional_classification() -> None:
+    """A normally completed source redaction is accounted and classified once."""
+
+    async def pump(*, timeout_ms: int) -> None:
+        assert timeout_ms == 0
+
+    runner, oracle, journal = _redaction_accounting_runner(pump=pump)
+    operation = LiveOperation(3, LiveOperationKind.REDACTION, 0, "op:1")
+
+    await runner._apply_batch_in_completion_order(
+        (operation,),
+        on_complete=runner._record_batch_results,
+    )
+
+    assert runner.operation_count == 1
+    assert runner.event_ids == {"op:3": "$redaction"}
+    assert runner.redacted_targets == {"$source": "$redaction"}
+    assert oracle.optional_sources == {"$source"}
+    assert [entry["event_id"] for entry in journal] == ["$redaction"]
+
+
+@pytest.mark.asyncio
+async def test_redaction_cancelled_in_pump_keeps_one_landed_journal_record() -> None:
+    """Cancellation after Matrix landing cannot erase or duplicate accounting."""
+    pump_started = asyncio.Event()
+    never = asyncio.Event()
+
+    async def pump(*, timeout_ms: int) -> None:
+        assert timeout_ms == 0
+        pump_started.set()
+        await never.wait()
+
+    runner, oracle, journal = _redaction_accounting_runner(pump=pump)
+    operation = LiveOperation(3, LiveOperationKind.REDACTION, 0, "op:1")
+    task = asyncio.create_task(
+        runner._apply_batch_in_completion_order(
+            (operation,),
+            on_complete=runner._record_batch_results,
+        ),
+    )
+    await pump_started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert runner.operation_count == 1
+    assert runner.event_ids == {"op:3": "$redaction"}
+    assert runner.redacted_targets == {"$source": "$redaction"}
+    assert oracle.optional_sources == set()
+    assert [entry["event_id"] for entry in journal] == ["$redaction"]
 
 
 @pytest.mark.asyncio

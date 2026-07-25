@@ -2868,6 +2868,8 @@ class FinalStateAuditor:
                 events,
                 redacted_source_event_ids=redacted_sources,
             )
+        else:
+            self._assert_direct_reply_model_sources(events, replies)
         return {
             "audited_events": len(events),
             "audited_rooms": len(set(room_ids)),
@@ -3339,6 +3341,31 @@ class FinalStateAuditor:
             msg = f"model source-revision audit failed: {problems}"
             raise AssertionError(msg)
 
+    def _assert_direct_reply_model_sources(
+        self,
+        events: Mapping[str, Mapping[str, Any]],
+        replies: Mapping[str, set[str]],
+    ) -> None:
+        """Bind every ledger-free direct reply to its one exact source marker."""
+        problems: list[str] = []
+        for source_event_id, logical_ref in self.oracle.expected_sources.items():
+            expected_marker = self.source_current_markers.get(source_event_id)
+            if expected_marker is None:
+                problems.append(f"{logical_ref} ({source_event_id}) has no retained source marker")
+                continue
+            for reply_event_id in replies.get(source_event_id, ()):
+                body = self._latest_agent_body(events, reply_event_id)
+                call_id = _body_call_id(body)
+                observed = self.observed_markers_for(call_id) if call_id is not None else frozenset()
+                if observed != {expected_marker}:
+                    problems.append(
+                        f"{logical_ref} ({source_event_id}) reply {reply_event_id} "
+                        f"expected exactly {expected_marker!r}, model saw {sorted(observed)}",
+                    )
+        if problems:
+            msg = f"direct-reply model source audit failed: {problems}"
+            raise AssertionError(msg)
+
     def _assert_final_bodies_complete(
         self,
         events: Mapping[str, Mapping[str, Any]],
@@ -3716,6 +3743,7 @@ class LiveFuzzRunner:
         expected_sources: set[str],
     ) -> tuple[str, str]:
         """Send one old-harness turn and wait for its completed stream."""
+        source_marker = _source_marker(label, ORIGINAL_REVISION)
         content = self._message_content(
             f"Live saturation {label}",
             relation=(
@@ -3728,6 +3756,7 @@ class LiveFuzzRunner:
                 if thread_root is not None and reply_to is not None
                 else None
             ),
+            marker=source_marker,
         )
         txn_id = f"live-saturation-{label}-{secrets.token_hex(4)}"
         room_id = self._room_for_thread(thread)
@@ -3744,6 +3773,7 @@ class LiveFuzzRunner:
                     content=content,
                 ),
             )
+            self.source_current_markers[source_event_id] = source_marker
             self.oracle.expect(
                 label,
                 source_event_id,
@@ -3905,11 +3935,21 @@ class LiveFuzzRunner:
         async def apply_and_record(
             operation: LiveOperation,
         ) -> tuple[LiveOperation, str | None, _SentPayload | None]:
+            if operation.kind is LiveOperationKind.REDACTION:
+                return await self._apply_redaction(
+                    operation,
+                    on_landed=record_result,
+                )
             result = await self._apply(operation)
+            record_result(result)
+            return result
+
+        def record_result(
+            result: tuple[LiveOperation, str | None, _SentPayload | None],
+        ) -> None:
             results.append(result)
             if on_complete is not None:
                 on_complete((result,))
-            return result
 
         tasks = [asyncio.create_task(apply_and_record(operation)) for operation in batch]
         try:
@@ -4202,6 +4242,9 @@ class LiveFuzzRunner:
         self,
         operation: LiveOperation,
     ) -> tuple[LiveOperation, str | None, _SentPayload | None]:
+        if operation.kind is LiveOperationKind.REDACTION:
+            return await self._apply_redaction(operation)
+
         assert operation.target is not None
         target_event_id = await self._resolve_target(operation.target)
         txn_id = f"live-fuzz-op-{operation.operation_id}"
@@ -4288,42 +4331,62 @@ class LiveFuzzRunner:
             )
             return operation, event_id, None
 
-        if operation.kind is LiveOperationKind.REDACTION:
-            event_id = await client.redact(target_event_id, txn_id, room_id=room_id)
-            self.redacted_targets[target_event_id] = event_id
-            self.sent_records.append(
-                _SentRecord(
-                    event_id,
-                    room_id,
-                    "m.room.redaction",
-                    sender=client.user_id,
-                    redacts=target_event_id,
-                    content={"reason": "live cache fuzz"},
-                ),
-            )
-            reverted_source = self._edit_event_source.get(target_event_id)
-            if reverted_source is not None:
-                # Redacting an ``m.replace`` reverts its target source to the
-                # latest surviving revision, so the model correctly ends at that
-                # earlier body. Revert the expected marker rather than treating
-                # this as a source redaction so the audit does not demand a
-                # revision Matrix itself rolled back.
-                self._pop_source_revision(reverted_source, target_event_id)
-            else:
-                await self.oracle.pump(timeout_ms=0)
-                self.oracle.refresh_ledger_attributions(min_interval=0.0)
-            if reverted_source is None and target_event_id not in self.oracle.settled_sources():
-                # A source redacted before its reply settles legitimately races
-                # the in-flight response, so its exact cardinality is zero-or-one.
-                self.oracle.mark_source_optional(target_event_id)
-            return operation, event_id, None
-
         payload = self.sent_payloads[operation.target]
         event_id = await client.send_event(payload.event_type, payload.txn_id, payload.content, room_id=room_id)
         if event_id != target_event_id:
             msg = f"idempotent retry changed event ID for {operation.target}: {target_event_id} -> {event_id}"
             raise AssertionError(msg)
         return operation, event_id, None
+
+    async def _apply_redaction(
+        self,
+        operation: LiveOperation,
+        *,
+        on_landed: Callable[
+            [tuple[LiveOperation, str | None, _SentPayload | None]],
+            None,
+        ]
+        | None = None,
+    ) -> tuple[LiveOperation, str | None, _SentPayload | None]:
+        """Land and record one redaction before cancellable oracle follow-up."""
+        assert operation.target is not None
+        target_event_id = await self._resolve_target(operation.target)
+        txn_id = f"live-fuzz-op-{operation.operation_id}"
+        client = self._client_for_operation(operation)
+        room_id = self._room_for_thread(operation.thread)
+        event_id = await client.redact(target_event_id, txn_id, room_id=room_id)
+        self.redacted_targets[target_event_id] = event_id
+        self.sent_records.append(
+            _SentRecord(
+                event_id,
+                room_id,
+                "m.room.redaction",
+                sender=client.user_id,
+                redacts=target_event_id,
+                content={"reason": "live cache fuzz"},
+            ),
+        )
+        reverted_source = self._edit_event_source.get(target_event_id)
+        if reverted_source is not None:
+            # Redacting an ``m.replace`` reverts its target source to the
+            # latest surviving revision, so the model correctly ends at that
+            # earlier body. Revert the expected marker rather than treating
+            # this as a source redaction so the audit does not demand a
+            # revision Matrix itself rolled back.
+            self._pop_source_revision(reverted_source, target_event_id)
+
+        result = (operation, event_id, None)
+        if on_landed is not None:
+            on_landed(result)
+
+        if reverted_source is None:
+            await self.oracle.pump(timeout_ms=0)
+            self.oracle.refresh_ledger_attributions(min_interval=0.0)
+            if target_event_id not in self.oracle.settled_sources():
+                # A source redacted before its reply settles legitimately races
+                # the in-flight response, so its exact cardinality is zero-or-one.
+                self.oracle.mark_source_optional(target_event_id)
+        return result
 
     def _push_source_revision(self, source_event_id: str, edit_event_id: str, marker: str) -> None:
         """Record a new current revision for a source and mirror it as the marker.
