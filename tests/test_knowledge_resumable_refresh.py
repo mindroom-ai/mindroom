@@ -1395,6 +1395,7 @@ async def test_candidate_progress_reports_real_outstanding_work(
     assert status.candidate.total_files == 5
     assert status.candidate.completed_count == 3
     assert status.candidate.failed_count == 2
+    assert status.candidate.pending_count == 2
 
 
 @pytest.mark.asyncio
@@ -1577,6 +1578,7 @@ async def test_candidate_pending_count_is_visible_while_the_build_runs(
     config = _config(tmp_path, docs_path)
     runtime_paths = runtime_paths_for(config)
     observed: list[tuple[int, int]] = []
+    pending_samples: list[int] = []
     original_index = KnowledgeManager._index_file_locked
 
     async def _observe_status(self: KnowledgeManager, resolved_path: Path, **kwargs: object) -> bool:
@@ -1584,6 +1586,7 @@ async def test_candidate_pending_count_is_visible_while_the_build_runs(
         status = get_knowledge_index_status("docs", config=config, runtime_paths=runtime_paths)
         if status.candidate is not None:
             observed.append((status.candidate.total_files, status.candidate.completed_count))
+            pending_samples.append(status.candidate.pending_count)
         return indexed
 
     KnowledgeManager._index_file_locked = _observe_status  # type: ignore[method-assign]
@@ -1597,3 +1600,7 @@ async def test_candidate_pending_count_is_visible_while_the_build_runs(
     assert any(completed < total for total, completed in observed), (
         f"pending work was never visible mid-build: {observed}"
     )
+    assert any(pending > 0 for pending in pending_samples), (
+        f"pending_count never reported outstanding work: {pending_samples}"
+    )
+    assert pending_samples == [total - completed for total, completed in observed]

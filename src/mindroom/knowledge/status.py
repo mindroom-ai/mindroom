@@ -36,6 +36,11 @@ class KnowledgeCandidateStatus:
     created_at: str | None = None
     updated_at: str | None = None
 
+    @property
+    def pending_count(self) -> int:
+        """Return files the candidate still owes before it can be published."""
+        return max(self.total_files - self.completed_count, 0)
+
 
 @dataclass(frozen=True)
 class KnowledgeIndexStatus:
