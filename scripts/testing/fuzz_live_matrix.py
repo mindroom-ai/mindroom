@@ -1427,7 +1427,8 @@ class ManagedTuwunelStack:
                     instance_name,
                     cwd=old_root,
                 )
-            elif instances is None:
+            elif instances is None or payload.get("state") == "creating":
+                compose_root = old_root if old_root.exists() else PROJECT_ROOT
                 _run_command(
                     "docker",
                     "compose",
@@ -1435,7 +1436,7 @@ class ManagedTuwunelStack:
                     docker_compose_project,
                     "down",
                     "-v",
-                    cwd=PROJECT_ROOT / "local" / "instances" / "deploy",
+                    cwd=compose_root / "local" / "instances" / "deploy",
                 )
             payload["state"] = "recovered"
             temporary = manifest_path.with_suffix(".tmp")
@@ -1486,8 +1487,11 @@ class ManagedTuwunelStack:
         self._acquire_host_lease()
         self._recover_abandoned_runs()
         self._write_manifest(state="creating")
-        _run_command("just", "local-instances-create", self.instance_name, "tuwunel")
+        # Instance creation can fail after registering or starting resources.
+        # From this point onward cleanup owns the exact instance name, even
+        # when the create command itself never returns successfully.
         self._created = True
+        _run_command("just", "local-instances-create", self.instance_name, "tuwunel")
         registry = json.loads(INSTANCE_REGISTRY.read_text(encoding="utf-8"))
         instance = registry["instances"][self.instance_name]
         matrix_port = int(instance["matrix_port"])
@@ -1858,22 +1862,47 @@ class ManagedTuwunelStack:
         process = self._mindroom_process
         if process is None:
             return
-        running = process.poll() is None
-        if kill or not running:
+        return_code = process.poll()
+        if return_code is not None:
             with suppress(ProcessLookupError):
                 os.killpg(process.pid, signal.SIGKILL)
-            if running:
-                process.wait(timeout=10)
-        else:
+            self._mindroom_process = None
+            msg = f"MindRoom exited before managed shutdown with status {return_code}"
+            raise RuntimeError(msg)
+        if kill:
             with suppress(ProcessLookupError):
-                os.killpg(process.pid, signal.SIGINT)
+                os.killpg(process.pid, signal.SIGKILL)
+            process.wait(timeout=10)
+            self._mindroom_process = None
+            return
+        with suppress(ProcessLookupError):
+            os.killpg(process.pid, signal.SIGINT)
+        try:
+            return_code = process.wait(timeout=20)
+        except subprocess.TimeoutExpired as exc:
             try:
-                process.wait(timeout=20)
-            except subprocess.TimeoutExpired:
                 with suppress(ProcessLookupError):
                     os.killpg(process.pid, signal.SIGKILL)
                 process.wait(timeout=10)
+            finally:
+                self._mindroom_process = None
+            msg = "MindRoom ignored SIGINT and required SIGKILL"
+            raise TimeoutError(msg) from exc
         self._mindroom_process = None
+        if return_code != 0:
+            msg = f"MindRoom graceful shutdown exited with status {return_code}"
+            raise RuntimeError(msg)
+
+    def assert_mindroom_running(self) -> None:
+        """Require the managed runtime to remain alive through final audit."""
+        process = self._mindroom_process
+        if process is None:
+            msg = "MindRoom is not running before final audit"
+            raise RuntimeError(msg)
+        return_code = process.poll()
+        if return_code is not None:
+            msg = f"MindRoom exited before final audit with status {return_code}:\n{self.log_tail()}"
+            raise RuntimeError(msg)
 
     @staticmethod
     def _wait_for_url(url: str, *, timeout: float) -> None:
@@ -2795,8 +2824,11 @@ class FinalStateAuditor:
         self._assert_sync_view_parity(events, sent_records, replies)
         ledger_metrics: dict[str, int] = {}
         if self.ledger_path is not None:
-            ledger_metrics = self._assert_ledger_attribution(replies)
-            self._assert_model_saw_current_sources(events)
+            ledger_metrics = self._assert_ledger_attribution(replies, redacted_source_event_ids=set(redacted))
+            self._assert_model_saw_current_sources(
+                events,
+                redacted_source_event_ids=set(redacted),
+            )
         return {
             "audited_events": len(events),
             "audited_rooms": len(set(room_ids)),
@@ -3011,8 +3043,14 @@ class FinalStateAuditor:
             count = len(replies.get(source_event_id, ()))
             if count > 1:
                 problems.append(f"source {logical_ref} has {count} direct replies in /messages")
-            elif not oracle.coalescing_threads and source_event_id not in oracle.optional_sources and count != 1:
+            elif source_event_id in oracle.optional_sources or count == 1:
+                continue
+            elif not oracle.coalescing_threads:
                 problems.append(f"source {logical_ref} has {count} canonical replies in /messages")
+            elif not self._visible_chain_reply_ids(source_event_id, replies):
+                problems.append(
+                    f"source {logical_ref} has no canonical reply in its requester chain",
+                )
         for source_event_id, reply_ids in replies.items():
             if source_event_id in oracle.expected_sources or source_event_id in oracle.internal_source_ids:
                 continue
@@ -3021,7 +3059,12 @@ class FinalStateAuditor:
             msg = f"final reply cardinality audit failed: {problems}"
             raise AssertionError(msg)
 
-    def _assert_ledger_attribution(self, replies: Mapping[str, set[str]]) -> dict[str, int]:
+    def _assert_ledger_attribution(
+        self,
+        replies: Mapping[str, set[str]],
+        *,
+        redacted_source_event_ids: Collection[str] = (),
+    ) -> dict[str, int]:
         """Every required source must present its own durable terminal record.
 
         Matrix relations cannot expose which sources one coalesced reply
@@ -3041,15 +3084,57 @@ class FinalStateAuditor:
         records = read_ledger_records(self.ledger_path, strict=True)
 
         problems: list[str] = []
-        ledger_response_ids, attributed, optional_problems = self._attribute_optional_replies(replies, records)
+        harness_redacted = set(redacted_source_event_ids)
+        problems.extend(self._ledger_redaction_problems(records, harness_redacted))
+        ledger_response_ids, attributed, optional_problems = self._attribute_optional_replies(
+            replies,
+            records,
+        )
         problems.extend(optional_problems)
+        required_response_ids, required_attributed, superseded, required_problems = self._attribute_required_replies(
+            replies,
+            records,
+        )
+        ledger_response_ids.update(required_response_ids)
+        attributed += required_attributed
+        problems.extend(required_problems)
+
+        all_expected_reply_ids = {
+            reply_id
+            for source_event_id, reply_ids in replies.items()
+            if source_event_id in oracle.expected_sources
+            for reply_id in reply_ids
+        }
+        problems.extend(
+            f"ledger response {response_id} is not a visible canonical reply"
+            for response_id in sorted(ledger_response_ids - all_expected_reply_ids)
+        )
+        problems.extend(
+            f"visible reply {reply_id} is not attributed by any durable turn record"
+            for reply_id in sorted(all_expected_reply_ids - ledger_response_ids)
+        )
+        if problems:
+            msg = f"durable turn attribution audit failed: {problems}"
+            raise AssertionError(msg)
+        return {"ledger_attributed_sources": attributed, "ledger_superseded_sources": superseded}
+
+    def _attribute_required_replies(
+        self,
+        replies: Mapping[str, set[str]],
+        records: Mapping[str, TurnRecord],
+    ) -> tuple[set[str], int, int, list[str]]:
+        """Audit response attribution for every non-optional requester chain."""
+        response_ids: set[str] = set()
+        attributed = 0
         superseded = 0
-        for chain in oracle.chains.values():
+        problems: list[str] = []
+        for chain in self.oracle.chains.values():
+            visible_chain_reply_ids = self._visible_chain_reply_ids(chain[-1], replies)
             anchored = False
             for source_event_id in reversed(chain):
-                if source_event_id in oracle.optional_sources:
+                if source_event_id in self.oracle.optional_sources:
                     continue
-                logical_ref = oracle.expected_sources[source_event_id]
+                logical_ref = self.oracle.expected_sources[source_event_id]
                 record = records.get(source_event_id)
                 if record is not None and source_event_id not in record.source_event_ids:
                     problems.append(
@@ -3057,13 +3142,16 @@ class FinalStateAuditor:
                     )
                     record = None
                 if record is not None and record.response_event_id is not None:
-                    ledger_response_ids.add(record.response_event_id)
-                    attributed += 1
-                    anchored = True
+                    if record.response_event_id not in visible_chain_reply_ids:
+                        problems.append(
+                            f"ledger response {record.response_event_id} for {logical_ref} "
+                            f"({source_event_id}) is not a visible canonical reply in its requester chain",
+                        )
+                    else:
+                        response_ids.add(record.response_event_id)
+                        attributed += 1
+                        anchored = True
                 elif anchored and record is not None and record.response_event_id is None:
-                    # An older message legitimately superseded by a newer settled
-                    # message from the same sender, proven by production's own
-                    # completed no-response record for this exact source.
                     superseded += 1
                 elif anchored:
                     problems.append(
@@ -3074,26 +3162,22 @@ class FinalStateAuditor:
                     problems.append(
                         f"newest chain source {logical_ref} ({source_event_id}) has no durable attribution",
                     )
+        return response_ids, attributed, superseded, problems
 
-        all_expected_reply_ids = {
-            reply_id
-            for source_event_id, reply_ids in replies.items()
-            if source_event_id in oracle.expected_sources
-            for reply_id in reply_ids
-        }
-        required_reply_ids = all_expected_reply_ids
-        problems.extend(
-            f"ledger response {response_id} is not a visible canonical reply"
-            for response_id in sorted(ledger_response_ids - all_expected_reply_ids)
-        )
-        problems.extend(
-            f"visible reply {reply_id} is not attributed by any durable turn record"
-            for reply_id in sorted(required_reply_ids - ledger_response_ids)
-        )
-        if problems:
-            msg = f"durable turn attribution audit failed: {problems}"
-            raise AssertionError(msg)
-        return {"ledger_attributed_sources": attributed, "ledger_superseded_sources": superseded}
+    @staticmethod
+    def _ledger_redaction_problems(
+        records: Mapping[str, TurnRecord],
+        harness_redacted: set[str],
+    ) -> list[str]:
+        """Reject production tombstones not proven by harness-authored redactions."""
+        problems: list[str] = []
+        for event_id, record in records.items():
+            forged = set(record.redacted_source_event_ids) - harness_redacted
+            if forged:
+                problems.append(
+                    f"turn record {event_id} claims unobserved source redactions: {sorted(forged)}",
+                )
+        return problems
 
     def _attribute_optional_replies(
         self,
@@ -3105,6 +3189,7 @@ class FinalStateAuditor:
         problems: list[str] = []
         for source_event_id in self.oracle.optional_sources:
             visible_reply_ids = replies.get(source_event_id, set())
+            visible_chain_reply_ids = self._visible_chain_reply_ids(source_event_id, replies)
             record = records.get(source_event_id)
             if record is not None and source_event_id not in record.source_event_ids:
                 problems.append(
@@ -3113,7 +3198,13 @@ class FinalStateAuditor:
                 record = None
             if not visible_reply_ids:
                 if record is not None and record.response_event_id is not None:
-                    response_ids.add(record.response_event_id)
+                    if record.response_event_id not in visible_chain_reply_ids:
+                        problems.append(
+                            f"ledger response {record.response_event_id} for optional source "
+                            f"{source_event_id} is not a visible canonical reply in its requester chain",
+                        )
+                    else:
+                        response_ids.add(record.response_event_id)
                 continue
             logical_ref = self.oracle.expected_sources[source_event_id]
             if record is None or record.response_event_id not in visible_reply_ids:
@@ -3125,7 +3216,24 @@ class FinalStateAuditor:
                 response_ids.add(record.response_event_id)
         return response_ids, len(response_ids), problems
 
-    def _assert_model_saw_current_sources(self, events: Mapping[str, Mapping[str, Any]]) -> None:
+    def _visible_chain_reply_ids(
+        self,
+        source_event_id: str,
+        replies: Mapping[str, set[str]],
+    ) -> set[str]:
+        """Return canonical replies attached anywhere in one requester chain."""
+        chain = next(
+            (candidate for candidate in self.oracle.chains.values() if source_event_id in candidate),
+            (),
+        )
+        return {reply_id for chain_source_event_id in chain for reply_id in replies.get(chain_source_event_id, ())}
+
+    def _assert_model_saw_current_sources(
+        self,
+        events: Mapping[str, Mapping[str, Any]],
+        *,
+        redacted_source_event_ids: Collection[str] = (),
+    ) -> None:
         """Every response-backed turn must be generated from its sources' current bodies.
 
         A right-shaped body proves the model was called, but not that it was
@@ -3142,20 +3250,22 @@ class FinalStateAuditor:
         redacted sources), so a record may keep its already-visible response
         while one covered source no longer feeds model replay. Requiring the
         redacted source's post-redaction edit marker would demand behavior
-        production correctly declines, so the required set is derived from
-        ``record.replay_source_event_ids`` (``source_event_ids`` minus
-        ``redacted_source_event_ids``) — the same contract production uses.
+        production correctly declines. The harness-authored redaction set is
+        the independent authority here: production's own tombstone fields are
+        checked against it and cannot waive a marker by themselves.
         """
         assert self.ledger_path is not None
         records = read_ledger_records(self.ledger_path, strict=True)
         expected_sources = self.oracle.expected_sources
         problems: list[str] = []
+        harness_redacted = set(redacted_source_event_ids)
+        problems.extend(self._ledger_redaction_problems(records, harness_redacted))
         for source_event_id, record in records.items():
             if record.response_event_id is None:
                 continue
             required = {
                 self.source_current_markers[covered]
-                for covered in record.replay_source_event_ids
+                for covered in set(record.source_event_ids) - harness_redacted
                 if covered in expected_sources and covered in self.source_current_markers
             }
             if not required:
@@ -3433,7 +3543,10 @@ class LiveFuzzRunner:
                 else await self._run_batches(self.scenario.batches)
             )
         await self._wait_for_restart_recovery_window()
-        return {**result, **await self._audit_final_state()}
+        self.stack.assert_mindroom_running()
+        audit_result = await self._audit_final_state()
+        self.stack.assert_mindroom_running()
+        return {**result, **audit_result}
 
     async def _run_saturation(self) -> dict[str, object]:
         """Run hot and parallel turns without cross-thread barriers."""
@@ -4684,7 +4797,7 @@ class FailureBundle:
     def __init__(self, directory: Path) -> None:
         self.directory = directory
         self.journal_path = directory / "realized_journal.jsonl"
-        self._cleanup_errors: list[str] = []
+        self._artifact_write_errors: list[tuple[str, BaseException]] = []
 
     @classmethod
     def create(
@@ -4782,9 +4895,9 @@ class FailureBundle:
         """Run one artifact writer, folding any failure into the transcript."""
         try:
             writer(self.directory / name)
-        except (OSError, ValueError, TypeError) as exc:
+        except BaseException as exc:
             detail = f"{name}: {exc}"
-            self._cleanup_errors.append(detail)
+            self._artifact_write_errors.append((f"write {name}", exc))
             if name != "artifact_errors.txt":
                 with (
                     suppress(OSError),
@@ -4839,6 +4952,10 @@ class FailureBundle:
         self._write_isolated(
             "tuwunel.log",
             lambda destination: destination.write_text(tuwunel_log, encoding="utf-8"),
+        )
+        _raise_cleanup_failures(
+            self._artifact_write_errors,
+            message="failure bundle artifact write failed",
         )
         return self.directory
 

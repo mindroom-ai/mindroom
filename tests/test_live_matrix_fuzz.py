@@ -164,7 +164,7 @@ def test_stop_mindroom_targets_exact_process_group(
 def test_stop_mindroom_kills_group_after_leader_already_exited(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Owned descendants must die even when the process-group leader exited."""
+    """A dead leader fails the gate after its owned descendants are killed."""
 
     class FakeProcess:
         pid = 4242
@@ -177,10 +177,93 @@ def test_stop_mindroom_kills_group_after_leader_already_exited(
     signals: list[tuple[int, signal.Signals]] = []
     monkeypatch.setattr("scripts.testing.fuzz_live_matrix.os.killpg", lambda pid, sig: signals.append((pid, sig)))
 
-    stack._stop_mindroom()
+    with pytest.raises(RuntimeError, match="exited before managed shutdown"):
+        stack._stop_mindroom()
 
     assert signals == [(4242, signal.SIGKILL)]
     assert stack._mindroom_process is None
+
+
+def test_stop_mindroom_reports_sigkill_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A hung graceful shutdown is cleanup, never passing health evidence."""
+
+    class FakeProcess:
+        pid = 4242
+        waits = 0
+
+        @staticmethod
+        def poll() -> None:
+            return None
+
+        def wait(self, *, timeout: float) -> int:
+            self.waits += 1
+            if timeout == 20:
+                command = "mindroom"
+                raise live_fuzz.subprocess.TimeoutExpired(command, timeout)
+            assert timeout == 10
+            return -signal.SIGKILL
+
+    process = FakeProcess()
+    stack = object.__new__(ManagedTuwunelStack)
+    stack._mindroom_process = process
+    signals: list[tuple[int, signal.Signals]] = []
+    monkeypatch.setattr(live_fuzz.os, "killpg", lambda pid, sig: signals.append((pid, sig)))
+
+    with pytest.raises(TimeoutError, match="required SIGKILL"):
+        stack._stop_mindroom()
+
+    assert signals == [
+        (process.pid, signal.SIGINT),
+        (process.pid, signal.SIGKILL),
+    ]
+    assert process.waits == 2
+    assert stack._mindroom_process is None
+
+
+def test_stop_mindroom_rejects_nonzero_graceful_exit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A SIGINT-observed exit still must report healthy shutdown status."""
+
+    class FakeProcess:
+        pid = 4242
+
+        @staticmethod
+        def poll() -> None:
+            return None
+
+        @staticmethod
+        def wait(*, timeout: float) -> int:
+            assert timeout == 20
+            return 3
+
+    stack = object.__new__(ManagedTuwunelStack)
+    stack._mindroom_process = FakeProcess()
+    monkeypatch.setattr(live_fuzz.os, "killpg", lambda _pid, _sig: None)
+
+    with pytest.raises(RuntimeError, match="graceful shutdown exited with status 3"):
+        stack._stop_mindroom()
+
+    assert stack._mindroom_process is None
+
+
+def test_final_runtime_health_rejects_preexited_process(tmp_path: Path) -> None:
+    """Canonical state cannot turn an already-dead runtime into a PASS."""
+
+    class FakeProcess:
+        @staticmethod
+        def poll() -> int:
+            return 7
+
+    stack = object.__new__(ManagedTuwunelStack)
+    stack._mindroom_process = FakeProcess()
+    stack.log_path = tmp_path / "mindroom.log"
+    stack.log_path.write_text("fatal runtime exit\n", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="exited before final audit with status 7"):
+        stack.assert_mindroom_running()
 
 
 def test_startup_maintenance_wait_uses_only_current_process_generation(tmp_path: Path) -> None:
@@ -1645,6 +1728,37 @@ async def test_ledger_attribution_flags_missing_and_orphaned_turns(tmp_path: Pat
 
 
 @pytest.mark.asyncio
+async def test_ledger_attribution_rejects_reply_reused_across_requester_chains(
+    tmp_path: Path,
+) -> None:
+    """One visible reply cannot settle another thread/requester chain."""
+    client = LiveMatrixClient("http://matrix.invalid", "!room:example")
+    oracle = ExactReplyOracle(client, "@agent:example", coalescing_threads=True)
+    ledger_path = tmp_path / "general_responded.json"
+    auditor = FinalStateAuditor(
+        client,
+        oracle,
+        agent_id="@agent:example",
+        expected_body_for=_short_body_for,
+        ledger_path=ledger_path,
+    )
+    try:
+        oracle.expect("op:1", "$chain-a", thread=0, client=0)
+        oracle.expect("op:2", "$chain-b", thread=1, client=1)
+        forged = TurnRecord(
+            source_event_ids=("$chain-a", "$chain-b"),
+            response_event_id="$one-reply",
+            completed=True,
+        )
+        _write_ledger(ledger_path, {"$chain-a": forged, "$chain-b": forged})
+
+        with pytest.raises(AssertionError, match="not a visible canonical reply in its requester chain"):
+            auditor._assert_ledger_attribution({"$chain-b": {"$one-reply"}})
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
 async def test_final_ledger_audit_rejects_one_malformed_projection(tmp_path: Path) -> None:
     """One corrupt row cannot disappear and let an otherwise valid audit pass."""
     client = LiveMatrixClient("http://matrix.invalid", "!room:example")
@@ -2365,8 +2479,8 @@ async def test_model_source_audit_ignores_no_response_supersession(tmp_path: Pat
 
 
 @pytest.mark.asyncio
-async def test_model_source_audit_ignores_redacted_source_marker(tmp_path: Path) -> None:
-    """A response-backed record whose only source was redacted requires no marker.
+async def test_model_source_audit_uses_harness_redaction_truth(tmp_path: Path) -> None:
+    """Only a harness-observed redaction may waive one source marker.
 
     Production tombstones a durably redacted source and refuses to regenerate an
     edit against it, so the still-visible response legitimately reflects the
@@ -2395,8 +2509,13 @@ async def test_model_source_audit_ignores_redacted_source_marker(tmp_path: Path)
         )
         _write_ledger(ledger_path, {"$a": redacted})
         events = {"$reply-a": _agent_reply_event("$a", "$reply-a", _short_body_for(4))}
-        # No marker is required for the tombstoned source, so the audit passes.
-        auditor._assert_model_saw_current_sources(events)
+        with pytest.raises(AssertionError, match="claims unobserved source redactions"):
+            auditor._assert_model_saw_current_sources(events)
+
+        auditor._assert_model_saw_current_sources(
+            events,
+            redacted_source_event_ids={"$a"},
+        )
     finally:
         await auditor.client.close()
 
@@ -2425,12 +2544,18 @@ async def test_model_source_audit_requires_live_sibling_not_redacted_sibling(tmp
         _write_ledger(ledger_path, {"$a": coalesced, "$b": coalesced})
         events = {"$combined": _agent_reply_event("$a", "$combined", _short_body_for(9))}
         # Live sibling $a satisfied, redacted sibling $b excluded -> passes.
-        auditor._assert_model_saw_current_sources(events)
+        auditor._assert_model_saw_current_sources(
+            events,
+            redacted_source_event_ids={"$b"},
+        )
 
         # Dropping the live sibling's marker still fails: only the redacted one is excused.
         auditor.observed_markers_for = lambda _call_id: frozenset()
         with pytest.raises(AssertionError, match="without current source markers"):
-            auditor._assert_model_saw_current_sources(events)
+            auditor._assert_model_saw_current_sources(
+                events,
+                redacted_source_event_ids={"$b"},
+            )
     finally:
         await auditor.client.close()
 
@@ -3329,6 +3454,48 @@ def test_live_stack_manifest_is_atomic_and_recoverable(tmp_path: Path) -> None:
         stack.temp_dir.cleanup()
 
 
+@pytest.mark.parametrize("remove_fails", [False, True])
+def test_create_failure_retains_exact_cleanup_obligation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    remove_fails: bool,
+) -> None:
+    """A partially successful create stays recoverable until exact removal."""
+    stack = ManagedTuwunelStack(state_root=tmp_path / "state")
+    commands: list[tuple[str, ...]] = []
+
+    def run_command(*command: str, **_kwargs: object) -> str:
+        commands.append(command)
+        if command[1] == "local-instances-create":
+            message = "create failed after side effect"
+            raise RuntimeError(message)
+        if remove_fails:
+            message = "remove failed"
+            raise RuntimeError(message)
+        return ""
+
+    monkeypatch.setattr(live_fuzz, "_run_command", run_command)
+
+    with pytest.raises(RuntimeError, match="create failed after side effect"):
+        stack.start()
+
+    assert stack._created is True
+    if remove_fails:
+        with pytest.raises(ExceptionGroup, match="live Matrix fuzz cleanup failed"):
+            stack.close()
+    else:
+        stack.close()
+
+    payload = json.loads(stack.manifest_path.read_text(encoding="utf-8"))
+    assert payload["state"] == ("cleanup_failed" if remove_fails else "closed")
+    assert stack._created is remove_fails
+    assert commands == [
+        ("just", "local-instances-create", stack.instance_name, "tuwunel"),
+        ("just", "local-instances-remove", stack.instance_name),
+    ]
+
+
 def test_abandoned_manifest_recovery_is_registry_aware_and_kills_exact_group(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -3370,6 +3537,51 @@ def test_abandoned_manifest_recovery_is_registry_aware_and_kills_exact_group(
         stack._recover_abandoned_runs()
 
         assert events == ["process"]
+        assert json.loads(manifest_path.read_text(encoding="utf-8"))["state"] == "recovered"
+    finally:
+        stack.temp_dir.cleanup()
+
+
+def test_abandoned_creating_manifest_cleans_unregistered_compose_project(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A crash between create side effects and registration still gets removed."""
+    state_root = tmp_path / "state"
+    old_root = tmp_path / "old-worktree"
+    registry_path = old_root / "local" / "instances" / "deploy" / "instances.json"
+    registry_path.parent.mkdir(parents=True)
+    registry_path.write_text(json.dumps({"instances": {}}), encoding="utf-8")
+    manifest_path = state_root / "runs" / "fuzz-old.json"
+    manifest_path.parent.mkdir(parents=True)
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "docker_compose_project": "fuzz-old",
+                "instance_name": "fuzz-old",
+                "project_root": str(old_root),
+                "state": "creating",
+            },
+        ),
+        encoding="utf-8",
+    )
+    stack = ManagedTuwunelStack(state_root=state_root)
+    commands: list[tuple[tuple[str, ...], dict[str, object]]] = []
+    try:
+        monkeypatch.setattr(
+            live_fuzz,
+            "_run_command",
+            lambda *command, **kwargs: commands.append((command, kwargs)),
+        )
+
+        stack._recover_abandoned_runs()
+
+        assert commands == [
+            (
+                ("docker", "compose", "-p", "fuzz-old", "down", "-v"),
+                {"cwd": old_root / "local" / "instances" / "deploy"},
+            ),
+        ]
         assert json.loads(manifest_path.read_text(encoding="utf-8"))["state"] == "recovered"
     finally:
         stack.temp_dir.cleanup()
@@ -3496,7 +3708,9 @@ async def test_every_live_profile_runs_the_shared_final_audit(profile: str) -> N
 
     runner = object.__new__(LiveFuzzRunner)
     runner.clients = (FakeClient(),)
-    runner.stack = FakeStack()
+    stack = FakeStack()
+    stack.assert_mindroom_running = lambda: calls.append("runtime-alive")  # type: ignore[attr-defined]
+    runner.stack = stack
     runner.oracle = FakeOracle()
     runner.scenario = LiveFuzzScenario(thread_count=1, batches=(), profile=profile)
     runner.reply_timeout = 12.0
@@ -3510,7 +3724,14 @@ async def test_every_live_profile_runs_the_shared_final_audit(profile: str) -> N
 
     result = await runner.run()
 
-    assert calls[-4:] == [profile, "maintenance", "oracle-quiet", "audit"]
+    assert calls[-6:] == [
+        profile,
+        "maintenance",
+        "oracle-quiet",
+        "runtime-alive",
+        "audit",
+        "runtime-alive",
+    ]
     assert result == {"status": "PASS", "audited_events": 7}
 
 
@@ -3601,6 +3822,10 @@ async def test_startup_phase_failure_prevents_shared_final_audit() -> None:
         async def initialize() -> None:
             return
 
+        @staticmethod
+        async def wait_until_exact(*, deadline_seconds: float, settle_seconds: float) -> None:
+            assert (deadline_seconds, settle_seconds) == (12.0, 0.75)
+
     class FakeStack:
         @staticmethod
         def wait_for_startup_maintenance(*, timeout_seconds: float) -> None:
@@ -3635,6 +3860,133 @@ async def test_startup_phase_failure_prevents_shared_final_audit() -> None:
         await runner.run()
 
     assert calls == ["maintenance-failed"]
+
+
+@pytest.mark.asyncio
+async def test_dead_runtime_prevents_shared_final_audit() -> None:
+    """A dead SUT cannot pass from already-persisted Matrix and ledger state."""
+    calls: list[str] = []
+
+    class FakeClient:
+        @staticmethod
+        async def register() -> None:
+            return
+
+        @staticmethod
+        async def join_room() -> None:
+            return
+
+    class FakeOracle:
+        @staticmethod
+        async def initialize() -> None:
+            return
+
+        @staticmethod
+        async def wait_until_exact(*, deadline_seconds: float, settle_seconds: float) -> None:
+            assert (deadline_seconds, settle_seconds) == (12.0, 0.75)
+
+    class FakeStack:
+        @staticmethod
+        def wait_for_startup_maintenance(*, timeout_seconds: float) -> None:
+            assert timeout_seconds == 12.0
+
+        @staticmethod
+        def assert_mindroom_running() -> None:
+            calls.append("runtime-dead")
+            message = "runtime exited"
+            raise RuntimeError(message)
+
+    async def send_roots(_threads: Collection[int]) -> None:
+        return
+
+    async def run_batches(*_args: object) -> dict[str, object]:
+        return {"status": "PASS"}
+
+    async def audit_final_state() -> dict[str, int]:
+        calls.append("audit")
+        return {}
+
+    runner = object.__new__(LiveFuzzRunner)
+    runner.clients = (FakeClient(),)
+    runner.stack = FakeStack()
+    runner.oracle = FakeOracle()
+    runner.scenario = LiveFuzzScenario(thread_count=1, batches=())
+    runner.reply_timeout = 12.0
+    runner.settle_seconds = 0.75
+    runner._startup_maintenance_pending = True
+    runner._send_roots = send_roots  # type: ignore[method-assign]
+    runner._run_batches = run_batches  # type: ignore[method-assign]
+    runner._audit_final_state = audit_final_state  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError, match="runtime exited"):
+        await runner.run()
+
+    assert calls == ["runtime-dead"]
+
+
+@pytest.mark.asyncio
+async def test_runtime_exit_during_final_audit_prevents_pass() -> None:  # noqa: C901
+    """SUT must remain alive through completion of canonical final reads."""
+    calls: list[str] = []
+
+    class FakeClient:
+        @staticmethod
+        async def register() -> None:
+            return
+
+        @staticmethod
+        async def join_room() -> None:
+            return
+
+    class FakeOracle:
+        @staticmethod
+        async def initialize() -> None:
+            return
+
+        @staticmethod
+        async def wait_until_exact(*, deadline_seconds: float, settle_seconds: float) -> None:
+            assert (deadline_seconds, settle_seconds) == (12.0, 0.75)
+
+    class FakeStack:
+        health_checks = 0
+
+        @staticmethod
+        def wait_for_startup_maintenance(*, timeout_seconds: float) -> None:
+            assert timeout_seconds == 12.0
+
+        def assert_mindroom_running(self) -> None:
+            self.health_checks += 1
+            calls.append(f"health:{self.health_checks}")
+            if self.health_checks == 2:
+                message = "runtime exited during audit"
+                raise RuntimeError(message)
+
+    async def send_roots(_threads: Collection[int]) -> None:
+        return
+
+    async def run_batches(*_args: object) -> dict[str, object]:
+        return {"status": "PASS"}
+
+    async def audit_final_state() -> dict[str, int]:
+        calls.append("audit")
+        return {}
+
+    runner = object.__new__(LiveFuzzRunner)
+    runner.clients = (FakeClient(),)
+    runner.stack = FakeStack()
+    runner.oracle = FakeOracle()
+    runner.scenario = LiveFuzzScenario(thread_count=1, batches=())
+    runner.reply_timeout = 12.0
+    runner.settle_seconds = 0.75
+    runner._startup_maintenance_pending = True
+    runner._send_roots = send_roots  # type: ignore[method-assign]
+    runner._run_batches = run_batches  # type: ignore[method-assign]
+    runner._audit_final_state = audit_final_state  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError, match="exited during audit"):
+        await runner.run()
+
+    assert calls == ["health:1", "audit", "health:2"]
 
 
 @pytest.mark.asyncio
@@ -3684,6 +4036,29 @@ async def test_final_messages_cardinality_rejects_delayed_duplicate() -> None:
             auditor._assert_reply_cardinality(
                 {"$source": {"$first", "$delayed-duplicate"}},
             )
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_chaos_cardinality_allows_zero_direct_reply_only_within_same_chain() -> None:
+    """Coalescing may cover same-chain sources, never another requester chain."""
+    client = LiveMatrixClient("http://matrix.invalid", "!room:example")
+    oracle = ExactReplyOracle(client, "@agent:example", coalescing_threads=True)
+    auditor = FinalStateAuditor(
+        client,
+        oracle,
+        agent_id="@agent:example",
+        expected_body_for=_short_body_for,
+    )
+    try:
+        oracle.expect("op:1", "$first", thread=0, client=0)
+        oracle.expect("op:2", "$second", thread=0, client=0)
+        auditor._assert_reply_cardinality({"$second": {"$combined"}})
+
+        oracle.expect("op:3", "$other-chain", thread=1, client=1)
+        with pytest.raises(AssertionError, match="op:3 has no canonical reply in its requester chain"):
+            auditor._assert_reply_cardinality({"$second": {"$combined"}})
     finally:
         await client.close()
 
@@ -4051,6 +4426,39 @@ async def test_failure_bundle_artifact_error_preserves_primary_failure(tmp_path:
     # Other artifacts were still written despite the one failure.
     assert (bundle.directory / "diagnostics.json").exists()
     assert (bundle.directory / "tuwunel.log").exists()
+
+
+@pytest.mark.asyncio
+async def test_direct_bundle_persistence_reports_writer_failure_after_other_artifacts(
+    tmp_path: Path,
+) -> None:
+    """A broken writer blocks success only after every independent write runs."""
+    bundle = FailureBundle.create(
+        tmp_path / "artifacts",
+        "run-direct-writer-failure",
+        scenario=_bundle_scenario(),
+        provenance={},
+    )
+    (bundle.directory / "mindroom.log").mkdir()
+    stack = _prepared_stack(tmp_path)
+    oracle = _snapshot_oracle()
+    runner = object.__new__(LiveFuzzRunner)
+    runner.oracle = oracle
+
+    try:
+        with pytest.raises(ExceptionGroup, match="failure bundle artifact write failed"):
+            live_fuzz._persist_run_bundle(
+                bundle,
+                stack,
+                runner,
+                exception=AssertionError("primary invariant"),
+            )
+    finally:
+        await oracle.client.close()
+
+    assert (bundle.directory / "diagnostics.json").exists()
+    assert (bundle.directory / "tuwunel.log").exists()
+    assert "mindroom.log" in (bundle.directory / "artifact_errors.txt").read_text(encoding="utf-8")
 
 
 @pytest.mark.asyncio
