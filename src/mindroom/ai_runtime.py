@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable, Generator, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -35,7 +36,7 @@ __all__ = [
     "append_inline_media_fallback_to_run_input",
     "attach_media_to_run_input",
     "cached_agent_run",
-    "cleanup_queued_notice_state",
+    "cleanup_queued_notice_state_async",
     "copy_run_input",
     "discard_empty_completed_run",
     "install_queued_message_notice_hook",
@@ -253,21 +254,22 @@ def _strip_queued_notice_from_session_storage(
     return changed
 
 
-def cleanup_queued_notice_state(
+async def cleanup_queued_notice_state_async(
     *,
     run_output: RunOutput | TeamRunOutput | None,
-    storage: BaseDb | None,
+    storage_factory: Callable[[], BaseDb] | None,
     session_id: str | None,
     session_type: SessionType,
     entity_name: str,
 ) -> None:
-    """Strip queued-message notices from returned and persisted run state."""
+    """Strip queued notices using worker-owned storage off the event loop."""
     _cleanup_queued_notice_from_run_output(run_output)
-    if storage is None or not session_id:
+    if storage_factory is None or not session_id:
         return
     try:
-        _strip_queued_notice_from_session_storage(
-            storage,
+        await asyncio.to_thread(
+            _strip_queued_notice_from_new_session_storage,
+            storage_factory,
             session_id,
             session_type=session_type,
         )
@@ -278,6 +280,24 @@ def cleanup_queued_notice_state(
             session_id=session_id,
             session_type=session_type.value,
         )
+
+
+def _strip_queued_notice_from_new_session_storage(
+    storage_factory: Callable[[], BaseDb],
+    session_id: str,
+    *,
+    session_type: SessionType,
+) -> None:
+    """Create, use, and close one session storage handle in its worker thread."""
+    storage = storage_factory()
+    try:
+        _strip_queued_notice_from_session_storage(
+            storage,
+            session_id,
+            session_type=session_type,
+        )
+    finally:
+        storage.close()
 
 
 def scrub_queued_notice_session_context(

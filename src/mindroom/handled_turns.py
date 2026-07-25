@@ -2,10 +2,10 @@
 
 Reads are served from in-memory state shared across every ledger bound to the
 same responses file, so sibling ledger instances in one process observe each
-other's writes without touching the filesystem. Disk persistence happens on a
-single write-behind worker thread that merges exact records into the file.
-One runtime process owns semantic ordering; an advisory lock keeps file updates
-atomic without blocking the event loop on filesystem I/O (issue #1260).
+other's writes without touching the filesystem. Disk persistence uses one
+ordered drain per ledger on a bounded process-wide worker pool. One runtime
+process owns semantic ordering; an advisory lock keeps file updates atomic
+without blocking the event loop on filesystem I/O (issue #1260).
 """
 
 from __future__ import annotations
@@ -37,6 +37,9 @@ logger = get_logger(__name__)
 _TURN_RECORD_SCHEMA_VERSION = 1
 _LEDGER_SCHEMA_VERSION_KEY = "schema_version"
 _LEDGER_RECORDS_KEY = "records"
+# Let independent agent ledgers make progress without allowing unbounded
+# concurrent durable writes and fsync pressure.
+_PERSIST_EXECUTOR_MAX_WORKERS = 8
 
 
 @dataclass(frozen=True)
@@ -389,13 +392,23 @@ class TurnRecordCodec:
 
 
 @dataclass
+class _PersistRequest:
+    """One ordered ledger persist request and its exact durability waiter."""
+
+    records: tuple[TurnRecord, ...]
+    completion: Future[None] | None
+
+
+@dataclass
 class _LedgerState:
     """In-memory canonical records shared by every ledger bound to one file."""
 
     responses: dict[str, TurnRecord] = field(default_factory=dict)
     lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
     loaded: bool = False
-    pending_persists: list[Future[None]] = field(default_factory=list, repr=False)
+    persist_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    pending_persists: list[_PersistRequest] = field(default_factory=list, repr=False)
+    persist_active: bool = False
 
 
 _LEDGER_STATES: dict[str, _LedgerState] = {}
@@ -415,11 +428,14 @@ def _shared_ledger_state(responses_file: Path) -> _LedgerState:
 
 
 def _persist_executor() -> ThreadPoolExecutor:
-    """Return the shared single-worker executor that orders ledger persists."""
+    """Return a bounded shared executor; each ledger still schedules only one drain."""
     global _PERSIST_EXECUTOR
     with _LEDGER_RUNTIME_LOCK:
         if _PERSIST_EXECUTOR is None:
-            _PERSIST_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="handled-turn-persist")
+            _PERSIST_EXECUTOR = ThreadPoolExecutor(
+                max_workers=_PERSIST_EXECUTOR_MAX_WORKERS,
+                thread_name_prefix="handled-turn-persist",
+            )
         return _PERSIST_EXECUTOR
 
 
@@ -581,43 +597,111 @@ class HandledTurnLedger:
         self._state.loaded = True
 
     def _wait_for_pending_persists_locked(self) -> None:
-        """Wait for queued disk merges while the state lock is held."""
-        pending = list(self._state.pending_persists)
-        self._state.pending_persists.clear()
-        first_error: Exception | None = None
-        for future in pending:
-            try:
-                future.result()
-            except Exception as exc:
-                if first_error is None:
-                    first_error = exc
-        if first_error is not None:
-            raise first_error
+        """Wait for the exact FIFO prefix queued before this barrier."""
+        barrier: Future[None] = Future()
+        with self._state.persist_lock:
+            self._state.pending_persists.append(_PersistRequest(records=(), completion=barrier))
+            self._ensure_persist_drain_locked()
+        barrier.result()
 
     def _schedule_persist_locked(self, turn_record: TurnRecord) -> Future[None]:
         """Queue one write-behind disk merge for records already applied to memory."""
-        future = _persist_executor().submit(self._persist_record, turn_record)
-        self._state.pending_persists = [
-            pending
-            for pending in self._state.pending_persists
-            if not pending.done() or pending.cancelled() or pending.exception() is not None
-        ]
-        self._state.pending_persists.append(future)
-        return future
+        completion: Future[None] = Future()
+        with self._state.persist_lock:
+            self._state.pending_persists.append(
+                _PersistRequest(records=(turn_record,), completion=completion),
+            )
+            self._ensure_persist_drain_locked()
+        return completion
 
-    def _persist_record(self, turn_record: TurnRecord) -> None:
-        """Merge already-applied records into the persisted ledger from a worker thread."""
+    def _ensure_persist_drain_locked(self) -> None:
+        """Start this ledger's sole drain while ``persist_lock`` is held."""
+        if self._state.persist_active:
+            return
+        self._state.persist_active = True
+        try:
+            _persist_executor().submit(self._persist_pending_records)
+        except Exception:
+            self._state.persist_active = False
+            raise
+
+    def _persist_pending_records(self) -> None:
+        """Drain FIFO batches, retrying one failed batch without later traffic."""
+        retry_available = True
+        while True:
+            with self._state.persist_lock:
+                if not self._state.pending_persists:
+                    self._state.persist_active = False
+                    return
+                requests = tuple(self._state.pending_persists)
+                self._state.pending_persists.clear()
+            records = tuple(record for request in requests for record in request.records)
+            try:
+                if records:
+                    self._persist_records(records)
+            except Exception as exc:
+                if not self._requeue_failed_persist_batch(
+                    requests,
+                    records,
+                    exc,
+                    retry_available=retry_available,
+                ):
+                    return
+                retry_available = False
+                continue
+            for request in requests:
+                if request.completion is not None and not request.completion.done():
+                    request.completion.set_result(None)
+            retry_available = True
+
+    def _requeue_failed_persist_batch(
+        self,
+        requests: tuple[_PersistRequest, ...],
+        records: tuple[TurnRecord, ...],
+        error: Exception,
+        *,
+        retry_available: bool,
+    ) -> bool:
+        """Requeue failed records and release every waiter if the retry is exhausted."""
+        for request in requests:
+            if request.completion is not None and not request.completion.done():
+                request.completion.set_exception(error)
+        pending_completions: tuple[Future[None], ...] = ()
+        with self._state.persist_lock:
+            self._state.pending_persists.insert(
+                0,
+                _PersistRequest(records=records, completion=None),
+            )
+            if retry_available:
+                return True
+            pending_completions = tuple(
+                request.completion
+                for request in self._state.pending_persists
+                if request.completion is not None and not request.completion.done()
+            )
+            self._state.pending_persists = [
+                _PersistRequest(records=request.records, completion=None) for request in self._state.pending_persists
+            ]
+            self._state.persist_active = False
+        for completion in pending_completions:
+            completion.set_exception(error)
+        return False
+
+    def _persist_records(self, turn_records: tuple[TurnRecord, ...]) -> None:
+        """Merge one batch of already-applied records from the persistence worker."""
         try:
             with advisory_file_lock(self._responses_lock_file, exclusive=True):
                 persisted_responses = self._read_responses_file_locked()
-                for event_id in turn_record.indexed_event_ids:
-                    persisted_responses[event_id] = turn_record
+                for turn_record in turn_records:
+                    for event_id in turn_record.indexed_event_ids:
+                        persisted_responses[event_id] = turn_record
                 self._write_responses_file_locked(persisted_responses)
         except Exception:
             logger.exception(
                 "handled_turn_persist_failed",
                 agent=self.agent_name,
                 responses_file=str(self._responses_file),
+                batch_size=len(turn_records),
             )
             raise
 

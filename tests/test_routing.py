@@ -157,7 +157,6 @@ def test_flattened_seams_keep_public_exports_at_the_behavior_layer() -> None:
         "mindroom.ai": (
             "attach_media_to_run_input",
             "copy_run_input",
-            "cleanup_queued_notice_state",
             "cached_agent_run",
             "append_inline_media_fallback_to_run_input",
             "get_model_instance",

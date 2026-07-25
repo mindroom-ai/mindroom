@@ -50,7 +50,6 @@ from mindroom.workers.runtime import (
     get_primary_worker_manager,
     primary_worker_backend_available,
     primary_worker_backend_name,
-    reconcile_drifted_worker_templates,
     serialized_kubernetes_worker_validation_snapshot,
 )
 
@@ -223,21 +222,20 @@ def _cleanup_workers_once(
         kubernetes_tool_validation_snapshot=kubernetes_tool_validation_snapshot,
         worker_grantable_credentials=worker_grantable_credentials,
     )
-    cleaned_workers = worker_manager.cleanup_idle_workers()
-    if cleaned_workers:
+    maintenance = worker_manager.maintain_workers()
+    if maintenance.cleaned:
         logger.info(
             "Cleaned idle workers",
-            count=len(cleaned_workers),
+            count=len(maintenance.cleaned),
             backend=worker_manager.backend_name,
         )
-    reconciled_workers = reconcile_drifted_worker_templates(worker_manager)
-    if reconciled_workers:
+    if maintenance.reconciled:
         logger.info(
             "Reconciled drifted worker pod templates",
-            count=len(reconciled_workers),
+            count=len(maintenance.reconciled),
             backend=worker_manager.backend_name,
         )
-    return len(cleaned_workers)
+    return len(maintenance.cleaned)
 
 
 async def _worker_cleanup_loop(

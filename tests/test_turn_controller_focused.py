@@ -592,19 +592,19 @@ async def test_response_waits_for_pending_context_persistence_before_generation(
     harness = _build_harness(config, tmp_path)
     room = _room_with_members(config, "general")
     event = _text_event("persist my response context first")
-    real_persist = harness.turn_store._ledger._persist_record
+    real_persist = harness.turn_store._ledger._persist_records
     persist_started = threading.Event()
     release_persist = threading.Event()
 
-    def persist_with_barrier(turn_record: TurnRecord) -> None:
-        if event.event_id in turn_record.indexed_event_ids and not turn_record.completed:
+    def persist_with_barrier(turn_records: tuple[TurnRecord, ...]) -> None:
+        if any(event.event_id in record.indexed_event_ids and not record.completed for record in turn_records):
             persist_started.set()
             if not release_persist.wait(timeout=5):
                 msg = "test did not release pending-context persistence"
                 raise TimeoutError(msg)
-        real_persist(turn_record)
+        real_persist(turn_records)
 
-    monkeypatch.setattr(harness.turn_store._ledger, "_persist_record", persist_with_barrier)
+    monkeypatch.setattr(harness.turn_store._ledger, "_persist_records", persist_with_barrier)
     delivery = asyncio.create_task(harness.deliver(room, event))
     try:
         assert await asyncio.to_thread(persist_started.wait, 5)
@@ -1189,15 +1189,17 @@ async def test_interactive_selection_persistence_failure_prevents_ack_and_genera
         selected_value="Option 1",
         thread_id="$thread-root:localhost",
     )
-    real_persist = harness.turn_store._ledger._persist_record
+    real_persist = harness.turn_store._ledger._persist_records
 
-    def fail_pending_persist(turn_record: TurnRecord) -> None:
-        if selection.question_event_id in turn_record.indexed_event_ids and not turn_record.completed:
+    def fail_pending_persist(turn_records: tuple[TurnRecord, ...]) -> None:
+        if any(
+            selection.question_event_id in record.indexed_event_ids and not record.completed for record in turn_records
+        ):
             msg = "pending context write failed"
             raise OSError(msg)
-        real_persist(turn_record)
+        real_persist(turn_records)
 
-    monkeypatch.setattr(harness.turn_store._ledger, "_persist_record", fail_pending_persist)
+    monkeypatch.setattr(harness.turn_store._ledger, "_persist_records", fail_pending_persist)
 
     with pytest.raises(OSError, match="pending context write failed"):
         await harness.controller.handle_interactive_selection(

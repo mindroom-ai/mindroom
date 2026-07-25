@@ -39,6 +39,14 @@ class WorkerHandle:
 
 
 @dataclass(frozen=True, slots=True)
+class WorkerMaintenanceResult:
+    """Workers changed by one backend maintenance pass."""
+
+    cleaned: tuple[WorkerHandle, ...]
+    reconciled: tuple[WorkerHandle, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class WorkerReadyProgress:
     """Progress event emitted while a worker is warming up."""
 

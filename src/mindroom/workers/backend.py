@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Protocol
 
+from mindroom.workers.models import WorkerMaintenanceResult
+
 if TYPE_CHECKING:
     from mindroom.workers.models import ProgressSink, WorkerHandle, WorkerSpec, WorkerStatus
 
@@ -58,6 +60,13 @@ class WorkerBackend(Protocol):
 
     def cleanup_idle_workers(self, *, now: float | None = None) -> list[WorkerHandle]:
         """Apply idle cleanup to known workers."""
+
+    def maintain_workers(self, *, now: float | None = None) -> WorkerMaintenanceResult:
+        """Run one backend maintenance pass."""
+        return WorkerMaintenanceResult(
+            cleaned=tuple(self.cleanup_idle_workers(now=now)),
+            reconciled=(),
+        )
 
     def record_failure(self, worker_key: str, failure_reason: str, *, now: float | None = None) -> WorkerHandle:
         """Persist a worker failure for observability."""

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from contextlib import contextmanager
 from dataclasses import replace
 from types import SimpleNamespace
@@ -24,7 +25,7 @@ from agno.session.team import TeamSession
 from mindroom import turn_controller
 from mindroom.ai import _PreparedAgentRun, ai_response, stream_agent_response
 from mindroom.ai_runtime import (
-    cleanup_queued_notice_state,
+    cleanup_queued_notice_state_async,
     install_queued_message_notice_hook,
     queued_message_signal_context,
 )
@@ -360,6 +361,7 @@ class _FakeStorage:
     def __init__(self) -> None:
         self.session: AgentSession | TeamSession | None = None
         self.upserted = False
+        self.closed = False
 
     def get_session(self, session_id: str, _session_type: object) -> AgentSession | TeamSession | None:
         if self.session is None or self.session.session_id != session_id:
@@ -370,6 +372,9 @@ class _FakeStorage:
         self.session = session
         self.upserted = True
         return session
+
+    def close(self) -> None:
+        self.closed = True
 
 
 class _FakeModel:
@@ -549,7 +554,12 @@ def test_same_target_batch_reservation_consumes_all_pending_messages(tmp_path: P
 
 @contextmanager
 def _open_scope(storage: _FakeStorage) -> object:
-    yield SimpleNamespace(storage=storage, session=storage.session, scope=HistoryScope("agent", "general"))
+    yield SimpleNamespace(
+        storage=storage,
+        storage_factory=lambda: storage,
+        session=storage.session,
+        scope=HistoryScope("agent", "general"),
+    )
 
 
 class _PrelockBarrierLock:
@@ -3268,7 +3278,8 @@ def test_create_team_instance_installs_notice_hook_on_team_model(tmp_path: Path)
         assert _notice_count(messages) == 1
 
 
-def test_cleanup_queued_notice_state_strips_nested_team_member_responses() -> None:
+@pytest.mark.asyncio
+async def test_cleanup_queued_notice_state_strips_nested_team_member_responses() -> None:
     """Team cleanup should recurse into nested member responses."""
     run_output = TeamRunOutput(
         run_id="run-1",
@@ -3283,34 +3294,40 @@ def test_cleanup_queued_notice_state_strips_nested_team_member_responses() -> No
         ],
         status=RunStatus.completed,
     )
-    storage = _FakeStorage()
-    storage.session = TeamSession(
-        session_id="session-1",
-        runs=[
-            TeamRunOutput(
-                run_id="run-1",
-                session_id="session-1",
-                messages=[_queued_notice_message()],
-                member_responses=[
-                    RunOutput(
-                        run_id="member-run-1",
-                        session_id="session-1",
-                        messages=[_queued_notice_message()],
-                    ),
-                ],
-                status=RunStatus.completed,
-            ),
-        ],
-    )
+    created_storages: list[_FakeStorage] = []
 
-    cleanup_queued_notice_state(
+    def storage_factory() -> _FakeStorage:
+        storage = _FakeStorage()
+        storage.session = TeamSession(
+            session_id="session-1",
+            runs=[
+                TeamRunOutput(
+                    run_id="run-1",
+                    session_id="session-1",
+                    messages=[_queued_notice_message()],
+                    member_responses=[
+                        RunOutput(
+                            run_id="member-run-1",
+                            session_id="session-1",
+                            messages=[_queued_notice_message()],
+                        ),
+                    ],
+                    status=RunStatus.completed,
+                ),
+            ],
+        )
+        created_storages.append(storage)
+        return storage
+
+    await cleanup_queued_notice_state_async(
         run_output=run_output,
-        storage=storage,
+        storage_factory=storage_factory,
         session_id="session-1",
         session_type=SessionType.TEAM,
         entity_name="queued-notice-team",
     )
 
+    storage = created_storages[0]
     assert _notice_count(run_output.messages or []) == 0
     assert run_output.member_responses is not None
     nested_member_run = run_output.member_responses[0]
@@ -3325,3 +3342,60 @@ def test_cleanup_queued_notice_state_strips_nested_team_member_responses() -> No
     stored_member_run = stored_team_run.member_responses[0]
     assert isinstance(stored_member_run, RunOutput)
     assert _notice_count(stored_member_run.messages or []) == 0
+    assert storage.closed is True
+
+
+@pytest.mark.asyncio
+async def test_async_cleanup_keeps_session_storage_io_off_event_loop() -> None:
+    """Slow synchronous session storage must not stall concurrent asyncio work."""
+    request_started = threading.Event()
+    release_request = threading.Event()
+    created_storages: list[_BlockingStorage] = []
+    event_loop_thread_id = threading.get_ident()
+
+    class _BlockingStorage(_FakeStorage):
+        def __init__(self) -> None:
+            super().__init__()
+            self.created_thread_id = threading.get_ident()
+
+        def get_session(self, session_id: str, _session_type: object) -> AgentSession | TeamSession | None:
+            request_started.set()
+            release_request.wait(timeout=1)
+            return super().get_session(session_id, _session_type)
+
+    def storage_factory() -> _BlockingStorage:
+        storage = _BlockingStorage()
+        storage.session = AgentSession(
+            session_id="session-1",
+            runs=[
+                RunOutput(
+                    run_id="run-1",
+                    session_id="session-1",
+                    messages=[_queued_notice_message()],
+                ),
+            ],
+        )
+        created_storages.append(storage)
+        return storage
+
+    cleanup_task = asyncio.create_task(
+        cleanup_queued_notice_state_async(
+            run_output=None,
+            storage_factory=storage_factory,
+            session_id="session-1",
+            session_type=SessionType.AGENT,
+            entity_name="queued-notice-agent",
+        ),
+    )
+    try:
+        assert await asyncio.to_thread(request_started.wait, 1)
+        await asyncio.wait_for(asyncio.sleep(0), timeout=0.1)
+        assert not cleanup_task.done()
+    finally:
+        release_request.set()
+
+    await asyncio.wait_for(cleanup_task, timeout=1)
+    storage = created_storages[0]
+    assert storage.created_thread_id != event_loop_thread_id
+    assert storage.upserted is True
+    assert storage.closed is True

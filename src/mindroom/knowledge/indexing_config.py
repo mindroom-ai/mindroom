@@ -121,6 +121,17 @@ class IndexingSettings:
         mode = settings["mode"]
         if mode not in _INDEXING_MODES:
             return None
+
+        # Legacy metadata predating these keys omits them entirely. Normalize the
+        # absent value to whatever ``indexing_settings_key`` emits today, so an
+        # old index is not misread as config-incompatible and needlessly rebuilt.
+        # That producer always emits a filter key for include/exclude_patterns,
+        # but only populates extra_extensions in semantic mode ("" otherwise).
+        def _optional_filter_key(name: str, *, empty_value: str = _EMPTY_FILTER_KEY) -> str:
+            return settings.get(name, "") or empty_value
+
+        semantic_only_empty = _EMPTY_FILTER_KEY if mode == "semantic" else ""
+
         return cls(
             base_id=settings["base_id"],
             storage_root=settings["storage_root"],
@@ -138,11 +149,14 @@ class IndexingSettings:
             git_skip_hidden=settings["git_skip_hidden"],
             git_include_patterns=settings["git_include_patterns"],
             git_exclude_patterns=settings["git_exclude_patterns"],
-            include_patterns=settings.get("include_patterns", ""),
-            exclude_patterns=settings.get("exclude_patterns", ""),
+            include_patterns=_optional_filter_key("include_patterns"),
+            exclude_patterns=_optional_filter_key("exclude_patterns"),
             include_extensions=settings["include_extensions"],
             exclude_extensions=settings["exclude_extensions"],
-            extra_extensions=settings.get("extra_extensions", ""),
+            extra_extensions=_optional_filter_key("extra_extensions", empty_value=semantic_only_empty),
+            # Not normalized on purpose: skip_hidden is a bool string rather than
+            # a filter key, and absent metadata must keep failing the corpus match
+            # so pre-skip_hidden indexes are rebuilt (see the field docstring).
             skip_hidden=settings.get("skip_hidden", ""),
         )
 
@@ -257,6 +271,9 @@ def storage_key_for_base(base_id: str, knowledge_path: Path) -> str:
 
 def _filter_settings_key(values: Iterable[str]) -> str:
     return str(tuple(sorted(values)))
+
+
+_EMPTY_FILTER_KEY = _filter_settings_key(())
 
 
 def indexing_settings_key(config: Config, storage_path: Path, base_id: str, knowledge_path: Path) -> IndexingSettings:

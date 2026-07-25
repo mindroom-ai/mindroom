@@ -155,6 +155,7 @@ class ThreadReadPolicy:
             room_id,
             thread_id,
             ignore_cancelled_room_fences=True,
+            coordination_scope=self.runtime.event_cache.principal_id,
         )
 
     def _full_history_result(
@@ -320,6 +321,7 @@ class ThreadReadPolicy:
                 ),
                 name=name,
                 ignore_cancelled_room_fences=True,
+                coordination_scope=self.runtime.event_cache.principal_id,
             ),
         )
 
