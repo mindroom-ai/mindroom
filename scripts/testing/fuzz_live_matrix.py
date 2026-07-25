@@ -1545,6 +1545,7 @@ class ManagedTuwunelStack:
         self._model_server: ThreadingHTTPServer | None = None
         self._model_thread: threading.Thread | None = None
         self._mindroom_process: subprocess.Popen[str] | None = None
+        self._mindroom_runtime_pid: int | None = None
         self._log_handle: TextIOWrapper | None = None
         self._env: dict[str, str] = {}
         self._provenance_sink = provenance_sink
@@ -1958,9 +1959,16 @@ class ManagedTuwunelStack:
 
     @property
     def mindroom_pid(self) -> int | None:
-        """Return the active MindRoom process ID for bounded resource sampling."""
+        """Return the managed process-group leader used for cleanup."""
         process = self._mindroom_process
         return process.pid if process is not None and process.poll() is None else None
+
+    @property
+    def mindroom_runtime_pid(self) -> int | None:
+        """Return the attested Python runtime process ID for resource sampling."""
+        if self.mindroom_pid is None:
+            return None
+        return self._mindroom_runtime_pid
 
     def assert_stress_dependencies_healthy(self) -> None:
         """Fail unless stress uses live Tuwunel, PostgreSQL, and the configured backend."""
@@ -2123,6 +2131,7 @@ class ManagedTuwunelStack:
         assert self._log_handle is not None
         overlay = self._required_nio_overlay()
         mindroom_root = self._selected_mindroom_root()
+        self._mindroom_runtime_pid = None
         self.attestation_path.unlink(missing_ok=True)
         self._mindroom_start_log_offset = self.log_path.stat().st_size if self.log_path.exists() else 0
         self._mindroom_process = subprocess.Popen(
@@ -2201,6 +2210,7 @@ class ManagedTuwunelStack:
                     **self._tuwunel_provenance(),
                     "runtime_generation": len(self._runtime_generations) + 1,
                 }
+                self._mindroom_runtime_pid = cast("int", generation["runtime_pid"])
                 self._runtime_generations.append(generation)
                 self.runtime_provenance = {
                     **generation,
@@ -2287,12 +2297,14 @@ class ManagedTuwunelStack:
     def _stop_mindroom(self, *, kill: bool = False) -> None:
         process = self._mindroom_process
         if process is None:
+            self._mindroom_runtime_pid = None
             return
         return_code = process.poll()
         if return_code is not None:
             with suppress(ProcessLookupError):
                 os.killpg(process.pid, signal.SIGKILL)
             self._mindroom_process = None
+            self._mindroom_runtime_pid = None
             msg = f"MindRoom exited before managed shutdown with status {return_code}"
             raise RuntimeError(msg)
         if kill:
@@ -2300,6 +2312,7 @@ class ManagedTuwunelStack:
                 os.killpg(process.pid, signal.SIGKILL)
             process.wait(timeout=10)
             self._mindroom_process = None
+            self._mindroom_runtime_pid = None
             return
         try:
             os.killpg(process.pid, signal.SIGINT)
@@ -2308,6 +2321,7 @@ class ManagedTuwunelStack:
                 return_code = process.wait(timeout=10)
             finally:
                 self._mindroom_process = None
+                self._mindroom_runtime_pid = None
             msg = f"MindRoom exited before managed SIGINT delivery with status {return_code}"
             raise RuntimeError(msg) from exc
         try:
@@ -2319,9 +2333,11 @@ class ManagedTuwunelStack:
                 process.wait(timeout=10)
             finally:
                 self._mindroom_process = None
+                self._mindroom_runtime_pid = None
             msg = "MindRoom ignored SIGINT and required SIGKILL"
             raise TimeoutError(msg) from exc
         self._mindroom_process = None
+        self._mindroom_runtime_pid = None
         expected_return_codes = {0, -int(signal.SIGINT), 128 + int(signal.SIGINT)}
         if return_code not in expected_return_codes:
             msg = f"MindRoom graceful shutdown exited with status {return_code}"
@@ -5617,7 +5633,7 @@ def _sample_mindroom_process(
     """Sample the current runtime process, rebinding after managed restarts."""
     import psutil as psutil_module  # noqa: PLC0415
 
-    pid = stack.mindroom_pid
+    pid = stack.mindroom_runtime_pid
     if pid is None:
         msg = "MindRoom process missing during stress resource sampling"
         raise RuntimeError(msg)
@@ -6057,13 +6073,18 @@ def _validated_child_provenance(
     if not isinstance(raw, dict):
         msg = "MindRoom runtime attestation must be a JSON object"
         raise TypeError(msg)
-    return _validated_import_provenance(
+    provenance = _validated_import_provenance(
         raw,
         overlay=overlay,
         expected_mindroom_revision=expected_mindroom_revision,
         expected_mindroom_root=expected_mindroom_root,
         expected_runner_revision=expected_runner_revision,
     )
+    runtime_pid = raw.get("runtime_pid")
+    if isinstance(runtime_pid, bool) or not isinstance(runtime_pid, int) or runtime_pid <= 0:
+        msg = "MindRoom runtime attestation omitted a valid runtime PID"
+        raise TypeError(msg)
+    return provenance
 
 
 def _validated_runner_provenance(expected_revision: str | None) -> dict[str, object]:
@@ -6225,6 +6246,7 @@ def _run_mindroom_runtime_child(attestation_path: Path, arguments: list[str]) ->
     payload = {
         "python": sys.version.split()[0],
         "platform": sys.platform,
+        "runtime_pid": os.getpid(),
         "mindroom_module_path": str(Path(mindroom_file).resolve()),
         "nio_module_path": str(Path(nio_file).resolve()),
         "nio_version": version("mindroom-nio"),

@@ -3479,6 +3479,7 @@ def test_child_provenance_uses_loaded_overlay(
                 "nio_module_path": str(tmp_path / "overlay" / "nio" / "__init__.py"),
                 "nio_version": "1.2.3",
                 "python": "3.13",
+                "runtime_pid": 1234,
             },
         ),
         encoding="utf-8",
@@ -3506,6 +3507,24 @@ def test_child_provenance_uses_loaded_overlay(
     assert provenance["nio_module_path"] == str((tmp_path / "overlay" / "nio" / "__init__.py").resolve())
     assert provenance["nio_revision"] == "nio-head"
     assert provenance["nio_expected_revision"] == "nio-head"
+    assert provenance["runtime_pid"] == 1234
+
+
+def test_child_provenance_requires_runtime_pid(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Resource evidence must bind to the attested Python child, not its launcher."""
+    attestation = tmp_path / "runtime-attestation.json"
+    attestation.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(live_fuzz, "_validated_import_provenance", lambda *_args, **_kwargs: {})
+
+    with pytest.raises(TypeError, match="valid runtime PID"):
+        _validated_child_provenance(
+            attestation,
+            overlay=NioOverlay(path=tmp_path / "nio", revision="nio-head"),
+            expected_mindroom_revision="mindroom-head",
+        )
 
 
 def test_child_provenance_rejects_revision_changed_after_preflight(
@@ -3562,6 +3581,7 @@ def test_child_provenance_allows_distinct_exact_runtime_and_runner(
             {
                 "mindroom_module_path": str(runtime_module),
                 "nio_module_path": str(nio_module),
+                "runtime_pid": 1234,
             },
         ),
         encoding="utf-8",
@@ -3615,6 +3635,7 @@ def test_restart_rejects_mindroom_head_move_and_keeps_first_generation(
             {
                 "mindroom_module_path": str(mindroom_path),
                 "nio_module_path": str(nio_path),
+                "runtime_pid": 1234,
             },
         ),
         encoding="utf-8",
@@ -4131,6 +4152,7 @@ def test_runtime_provenance_identifies_tuwunel_server(
                 "nio_dirty": False,
                 "nio_expected_revision": "nio-head",
                 "nio_revision": "nio-head",
+                "runtime_pid": 1234,
             },
         )
         monkeypatch.setattr(
@@ -4155,6 +4177,7 @@ def test_runtime_provenance_identifies_tuwunel_server(
         assert all(generation["mindroom_revision"] == "abc" for generation in generations)
         assert stack.runtime_provenance["mindroom_frozen_revision"] == "abc"
         assert stack.runtime_provenance["runtime_generation"] == 2
+        assert stack._mindroom_runtime_pid == 1234
         assert len(sink) == 2
         assert len(sink[0]["runtime_generations"]) == 1
         assert sink[1] == stack.runtime_provenance
@@ -4191,6 +4214,7 @@ def test_final_source_recheck_rejects_post_attestation_mutation(
             {
                 "mindroom_module_path": str(mindroom_path),
                 "nio_module_path": str(nio_path),
+                "runtime_pid": 1234,
             },
         ),
         encoding="utf-8",
@@ -4458,7 +4482,7 @@ def test_resource_sampler_rebinds_after_managed_runtime_restart(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """CPU and RSS evidence must follow the new child PID after a cold boundary."""
-    stack = SimpleNamespace(mindroom_pid=22)
+    stack = SimpleNamespace(mindroom_runtime_pid=22)
     stale_process = SimpleNamespace(pid=11)
     current_process = MagicMock(pid=22)
     current_process.cpu_percent.side_effect = [None, 37.5]
