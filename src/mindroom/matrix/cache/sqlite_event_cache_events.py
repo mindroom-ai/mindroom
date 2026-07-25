@@ -11,6 +11,7 @@ from .event_cache_events import (
     SerializedCachedEvent,
     batch_redaction_candidate_ids,
     cache_rows_were_deleted,
+    cached_event_owns_mxc,
     decode_cached_event,
     decode_cached_events,
     event_edit_rows,
@@ -20,6 +21,7 @@ from .event_cache_events import (
     filter_redacted_events,
     redaction_removal_event_ids,
     serialize_cacheable_events,
+    validated_mxc_text_rows,
 )
 
 if TYPE_CHECKING:
@@ -217,28 +219,13 @@ async def load_mxc_text(
     mxc_url: str,
 ) -> str | None:
     """Return plaintext only through a surviving visible event reference."""
-    cursor = await db.execute(
-        """
-        SELECT plaintext.text_content
-        FROM mxc_text_cache AS plaintext
-        JOIN event_mxc_references AS reference
-          ON reference.principal_id = plaintext.principal_id
-         AND reference.room_id = plaintext.room_id
-         AND reference.mxc_url = plaintext.mxc_url
-        JOIN events
-          ON events.principal_id = reference.principal_id
-         AND events.room_id = reference.room_id
-         AND events.event_id = reference.event_id
-        WHERE plaintext.principal_id = ?
-          AND plaintext.room_id = ?
-          AND reference.event_id = ?
-          AND plaintext.mxc_url = ?
-        """,
-        (principal_id, room_id, event_id, mxc_url),
+    texts = await load_mxc_texts(
+        db,
+        principal_id=principal_id,
+        room_id=room_id,
+        references=((event_id, mxc_url),),
     )
-    row = await cursor.fetchone()
-    await cursor.close()
-    return None if row is None else str(row[0])
+    return texts.get((event_id, mxc_url))
 
 
 async def load_mxc_texts(
@@ -261,7 +248,8 @@ async def load_mxc_texts(
         )
         cursor = await db.execute(
             f"""
-            SELECT reference.event_id, plaintext.mxc_url, plaintext.text_content
+            SELECT reference.event_id, plaintext.mxc_url, plaintext.text_content,
+                   events.event_json, events.origin_server_ts
             FROM mxc_text_cache AS plaintext
             JOIN event_mxc_references AS reference
               ON reference.principal_id = plaintext.principal_id
@@ -281,9 +269,7 @@ async def load_mxc_texts(
             rows = await cursor.fetchall()
         finally:
             await cursor.close()
-        resolved.update(
-            {(str(event_id), str(mxc_url)): str(text_content) for event_id, mxc_url, text_content in rows},
-        )
+        resolved.update(validated_mxc_text_rows(rows, room_id=room_id))
     return resolved
 
 
@@ -298,7 +284,7 @@ async def _event_owns_mxc_text(
     """Return whether one visible event currently owns the room-scoped MXC."""
     cursor = await db.execute(
         """
-        SELECT 1
+        SELECT events.event_json, events.origin_server_ts
         FROM events
         JOIN event_mxc_references AS reference
           ON reference.principal_id = events.principal_id
@@ -313,7 +299,13 @@ async def _event_owns_mxc_text(
     )
     owns_plaintext = await cursor.fetchone()
     await cursor.close()
-    return owns_plaintext is not None
+    return owns_plaintext is not None and cached_event_owns_mxc(
+        owns_plaintext[0],
+        event_id,
+        owns_plaintext[1],
+        room_id=room_id,
+        mxc_url=mxc_url,
+    )
 
 
 async def persist_mxc_text(

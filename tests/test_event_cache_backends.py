@@ -48,7 +48,7 @@ from tests.event_cache_test_support import get_latest_edit
 from tests.event_cache_test_support import replace_thread_unconditionally as _replace_thread
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Awaitable, Callable
     from pathlib import Path
 
     import aiosqlite
@@ -315,6 +315,7 @@ async def _assert_invalid_sidecar_owners_are_rejected(
     cache: ConversationEventCache,
     *,
     room_id: str,
+    seed_legacy_owner: Callable[[str, str], Awaitable[None]],
 ) -> None:
     """Assert state and explicit other-room events cannot own durable plaintext."""
     mxc_url = "mxc://localhost/sidecar"
@@ -340,6 +341,9 @@ async def _assert_invalid_sidecar_owners_are_rejected(
         }
         await cache.store_event(event_id, room_id, event)
         assert not await cache.store_mxc_text(room_id, event_id, mxc_url, "plaintext")
+        assert await cache.get_mxc_text(room_id, event_id, mxc_url) is None
+        await seed_legacy_owner(event_id, mxc_url)
+        assert not await cache.store_mxc_text(room_id, event_id, mxc_url, "replacement")
         assert await cache.get_mxc_text(room_id, event_id, mxc_url) is None
 
 
@@ -2113,8 +2117,31 @@ async def test_sqlite_cache_validates_bundled_edits_and_sidecar_owners(tmp_path:
     cache = SqliteEventCache(tmp_path / "event-cache.db")
     await cache.initialize()
     try:
+
+        async def seed_legacy_owner(event_id: str, mxc_url: str) -> None:
+            assert cache._runtime.db is not None
+            await cache._runtime.db.execute(
+                """
+                INSERT OR IGNORE INTO event_mxc_references(principal_id, room_id, event_id, mxc_url)
+                VALUES (?, ?, ?, ?)
+                """,
+                (cache.principal_id, room_id, event_id, mxc_url),
+            )
+            await cache._runtime.db.execute(
+                """
+                INSERT OR REPLACE INTO mxc_text_cache(principal_id, room_id, mxc_url, text_content, cached_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (cache.principal_id, room_id, mxc_url, "legacy plaintext", 1.0),
+            )
+            await cache._runtime.db.commit()
+
         await _assert_bundled_and_cached_edits_share_validation(cache, room_id=room_id)
-        await _assert_invalid_sidecar_owners_are_rejected(cache, room_id=room_id)
+        await _assert_invalid_sidecar_owners_are_rejected(
+            cache,
+            room_id=room_id,
+            seed_legacy_owner=seed_legacy_owner,
+        )
     finally:
         await cache.close()
 
@@ -2176,8 +2203,33 @@ async def test_postgres_cache_validates_bundled_edits_and_sidecar_owners(
     )
     await cache.initialize()
     try:
+
+        async def seed_legacy_owner(event_id: str, mxc_url: str) -> None:
+            assert cache._runtime.db is not None
+            await cache._runtime.db.execute(
+                """
+                INSERT INTO mindroom_event_cache_event_mxc_references(namespace, room_id, event_id, mxc_url)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT DO NOTHING
+                """,
+                (cache.namespace, room_id, event_id, mxc_url),
+            )
+            await cache._runtime.db.execute(
+                """
+                INSERT INTO mindroom_event_cache_mxc_text(namespace, room_id, mxc_url, text_content, cached_at)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT(namespace, room_id, mxc_url) DO UPDATE SET text_content = excluded.text_content
+                """,
+                (cache.namespace, room_id, mxc_url, "legacy plaintext", 1.0),
+            )
+            await cache._runtime.db.commit()
+
         await _assert_bundled_and_cached_edits_share_validation(cache, room_id=room_id)
-        await _assert_invalid_sidecar_owners_are_rejected(cache, room_id=room_id)
+        await _assert_invalid_sidecar_owners_are_rejected(
+            cache,
+            room_id=room_id,
+            seed_legacy_owner=seed_legacy_owner,
+        )
     finally:
         await cache.close()
 

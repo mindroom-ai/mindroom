@@ -11,6 +11,7 @@ from .event_cache_events import (
     SerializedCachedEvent,
     batch_redaction_candidate_ids,
     cache_rows_were_deleted,
+    cached_event_owns_mxc,
     decode_cached_event,
     event_edit_rows,
     event_mxc_urls,
@@ -19,6 +20,7 @@ from .event_cache_events import (
     filter_redacted_events,
     redaction_removal_event_ids,
     serialize_cacheable_events,
+    validated_mxc_text_rows,
 )
 from .postgres_cursor import fetchall, fetchone, rowcount
 
@@ -220,27 +222,13 @@ async def load_mxc_text(
     mxc_url: str,
 ) -> str | None:
     """Return one durably cached MXC text payload when present."""
-    row = await fetchone(
+    texts = await load_mxc_texts(
         db,
-        """
-        SELECT plaintext.text_content
-        FROM mindroom_event_cache_mxc_text AS plaintext
-        JOIN mindroom_event_cache_event_mxc_references AS reference
-          ON reference.namespace = plaintext.namespace
-         AND reference.room_id = plaintext.room_id
-         AND reference.mxc_url = plaintext.mxc_url
-        JOIN mindroom_event_cache_events AS events
-          ON events.namespace = reference.namespace
-         AND events.room_id = reference.room_id
-         AND events.event_id = reference.event_id
-        WHERE plaintext.namespace = %s
-          AND plaintext.room_id = %s
-          AND reference.event_id = %s
-          AND plaintext.mxc_url = %s
-        """,
-        (namespace, room_id, event_id, mxc_url),
+        namespace=namespace,
+        room_id=room_id,
+        references=((event_id, mxc_url),),
     )
-    return None if row is None else str(row[0])
+    return texts.get((event_id, mxc_url))
 
 
 async def load_mxc_texts(
@@ -261,7 +249,8 @@ async def load_mxc_texts(
             SELECT *
             FROM unnest(%s::text[], %s::text[])
         )
-        SELECT reference.event_id, plaintext.mxc_url, plaintext.text_content
+        SELECT reference.event_id, plaintext.mxc_url, plaintext.text_content,
+               events.event_json, events.origin_server_ts
         FROM requested
         JOIN mindroom_event_cache_event_mxc_references AS reference
           ON reference.event_id = requested.event_id
@@ -284,7 +273,7 @@ async def load_mxc_texts(
             room_id,
         ),
     )
-    return {(str(event_id), str(mxc_url)): str(text_content) for event_id, mxc_url, text_content in rows}
+    return validated_mxc_text_rows(rows, room_id=room_id)
 
 
 async def persist_mxc_text(
@@ -301,7 +290,7 @@ async def persist_mxc_text(
     owns_plaintext = await fetchone(
         db,
         """
-        SELECT 1
+        SELECT events.event_json, events.origin_server_ts
         FROM mindroom_event_cache_events AS events
         JOIN mindroom_event_cache_event_mxc_references AS reference
           ON reference.namespace = events.namespace
@@ -314,7 +303,13 @@ async def persist_mxc_text(
         """,
         (namespace, room_id, event_id, mxc_url),
     )
-    if owns_plaintext is None:
+    if owns_plaintext is None or not cached_event_owns_mxc(
+        owns_plaintext[0],
+        event_id,
+        owns_plaintext[1],
+        room_id=room_id,
+        mxc_url=mxc_url,
+    ):
         return False
     await db.execute(
         """

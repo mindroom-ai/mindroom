@@ -140,6 +140,21 @@ def event_mxc_urls(event: dict[str, Any], *, room_id: str) -> frozenset[str]:
     )
 
 
+def cached_event_owns_mxc(event_json: str, event_id: str, timestamp: int, *, room_id: str, mxc_url: str) -> bool:
+    """Return whether one index-valid visible event owns an MXC reference."""
+    decoded = decode_cached_event(event_json, event_id, timestamp, room_id=room_id)
+    return decoded is not None and mxc_url in event_mxc_urls(decoded.event, room_id=room_id)
+
+
+def validated_mxc_text_rows(rows: Iterable[Any], *, room_id: str) -> dict[tuple[str, str], str]:
+    """Return plaintext rows whose event payload still owns the requested MXC."""
+    return {
+        (str(event_id), str(mxc_url)): str(text)
+        for event_id, mxc_url, text, event_json, timestamp in rows
+        if cached_event_owns_mxc(event_json, event_id, timestamp, room_id=room_id, mxc_url=mxc_url)
+    }
+
+
 def event_redaction_candidate_ids(event_id: str, event: dict[str, Any]) -> frozenset[str]:
     """Return IDs whose tombstones would prevent caching one event."""
     candidate_ids = {event_id}
