@@ -125,11 +125,8 @@ class EditRegenerator:
             original_event_id=original_event_id,
             requester_user_id=requester_user_id,
         )
-        if turn_record is None or turn_record.requester_id != requester_user_id:
-            self._logger().debug(
-                "No requester-owned handled turn record found for edited message",
-                original_event_id=original_event_id,
-            )
+        if turn_record is None or turn_record.requester_id_for_source(original_event_id) != requester_user_id:
+            self._logger().debug("edit_source_requester_mismatch", event_id=original_event_id)
             return
         if (
             turn_record.conversation_target is None

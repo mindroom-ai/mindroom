@@ -207,6 +207,12 @@ class TurnRecord:
         """Return whether the turn combines multiple source events."""
         return len(self.source_event_ids) > 1
 
+    def requester_id_for_source(self, source_event_id: str) -> str | None:
+        """Return the exact requester for one source in this turn."""
+        if self.source_event_metadata is None:
+            return self.requester_id
+        return metadata.sender if (metadata := self.source_event_metadata.get(source_event_id)) is not None else None
+
     @property
     def indexed_event_ids(self) -> tuple[str, ...]:
         """Return canonical source IDs followed by non-source discovery aliases."""

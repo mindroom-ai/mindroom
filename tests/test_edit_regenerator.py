@@ -254,6 +254,55 @@ async def test_edit_from_another_requester_does_not_regenerate(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
+async def test_coalesced_edit_uses_exact_source_requester(tmp_path: Path) -> None:
+    """Each member of a coalesced turn remains editable only by its own requester."""
+    alice = "@alice:example.org"
+    bob = "@bob:example.org"
+    first_event_id = "$m1:example.org"
+    second_event_id = "$m2:example.org"
+    record = _turn_record(
+        source_event_ids=(first_event_id, second_event_id),
+        source_event_prompts={first_event_id: "first message", second_event_id: "second message"},
+        source_event_metadata={
+            first_event_id: SourceEventMetadata(sender=alice),
+            second_event_id: SourceEventMetadata(sender=bob),
+        },
+        requester_id=bob,
+    )
+    harness = _harness(tmp_path, turn_record=record)
+    event, event_info = _edit_event(
+        original_event_id=first_event_id,
+        new_body="edited first message",
+        sender=alice,
+    )
+
+    await harness.regenerator.handle_message_edit(harness.room, event, event_info, alice)
+
+    request = harness.generate_response.await_args.args[0]
+    assert request.user_id == alice
+    assert "edited first message" in request.prompt
+    assert "second message" in request.prompt
+
+
+@pytest.mark.asyncio
+async def test_coalesced_edit_without_source_requester_fails_closed(tmp_path: Path) -> None:
+    """Incomplete coalesced ownership metadata cannot fall back to the anchor requester."""
+    first_event_id = "$m1:example.org"
+    second_event_id = "$m2:example.org"
+    record = _turn_record(
+        source_event_ids=(first_event_id, second_event_id),
+        source_event_prompts={first_event_id: "first message", second_event_id: "second message"},
+        source_event_metadata={second_event_id: SourceEventMetadata(sender=USER_ID)},
+    )
+    harness = _harness(tmp_path, turn_record=record)
+    event, event_info = _edit_event(original_event_id=first_event_id)
+
+    await _handle_edit(harness, event, event_info)
+
+    _assert_no_regeneration(harness)
+
+
+@pytest.mark.asyncio
 async def test_lifecycle_lock_callback_removes_stale_runs(tmp_path: Path) -> None:
     """The lock-acquired callback prunes stale persisted runs for the regeneration record."""
     record = _turn_record()
@@ -410,9 +459,13 @@ async def test_coalesced_edit_preserves_tagged_source_metadata(tmp_path: Path) -
     )
     harness = _harness(tmp_path, turn_record=record)
     harness.config.timezone = "America/Los_Angeles"
-    event, event_info = _edit_event(original_event_id=first_event_id, new_body="edited ]]> first <message>")
+    event, event_info = _edit_event(
+        original_event_id=first_event_id,
+        new_body="edited ]]> first <message>",
+        sender="@alice:example.org",
+    )
 
-    await _handle_edit(harness, event, event_info)
+    await harness.regenerator.handle_message_edit(harness.room, event, event_info, "@alice:example.org")
 
     assert harness.generate_response.await_args.args[0].prompt == (
         "The user sent the following messages in quick succession. "
@@ -487,10 +540,7 @@ async def test_edit_without_turn_record_returns_early(tmp_path: Path) -> None:
 
     _assert_no_regeneration(harness)
     harness.resolver.build_message_envelope.assert_not_called()
-    harness.logger.debug.assert_any_call(
-        "No requester-owned handled turn record found for edited message",
-        original_event_id=ORIGINAL_EVENT_ID,
-    )
+    harness.logger.debug.assert_any_call("edit_source_requester_mismatch", event_id=ORIGINAL_EVENT_ID)
 
 
 @pytest.mark.asyncio
