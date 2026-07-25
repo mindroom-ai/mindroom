@@ -851,8 +851,8 @@ async def test_auto_resume_classifies_later_activity_by_effective_sender_and_his
         ),
     ]
     conversation_cache = _auto_resume_conversation_cache(interrupted)
-    conversation_cache.get_strict_thread_history.side_effect = None
-    conversation_cache.get_strict_thread_history.return_value = _authoritative_history(
+    conversation_cache.refresh_strict_thread_history_from_source.side_effect = None
+    conversation_cache.refresh_strict_thread_history_from_source.return_value = _authoritative_history(
         _history_message("$target", timestamp=100),
         _history_message("$newer", sender=newer_sender, timestamp=100, content=newer_content),
     )
@@ -889,8 +889,8 @@ async def test_prior_auto_resume_relay_does_not_suppress_sibling_resume(tmp_path
         ),
     ]
     conversation_cache = _auto_resume_conversation_cache(interrupted)
-    conversation_cache.get_strict_thread_history.side_effect = None
-    conversation_cache.get_strict_thread_history.return_value = _authoritative_history(
+    conversation_cache.refresh_strict_thread_history_from_source.side_effect = None
+    conversation_cache.refresh_strict_thread_history_from_source.return_value = _authoritative_history(
         _history_message("$target"),
         _history_message(
             "$prior-resume",
@@ -931,19 +931,15 @@ async def test_auto_resume_fails_closed_without_authoritative_target_history(
     interrupted = [InterruptedThread(ROOM_ID, "$thread", "$target", "partial", "test_agent")]
     conversation_cache = None if history_case == "missing" else _auto_resume_conversation_cache(interrupted)
     if conversation_cache is not None and history_case == "failed":
-        conversation_cache.get_strict_thread_history.side_effect = RuntimeError("history failed")
+        conversation_cache.refresh_strict_thread_history_from_source.side_effect = RuntimeError("history failed")
     elif conversation_cache is not None and history_case == "degraded":
-        conversation_cache.get_strict_thread_history.side_effect = None
-        conversation_cache.get_strict_thread_history.return_value = thread_history_result(
+        conversation_cache.refresh_strict_thread_history_from_source.side_effect = None
+        conversation_cache.refresh_strict_thread_history_from_source.return_value = thread_history_result(
             [_history_message("$target")],
             is_full_history=False,
             diagnostics={"thread_read_source": "degraded", "thread_read_degraded": True},
         )
     elif conversation_cache is not None and history_case == "missing_target":
-        conversation_cache.get_strict_thread_history.side_effect = None
-        conversation_cache.get_strict_thread_history.return_value = _authoritative_history(
-            _history_message("$other"),
-        )
         conversation_cache.refresh_strict_thread_history_from_source.side_effect = None
         conversation_cache.refresh_strict_thread_history_from_source.return_value = _authoritative_history(
             _history_message("$other"),
@@ -952,8 +948,8 @@ async def test_auto_resume_fails_closed_without_authoritative_target_history(
         state = MatrixState.load(runtime_paths_for(config))
         state.accounts.pop(managed_account_key("other"))
         state.save(runtime_paths_for(config))
-        conversation_cache.get_strict_thread_history.side_effect = None
-        conversation_cache.get_strict_thread_history.return_value = _authoritative_history(
+        conversation_cache.refresh_strict_thread_history_from_source.side_effect = None
+        conversation_cache.refresh_strict_thread_history_from_source.return_value = _authoritative_history(
             _history_message("$target"),
             _history_message("$later", sender=OTHER_BOT_USER_ID),
         )
@@ -1009,17 +1005,58 @@ async def test_auto_resume_refreshes_matrix_when_startup_cache_omits_target(tmp_
         )
 
     assert resumed_count == 1
-    conversation_cache.get_strict_thread_history.assert_awaited_once_with(
+    conversation_cache.get_strict_thread_history.assert_not_awaited()
+    conversation_cache.refresh_strict_thread_history_from_source.assert_awaited_once_with(
         ROOM_ID,
         "$thread",
         caller_label="startup_auto_resume_freshness",
     )
+    mock_send.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_auto_resume_source_refresh_sees_newer_human_missing_from_startup_cache(tmp_path: Path) -> None:
+    """Startup recovery should not resume when Matrix has newer human work absent from cache."""
+    config = _make_config(tmp_path)
+    client = AsyncMock(spec=nio.AsyncClient)
+    interrupted = [
+        InterruptedThread(
+            ROOM_ID,
+            "$thread",
+            "$target",
+            "partial",
+            "test_agent",
+            original_sender_id=USER_ID,
+        ),
+    ]
+    conversation_cache = _auto_resume_conversation_cache(interrupted)
+    conversation_cache.get_strict_thread_history.side_effect = None
+    conversation_cache.get_strict_thread_history.return_value = _authoritative_history(
+        _history_message("$target"),
+    )
+    conversation_cache.refresh_strict_thread_history_from_source.side_effect = None
+    conversation_cache.refresh_strict_thread_history_from_source.return_value = _authoritative_history(
+        _history_message("$target"),
+        _history_message("$newer-human", sender=USER_ID),
+    )
+
+    with patch("mindroom.matrix.stale_stream_cleanup.send_message_result", new=AsyncMock()) as mock_send:
+        resumed_count = await auto_resume_interrupted_threads(
+            client,
+            interrupted,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            conversation_cache=conversation_cache,
+        )
+
+    assert resumed_count == 0
+    conversation_cache.get_strict_thread_history.assert_not_awaited()
     conversation_cache.refresh_strict_thread_history_from_source.assert_awaited_once_with(
         ROOM_ID,
         "$thread",
-        caller_label="startup_auto_resume_target_refresh",
+        caller_label="startup_auto_resume_freshness",
     )
-    mock_send.assert_awaited_once()
+    mock_send.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1050,7 +1087,7 @@ async def test_auto_resume_rechecks_after_delay_before_each_delivery(tmp_path: P
             messages.append(_history_message("$human-later", sender=USER_ID))
         return _authoritative_history(*messages)
 
-    conversation_cache.get_strict_thread_history.side_effect = history_for_call
+    conversation_cache.refresh_strict_thread_history_from_source.side_effect = history_for_call
 
     with (
         patch(
@@ -2091,7 +2128,9 @@ async def test_recent_mid_tool_shutdown_marker_resumes_only_without_newer_human_
             ),
         )
     conversation_cache = AsyncMock()
-    conversation_cache.get_strict_thread_history.return_value = _authoritative_history(*history_messages)
+    conversation_cache.refresh_strict_thread_history_from_source.return_value = _authoritative_history(
+        *history_messages,
+    )
     conversation_cache.notify_outbound_message = Mock()
 
     with patch(
