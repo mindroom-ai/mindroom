@@ -152,8 +152,12 @@ class EditRegenerator:
         ):
             return
         source_event_id = turn_record.prompt_source_event_id(original_event_id)
-        source_metadata = (turn_record.source_event_metadata or {}).get(source_event_id)
-        source_requester_id = source_metadata.sender if source_metadata is not None else turn_record.requester_id
+        source_metadata = turn_record.source_event_metadata
+        if source_metadata is None:
+            source_requester_id = turn_record.requester_id if not turn_record.is_coalesced else None
+        else:
+            exact_source_metadata = source_metadata.get(source_event_id)
+            source_requester_id = exact_source_metadata.sender if exact_source_metadata is not None else None
         if source_requester_id != requester_user_id:
             return
         context = await self.edit_regeneration_context(
@@ -362,12 +366,18 @@ class EditRegenerator:
                 mailbox.pending.pop(source_event_id)
 
     async def _drain(self, room: nio.MatrixRoom, initial_record: TurnRecord, mailbox: _Mailbox) -> None:
-        while not self.deps.turn_store.try_claim_turn(initial_record):
-            await self.deps.wait_for_turn_settled(initial_record.indexed_event_ids)
+        claimed_record = initial_record
+        while not self.deps.turn_store.try_claim_turn(claimed_record):
+            await self.deps.wait_for_turn_settled(claimed_record.indexed_event_ids)
+            latest = max(mailbox.pending.values(), key=lambda edit: edit.revision)
+            refreshed_record = self.deps.turn_store.get_turn_record(latest.original_event_id)
+            if refreshed_record is None:
+                return
+            claimed_record = refreshed_record
         try:
             await self._drain_claimed(room, mailbox)
         finally:
-            self.deps.turn_store.release_pending_turn_claim(initial_record)
+            self.deps.turn_store.release_pending_turn_claim(claimed_record)
 
     async def _drain_claimed(self, room: nio.MatrixRoom, mailbox: _Mailbox) -> None:
         while mailbox.pending:

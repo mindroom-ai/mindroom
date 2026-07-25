@@ -23,6 +23,7 @@ from mindroom import interactive
 from mindroom.agent_storage import get_agent_session
 from mindroom.agents import remove_run_by_event_id
 from mindroom.bot import AgentBot, TeamBot
+from mindroom.coalescing_batch import tagged_coalesced_prompt
 from mindroom.commands import config_confirmation
 from mindroom.config.main import Config
 from mindroom.constants import (
@@ -32,13 +33,14 @@ from mindroom.constants import (
     MATRIX_RESPONSE_OWNER_METADATA_KEY,
     MATRIX_SEEN_EVENT_IDS_METADATA_KEY,
     MATRIX_SOURCE_EVENT_IDS_METADATA_KEY,
+    MATRIX_SOURCE_EVENT_METADATA_KEY,
     MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY,
     MATRIX_TURN_SCHEMA_VERSION_METADATA_KEY,
     ROUTER_AGENT_NAME,
     resolve_runtime_paths,
 )
 from mindroom.final_delivery import FinalDeliveryOutcome
-from mindroom.handled_turns import TurnRecord, TurnRecordCodec
+from mindroom.handled_turns import SourceEventMetadata, TurnRecord, TurnRecordCodec
 from mindroom.history.interrupted_replay import _build_interrupted_replay_run, build_interrupted_replay_snapshot
 from mindroom.history.types import HistoryScope
 from mindroom.matrix.cache.thread_history_result import thread_history_result
@@ -170,6 +172,7 @@ def _record_handled_turn(
     *,
     response_event_id: str | None = None,
     source_event_prompts: dict[str, str] | None = None,
+    source_event_metadata: dict[str, SourceEventMetadata] | None = None,
     response_owner: str | None = None,
     requester_id: str | None = "@user:example.com",
     history_scope: HistoryScope | None = None,
@@ -182,12 +185,35 @@ def _record_handled_turn(
             response_event_id=response_event_id,
             visible_echo_event_id=response_event_id,
             source_event_prompts=source_event_prompts,
+            source_event_metadata=source_event_metadata,
             response_owner=response_owner,
             requester_id=requester_id,
             history_scope=history_scope,
             conversation_target=conversation_target,
         ),
     )
+
+
+def _source_metadata(*source_event_ids: str) -> dict[str, SourceEventMetadata]:
+    return {source_event_id: SourceEventMetadata(sender="@user:example.com") for source_event_id in source_event_ids}
+
+
+def _source_metadata_records(*source_event_ids: str) -> dict[str, dict[str, object]]:
+    return {
+        source_event_id: metadata.to_record()
+        for source_event_id, metadata in _source_metadata(*source_event_ids).items()
+    }
+
+
+def _tagged_prompt(source_event_ids: tuple[str, ...], prompts: dict[str, str]) -> str:
+    prompt = tagged_coalesced_prompt(
+        source_event_ids,
+        prompts,
+        _source_metadata(*source_event_ids),
+        timestamp_formatter=lambda _timestamp_ms: None,
+    )
+    assert prompt is not None
+    return prompt
 
 
 def _agent_history_scope(agent_name: str) -> HistoryScope:
@@ -1389,6 +1415,7 @@ async def test_handle_message_edit_rebuilds_coalesced_prompt_for_non_primary_edi
             "$first:example.com": "first",
             "$primary:example.com": "primary",
         },
+        source_event_metadata=_source_metadata("$first:example.com", "$primary:example.com"),
         response_owner="test_agent",
         history_scope=_agent_history_scope("test_agent"),
         conversation_target=stored_target,
@@ -1462,9 +1489,9 @@ async def test_handle_message_edit_rebuilds_coalesced_prompt_for_non_primary_edi
 
         mock_generate_response.assert_awaited_once()
         request = mock_generate_response.call_args.args[0]
-        assert request.prompt == (
-            "The user sent the following messages in quick succession. "
-            "Treat them as one turn and respond once:\n\nupdated first\nprimary"
+        assert request.prompt == _tagged_prompt(
+            ("$first:example.com", "$primary:example.com"),
+            {"$first:example.com": "updated first", "$primary:example.com": "primary"},
         )
         response_target = request.response_envelope.target
         assert response_target.reply_to_event_id == "$primary:example.com"
@@ -1475,6 +1502,10 @@ async def test_handle_message_edit_rebuilds_coalesced_prompt_for_non_primary_edi
                 "$first:example.com": "updated first",
                 "$primary:example.com": "primary",
             },
+            MATRIX_SOURCE_EVENT_METADATA_KEY: _source_metadata_records(
+                "$first:example.com",
+                "$primary:example.com",
+            ),
             "matrix_source_event_revisions": {
                 "$first:example.com": [1000001, "$edit:example.com"],
             },
@@ -1943,6 +1974,10 @@ async def test_handle_message_edit_rebuilds_coalesced_prompt_from_persisted_run_
                         "$first:example.com": "first",
                         "$primary:example.com": "primary",
                     },
+                    MATRIX_SOURCE_EVENT_METADATA_KEY: _source_metadata_records(
+                        "$first:example.com",
+                        "$primary:example.com",
+                    ),
                 },
             ),
         ],
@@ -1982,9 +2017,9 @@ async def test_handle_message_edit_rebuilds_coalesced_prompt_from_persisted_run_
 
         mock_generate_response.assert_awaited_once()
         request = mock_generate_response.call_args.args[0]
-        assert request.prompt == (
-            "The user sent the following messages in quick succession. "
-            "Treat them as one turn and respond once:\n\nupdated first\nprimary"
+        assert request.prompt == _tagged_prompt(
+            ("$first:example.com", "$primary:example.com"),
+            {"$first:example.com": "updated first", "$primary:example.com": "primary"},
         )
         response_target = request.response_envelope.target
         assert response_target.reply_to_event_id == "$primary:example.com"
@@ -1995,6 +2030,10 @@ async def test_handle_message_edit_rebuilds_coalesced_prompt_from_persisted_run_
                 "$first:example.com": "updated first",
                 "$primary:example.com": "primary",
             },
+            MATRIX_SOURCE_EVENT_METADATA_KEY: _source_metadata_records(
+                "$first:example.com",
+                "$primary:example.com",
+            ),
             "matrix_source_event_revisions": {
                 "$first:example.com": [1000001, "$edit:example.com"],
             },
@@ -2329,6 +2368,7 @@ async def test_handle_message_edit_uses_persisted_interrupted_response_event_id_
             "$first:example.com": "first",
             "$anchor:example.com": "anchor",
         },
+        source_event_metadata=_source_metadata("$first:example.com", "$anchor:example.com"),
         response_owner="test_agent",
         history_scope=_agent_history_scope("test_agent"),
         conversation_target=MessageTarget.resolve("!test:example.com", None, "$anchor:example.com"),
@@ -2353,6 +2393,10 @@ async def test_handle_message_edit_uses_persisted_interrupted_response_event_id_
                             "$first:example.com": "first",
                             "$anchor:example.com": "anchor",
                         },
+                        MATRIX_SOURCE_EVENT_METADATA_KEY: _source_metadata_records(
+                            "$first:example.com",
+                            "$anchor:example.com",
+                        ),
                     },
                     response_event_id="$partial-response:example.com",
                 ),
@@ -2430,9 +2474,9 @@ async def test_handle_message_edit_uses_persisted_interrupted_response_event_id_
     request = mock_generate_response.call_args.args[0]
     assert request.existing_event_id == "$partial-response:example.com"
     assert request.response_envelope.target.reply_to_event_id == "$anchor:example.com"
-    assert request.prompt == (
-        "The user sent the following messages in quick succession. "
-        "Treat them as one turn and respond once:\n\nupdated first\nanchor"
+    assert request.prompt == _tagged_prompt(
+        ("$first:example.com", "$anchor:example.com"),
+        {"$first:example.com": "updated first", "$anchor:example.com": "anchor"},
     )
     assert request.matrix_run_metadata == {
         MATRIX_SOURCE_EVENT_IDS_METADATA_KEY: ["$first:example.com", "$anchor:example.com"],
@@ -2440,6 +2484,10 @@ async def test_handle_message_edit_uses_persisted_interrupted_response_event_id_
             "$first:example.com": "updated first",
             "$anchor:example.com": "anchor",
         },
+        MATRIX_SOURCE_EVENT_METADATA_KEY: _source_metadata_records(
+            "$first:example.com",
+            "$anchor:example.com",
+        ),
         "matrix_source_event_revisions": {
             "$first:example.com": [1000001, "$edit:example.com"],
         },
@@ -3193,6 +3241,10 @@ async def test_handle_message_edit_recovers_missing_ledger_row_from_persisted_ru
                         "$first:example.com": "first",
                         "$primary:example.com": "primary",
                     },
+                    MATRIX_SOURCE_EVENT_METADATA_KEY: _source_metadata_records(
+                        "$first:example.com",
+                        "$primary:example.com",
+                    ),
                     **_run_response_context_metadata(
                         response_owner=bot.agent_name,
                         history_scope=history_scope,
@@ -3237,9 +3289,9 @@ async def test_handle_message_edit_recovers_missing_ledger_row_from_persisted_ru
 
         mock_generate_response.assert_awaited_once()
         request = mock_generate_response.call_args.args[0]
-        assert request.prompt == (
-            "The user sent the following messages in quick succession. "
-            "Treat them as one turn and respond once:\n\nupdated first\nprimary"
+        assert request.prompt == _tagged_prompt(
+            ("$first:example.com", "$primary:example.com"),
+            {"$first:example.com": "updated first", "$primary:example.com": "primary"},
         )
         assert request.response_envelope.target == conversation_target
         assert request.matrix_run_metadata == {
@@ -3248,6 +3300,10 @@ async def test_handle_message_edit_recovers_missing_ledger_row_from_persisted_ru
                 "$first:example.com": "updated first",
                 "$primary:example.com": "primary",
             },
+            MATRIX_SOURCE_EVENT_METADATA_KEY: _source_metadata_records(
+                "$first:example.com",
+                "$primary:example.com",
+            ),
             "matrix_source_event_revisions": {
                 "$first:example.com": [1000001, "$edit:example.com"],
             },
@@ -3345,6 +3401,10 @@ async def test_handle_message_edit_recovers_threaded_turn_using_resolved_context
                             "$first:example.com": "first",
                             "$primary:example.com": "primary",
                         },
+                        MATRIX_SOURCE_EVENT_METADATA_KEY: _source_metadata_records(
+                            "$first:example.com",
+                            "$primary:example.com",
+                        ),
                         "matrix_response_event_id": "$response:example.com",
                     },
                 ),
@@ -3360,6 +3420,7 @@ async def test_handle_message_edit_recovers_threaded_turn_using_resolved_context
             "$first:example.com": "first",
             "$primary:example.com": "primary",
         },
+        source_event_metadata=_source_metadata("$first:example.com", "$primary:example.com"),
         response_owner="test_agent",
         history_scope=_agent_history_scope("test_agent"),
         conversation_target=MessageTarget.resolve(

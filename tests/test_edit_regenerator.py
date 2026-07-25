@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
-from mindroom.coalescing_batch import coalesced_prompt
+from mindroom.coalescing_batch import tagged_coalesced_prompt
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
@@ -26,7 +26,7 @@ from mindroom.response_runner import ResponseRequest
 from mindroom.sync_restart_retry import SyncRestartRetryQueue
 from mindroom.timestamp_formatting import format_timestamp_ms
 from mindroom.turn_policy import IngressHookRunner
-from mindroom.turn_store import TurnStore
+from mindroom.turn_store import TurnStore, TurnStoreDeps
 from tests.conftest import make_visible_message, request_envelope
 from tests.identity_helpers import entity_ids
 
@@ -110,6 +110,21 @@ def _turn_record(
         history_scope=HistoryScope(kind="agent", scope_id=AGENT_NAME),
         conversation_target=MessageTarget.resolve(ROOM_ID, thread_id, anchor),
     )
+
+
+def _source_metadata(*source_event_ids: str) -> dict[str, SourceEventMetadata]:
+    return {source_event_id: SourceEventMetadata(sender=USER_ID) for source_event_id in source_event_ids}
+
+
+def _tagged_prompt(source_event_ids: tuple[str, ...], prompts: dict[str, str]) -> str:
+    prompt = tagged_coalesced_prompt(
+        source_event_ids,
+        prompts,
+        _source_metadata(*source_event_ids),
+        timestamp_formatter=lambda _timestamp_ms: None,
+    )
+    assert prompt is not None
+    return prompt
 
 
 def _edit_event(
@@ -393,6 +408,7 @@ async def test_concurrent_coalesced_sibling_edits_are_both_retained(tmp_path: Pa
                 first_event_id: "first base",
                 second_event_id: "second base",
             },
+            source_event_metadata=_source_metadata(first_event_id, second_event_id),
         ),
     )
     first_generation_started = asyncio.Event()
@@ -438,8 +454,14 @@ async def test_concurrent_coalesced_sibling_edits_are_both_retained(tmp_path: Pa
     await asyncio.gather(first_task, second_task)
 
     assert [call.args[0].prompt for call in harness.generate_response.await_args_list] == [
-        coalesced_prompt(["first edited", "second base"]),
-        coalesced_prompt(["first edited", "second edited"]),
+        _tagged_prompt(
+            (first_event_id, second_event_id),
+            {first_event_id: "first edited", second_event_id: "second base"},
+        ),
+        _tagged_prompt(
+            (first_event_id, second_event_id),
+            {first_event_id: "first edited", second_event_id: "second edited"},
+        ),
     ]
     recorded = harness.turn_store.record_turn.call_args.args[0]
     assert recorded.source_event_prompts == {
@@ -466,6 +488,7 @@ async def test_suppressed_coalesced_edit_body_is_retained_for_later_sibling(tmp_
                 first_event_id: "first base",
                 second_event_id: "second base",
             },
+            source_event_metadata=_source_metadata(first_event_id, second_event_id),
         ),
     )
     harness.ingress_hook_runner.emit_message_received_hooks.side_effect = [True, False]
@@ -492,8 +515,9 @@ async def test_suppressed_coalesced_edit_body_is_retained_for_later_sibling(tmp_
 
     await _handle_edit(harness, second, second_info)
 
-    assert harness.generate_response.await_args.args[0].prompt == coalesced_prompt(
-        ["first suppressed edit", "second edit"],
+    assert harness.generate_response.await_args.args[0].prompt == _tagged_prompt(
+        (first_event_id, second_event_id),
+        {first_event_id: "first suppressed edit", second_event_id: "second edit"},
     )
     assert harness.regenerator._mailboxes == {}
 
@@ -761,6 +785,92 @@ async def test_edit_waits_for_active_retry_then_uses_retried_response(tmp_path: 
 
 
 @pytest.mark.asyncio
+async def test_edit_reloads_canonical_alias_owner_after_concurrent_claim(tmp_path: Path) -> None:
+    """A stale alias record must not spin after its replacement claim settles."""
+    human_event_id = ORIGINAL_EVENT_ID
+    old_relay_event_id = "$old-relay:example.org"
+    new_relay_event_id = "$new-relay:example.org"
+    old_record = _turn_record(
+        source_event_ids=(old_relay_event_id,),
+        discovery_event_ids=(human_event_id,),
+        response_event_id="$old-response:example.org",
+        source_event_prompts={old_relay_event_id: "old prompt"},
+        source_event_metadata={
+            old_relay_event_id: SourceEventMetadata(sender=USER_ID, discovery_event_id=human_event_id),
+        },
+    )
+    new_record = _turn_record(
+        source_event_ids=(new_relay_event_id,),
+        discovery_event_ids=(human_event_id,),
+        response_event_id="$new-response:example.org",
+        source_event_prompts={new_relay_event_id: "new prompt"},
+        source_event_metadata={
+            new_relay_event_id: SourceEventMetadata(sender=USER_ID, discovery_event_id=human_event_id),
+        },
+    )
+    harness = _harness(tmp_path, turn_record=None)
+    state_writer = MagicMock()
+    state_writer.supports_run_recovery.return_value = False
+    real_store = TurnStore(
+        TurnStoreDeps(
+            agent_name=AGENT_NAME,
+            tracking_base_path=tmp_path,
+            state_writer=state_writer,
+            resolver=harness.resolver,
+            tool_runtime=MagicMock(),
+        ),
+    )
+    real_store.record_pending_turn(old_record)
+    claim_ready = asyncio.Event()
+    wait_started = asyncio.Event()
+    concurrent_claim: TurnRecord | None = None
+
+    async def replace_alias_owner_and_claim(**_kwargs: object) -> bool:
+        nonlocal concurrent_claim
+        real_store.record_turn(new_record)
+        concurrent_claim = real_store.get_turn_record(new_relay_event_id)
+        assert concurrent_claim is not None
+        assert real_store.try_claim_turn(concurrent_claim) is True
+        claim_ready.set()
+        return False
+
+    async def wait_for_turn_settled(event_ids: tuple[str, ...]) -> None:
+        wait_started.set()
+        await real_store.wait_for_turn_settled(event_ids)
+
+    harness.ingress_hook_runner.emit_message_received_hooks.side_effect = replace_alias_owner_and_claim
+    harness.regenerator.deps = replace(
+        harness.regenerator.deps,
+        turn_store=real_store,
+        wait_for_turn_settled=wait_for_turn_settled,
+    )
+    event, event_info = _edit_event(
+        original_event_id=human_event_id,
+        new_body="latest edit",
+    )
+
+    task = asyncio.create_task(_handle_edit(harness, event, event_info))
+    await asyncio.wait_for(claim_ready.wait(), timeout=1)
+    await asyncio.wait_for(wait_started.wait(), timeout=1)
+    assert not task.done()
+    assert concurrent_claim is not None
+    real_store.release_pending_turn_claim(concurrent_claim)
+    await asyncio.wait_for(task, timeout=1)
+
+    request = harness.generate_response.await_args.args[0]
+    assert request.prompt == "latest edit"
+    assert request.existing_event_id == new_record.response_event_id
+    recorded = real_store.get_turn_record(human_event_id)
+    assert recorded is not None
+    assert recorded.source_event_ids == (new_relay_event_id,)
+    assert recorded.source_event_revisions == {
+        human_event_id: (event.server_timestamp, event.event_id),
+    }
+    assert real_store.try_claim_turn(recorded) is True
+    real_store.release_pending_turn_claim(recorded)
+
+
+@pytest.mark.asyncio
 async def test_pending_original_failure_releases_wait_without_regeneration(tmp_path: Path) -> None:
     """A settled original with no response ID should end the drain without hanging."""
     pending_record = _turn_record(response_event_id=None)
@@ -809,13 +919,17 @@ async def test_coalesced_edit_rebuilds_combined_prompt(tmp_path: Path) -> None:
     record = _turn_record(
         source_event_ids=(first_event_id, second_event_id),
         source_event_prompts={first_event_id: "first message", second_event_id: "second message"},
+        source_event_metadata=_source_metadata(first_event_id, second_event_id),
     )
     harness = _harness(tmp_path, turn_record=record)
     event, event_info = _edit_event(original_event_id=first_event_id, new_body="edited first message")
 
     await _handle_edit(harness, event, event_info)
 
-    expected_prompt = coalesced_prompt(["edited first message", "second message"])
+    expected_prompt = _tagged_prompt(
+        (first_event_id, second_event_id),
+        {first_event_id: "edited first message", second_event_id: "second message"},
+    )
     assert harness.generate_response.await_args.args[0].prompt == expected_prompt
 
     metadata_call = harness.turn_store.build_run_metadata.call_args
@@ -844,6 +958,7 @@ async def test_coalesced_sibling_edit_excludes_redacted_source_prompt(tmp_path: 
         source_event_ids=(first_event_id, second_event_id),
         redacted_source_event_ids=(first_event_id,),
         source_event_prompts={first_event_id: "REDACTED_SECRET", second_event_id: "second message"},
+        source_event_metadata=_source_metadata(first_event_id, second_event_id),
     )
     harness = _harness(tmp_path, turn_record=record)
     event, event_info = _edit_event(original_event_id=second_event_id, new_body="edited second message")
@@ -851,7 +966,10 @@ async def test_coalesced_sibling_edit_excludes_redacted_source_prompt(tmp_path: 
     await _handle_edit(harness, event, event_info)
 
     request = harness.generate_response.await_args.args[0]
-    assert request.prompt == coalesced_prompt(["edited second message"])
+    assert request.prompt == _tagged_prompt(
+        (second_event_id,),
+        {second_event_id: "edited second message"},
+    )
     assert "REDACTED_SECRET" not in request.prompt
     assert request.prepare_source_turn is not None
     assert request.prepare_source_turn() is False
@@ -872,6 +990,7 @@ async def test_coalesced_edit_rechecks_every_snapshotted_source_under_lock(tmp_p
     record = _turn_record(
         source_event_ids=(first_event_id, second_event_id),
         source_event_prompts={first_event_id: "first message", second_event_id: "second message"},
+        source_event_metadata=_source_metadata(first_event_id, second_event_id),
     )
     harness = _harness(tmp_path, turn_record=record)
     redaction_checks = 0
@@ -897,8 +1016,14 @@ async def test_coalesced_edit_rechecks_every_snapshotted_source_under_lock(tmp_p
     await _handle_edit(harness, event, event_info)
 
     assert [call.args[0].prompt for call in harness.generate_response.await_args_list] == [
-        coalesced_prompt(["first message", "edited second message"]),
-        coalesced_prompt(["edited second message"]),
+        _tagged_prompt(
+            (first_event_id, second_event_id),
+            {first_event_id: "first message", second_event_id: "edited second message"},
+        ),
+        _tagged_prompt(
+            (second_event_id,),
+            {second_event_id: "edited second message"},
+        ),
     ]
     assert harness.turn_store.prepare_response_for_redactions.call_count == 2
     assert harness.turn_store.record_turn.call_args.args[0].redacted_source_event_ids == (first_event_id,)
@@ -913,6 +1038,7 @@ async def test_edit_of_redacted_coalesced_source_is_ignored(tmp_path: Path) -> N
         source_event_ids=(first_event_id, second_event_id),
         redacted_source_event_ids=(first_event_id,),
         source_event_prompts={first_event_id: "REDACTED_SECRET", second_event_id: "second message"},
+        source_event_metadata=_source_metadata(first_event_id, second_event_id),
     )
     harness = _harness(tmp_path, turn_record=record)
     event, event_info = _edit_event(original_event_id=first_event_id, new_body="restore secret")
@@ -1053,6 +1179,31 @@ async def test_multi_sender_coalesced_source_allows_only_its_sender_to_edit(
 
 
 @pytest.mark.asyncio
+async def test_partial_coalesced_metadata_rejects_anchor_sender_editing_sibling(tmp_path: Path) -> None:
+    """Missing exact-source ownership must fail closed for a coalesced turn."""
+    alice_event_id = "$alice:example.org"
+    bob_event_id = "$bob:example.org"
+    record = _turn_record(
+        source_event_ids=(alice_event_id, bob_event_id),
+        source_event_prompts={alice_event_id: "alice base", bob_event_id: "bob base"},
+        source_event_metadata={
+            bob_event_id: SourceEventMetadata(sender="@bob:example.org"),
+        },
+        requester_id="@bob:example.org",
+    )
+    harness = _harness(tmp_path, turn_record=record)
+    event, event_info = _edit_event(
+        original_event_id=alice_event_id,
+        sender="@bob:example.org",
+    )
+
+    await harness.regenerator.handle_message_edit(harness.room, event, event_info, event.sender)
+
+    _assert_no_regeneration(harness)
+    harness.resolver.build_message_envelope.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_coalesced_routed_alias_edit_updates_owned_relay_prompt(tmp_path: Path) -> None:
     """A human edit routed through a relay must replace that relay's prompt."""
     first_relay = "$relay-one:example.org"
@@ -1091,6 +1242,7 @@ async def test_coalesced_edit_without_persisted_prompts_is_skipped(tmp_path: Pat
     record = _turn_record(
         source_event_ids=("$m1:example.org", "$m2:example.org"),
         source_event_prompts=None,
+        source_event_metadata=_source_metadata("$m1:example.org", "$m2:example.org"),
     )
     harness = _harness(tmp_path, turn_record=record)
     event, event_info = _edit_event(original_event_id="$m1:example.org")
@@ -1106,6 +1258,7 @@ async def test_coalesced_edit_with_incomplete_prompt_map_is_skipped(tmp_path: Pa
     record = _turn_record(
         source_event_ids=("$m1:example.org", "$m2:example.org"),
         source_event_prompts={"$m1:example.org": "first message"},
+        source_event_metadata=_source_metadata("$m1:example.org", "$m2:example.org"),
     )
     harness = _harness(tmp_path, turn_record=record)
     event, event_info = _edit_event(original_event_id="$m1:example.org")
@@ -1387,6 +1540,7 @@ async def test_sync_restart_retries_waiting_coalesced_sibling(tmp_path: Path) ->
                 first_event_id: "first base",
                 second_event_id: "second base",
             },
+            source_event_metadata=_source_metadata(first_event_id, second_event_id),
         ),
     )
     generation_started = asyncio.Event()
