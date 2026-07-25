@@ -22,12 +22,6 @@ if TYPE_CHECKING:
 _EDITABLE_EVENT_TYPES = frozenset({"m.room.message", "io.mindroom.tool_approval"})
 
 type _CachedEventValue = tuple[str, dict[str, Any]]
-# Backend drivers return their own row types, so these column contracts stay positional and are
-# enforced by the destructuring in the consuming helper rather than by the type checker.
-# _CachedEventIndexRow is (event_json, event_id, origin_server_ts) in that exact order.
-type _CachedEventIndexRow = Sequence[Any]
-# _MxcTextRow is (event_id, mxc_url, text_content, event_json, origin_server_ts) in that order.
-type _MxcTextRow = Sequence[Any]
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,7 +69,7 @@ def decode_cached_event(
     return CachedEventRow(event=event, cached_at=None if cached_at is None else float(cached_at))
 
 
-def decode_cached_events(rows: Iterable[_CachedEventIndexRow], *, room_id: str) -> list[dict[str, Any]]:
+def decode_cached_events(rows: Iterable[Sequence[Any]], *, room_id: str) -> list[dict[str, Any]]:
     """Decode ``(event_json, event_id, origin_server_ts)`` rows, rejecting any index mismatch."""
     decoded: list[dict[str, Any]] = []
     for event_json, event_id, origin_server_ts in rows:
@@ -179,7 +173,7 @@ def cached_event_owns_mxc(
     return decoded is not None and mxc_url in event_mxc_urls(decoded.event, room_id=room_id)
 
 
-def validated_mxc_text_rows(rows: Iterable[_MxcTextRow], *, room_id: str) -> dict[tuple[str, str], str]:
+def validated_mxc_text_rows(rows: Iterable[Sequence[Any]], *, room_id: str) -> dict[tuple[str, str], str]:
     """Return plaintext rows whose event payload still owns the requested MXC.
 
     Rows are ``(event_id, mxc_url, text_content, event_json, origin_server_ts)`` in that order.
