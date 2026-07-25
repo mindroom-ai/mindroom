@@ -33,7 +33,7 @@ from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.matrix.cache.thread_reads import ThreadReadMode
 from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
-from mindroom.matrix.client_thread_history import fetch_thread_history
+from mindroom.matrix.client_thread_history import BulkThreadRefreshStats, fetch_thread_history
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.matrix.conversation_cache import MatrixConversationCache, _cached_room_get_event
 from mindroom.matrix.event_info import EventInfo
@@ -844,39 +844,40 @@ async def test_strict_thread_history_propagates_cache_coordinator_timeout(
 
 
 @pytest.mark.asyncio
-async def test_conversation_cache_startup_prewarm_fetch_preserves_fixed_metadata(
+async def test_conversation_cache_startup_prewarm_bulk_refresh_preserves_metadata(
     tmp_path: Path,
 ) -> None:
-    """Startup prewarm should bypass read coordination while keeping strict fetch metadata."""
+    """Startup prewarm should call the bulk room refresher with fixed metadata."""
     event_cache = SqliteEventCache(tmp_path / "event_cache.db")
     await event_cache.initialize()
     client = MagicMock()
     conversation_cache = _conversation_cache_for_thread_reads(tmp_path, event_cache, client=client)
-    fetch_dispatch_thread_snapshot = AsyncMock(return_value=thread_history_result([], is_full_history=False))
+    stats = BulkThreadRefreshStats(
+        requested_threads=1,
+        stored_threads=1,
+        missing_root_ids=frozenset(),
+        room_scan_pages=1,
+        scanned_event_count=2,
+    )
+    bulk_refresh_room_thread_histories = AsyncMock(return_value=stats)
 
     try:
-        with (
-            patch(
-                "mindroom.matrix.conversation_cache.fetch_dispatch_thread_snapshot",
-                fetch_dispatch_thread_snapshot,
-            ),
-            patch("mindroom.matrix.conversation_cache.time.time", return_value=222.0),
+        with patch(
+            "mindroom.matrix.conversation_cache.bulk_refresh_room_thread_histories",
+            bulk_refresh_room_thread_histories,
         ):
-            await conversation_cache._refresh_dispatch_thread_snapshot_for_startup_prewarm(
+            result = await conversation_cache._bulk_refresh_startup_threads(
                 "!room:localhost",
-                "$thread:localhost",
+                ["$thread:localhost"],
             )
 
-        fetch_dispatch_thread_snapshot.assert_awaited_once_with(
+        assert result == stats
+        bulk_refresh_room_thread_histories.assert_awaited_once_with(
             client,
             "!room:localhost",
-            "$thread:localhost",
-            event_cache=event_cache,
-            cache_write_guard_started_at=222.0,
-            trusted_sender_ids=conversation_cache._trusted_sender_ids(),
+            event_cache,
+            thread_root_ids=["$thread:localhost"],
             caller_label="startup_thread_prewarm",
-            coordinator_queue_wait_ms=0.0,
-            resolution_reuse=conversation_cache._thread_resolution_reuse,
         )
     finally:
         await event_cache.close()

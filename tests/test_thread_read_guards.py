@@ -827,22 +827,22 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         try:
             bot.client.room_messages = AsyncMock(side_effect=room_messages)
             prewarm_task = asyncio.create_task(
-                bot._conversation_cache._refresh_dispatch_thread_snapshot_for_startup_prewarm(
+                bot._conversation_cache._bulk_refresh_startup_threads(
                     room_id,
-                    thread_id,
+                    [thread_id],
                 ),
             )
             await asyncio.wait_for(prewarm_fetch_started.wait(), timeout=1.0)
 
             allow_prewarm_fetch_finish.set()
-            prewarm_history = await asyncio.wait_for(prewarm_task, timeout=1.0)
+            prewarm_stats = await asyncio.wait_for(prewarm_task, timeout=1.0)
 
             history = await bot._conversation_cache.get_dispatch_thread_history(room_id, thread_id)
         finally:
             allow_prewarm_fetch_finish.set()
             await _close_bound_runtime_support(bot, support)
 
-        assert [message.body for message in prewarm_history] == ["Old root", "Old reply"]
+        assert prewarm_stats.stored_threads == 1
         assert [message.body for message in history] == ["Old root", "Old reply"]
         assert history.diagnostics[THREAD_HISTORY_SOURCE_DIAGNOSTIC] == THREAD_HISTORY_SOURCE_CACHE
         assert THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC not in history.diagnostics

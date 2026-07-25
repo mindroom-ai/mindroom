@@ -811,7 +811,7 @@ class AgentBot:
                 await self.startup_thread_prewarm_registry.release(self.event_cache.principal_id, room_id)
 
     async def _run_startup_thread_prewarm(self) -> None:
-        """Prewarm recent thread snapshots per joined room without blocking live dispatch behind cache seeding."""
+        """Prewarm recent thread snapshots with one bounded bulk scan per joined room."""
         try:
             joined_rooms = await self._get_startup_thread_prewarm_joined_rooms()
             for room_id in joined_rooms:
