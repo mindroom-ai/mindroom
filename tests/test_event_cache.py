@@ -879,6 +879,60 @@ async def test_strict_source_refresh_bypasses_usable_cache(
 
 
 @pytest.mark.asyncio
+async def test_strict_source_refresh_evicts_turn_memoization(tmp_path: Path) -> None:
+    """A successful source refresh should prevent later same-turn reads from returning stale history."""
+    event_cache = SqliteEventCache(tmp_path / "event_cache.db")
+    await event_cache.initialize()
+    conversation_cache = _conversation_cache_for_thread_reads(tmp_path, event_cache, client=object())
+    conversation_cache.runtime.event_cache_write_coordinator = EventCacheWriteCoordinator(
+        logger=conversation_cache.logger,
+    )
+    cached_history = thread_history_result(
+        [ResolvedVisibleMessage.synthetic(sender="@user:localhost", body="Question", event_id="$question")],
+        is_full_history=True,
+    )
+    refreshed_history = thread_history_result(
+        [
+            *cached_history,
+            ResolvedVisibleMessage.synthetic(sender="@bot:localhost", body="Answer", event_id="$answer"),
+        ],
+        is_full_history=True,
+    )
+
+    try:
+        with (
+            patch(
+                "mindroom.matrix.conversation_cache.fetch_dispatch_thread_history",
+                AsyncMock(side_effect=[cached_history, refreshed_history]),
+            ) as fetch_thread_history,
+            patch(
+                "mindroom.matrix.conversation_cache.refresh_thread_history_from_source",
+                AsyncMock(return_value=refreshed_history),
+            ),
+        ):
+            async with conversation_cache.turn_scope():
+                before_refresh = await conversation_cache.get_strict_thread_history(
+                    "!room:localhost",
+                    "$thread:localhost",
+                )
+                refreshed = await conversation_cache.refresh_strict_thread_history_from_source(
+                    "!room:localhost",
+                    "$thread:localhost",
+                )
+                after_refresh = await conversation_cache.get_strict_thread_history(
+                    "!room:localhost",
+                    "$thread:localhost",
+                )
+    finally:
+        await event_cache.close()
+
+    assert [message.event_id for message in before_refresh] == ["$question"]
+    assert [message.event_id for message in refreshed] == ["$question", "$answer"]
+    assert [message.event_id for message in after_refresh] == ["$question", "$answer"]
+    assert fetch_thread_history.await_count == 2
+
+
+@pytest.mark.asyncio
 async def test_strict_thread_history_propagates_cache_coordinator_timeout(
     tmp_path: Path,
 ) -> None:
