@@ -252,9 +252,48 @@ class LiveFuzzScenario:
         )
         for batch in self.batches:
             self._validate_batch(batch, state)
+        if self.profile == "saturation":
+            self._validate_saturation_shape()
         if not state.mindroom_running:
             msg = "live Matrix fuzz traces must leave MindRoom running"
             raise ValueError(msg)
+
+    def _validate_saturation_shape(self) -> None:
+        """Require the exact hot-then-parallel shape executed by the saturation driver."""
+        if self.thread_count < 2:
+            msg = "saturation traces need one hot thread and at least one parallel thread"
+            raise ValueError(msg)
+        if self.client_count != 1:
+            msg = "saturation traces use implicit per-thread clients and must keep client_count at one"
+            raise ValueError(msg)
+
+        parallel_start = next(
+            (index for index, batch in enumerate(self.batches) if any(operation.thread != 0 for operation in batch)),
+            len(self.batches),
+        )
+        expected_targets = {thread: f"response:root:{thread}" for thread in range(self.thread_count)}
+        parallel_threads = set(range(1, self.thread_count))
+        for index, batch in enumerate(self.batches):
+            expected_threads = {0} if index < parallel_start else parallel_threads
+            batch_threads = [operation.thread for operation in batch]
+            if len(batch_threads) != len(expected_threads) or set(batch_threads) != expected_threads:
+                msg = "saturation batches need exactly one operation for every expected phase thread"
+                raise ValueError(msg)
+            for operation in batch:
+                if operation.kind is not LiveOperationKind.THREAD_MESSAGE:
+                    msg = "saturation traces may contain only thread-message operations"
+                    raise ValueError(msg)
+                if operation.client != 0:
+                    msg = "saturation operation clients are assigned implicitly from their thread"
+                    raise ValueError(msg)
+                expected_target = expected_targets[operation.thread]
+                if operation.target != expected_target:
+                    msg = (
+                        f"saturation operation {operation.event_ref} must target "
+                        f"{expected_target!r}, not {operation.target!r}"
+                    )
+                    raise ValueError(msg)
+                expected_targets[operation.thread] = f"response:{operation.event_ref}"
 
     def _validate_batch(self, batch: tuple[LiveOperation, ...], state: _ValidationState) -> None:
         if not batch:

@@ -440,6 +440,57 @@ def test_saturation_scenario_matches_original_two_phase_workload() -> None:
     assert all([operation.thread for operation in batch] == list(range(1, 13)) for batch in scenario.batches[100:])
 
 
+@pytest.mark.parametrize(
+    ("scenario", "error"),
+    [
+        (
+            LiveFuzzScenario(thread_count=1, batches=(), profile="saturation"),
+            "at least one parallel thread",
+        ),
+        (
+            LiveFuzzScenario(
+                thread_count=3,
+                profile="saturation",
+                batches=(
+                    (
+                        LiveOperation(
+                            0,
+                            LiveOperationKind.THREAD_MESSAGE,
+                            1,
+                            "response:root:1",
+                        ),
+                    ),
+                ),
+            ),
+            "every expected phase thread",
+        ),
+        (
+            LiveFuzzScenario(
+                thread_count=2,
+                profile="saturation",
+                batches=((LiveOperation(0, LiveOperationKind.REACTION, 0, "root:0"),),),
+            ),
+            "only thread-message operations",
+        ),
+        (
+            LiveFuzzScenario(
+                thread_count=2,
+                profile="saturation",
+                batches=((LiveOperation(0, LiveOperationKind.THREAD_MESSAGE, 0, "root:0"),),),
+            ),
+            "must target 'response:root:0'",
+        ),
+    ],
+)
+def test_saturation_validation_rejects_shapes_the_driver_cannot_replay(
+    scenario: LiveFuzzScenario,
+    error: str,
+) -> None:
+    """Validated saturation traces must match every operation the driver sends."""
+    with pytest.raises(ValueError, match=error):
+        scenario.validate()
+
+
 def test_generators_never_edit_one_source_twice_per_batch() -> None:
     """Codex #6: no seed may place two edits of one source in a concurrent batch.
 
