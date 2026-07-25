@@ -1906,10 +1906,11 @@ class TurnController:
             dispatch_timing.mark("gate_exit")
         async with self.deps.resolver.turn_thread_cache_scope():
             dispatch_start = time.monotonic()
-            routed_alias = self.deps.ingress.router_relay_original_event_id(handoff.event)
+            relay_alias = self.deps.ingress.router_relay_original_event_id
+            routed_aliases = tuple(filter(None, (relay_alias(item.event) for item in batch.pending_events)))
             handled_turn = TurnRecord.create(
                 handoff.source_event_ids,
-                discovery_event_ids=(routed_alias,) if routed_alias else (),
+                discovery_event_ids=routed_aliases,
                 source_event_prompts=dict(handoff.source_event_prompts),
                 source_event_metadata=dict(handoff.source_event_metadata)
                 if len(handoff.source_event_ids) > 1

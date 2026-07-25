@@ -27,6 +27,7 @@ from mindroom import constants, interactive
 from mindroom.attachments import register_local_attachment
 from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.coalescing import CoalescingGate
+from mindroom.coalescing_batch import CoalescedBatch, CoalescingKey, PendingEvent, build_coalesced_batch
 from mindroom.config.agent import AgentConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
@@ -72,7 +73,6 @@ if TYPE_CHECKING:
     from pathlib import Path
     from unittest.mock import AsyncMock
 
-    from mindroom.coalescing_batch import CoalescedBatch
     from mindroom.delivery_gateway import DeliveryGateway, EditTextRequest, SendTextRequest
     from mindroom.dispatch_handoff import PreparedTextEvent
     from mindroom.hooks import MessageEnvelope
@@ -457,6 +457,37 @@ def _text_event(
     )
 
 
+def _router_relay_event(
+    config: Config,
+    *,
+    event_id: str,
+    original_event_id: str,
+    body: str,
+    origin_server_ts: int,
+) -> nio.RoomMessageText:
+    """Build one trusted router relay that explicitly replies to its human source."""
+    return nio.RoomMessageText.from_dict(
+        {
+            "content": {
+                "body": body,
+                "msgtype": "m.text",
+                constants.ORIGINAL_SENDER_KEY: _SENDER,
+                constants.SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+                "m.relates_to": {
+                    "rel_type": "m.thread",
+                    "event_id": _THREAD_ROOT,
+                    "m.in_reply_to": {"event_id": original_event_id},
+                },
+            },
+            "event_id": event_id,
+            "sender": _entity_user_id(config, ROUTER_AGENT_NAME),
+            "origin_server_ts": origin_server_ts,
+            "room_id": _ROOM_ID,
+            "type": "m.room.message",
+        },
+    )
+
+
 @pytest.mark.asyncio
 async def test_replayed_turn_is_rejected_before_policy_and_recorded(config: Config, tmp_path: Path) -> None:
     """A turn superseded by a newer unresponded requester message never reaches policy.
@@ -485,6 +516,56 @@ async def test_replayed_turn_is_rejected_before_policy_and_recorded(config: Conf
     assert harness.runner.requests == []
     assert harness.gateway.sent == []
     assert harness.turn_store.is_handled(event.event_id) is True
+
+
+@pytest.mark.asyncio
+async def test_coalesced_router_relays_index_every_human_source_for_edit_lookup(
+    config: Config,
+    tmp_path: Path,
+) -> None:
+    """Every human source of coalesced relays must discover the shared response."""
+    harness = _build_harness(config, tmp_path)
+    room = _room_with_members(config, "general", ROUTER_AGENT_NAME)
+    mention = _entity_user_id(config, "general")
+    relay_events = [
+        _router_relay_event(
+            config,
+            event_id="$relay-one:localhost",
+            original_event_id="$human-one:localhost",
+            body=f"{mention} first",
+            origin_server_ts=1_000_000,
+        ),
+        _router_relay_event(
+            config,
+            event_id="$relay-two:localhost",
+            original_event_id="$human-two:localhost",
+            body=f"{mention} second",
+            origin_server_ts=1_000_001,
+        ),
+    ]
+    batch = build_coalesced_batch(
+        CoalescingKey(_ROOM_ID, _THREAD_ROOT, _SENDER),
+        [
+            PendingEvent(
+                event=event,
+                room=room,
+                source_kind=TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+                requester_user_id=_SENDER,
+                trust_internal_payload_metadata=True,
+            )
+            for event in relay_events
+        ],
+    )
+
+    await harness.controller.handle_coalesced_batch(batch)
+    await harness.runner.settle_inbox_responses()
+
+    first_lookup = harness.turn_store.get_turn_record("$human-one:localhost")
+    second_lookup = harness.turn_store.get_turn_record("$human-two:localhost")
+    assert first_lookup is not None
+    assert first_lookup == second_lookup
+    assert first_lookup.source_event_ids == ("$relay-one:localhost", "$relay-two:localhost")
+    assert first_lookup.discovery_event_ids == ("$human-one:localhost", "$human-two:localhost")
 
 
 @pytest.mark.asyncio

@@ -65,7 +65,6 @@ class _Edit:
     envelope: MessageEnvelope
     revision: SourceEventRevision
     suppressed: bool
-    retry: Callable[[], Awaitable[None]]
 
 
 @dataclass
@@ -212,7 +211,6 @@ class EditRegenerator:
                 correlation_id=event.event_id,
                 policy=hook_ingress_policy(envelope),
             ),
-            retry=lambda: self.handle_message_edit(room, event, event_info, requester_user_id),
         )
         assert turn_record.anchor_event_id is not None
         key = (turn_record.conversation_target.room_id, turn_record.anchor_event_id, envelope.requester_id)
