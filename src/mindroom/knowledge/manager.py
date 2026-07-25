@@ -1347,6 +1347,13 @@ class KnowledgeManager:
             return ()
         return tuple(document.content for document in documents if document.content)
 
+    def _chunk_texts_for_batch(self, files: Sequence[Path]) -> list[str]:
+        """Return every chunk text one batch will embed, in batch order."""
+        chunk_texts: list[str] = []
+        for resolved_path in files:
+            chunk_texts.extend(self._chunk_texts_for_prefetch(resolved_path))
+        return chunk_texts
+
     async def _prefetch_batch_embeddings(
         self,
         embedder: BatchPrefetchEmbedder,
@@ -1356,9 +1363,9 @@ class KnowledgeManager:
         """Embed one batch's chunks in as few provider requests as limits allow."""
         if not embedder.supports_batching():
             return
-        chunk_texts: list[str] = []
-        for resolved_path in files:
-            chunk_texts.extend(await asyncio.to_thread(self._chunk_texts_for_prefetch, resolved_path))
+        # One thread hop for the whole batch: a hop per file would serialize
+        # reads that cost far less than the round trip scheduling them.
+        chunk_texts = await asyncio.to_thread(self._chunk_texts_for_batch, list(files))
         if not chunk_texts:
             return
 

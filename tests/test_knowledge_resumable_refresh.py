@@ -1604,3 +1604,68 @@ async def test_candidate_pending_count_is_visible_while_the_build_runs(
         f"pending_count never reported outstanding work: {pending_samples}"
     )
     assert pending_samples == [total - completed for total, completed in observed]
+
+
+@pytest.mark.asyncio
+async def test_candidate_converges_across_repeated_interruptions_and_source_changes(
+    tmp_path: Path,
+    embedder: _RecordingEmbedder,
+) -> None:
+    """Successive interrupted refreshes converge instead of restarting.
+
+    The corpus is mutated between every attempt, which is the situation a
+    large Git-backed source is always in: each pass must keep what it has,
+    absorb the delta, and eventually publish the latest snapshot.
+    """
+    docs_path = tmp_path / "docs"
+    _write_corpus(docs_path, 9)
+    config = _config(tmp_path, docs_path)
+    runtime_paths = runtime_paths_for(config)
+    original_index = KnowledgeManager._index_file_locked
+    blocked = {"doc0004.md", "doc0007.md"}
+
+    async def _fail_blocked(self: KnowledgeManager, resolved_path: Path, **kwargs: object) -> bool:
+        if resolved_path.name in blocked:
+            return False
+        return await original_index(self, resolved_path, **kwargs)
+
+    KnowledgeManager._index_file_locked = _fail_blocked  # type: ignore[method-assign]
+    try:
+        # Attempt 1: two files cannot be indexed, so nothing publishes.
+        await _manager(config).reindex_all()
+        first = load_candidate_checkpoint(_storage_path(config, runtime_paths))
+        assert first is not None
+        assert set(first.failed) == blocked
+        candidate_collection = first.collection
+
+        # Attempt 2: still blocked, and the source moves underneath it.
+        (docs_path / "doc0000.md").write_text("rewritten body", encoding="utf-8")
+        (docs_path / "doc0001.md").unlink()
+        (docs_path / "extra.md").write_text("added between attempts", encoding="utf-8")
+        await _manager(config).reindex_all()
+        second = load_candidate_checkpoint(_storage_path(config, runtime_paths))
+        assert second is not None
+        assert second.collection == candidate_collection, "each attempt continues the same candidate"
+        assert "doc0001.md" not in second.completed
+        assert second.completed["doc0000.md"] != first.completed["doc0000.md"], "changed file was re-indexed"
+        assert "extra.md" in second.completed
+    finally:
+        KnowledgeManager._index_file_locked = original_index  # type: ignore[method-assign]
+
+    # Attempt 3: the blocker clears and the accumulated candidate publishes.
+    embedder.embedded_texts.clear()
+    blocked.clear()
+    await _manager(config).reindex_all()
+
+    assert embedder.embedded_count("rewritten body") == 0, "work kept across attempts is not redone"
+    assert embedder.embedded_count("added between attempts") == 0
+    state = _published_state(config, runtime_paths)
+    assert state is not None
+    assert state.status == "complete"
+    assert state.collection == candidate_collection
+    assert state.indexed_count == 9
+    stored = sorted(record.metadata["source_path"] for record in _FakeVectorDb.store[candidate_collection])
+    assert stored == sorted(
+        [f"doc{index:04d}.md" for index in range(9) if index != 1] + ["extra.md"],
+    )
+    assert load_candidate_checkpoint(_storage_path(config, runtime_paths)) is None
