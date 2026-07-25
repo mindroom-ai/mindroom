@@ -127,7 +127,7 @@ async def _send_prepared_room_message(
     message_type: str,
     cache_bypass: bool,
     operation: str,
-    retry_sync_recovery: bool = False,
+    retry_sync_recovery: bool,
 ) -> object | None:
     """Send one prepared Matrix room message and normalize local delivery exceptions."""
 
@@ -169,8 +169,8 @@ async def _send_prepared_room_message(
         return await send_once()
     except asyncio.CancelledError:
         raise
-    except nio.SendRetryError as error:
-        if retry_sync_recovery:
+    except Exception as error:
+        if retry_sync_recovery and isinstance(error, nio.SendRetryError):
             return await _retry_prepared_room_message_after_sync_recovery(
                 send_once,
                 original_error=error,
@@ -178,14 +178,6 @@ async def _send_prepared_room_message(
                 operation=operation,
                 cache_bypass=cache_bypass,
             )
-        _log_matrix_delivery_exception(
-            error,
-            room_id=room_id,
-            operation=operation,
-            cache_bypass=cache_bypass,
-        )
-        return None
-    except Exception as error:
         _log_matrix_delivery_exception(
             error,
             room_id=room_id,

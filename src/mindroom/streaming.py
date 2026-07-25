@@ -1087,7 +1087,7 @@ class StreamingResponse:
         client: nio.AsyncClient,
         *,
         content: dict[str, Any],
-        retry_sync_recovery: bool = False,
+        retry_sync_recovery: bool,
     ) -> bool:
         """Send the initial streaming event."""
         delivered = await send_message_result(
@@ -1113,7 +1113,7 @@ class StreamingResponse:
         *,
         content: dict[str, Any],
         display_text: str,
-        retry_sync_recovery: bool = False,
+        retry_sync_recovery: bool,
     ) -> bool:
         """Send one streaming edit event for the existing message."""
         assert self.event_id is not None
@@ -1143,8 +1143,7 @@ class StreamingResponse:
     ) -> bool:
         """Send a new event or edit the existing one."""
         total_attempts = 2 if retry_on_failure or retry_without_backoff else 1
-        attempt = 1
-        while attempt <= total_attempts:
+        for attempt in range(1, total_attempts + 1):
             try:
                 if self.event_id is None:
                     logger.debug("Sending initial streaming message", attempt=attempt)
@@ -1184,7 +1183,6 @@ class StreamingResponse:
                     event_id=self.event_id,
                     room_id=self.room_id,
                 )
-            attempt += 1
         return False
 
 
