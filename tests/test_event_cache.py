@@ -821,50 +821,53 @@ async def test_strict_source_refresh_bypasses_usable_cache(
     """Explicit source refresh should serialize one Matrix fetch without accepting a cache hit."""
     event_cache = SqliteEventCache(tmp_path / "event_cache.db")
     await event_cache.initialize()
-    client = MagicMock()
+    client = object()
     conversation_cache = _conversation_cache_for_thread_reads(tmp_path, event_cache, client=client)
-
-    async def run_thread_update(
-        _room_id: str,
-        _thread_id: str,
-        update_coro_factory: Callable[[], Awaitable[ThreadHistoryResult]],
-        **_kwargs: object,
-    ) -> ThreadHistoryResult:
-        return await update_coro_factory()
-
-    coordinator = MagicMock()
-    coordinator.wait_for_thread_idle = AsyncMock(return_value=None)
-    coordinator.run_thread_update = AsyncMock(side_effect=run_thread_update)
+    coordinator = EventCacheWriteCoordinator(logger=conversation_cache.logger)
     conversation_cache.runtime.event_cache_write_coordinator = coordinator
+    release_write = asyncio.Event()
+    write_started = asyncio.Event()
+
+    async def pending_cache_write() -> None:
+        write_started.set()
+        await release_write.wait()
+
+    pending_write_task = coordinator.queue_thread_update(
+        "!room:localhost",
+        "$thread:localhost",
+        pending_cache_write,
+        name="matrix_cache_pending_source_refresh_test_write",
+        coordination_scope=event_cache.principal_id,
+    )
     fetched_history = thread_history_result(
         [ResolvedVisibleMessage.synthetic(sender="@bot:localhost", body="Target", event_id="$target")],
         is_full_history=True,
     )
 
     try:
-        with (
-            patch(
-                "mindroom.matrix.conversation_cache.refresh_thread_history_from_source",
-                AsyncMock(return_value=fetched_history),
-            ) as refresh_thread_history,
-            patch(
-                "mindroom.matrix.conversation_cache.fetch_dispatch_thread_history",
-                AsyncMock(side_effect=AssertionError("source refresh must bypass usable cache")),
-            ),
-        ):
-            result = await conversation_cache.refresh_strict_thread_history_from_source(
-                "!room:localhost",
-                "$thread:localhost",
-                caller_label="startup_auto_resume_target_refresh",
+        await asyncio.wait_for(write_started.wait(), timeout=0.2)
+        with patch(
+            "mindroom.matrix.conversation_cache.refresh_thread_history_from_source",
+            AsyncMock(return_value=fetched_history),
+        ) as refresh_thread_history:
+            read_task = asyncio.create_task(
+                conversation_cache.refresh_strict_thread_history_from_source(
+                    "!room:localhost",
+                    "$thread:localhost",
+                    caller_label="startup_auto_resume_target_refresh",
+                ),
             )
+            await asyncio.sleep(0)
+            refresh_thread_history.assert_not_awaited()
+            release_write.set()
+            result = await asyncio.wait_for(read_task, timeout=0.2)
     finally:
+        release_write.set()
+        await pending_write_task
         await event_cache.close()
 
     assert [message.event_id for message in result] == ["$target"]
     assert result.is_full_history is True
-    coordinator.wait_for_thread_idle.assert_awaited_once()
-    coordinator.run_thread_update.assert_awaited_once()
-    assert coordinator.run_thread_update.await_args.kwargs["name"] == ("matrix_cache_refresh_strict_thread_from_source")
     refresh_thread_history.assert_awaited_once()
     assert refresh_thread_history.await_args.args[:4] == (
         client,
