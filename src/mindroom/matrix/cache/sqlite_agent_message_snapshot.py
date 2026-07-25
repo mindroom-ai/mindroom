@@ -4,69 +4,16 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from mindroom.matrix.media import valid_room_message_replacement
 
 from . import sqlite_event_cache_events, sqlite_event_cache_threads
 from .agent_message_snapshot import AgentMessageSnapshot, AgentMessageSnapshotUnavailable
-from .agent_message_snapshot_semantics import (
-    SnapshotLookupResult,
-    event_matches_snapshot_scope,
-    snapshot_lookup_result,
-    thread_cache_has_no_snapshot,
-)
-from .event_cache_events import decode_cached_event
+from .agent_message_snapshot_semantics import load_agent_message_snapshot
 
 if TYPE_CHECKING:
     import aiosqlite
-
-
-async def _thread_scope_has_no_snapshot(
-    db: aiosqlite.Connection,
-    *,
-    principal_id: str,
-    room_id: str,
-    thread_id: str | None,
-) -> bool:
-    if thread_id is None:
-        return False
-
-    return thread_cache_has_no_snapshot(
-        await sqlite_event_cache_threads.load_thread_cache_state(
-            db,
-            principal_id=principal_id,
-            room_id=room_id,
-            thread_id=thread_id,
-        ),
-    )
-
-
-async def _snapshot_from_event(
-    db: aiosqlite.Connection,
-    *,
-    principal_id: str,
-    room_id: str,
-    thread_id: str | None,
-    event: dict[str, Any],
-    cached_at: float | None,
-    runtime_started_at: float | None,
-) -> SnapshotLookupResult:
-    latest_edit = await sqlite_event_cache_events.load_latest_edit_row(
-        db,
-        principal_id=principal_id,
-        room_id=room_id,
-        original=event,
-        validator=valid_room_message_replacement,
-    )
-    return snapshot_lookup_result(
-        event,
-        latest_edit=latest_edit,
-        room_id=room_id,
-        thread_id=thread_id,
-        cached_at=cached_at,
-        runtime_started_at=runtime_started_at,
-    )
 
 
 async def _iter_scope_events(
@@ -103,53 +50,6 @@ async def _iter_scope_events(
     )
 
 
-async def _load_scope_snapshot(
-    db: aiosqlite.Connection,
-    *,
-    principal_id: str,
-    room_id: str,
-    thread_id: str | None,
-    sender: str,
-    runtime_started_at: float | None,
-) -> AgentMessageSnapshot | None:
-    cursor = await _iter_scope_events(
-        db,
-        principal_id=principal_id,
-        room_id=room_id,
-        thread_id=thread_id,
-    )
-    try:
-        while True:
-            row = await cursor.fetchone()
-            if row is None:
-                return None
-            decoded = decode_cached_event(row[0], row[2], row[3], room_id=room_id, cached_at=row[1])
-            if decoded is None:
-                continue
-            event = decoded.event
-            if not event_matches_snapshot_scope(
-                event,
-                thread_id=thread_id,
-                sender=sender,
-            ):
-                continue
-            result = await _snapshot_from_event(
-                db,
-                principal_id=principal_id,
-                room_id=room_id,
-                thread_id=thread_id,
-                event=event,
-                cached_at=decoded.cached_at,
-                runtime_started_at=runtime_started_at,
-            )
-            if result.stop_scanning:
-                return None
-            if result.snapshot is not None:
-                return result.snapshot
-    finally:
-        await cursor.close()
-
-
 async def load_sqlite_agent_message_snapshot(
     db: aiosqlite.Connection,
     *,
@@ -161,21 +61,40 @@ async def load_sqlite_agent_message_snapshot(
 ) -> AgentMessageSnapshot | None:
     """Return the latest visible message from ``sender`` in the given scope."""
     try:
-        if await _thread_scope_has_no_snapshot(
-            db,
-            principal_id=principal_id,
-            room_id=room_id,
-            thread_id=thread_id,
-        ):
-            return None
-        return await _load_scope_snapshot(
-            db,
-            principal_id=principal_id,
-            room_id=room_id,
-            thread_id=thread_id,
-            sender=sender,
-            runtime_started_at=runtime_started_at,
+        cache_state = (
+            await sqlite_event_cache_threads.load_thread_cache_state(
+                db,
+                principal_id=principal_id,
+                room_id=room_id,
+                thread_id=thread_id,
+            )
+            if thread_id is not None
+            else None
         )
+        cursor = await _iter_scope_events(
+            db,
+            principal_id=principal_id,
+            room_id=room_id,
+            thread_id=thread_id,
+        )
+        try:
+            return await load_agent_message_snapshot(
+                cache_state=cache_state,
+                latest_edit_lookup=lambda event: sqlite_event_cache_events.load_latest_edit_row(
+                    db,
+                    principal_id=principal_id,
+                    room_id=room_id,
+                    original=event,
+                    validator=valid_room_message_replacement,
+                ),
+                next_row=cursor.fetchone,
+                room_id=room_id,
+                thread_id=thread_id,
+                sender=sender,
+                runtime_started_at=runtime_started_at,
+            )
+        finally:
+            await cursor.close()
     except json.JSONDecodeError as exc:
         msg = "Cached Matrix event JSON is corrupt"
         raise AgentMessageSnapshotUnavailable(msg) from exc

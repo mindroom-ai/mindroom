@@ -10,25 +10,33 @@ import nio
 from mindroom.matrix.event_info import EventInfo, event_source_is_state_event
 from mindroom.matrix.media import parse_room_message_event_source, valid_room_message_replacement
 from mindroom.matrix.replacements import ordered_replacements, replacement_content
-from mindroom.matrix.thread_membership import event_info_proves_thread_membership
+from mindroom.matrix.thread_projection import resolve_thread_ids_for_event_infos
 
 from .agent_message_snapshot import AgentMessageSnapshot, AgentMessageSnapshotUnavailable
+from .event_cache_events import decode_cached_event
 from .thread_cache_helpers import thread_cache_rejection_reason
 
 if TYPE_CHECKING:
+    import sqlite3
+    from collections.abc import Awaitable, Callable
+
     from .event_cache import ThreadCacheState
     from .event_cache_events import CachedEventRow
 
+    type _LatestEditLookup = Callable[[dict[str, Any]], Awaitable[CachedEventRow | None]]
+    type _SnapshotScopeRow = tuple[str, float | None, str, int] | sqlite3.Row
+    type _SnapshotScopeRowLookup = Callable[[], Awaitable[_SnapshotScopeRow | None]]
+
 
 @dataclass(frozen=True, slots=True)
-class SnapshotLookupResult:
+class _SnapshotLookupResult:
     """Outcome for one matching scope event during latest-message lookup."""
 
     snapshot: AgentMessageSnapshot | None
     stop_scanning: bool = False
 
 
-def thread_cache_has_no_snapshot(cache_state: ThreadCacheState | None) -> bool:
+def _thread_cache_has_no_snapshot(cache_state: ThreadCacheState | None) -> bool:
     """Return whether a thread has no snapshot, raising when cached state is unsafe."""
     rejection_reason = thread_cache_rejection_reason(cache_state)
     if rejection_reason in {"no_cache_state", "cache_never_validated"}:
@@ -39,13 +47,13 @@ def thread_cache_has_no_snapshot(cache_state: ThreadCacheState | None) -> bool:
     return False
 
 
-def event_matches_snapshot_scope(
+def _event_matches_snapshot_scope(
     event: dict[str, Any],
     *,
     thread_id: str | None,
     sender: str,
 ) -> bool:
-    """Return whether one event is a visible message candidate for a snapshot scope."""
+    """Return whether one indexed event is a visible message candidate for a snapshot scope."""
     if (
         event.get("type") != "m.room.message"
         or event.get("sender") != sender
@@ -53,20 +61,174 @@ def event_matches_snapshot_scope(
         or not isinstance(parse_room_message_event_source(event), nio.RoomMessage)
     ):
         return False
-    event_info = EventInfo.from_event(event)
-    if event_info.relation_type == "m.replace" or (thread_id is None and event_info.relation_type == "m.thread"):
-        return False
-    if thread_id is None:
-        return True
-    event_id = event.get("event_id")
-    return (
-        isinstance(event_id, str)
-        and bool(event_id)
-        and event_info_proves_thread_membership(event_info, event_id, thread_id)
+    relation_type = EventInfo.from_event(event).relation_type
+    return relation_type != "m.replace" and not (thread_id is None and relation_type == "m.thread")
+
+
+async def _resolved_snapshot_thread_event_ids(
+    events: list[dict[str, Any]],
+    *,
+    room_id: str,
+    thread_id: str,
+) -> frozenset[str]:
+    """Return events whose local relation graph resolves to the requested thread."""
+    event_infos = {
+        event_id: EventInfo.from_event(event)
+        for event in events
+        if isinstance(event_id := event.get("event_id"), str) and event_id
+    }
+    root_info = event_infos.get(thread_id)
+    resolved = await resolve_thread_ids_for_event_infos(
+        room_id,
+        event_infos=event_infos,
+        ordered_event_ids=list(event_infos),
+        resolved_thread_ids={thread_id: thread_id} if root_info is not None and root_info.can_be_thread_root else None,
+    )
+    return frozenset(event_id for event_id, resolved_thread_id in resolved.items() if resolved_thread_id == thread_id)
+
+
+async def _snapshot_result_for_event(
+    event: dict[str, Any],
+    *,
+    cached_at: float | None,
+    latest_edit_lookup: _LatestEditLookup,
+    room_id: str,
+    thread_id: str | None,
+    sender: str,
+    runtime_started_at: float | None,
+) -> _SnapshotLookupResult | None:
+    """Return one matching event's snapshot outcome, or no scope match."""
+    if not _event_matches_snapshot_scope(event, thread_id=thread_id, sender=sender):
+        return None
+    return _snapshot_lookup_result(
+        event,
+        latest_edit=await latest_edit_lookup(event),
+        room_id=room_id,
+        thread_id=thread_id,
+        cached_at=cached_at,
+        runtime_started_at=runtime_started_at,
     )
 
 
-def snapshot_lookup_result(
+async def _next_decoded_snapshot_row(
+    *,
+    next_row: _SnapshotScopeRowLookup,
+    room_id: str,
+) -> CachedEventRow | None:
+    """Return the next cache row whose payload matches its authoritative indexes."""
+    while (row := await next_row()) is not None:
+        decoded = decode_cached_event(
+            row[0],
+            row[2],
+            row[3],
+            room_id=room_id,
+            cached_at=row[1],
+        )
+        if decoded is not None:
+            return decoded
+    return None
+
+
+async def _load_room_agent_message_snapshot(
+    *,
+    latest_edit_lookup: _LatestEditLookup,
+    next_row: _SnapshotScopeRowLookup,
+    room_id: str,
+    sender: str,
+    runtime_started_at: float | None,
+) -> AgentMessageSnapshot | None:
+    """Stream one room-scoped query until its latest visible message is known."""
+    while (decoded := await _next_decoded_snapshot_row(next_row=next_row, room_id=room_id)) is not None:
+        result = await _snapshot_result_for_event(
+            decoded.event,
+            cached_at=decoded.cached_at,
+            latest_edit_lookup=latest_edit_lookup,
+            room_id=room_id,
+            thread_id=None,
+            sender=sender,
+            runtime_started_at=runtime_started_at,
+        )
+        if result is None:
+            continue
+        if result.stop_scanning:
+            return None
+        if result.snapshot is not None:
+            return result.snapshot
+    return None
+
+
+async def _load_thread_agent_message_snapshot(
+    *,
+    latest_edit_lookup: _LatestEditLookup,
+    next_row: _SnapshotScopeRowLookup,
+    room_id: str,
+    thread_id: str,
+    sender: str,
+    runtime_started_at: float | None,
+) -> AgentMessageSnapshot | None:
+    """Resolve one complete indexed thread graph before selecting its latest message."""
+    decoded_rows: list[CachedEventRow] = []
+    while (decoded := await _next_decoded_snapshot_row(next_row=next_row, room_id=room_id)) is not None:
+        decoded_rows.append(decoded)
+    resolved_thread_event_ids = await _resolved_snapshot_thread_event_ids(
+        [decoded.event for decoded in decoded_rows],
+        room_id=room_id,
+        thread_id=thread_id,
+    )
+    for decoded in decoded_rows:
+        event = decoded.event
+        if event.get("event_id") not in resolved_thread_event_ids:
+            continue
+        result = await _snapshot_result_for_event(
+            event,
+            cached_at=decoded.cached_at,
+            latest_edit_lookup=latest_edit_lookup,
+            room_id=room_id,
+            thread_id=thread_id,
+            sender=sender,
+            runtime_started_at=runtime_started_at,
+        )
+        if result is None:
+            continue
+        if result.stop_scanning:
+            return None
+        if result.snapshot is not None:
+            return result.snapshot
+    return None
+
+
+async def load_agent_message_snapshot(
+    *,
+    cache_state: ThreadCacheState | None,
+    latest_edit_lookup: _LatestEditLookup,
+    next_row: _SnapshotScopeRowLookup,
+    room_id: str,
+    thread_id: str | None,
+    sender: str,
+    runtime_started_at: float | None,
+) -> AgentMessageSnapshot | None:
+    """Return the latest valid visible message from one backend-neutral scope query."""
+    if thread_id is None:
+        return await _load_room_agent_message_snapshot(
+            latest_edit_lookup=latest_edit_lookup,
+            next_row=next_row,
+            room_id=room_id,
+            sender=sender,
+            runtime_started_at=runtime_started_at,
+        )
+    if _thread_cache_has_no_snapshot(cache_state):
+        return None
+    return await _load_thread_agent_message_snapshot(
+        latest_edit_lookup=latest_edit_lookup,
+        next_row=next_row,
+        room_id=room_id,
+        thread_id=thread_id,
+        sender=sender,
+        runtime_started_at=runtime_started_at,
+    )
+
+
+def _snapshot_lookup_result(
     event: dict[str, Any],
     *,
     latest_edit: CachedEventRow | None,
@@ -74,7 +236,7 @@ def snapshot_lookup_result(
     thread_id: str | None,
     cached_at: float | None,
     runtime_started_at: float | None,
-) -> SnapshotLookupResult:
+) -> _SnapshotLookupResult:
     """Resolve one cached event and optional edit into a visible snapshot outcome."""
     replacements = ordered_replacements(
         event,
@@ -89,10 +251,10 @@ def snapshot_lookup_result(
         and runtime_started_at is not None
         and (visible_cached_at is None or visible_cached_at < runtime_started_at)
     ):
-        return SnapshotLookupResult(snapshot=None, stop_scanning=True)
+        return _SnapshotLookupResult(snapshot=None, stop_scanning=True)
 
     visible_content = dict(event["content"])
     if latest_replacement is not None:
         visible_content = replacement_content(visible_content, latest_replacement["content"]["m.new_content"])
     snapshot = AgentMessageSnapshot(content=visible_content, origin_server_ts=event["origin_server_ts"])
-    return SnapshotLookupResult(snapshot=snapshot)
+    return _SnapshotLookupResult(snapshot=snapshot)

@@ -1722,12 +1722,12 @@ visibility = [
 path = "mindroom.matrix.cache.agent_message_snapshot_semantics"
 depends_on = [
     "mindroom.matrix.cache.agent_message_snapshot",
+    "mindroom.matrix.cache.event_cache_events",
     "mindroom.matrix.cache.thread_cache_helpers",
     "mindroom.matrix.event_info",
     "mindroom.matrix.media",
     "mindroom.matrix.replacements",
-    "mindroom.matrix.thread_membership",
-    "mindroom.matrix.visible_body",
+    "mindroom.matrix.thread_projection",
 ]
 visibility = [
     "mindroom.matrix.cache.postgres_agent_message_snapshot",
@@ -1787,6 +1787,7 @@ depends_on = [
     "mindroom.matrix.sidecar_content",
 ]
 visibility = [
+    "mindroom.matrix.cache.agent_message_snapshot_semantics",
     "mindroom.matrix.cache.postgres_agent_message_snapshot",
     "mindroom.matrix.cache.postgres_event_cache_events",
     "mindroom.matrix.cache.postgres_event_cache_threads",
@@ -4092,7 +4093,11 @@ expose = [
     "sort_thread_messages_root_first",
 ]
 from = ["mindroom.matrix.thread_projection"]
-visibility = ["mindroom.matrix.client_thread_history", "mindroom.matrix.stale_stream_cleanup"]
+visibility = [
+    "mindroom.matrix.cache.agent_message_snapshot_semantics",
+    "mindroom.matrix.client_thread_history",
+    "mindroom.matrix.stale_stream_cleanup",
+]
 exclusive = true
 
 [[interfaces]]

@@ -115,6 +115,49 @@ async def test_get_latest_agent_message_snapshot_returns_unedited_thread_message
 
 
 @pytest.mark.asyncio
+async def test_get_latest_agent_message_snapshot_keeps_agent_thread_root(
+    event_cache_factory: Callable[[], ConversationEventCache],
+) -> None:
+    """The authoritative thread root remains eligible when the agent sent it."""
+    cache = event_cache_factory()
+    await cache.initialize()
+    try:
+        room_id = "!room:localhost"
+        thread_id = "$thread-root"
+        await _replace_thread(
+            cache,
+            room_id,
+            thread_id,
+            [
+                _message_event(
+                    event_id=thread_id,
+                    sender="@agent:localhost",
+                    body="Agent question",
+                    origin_server_ts=1000,
+                ),
+                _message_event(
+                    event_id="$reply",
+                    sender="@user:localhost",
+                    body="User answer",
+                    origin_server_ts=2000,
+                    relates_to={"rel_type": "m.thread", "event_id": thread_id},
+                ),
+            ],
+        )
+        snapshot = await cache.get_latest_agent_message_snapshot(
+            room_id,
+            thread_id,
+            "@agent:localhost",
+            runtime_started_at=None,
+        )
+    finally:
+        await cache.close()
+
+    assert snapshot is not None
+    assert snapshot.content["body"] == "Agent question"
+
+
+@pytest.mark.asyncio
 async def test_get_latest_agent_message_snapshot_ignores_wrong_thread_index_row(
     event_cache_factory: Callable[[], ConversationEventCache],
 ) -> None:
@@ -168,6 +211,94 @@ async def test_get_latest_agent_message_snapshot_ignores_wrong_thread_index_row(
 
     assert snapshot is not None
     assert snapshot.content["body"] == "Answer"
+
+
+@pytest.mark.parametrize(
+    "relation_type",
+    [
+        "reply",
+        "reference",
+    ],
+    ids=["reply", "reference"],
+)
+@pytest.mark.parametrize(
+    ("target_event_id", "expected_body"),
+    [
+        ("$direct-child", "Indirect answer"),
+        ("$other-thread-child", "Direct answer"),
+    ],
+    ids=["same-thread", "other-thread"],
+)
+@pytest.mark.asyncio
+async def test_get_latest_agent_message_snapshot_resolves_indexed_indirect_thread_member(
+    event_cache_factory: Callable[[], ConversationEventCache],
+    relation_type: str,
+    target_event_id: str,
+    expected_body: str,
+) -> None:
+    """Replies and references must resolve through their canonical relation graph."""
+    cache = event_cache_factory()
+    await cache.initialize()
+    try:
+        room_id = "!room:localhost"
+        thread_id = "$thread-root"
+        indirect_relation = (
+            {"m.in_reply_to": {"event_id": target_event_id}}
+            if relation_type == "reply"
+            else {"rel_type": "m.reference", "event_id": target_event_id}
+        )
+        await _replace_thread(
+            cache,
+            room_id,
+            thread_id,
+            [
+                _message_event(
+                    event_id=thread_id,
+                    sender="@user:localhost",
+                    body="Question",
+                    origin_server_ts=1000,
+                ),
+                _message_event(
+                    event_id="$direct-answer",
+                    sender="@agent:localhost",
+                    body="Direct answer",
+                    origin_server_ts=1500,
+                    relates_to={"rel_type": "m.thread", "event_id": thread_id},
+                ),
+                _message_event(
+                    event_id="$direct-child",
+                    sender="@user:localhost",
+                    body="Direct child",
+                    origin_server_ts=2000,
+                    relates_to={"rel_type": "m.thread", "event_id": thread_id},
+                ),
+                _message_event(
+                    event_id="$other-thread-child",
+                    sender="@user:localhost",
+                    body="Other thread child",
+                    origin_server_ts=2500,
+                    relates_to={"rel_type": "m.thread", "event_id": "$other-root"},
+                ),
+                _message_event(
+                    event_id="$indirect-agent-message",
+                    sender="@agent:localhost",
+                    body="Indirect answer",
+                    origin_server_ts=3000,
+                    relates_to=indirect_relation,
+                ),
+            ],
+        )
+        snapshot = await cache.get_latest_agent_message_snapshot(
+            room_id,
+            thread_id,
+            "@agent:localhost",
+            runtime_started_at=None,
+        )
+    finally:
+        await cache.close()
+
+    assert snapshot is not None
+    assert snapshot.content["body"] == expected_body
 
 
 @pytest.mark.asyncio
