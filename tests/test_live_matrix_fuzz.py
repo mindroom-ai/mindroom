@@ -2752,6 +2752,7 @@ async def test_run_live_closes_every_client_without_masking_primary_failure(
     closed: list[int] = []
     clients: list[object] = []
     primary = ValueError("primary fuzz failure")
+    interruption = KeyboardInterrupt("close interrupted")
 
     class FakeClient:
         def __init__(self, *_args: object, **_kwargs: object) -> None:
@@ -2761,6 +2762,8 @@ async def test_run_live_closes_every_client_without_masking_primary_failure(
         async def close(self) -> None:
             closed.append(self.index)
             if self.index == 0:
+                raise interruption
+            if self.index == 1:
                 message = "close failed"
                 raise RuntimeError(message)
 
@@ -2792,6 +2795,114 @@ async def test_run_live_closes_every_client_without_masking_primary_failure(
     assert raised.value is primary
     assert closed == [0, 1, 2]
     assert any("Matrix client cleanup failures" in note for note in primary.__notes__)
+    assert any("KeyboardInterrupt: close interrupted" in note for note in primary.__notes__)
+    assert any("RuntimeError: close failed" in note for note in primary.__notes__)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "interruption",
+    [KeyboardInterrupt("close interrupted"), SystemExit("close exited")],
+)
+async def test_run_live_finishes_client_cleanup_before_rethrowing_first_interrupt(
+    monkeypatch: pytest.MonkeyPatch,
+    interruption: BaseException,
+) -> None:
+    """A passing workload rethrows its exact cleanup interrupt after every close."""
+    closed: list[int] = []
+    clients: list[object] = []
+
+    class FakeClient:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            self.index = len(clients)
+            clients.append(self)
+
+        async def close(self) -> None:
+            closed.append(self.index)
+            if self.index == 0:
+                raise interruption
+            if self.index == 1:
+                message = "secondary close failed"
+                raise RuntimeError(message)
+
+    class FakeRunner:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        async def run(self) -> dict[str, object]:
+            return {"status": "PASS"}
+
+    monkeypatch.setattr(live_fuzz, "LiveMatrixClient", FakeClient)
+    monkeypatch.setattr(live_fuzz, "LiveFuzzRunner", FakeRunner)
+    stack: Any = SimpleNamespace(
+        homeserver="http://matrix.invalid",
+        room_ids={"lobby": "!room:example"},
+        room_keys=("lobby",),
+        room_id="!room:example",
+    )
+    scenario = LiveFuzzScenario(thread_count=1, client_count=3, batches=())
+
+    with pytest.raises(type(interruption)) as raised:
+        await live_fuzz._run_live(
+            stack,
+            scenario,
+            reply_timeout=1,
+            settle_seconds=0,
+        )
+
+    assert raised.value is interruption
+    assert closed == [0, 1, 2]
+    assert any("RuntimeError: secondary close failed" in note for note in interruption.__notes__)
+
+
+@pytest.mark.asyncio
+async def test_run_live_groups_ordinary_client_cleanup_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A passing workload reports every ordinary close failure as one group."""
+    closed: list[int] = []
+    clients: list[object] = []
+
+    class FakeClient:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            self.index = len(clients)
+            clients.append(self)
+
+        async def close(self) -> None:
+            closed.append(self.index)
+            if self.index < 2:
+                message = f"close {self.index} failed"
+                raise RuntimeError(message)
+
+    class FakeRunner:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        async def run(self) -> dict[str, object]:
+            return {"status": "PASS"}
+
+    monkeypatch.setattr(live_fuzz, "LiveMatrixClient", FakeClient)
+    monkeypatch.setattr(live_fuzz, "LiveFuzzRunner", FakeRunner)
+    stack: Any = SimpleNamespace(
+        homeserver="http://matrix.invalid",
+        room_ids={"lobby": "!room:example"},
+        room_keys=("lobby",),
+        room_id="!room:example",
+    )
+    scenario = LiveFuzzScenario(thread_count=1, client_count=3, batches=())
+
+    with pytest.raises(ExceptionGroup, match="Matrix client cleanup failed") as raised:
+        await live_fuzz._run_live(
+            stack,
+            scenario,
+            reply_timeout=1,
+            settle_seconds=0,
+        )
+
+    assert closed == [0, 1, 2]
+    assert len(raised.value.exceptions) == 2
+    assert "close Matrix client 0: close 0 failed" in str(raised.value.exceptions[0])
+    assert "close Matrix client 1: close 1 failed" in str(raised.value.exceptions[1])
 
 
 def test_pass_receipt_survives_bundle_discard(tmp_path: Path) -> None:
@@ -2866,10 +2977,15 @@ def test_runtime_provenance_identifies_tuwunel_server(
         stack.temp_dir.cleanup()
 
 
-def test_stack_close_attempts_every_stage_after_failures(
+@pytest.mark.parametrize(
+    "interruption",
+    [KeyboardInterrupt("stop interrupted"), SystemExit("stop exited")],
+)
+def test_stack_close_attempts_every_stage_before_rethrowing_first_interrupt(
     monkeypatch: pytest.MonkeyPatch,
+    interruption: BaseException,
 ) -> None:
-    """One teardown failure must not skip later cleanup stages."""
+    """One teardown interrupt must not skip later cleanup stages."""
     events: list[str] = []
 
     class FakeLog:
@@ -2904,8 +3020,7 @@ def test_stack_close_attempts_every_stage_after_failures(
 
     def stop_mindroom() -> None:
         events.append("mindroom")
-        message = "stop failed"
-        raise KeyboardInterrupt(message)
+        raise interruption
 
     stack._stop_mindroom = stop_mindroom  # type: ignore[method-assign]
     stack._log_handle = FakeLog()
@@ -2926,9 +3041,10 @@ def test_stack_close_attempts_every_stage_after_failures(
         message = "snapshot failed"
         raise ValueError(message)
 
-    with pytest.raises(ExceptionGroup) as raised:
+    with pytest.raises(type(interruption)) as raised:
         stack.close(before_destructive_cleanup=snapshot)
 
+    assert raised.value is interruption
     assert events == [
         "mindroom",
         "log",
@@ -2941,7 +3057,45 @@ def test_stack_close_attempts_every_stage_after_failures(
         "manifest",
         "lease",
     ]
-    assert len(raised.value.exceptions) == 3
+    assert any("stop model server: RuntimeError: shutdown failed" in note for note in interruption.__notes__)
+    assert any("snapshot runtime evidence: ValueError: snapshot failed" in note for note in interruption.__notes__)
+
+
+def test_stack_close_groups_ordinary_cleanup_failures() -> None:
+    """Ordinary teardown failures remain grouped after all stages finish."""
+    events: list[str] = []
+    stack = object.__new__(ManagedTuwunelStack)
+
+    def stop_mindroom() -> None:
+        events.append("mindroom")
+        message = "stop failed"
+        raise RuntimeError(message)
+
+    class FakeTempDir:
+        def cleanup(self) -> None:
+            events.append("temp")
+
+    def release_lease() -> None:
+        events.append("lease")
+        message = "lease failed"
+        raise OSError(message)
+
+    stack._stop_mindroom = stop_mindroom  # type: ignore[method-assign]
+    stack._log_handle = None
+    stack._model_server = None
+    stack._model_thread = None
+    stack._created = False
+    stack.temp_dir = FakeTempDir()
+    stack._write_manifest = lambda **_kwargs: events.append("manifest")  # type: ignore[method-assign]
+    stack._release_host_lease = release_lease  # type: ignore[method-assign]
+
+    with pytest.raises(ExceptionGroup, match="live Matrix fuzz cleanup failed") as raised:
+        stack.close()
+
+    assert events == ["mindroom", "temp", "manifest", "lease"]
+    assert len(raised.value.exceptions) == 2
+    assert "stop MindRoom: stop failed" in str(raised.value.exceptions[0])
+    assert "release host lease: lease failed" in str(raised.value.exceptions[1])
 
 
 def test_host_lease_excludes_second_live_stack(tmp_path: Path) -> None:
@@ -3476,6 +3630,77 @@ async def test_failure_bundle_artifact_error_preserves_primary_failure(tmp_path:
     # Other artifacts were still written despite the one failure.
     assert (bundle.directory / "diagnostics.json").exists()
     assert (bundle.directory / "tuwunel.log").exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failed_collector", ["diagnostics.json", "tuwunel.log"])
+async def test_failure_bundle_finalizes_every_artifact_after_collector_failure(
+    tmp_path: Path,
+    failed_collector: str,
+) -> None:
+    """One collector failure leaves a sentinel without blocking finalization."""
+    bundle = FailureBundle.create(
+        tmp_path / "artifacts",
+        f"run-{failed_collector}",
+        scenario=_bundle_scenario(),
+        provenance={},
+    )
+    stack = _prepared_stack(tmp_path)
+    oracle = _snapshot_oracle()
+    runner = object.__new__(LiveFuzzRunner)
+    runner.oracle = oracle
+    collector_error = RuntimeError(f"{failed_collector} exploded")
+
+    if failed_collector == "diagnostics.json":
+
+        def fail_diagnostics() -> dict[str, int]:
+            stack.events.append("diagnostics")
+            raise collector_error
+
+        stack.diagnostic_counts = fail_diagnostics  # type: ignore[method-assign]
+    else:
+
+        def fail_tuwunel_log() -> str:
+            stack.events.append("tuwunel_log")
+            raise collector_error
+
+        stack.tuwunel_log = fail_tuwunel_log  # type: ignore[method-assign]
+
+    try:
+        with pytest.raises(ExceptionGroup, match="failure bundle collector failed"):
+            live_fuzz._persist_run_bundle(
+                bundle,
+                stack,
+                runner,
+                exception=AssertionError("primary invariant"),
+            )
+    finally:
+        await oracle.client.close()
+
+    expected = {
+        "artifact_errors.txt",
+        "diagnostics.json",
+        "exception.txt",
+        "handled_turns.json",
+        "mindroom.log",
+        "model_observations.json",
+        "oracle_snapshot.json",
+        "tuwunel.log",
+    }
+    assert expected <= {path.name for path in bundle.directory.iterdir()}
+    assert stack.events == ["diagnostics", "tuwunel_log"]
+    assert "primary invariant" in (bundle.directory / "exception.txt").read_text(encoding="utf-8")
+    assert json.loads((bundle.directory / "oracle_snapshot.json").read_text(encoding="utf-8"))["expected_sources"] == {
+        "$source": "op:1",
+    }
+    assert (bundle.directory / "model_observations.json").exists()
+    capture_errors = (bundle.directory / "artifact_errors.txt").read_text(encoding="utf-8")
+    assert f"{failed_collector}: RuntimeError: {failed_collector} exploded" in capture_errors
+    if failed_collector == "diagnostics.json":
+        sentinel = json.loads((bundle.directory / "diagnostics.json").read_text(encoding="utf-8"))["_capture_error"]
+    else:
+        sentinel = (bundle.directory / "tuwunel.log").read_text(encoding="utf-8")
+    assert f"<{failed_collector} capture failed: RuntimeError: {failed_collector} exploded>" in sentinel
 
 
 def test_failure_bundle_records_artifact_error_after_finalize(tmp_path: Path) -> None:

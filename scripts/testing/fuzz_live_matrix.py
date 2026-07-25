@@ -1235,15 +1235,56 @@ def _run_command(
 
 
 def _attempt_cleanup(
-    errors: list[Exception],
+    errors: list[tuple[str, BaseException]],
     label: str,
     action: Callable[[], object],
-) -> None:
+) -> bool:
     """Run one teardown stage while retaining its failure."""
     try:
         action()
     except BaseException as exc:
-        errors.append(RuntimeError(f"{label}: {exc}"))
+        errors.append((label, exc))
+        return False
+    return True
+
+
+def _join_model_server_thread(thread: threading.Thread) -> None:
+    """Join the model-server thread or report that it survived teardown."""
+    thread.join(timeout=5)
+    if thread.is_alive():
+        msg = "thread remained alive"
+        raise RuntimeError(msg)
+
+
+def _format_cleanup_failure(label: str, error: BaseException) -> str:
+    """Describe one retained teardown failure with its owning stage."""
+    return f"{label}: {type(error).__name__}: {error}"
+
+
+def _raise_cleanup_failures(
+    errors: list[tuple[str, BaseException]],
+    *,
+    message: str,
+) -> None:
+    """Raise retained teardown failures without replacing control-flow exits."""
+    if not errors:
+        return
+    first_interrupt = next(
+        (
+            (index, error)
+            for index, (_label, error) in enumerate(errors)
+            if isinstance(error, (KeyboardInterrupt, SystemExit))
+        ),
+        None,
+    )
+    if first_interrupt is not None:
+        interrupt_index, interrupt = first_interrupt
+        for index, (label, error) in enumerate(errors):
+            if index != interrupt_index:
+                interrupt.add_note(_format_cleanup_failure(label, error))
+        raise interrupt
+    wrapped = [RuntimeError(f"{label}: {error}") for label, error in errors]
+    raise ExceptionGroup(message, wrapped)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1509,7 +1550,7 @@ class ManagedTuwunelStack:
         before_destructive_cleanup: Callable[[], None] | None = None,
     ) -> None:
         """Attempt every teardown stage and report all cleanup failures."""
-        errors: list[Exception] = []
+        errors: list[tuple[str, BaseException]] = []
 
         _attempt_cleanup(errors, "stop MindRoom", self._stop_mindroom)
         if self._log_handle is not None:
@@ -1524,21 +1565,20 @@ class ManagedTuwunelStack:
             self._model_server = None
         if self._model_thread is not None:
             thread = self._model_thread
-            _attempt_cleanup(errors, "join model server thread", lambda: thread.join(timeout=5))
-            if thread.is_alive():
-                errors.append(RuntimeError("join model server thread: thread remained alive"))
-            else:
+            if _attempt_cleanup(
+                errors,
+                "join model server thread",
+                lambda: _join_model_server_thread(thread),
+            ):
                 self._model_thread = None
         if before_destructive_cleanup is not None:
             _attempt_cleanup(errors, "snapshot runtime evidence", before_destructive_cleanup)
-        if self._created:
-            _attempt_cleanup(
-                errors,
-                "remove Tuwunel instance",
-                lambda: _run_command("just", "local-instances-remove", self.instance_name),
-            )
-            if not any(str(error).startswith("remove Tuwunel instance:") for error in errors):
-                self._created = False
+        if self._created and _attempt_cleanup(
+            errors,
+            "remove Tuwunel instance",
+            lambda: _run_command("just", "local-instances-remove", self.instance_name),
+        ):
+            self._created = False
         _attempt_cleanup(errors, "remove temporary stack storage", self.temp_dir.cleanup)
         cleanup_state = "cleanup_failed" if errors else "closed"
         _attempt_cleanup(
@@ -1546,13 +1586,11 @@ class ManagedTuwunelStack:
             "write cleanup manifest",
             lambda: self._write_manifest(
                 state=cleanup_state,
-                cleanup_errors=[str(error) for error in errors],
+                cleanup_errors=[_format_cleanup_failure(label, error) for label, error in errors],
             ),
         )
         _attempt_cleanup(errors, "release host lease", self._release_host_lease)
-        if errors:
-            message = "live Matrix fuzz cleanup failed"
-            raise ExceptionGroup(message, errors)
+        _raise_cleanup_failures(errors, message="live Matrix fuzz cleanup failed")
 
     def log_tail(self, lines: int = 80) -> str:
         """Return recent MindRoom output when a live invariant fails."""
@@ -4199,6 +4237,15 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+async def _close_live_matrix_client(client: LiveMatrixClient) -> BaseException | None:
+    """Close one client while retaining even process-control exceptions."""
+    try:
+        await client.close()
+    except BaseException as exc:
+        return exc
+    return None
+
+
 async def _run_live(
     stack: ManagedTuwunelStack,
     scenario: LiveFuzzScenario,
@@ -4234,21 +4281,17 @@ async def _run_live(
         raise
     finally:
         close_results = await asyncio.gather(
-            *(client.close() for client in clients),
-            return_exceptions=True,
+            *(_close_live_matrix_client(client) for client in clients),
         )
-        close_errors = [result for result in close_results if isinstance(result, BaseException)]
+        close_errors = [
+            (f"close Matrix client {index}", result) for index, result in enumerate(close_results) if result is not None
+        ]
         if close_errors:
-            details = "; ".join(f"{type(error).__name__}: {error}" for error in close_errors)
             if primary_error is not None:
+                details = "; ".join(_format_cleanup_failure(label, error) for label, error in close_errors)
                 primary_error.add_note(f"Matrix client cleanup failures: {details}")
             else:
-                wrapped = [
-                    error if isinstance(error, Exception) else RuntimeError(f"{type(error).__name__}: {error}")
-                    for error in close_errors
-                ]
-                message = "Matrix client cleanup failed"
-                raise ExceptionGroup(message, wrapped)
+                _raise_cleanup_failures(close_errors, message="Matrix client cleanup failed")
 
 
 def _scenario_from_args(args: argparse.Namespace) -> LiveFuzzScenario:
@@ -4643,6 +4686,15 @@ class FailureBundle:
             append_error,
         )
 
+    def record_capture_error(self, artifact: str, error: BaseException) -> None:
+        """Retain one collector failure beside its sentinel artifact."""
+
+        def append_error(destination: Path) -> None:
+            with destination.open("a", encoding="utf-8") as handle:
+                handle.write(f"{artifact}: {type(error).__name__}: {error}\n")
+
+        self._write_isolated("artifact_errors.txt", append_error)
+
     def _write_isolated(self, name: str, writer: Callable[[Path], None]) -> None:
         """Run one artifact writer, folding any failure into the transcript."""
         try:
@@ -4664,8 +4716,8 @@ class FailureBundle:
         log_path: Path,
         ledger_path: Path,
         oracle_snapshot: Mapping[str, object],
-        model_observations: Mapping[int, list[str]],
-        diagnostics: Mapping[str, int],
+        model_observations: Mapping[object, object],
+        diagnostics: Mapping[str, object],
         tuwunel_log: str,
     ) -> Path:
         """Copy every durable artifact before the stack is torn down."""
@@ -4706,6 +4758,27 @@ class FailureBundle:
             lambda destination: destination.write_text(tuwunel_log, encoding="utf-8"),
         )
         return self.directory
+
+
+def _capture_bundle_collector(
+    bundle: FailureBundle,
+    artifact: str,
+    collector: Callable[[], object],
+    sentinel: Callable[[BaseException], object],
+    errors: list[tuple[str, BaseException]],
+) -> object:
+    """Run one evidence collector without blocking independent artifacts."""
+    try:
+        return collector()
+    except BaseException as exc:
+        bundle.record_capture_error(artifact, exc)
+        errors.append((f"capture {artifact}", exc))
+        return sentinel(exc)
+
+
+def _capture_error_text(artifact: str, error: BaseException) -> str:
+    """Build a durable sentinel for a failed evidence collector."""
+    return f"<{artifact} capture failed: {type(error).__name__}: {error}>"
 
 
 def _record_secondary_failure(
@@ -4860,17 +4933,59 @@ def _persist_run_bundle(
     exception: BaseException | None = None,
 ) -> Path:
     """Copy disposable stack evidence before cleanup can remove its sources."""
-    oracle_snapshot = _sanitized_oracle_snapshot(runner.oracle) if runner is not None else {}
+    capture_errors: list[tuple[str, BaseException]] = []
+    oracle_snapshot = cast(
+        "Mapping[str, object]",
+        _capture_bundle_collector(
+            bundle,
+            "oracle_snapshot.json",
+            lambda: _sanitized_oracle_snapshot(runner.oracle) if runner is not None else {},
+            lambda error: {"_capture_error": _capture_error_text("oracle_snapshot.json", error)},
+            capture_errors,
+        ),
+    )
+    model_observations = cast(
+        "Mapping[object, object]",
+        _capture_bundle_collector(
+            bundle,
+            "model_observations.json",
+            _ModelHandler.observations_snapshot,
+            lambda error: {"_capture_error": _capture_error_text("model_observations.json", error)},
+            capture_errors,
+        ),
+    )
+    diagnostics = cast(
+        "Mapping[str, object]",
+        _capture_bundle_collector(
+            bundle,
+            "diagnostics.json",
+            stack.diagnostic_counts,
+            lambda error: {"_capture_error": _capture_error_text("diagnostics.json", error)},
+            capture_errors,
+        ),
+    )
+    tuwunel_log = cast(
+        "str",
+        _capture_bundle_collector(
+            bundle,
+            "tuwunel.log",
+            stack.tuwunel_log,
+            lambda error: _capture_error_text("tuwunel.log", error) + "\n",
+            capture_errors,
+        ),
+    )
     ledger_path = stack.storage_path / "tracking" / f"{AGENT_NAME}_responded.json"
-    return bundle.finalize(
+    path = bundle.finalize(
         exception=exception,
         log_path=stack.log_path,
         ledger_path=ledger_path,
         oracle_snapshot=oracle_snapshot,
-        model_observations=_ModelHandler.observations_snapshot(),
-        diagnostics=stack.diagnostic_counts(),
-        tuwunel_log=stack.tuwunel_log(),
+        model_observations=model_observations,
+        diagnostics=diagnostics,
+        tuwunel_log=tuwunel_log,
     )
+    _raise_cleanup_failures(capture_errors, message="failure bundle collector failed")
+    return path
 
 
 if __name__ == "__main__":
