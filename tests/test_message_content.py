@@ -288,6 +288,10 @@ class TestResolvedMessageExtraction:
 
         body, content = await extract_edit_body(
             {
+                "event_id": "$legacy-edit",
+                "sender": "@alice:example.com",
+                "origin_server_ts": 2000,
+                "type": "m.room.message",
                 "content": {
                     "msgtype": "m.text",
                     "body": "* Preview edit",
@@ -640,7 +644,10 @@ class TestResolvedMessageExtraction:
 
         body, content = await extract_visible_edit_body(
             {
+                "event_id": "$edit",
                 "sender": f"@mindroom_general:{current_domain}",
+                "origin_server_ts": 2000,
+                "type": "m.room.message",
                 "content": {
                     "msgtype": "m.text",
                     "body": "* Preview edit",
@@ -1566,7 +1573,10 @@ class TestCanonicalContentResolution:
     async def test_extract_edit_body_prefers_canonical_stream_body(self) -> None:
         """Edit extraction should drop transient warmup suffixes when canonical stream text is present."""
         event_source = {
+            "event_id": "$edit",
             "sender": "@mindroom_general:localhost",
+            "origin_server_ts": 2000,
+            "type": "m.room.message",
             "content": {
                 "body": "* hello",
                 "msgtype": "m.text",
@@ -1596,7 +1606,10 @@ class TestCanonicalContentResolution:
     async def test_extract_edit_body_ignores_untrusted_visible_body(self) -> None:
         """Edit extraction should not trust canonical-body overrides from arbitrary room senders."""
         event_source = {
+            "event_id": "$edit",
             "sender": "@alice:localhost",
+            "origin_server_ts": 2000,
+            "type": "m.room.message",
             "content": {
                 "body": "* hello",
                 "msgtype": "m.text",
@@ -1626,7 +1639,10 @@ class TestCanonicalContentResolution:
     async def test_extract_edit_body_preserves_explicit_empty_string_body(self) -> None:
         """Edit extraction should keep explicit empty-string bodies instead of dropping the edit."""
         event_source = {
+            "event_id": "$edit",
             "sender": "@mindroom_general:localhost",
+            "origin_server_ts": 2000,
+            "type": "m.room.message",
             "content": {
                 "body": "* Preview edit",
                 "msgtype": "m.text",

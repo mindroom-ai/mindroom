@@ -612,6 +612,18 @@ async def test_edit_without_resolved_body_is_skipped(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_malformed_inline_edit_is_skipped(tmp_path: Path) -> None:
+    """An inline edit with invalid replacement content cannot trigger regeneration."""
+    harness = _harness(tmp_path, turn_record=_turn_record())
+    event, event_info = _edit_event()
+    event.source["content"]["m.new_content"] = {"body": "malformed"}
+
+    await _handle_edit(harness, event, event_info)
+
+    _assert_no_regeneration(harness)
+
+
+@pytest.mark.asyncio
 async def test_record_without_persisted_response_context_is_skipped(tmp_path: Path) -> None:
     """A turn record missing persisted response context cannot be regenerated."""
     record = TurnRecord(

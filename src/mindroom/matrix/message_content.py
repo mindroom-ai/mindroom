@@ -460,9 +460,9 @@ async def extract_edit_body(
         expected_membership_epoch=expected_membership_epoch,
         hydration_batch=hydration_batch,
     )
-    if content_changed and (
-        not replacement_validator({**event_source, "content": resolved_content})
-        or resolved_content.get("m.relates_to")
+    if not replacement_validator({**event_source, "content": resolved_content}) or (
+        content_changed
+        and resolved_content.get("m.relates_to")
         != _normalized_content_dict(event_source.get("content")).get("m.relates_to")
     ):
         return None, None
