@@ -75,6 +75,34 @@ def test_model_stream_disconnect_does_not_escape_request_handler() -> None:
     assert handler.close_connection is True
 
 
+def test_nonstreaming_summary_prompt_does_not_enter_stress_barrier() -> None:
+    """Background summaries may quote a marker without becoming stress requests."""
+    handler = object.__new__(_ModelHandler)
+    marker = live_fuzz.StressConfig(
+        threads=1,
+        waves=1,
+        stream_seconds=1,
+        edit_interval=1,
+    ).marker(0, 0)
+    payload = json.dumps(
+        {
+            "messages": [{"role": "user", "content": f"<thread_messages>{marker}</thread_messages>"}],
+            "stream": False,
+        },
+    ).encode()
+    handler.path = "/v1/chat/completions"
+    handler.headers = {"Content-Length": str(len(payload))}
+    handler.rfile = io.BytesIO(payload)
+    handler.call_ids = iter((1,))
+    handler.close_connection = False
+    sent: list[dict[str, object]] = []
+    handler._send_json = sent.append  # type: ignore[method-assign]
+
+    handler.do_POST()
+
+    assert sent[0]["choices"][0]["message"]["content"].startswith("LIVE-FUZZ call=1")  # type: ignore[index]
+
+
 def test_lifecycle_command_timeout_kills_bounded_process_group() -> None:
     """A hung lifecycle command must time out instead of hanging the campaign."""
     with pytest.raises(TimeoutError, match="command timed out"):

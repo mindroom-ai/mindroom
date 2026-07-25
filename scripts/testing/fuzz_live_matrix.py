@@ -1228,9 +1228,9 @@ class _ModelHandler(BaseHTTPRequestHandler):
         payload = json.loads(self.rfile.read(content_length))
         call_id = next(self.call_ids)
         self._record_observation(call_id, self._final_user_markers(payload))
-        stress_request = parse_stress_request(self._final_user_text(payload))
+        stress_request = parse_stress_request(self._final_user_text(payload)) if payload.get("stream") is True else None
         if stress_request is not None:
-            if payload.get("stream") is not True or self.stress_controller is None:
+            if self.stress_controller is None:
                 self.send_error(HTTPStatus.BAD_REQUEST, "stress requests require the armed streaming controller")
                 return
             try:
