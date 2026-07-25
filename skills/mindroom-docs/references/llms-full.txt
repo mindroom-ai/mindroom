@@ -16161,6 +16161,11 @@ Outgoing encrypted Matrix sends always deliver to unverified devices.
 MindRoom bots have no interactive device-verification flow, so enforcing nio's device-trust checks would fail every send to an encrypted room with an `OlmUnverifiedDeviceError` and the agent would appear to silently ignore messages.
 A configurable trust policy only becomes meaningful once a device-verification mechanism exists (for example trust-on-first-use, a verification command, or cross-signing support).
 
+While a room's timeline is still recovering from a limited sync, nio rejects sends to that room with `SendRetryError` until the gap closes, so MindRoom retries the affected delivery in place instead of dropping it.
+Streaming progress updates and completed terminal deliveries reuse the identical prepared payload and retry for up to 30 seconds — one recovery pump — backing off from 50ms to 500ms between attempts.
+Cancelled and errored terminal updates never wait on recovery, so a stopped or failed turn still settles immediately.
+If the window expires the delivery is reported as failed, the placeholder settles as a delivery failure, and the failure update itself is sent without waiting on recovery again.
+
 ## End-to-End Encryption
 
 Agents fully participate in encrypted rooms: they decrypt inbound text and media, reply encrypted, and re-fetch and decrypt thread history from the homeserver.
