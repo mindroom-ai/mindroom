@@ -1694,6 +1694,19 @@ class AgentBot:
         shutdown_intent: RuntimeShutdownIntent = GENERIC_SHUTDOWN,
     ) -> None:
         """Cancel work that must not outlive the Matrix sync loop."""
+        if not self._sync_shutting_down:
+            reason_category = {
+                "restart": "config_reload",
+                "entity_removed": "agent_shutdown",
+                "shutdown": "process_shutdown",
+                None: "agent_shutdown",
+            }[shutdown_intent.stop_reason]
+            logger.info(
+                "matrix_agent_response_runtime_shutdown",
+                active_response_count=self.in_flight_response_count,
+                restart_reason_category=reason_category,
+                resulting_action="drain_then_cancel_response_runtime",
+            )
         self._sync_shutting_down = True
         self._response_runner.refuse_pending_admissions()
         await self._cancel_startup_thread_prewarm()
