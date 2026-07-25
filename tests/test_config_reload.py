@@ -7,6 +7,7 @@ import json
 import sys
 import tempfile
 from contextlib import suppress
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -2850,6 +2851,8 @@ async def test_tracked_inbox_response_cancelled_during_reload_never_sends_placeh
     runner = unwrap_extracted_collaborator(bot._response_runner)
     admission_gate = ResponseAdmissionGate()
     runner.admission_gate = admission_gate
+    refusal_logger = MagicMock()
+    runner.deps = replace(runner.deps, logger=refusal_logger)
 
     # Stand where a config apply stands: admission closed, plan in progress.
     assert await admission_gate.close_if_idle()
@@ -2881,12 +2884,14 @@ async def test_tracked_inbox_response_cancelled_during_reload_never_sends_placeh
 
         assert task.cancelled()
         assert bot.in_flight_response_count == 0
-        # No placeholder or response is generated, but the dropped turn is not
-        # silent: the room gets one notice telling the user to resend.
-        send_response.assert_awaited_once()
-        notice_text = send_response.await_args.kwargs["response_text"]
-        assert "configuration reload" in notice_text.lower()
-        assert "again" in notice_text.lower()
+        # No Matrix I/O on the refusal path: this runs inside the drain that
+        # stopping a bot performs, so an untimed send would stall that drain.
+        send_response.assert_not_awaited()
+        # The dropped turn is still not silent; nothing re-dispatches it.
+        assert any(
+            call.args and call.args[0] == "response_refused_during_config_apply"
+            for call in refusal_logger.warning.call_args_list
+        )
     finally:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)

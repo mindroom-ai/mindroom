@@ -122,9 +122,6 @@ if TYPE_CHECKING:
 
 type _MatrixEventId = str
 _CONFIG_APPLY_CANCEL_MESSAGE = "Configuration reload is restarting this entity"
-_CONFIG_APPLY_REFUSED_NOTICE = (
-    "⚠️ A configuration reload is being applied, so this message was not handled. Please send it again."
-)
 _ToolContextResult = TypeVar("_ToolContextResult")
 _ToolStreamChunk = TypeVar("_ToolStreamChunk")
 _StateMutationResult = TypeVar("_StateMutationResult")
@@ -800,9 +797,15 @@ class ResponseRunner:
         """Admit one response before lifecycle locking or visible placeholder work."""
         if not await self._admission_gate.admit():
             # A config apply owns the runtime; give up before any lifecycle lock
-            # or visible placeholder work. The turn is dropped rather than
-            # queued, so it has to be observable in logs and in the room.
-            await self._notify_response_refused_by_config_apply(request, response_kind=response_kind)
+            # or visible placeholder work. Nothing re-dispatches the turn, so log
+            # the loss here. Deliberately no Matrix send: this path runs inside
+            # the drain that stopping a bot performs, and an untimed room_send
+            # would stall that drain until it cancelled live responses.
+            self.deps.logger.warning(
+                "response_refused_during_config_apply",
+                response_kind=response_kind,
+                **request.response_envelope.target.log_context,
+            )
             raise asyncio.CancelledError(_CONFIG_APPLY_CANCEL_MESSAGE)
         try:
             resolved_target = request.response_envelope.target
@@ -844,39 +847,6 @@ class ResponseRunner:
                 ) from cause
         finally:
             self._admission_gate.release()
-
-    async def _notify_response_refused_by_config_apply(
-        self,
-        request: ResponseRequest,
-        *,
-        response_kind: str,
-    ) -> None:
-        """Make an admission refusal observable instead of silently dropping the turn.
-
-        The dispatch path swallows pre-lock cancellation and releases the turn
-        claim without a terminal outcome, and nothing re-dispatches the turn. So
-        this is the only place the loss can be reported.
-        """
-        target = request.response_envelope.target
-        self.deps.logger.warning(
-            "response_refused_during_config_apply",
-            response_kind=response_kind,
-            room_id=target.room_id,
-            thread_id=target.resolved_thread_id,
-            reply_to_event_id=target.reply_to_event_id,
-        )
-        try:
-            await self.deps.delivery_gateway.send_text(
-                SendTextRequest(target=target, response_text=_CONFIG_APPLY_REFUSED_NOTICE),
-            )
-        except Exception as error:
-            # The turn is already lost; a failed notice must not also mask it.
-            self.deps.logger.warning(
-                "response_refusal_notice_failed",
-                room_id=target.room_id,
-                exception_type=error.__class__.__name__,
-                error=str(error),
-            )
 
     async def _finalize_early_placeholder_cancellation(
         self,
