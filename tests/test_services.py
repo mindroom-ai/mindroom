@@ -34,7 +34,7 @@ from mindroom.services.systemd import _restart_service as _restart_systemd_servi
 from mindroom.services.systemd import _start_service as _start_systemd_service
 from mindroom.services.systemd import _stop_service as _stop_systemd_service
 
-runner = CliRunner(env={"NO_COLOR": "1", "TERM": "dumb"})
+runner = CliRunner()
 
 
 def test_build_service_command_runs_mindroom_with_uv_tool(tmp_path: Path) -> None:
