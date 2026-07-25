@@ -796,14 +796,13 @@ class MatrixConversationCache(ConversationCacheProtocol):
         coordinator = self.runtime.startup_room_history
         if coordinator is None or not self.runtime.event_cache.durable_writes_available:
             return {}
-        result = await coordinator.acquire(
+        return await coordinator.acquire(
             principal_id=self.runtime.event_cache.principal_id,
             room_id=room_id,
             thread_root_ids=thread_root_ids,
             scan=self._scan_startup_room_history,
             task_owner=self.runtime,
         )
-        return result.outcomes
 
     def _log_startup_thread_prewarm_complete(
         self,

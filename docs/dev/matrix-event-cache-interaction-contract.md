@@ -123,7 +123,9 @@ Ordering within one startup generation is: first sync establishes room state, st
 
 The shared operation is keyed by startup generation, cache principal, and room ID, so principals never share each other's cache namespace and a later startup wave re-certifies the same rooms.
 
-Callers contribute the thread roots they need; roots contributed before the scan starts join its scope, and roots arriving after that scope freezes are collected into exactly one follow-up batch rather than starting one scan each.
+Auto-resume asks for all of its candidate roots at once, so one room walk replaces the per-thread reconstruction a busy room used to pay, and the shared operation removes the remaining duplicate of prewarm and auto-resume starting on the same room concurrently.
+
+Roots contributed before a scan starts join its scope, and a caller whose roots a running scan does not cover waits for it and then starts at most one more scan rather than a second concurrent walk of the same room.
 
 Each root receives exactly one terminal outcome: `stored`, `already_trusted`, `missing`, `truncated`, `invalidated`, or `failed`.
 
@@ -135,7 +137,7 @@ An empty result means shared certification was unavailable rather than that cert
 
 Startup pagination never runs under the room write barrier: unrelated same-room writes stay live for the length of the walk, and `replace_thread_if_not_newer` is what rejects a snapshot whose membership epoch or thread cache state moved after the fetch began.
 
-Each shared operation emits `startup_room_history_started`, `startup_room_history_joined`, `startup_room_history_follow_up_scheduled`, and `startup_room_history_completed` with the startup generation, candidate root count, per-outcome root counts, page and event counts, truncation, peak waiter count, queue wait, fetch time, and terminal status.
+Each executed scan emits `startup_room_history_completed` with the startup generation, room, principal, candidate root count, per-outcome root counts, page and event counts, truncation, queue wait, fetch time, and terminal status, so the number of scans per room per generation is the coalescing signal; a failed scan additionally emits `startup_room_history_scan_failed`.
 
 ## Disposable live audit
 

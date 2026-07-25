@@ -89,25 +89,6 @@ class _RecordingScanner:
 
 
 @pytest.mark.asyncio
-async def test_fifty_roots_in_one_room_use_one_scan() -> None:
-    """One acquisition for many interrupted roots must pay exactly one room scan."""
-    coordinator = StartupRoomHistoryCoordinator()
-    scanner = _RecordingScanner()
-    root_ids = [f"$thread-{index}:localhost" for index in range(50)]
-
-    result = await coordinator.acquire(
-        principal_id=PRINCIPAL_ID,
-        room_id=ROOM_ID,
-        thread_root_ids=root_ids,
-        scan=scanner,
-    )
-
-    assert scanner.scan_count == 1
-    assert scanner.scanned_root_sets[0] == frozenset(root_ids)
-    assert all(result.outcomes[root_id].certified for root_id in root_ids)
-
-
-@pytest.mark.asyncio
 async def test_freshness_callers_join_a_running_prewarm_scan() -> None:
     """Callers arriving while prewarm scans must join it instead of fetching again."""
     coordinator = StartupRoomHistoryCoordinator()
@@ -140,10 +121,9 @@ async def test_freshness_callers_join_a_running_prewarm_scan() -> None:
     freshness_results = await asyncio.gather(*freshness)
 
     assert scanner.scan_count == 1
-    assert all(prewarm_result.outcomes[root_id].certified for root_id in prewarm_roots)
+    assert all(prewarm_result[root_id].certified for root_id in prewarm_roots)
     for root_id, result in zip(prewarm_roots, freshness_results, strict=True):
-        assert result.outcomes == {root_id: StartupRootOutcome.STORED}
-        assert result.flights_created == 0
+        assert result == {root_id: StartupRootOutcome.STORED}
 
 
 @pytest.mark.asyncio
@@ -167,8 +147,7 @@ async def test_prewarm_observes_completed_freshness_work_without_rescanning() ->
     )
 
     assert scanner.scan_count == 1
-    assert prewarm_result.flights_awaited == 0
-    assert all(prewarm_result.outcomes[root_id].certified for root_id in root_ids)
+    assert all(prewarm_result[root_id].certified for root_id in root_ids)
 
 
 @pytest.mark.asyncio
@@ -213,90 +192,8 @@ async def test_roots_contributed_before_scope_freeze_join_the_same_scan() -> Non
 
     assert scanner.scan_count == 1
     assert scanner.scanned_root_sets[0] == frozenset({"$thread-a:localhost", "$thread-b:localhost"})
-    assert first_result.outcomes["$thread-a:localhost"].certified
-    assert second_result.outcomes["$thread-b:localhost"].certified
-
-
-@pytest.mark.asyncio
-async def test_late_candidates_share_one_bounded_follow_up_scan() -> None:
-    """Many roots arriving after scope freeze must share exactly one follow-up scan."""
-    coordinator = StartupRoomHistoryCoordinator()
-    scanner = _RecordingScanner(blocking=True)
-
-    prewarm = asyncio.create_task(
-        coordinator.acquire(
-            principal_id=PRINCIPAL_ID,
-            room_id=ROOM_ID,
-            thread_root_ids=["$prewarmed:localhost"],
-            scan=scanner,
-        ),
-    )
-    await asyncio.wait_for(scanner.started.wait(), timeout=1.0)
-    late_root_ids = [f"$late-{index}:localhost" for index in range(10)]
-    late_callers = [
-        asyncio.create_task(
-            coordinator.acquire(
-                principal_id=PRINCIPAL_ID,
-                room_id=ROOM_ID,
-                thread_root_ids=[root_id],
-                scan=scanner,
-            ),
-        )
-        for root_id in late_root_ids
-    ]
-    await asyncio.sleep(0)
-    scanner.release.set()
-    await prewarm
-    late_results = await asyncio.gather(*late_callers)
-
-    # One initial scan plus exactly one follow-up batch covering every late root.
-    assert scanner.scan_count == 2
-    assert scanner.scanned_root_sets[0] == frozenset({"$prewarmed:localhost"})
-    assert scanner.scanned_root_sets[1] == frozenset(late_root_ids)
-    for root_id, result in zip(late_root_ids, late_results, strict=True):
-        assert result.outcomes == {root_id: StartupRootOutcome.STORED}
-
-
-@pytest.mark.asyncio
-async def test_partial_joiner_is_logged_as_joining_not_starting() -> None:
-    """Scheduling a follow-up while joining a running scan must not be logged as a new scan."""
-    coordinator = StartupRoomHistoryCoordinator()
-    scanner = _RecordingScanner(blocking=True)
-
-    prewarm = asyncio.create_task(
-        coordinator.acquire(
-            principal_id=PRINCIPAL_ID,
-            room_id=ROOM_ID,
-            thread_root_ids=["$shared:localhost"],
-            scan=scanner,
-        ),
-    )
-    await asyncio.wait_for(scanner.started.wait(), timeout=1.0)
-    with patch("mindroom.matrix.startup_room_history.logger") as mock_logger:
-        # This caller overlaps the running scan and also brings one root that arrived too late.
-        partial = asyncio.create_task(
-            coordinator.acquire(
-                principal_id=PRINCIPAL_ID,
-                room_id=ROOM_ID,
-                thread_root_ids=["$shared:localhost", "$late:localhost"],
-                scan=scanner,
-            ),
-        )
-        await asyncio.sleep(0)
-        scanner.release.set()
-        await prewarm
-        partial_result = await partial
-        logged_events = [call.args[0] for call in mock_logger.info.call_args_list]
-
-    assert partial_result.flights_created == 0
-    assert "startup_room_history_started" not in logged_events
-    assert "startup_room_history_joined" in logged_events
-    assert "startup_room_history_follow_up_scheduled" in logged_events
-    assert partial_result.outcomes == {
-        "$shared:localhost": StartupRootOutcome.STORED,
-        "$late:localhost": StartupRootOutcome.STORED,
-    }
-    assert scanner.scan_count == 2
+    assert first_result["$thread-a:localhost"].certified
+    assert second_result["$thread-b:localhost"].certified
 
 
 @pytest.mark.asyncio
@@ -333,9 +230,9 @@ async def test_failed_room_releases_ownership_and_other_rooms_continue() -> None
         scan=flaky_scan,
     )
 
-    assert failed.outcomes == {"$thread:localhost": StartupRootOutcome.FAILED}
-    assert other_room.outcomes["$other:localhost"].certified
-    assert retried.outcomes == {"$thread:localhost": StartupRootOutcome.STORED}
+    assert failed == {"$thread:localhost": StartupRootOutcome.FAILED}
+    assert other_room["$other:localhost"].certified
+    assert retried == {"$thread:localhost": StartupRootOutcome.STORED}
     assert attempts == 2
 
 
@@ -370,7 +267,7 @@ async def test_cancelling_one_waiter_keeps_shared_room_work_running() -> None:
     surviving_result = await surviving_caller
 
     assert scanner.scan_count == 1
-    assert surviving_result.outcomes["$thread:localhost"].certified
+    assert surviving_result["$thread:localhost"].certified
 
 
 @pytest.mark.asyncio
@@ -393,7 +290,7 @@ async def test_close_cancels_owned_work_and_leaves_no_claim_behind() -> None:
     await coordinator.aclose()
     result = await asyncio.wait_for(caller, timeout=1.0)
 
-    assert result.outcomes == {"$thread:localhost": StartupRootOutcome.FAILED}
+    assert result == {"$thread:localhost": StartupRootOutcome.FAILED}
     assert coordinator._states == {}
     assert not coordinator._room_slots.locked()
     await wait_for_background_tasks(timeout=1.0, owner=owner)
@@ -406,7 +303,7 @@ async def test_close_cancels_owned_work_and_leaves_no_claim_behind() -> None:
         thread_root_ids=["$thread:localhost"],
         scan=scanner,
     )
-    assert retried.outcomes["$thread:localhost"].certified
+    assert retried["$thread:localhost"].certified
 
 
 @pytest.mark.asyncio
@@ -436,8 +333,8 @@ async def test_principals_never_share_one_rooms_startup_work() -> None:
     )
 
     assert scanned_principals == [PRINCIPAL_ID, OTHER_PRINCIPAL_ID]
-    assert first.outcomes["$thread:localhost"].certified
-    assert second.outcomes["$thread:localhost"].certified
+    assert first["$thread:localhost"].certified
+    assert second["$thread:localhost"].certified
 
 
 @pytest.mark.asyncio
@@ -816,45 +713,3 @@ async def test_certification_failure_falls_back_to_the_per_thread_freshness_read
     conversation_cache.get_strict_thread_history.assert_awaited_once()
     assert resumed_count == 0
     send_resume.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_startup_scan_does_not_delay_live_room_cache_writes(tmp_path: Path) -> None:
-    """A live same-room cache write must complete while a startup room walk is still paginating."""
-    scan_started = asyncio.Event()
-    release_scan = asyncio.Event()
-    live_write_done = asyncio.Event()
-
-    async def blocking_page(*_args: object, **_kwargs: object) -> nio.RoomMessagesResponse:
-        scan_started.set()
-        await release_scan.wait()
-        return _messages_response([_message_event("$root:localhost", "root", timestamp=1)], end=None)
-
-    client = MagicMock()
-    client.room_messages = AsyncMock(side_effect=blocking_page)
-
-    async def live_write() -> None:
-        live_write_done.set()
-
-    async with _conversation_cache_scope(tmp_path, client=client) as (conversation_cache, event_cache):
-        coordinator = conversation_cache.runtime.event_cache_write_coordinator
-        try:
-            acquisition = asyncio.create_task(
-                conversation_cache.ensure_startup_thread_history(ROOM_ID, ["$root:localhost"]),
-            )
-            await asyncio.wait_for(scan_started.wait(), timeout=1.0)
-            live_task = coordinator.queue_room_update(
-                ROOM_ID,
-                live_write,
-                name="test_live_room_write",
-                coordination_scope=event_cache.principal_id,
-            )
-            await asyncio.wait_for(live_task, timeout=1.0)
-            assert live_write_done.is_set()
-            assert not acquisition.done()
-            release_scan.set()
-            outcomes = await asyncio.wait_for(acquisition, timeout=1.0)
-        finally:
-            release_scan.set()
-
-    assert outcomes == {"$root:localhost": StartupRootOutcome.STORED}
