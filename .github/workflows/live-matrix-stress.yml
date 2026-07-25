@@ -10,10 +10,14 @@ on:
       - "local/instances/deploy/**"
       - "scripts/testing/fuzz_live_matrix.py"
       - "scripts/testing/live_matrix_stress.py"
+      - "src/mindroom/model_loading.py"
       - "src/mindroom/matrix/**"
       - "src/mindroom/streaming.py"
+      - "src/mindroom/synthetic_model.py"
       - "tests/test_live_matrix_fuzz.py"
       - "tests/test_live_matrix_stress.py"
+      - "tests/test_model_loading.py"
+      - "tests/test_synthetic_model.py"
       - "uv.lock"
   push:
     tags:
@@ -62,7 +66,13 @@ jobs:
         run: uv sync --all-extras
 
       - name: Run deterministic stress tests
-        run: uv run pytest -n auto -x --lf tests/test_live_matrix_stress.py tests/test_live_matrix_fuzz.py -k "stress or barrier or baseline"
+        run: >-
+          uv run pytest -n auto -x --lf
+          tests/test_synthetic_model.py
+          tests/test_model_loading.py
+          tests/test_live_matrix_stress.py
+          tests/test_live_matrix_fuzz.py
+          -k "synthetic or stress or barrier or baseline"
 
   smoke:
     if: github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.tier == 'smoke')

@@ -10,19 +10,19 @@ import platform
 import re
 import statistics
 import subprocess
-import threading
 import time
 from collections import Counter, defaultdict
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Literal, cast
+
+from mindroom.synthetic_model import SyntheticPlan, synthetic_plan
 
 STRESS_TRACE_VERSION = 1
 STRESS_BASELINE_VERSION = 1
 DEFAULT_STRESS_ARTIFACT_ROOT = Path("artifacts/live-matrix-stress")
 DEFAULT_PERFORMANCE_ALLOWANCE = 0.25
-STRESS_MARKER_PATTERN = re.compile(r"LMS\[wave=(\d+);thread=(\d+);seed=(-?\d+)\]")
 _SENSITIVE_KEY_PATTERN = re.compile(
     r"(?:access[_-]?token|authorization|cookie|database[_-]?url|password|secret|sync[_-]?token)",
     re.IGNORECASE,
@@ -65,9 +65,14 @@ def _positive(value: float, field_name: str) -> None:
 class StressConfig:
     """Replayable synthetic workload shape for one stress run."""
 
-    threads: int = 50
+    threads: int = 100
+    rooms: int = 10
     stream_seconds: float = 45.0
     edit_interval: float = 0.5
+    chars_per_second: float = 80.0
+    tool_call_probability: float = 1.0
+    min_sleep_seconds: int = 1
+    max_sleep_seconds: int = 3
     waves: int = 2
     history_turns: int = 20
     cache_backend: Literal["postgres"] = "postgres"
@@ -81,8 +86,22 @@ class StressConfig:
     def validate(self) -> None:
         """Reject shapes that cannot provide exact deterministic evidence."""
         _positive(self.threads, "threads")
+        _positive(self.rooms, "rooms")
+        if self.rooms > self.threads:
+            msg = "rooms cannot exceed threads"
+            raise ValueError(msg)
         _positive(self.stream_seconds, "stream_seconds")
         _positive(self.edit_interval, "edit_interval")
+        _positive(self.chars_per_second, "chars_per_second")
+        if not 0 <= self.tool_call_probability <= 1:
+            msg = "tool_call_probability must be between 0 and 1"
+            raise ValueError(msg)
+        if self.min_sleep_seconds < 0:
+            msg = "min_sleep_seconds must be non-negative"
+            raise ValueError(msg)
+        if self.max_sleep_seconds < self.min_sleep_seconds:
+            msg = "max_sleep_seconds must be greater than or equal to min_sleep_seconds"
+            raise ValueError(msg)
         _positive(self.waves, "waves")
         if self.history_turns < 0:
             msg = "history_turns must be non-negative"
@@ -102,15 +121,19 @@ class StressConfig:
             raise ValueError(msg)
 
     @property
-    def pulses_per_stream(self) -> int:
-        """Return exact model update pulses emitted by every stream."""
-        self.validate()
-        return round(self.stream_seconds / self.edit_interval)
+    def min_response_chars(self) -> int:
+        """Return the shortest seeded response at half the configured duration."""
+        return max(64, round(self.stream_seconds * self.chars_per_second / 2))
 
     @property
-    def expected_model_pulses(self) -> int:
-        """Return total model pulses for the configured waves."""
-        return self.threads * self.waves * self.pulses_per_stream
+    def max_response_chars(self) -> int:
+        """Return the longest seeded response at the configured duration."""
+        return max(self.min_response_chars, round(self.stream_seconds * self.chars_per_second))
+
+    @property
+    def chunk_chars(self) -> int:
+        """Return the chunk size matching the configured update cadence."""
+        return max(1, round(self.edit_interval * self.chars_per_second))
 
     def marker(self, wave: int, thread: int) -> str:
         """Build one deterministic synthetic request marker."""
@@ -162,70 +185,108 @@ class StressRequest:
         return f"wave-{self.wave:02d}/thread-{self.thread:03d}"
 
 
-def parse_stress_request(text: str) -> StressRequest | None:
-    """Parse the one stress marker embedded in a model request."""
-    matches = STRESS_MARKER_PATTERN.findall(text)
-    if not matches:
-        return None
-    if len(matches) != 1:
-        msg = f"stress model request contains {len(matches)} markers"
-        raise ValueError(msg)
-    wave, thread, seed = matches[0]
-    return StressRequest(wave=int(wave), thread=int(thread), seed=int(seed))
+class SyntheticStressAudit:
+    """Audit exact built-in synthetic-model behavior from append-only telemetry."""
 
-
-@dataclass(slots=True)
-class StreamObservation:
-    """Thread-safe timing observations for one fake-model stream."""
-
-    request: StressRequest
-    reached_at: float
-    released_at: float | None = None
-    started_at: float | None = None
-    finished_at: float | None = None
-    pulses: list[float] = field(default_factory=list)
-    cancelled: bool = False
-
-    def artifact_dict(self) -> dict[str, object]:
-        """Return relative timings without host-clock data."""
-        released_at = self.released_at
-        started_at = self.started_at
-        finished_at = self.finished_at
-        return {
-            "label": self.request.label,
-            "barrier_wait_ms": None if released_at is None else round((released_at - self.reached_at) * 1000, 3),
-            "stream_duration_seconds": (
-                None if started_at is None or finished_at is None else round(finished_at - started_at, 3)
-            ),
-            "pulse_count": len(self.pulses),
-            "pulse_offsets_seconds": (
-                [] if started_at is None else [round(pulse - started_at, 3) for pulse in self.pulses]
-            ),
-            "cancelled": self.cancelled,
-        }
-
-
-class StressModelController:
-    """Reusable per-wave barrier and exact-cadence fake-model stream controller."""
-
-    def __init__(
-        self,
-        config: StressConfig,
-        *,
-        clock: Callable[[], float] = time.monotonic,
-        sleeper: Callable[[float], None] = time.sleep,
-        serialize_streams: bool = False,
-    ) -> None:
+    def __init__(self, config: StressConfig, telemetry_path: Path) -> None:
         config.validate()
         self.config = config
-        self._clock = clock
-        self._sleeper = sleeper
-        self._condition = threading.Condition()
-        self._observations: dict[tuple[int, int], StreamObservation] = {}
-        self._active_streams = 0
-        self._max_active_streams = 0
-        self._active_timeline: list[tuple[float, int]] = []
-        self._serialization_lock = threading.Lock() if serialize_streams else None
+        self.telemetry_path = telemetry_path
+
+    def plan(self, request: StressRequest) -> SyntheticPlan:
+        """Return the exact seeded model plan for one stress request."""
+        self._validate_request(request)
+        identity = self.config.marker(request.wave, request.thread)
+        return synthetic_plan(
+            identity,
+            seed=self.config.seed,
+            min_response_chars=self.config.min_response_chars,
+            max_response_chars=self.config.max_response_chars,
+            tool_call_probability=self.config.tool_call_probability,
+            min_sleep_seconds=self.config.min_sleep_seconds,
+            max_sleep_seconds=self.config.max_sleep_seconds,
+            tool_available=True,
+        )
+
+    def expected_body(self, request: StressRequest) -> str:
+        """Return the exact final body for one configured request."""
+        return self.plan(request).body
+
+    def reached_count(self, wave: int) -> int:
+        """Return distinct initial requests recorded at one wave barrier."""
+        return len(
+            {
+                str(event["request_id"])
+                for event in self._events()
+                if event.get("kind") == "barrier_reached"
+                and event.get("phase") == "initial"
+                and event.get("group") == str(wave)
+            },
+        )
+
+    def snapshot(self) -> dict[str, object]:
+        """Return deterministic request counts, concurrency, and response shape."""
+        events = self._stress_events()
+        counts = Counter((str(event.get("kind")), str(event.get("phase"))) for event in events)
+        plans = [
+            self.plan(StressRequest(wave=wave, thread=thread, seed=self.config.seed))
+            for wave in range(self.config.waves)
+            for thread in range(self.config.threads)
+        ]
+        timeline, max_active_streams = self._active_timeline(events)
+        return {
+            "reached_by_wave": {str(wave): self.reached_count(wave) for wave in range(self.config.waves)},
+            "event_counts": {f"{kind}:{phase}": count for (kind, phase), count in sorted(counts.items())},
+            "max_active_streams": max_active_streams,
+            "active_stream_timeline": timeline,
+            "response_chars": latency_summary([float(len(plan.body)) for plan in plans]),
+            "tool_calls": sum(plan.tool_call_id is not None for plan in plans),
+            "sleep_seconds": latency_summary(
+                [float(plan.sleep_seconds) for plan in plans if plan.sleep_seconds is not None],
+            ),
+        }
+
+    def assert_complete(self) -> None:
+        """Fail unless every seeded request completed every expected phase once."""
+        events = self._stress_events()
+        failures: list[str] = []
+        for wave in range(self.config.waves):
+            reached = self.reached_count(wave)
+            if reached != self.config.threads:
+                failures.append(f"wave {wave} barrier reached {reached}/{self.config.threads}")
+        by_request = Counter(
+            (
+                str(event.get("request_id")),
+                str(event.get("kind")),
+                str(event.get("phase")),
+            )
+            for event in events
+        )
+        for wave in range(self.config.waves):
+            for thread in range(self.config.threads):
+                request = StressRequest(wave=wave, thread=thread, seed=self.config.seed)
+                plan = self.plan(request)
+                expected = {
+                    ("barrier_reached", "initial"): 1,
+                    ("request_started", "initial"): 1,
+                    ("request_finished", "initial"): 1,
+                    ("tool_call_emitted", "initial"): int(plan.tool_call_id is not None),
+                    ("request_started", "continuation"): int(plan.tool_call_id is not None),
+                    ("request_finished", "continuation"): int(plan.tool_call_id is not None),
+                }
+                for (kind, phase), count in expected.items():
+                    actual = by_request[(plan.request_id, kind, phase)]
+                    if actual != count:
+                        failures.append(
+                            f"{request.label} {kind}:{phase} count {actual}/{count}",
+                        )
+        max_active_streams = self._active_timeline(events)[1]
+        if max_active_streams != self.config.threads:
+            failures.append(
+                f"maximum active model streams {max_active_streams}/{self.config.threads}",
+            )
+        if failures:
+            raise AssertionError("; ".join(failures))
 
     def _validate_request(self, request: StressRequest) -> None:
         if request.seed != self.config.seed:
@@ -235,181 +296,58 @@ class StressModelController:
             msg = f"stress request outside configured shape: {request.label}"
             raise ValueError(msg)
 
-    def reach_barrier(self, request: StressRequest) -> StreamObservation:
-        """Register one request and wait until its complete wave reaches the barrier."""
-        self._validate_request(request)
-        key = (request.wave, request.thread)
-        deadline = self._clock() + self.config.barrier_timeout_seconds
-        with self._condition:
-            if key in self._observations:
-                msg = f"duplicate stress model request at {request.label}"
-                raise RuntimeError(msg)
-            observation = StreamObservation(request=request, reached_at=self._clock())
-            self._observations[key] = observation
-            self._condition.notify_all()
-            while self.reached_count(request.wave) < self.config.threads:
-                remaining = deadline - self._clock()
-                if remaining <= 0:
-                    missing = sorted(set(range(self.config.threads)) - self.reached_threads(request.wave))
-                    msg = (
-                        f"stress model barrier wave {request.wave} reached "
-                        f"{self.reached_count(request.wave)}/{self.config.threads}; missing={missing}"
-                    )
-                    raise TimeoutError(msg)
-                self._condition.wait(timeout=remaining)
-            released_at = self._clock()
-            for wave_key, wave_observation in self._observations.items():
-                if wave_key[0] == request.wave and wave_observation.released_at is None:
-                    wave_observation.released_at = released_at
-            self._condition.notify_all()
-            return observation
+    def _events(self) -> list[dict[str, object]]:
+        if not self.telemetry_path.exists():
+            return []
+        events: list[dict[str, object]] = []
+        for line in self.telemetry_path.read_text(encoding="utf-8").splitlines():
+            payload = json.loads(line)
+            if not isinstance(payload, dict):
+                msg = "synthetic model telemetry entry must be an object"
+                raise TypeError(msg)
+            events.append(cast("dict[str, object]", payload))
+        return events
 
-    def stream(self, request: StressRequest) -> Iterator[str]:
-        """Yield exact deterministic pulses after the wave barrier releases."""
-        observation = self.reach_barrier(request)
-        serialization_lock = self._serialization_lock
-        if serialization_lock is None:
-            yield from self._stream_observation(observation)
-            return
-        with serialization_lock:
-            yield from self._stream_observation(observation)
-
-    def expected_body(self, request: StressRequest) -> str:
-        """Return the exact cumulative body produced by one complete stream."""
-        self._validate_request(request)
-        chunks = []
-        for pulse in range(self.config.pulses_per_stream):
-            completion = (
-                f" COMPLETE[wave={request.wave};thread={request.thread:03d};pulses={self.config.pulses_per_stream}]"
-                if pulse + 1 == self.config.pulses_per_stream
-                else ""
-            )
-            chunks.append(
-                f"SYNTHETIC wave={request.wave} thread={request.thread:03d} "
-                f"pulse={pulse + 1:03d}/{self.config.pulses_per_stream:03d}{completion} ",
-            )
-        return "".join(chunks)
-
-    def _stream_observation(self, observation: StreamObservation) -> Iterator[str]:
-        with self._condition:
-            observation.started_at = self._clock()
-            self._active_streams += 1
-            self._max_active_streams = max(self._max_active_streams, self._active_streams)
-            self._active_timeline.append((observation.started_at, self._active_streams))
-        try:
-            for pulse in range(self.config.pulses_per_stream):
-                scheduled_at = cast("float", observation.started_at) + (pulse + 1) * self.config.edit_interval
-                delay = scheduled_at - self._clock()
-                if delay > 0:
-                    self._sleeper(delay)
-                emitted_at = self._clock()
-                with self._condition:
-                    observation.pulses.append(emitted_at)
-                completion = (
-                    f" COMPLETE[wave={observation.request.wave};thread={observation.request.thread:03d};"
-                    f"pulses={self.config.pulses_per_stream}]"
-                    if pulse + 1 == self.config.pulses_per_stream
-                    else ""
-                )
-                yield (
-                    f"SYNTHETIC wave={observation.request.wave} thread={observation.request.thread:03d} "
-                    f"pulse={pulse + 1:03d}/{self.config.pulses_per_stream:03d}{completion} "
-                )
-        except GeneratorExit:
-            observation.cancelled = True
-            raise
-        finally:
-            with self._condition:
-                observation.finished_at = self._clock()
-                self._active_streams -= 1
-                self._active_timeline.append((observation.finished_at, self._active_streams))
-                self._condition.notify_all()
-
-    def reached_threads(self, wave: int) -> set[int]:
-        """Return logical threads registered at one wave barrier."""
-        return {thread for (observed_wave, thread) in self._observations if observed_wave == wave}
-
-    def reached_count(self, wave: int) -> int:
-        """Return request count registered at one wave barrier."""
-        return len(self.reached_threads(wave))
-
-    @property
-    def max_active_streams(self) -> int:
-        """Return maximum simultaneous fake-model streams."""
-        with self._condition:
-            return self._max_active_streams
-
-    @property
-    def total_pulses(self) -> int:
-        """Return emitted model pulse count."""
-        with self._condition:
-            return sum(len(observation.pulses) for observation in self._observations.values())
-
-    def snapshot(self) -> dict[str, object]:
-        """Return synthetic logical model timing evidence."""
-        with self._condition:
-            observations = [observation.artifact_dict() for _, observation in sorted(self._observations.items())]
-            origin = min(
-                (observation.reached_at for observation in self._observations.values()),
-                default=self._clock(),
-            )
-            timeline = [
-                {"offset_seconds": round(moment - origin, 3), "active_streams": active}
-                for moment, active in self._active_timeline
-            ]
-        barrier_waits = [
-            float(wait)
-            for observation in observations
-            for wait in (observation["barrier_wait_ms"],)
-            if isinstance(wait, int | float)
-        ]
-        return {
-            "reached_by_wave": {str(wave): self.reached_count(wave) for wave in range(self.config.waves)},
-            "barrier_wait_ms": latency_summary(barrier_waits),
-            "max_active_streams": self.max_active_streams,
-            "total_pulses": self.total_pulses,
-            "active_stream_timeline": timeline,
-            "streams": observations,
+    def _stress_events(self) -> list[dict[str, object]]:
+        request_ids = {
+            self.plan(
+                StressRequest(
+                    wave=wave,
+                    thread=thread,
+                    seed=self.config.seed,
+                ),
+            ).request_id
+            for wave in range(self.config.waves)
+            for thread in range(self.config.threads)
         }
+        return [event for event in self._events() if event.get("request_id") in request_ids]
 
-    def assert_complete(self, *, duration_tolerance_seconds: float | None = None) -> None:
-        """Fail unless every configured stream reached full cadence and concurrency."""
-        tolerance = duration_tolerance_seconds
-        if tolerance is None:
-            tolerance = max(0.25, self.config.edit_interval * 2)
-        failures = self._completion_failures(tolerance)
-        if failures:
-            raise AssertionError("; ".join(failures))
-
-    def _completion_failures(self, tolerance: float) -> list[str]:
-        """Return every model-shape failure without stopping at the first."""
-        failures: list[str] = []
-        for wave in range(self.config.waves):
-            reached = self.reached_count(wave)
-            if reached != self.config.threads:
-                failures.append(f"wave {wave} barrier reached {reached}/{self.config.threads}")
-        if self.max_active_streams != self.config.threads:
-            failures.append(
-                f"maximum active model streams {self.max_active_streams}/{self.config.threads}",
+    @staticmethod
+    def _active_timeline(events: Sequence[Mapping[str, object]]) -> tuple[list[dict[str, object]], int]:
+        ordered = sorted(
+            (
+                (float(event["time"]), 1 if event.get("kind") == "request_started" else -1)
+                for event in events
+                if event.get("kind") in {"request_started", "request_finished"}
+            ),
+            key=lambda item: (item[0], -item[1]),
+        )
+        if not ordered:
+            return [], 0
+        origin = ordered[0][0]
+        active = 0
+        maximum = 0
+        timeline: list[dict[str, object]] = []
+        for timestamp, delta in ordered:
+            active += delta
+            maximum = max(maximum, active)
+            timeline.append(
+                {
+                    "offset_seconds": round(timestamp - origin, 3),
+                    "active_streams": active,
+                },
             )
-        for key, observation in sorted(self._observations.items()):
-            if len(observation.pulses) != self.config.pulses_per_stream:
-                failures.append(
-                    f"wave {key[0]} thread {key[1]} emitted "
-                    f"{len(observation.pulses)}/{self.config.pulses_per_stream} pulses",
-                )
-            if observation.started_at is None or observation.finished_at is None:
-                failures.append(f"wave {key[0]} thread {key[1]} did not finish")
-                continue
-            duration = observation.finished_at - observation.started_at
-            if abs(duration - self.config.stream_seconds) > tolerance:
-                failures.append(
-                    f"wave {key[0]} thread {key[1]} duration "
-                    f"{duration:.3f}s outside {self.config.stream_seconds:.3f}s +/- {tolerance:.3f}s",
-                )
-            if observation.cancelled:
-                failures.append(f"wave {key[0]} thread {key[1]} was cancelled")
-        return failures
+        return timeline, maximum
 
 
 def percentile(values: Sequence[float], percentile_value: float) -> float:
@@ -1340,8 +1278,8 @@ __all__ = [
     "StressBaseline",
     "StressConfig",
     "StressLogMetrics",
-    "StressModelController",
     "StressRequest",
+    "SyntheticStressAudit",
     "aggregate_log_metrics",
     "assert_matrix_edit_shape",
     "assert_resource_health",
@@ -1349,7 +1287,6 @@ __all__ = [
     "expected_minimum_matrix_edits",
     "latency_summary",
     "matrix_edit_activity",
-    "parse_stress_request",
     "parse_structured_log",
     "percentile",
     "resource_summary",

@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import json
 import shutil
-import threading
 from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -23,37 +22,21 @@ from scripts.testing.live_matrix_stress import (
     StressBaseline,
     StressConfig,
     StressLogMetrics,
-    StressModelController,
     StressRequest,
+    SyntheticStressAudit,
     aggregate_log_metrics,
     assert_matrix_edit_shape,
     assert_resource_health,
     current_machine_class,
     expected_minimum_matrix_edits,
     latency_summary,
-    parse_stress_request,
     percentile,
     resource_summary,
     write_replay_command,
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
-
     from pytest_mock import MockerFixture
-
-
-class _FakeClock:
-    """Advance deterministic monotonic time whenever the model sleeps."""
-
-    def __init__(self) -> None:
-        self.value = 100.0
-
-    def __call__(self) -> float:
-        return self.value
-
-    def sleep(self, seconds: float) -> None:
-        self.value += seconds
 
 
 def _sample(multiplier: float = 1.0) -> BaselineSample:
@@ -77,14 +60,18 @@ def _stable_baseline() -> StressBaseline:
 def test_stress_profile_defaults_and_trace_round_trip() -> None:
     config = StressConfig()
 
-    assert config.threads == 50
+    assert config.threads == 100
+    assert config.rooms == 10
     assert config.stream_seconds == 45
     assert config.edit_interval == 0.5
-    assert config.pulses_per_stream == 90
+    assert config.chars_per_second == 80
+    assert config.min_response_chars == 1800
+    assert config.max_response_chars == 3600
+    assert config.chunk_chars == 40
+    assert config.tool_call_probability == 1
     assert config.waves == 2
     assert config.cache_backend == "postgres"
     assert config.fault_mode == "none"
-    assert config.expected_model_pulses == 9000
     assert StressConfig.from_json(config.to_json()) == config
 
 
@@ -92,6 +79,7 @@ def test_stress_profile_defaults_and_trace_round_trip() -> None:
     ("changes", "message"),
     [
         ({"threads": 0}, "threads must be positive"),
+        ({"threads": 2, "rooms": 3}, "rooms cannot exceed threads"),
         ({"cache_backend": "sqlite"}, "requires PostgreSQL"),
         ({"stream_seconds": 1.1, "edit_interval": 0.5}, "exactly divisible"),
         ({"history_turns": -1}, "history_turns must be non-negative"),
@@ -105,119 +93,13 @@ def test_stress_config_rejects_invalid_shapes(changes: dict[str, object], messag
         config.validate()
 
 
-def test_stress_marker_parse_and_validation() -> None:
-    config = StressConfig(threads=2, waves=1, stream_seconds=1, edit_interval=0.5, seed=17)
+def test_stress_marker_and_request_label() -> None:
+    config = StressConfig(threads=2, rooms=1, waves=1, stream_seconds=1, edit_interval=0.5, seed=17)
 
     marker = config.marker(0, 1)
 
     assert marker == "LMS[wave=0;thread=001;seed=17]"
-    assert parse_stress_request(f"synthetic {marker}") == StressRequest(wave=0, thread=1, seed=17)
-    assert parse_stress_request("ordinary setup call") is None
-    with pytest.raises(ValueError, match="contains 2 markers"):
-        parse_stress_request(f"{marker} {marker}")
-
-
-def test_fifty_request_barrier_releases_together() -> None:
-    config = StressConfig(
-        threads=50,
-        waves=1,
-        stream_seconds=0.01,
-        edit_interval=0.01,
-        barrier_timeout_seconds=5,
-    )
-    controller = StressModelController(config)
-    release = threading.Barrier(config.threads + 1)
-    failures: list[BaseException] = []
-
-    def reach(thread_index: int) -> None:
-        release.wait()
-        try:
-            list(
-                controller.stream(
-                    StressRequest(wave=0, thread=thread_index, seed=config.seed),
-                ),
-            )
-        except BaseException as exc:  # pragma: no cover - asserted below
-            failures.append(exc)
-
-    workers = [threading.Thread(target=reach, args=(thread_index,)) for thread_index in range(config.threads)]
-    for worker in workers:
-        worker.start()
-    release.wait()
-    for worker in workers:
-        worker.join(timeout=10)
-
-    assert not failures
-    assert not any(worker.is_alive() for worker in workers)
-    assert controller.reached_count(0) == 50
-    assert controller.max_active_streams == 50
-    assert controller.total_pulses == 50
-    controller.assert_complete(duration_tolerance_seconds=0.1)
-
-
-def test_barrier_timeout_reports_exact_missing_threads() -> None:
-    config = StressConfig(
-        threads=3,
-        waves=1,
-        stream_seconds=0.01,
-        edit_interval=0.01,
-        barrier_timeout_seconds=0.05,
-    )
-    controller = StressModelController(config)
-
-    with pytest.raises(
-        TimeoutError,
-        match=r"reached 1/3; missing=\[1, 2\]",
-    ):
-        controller.reach_barrier(StressRequest(wave=0, thread=0, seed=config.seed))
-
-
-def test_exact_pulse_count_duration_and_completion_marker() -> None:
-    clock = _FakeClock()
-    config = StressConfig(threads=1, waves=1, stream_seconds=2, edit_interval=0.5)
-    controller = StressModelController(config, clock=clock, sleeper=clock.sleep)
-
-    chunks = list(controller.stream(StressRequest(wave=0, thread=0, seed=config.seed)))
-
-    assert len(chunks) == 4
-    assert "pulse=001/004" in chunks[0]
-    assert chunks[-1].endswith("COMPLETE[wave=0;thread=000;pulses=4] ")
-    snapshot = controller.snapshot()
-    assert snapshot["total_pulses"] == 4
-    stream = snapshot["streams"][0]
-    assert stream["stream_duration_seconds"] == 2.0
-    assert stream["pulse_offsets_seconds"] == [0.5, 1.0, 1.5, 2.0]
-    assert snapshot["barrier_wait_ms"]["count"] == 1
-    controller.assert_complete()
-
-
-def test_serialized_stream_fault_fails_concurrency_gate() -> None:
-    config = StressConfig(
-        threads=2,
-        waves=1,
-        stream_seconds=0.02,
-        edit_interval=0.01,
-        barrier_timeout_seconds=2,
-    )
-    controller = StressModelController(config, serialize_streams=True)
-    workers = [
-        threading.Thread(
-            target=lambda thread_index=thread_index: list(
-                controller.stream(
-                    StressRequest(wave=0, thread=thread_index, seed=config.seed),
-                ),
-            ),
-        )
-        for thread_index in range(config.threads)
-    ]
-    for worker in workers:
-        worker.start()
-    for worker in workers:
-        worker.join(timeout=5)
-
-    assert controller.max_active_streams == 1
-    with pytest.raises(AssertionError, match="maximum active model streams 1/2"):
-        controller.assert_complete()
+    assert StressRequest(wave=0, thread=1, seed=17).label == "wave-00/thread-001"
 
 
 def test_serialized_stream_fault_round_trips_in_replay_config() -> None:
@@ -226,17 +108,46 @@ def test_serialized_stream_fault_round_trips_in_replay_config() -> None:
     assert StressConfig.from_json(config.to_json()).fault_mode == "serialize-streams"
 
 
-def test_cancelled_stream_is_recorded_and_fails_gate() -> None:
-    clock = _FakeClock()
-    config = StressConfig(threads=1, waves=1, stream_seconds=2, edit_interval=0.5)
-    controller = StressModelController(config, clock=clock, sleeper=clock.sleep)
-    stream: Iterator[str] = controller.stream(StressRequest(wave=0, thread=0, seed=config.seed))
+def test_synthetic_stress_audit_requires_real_tool_continuation(tmp_path: Path) -> None:
+    config = StressConfig(
+        threads=1,
+        rooms=1,
+        waves=1,
+        stream_seconds=2,
+        edit_interval=0.5,
+        tool_call_probability=1,
+    )
+    telemetry_path = tmp_path / "synthetic.jsonl"
+    audit = SyntheticStressAudit(config, telemetry_path)
+    request = StressRequest(wave=0, thread=0, seed=config.seed)
+    plan = audit.plan(request)
+    events = [
+        {"kind": "barrier_reached", "phase": "initial", "group": "0", "time": 1.0},
+        {"kind": "request_started", "phase": "initial", "group": "0", "time": 2.0},
+        {"kind": "tool_call_emitted", "phase": "initial", "group": "0", "time": 3.0},
+        {"kind": "request_finished", "phase": "initial", "group": "0", "time": 4.0},
+        {"kind": "request_started", "phase": "continuation", "group": "0", "time": 5.0},
+        {"kind": "request_finished", "phase": "continuation", "group": "0", "time": 6.0},
+    ]
+    telemetry_path.write_text(
+        "".join(json.dumps({"request_id": plan.request_id, **event}) + "\n" for event in events),
+        encoding="utf-8",
+    )
 
-    next(stream)
-    stream.close()
+    audit.assert_complete()
+    assert audit.expected_body(request) == plan.body
+    assert audit.snapshot()["tool_calls"] == 1
 
-    with pytest.raises(AssertionError, match="was cancelled"):
-        controller.assert_complete()
+    telemetry_path.write_text(
+        "".join(
+            json.dumps({"request_id": plan.request_id, **event}) + "\n"
+            for event in events
+            if event["phase"] != "continuation"
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(AssertionError, match="request_started:continuation count 0/1"):
+        audit.assert_complete()
 
 
 def test_latency_percentiles_are_interpolated() -> None:
@@ -516,7 +427,7 @@ def test_artifact_bundle_rejects_temporary_roots(root: Path) -> None:
 
 
 def test_matrix_edit_shape_counts_and_overlap() -> None:
-    config = StressConfig(threads=2, waves=1, stream_seconds=10, edit_interval=0.5)
+    config = StressConfig(threads=2, rooms=1, waves=1, stream_seconds=10, edit_interval=0.5)
     edits = {
         "wave-00/thread-000": [1.0, 5.0],
         "wave-00/thread-001": [2.0, 6.0],
@@ -530,7 +441,7 @@ def test_matrix_edit_shape_counts_and_overlap() -> None:
 
 
 def test_matrix_edit_shape_faults_on_missing_final_edit() -> None:
-    config = StressConfig(threads=2, waves=1, stream_seconds=10, edit_interval=0.5)
+    config = StressConfig(threads=2, rooms=1, waves=1, stream_seconds=10, edit_interval=0.5)
 
     with pytest.raises(AssertionError, match="insufficient Matrix edit activity"):
         assert_matrix_edit_shape(

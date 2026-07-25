@@ -77,11 +77,12 @@ def test_model_stream_disconnect_does_not_escape_request_handler() -> None:
     assert handler.close_connection is True
 
 
-def test_nonstreaming_summary_prompt_does_not_enter_stress_barrier() -> None:
-    """Background summaries may quote a marker without becoming stress requests."""
+def test_nonstreaming_summary_marker_uses_regular_stub_response() -> None:
+    """Background summaries may quote stress input while using the lifecycle stub."""
     handler = object.__new__(_ModelHandler)
     marker = live_fuzz.StressConfig(
         threads=1,
+        rooms=1,
         waves=1,
         stream_seconds=1,
         edit_interval=1,
@@ -4418,10 +4419,11 @@ def test_host_lease_excludes_second_live_stack(tmp_path: Path) -> None:
         second.temp_dir.cleanup()
 
 
-def test_live_stack_wires_serialization_fault_into_model_controller(tmp_path: Path) -> None:
-    """The CLI-level fault reaches the model controller used by the live stack."""
+def test_live_stack_wires_serialization_fault_into_builtin_model(tmp_path: Path) -> None:
+    """The CLI-level fault reaches the built-in model used by the live stack."""
     config = live_fuzz.StressConfig(
         threads=2,
+        rooms=1,
         waves=1,
         stream_seconds=0.02,
         edit_interval=0.01,
@@ -4432,18 +4434,24 @@ def test_live_stack_wires_serialization_fault_into_model_controller(tmp_path: Pa
         stress_config=config,
     )
     try:
-        assert stack.stress_controller is not None
-        assert stack.stress_controller._serialization_lock is not None
+        stack._write_config(12345)
+        payload = yaml.safe_load(stack.config_path.read_text(encoding="utf-8"))
+        assert payload["models"]["stress"]["provider"] == "synthetic"
+        assert payload["models"]["stress"]["extra_kwargs"]["serialize_streams"] is True
+        assert payload["agents"]["general"]["model"] == "stress"
+        assert payload["agents"]["general"]["tools"] == ["sleep"]
+        assert stack.stress_audit is not None
     finally:
         stack.temp_dir.cleanup()
 
 
-def test_stress_stack_bounds_model_timeout_beyond_barrier_and_disables_retries(
+def test_stress_stack_configures_seeded_builtin_model_without_credentials(
     tmp_path: Path,
 ) -> None:
-    """Long barrier waits must not trigger duplicate OpenAI requests."""
+    """Stress uses the built-in model while lifecycle calls keep the tiny stub."""
     config = live_fuzz.StressConfig(
         threads=2,
+        rooms=1,
         stream_seconds=45,
         edit_interval=0.5,
         waves=1,
@@ -4459,9 +4467,12 @@ def test_stress_stack_bounds_model_timeout_beyond_barrier_and_disables_retries(
         payload = yaml.safe_load(stack.config_path.read_text(encoding="utf-8"))
         assert payload["models"]["default"]["extra_kwargs"] == {
             "base_url": "http://127.0.0.1:12345/v1",
-            "max_retries": 0,
-            "timeout": 165,
         }
+        synthetic = payload["models"]["stress"]
+        assert synthetic["provider"] == "synthetic"
+        assert synthetic["extra_kwargs"]["barrier_size"] == 2
+        assert synthetic["extra_kwargs"]["tool_call_probability"] == 1
+        assert synthetic["extra_kwargs"]["activation_pattern"].startswith("LMS")
         assert payload["defaults"]["thread_summary_first_threshold"] == 1_000_000
     finally:
         stack.temp_dir.cleanup()
@@ -4472,6 +4483,7 @@ def test_cache_wave_gate_records_unresolved_warm_scans_without_accepting_duplica
     runner = object.__new__(live_fuzz.LiveMatrixStressRunner)
     runner.config = live_fuzz.StressConfig(
         threads=2,
+        rooms=1,
         stream_seconds=1,
         edit_interval=0.5,
         waves=2,

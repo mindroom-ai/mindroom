@@ -21,6 +21,7 @@ Models define the AI providers and model IDs used by agents.
 - `cerebras` - Cerebras-hosted models
 - `deepseek` - DeepSeek models
 - `zai` - Z.ai GLM models
+- `synthetic` - Built-in deterministic streaming model for local load and tool-call testing
 
 ## Model Config Fields
 
@@ -125,6 +126,43 @@ models:
     extra_kwargs:
       base_url: http://localhost:8080/v1
 ```
+
+## Built-In Synthetic Model
+
+Use `provider: synthetic` to run realistic local concurrency tests without an API key or external model server.
+The model streams deterministic Lorem Ipsum at a fixed character rate, chooses a seeded response length, and can issue the built-in `sleep` tool before continuing the same response.
+The default tool-call probability is zero, so enabling tool calls is always explicit.
+
+```yaml
+models:
+  load_test:
+    provider: synthetic
+    id: local-load-test
+    extra_kwargs:
+      seed: 17
+      min_response_chars: 800
+      max_response_chars: 1600
+      chunk_chars: 40
+      chars_per_second: 80
+      tool_call_probability: 0.5
+      min_sleep_seconds: 1
+      max_sleep_seconds: 3
+
+agents:
+  load_test:
+    display_name: Load Test
+    role: Exercise the full MindRoom response path.
+    model: load_test
+    tools: [sleep]
+    rooms: [lobby]
+```
+
+The same seed and matched request identity always produce the same body length, tool decision, split point, and sleep duration.
+Set `identity_pattern` to extract a stable request marker when prompts contain changing surrounding context.
+Set `activation_pattern` to make unmatched setup or lifecycle prompts return the short `inactive_response` without a tool call or barrier wait.
+The advanced `barrier_size` and `barrier_group_pattern` settings synchronize request groups for deterministic concurrency tests.
+Set `coordination_key` when separately materialized model instances must share that barrier and optional stream-serialization state.
+Set `telemetry_path` only for local tests that need append-only request timing evidence.
 
 ## OpenAI API Models
 
