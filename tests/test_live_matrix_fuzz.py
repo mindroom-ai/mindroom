@@ -4322,6 +4322,29 @@ def test_live_stack_wires_serialization_fault_into_model_controller(tmp_path: Pa
         stack.temp_dir.cleanup()
 
 
+def test_resource_sampler_rebinds_after_managed_runtime_restart(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CPU and RSS evidence must follow the new child PID after a cold boundary."""
+    stack = SimpleNamespace(mindroom_pid=22)
+    stale_process = SimpleNamespace(pid=11)
+    current_process = MagicMock(pid=22)
+    current_process.cpu_percent.side_effect = [None, 37.5]
+    current_process.memory_info.return_value = SimpleNamespace(rss=123456)
+    process_factory = MagicMock(return_value=current_process)
+    monkeypatch.setattr(live_fuzz.psutil, "Process", process_factory)
+
+    process, cpu_percent, rss_bytes = live_fuzz._sample_mindroom_process(
+        stack,  # type: ignore[arg-type]
+        stale_process,  # type: ignore[arg-type]
+    )
+
+    assert process is current_process
+    assert cpu_percent == 37.5
+    assert rss_bytes == 123456
+    process_factory.assert_called_once_with(22)
+
+
 def test_clear_stress_cache_restarts_runtime_without_clearing_sync_checkpoint() -> None:
     """An empty SQL cache must not leave a stale warm in-memory cache behind."""
     stack = object.__new__(ManagedTuwunelStack)

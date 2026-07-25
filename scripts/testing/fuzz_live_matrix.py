@@ -5544,12 +5544,7 @@ async def _sample_stress_resources(
     samples: list[ResourceSample],
 ) -> None:
     """Sample process, sync, Tuwunel, and PostgreSQL health at bounded cadence."""
-    pid = stack.mindroom_pid
-    if pid is None:
-        msg = "MindRoom process missing before stress resource sampling"
-        raise RuntimeError(msg)
-    process = psutil.Process(pid)
-    process.cpu_percent(None)
+    process: psutil.Process | None = None
     started_at = time.monotonic()
     async with httpx.AsyncClient(timeout=10) as client:
         while not stop.is_set():
@@ -5572,12 +5567,7 @@ async def _sample_stress_resources(
                 asyncio.to_thread(postgres.is_healthy) if postgres is not None else asyncio.sleep(0, result=False),
                 asyncio.to_thread(stack.tuwunel_is_healthy),
             )
-            try:
-                cpu_percent = process.cpu_percent(None)
-                rss_bytes = process.memory_info().rss
-            except psutil.Error:
-                cpu_percent = 0.0
-                rss_bytes = 0
+            process, cpu_percent, rss_bytes = _sample_mindroom_process(stack, process)
             samples.append(
                 ResourceSample(
                     offset_seconds=round(time.monotonic() - started_at, 3),
@@ -5596,6 +5586,25 @@ async def _sample_stress_resources(
                 )
             except TimeoutError:
                 continue
+
+
+def _sample_mindroom_process(
+    stack: ManagedTuwunelStack,
+    process: psutil.Process | None,
+) -> tuple[psutil.Process, float, int]:
+    """Sample the current runtime process, rebinding after managed restarts."""
+    pid = stack.mindroom_pid
+    if pid is None:
+        msg = "MindRoom process missing during stress resource sampling"
+        raise RuntimeError(msg)
+    if process is None or process.pid != pid:
+        process = psutil.Process(pid)
+        process.cpu_percent(None)
+    try:
+        return process, process.cpu_percent(None), process.memory_info().rss
+    except psutil.Error as exc:
+        msg = f"MindRoom process {pid} disappeared during stress resource sampling"
+        raise RuntimeError(msg) from exc
 
 
 async def _run_stress_live(
@@ -6903,7 +6912,7 @@ def _run_stress_main(args: argparse.Namespace) -> None:
         {"status": "PASS", "resources_removed": True},
     )
     result["artifact_directory"] = str(bundle.directory)
-    print(json.dumps(result, sort_keys=True))
+    print(json.dumps(bundle.sanitizer.value(result), sort_keys=True))
 
 
 def _run_nonstress_main(args: argparse.Namespace) -> None:
