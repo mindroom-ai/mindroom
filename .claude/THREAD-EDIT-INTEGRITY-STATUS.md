@@ -23,10 +23,20 @@
 
 ## Independent review finding
 
-- Exact-`8aca4563c` native Codex independently found that redacting an explicit edit can leave the same edit visible through the original event's bundled `unsigned.m.relations.m.replace`.
-- The claim must be independently reproduced before any production edit.
-- If valid, add backend-neutral and SQLite/PostgreSQL regressions at the owning cache seam and reject tombstoned bundled edit event IDs.
+- Exact-`8aca4563c` native Codex returned `CHANGES REQUIRED` with two blockers.
+- Redacting an explicit edit leaves the same edit visible through the original event's bundled `unsigned.m.relations.m.replace`.
+- A SQLite probe independently reproduces `$edit` surviving latest-edit lookup after a successful redaction removes its explicit row.
+- A wrong-room inline edit independently reproduces one regeneration when explicit source room `!other:example.org` disagrees with authoritative room `!room:example.org`.
+- Add backend-neutral and SQLite/PostgreSQL regressions at the owning cache seam and reject tombstoned bundled edit event IDs.
+- Pass the authoritative room through direct extraction and reject conflicting explicit room evidence.
 - Any production correction must remain under the hard net `+200` source ceiling.
+
+## Current GitHub conflict
+
+- Current pushed head is `3fd554dc2758b37674232b635e9f34c9dc9c2d6b`.
+- GitHub reports `CONFLICTING` because `origin/main` advanced to `5f062224a1f490a91a72c555bf2fa0ca59c096b3` while the PR base snapshot remains `66dd4f4a68bcfd1a5e43b2cac20a1b464f306ab1`.
+- Both sides changed `postgres_event_cache.py`, `client_thread_history.py`, `conversation_cache.py`, `tach.toml`, and cache tests.
+- Correct the verified blockers first, then merge exact current `origin/main` with explicit conflict review.
 
 ## Required gates after the final correction
 
@@ -42,4 +52,5 @@
 - `pr1641_pytest_8aca4563.md` records the exact pytest failure and classification.
 - `pr1641_ci_8aca4563.md` records the independent amd64 infrastructure failure and same-head rerun.
 - `pr1641_codex_8aca4563.md` is the expected report for the rejected exact-head native review.
+- `pr1641_codex_8aca_reproduction.md` records independent reproduction of both blockers.
 - `thread_edit_integrity_agent.md`, `MERGE-GATES.md`, and `RESOURCE-GATE.md` remain the campaign ledgers.
