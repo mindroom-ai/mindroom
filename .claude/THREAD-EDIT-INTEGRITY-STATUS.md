@@ -66,3 +66,15 @@
 - `pr1641_codex_8aca4563.md` is the expected report for the rejected exact-head native review.
 - `pr1641_codex_8aca_reproduction.md` records independent reproduction of both blockers.
 - `thread_edit_integrity_agent.md`, `MERGE-GATES.md`, and `RESOURCE-GATE.md` remain the campaign ledgers.
+
+## Generic sidecar-owner correction
+
+- Exact implementation commit `e994e7f46333f17dea4914a0abc7310bc766caf6` fixes a verified CodeRabbit blocker.
+- The cache contract allows only `m.room.message` events to own durable sidecar plaintext.
+- Generic timeline events now fail both new ownership registration and legacy-reference revalidation at the shared `event_mxc_urls` seam.
+- Pure selector and SQLite backend regressions pass all four focused cases.
+- Ruff, formatting, type, Vulture, Tach, module privacy, diff, and commit hooks pass.
+- Production source is `+813/-613`, net `+200` against merge base `5f062224a1f490a91a72c555bf2fa0ca59c096b3`.
+- The exact-`dfceccb29` native review and CI became stale when this correction moved the head.
+- Fresh exact-head native Codex and GitHub CI are required after this status commit is pushed.
+- PostgreSQL, full pytest, all-file hooks, Docker, and real-Tuwunel remain closed behind PR #1639.
