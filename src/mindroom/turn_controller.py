@@ -16,6 +16,7 @@ from mindroom.coalescing_batch import (
     CoalescedBatch,
     CoalescingKey,
     PendingEvent,
+    TimestampFormatter,
     build_coalesced_batch,
 )
 from mindroom.coalescing_cleanup import close_pending_event_metadata_once
@@ -103,7 +104,7 @@ from mindroom.thread_utils import (
     is_router_only_agent_mention,
     thread_requires_explicit_agent_targeting,
 )
-from mindroom.timestamp_formatting import format_timestamp_ms, normalize_timestamp_ms
+from mindroom.timestamp_formatting import normalize_timestamp_ms
 from mindroom.timing import (
     DispatchPipelineTiming,
     attach_dispatch_pipeline_timing,
@@ -327,6 +328,7 @@ class TurnControllerDeps:
     edit_regenerator: _EditRegenerator
     ingress: IngressValidator
     restart_retry: SyncRestartRetryQueue
+    timestamp_formatter: TimestampFormatter
 
 
 @dataclass
@@ -1963,17 +1965,13 @@ class TurnController:
             return build_coalesced_batch(
                 batch.coalescing_key,
                 surviving,
-                timestamp_formatter=self._coalesced_timestamp_formatter,
+                timestamp_formatter=self.deps.timestamp_formatter,
             )
         except BaseException:
             self.deps.turn_store.release_pending_turn_claim(
                 TurnRecord.create(list(claimed), completed=False),
             )
             raise
-
-    def _coalesced_timestamp_formatter(self, timestamp_ms: float | None) -> str | None:
-        """Render batch prompt timestamps exactly like the coalescing gate does."""
-        return format_timestamp_ms(timestamp_ms, timezone=self.deps.runtime.config.timezone)
 
     def _queued_notice_target_key_for_handoff(self, handoff: DispatchHandoff) -> tuple[str, str | None]:
         coalescing_key = handoff.ingress.coalescing_key

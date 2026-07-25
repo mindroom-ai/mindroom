@@ -387,6 +387,7 @@ def _build_harness(
             edit_regenerator=_UnusedEditRegenerator(),
             ingress=ingress_validator,
             restart_retry=restart_retry,
+            timestamp_formatter=lambda timestamp_ms: str(timestamp_ms) if timestamp_ms is not None else None,
         ),
     )
     controller_ref.append(controller)

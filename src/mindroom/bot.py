@@ -399,6 +399,10 @@ class AgentBot:
             msg = f"Missing Matrix ID for {self.agent_name!r} during runtime initialization"
             raise PermanentMatrixStartupError(msg)
         runtime_matrix_id = self.matrix_id
+
+        def timestamp_formatter(timestamp_ms: float | None) -> str | None:
+            return format_timestamp_ms(timestamp_ms, timezone=self.config.timezone)
+
         self._coalescing_gate = CoalescingGate(
             dispatch_batch=self._dispatch_coalesced_batch,
             debounce_seconds=lambda: self.config.defaults.coalescing.debounce_ms / 1000,
@@ -406,10 +410,7 @@ class AgentBot:
             wait_until_dispatch_allowed=self._wait_until_coalesced_dispatch_allowed,
             room_scope_is_single_conversation=self._room_scope_is_single_conversation,
             dispatch_allowed_now=self._coalesced_dispatch_allowed_now,
-            timestamp_formatter=lambda timestamp_ms: format_timestamp_ms(
-                timestamp_ms,
-                timezone=self.config.timezone,
-            ),
+            timestamp_formatter=timestamp_formatter,
         )
         self._hook_context_support = HookContextSupport(
             runtime=self._runtime_view,
@@ -530,10 +531,7 @@ class AgentBot:
                 turn_store=self._turn_store,
                 ingress_hook_runner=self._ingress_hook_runner,
                 generate_response=lambda request: self._run_regenerated_response(request),
-                timestamp_formatter=lambda timestamp_ms: format_timestamp_ms(
-                    timestamp_ms,
-                    timezone=self.config.timezone,
-                ),
+                timestamp_formatter=timestamp_formatter,
             ),
         )
         self._turn_policy = TurnPolicy(
@@ -580,6 +578,7 @@ class AgentBot:
                 edit_regenerator=self._edit_regenerator,
                 ingress=self._ingress_validator,
                 restart_retry=self._restart_retry_queue,
+                timestamp_formatter=timestamp_formatter,
             ),
         )
 

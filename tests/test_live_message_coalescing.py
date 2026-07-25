@@ -871,9 +871,9 @@ async def test_flushed_batch_salvages_innocent_source_when_duplicate_is_claimed(
     """A stale duplicate in a batch must not starve innocent co-batched sources.
 
     A replayed source can pass the ingress in-flight precheck before its
-    original delivery claims, stall, and join a follow-up batch with a fresh
-    source. The previous all-or-nothing claim collided on the duplicate and
-    silently dropped the whole batch, permanently starving the fresh source.
+    original delivery claims, stall, and join a follow-up batch with fresh
+    sources. The previous all-or-nothing claim collided on the duplicate and
+    silently dropped the whole batch, permanently starving the fresh sources.
     """
     bot = _make_bot(tmp_path)
     room = _make_room()
@@ -881,12 +881,22 @@ async def test_flushed_batch_salvages_innocent_source_when_duplicate_is_claimed(
     assert bot._turn_store.try_claim_turn(TurnRecord.create(["$dup"], completed=False))
 
     dup_event = _text_event(event_id="$dup", body="duplicate text", server_timestamp=1_712_350_001_000)
-    fresh_event = _text_event(event_id="$fresh", body="innocent text", server_timestamp=1_712_350_002_000)
+    first_fresh_event = _text_event(
+        event_id="$fresh-1",
+        body="first innocent text",
+        server_timestamp=1_712_350_002_000,
+    )
+    second_fresh_event = _text_event(
+        event_id="$fresh-2",
+        body="second innocent text",
+        server_timestamp=1_712_350_003_000,
+    )
     batch = build_coalesced_batch(
         CoalescingKey("!room:localhost", None, "@user:localhost"),
         [
             PendingEvent(event=dup_event, room=room, source_kind="message"),
-            PendingEvent(event=fresh_event, room=room, source_kind="message"),
+            PendingEvent(event=first_fresh_event, room=room, source_kind="message"),
+            PendingEvent(event=second_fresh_event, room=room, source_kind="message"),
         ],
     )
 
@@ -895,11 +905,17 @@ async def test_flushed_batch_salvages_innocent_source_when_duplicate_is_claimed(
 
     dispatch.assert_awaited_once()
     handoff = dispatch.await_args.args[0]
-    assert dispatch.await_args.kwargs["handled_turn"].source_event_ids == ("$fresh",)
+    assert handoff.source_event_ids == ("$fresh-1", "$fresh-2")
+    assert dispatch.await_args.kwargs["handled_turn"].source_event_ids == ("$fresh-1", "$fresh-2")
     assert dispatch.await_args.kwargs["turn_claim_held"] is True
     assert "duplicate text" not in handoff.event.body
-    assert "innocent text" in handoff.event.body
-    assert bot._turn_store.is_claimed_in_flight("$fresh")
+    assert '<msg event_id="$fresh-1"' in handoff.event.body
+    assert "<![CDATA[first innocent text]]>" in handoff.event.body
+    assert '<msg event_id="$fresh-2"' in handoff.event.body
+    assert "<![CDATA[second innocent text]]>" in handoff.event.body
+    assert handoff.event.body.index('event_id="$fresh-1"') < handoff.event.body.index('event_id="$fresh-2"')
+    assert bot._turn_store.is_claimed_in_flight("$fresh-1")
+    assert bot._turn_store.is_claimed_in_flight("$fresh-2")
     assert bot._turn_store.is_claimed_in_flight("$dup")
 
 

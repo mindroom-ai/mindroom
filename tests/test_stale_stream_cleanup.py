@@ -2119,6 +2119,37 @@ async def test_prior_generation_stamp_is_still_cleaned(tmp_path: Path) -> None:
     edit_result.assert_awaited_once()
 
 
+@pytest.mark.asyncio
+async def test_fresh_unstamped_legacy_stream_is_repaired(tmp_path: Path) -> None:
+    """Fresh legacy streams without a generation stamp remain repairable after restart."""
+    config = _make_config(tmp_path)
+    client = _make_client()
+    client.rooms = _joined_room_cache()
+    client.room_messages.return_value = _room_messages_response(
+        _make_message_event(
+            event_id="$legacy-leftover",
+            body="Working ⋯",
+            timestamp_ms=NOW_MS - 1_000,
+            extra_content={STREAM_STATUS_KEY: "streaming"},
+        ),
+    )
+
+    with patch(
+        "mindroom.matrix.stale_stream_cleanup.edit_message_result",
+        new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit")),
+    ) as edit_result:
+        cleaned, interrupted = await _run_cleanup(
+            client,
+            config,
+            joined_rooms=[ROOM_ID],
+            runtime_generation="gen-current",
+        )
+
+    assert cleaned == 1
+    assert interrupted == []
+    edit_result.assert_awaited_once()
+
+
 def test_runtime_generation_rotates_on_same_object_restart() -> None:
     """mark_runtime_started rotates the generation so prior-run streams stay repairable.
 
