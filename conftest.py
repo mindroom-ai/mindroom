@@ -4,20 +4,19 @@ This file exists at the repository root so pytest imports it before
 ``tests/conftest.py`` and before any test module imports the MindRoom CLI.
 """
 
-from __future__ import annotations
-
 import os
 
-# Rich resolves colour support once, when a `Console` is constructed, and the CLI builds
-# its consoles at import time (`mindroom.cli.config`, `.desktop`, `.service`). Typer does
-# the same for its own error consoles. A shell that forces colour (Claude Code, Codex and
-# several terminals export `FORCE_COLOR`) therefore bakes ANSI escapes into output that
-# `typer.testing.CliRunner` captures from a non-tty buffer, breaking substring assertions
-# and YAML parsing of `mindroom config init --print`.
+# Rich resolves color support once, when a `Console` is constructed, and the CLI builds
+# its consoles at import time (`mindroom.cli.config`, `.desktop`, `.service`), so no
+# fixture can influence them. A shell that exports `FORCE_COLOR` (Claude Code, Codex and
+# several terminals do) makes Rich force a color terminal even though
+# `typer.testing.CliRunner` captures to a non-tty buffer, baking ANSI escapes into output
+# that tests assert on and parse as YAML.
 #
-# Neutralise the forcing variables and pin a dumb terminal here, before anything imports
-# Rich or Typer, so `pytest` behaves identically in every shell. `NO_COLOR` alone is not
-# enough: it strips colour but leaves bold and other SGR codes.
-for _colour_forcing_var in ("CLICOLOR_FORCE", "COLORTERM", "FORCE_COLOR", "PY_COLORS"):
-    os.environ.pop(_colour_forcing_var, None)
+# Pinning a dumb terminal is the one switch that settles it, because Rich gates all three
+# sources of noise on `Console.is_dumb_terminal`: color (`_detect_color_system` returns
+# `None`), control codes (`Console.control` writes nothing) and width (`Console.size`
+# returns a fixed 80x25 instead of the invoking terminal's size). It wins over
+# `FORCE_COLOR` and over Typer's own `force_terminal` consoles. Setting `NO_COLOR`
+# instead would not do: it strips color but leaves bold and other SGR codes.
 os.environ["TERM"] = "dumb"
