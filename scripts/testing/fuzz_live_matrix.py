@@ -2029,7 +2029,8 @@ class ManagedTuwunelStack:
             msg = "MindRoom ignored SIGINT and required SIGKILL"
             raise TimeoutError(msg) from exc
         self._mindroom_process = None
-        if return_code != 0:
+        expected_return_codes = {0, -int(signal.SIGINT), 128 + int(signal.SIGINT)}
+        if return_code not in expected_return_codes:
             msg = f"MindRoom graceful shutdown exited with status {return_code}"
             raise RuntimeError(msg)
 
@@ -3297,7 +3298,6 @@ class FinalStateAuditor:
         superseded = 0
         problems: list[str] = []
         for chain in self.oracle.chains.values():
-            visible_chain_reply_ids = self._visible_chain_reply_ids(chain[-1], replies)
             anchored = False
             for source_event_id in reversed(chain):
                 if source_event_id in self.oracle.optional_sources:
@@ -3309,11 +3309,18 @@ class FinalStateAuditor:
                         f"turn record keyed by {source_event_id} does not own that source: {record.source_event_ids}",
                     )
                     record = None
+                if record is not None and not self._record_sources_share_thread(record):
+                    problems.append(
+                        f"turn record keyed by {source_event_id} coalesces sources across logical Matrix threads: "
+                        f"{record.source_event_ids}",
+                    )
+                    record = None
                 if record is not None and record.response_event_id is not None:
-                    if record.response_event_id not in visible_chain_reply_ids:
+                    visible_record_reply_ids = self._visible_record_reply_ids(record, replies)
+                    if record.response_event_id not in visible_record_reply_ids:
                         problems.append(
                             f"ledger response {record.response_event_id} for {logical_ref} "
-                            f"({source_event_id}) is not a visible canonical reply in its requester chain",
+                            f"({source_event_id}) is not a visible canonical reply for its owned sources",
                         )
                     else:
                         response_ids.add(record.response_event_id)
@@ -3363,19 +3370,25 @@ class FinalStateAuditor:
         problems: list[str] = []
         for source_event_id in self.oracle.optional_sources:
             visible_reply_ids = replies.get(source_event_id, set())
-            visible_chain_reply_ids = self._visible_chain_reply_ids(source_event_id, replies)
             record = records.get(source_event_id)
             if record is not None and source_event_id not in record.source_event_ids:
                 problems.append(
                     f"turn record keyed by {source_event_id} does not own that source: {record.source_event_ids}",
                 )
                 record = None
+            if record is not None and not self._record_sources_share_thread(record):
+                problems.append(
+                    f"turn record keyed by {source_event_id} coalesces sources across logical Matrix threads: "
+                    f"{record.source_event_ids}",
+                )
+                record = None
             if not visible_reply_ids:
                 if record is not None and record.response_event_id is not None:
-                    if record.response_event_id not in visible_chain_reply_ids:
+                    visible_record_reply_ids = self._visible_record_reply_ids(record, replies)
+                    if record.response_event_id not in visible_record_reply_ids:
                         problems.append(
                             f"ledger response {record.response_event_id} for optional source "
-                            f"{source_event_id} is not a visible canonical reply in its requester chain",
+                            f"{source_event_id} is not a visible canonical reply for its owned sources",
                         )
                     else:
                         response_ids.add(record.response_event_id)
@@ -3401,6 +3414,23 @@ class FinalStateAuditor:
             (),
         )
         return {reply_id for chain_source_event_id in chain for reply_id in replies.get(chain_source_event_id, ())}
+
+    @staticmethod
+    def _visible_record_reply_ids(
+        record: TurnRecord,
+        replies: Mapping[str, set[str]],
+    ) -> set[str]:
+        """Return canonical replies attached to sources owned by one durable turn."""
+        return {
+            reply_id for source_event_id in record.source_event_ids for reply_id in replies.get(source_event_id, ())
+        }
+
+    def _record_sources_share_thread(self, record: TurnRecord) -> bool:
+        """Return whether every owned source belongs to one known Matrix thread."""
+        source_threads = {
+            self.oracle.source_threads.get(source_event_id) for source_event_id in record.source_event_ids
+        }
+        return None not in source_threads and len(source_threads) == 1
 
     def _assert_model_saw_current_sources(
         self,

@@ -229,7 +229,7 @@ def test_stop_mindroom_reports_sigkill_fallback(
 def test_stop_mindroom_rejects_nonzero_graceful_exit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A SIGINT-observed exit still must report healthy shutdown status."""
+    """An unexpected exit after SIGINT still fails managed shutdown."""
 
     class FakeProcess:
         pid = 4242
@@ -249,6 +249,35 @@ def test_stop_mindroom_rejects_nonzero_graceful_exit(
 
     with pytest.raises(RuntimeError, match="graceful shutdown exited with status 3"):
         stack._stop_mindroom()
+
+    assert stack._mindroom_process is None
+
+
+@pytest.mark.parametrize("return_code", [-signal.SIGINT, 128 + signal.SIGINT])
+def test_stop_mindroom_accepts_sigint_exit_status(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    return_code: int,
+) -> None:
+    """Direct and shell-encoded SIGINT statuses prove expected managed shutdown."""
+
+    class FakeProcess:
+        pid = 4242
+
+        @staticmethod
+        def poll() -> None:
+            return None
+
+        @staticmethod
+        def wait(*, timeout: float) -> int:
+            assert timeout == 20
+            return return_code
+
+    stack = object.__new__(ManagedTuwunelStack)
+    stack._mindroom_process = FakeProcess()
+    monkeypatch.setattr(live_fuzz.os, "killpg", lambda _pid, _sig: None)
+
+    stack._stop_mindroom()
 
     assert stack._mindroom_process is None
 
@@ -1933,10 +1962,62 @@ async def test_ledger_attribution_flags_missing_and_orphaned_turns(tmp_path: Pat
 
 
 @pytest.mark.asyncio
-async def test_ledger_attribution_rejects_reply_reused_across_requester_chains(
+async def test_ledger_attribution_accepts_cross_requester_coalesced_record(
     tmp_path: Path,
 ) -> None:
-    """One visible reply cannot settle another thread/requester chain."""
+    """One completed record may attach its shared reply to either owned source."""
+    client = LiveMatrixClient("http://matrix.invalid", "!room:example")
+    oracle = ExactReplyOracle(client, "@agent:example", coalescing_threads=True)
+    ledger_path = tmp_path / "general_responded.json"
+    auditor = FinalStateAuditor(
+        client,
+        oracle,
+        agent_id="@agent:example",
+        expected_body_for=_short_body_for,
+        ledger_path=ledger_path,
+    )
+    try:
+        oracle.expect("op:1", "$chain-a", thread=0, client=0)
+        oracle.expect("op:2", "$chain-b", thread=0, client=1)
+        coalesced = TurnRecord(
+            source_event_ids=("$chain-a", "$chain-b"),
+            response_event_id="$one-reply",
+            completed=True,
+        )
+        _write_ledger(ledger_path, {"$chain-a": coalesced, "$chain-b": coalesced})
+
+        assert auditor._assert_ledger_attribution({"$chain-b": {"$one-reply"}}) == {
+            "ledger_attributed_sources": 2,
+            "ledger_superseded_sources": 0,
+        }
+
+        stale = replace(coalesced, response_event_id="$stale-reply")
+        _write_ledger(ledger_path, {"$chain-a": stale, "$chain-b": stale})
+        with pytest.raises(AssertionError, match=r"\$stale-reply.*not a visible canonical reply"):
+            auditor._assert_ledger_attribution({"$chain-b": {"$one-reply"}})
+
+        chain_a = TurnRecord(
+            source_event_ids=("$chain-a",),
+            response_event_id="$one-reply",
+            completed=True,
+        )
+        chain_b = TurnRecord(
+            source_event_ids=("$chain-b",),
+            response_event_id="$one-reply",
+            completed=True,
+        )
+        _write_ledger(ledger_path, {"$chain-a": chain_a, "$chain-b": chain_b})
+        with pytest.raises(AssertionError, match=r"\$chain-a.*not a visible canonical reply"):
+            auditor._assert_ledger_attribution({"$chain-b": {"$one-reply"}})
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_ledger_attribution_rejects_coalesced_record_across_threads(
+    tmp_path: Path,
+) -> None:
+    """One record cannot claim a visible reply from another logical thread."""
     client = LiveMatrixClient("http://matrix.invalid", "!room:example")
     oracle = ExactReplyOracle(client, "@agent:example", coalescing_threads=True)
     ledger_path = tmp_path / "general_responded.json"
@@ -1957,7 +2038,7 @@ async def test_ledger_attribution_rejects_reply_reused_across_requester_chains(
         )
         _write_ledger(ledger_path, {"$chain-a": forged, "$chain-b": forged})
 
-        with pytest.raises(AssertionError, match="not a visible canonical reply in its requester chain"):
+        with pytest.raises(AssertionError, match="coalesces sources across logical Matrix threads"):
             auditor._assert_ledger_attribution({"$chain-b": {"$one-reply"}})
     finally:
         await client.close()
