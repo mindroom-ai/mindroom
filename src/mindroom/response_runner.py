@@ -84,7 +84,6 @@ from .delivery_gateway import (
     StreamingDeliveryRequest,
 )
 from .media_inputs import MediaInputs
-from .response_admission import ResponseAdmissionGate
 from .response_lifecycle import (
     QueuedHumanNoticeReservation,
     ResponseLifecycle,
@@ -119,6 +118,8 @@ if TYPE_CHECKING:
     from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.runtime_context import ToolRuntimeSupport
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+
+    from .response_admission import ResponseAdmissionGate
 
 type _MatrixEventId = str
 _CONFIG_APPLY_CANCEL_MESSAGE = "Configuration reload is restarting this entity"
@@ -484,7 +485,9 @@ class ResponseRunner:
     """Run one response lifecycle while keeping bot seams patchable."""
 
     deps: ResponseRunnerDeps
-    _admission_gate: ResponseAdmissionGate = field(default_factory=ResponseAdmissionGate, init=False, repr=False)
+    # Own count, distinct from the shared gate's process-wide total: callers like
+    # the todo-poke idle check ask whether *this* entity is busy.
+    _in_flight_response_count: int = field(default=0, init=False)
     _lifecycle_coordinator: ResponseLifecycleCoordinator = field(
         default_factory=ResponseLifecycleCoordinator,
         init=False,
@@ -561,18 +564,13 @@ class ResponseRunner:
 
     @property
     def in_flight_response_count(self) -> int:
-        """Return the number of active response lifecycles."""
-        return self._admission_gate.in_flight_response_count
+        """Return the number of active response lifecycles for this entity."""
+        return self._in_flight_response_count
 
     @property
-    def admission_gate(self) -> ResponseAdmissionGate:
-        """Return the gate deciding whether responses may start right now."""
-        return self._admission_gate
-
-    @admission_gate.setter
-    def admission_gate(self, value: ResponseAdmissionGate) -> None:
-        """Bind the orchestrator-owned response-admission gate."""
-        self._admission_gate = value
+    def _admission_gate(self) -> ResponseAdmissionGate:
+        """Return the orchestrator-owned gate deciding whether responses may start."""
+        return self.deps.runtime.response_admission_gate
 
     def _show_tool_calls(self, agent_name: str | None = None) -> bool:
         """Return tool-call visibility for the current or target agent."""
@@ -807,6 +805,7 @@ class ResponseRunner:
                 **request.response_envelope.target.log_context,
             )
             raise asyncio.CancelledError(_CONFIG_APPLY_CANCEL_MESSAGE)
+        self._in_flight_response_count += 1
         try:
             resolved_target = request.response_envelope.target
             early_placeholder = _EarlyPlaceholderState()
@@ -846,6 +845,7 @@ class ResponseRunner:
                     placeholder_event_id=early_placeholder.placeholder_event_id,
                 ) from cause
         finally:
+            self._in_flight_response_count -= 1
             self._admission_gate.release()
 
     async def _finalize_early_placeholder_cancellation(

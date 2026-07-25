@@ -1585,7 +1585,7 @@ async def test_queued_config_reload_waits_for_in_flight_response_without_event_i
     orchestrator.running = True
     orchestrator.agent_bots["agent1"] = bot
     # The orchestrator owns one shared gate that every managed bot admits through.
-    runner.admission_gate = orchestrator.config_reload.response_admission_gate
+    bot.admission_gate = orchestrator.config_reload.response_admission_gate
     orchestrator.config_reload.update_config = AsyncMock(return_value=True)
 
     response_task = asyncio.create_task(
@@ -2827,6 +2827,79 @@ async def test_in_flight_response_count_nonzero_during_send_response(
 
 
 @pytest.mark.asyncio
+async def test_in_flight_response_count_stays_per_entity_across_bots(
+    tmp_path: Path,
+    mock_agent_users: dict[str, AgentMatrixUser],
+) -> None:
+    """One bot's active response must not make a different bot look busy.
+
+    Every bot shares one admission gate, whose count is process-wide. Callers
+    like the todo-poke idle check ask whether *this* entity is busy, so the
+    per-bot count must stay distinct from the gate total.
+    """
+    config = _runtime_bound_config(
+        Config(
+            agents={"agent1": AgentConfig(display_name="Agent 1"), "agent2": AgentConfig(display_name="Agent 2")},
+            router=RouterConfig(model="default"),
+        ),
+        tmp_path,
+    )
+    bots = {}
+    for agent_name in ("agent1", "agent2"):
+        bot = AgentBot(
+            agent_user=mock_agent_users[agent_name],
+            storage_path=tmp_path,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+        )
+        setup_test_bot(bot, AsyncMock())
+        bots[agent_name] = bot
+
+    shared_gate = ResponseAdmissionGate()
+    for bot in bots.values():
+        bot.admission_gate = shared_gate
+
+    busy, idle = bots["agent1"], bots["agent2"]
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def blocked_response(_target: MessageTarget, _early_placeholder: object) -> str | None:
+        entered.set()
+        await release.wait()
+        return None
+
+    busy_runner = unwrap_extracted_collaborator(busy._response_runner)
+    task = asyncio.create_task(
+        busy_runner._run_locked_response_lifecycle(
+            ResponseRequest(
+                thread_history=(),
+                prompt="Hello",
+                response_envelope=request_envelope(
+                    room_id="!room:localhost",
+                    reply_to_event_id="$reply",
+                    agent_name=busy.agent_name,
+                ),
+            ),
+            response_kind="ai",
+            locked_operation=blocked_response,
+        ),
+    )
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=1)
+        assert busy.in_flight_response_count == 1
+        # The shared gate sees the response, so a reload correctly defers...
+        assert shared_gate.in_flight_response_count == 1
+        # ...but the unrelated bot is still idle.
+        assert idle.in_flight_response_count == 0
+    finally:
+        release.set()
+        await asyncio.gather(task, return_exceptions=True)
+
+    assert busy.in_flight_response_count == 0
+    assert shared_gate.in_flight_response_count == 0
+
+
+@pytest.mark.asyncio
 async def test_tracked_inbox_response_cancelled_during_reload_never_sends_placeholder(
     tmp_path: Path,
     mock_agent_users: dict[str, AgentMatrixUser],
@@ -2850,13 +2923,13 @@ async def test_tracked_inbox_response_cancelled_during_reload_never_sends_placeh
     install_send_response_mock(bot, send_response)
     runner = unwrap_extracted_collaborator(bot._response_runner)
     admission_gate = ResponseAdmissionGate()
-    runner.admission_gate = admission_gate
+    bot.admission_gate = admission_gate
     refusal_logger = MagicMock()
     runner.deps = replace(runner.deps, logger=refusal_logger)
 
     # Stand where a config apply stands: admission closed, plan in progress.
     assert admission_gate.close_if_idle()
-    assert runner.admission_gate is admission_gate
+    assert bot.admission_gate is admission_gate
     task = bot._response_runner.track_inbox_response(
         bot._response_runner.generate_response(
             ResponseRequest(

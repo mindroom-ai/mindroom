@@ -6,6 +6,8 @@ import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol
 
+from mindroom.response_admission import ResponseAdmissionGate
+
 if TYPE_CHECKING:
     import nio
 
@@ -44,6 +46,9 @@ class BotRuntimeView(Protocol):
     def startup_thread_prewarm_registry(self) -> StartupThreadPrewarmRegistry: ...  # noqa: D102
 
     @property
+    def response_admission_gate(self) -> ResponseAdmissionGate: ...  # noqa: D102
+
+    @property
     def runtime_started_at(self) -> float: ...  # noqa: D102
 
     @property
@@ -64,6 +69,9 @@ class BotRuntimeState:
     event_cache: ConversationEventCache | None
     event_cache_write_coordinator: EventCacheWriteCoordinator | None
     startup_thread_prewarm_registry: StartupThreadPrewarmRegistry | None = None
+    # Orchestrator-owned and shared across bots. Lives here, not on ResponseRunner,
+    # so it survives the runtime rebuild after a login identity change.
+    response_admission_gate: ResponseAdmissionGate = field(default_factory=ResponseAdmissionGate)
     runtime_started_at: float = field(default_factory=time.time)
     callback_failure_count: int = 0
 

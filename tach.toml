@@ -1337,6 +1337,7 @@ path = "mindroom.response_admission"
 depends_on = []
 visibility = [
     "mindroom.bot",
+    "mindroom.bot_runtime_view",
     "mindroom.orchestration.config_lifecycle",
     "mindroom.orchestrator",
     "mindroom.response_runner",
@@ -1994,7 +1995,7 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.bot_runtime_view"
-depends_on = ["mindroom.matrix.cache"]
+depends_on = ["mindroom.matrix.cache", "mindroom.response_admission"]
 visibility = [
     "mindroom.bot",
     "mindroom.matrix.cache.thread_reads",
