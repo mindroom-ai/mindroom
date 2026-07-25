@@ -1167,6 +1167,29 @@ async def test_startup_thread_prewarm_bulk_refresh_waits_for_background_warm(tmp
 
 
 @pytest.mark.asyncio
+async def test_startup_thread_prewarm_bulk_failure_is_logged_only_by_caller(tmp_path: Path) -> None:
+    """Awaited bulk failures should not also be logged by the background-task callback."""
+    bot = _agent_bot(tmp_path)
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id or "@mindroom_code:localhost")
+
+    with (
+        patch(
+            "mindroom.matrix.conversation_cache.bulk_refresh_room_thread_histories",
+            new=AsyncMock(side_effect=RuntimeError("boom")),
+        ),
+        patch("mindroom.background_tasks.logger.exception") as background_task_log,
+        pytest.raises(RuntimeError, match="boom"),
+    ):
+        await bot._conversation_cache._bulk_refresh_startup_threads(
+            "!room:localhost",
+            ["$thread-root"],
+        )
+
+    await asyncio.sleep(0)
+    background_task_log.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_startup_thread_prewarm_joined_rooms_failure_is_fail_open(tmp_path: Path) -> None:
     """Startup thread prewarm should log and stop cleanly when joined room lookup fails."""
     bot = _agent_bot(tmp_path)

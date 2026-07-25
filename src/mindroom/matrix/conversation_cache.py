@@ -717,6 +717,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
                 room_id,
                 refresh_room_threads,
                 name="matrix_cache_bulk_startup_thread_prewarm",
+                log_exceptions=False,
                 coordination_scope=self.runtime.event_cache.principal_id,
             ),
         )
