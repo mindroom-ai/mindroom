@@ -279,6 +279,25 @@ class _PrecheckedEvent[T]:
     requester_user_id: str
 
 
+@dataclass
+class _TurnClaimLease:
+    """Release or transfer one already-acquired pending-turn claim exactly once."""
+
+    turn_record: TurnRecord
+    owned: bool = True
+
+    def release(self, turn_store: TurnStore) -> None:
+        """Release the claim only while this lease still owns it."""
+        if not self.owned:
+            return
+        self.owned = False
+        turn_store.release_pending_turn_claim(self.turn_record)
+
+    def transfer(self) -> None:
+        """Transfer claim cleanup to the normal text-dispatch owner."""
+        self.owned = False
+
+
 type _PrecheckedTextDispatchEvent = _PrecheckedEvent[TextDispatchEvent]
 type _PrecheckedInboundMediaEvent = _PrecheckedEvent[MatrixMediaEvent]
 
@@ -373,6 +392,29 @@ class TurnController:
         if requester_user_id is None:
             return None
         return _PrecheckedEvent(event=event, requester_user_id=requester_user_id)
+
+    def _claim_command_before_resolution(
+        self,
+        event: nio.RoomMessageText,
+        *,
+        is_edit: bool,
+    ) -> tuple[bool, _TurnClaimLease | None]:
+        """Claim a raw command source before conversation resolution can suspend."""
+        content = event.source.get("content") if isinstance(event.source, dict) else None
+        source_kind = self.deps.ingress.event_source_kind(event, content) if isinstance(content, dict) else None
+        command = (
+            None
+            if is_edit
+            else self.deps.ingress.command_control_input(
+                event,
+                source_kind=source_kind or MESSAGE_SOURCE_KIND,
+            )
+        )
+        if command is None:
+            return False, None
+        command_turn = TurnRecord.create([event.event_id], completed=False)
+        claim = _TurnClaimLease(command_turn) if self.deps.turn_store.try_claim_turn(command_turn) else None
+        return True, claim
 
     def _mark_source_events_responded(self, handled_turn: TurnRecord) -> None:
         """Mark one or more source events as handled by the same terminal outcome."""
@@ -725,6 +767,7 @@ class TurnController:
         requester_user_id: str,
         reservation_owner: _PromptIngressReservationOwner,
         coalescing_thread_id: str | None,
+        command_claim: _TurnClaimLease | None = None,
     ) -> _IngressAdmissionOutcome:
         """Run shared ingress dispatch for text events and sidecar text previews."""
         target = self.deps.resolver.build_message_target(
@@ -779,13 +822,22 @@ class TurnController:
                 )
                 return _IngressAdmissionOutcome.CONSUMED
         if self.deps.ingress.command_control_input(prepared_event, source_kind=envelope.source_kind) is not None:
-            await self._dispatch_command_control_input(
-                room=room,
-                dispatch_event=dispatch_event,
-                envelope=envelope,
-                coalescing_thread_id=coalescing_thread_id,
-                requester_user_id=requester_user_id,
-            )
+            if command_claim is None:
+                command_turn = TurnRecord.create([dispatch_event.event_id], completed=False)
+                if not self.deps.turn_store.try_claim_turn(command_turn):
+                    return _IngressAdmissionOutcome.CONSUMED
+                command_claim = _TurnClaimLease(command_turn)
+            try:
+                await self._dispatch_command_control_input(
+                    room=room,
+                    dispatch_event=dispatch_event,
+                    envelope=envelope,
+                    coalescing_thread_id=coalescing_thread_id,
+                    requester_user_id=requester_user_id,
+                    command_claim=command_claim,
+                )
+            finally:
+                command_claim.release(self.deps.turn_store)
             return _IngressAdmissionOutcome.CONSUMED
         return await self._enqueue_prepared_text_for_dispatch(
             room=room,
@@ -859,6 +911,7 @@ class TurnController:
         envelope: MessageEnvelope,
         coalescing_thread_id: str | None,
         requester_user_id: str,
+        command_claim: _TurnClaimLease,
     ) -> None:
         """Dispatch one command as a control input without entering the coalescing gate."""
         pending_event = PendingEvent(
@@ -884,8 +937,13 @@ class TurnController:
             source_event_prompts=dict(handoff.source_event_prompts),
             source_event_metadata=dict(handoff.source_event_metadata) if len(handoff.source_event_ids) > 1 else None,
         )
+        command_claim.transfer()
         try:
-            await self._dispatch_handoff(handoff, handled_turn=handled_turn)
+            await self._dispatch_handoff(
+                handoff,
+                handled_turn=handled_turn,
+                turn_claim_held=True,
+            )
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -2046,6 +2104,10 @@ class TurnController:
         if prechecked_event is None:
             return
 
+        is_command, command_claim = self._claim_command_before_resolution(event, is_edit=event_info.is_edit)
+        if is_command and command_claim is None:
+            return
+
         dispatch_timing = create_dispatch_pipeline_timing(
             event_id=event.event_id,
             room_id=room.room_id,
@@ -2072,6 +2134,7 @@ class TurnController:
                 event_info=event_info,
                 dispatch_timing=dispatch_timing,
                 reservation_owner=reservation_owner,
+                command_claim=command_claim,
             )
         except IngressAdmissionClosedError:
             self.deps.logger.debug(
@@ -2080,6 +2143,8 @@ class TurnController:
                 room_id=room.room_id,
             )
         finally:
+            if command_claim is not None:
+                command_claim.release(self.deps.turn_store)
             if owns_reservation:
                 await reservation_owner.release()
 
@@ -2091,6 +2156,7 @@ class TurnController:
         event_info: EventInfo,
         dispatch_timing: DispatchPipelineTiming | None,
         reservation_owner: _PromptIngressReservationOwner,
+        command_claim: _TurnClaimLease | None,
     ) -> None:
         """Resolve, normalize, and admit one live (non-edit) text event."""
         event = prechecked_event.event
@@ -2138,6 +2204,7 @@ class TurnController:
             requester_user_id=prechecked_event.requester_user_id,
             reservation_owner=reservation_owner,
             coalescing_thread_id=ingress_thread_id,
+            command_claim=command_claim,
         )
 
     async def _dispatch_text_message(

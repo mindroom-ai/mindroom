@@ -198,12 +198,14 @@ class TurnStore:
         )
 
     def try_claim_turn(self, turn_record: TurnRecord) -> bool:
-        """Claim source processing before any expensive dispatch resolution."""
+        """Claim source processing when no live or terminal turn owns it."""
         event_ids = turn_record.indexed_event_ids
         if not turn_record.source_event_ids:
             return False
         with self._pending_claim_lock:
-            if self._pending_claimed_event_ids.intersection(event_ids):
+            if self._pending_claimed_event_ids.intersection(event_ids) or any(
+                self.is_handled(event_id) for event_id in event_ids
+            ):
                 return False
             self._pending_claimed_event_ids.update(event_ids)
         return True

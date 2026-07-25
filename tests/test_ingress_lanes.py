@@ -41,6 +41,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.coalescing_batch import CoalescedBatch
+    from mindroom.handled_turns import TurnRecord
 
 
 def _room(room_id: str = "!room:localhost") -> nio.MatrixRoom:
@@ -421,6 +422,90 @@ async def test_router_command_targeting_unresolved_conversation_fails_visibly(tm
     assert "command" in request.response_text.lower()
     dispatch_mock.assert_not_awaited()
     assert bot._turn_store.is_handled("$cmd")
+
+
+@pytest.mark.asyncio
+async def test_duplicate_command_claims_before_conversation_resolution(tmp_path: Path) -> None:
+    """A replay cannot pass precheck, wait in resolution, then execute the command again."""
+    bot = _make_bot(tmp_path)
+    room = _make_room()
+    command_event = _text_event(event_id="$cmd", body="!help", server_timestamp=1000)
+    resolution_started = asyncio.Event()
+    release_resolution = asyncio.Event()
+
+    async def resolve_thread_id(_room: nio.MatrixRoom, _event: nio.RoomMessageText) -> None:
+        resolution_started.set()
+        await release_resolution.wait()
+
+    async def record_dispatch(
+        _room: nio.MatrixRoom,
+        _event: nio.RoomMessageText,
+        _requester_user_id: str,
+        *,
+        handled_turn: TurnRecord,
+        turn_claim_held: bool,
+        **_metadata: object,
+    ) -> None:
+        assert turn_claim_held is True
+        bot._turn_store.release_pending_turn_claim(handled_turn)
+
+    resolve_mock = AsyncMock(side_effect=resolve_thread_id)
+    dispatch_mock = AsyncMock(side_effect=record_dispatch)
+    with (
+        patch.object(bot._conversation_resolver, "coalescing_thread_id", new=resolve_mock),
+        patch.object(bot._turn_controller, "_dispatch_text_message", new=dispatch_mock),
+    ):
+        first = asyncio.create_task(bot._turn_controller.handle_text_event(room, command_event))
+        await resolution_started.wait()
+        second = asyncio.create_task(bot._turn_controller.handle_text_event(room, command_event))
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        resolution_calls_before_release = resolve_mock.await_count
+        release_resolution.set()
+        await asyncio.gather(first, second)
+
+    assert resolution_calls_before_release == 1
+    dispatch_mock.assert_awaited_once()
+    assert not bot._turn_store.is_claimed_in_flight("$cmd")
+
+
+@pytest.mark.asyncio
+async def test_duplicate_unresolvable_command_emits_one_terminal_notice(tmp_path: Path) -> None:
+    """Target-resolution failure remains one handled command under replay."""
+    bot = _make_bot(tmp_path, agent_name="router")
+    room = _make_room()
+    command_event = _text_event(event_id="$cmd", body="!help", server_timestamp=1000, thread_id="$pending_root")
+    resolution_started = asyncio.Event()
+    release_resolution = asyncio.Event()
+
+    async def fail_thread_resolution(
+        _room: nio.MatrixRoom,
+        _event: nio.RoomMessageText,
+    ) -> None:
+        resolution_started.set()
+        await release_resolution.wait()
+        message = "unproven root"
+        raise ThreadMembershipLookupError(message)
+
+    resolve_mock = AsyncMock(side_effect=fail_thread_resolution)
+    send_text_mock = AsyncMock(return_value="$notice")
+    with (
+        patch.object(bot._conversation_resolver, "coalescing_thread_id", new=resolve_mock),
+        patch.object(bot._delivery_gateway, "send_text", new=send_text_mock),
+    ):
+        first = asyncio.create_task(bot._turn_controller.handle_text_event(room, command_event))
+        await resolution_started.wait()
+        second = asyncio.create_task(bot._turn_controller.handle_text_event(room, command_event))
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        resolution_calls_before_release = resolve_mock.await_count
+        release_resolution.set()
+        await asyncio.gather(first, second)
+
+    assert resolution_calls_before_release == 1
+    send_text_mock.assert_awaited_once()
+    assert bot._turn_store.is_handled("$cmd")
+    assert not bot._turn_store.is_claimed_in_flight("$cmd")
 
 
 @pytest.mark.asyncio

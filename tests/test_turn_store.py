@@ -561,6 +561,16 @@ def test_is_claimed_in_flight_tracks_live_claims(tmp_path: Path) -> None:
     assert store.is_claimed_in_flight("$source") is False
 
 
+def test_pending_turn_claim_rejects_terminal_owner(tmp_path: Path) -> None:
+    """A stale precheck cannot reclaim a source after its outcome becomes durable."""
+    store = _store(tmp_path)
+    turn = TurnRecord.create(["$source"], completed=False)
+    store.record_turn(turn)
+
+    assert store.try_claim_turn(turn) is False
+    assert store.is_claimed_in_flight("$source") is False
+
+
 def test_is_claimed_in_flight_sees_absorbed_discovery_alias(tmp_path: Path) -> None:
     """Discovery aliases folded into a claim also count as in flight."""
     store = _store(tmp_path)
@@ -615,7 +625,7 @@ async def test_terminal_turn_keeps_claim_until_response_task_finishes(tmp_path: 
     assert store.try_claim_turn(turn) is False
     release_response.set()
     await response_task
-    assert store.try_claim_turn(turn) is True
+    assert store.try_claim_turn(turn) is False
     assert store.try_claim_turn(other_turn) is False
 
 
