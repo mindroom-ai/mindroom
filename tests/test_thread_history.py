@@ -3283,6 +3283,78 @@ class TestThreadHistoryCache:
         assert history.diagnostics["cache_repair_usable"] is True
 
     @pytest.mark.asyncio
+    async def test_refresh_retries_membership_epoch_race_then_installs_snapshot(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A rejoin during reconstruction should recapture its epoch and install on attempt two."""
+        room_id = "!room:localhost"
+        thread_id = "$thread_root"
+        event_source = {
+            "type": "m.room.message",
+            "room_id": room_id,
+            "event_id": thread_id,
+            "sender": "@user:localhost",
+            "origin_server_ts": 1000,
+            "content": {"body": "fresh", "msgtype": "m.text"},
+        }
+        fetch_result = matrix_client_module._ThreadHistoryFetchResult(
+            history=[
+                ResolvedVisibleMessage.synthetic(
+                    sender="@user:localhost",
+                    body="fresh",
+                    event_id=thread_id,
+                    content={"body": "fresh", "msgtype": "m.text"},
+                ),
+            ],
+            event_sources=[event_source],
+            fetch_ms=1.0,
+            room_scan_pages=1,
+            scanned_event_count=1,
+            resolution_ms=1.0,
+            sidecar_hydration_ms=0.0,
+        )
+        event_cache = SqliteEventCache(tmp_path / "membership_epoch_retry.db")
+        fetch_count = 0
+
+        async def fetch_snapshot(*_args: object, **_kwargs: object) -> matrix_client_module._ThreadHistoryFetchResult:
+            nonlocal fetch_count
+            fetch_count += 1
+            if fetch_count == 1:
+                departure_epoch = event_cache.mark_room_departed(room_id)
+                await event_cache.purge_room(room_id)
+                await event_cache.mark_room_joined(
+                    room_id,
+                    expected_departure_epoch=departure_epoch,
+                )
+            return fetch_result
+
+        await event_cache.initialize()
+        try:
+            with patch(
+                "mindroom.matrix.client_thread_history._fetch_thread_repair_snapshot",
+                new=AsyncMock(side_effect=fetch_snapshot),
+            ) as fetch:
+                history = await matrix_client_module.refresh_thread_history_from_source(
+                    AsyncMock(),
+                    room_id,
+                    thread_id,
+                    event_cache=event_cache,
+                    allow_stale_fallback=False,
+                )
+
+            cached_events = await event_cache.get_thread_events(room_id, thread_id)
+        finally:
+            await event_cache.close()
+
+        assert fetch.await_count == 2
+        assert history.diagnostics["cache_store_outcome"] == ThreadCacheReplaceOutcome.STORED.value
+        assert history.diagnostics["cache_repair_attempts"] == 2
+        assert history.diagnostics["cache_repair_usable"] is True
+        assert cached_events is not None
+        assert [event["event_id"] for event in cached_events] == [thread_id]
+
+    @pytest.mark.asyncio
     async def test_refresh_recognizes_existing_newer_usable_cache_winner(self) -> None:
         """A newer trusted snapshot should win without another fetch or generic failure."""
         event_cache = _event_cache()

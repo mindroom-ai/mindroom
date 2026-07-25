@@ -74,7 +74,7 @@ class ThreadRepairRegistry:
 
     def _record_failure(self, key: _ThreadRepairKey) -> None:
         now = self.clock()
-        self._retry_after = {expired: until for expired, until in self._retry_after.items() if until > now}
+        self._retry_after = {active_key: until for active_key, until in self._retry_after.items() if until > now}
         self._retry_after[key] = now + self.failure_backoff_seconds
 
     def retry_after_seconds(self, key: _ThreadRepairKey) -> float:

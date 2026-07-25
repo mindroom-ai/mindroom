@@ -1247,6 +1247,7 @@ async def test_departed_refill_guard_blocks_point_plaintext_and_thread_writes_af
             )
             is ThreadCacheReplaceOutcome.RETRYABLE_CONFLICT
         )
+        assert await refill_cache.get_thread_events(room_id, thread_id) is None
         assert await _raw_mxc_text_count(refill_cache, room_id, mxc_url) == 0
 
         assert (
