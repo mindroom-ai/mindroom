@@ -549,6 +549,19 @@ def test_managed_postgres_preflight_never_falls_back(mocker: MockerFixture) -> N
     assert any(call.args[0][:3] == ("docker", "rm", "--force") for call in run.call_args_list)
 
 
+def test_stress_cache_clear_covers_principal_scoped_namespaces(mocker: MockerFixture) -> None:
+    completed = mocker.Mock(returncode=0, stdout="", stderr="")
+    run = mocker.patch("scripts.testing.live_matrix_stress.subprocess.run", return_value=completed)
+    postgres = ManagedStressPostgres("synthetic-postgres")
+    postgres._started = True
+
+    postgres.clear_cache_namespace("synthetic")
+
+    sql = run.call_args.args[0][-1]
+    assert "namespace = 'synthetic' OR namespace LIKE 'synthetic:%'" in sql
+    assert sql.count("DELETE FROM") == 9
+
+
 def test_replay_command_uses_only_repository_relative_paths() -> None:
     command = write_replay_command()
 

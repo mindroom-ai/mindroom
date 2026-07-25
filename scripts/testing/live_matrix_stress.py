@@ -1114,7 +1114,10 @@ class ManagedStressPostgres:
             "mindroom_event_cache_room_state",
         )
         statements = " ".join(
-            f"DELETE FROM {table} WHERE namespace = '{namespace}';"  # noqa: S608 - table allowlist and validated namespace
+            (
+                f"DELETE FROM {table} WHERE namespace = '{namespace}' "  # noqa: S608 - table allowlist and validated namespace
+                f"OR namespace LIKE '{namespace}:%';"
+            )
             for table in tables
         )
         result = subprocess.run(
