@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Literal, cast
 
 from mindroom.synthetic_model import SyntheticPlan, synthetic_plan
+from mindroom.tool_system.events import format_tool_combined
 
 STRESS_TRACE_VERSION = 1
 STRESS_BASELINE_VERSION = 1
@@ -209,8 +210,21 @@ class SyntheticStressAudit:
         )
 
     def expected_body(self, request: StressRequest) -> str:
-        """Return the exact final body for one configured request."""
+        """Return the exact model-generated body for one configured request."""
         return self.plan(request).body
+
+    def expected_matrix_body(self, request: StressRequest) -> str:
+        """Return the exact body after MindRoom inserts its visible tool marker."""
+        plan = self.plan(request)
+        if plan.split_at is None or plan.sleep_seconds is None:
+            return plan.body
+        tool_marker, _ = format_tool_combined(
+            "sleep",
+            {"seconds": plan.sleep_seconds},
+            None,
+            tool_index=1,
+        )
+        return plan.prefix + tool_marker + plan.suffix
 
     def reached_count(self, wave: int) -> int:
         """Return distinct initial requests recorded at one wave barrier."""

@@ -5233,7 +5233,7 @@ class LiveMatrixStressRunner:
         requests = tuple(
             StressRequest(wave=wave, thread=thread, seed=self.config.seed) for thread in range(self.config.threads)
         )
-        self._expected_stress_bodies.update(self.model_audit.expected_body(request) for request in requests)
+        self._expected_stress_bodies.update(self.model_audit.expected_matrix_body(request) for request in requests)
         sent_results = await self._send_many(
             (
                 (
@@ -5463,7 +5463,7 @@ class LiveMatrixStressRunner:
                 raise AssertionError(msg)
         request = StressRequest(wave=turn.wave, thread=turn.thread, seed=self.config.seed)
         plan = self.model_audit.plan(request)
-        expected_body = plan.body
+        expected_body = self.model_audit.expected_matrix_body(request)
         if not bodies or bodies[-1] != expected_body:
             msg = f"stress final content mismatch for {turn.label}"
             raise AssertionError(msg)

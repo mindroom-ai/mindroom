@@ -136,6 +136,7 @@ def test_synthetic_stress_audit_requires_real_tool_continuation(tmp_path: Path) 
 
     audit.assert_complete()
     assert audit.expected_body(request) == plan.body
+    assert audit.expected_matrix_body(request) == plan.prefix + "\n\n🔧 `sleep` [1]\n\n" + plan.suffix
     assert audit.snapshot()["tool_calls"] == 1
 
     telemetry_path.write_text(
