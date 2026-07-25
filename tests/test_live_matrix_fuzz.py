@@ -7,6 +7,7 @@ import io
 import json
 import shutil
 import signal
+import subprocess
 import sys
 from collections import defaultdict
 from dataclasses import replace
@@ -42,6 +43,7 @@ from scripts.testing.fuzz_live_matrix import (
     ManagedTuwunelStack,
     NioOverlay,
     _body_call_id,
+    _git_state_for_file,
     _ModelHandler,
     _parse_markers,
     _persist_failure_bundle,
@@ -3417,6 +3419,51 @@ def test_nio_overlay_preflight_rejects_missing_checkout() -> None:
     """A gate-quality run cannot reach stack creation without an explicit overlay."""
     with pytest.raises(RuntimeError, match="requires --nio-overlay"):
         _prepare_nio_overlay(None)
+
+
+def test_git_state_ignores_only_declared_untracked_build_metadata(tmp_path: Path) -> None:
+    """Editable-build metadata is inert while any other source dirt stays fatal."""
+    root = tmp_path / "nio"
+    module = root / "src" / "nio" / "__init__.py"
+    module.parent.mkdir(parents=True)
+    module.write_text("", encoding="utf-8")
+    subprocess.run(("git", "init", str(root)), check=True, capture_output=True)
+    subprocess.run(("git", "-C", str(root), "add", str(module.relative_to(root))), check=True)
+    subprocess.run(
+        (
+            "git",
+            "-C",
+            str(root),
+            "-c",
+            "user.name=MindRoom Tests",
+            "-c",
+            "user.email=tests@mindroom.local",
+            "commit",
+            "-m",
+            "fixture",
+        ),
+        check=True,
+        capture_output=True,
+    )
+    metadata = root / "src" / "mindroom_nio.egg-info"
+    metadata.mkdir()
+    (metadata / "PKG-INFO").write_text("generated", encoding="utf-8")
+
+    revision, dirty = _git_state_for_file(
+        module,
+        scopes=(root / "src",),
+        ignored_untracked_scopes=(metadata,),
+    )
+
+    assert revision is not None
+    assert dirty is False
+
+    (root / "src" / "unexpected.py").write_text("", encoding="utf-8")
+    assert _git_state_for_file(
+        module,
+        scopes=(root / "src",),
+        ignored_untracked_scopes=(metadata,),
+    )[1]
 
 
 def test_stack_rejects_missing_nio_overlay_before_live_setup(

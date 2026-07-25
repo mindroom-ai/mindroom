@@ -5942,6 +5942,7 @@ def _git_state_for_file(
     path: Path,
     *,
     scopes: Collection[Path] = (),
+    ignored_untracked_scopes: Collection[Path] = (),
 ) -> tuple[str | None, bool]:
     """Return the containing Git revision and whether its checkout is dirty."""
     root = _git_root_for_path(path)
@@ -5963,12 +5964,27 @@ def _git_state_for_file(
         str(scope.resolve().relative_to(root)) for scope in scopes or (path,) if scope.resolve().is_relative_to(root)
     ]
     status = subprocess.run(
-        ("git", "-C", str(root), "status", "--short", "--untracked-files=all", "--", *relative_scopes),
+        ("git", "-C", str(root), "status", "--porcelain=v1", "-z", "--untracked-files=all", "--", *relative_scopes),
         check=False,
         capture_output=True,
         text=True,
         timeout=10,
     )
+    ignored_untracked = tuple(
+        scope.resolve().relative_to(root) for scope in ignored_untracked_scopes if scope.resolve().is_relative_to(root)
+    )
+    dirty_entries = [
+        entry
+        for entry in status.stdout.split("\0")
+        if entry
+        and (
+            not entry.startswith("?? ")
+            or not any(
+                (candidate := Path(entry[3:])) == ignored or candidate.is_relative_to(ignored)
+                for ignored in ignored_untracked
+            )
+        )
+    ]
     revision = subprocess.run(
         ("git", "-C", str(root), "rev-parse", "HEAD"),
         check=False,
@@ -5978,7 +5994,15 @@ def _git_state_for_file(
     )
     return (
         revision.stdout.strip() if revision.returncode == 0 else None,
-        status.returncode != 0 or bool(status.stdout.strip()),
+        status.returncode != 0 or bool(dirty_entries),
+    )
+
+
+def _nio_build_metadata_paths(root: Path) -> tuple[Path, ...]:
+    """Return inert setuptools metadata locations created by editable builds."""
+    return (
+        root / "mindroom_nio.egg-info",
+        root / "src" / "mindroom_nio.egg-info",
     )
 
 
@@ -6079,6 +6103,7 @@ def _prepare_nio_overlay(path: Path | None) -> NioOverlay:
             root / "pyproject.toml",
             root / "uv.lock",
         ),
+        ignored_untracked_scopes=_nio_build_metadata_paths(root),
     )
     if revision is None:
         msg = f"could not verify exact mindroom-nio overlay revision: {root}"
@@ -6235,6 +6260,7 @@ def _validated_import_provenance(
             overlay_path / "pyproject.toml",
             overlay_path / "uv.lock",
         ),
+        ignored_untracked_scopes=_nio_build_metadata_paths(overlay_path),
     )
     if nio_revision != overlay.revision:
         msg = (
