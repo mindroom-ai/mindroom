@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Any, Protocol, cast
 import nio
 from nio.responses import RoomGetEventError
 
+from mindroom.background_tasks import create_background_task
 from mindroom.entity_resolution import current_internal_sender_ids
 from mindroom.logging_config import get_logger
 from mindroom.matrix.cache import (
@@ -32,10 +33,12 @@ from mindroom.matrix.cache import (
     thread_history_result,
 )
 from mindroom.matrix.cache.thread_reads import ThreadReadMode, ThreadReadPolicy
+from mindroom.matrix.cache.thread_repair import ThreadRepairBackoffError
 from mindroom.matrix.cache.thread_write_cache_ops import ThreadMutationCacheOps
 from mindroom.matrix.cache.thread_writes import ThreadLiveWritePolicy, ThreadOutboundWritePolicy, ThreadSyncWritePolicy
 from mindroom.matrix.client_thread_history import (
     BulkThreadRefreshStats,
+    RetainedThreadEventSourceProvider,
     bulk_refresh_room_thread_histories,
     fetch_dispatch_thread_history,
     fetch_dispatch_thread_snapshot,
@@ -51,7 +54,14 @@ from mindroom.matrix.media import (
 from mindroom.matrix.membership_fence import UNCERTIFIED_MEMBERSHIP_EPOCH
 from mindroom.matrix.message_content import extract_edit_body
 from mindroom.matrix.thread_bookkeeping import ThreadMutationResolver
-from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
+from mindroom.matrix.thread_diagnostics import (
+    THREAD_HISTORY_DEGRADED_DIAGNOSTIC,
+    THREAD_HISTORY_ERROR_DIAGNOSTIC,
+    THREAD_HISTORY_SOURCE_CACHE,
+    THREAD_HISTORY_SOURCE_DEGRADED,
+    THREAD_HISTORY_SOURCE_DIAGNOSTIC,
+    is_thread_history_degraded,
+)
 from mindroom.matrix.thread_membership import resolve_event_thread_membership
 from mindroom.matrix.thread_resolution_reuse import ThreadResolutionReuseCache
 from mindroom.matrix.thread_room_scan import (
@@ -68,6 +78,7 @@ if TYPE_CHECKING:
     import structlog
 
     from mindroom.bot_runtime_view import BotRuntimeView
+    from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
     from mindroom.matrix.sync_certification import SyncCacheWriteResult
 
 
@@ -423,6 +434,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
         self._write_cache_ops = ThreadMutationCacheOps(
             logger_getter=lambda: self.logger,
             runtime=self.runtime,
+            schedule_thread_repair=self._schedule_missing_thread_repair,
         )
         self._outbound = ThreadOutboundWritePolicy(
             resolver=resolver,
@@ -677,6 +689,87 @@ class MatrixConversationCache(ConversationCacheProtocol):
             coordinator_queue_wait_ms=coordinator_queue_wait_ms,
         )
 
+    @staticmethod
+    def _event_ids(event_sources: Collection[dict[str, Any]]) -> set[str]:
+        """Return valid event IDs from raw cache or retained-journal sources."""
+        return {
+            event_id for event_source in event_sources if isinstance((event_id := event_source.get("event_id")), str)
+        }
+
+    async def _cached_thread_event_ids_for_repair(
+        self,
+        room_id: str,
+        thread_id: str,
+        *,
+        failure_message: str,
+    ) -> set[str] | None:
+        """Read raw event IDs for repair bookkeeping without failing the user-facing read."""
+        try:
+            event_sources = await self.runtime.event_cache.get_thread_events(room_id, thread_id)
+        except Exception as exc:
+            self.logger.warning(
+                failure_message,
+                room_id=room_id,
+                thread_id=thread_id,
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+            return None
+        return self._event_ids(event_sources or ())
+
+    async def _prepare_retained_thread_repair_deltas(
+        self,
+        coordinator: EventCacheWriteCoordinator,
+        room_id: str,
+        thread_id: str,
+        *,
+        principal_id: str,
+    ) -> None:
+        """Force a refill when certified retained deltas are not yet in raw cache."""
+        retained_event_ids = self._event_ids(
+            coordinator.pending_thread_repair_deltas(
+                room_id,
+                thread_id,
+                coordination_scope=principal_id,
+            ),
+        )
+        if not retained_event_ids:
+            return
+        cached_event_ids = await self._cached_thread_event_ids_for_repair(
+            room_id,
+            thread_id,
+            failure_message="Failed to inspect retained thread deltas before repair",
+        )
+        if cached_event_ids is None or retained_event_ids - cached_event_ids:
+            await self._write_cache_ops.invalidate_known_thread(
+                room_id,
+                thread_id,
+                reason="retained_thread_delta_missing",
+            )
+
+    async def _acknowledge_repaired_thread_deltas(
+        self,
+        coordinator: EventCacheWriteCoordinator,
+        room_id: str,
+        thread_id: str,
+        *,
+        principal_id: str,
+    ) -> None:
+        """Forget retained deltas proven present in the repaired raw snapshot."""
+        repaired_event_ids = await self._cached_thread_event_ids_for_repair(
+            room_id,
+            thread_id,
+            failure_message="Failed to inspect repaired thread cache for retained deltas",
+        )
+        if repaired_event_ids is None:
+            return
+        coordinator.acknowledge_thread_repair_deltas(
+            room_id,
+            thread_id,
+            repaired_event_ids,
+            coordination_scope=principal_id,
+        )
+
     async def _fetch_thread_from_client(
         self,
         fetcher: Callable[..., Awaitable[ThreadHistoryResult]],
@@ -686,17 +779,139 @@ class MatrixConversationCache(ConversationCacheProtocol):
         caller_label: str,
         coordinator_queue_wait_ms: float,
     ) -> ThreadHistoryResult:
-        fetch_started_at = time.time()
-        return await fetcher(
-            self._require_client(),
-            room_id,
-            thread_id,
-            event_cache=self.runtime.event_cache,
-            cache_write_guard_started_at=fetch_started_at,
-            trusted_sender_ids=self._trusted_sender_ids(),
-            caller_label=caller_label,
-            coordinator_queue_wait_ms=coordinator_queue_wait_ms,
-            resolution_reuse=self._thread_resolution_reuse,
+        coordinator = self.runtime.event_cache_write_coordinator
+        if coordinator is None:
+            return await fetcher(
+                self._require_client(),
+                room_id,
+                thread_id,
+                event_cache=self.runtime.event_cache,
+                trusted_sender_ids=self._trusted_sender_ids(),
+                caller_label=caller_label,
+                coordinator_queue_wait_ms=coordinator_queue_wait_ms,
+                resolution_reuse=self._thread_resolution_reuse,
+            )
+
+        principal_id = self.runtime.event_cache.principal_id
+
+        async def repair() -> ThreadHistoryResult:
+            def pending_event_sources() -> tuple[dict[str, Any], ...]:
+                return coordinator.pending_thread_repair_deltas(
+                    room_id,
+                    thread_id,
+                    coordination_scope=principal_id,
+                )
+
+            await self._prepare_retained_thread_repair_deltas(
+                coordinator,
+                room_id,
+                thread_id,
+                principal_id=principal_id,
+            )
+            result = await fetcher(
+                self._require_client(),
+                room_id,
+                thread_id,
+                event_cache=self.runtime.event_cache,
+                trusted_sender_ids=self._trusted_sender_ids(),
+                caller_label=caller_label,
+                coordinator_queue_wait_ms=coordinator_queue_wait_ms,
+                resolution_reuse=self._thread_resolution_reuse,
+                retained_event_sources=RetainedThreadEventSourceProvider(pending_event_sources),
+            )
+            if self._thread_repair_result_is_usable(result):
+                await self._acknowledge_repaired_thread_deltas(
+                    coordinator,
+                    room_id,
+                    thread_id,
+                    principal_id=principal_id,
+                )
+            return result
+
+        try:
+            repair_run = await coordinator.run_thread_repair(
+                room_id,
+                thread_id,
+                repair,
+                result_is_usable=self._thread_repair_result_is_usable,
+                acknowledged_event_ids=lambda _result: (),
+                coordination_scope=principal_id,
+            )
+        except ThreadRepairBackoffError as exc:
+            self.logger.warning(
+                "Thread cache repair suppressed during bounded backoff",
+                room_id=room_id,
+                thread_id=thread_id,
+                caller_label=caller_label,
+                retry_after_seconds=exc.retry_after_seconds,
+            )
+            return thread_history_result(
+                [],
+                is_full_history=False,
+                diagnostics={
+                    THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_DEGRADED,
+                    THREAD_HISTORY_DEGRADED_DIAGNOSTIC: True,
+                    THREAD_HISTORY_ERROR_DIAGNOSTIC: "cache_repair_backoff",
+                    "cache_repair_backoff_seconds": exc.retry_after_seconds,
+                },
+            )
+        result = repair_run.value
+        if not repair_run.joined or result.is_full_history or fetcher is fetch_dispatch_thread_snapshot:
+            return result
+        if self._thread_repair_result_is_usable(result):
+            return await self._fetch_thread_from_client(
+                fetcher,
+                room_id,
+                thread_id,
+                caller_label=caller_label,
+                coordinator_queue_wait_ms=coordinator_queue_wait_ms,
+            )
+        return result
+
+    @staticmethod
+    def _thread_repair_result_is_usable(result: ThreadHistoryResult) -> bool:
+        """Return whether one flight left a trusted durable snapshot."""
+        source = result.diagnostics.get(THREAD_HISTORY_SOURCE_DIAGNOSTIC)
+        return source == THREAD_HISTORY_SOURCE_CACHE or result.diagnostics.get("cache_repair_usable") is True
+
+    def _schedule_missing_thread_repair(self, room_id: str, thread_id: str) -> None:
+        """Schedule bounded background repair after an append finds no snapshot."""
+        coordinator = self.runtime.event_cache_write_coordinator
+        if coordinator is None:
+            return
+
+        async def repair() -> None:
+            try:
+                await self._fetch_thread_from_client(
+                    fetch_dispatch_thread_snapshot,
+                    room_id,
+                    thread_id,
+                    caller_label="missing_cache_live_append_repair",
+                    coordinator_queue_wait_ms=0.0,
+                )
+            except ThreadRepairBackoffError as exc:
+                self.logger.debug(
+                    "Thread cache repair remains in backoff",
+                    room_id=room_id,
+                    thread_id=thread_id,
+                    retry_after_seconds=exc.retry_after_seconds,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self.logger.warning(
+                    "Background thread cache repair failed",
+                    room_id=room_id,
+                    thread_id=thread_id,
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                )
+
+        create_background_task(
+            repair(),
+            name="matrix_cache_schedule_missing_thread_repair",
+            owner=coordinator.background_task_owner,
+            log_exceptions=False,
         )
 
     async def _bulk_refresh_startup_threads(
@@ -704,7 +919,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
         room_id: str,
         thread_ids: Collection[str],
     ) -> BulkThreadRefreshStats:
-        """Refresh one room's startup threads in one scan under the room write barrier."""
+        """Refresh startup threads without occupying the live write coordinator during the scan."""
 
         async def refresh_room_threads() -> BulkThreadRefreshStats:
             return await bulk_refresh_room_thread_histories(
@@ -716,19 +931,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
                 max_scan_pages=_STARTUP_PREWARM_MAX_SCAN_PAGES,
             )
 
-        coordinator = self.runtime.event_cache_write_coordinator
-        if coordinator is None:
-            return await refresh_room_threads()
-        return cast(
-            "BulkThreadRefreshStats",
-            await coordinator.queue_room_update(
-                room_id,
-                refresh_room_threads,
-                name="matrix_cache_bulk_startup_thread_prewarm",
-                log_exceptions=False,
-                coordination_scope=self.runtime.event_cache.principal_id,
-            ),
-        )
+        return await refresh_room_threads()
 
     def _log_startup_thread_prewarm_complete(
         self,

@@ -42,9 +42,11 @@ class ThreadMutationCacheOps:
         *,
         logger_getter: Callable[[], structlog.stdlib.BoundLogger],
         runtime: BotRuntimeView,
+        schedule_thread_repair: Callable[[str, str], None] | None = None,
     ) -> None:
         self._logger_getter = logger_getter
         self.runtime = runtime
+        self._schedule_thread_repair = schedule_thread_repair
 
     @property
     def logger(self) -> structlog.stdlib.BoundLogger:
@@ -314,9 +316,11 @@ class ThreadMutationCacheOps:
                 event_id=event_id,
                 context=context,
             )
+            if self._schedule_thread_repair is not None:
+                self._schedule_thread_repair(room_id, thread_id)
             return False
         try:
-            await self.runtime.event_cache.revalidate_thread_after_incremental_update(
+            revalidated = await self.runtime.event_cache.revalidate_thread_after_incremental_update(
                 room_id,
                 thread_id,
             )
@@ -331,4 +335,32 @@ class ThreadMutationCacheOps:
             )
             if raise_on_failure:
                 raise
+        else:
+            coordinator = self.runtime.event_cache_write_coordinator
+            if revalidated and coordinator is not None and isinstance(event_id, str):
+                coordinator.acknowledge_thread_repair_deltas(
+                    room_id,
+                    thread_id,
+                    (event_id,),
+                    coordination_scope=self.runtime.event_cache.principal_id,
+                )
+            elif not revalidated and self._schedule_thread_repair is not None:
+                self._schedule_thread_repair(room_id, thread_id)
         return True
+
+    def retain_thread_repair_delta(
+        self,
+        room_id: str,
+        thread_id: str,
+        event_source: dict[str, Any],
+    ) -> None:
+        """Retain one certified event before its ordered append begins."""
+        coordinator = self.runtime.event_cache_write_coordinator
+        if coordinator is None:
+            return
+        coordinator.retain_thread_repair_delta(
+            room_id,
+            thread_id,
+            event_source,
+            coordination_scope=self.runtime.event_cache.principal_id,
+        )

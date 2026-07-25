@@ -17,6 +17,7 @@ from mindroom.matrix import client_thread_history
 from mindroom.matrix.cache import (
     ConversationEventCache,
     SharedConversationEventCache,
+    ThreadCacheReplaceOutcome,
     postgres_event_cache_events,
     postgres_event_cache_threads,
     sqlite_event_cache,
@@ -1106,7 +1107,7 @@ async def test_pre_departure_thread_refill_cannot_resurrect_after_rejoin(
             fetch_started_at=100.0,
         )
 
-        assert replaced is False
+        assert replaced.outcome is ThreadCacheReplaceOutcome.WRITES_UNAVAILABLE
         assert await cache.get_thread_events(room_id, thread_id) is None
         assert await cache.get_event(room_id, "$redacted") is None
     finally:
@@ -1158,7 +1159,7 @@ async def test_pre_departure_thread_refill_from_another_runtime_cannot_resurrect
             fetch_started_at=state.room_invalidated_at - 1.0,
         )
 
-        assert replaced is False
+        assert replaced.outcome is ThreadCacheReplaceOutcome.WRITES_UNAVAILABLE
         assert await departing_cache.get_thread_events(room_id, thread_id) is None
         assert await departing_cache.get_event(room_id, "$secret") is None
 

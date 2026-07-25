@@ -1701,6 +1701,7 @@ depends_on = [
     "mindroom.matrix.cache.event_normalization",
     "mindroom.matrix.cache.write_coordinator",
     "mindroom.matrix.cache.thread_cache_helpers",
+    "mindroom.matrix.cache.thread_cache_state",
     "mindroom.matrix.cache.thread_history_result",
 ]
 
@@ -1807,6 +1808,14 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.matrix.cache.thread_repair"
+depends_on = []
+visibility = [
+    "mindroom.matrix.cache.write_coordinator",
+    "mindroom.matrix.conversation_cache",
+]
+
+[[modules]]
 path = "mindroom.matrix.cache.thread_cache_helpers"
 depends_on = []
 
@@ -1822,6 +1831,7 @@ visibility = [
 path = "mindroom.matrix.cache.thread_cache_state"
 depends_on = ["mindroom.matrix.cache.event_cache"]
 visibility = [
+    "mindroom.matrix.cache",
     "mindroom.matrix.cache.postgres_event_cache",
     "mindroom.matrix.cache.postgres_event_cache_threads",
     "mindroom.matrix.cache.sqlite_event_cache",
@@ -1916,7 +1926,7 @@ visibility = ["mindroom.runtime_support"]
 
 [[modules]]
 path = "mindroom.matrix.cache.write_coordinator"
-depends_on = []
+depends_on = ["mindroom.matrix.cache.thread_repair"]
 
 [[modules]]
 path = "mindroom.matrix.cache.outbound_thread_reservations"
@@ -1937,10 +1947,12 @@ depends_on = [
 [[modules]]
 path = "mindroom.matrix.conversation_cache"
 depends_on = [
+    "mindroom.background_tasks",
     "mindroom.entity_resolution",
     "mindroom.matrix.cache",
     "mindroom.matrix.cache.thread_history_result",
     "mindroom.matrix.cache.thread_reads",
+    "mindroom.matrix.cache.thread_repair",
     "mindroom.matrix.cache.thread_write_cache_ops",
     "mindroom.matrix.cache.thread_writes",
     "mindroom.matrix.client_thread_history",
@@ -3790,6 +3802,8 @@ expose = [
     "EventCacheWriteCoordinator",
     "SharedConversationEventCache",
     "ThreadCacheState",
+    "ThreadCacheReplaceOutcome",
+    "ThreadCacheReplaceResult",
     "ThreadHistoryResult",
     "ThreadRevision",
     "is_opaque_encrypted_event_source",
@@ -4027,6 +4041,7 @@ from = ["mindroom.matrix.client_visible_messages"]
 expose = [
     "fetch_thread_event_sources_via_room_messages",
     "BulkThreadRefreshStats",
+    "RetainedThreadEventSourceProvider",
     "RoomThreadsPageError",
     "ThreadRoomScanRootNotFoundError",
     "bulk_refresh_room_thread_histories",

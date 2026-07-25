@@ -17,7 +17,12 @@ import pytest
 from mindroom.config.matrix import CacheConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.logging_config import get_logger
-from mindroom.matrix.cache import postgres_event_cache_threads, sqlite_event_cache, sqlite_event_cache_threads
+from mindroom.matrix.cache import (
+    ThreadCacheReplaceOutcome,
+    postgres_event_cache_threads,
+    sqlite_event_cache,
+    sqlite_event_cache_threads,
+)
 from mindroom.matrix.cache.event_cache import EventCacheBackendUnavailableError
 from mindroom.matrix.cache.postgres_event_cache import (
     PostgresEventCache,
@@ -1762,7 +1767,7 @@ async def test_postgres_event_cache_flushes_pending_invalidations_before_guarded
             fetch_started_at=150.0,
         )
 
-        assert replaced is False
+        assert replaced.outcome is ThreadCacheReplaceOutcome.INVALIDATED
         state = await cache.get_thread_cache_state(room_id, thread_id)
         assert state is not None
         assert state.invalidated_at == 200.0
@@ -1817,7 +1822,7 @@ async def test_postgres_event_cache_flushes_newer_thread_marker_with_pending_roo
             fetch_started_at=150.0,
         )
 
-        assert replaced is False
+        assert replaced.outcome is ThreadCacheReplaceOutcome.INVALIDATED
         state = await cache.get_thread_cache_state(room_id, thread_id)
         assert state is not None
         assert state.room_invalidated_at == 100.0
@@ -1892,7 +1897,7 @@ async def test_postgres_event_cache_preserves_pending_marker_recorded_during_flu
             fetch_started_at=150.0,
         )
 
-        assert replaced is False
+        assert replaced.outcome is ThreadCacheReplaceOutcome.INVALIDATED
         assert injected_newer_pending_marker is True
         diagnostics = cache.runtime_diagnostics()
         assert diagnostics["cache_postgres_pending_thread_invalidations"] == 1

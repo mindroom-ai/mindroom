@@ -22,6 +22,7 @@ from mindroom.config.models import ModelConfig
 from mindroom.conversation_resolver import ConversationResolver, ConversationResolverDeps, _ThreadIdLookup
 from mindroom.matrix.cache import (
     ConversationEventCache,
+    ThreadCacheReplaceOutcome,
     ThreadCacheState,
     event_normalization,
     sqlite_event_cache_events,
@@ -32,6 +33,7 @@ from mindroom.matrix.cache.event_batching import group_lookup_events_by_room
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.matrix.cache.thread_reads import ThreadReadMode
+from mindroom.matrix.cache.thread_repair import ThreadRepairRunResult
 from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
 from mindroom.matrix.client_thread_history import BulkThreadRefreshStats, fetch_thread_history
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
@@ -323,13 +325,13 @@ async def test_conversation_cache_thread_reads_forward_client_fetch_metadata(
     client = MagicMock()
     conversation_cache = _conversation_cache_for_thread_reads(tmp_path, event_cache, client=client)
     read_modes = [
-        ("get_thread_history", "fetch_thread_history", True, 101.0, 50.0),
-        ("get_dispatch_thread_snapshot", "fetch_dispatch_thread_snapshot", False, 102.0, 75.0),
-        ("get_dispatch_thread_history", "fetch_dispatch_thread_history", True, 103.0, 100.0),
+        ("get_thread_history", "fetch_thread_history", True, 50.0),
+        ("get_dispatch_thread_snapshot", "fetch_dispatch_thread_snapshot", False, 75.0),
+        ("get_dispatch_thread_history", "fetch_dispatch_thread_history", True, 100.0),
     ]
     fetchers = {
         name: AsyncMock(return_value=thread_history_result([], is_full_history=is_full_history))
-        for _method_name, name, is_full_history, _guard_started_at, _queue_wait_ms in read_modes
+        for _method_name, name, is_full_history, _queue_wait_ms in read_modes
     }
 
     try:
@@ -343,7 +345,6 @@ async def test_conversation_cache_thread_reads_forward_client_fetch_metadata(
                 "mindroom.matrix.conversation_cache.fetch_dispatch_thread_history",
                 fetchers["fetch_dispatch_thread_history"],
             ),
-            patch("mindroom.matrix.conversation_cache.time.time", side_effect=[101.0, 102.0, 103.0]),
             patch(
                 "mindroom.matrix.cache.thread_reads.time.perf_counter",
                 side_effect=[1.0, 1.05, 2.0, 2.01, 2.075, 2.075, 2.075, 3.0, 3.01, 3.1, 3.1, 3.1],
@@ -354,7 +355,7 @@ async def test_conversation_cache_thread_reads_forward_client_fetch_metadata(
                 "get_dispatch_thread_snapshot": conversation_cache.get_dispatch_thread_snapshot,
                 "get_dispatch_thread_history": conversation_cache.get_dispatch_thread_history,
             }
-            for method_name, _name, is_full_history, _guard_started_at, _queue_wait_ms in read_modes:
+            for method_name, _name, is_full_history, _queue_wait_ms in read_modes:
                 result = await read_methods[method_name](
                     "!room:localhost",
                     "$thread:localhost",
@@ -362,13 +363,12 @@ async def test_conversation_cache_thread_reads_forward_client_fetch_metadata(
                 )
                 assert result.is_full_history is is_full_history
 
-        for method_name, name, _is_full_history, guard_started_at, queue_wait_ms in read_modes:
+        for method_name, name, _is_full_history, queue_wait_ms in read_modes:
             fetchers[name].assert_awaited_once_with(
                 client,
                 "!room:localhost",
                 "$thread:localhost",
                 event_cache=event_cache,
-                cache_write_guard_started_at=guard_started_at,
                 trusted_sender_ids=conversation_cache._trusted_sender_ids(),
                 caller_label=f"caller-{method_name}",
                 coordinator_queue_wait_ms=queue_wait_ms,
@@ -393,7 +393,6 @@ async def test_dispatch_thread_read_degrades_when_cache_coordinator_never_drains
 
     coordinator = MagicMock()
     coordinator.wait_for_thread_idle = AsyncMock(side_effect=never_idle)
-    coordinator.run_thread_update = AsyncMock(side_effect=AssertionError("timed-out reads must not enter refresh"))
     conversation_cache.runtime.event_cache_write_coordinator = coordinator
     _set_dispatch_thread_read_timeout(conversation_cache, 0.01)
 
@@ -416,7 +415,6 @@ async def test_dispatch_thread_read_degrades_when_cache_coordinator_never_drains
     assert result.diagnostics["thread_read_source"] == "degraded"
     assert result.diagnostics["caller_label"] == "dispatch_context"
     coordinator.wait_for_thread_idle.assert_awaited_once()
-    coordinator.run_thread_update.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -474,10 +472,10 @@ async def test_dispatch_thread_read_timeout_does_not_cancel_pending_cache_write(
 
 
 @pytest.mark.asyncio
-async def test_dispatch_thread_read_bypasses_refresh_queue_after_idle_wait(
+async def test_dispatch_thread_read_joins_singleflight_repair_after_idle_wait(
     tmp_path: Path,
 ) -> None:
-    """Dispatch fetches should bypass coordinator queuing after the bounded idle wait."""
+    """Dispatch fetches should enter single-flight repair after the bounded idle wait."""
     event_cache = SqliteEventCache(tmp_path / "event_cache.db")
     await event_cache.initialize()
     client = MagicMock()
@@ -485,7 +483,17 @@ async def test_dispatch_thread_read_bypasses_refresh_queue_after_idle_wait(
 
     coordinator = MagicMock()
     coordinator.wait_for_thread_idle = AsyncMock(return_value=None)
-    coordinator.run_thread_update = AsyncMock(side_effect=AssertionError("dispatch reads should bypass refresh queue"))
+    coordinator.pending_thread_repair_deltas.return_value = ()
+
+    async def run_thread_repair(
+        _room_id: str,
+        _thread_id: str,
+        repair: Callable[[], Awaitable[ThreadHistoryResult]],
+        **_kwargs: object,
+    ) -> ThreadRepairRunResult[ThreadHistoryResult]:
+        return ThreadRepairRunResult(value=await repair(), joined=False)
+
+    coordinator.run_thread_repair = AsyncMock(side_effect=run_thread_repair)
     conversation_cache.runtime.event_cache_write_coordinator = coordinator
     fetched_history = thread_history_result([], is_full_history=True)
 
@@ -508,7 +516,7 @@ async def test_dispatch_thread_read_bypasses_refresh_queue_after_idle_wait(
     assert result == []
     assert result.is_full_history is True
     coordinator.wait_for_thread_idle.assert_awaited_once()
-    coordinator.run_thread_update.assert_not_awaited()
+    coordinator.run_thread_repair.assert_awaited_once()
     fetch_dispatch_thread_history.assert_awaited_once()
 
 
@@ -522,12 +530,13 @@ async def test_dispatch_thread_read_degrades_when_fetcher_stalls(
     client = MagicMock()
     conversation_cache = _conversation_cache_for_thread_reads(tmp_path, event_cache, client=client)
 
-    async def never_returns(*_args: object, **_kwargs: object) -> ThreadHistoryResult:
-        await asyncio.Event().wait()
+    release_fetch = asyncio.Event()
 
-    coordinator = MagicMock()
-    coordinator.wait_for_thread_idle = AsyncMock(return_value=None)
-    coordinator.run_thread_update = AsyncMock(side_effect=AssertionError("dispatch reads should bypass refresh queue"))
+    async def never_returns(*_args: object, **_kwargs: object) -> ThreadHistoryResult:
+        await release_fetch.wait()
+        return thread_history_result([], is_full_history=False)
+
+    coordinator = EventCacheWriteCoordinator(logger=MagicMock())
     conversation_cache.runtime.event_cache_write_coordinator = coordinator
     _set_dispatch_thread_read_timeout(conversation_cache, 0.01)
 
@@ -545,6 +554,8 @@ async def test_dispatch_thread_read_degrades_when_fetcher_stalls(
                 timeout=0.2,
             )
     finally:
+        release_fetch.set()
+        await coordinator.close()
         await event_cache.close()
 
     assert result == []
@@ -554,8 +565,6 @@ async def test_dispatch_thread_read_degrades_when_fetcher_stalls(
     assert result.diagnostics["thread_read_source"] == "degraded"
     assert result.diagnostics["caller_label"] == "dispatch_context"
     assert "dispatch_fetch_wait_ms" in result.diagnostics
-    coordinator.wait_for_thread_idle.assert_awaited_once()
-    coordinator.run_thread_update.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -675,7 +684,6 @@ async def test_dispatch_thread_read_uses_single_deadline_after_coordinator_wait(
 
     coordinator = MagicMock()
     coordinator.wait_for_thread_idle = AsyncMock(return_value=None)
-    coordinator.run_thread_update = AsyncMock(side_effect=AssertionError("dispatch reads should bypass refresh queue"))
     conversation_cache.runtime.event_cache_write_coordinator = coordinator
     _set_dispatch_thread_read_timeout(conversation_cache, 1.0)
 
@@ -707,7 +715,6 @@ async def test_dispatch_thread_read_uses_single_deadline_after_coordinator_wait(
     assert result.diagnostics["thread_read_source"] == "degraded"
     assert "dispatch_fetch_wait_ms" in result.diagnostics
     coordinator.wait_for_thread_idle.assert_awaited_once()
-    coordinator.run_thread_update.assert_not_awaited()
     fetch_dispatch_thread_snapshot.assert_not_awaited()
 
 
@@ -721,17 +728,18 @@ async def test_strict_thread_history_uses_no_stale_fetch_without_dispatch_timeou
     client = MagicMock()
     conversation_cache = _conversation_cache_for_thread_reads(tmp_path, event_cache, client=client)
 
-    async def run_thread_update(
+    async def run_thread_repair(
         _room_id: str,
         _thread_id: str,
-        update_coro_factory: Callable[[], Awaitable[ThreadHistoryResult]],
+        repair: Callable[[], Awaitable[ThreadHistoryResult]],
         **_kwargs: object,
-    ) -> ThreadHistoryResult:
-        return await update_coro_factory()
+    ) -> ThreadRepairRunResult[ThreadHistoryResult]:
+        return ThreadRepairRunResult(value=await repair(), joined=False)
 
     coordinator = MagicMock()
     coordinator.wait_for_thread_idle = AsyncMock(return_value=None)
-    coordinator.run_thread_update = AsyncMock(side_effect=run_thread_update)
+    coordinator.pending_thread_repair_deltas.return_value = ()
+    coordinator.run_thread_repair = AsyncMock(side_effect=run_thread_repair)
     conversation_cache.runtime.event_cache_write_coordinator = coordinator
     fetched_history = thread_history_result([], is_full_history=True)
 
@@ -756,8 +764,7 @@ async def test_strict_thread_history_uses_no_stale_fetch_without_dispatch_timeou
 
     assert result.is_full_history is True
     coordinator.wait_for_thread_idle.assert_awaited_once()
-    coordinator.run_thread_update.assert_awaited_once()
-    assert coordinator.run_thread_update.await_args.kwargs["name"] == "matrix_cache_refresh_strict_thread_history"
+    coordinator.run_thread_repair.assert_awaited_once()
     fetch_dispatch_thread_history.assert_awaited_once()
 
 
@@ -768,21 +775,23 @@ async def test_fresh_strict_history_bypasses_inherited_turn_memoization(tmp_path
     await event_cache.initialize()
     conversation_cache = _conversation_cache_for_thread_reads(tmp_path, event_cache, client=MagicMock())
 
-    async def run_thread_update(
+    async def run_thread_repair(
         _room_id: str,
         _thread_id: str,
-        update_coro_factory: Callable[[], Awaitable[ThreadHistoryResult]],
+        repair: Callable[[], Awaitable[ThreadHistoryResult]],
         **_kwargs: object,
-    ) -> ThreadHistoryResult:
-        return await update_coro_factory()
+    ) -> ThreadRepairRunResult[ThreadHistoryResult]:
+        return ThreadRepairRunResult(value=await repair(), joined=False)
 
     coordinator = MagicMock()
     coordinator.wait_for_thread_idle = AsyncMock(return_value=None)
-    coordinator.run_thread_update = AsyncMock(side_effect=run_thread_update)
+    coordinator.pending_thread_repair_deltas.return_value = ()
+    coordinator.run_thread_repair = AsyncMock(side_effect=run_thread_repair)
     conversation_cache.runtime.event_cache_write_coordinator = coordinator
     before_delivery = thread_history_result(
         [ResolvedVisibleMessage.synthetic(sender="@user:localhost", body="Question", event_id="$question")],
         is_full_history=True,
+        diagnostics={"cache_repair_usable": True},
     )
     after_delivery = thread_history_result(
         [
@@ -790,6 +799,7 @@ async def test_fresh_strict_history_bypasses_inherited_turn_memoization(tmp_path
             ResolvedVisibleMessage.synthetic(sender="@bot:localhost", body="Answer", event_id="$answer"),
         ],
         is_full_history=True,
+        diagnostics={"cache_repair_usable": True},
     )
 
     try:
@@ -826,7 +836,7 @@ async def test_strict_thread_history_propagates_cache_coordinator_timeout(
 
     coordinator = MagicMock()
     coordinator.wait_for_thread_idle = AsyncMock(side_effect=TimeoutError("strict wait timed out"))
-    coordinator.run_thread_update = AsyncMock(side_effect=AssertionError("strict read should not fetch after timeout"))
+    coordinator.run_thread_repair = AsyncMock(side_effect=AssertionError("strict read should not fetch after timeout"))
     conversation_cache.runtime.event_cache_write_coordinator = coordinator
 
     try:
@@ -840,7 +850,7 @@ async def test_strict_thread_history_propagates_cache_coordinator_timeout(
         await event_cache.close()
 
     coordinator.wait_for_thread_idle.assert_awaited_once()
-    coordinator.run_thread_update.assert_not_awaited()
+    coordinator.run_thread_repair.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1099,12 +1109,12 @@ async def test_replace_thread_if_not_newer_refuses_after_midflight_invalidation(
     finally:
         await cache.close()
 
-    assert replaced_behind_marker is False
+    assert replaced_behind_marker.outcome is ThreadCacheReplaceOutcome.INVALIDATED
     assert state_after_refusal is not None
     assert state_after_refusal.invalidated_at == 200.0
     assert thread_cache_rejection_reason(state_after_refusal) == "thread_invalidated_after_validation"
 
-    assert replaced_after_marker is True
+    assert replaced_after_marker.outcome is ThreadCacheReplaceOutcome.STORED
     assert state_after_replace is not None
     # The stored validation time is clamped to fetch start, so an invalidation landing during the
     # fetch still outranks this snapshot at read time even if it slipped past the replace guard.
@@ -1143,7 +1153,7 @@ async def test_replace_thread_if_not_newer_refuses_after_midflight_room_invalida
     finally:
         await cache.close()
 
-    assert replaced is False
+    assert replaced.outcome is ThreadCacheReplaceOutcome.INVALIDATED
     assert state is not None
     assert state.room_invalidated_at == 200.0
     assert thread_cache_rejection_reason(state) == "room_invalidated_after_validation"

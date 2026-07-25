@@ -926,8 +926,8 @@ async def test_bot_ready_skips_threads_api_when_local_recent_cache_is_sufficient
 
 
 @pytest.mark.asyncio
-async def test_startup_thread_prewarm_bulk_refreshes_once_under_room_barrier(tmp_path: Path) -> None:
-    """Startup prewarm should use one room scan and serialize competing local cache writes."""
+async def test_startup_thread_prewarm_bulk_refresh_does_not_block_live_write(tmp_path: Path) -> None:
+    """Startup prewarm should use one room scan without monopolizing live cache writes."""
     bot = _agent_bot(tmp_path)
     bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id or "@mindroom_code:localhost")
     bot._conversation_cache.logger = MagicMock()
@@ -975,11 +975,11 @@ async def test_startup_thread_prewarm_bulk_refreshes_once_under_room_barrier(tmp
                 name="test_competing_startup_write",
                 coordination_scope=bot.event_cache.principal_id,
             )
-            await asyncio.sleep(0)
-            assert not competing_write_started.is_set()
+            await asyncio.wait_for(competing_write_started.wait(), timeout=1.0)
+            assert prewarm_task.done() is False
+            await competing_task
             release_bulk_refresh.set()
             assert await prewarm_task
-            await competing_task
         finally:
             release_bulk_refresh.set()
             await asyncio.gather(prewarm_task, return_exceptions=True)

@@ -19,7 +19,12 @@ import mindroom.matrix.client_thread_history as matrix_client_module
 from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.matrix.cache import ThreadHistoryResult, thread_cache_rejection_reason
+from mindroom.matrix.cache import (
+    ThreadCacheReplaceOutcome,
+    ThreadCacheReplaceResult,
+    ThreadHistoryResult,
+    thread_cache_rejection_reason,
+)
 from mindroom.matrix.cache.event_cache import ThreadCacheState
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from mindroom.matrix.cache.thread_cache_state import THREAD_HISTORY_TRUST_METADATA_KEY
@@ -30,6 +35,7 @@ from mindroom.matrix.client_thread_history import (
     _event_source_for_cache,
     _fetch_thread_history_via_room_messages_with_events,
     _group_scanned_sources_by_thread,
+    _merge_retained_thread_event_sources,
     _resolve_thread_history_from_event_sources_timed,
 )
 from mindroom.matrix.conversation_cache import MatrixConversationCache
@@ -94,6 +100,45 @@ def build_threaded_edit_content(*args: object, **kwargs: object) -> dict[str, ob
 
 class TestThreadHistory:
     """Test thread history fetching functionality."""
+
+    def test_retained_delta_does_not_resurrect_redacted_fetched_event(self) -> None:
+        """Authoritative fetched state must win when the retained journal has the same event ID."""
+        fetched_sources = [
+            {
+                "event_id": "$thread_root",
+                "origin_server_ts": 1000,
+                "type": "m.room.message",
+                "content": {"body": "Root"},
+            },
+            {
+                "event_id": "$reply",
+                "origin_server_ts": 2000,
+                "type": "m.room.message",
+                "content": {},
+                "unsigned": {"redacted_because": {"event_id": "$redaction"}},
+            },
+        ]
+        retained_sources = [
+            {
+                "event_id": "$reply",
+                "origin_server_ts": 2000,
+                "type": "m.room.message",
+                "content": {
+                    "body": "Pre-redaction reply",
+                    "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
+                },
+            },
+        ]
+
+        merged, changed = _merge_retained_thread_event_sources(
+            fetched_sources,
+            retained_sources,
+            thread_id="$thread_root",
+        )
+
+        assert changed is False
+        assert merged[1]["content"] == {}
+        assert merged[1]["unsigned"] == {"redacted_because": {"event_id": "$redaction"}}
 
     @pytest.mark.asyncio
     async def test_long_cached_sidecar_thread_uses_one_bounded_cache_read(self) -> None:
@@ -3183,7 +3228,152 @@ class TestThreadHistoryCache:
         broken_cache.replace_thread_if_not_newer = AsyncMock(side_effect=RuntimeError("db broken"))
         history = await fetch_thread_history(client, "!room:localhost", "$thread_root", event_cache=broken_cache)
         assert [message.event_id for message in history] == ["$thread_root", "$reply"]
+        assert history.diagnostics["cache_store_outcome"] == ThreadCacheReplaceOutcome.HARD_FAILURE.value
+        assert history.diagnostics["cache_repair_usable"] is False
         broken_cache.replace_thread_if_not_newer.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_refresh_retries_one_generation_conflict_then_installs_snapshot(self) -> None:
+        """A mid-flight invalidation should trigger one bounded authoritative retry."""
+        event_cache = _event_cache()
+        event_cache.replace_thread_if_not_newer.side_effect = [
+            ThreadCacheReplaceResult(ThreadCacheReplaceOutcome.INVALIDATED),
+            ThreadCacheReplaceResult(ThreadCacheReplaceOutcome.STORED),
+        ]
+        fetch_result = matrix_client_module._ThreadHistoryFetchResult(
+            history=[
+                ResolvedVisibleMessage.synthetic(
+                    sender="@user:localhost",
+                    body="fresh",
+                    event_id="$thread_root",
+                    content={"body": "fresh"},
+                ),
+            ],
+            event_sources=[{"event_id": "$thread_root"}],
+            fetch_ms=1.0,
+            room_scan_pages=1,
+            scanned_event_count=1,
+            resolution_ms=1.0,
+            sidecar_hydration_ms=0.0,
+        )
+
+        with patch(
+            "mindroom.matrix.client_thread_history._fetch_thread_repair_snapshot",
+            new=AsyncMock(return_value=fetch_result),
+        ) as fetch:
+            history = await matrix_client_module.refresh_thread_history_from_source(
+                AsyncMock(),
+                "!room:localhost",
+                "$thread_root",
+                event_cache=event_cache,
+                allow_stale_fallback=False,
+            )
+
+        assert fetch.await_count == 2
+        assert history.diagnostics["cache_store_outcome"] == ThreadCacheReplaceOutcome.STORED.value
+        assert history.diagnostics["cache_repair_attempts"] == 2
+        assert history.diagnostics["cache_repair_usable"] is True
+
+    @pytest.mark.asyncio
+    async def test_refresh_recognizes_existing_newer_usable_cache_winner(self) -> None:
+        """A newer trusted snapshot should win without another fetch or generic failure."""
+        event_cache = _event_cache()
+        event_cache.replace_thread_if_not_newer.return_value = ThreadCacheReplaceResult(
+            ThreadCacheReplaceOutcome.EXISTING_USABLE,
+        )
+        fetched = matrix_client_module._ThreadHistoryFetchResult(
+            history=[
+                ResolvedVisibleMessage.synthetic(
+                    sender="@user:localhost",
+                    body="older fetch",
+                    event_id="$thread_root",
+                    content={"body": "older fetch"},
+                ),
+            ],
+            event_sources=[{"event_id": "$thread_root"}],
+            fetch_ms=1.0,
+            room_scan_pages=1,
+            scanned_event_count=1,
+            resolution_ms=1.0,
+            sidecar_hydration_ms=0.0,
+        )
+        newer = ThreadHistoryResult(
+            [
+                ResolvedVisibleMessage.synthetic(
+                    sender="@user:localhost",
+                    body="newer cache",
+                    event_id="$thread_root",
+                    content={"body": "newer cache"},
+                ),
+            ],
+            is_full_history=True,
+            diagnostics={THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_CACHE},
+        )
+
+        with (
+            patch(
+                "mindroom.matrix.client_thread_history._fetch_thread_repair_snapshot",
+                new=AsyncMock(return_value=fetched),
+            ) as fetch,
+            patch(
+                "mindroom.matrix.client_thread_history._load_cached_thread_history_if_usable",
+                new=AsyncMock(return_value=(newer, None)),
+            ),
+        ):
+            history = await matrix_client_module.refresh_thread_history_from_source(
+                AsyncMock(),
+                "!room:localhost",
+                "$thread_root",
+                event_cache=event_cache,
+                allow_stale_fallback=False,
+            )
+
+        assert fetch.await_count == 1
+        assert [message.body for message in history] == ["newer cache"]
+        assert history.diagnostics["cache_store_outcome"] == ThreadCacheReplaceOutcome.EXISTING_USABLE.value
+        assert history.diagnostics["cache_repair_usable"] is True
+
+    @pytest.mark.asyncio
+    async def test_refresh_reports_unresolved_invalidation_after_bounded_retry(self) -> None:
+        """Repeated invalidation must remain explicit and never become reported cache success."""
+        event_cache = _event_cache()
+        event_cache.replace_thread_if_not_newer.return_value = ThreadCacheReplaceResult(
+            ThreadCacheReplaceOutcome.INVALIDATED,
+        )
+        fetch_result = matrix_client_module._ThreadHistoryFetchResult(
+            history=[
+                ResolvedVisibleMessage.synthetic(
+                    sender="@user:localhost",
+                    body="homeserver fallback",
+                    event_id="$thread_root",
+                    content={"body": "homeserver fallback"},
+                ),
+            ],
+            event_sources=[{"event_id": "$thread_root"}],
+            fetch_ms=1.0,
+            room_scan_pages=1,
+            scanned_event_count=1,
+            resolution_ms=1.0,
+            sidecar_hydration_ms=0.0,
+        )
+
+        with patch(
+            "mindroom.matrix.client_thread_history._fetch_thread_repair_snapshot",
+            new=AsyncMock(return_value=fetch_result),
+        ) as fetch:
+            history = await matrix_client_module.refresh_thread_history_from_source(
+                AsyncMock(),
+                "!room:localhost",
+                "$thread_root",
+                event_cache=event_cache,
+                allow_stale_fallback=False,
+            )
+
+        assert fetch.await_count == 2
+        assert [message.body for message in history] == ["homeserver fallback"]
+        assert history.diagnostics["cache_store_outcome"] == ThreadCacheReplaceOutcome.INVALIDATED.value
+        assert history.diagnostics["cache_repair_attempts"] == 2
+        assert history.diagnostics["cache_repair_usable"] is False
 
     @pytest.mark.asyncio
     async def test_incremental_thread_revalidation_ignores_runtime_age_but_not_room_staleness(
@@ -3999,7 +4189,9 @@ class TestThreadHistoryCache:
         """Authoritative history remains available while every derived cache write is rejected."""
         event_cache = _event_cache()
         event_cache.room_membership_epoch.side_effect = RuntimeError("cache unavailable")
-        event_cache.replace_thread_if_not_newer.return_value = False
+        event_cache.replace_thread_if_not_newer.return_value = ThreadCacheReplaceResult(
+            ThreadCacheReplaceOutcome.WRITES_UNAVAILABLE,
+        )
         fetch_result = matrix_client_module._ThreadHistoryFetchResult(
             history=[
                 ResolvedVisibleMessage.synthetic(
