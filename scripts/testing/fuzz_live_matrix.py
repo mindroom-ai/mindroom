@@ -2304,11 +2304,13 @@ def read_ledger_records(
     A completed record with a visible ``response_event_id`` proves that source
     was answered. A completed record with ``response_event_id`` set to ``None``
     is production's exact durable proof that the source was legitimately
-    skipped as a superseded replay. Missing, malformed, or ``completed=False``
-    records are omitted during live polling, so the oracle can wait for a
-    terminal outcome rather than inferring supersession from chronology alone.
-    Final audits use strict mode and reject every unreadable, malformed, or
+    skipped as a superseded replay. Missing, malformed, or non-terminal records
+    are omitted during live polling, so the oracle can wait for a terminal
+    outcome rather than inferring supersession from chronology alone. Final
+    audits use strict mode and reject every unreadable, malformed, or
     non-terminal entry instead of letting corruption look like an empty ledger.
+    A fully redacted record whose cleanup is complete is already terminal even
+    when ``completed`` remains false.
     """
     raw_records = _load_ledger_rows(ledger_path, strict=strict)
     if raw_records is None:
@@ -2365,8 +2367,12 @@ def _decode_ledger_rows(
             _invalid_ledger(ledger_path, f"record {event_id!r} is malformed", strict=strict)
             continue
         decoded_records[event_id] = record
-        if not record.completed:
+        fully_redacted = not record.replay_source_event_ids
+        cleanup_complete = not record.pending_redaction_cleanup_event_ids
+        if not record.completed and not (fully_redacted and cleanup_complete):
             _invalid_ledger(ledger_path, f"record {event_id!r} is incomplete", strict=strict)
+            continue
+        if not record.completed:
             continue
         records[event_id] = record
     if strict:

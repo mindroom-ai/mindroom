@@ -9,6 +9,7 @@ import shutil
 import signal
 import sys
 from collections import defaultdict
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
@@ -2015,6 +2016,28 @@ def test_strict_ledger_read_rejects_incomplete_record(tmp_path: Path) -> None:
 
     assert live_fuzz.read_ledger_records(ledger_path) == {}
     with pytest.raises(AssertionError, match=r"\$pending.*incomplete"):
+        live_fuzz.read_ledger_records(ledger_path, strict=True)
+
+
+def test_strict_ledger_read_accepts_clean_redaction_tombstone(tmp_path: Path) -> None:
+    """A fully redacted turn is terminal once durable cleanup has completed."""
+    ledger_path = tmp_path / "general_responded.json"
+    tombstone = TurnRecord(
+        source_event_ids=("$stop-reaction",),
+        redacted_source_event_ids=("$stop-reaction",),
+        response_event_id=None,
+        completed=False,
+    )
+    _write_ledger(ledger_path, {"$stop-reaction": tombstone})
+
+    assert live_fuzz.read_ledger_records(ledger_path, strict=True) == {}
+
+    pending_cleanup = replace(
+        tombstone,
+        pending_redaction_cleanup_event_ids=("$stop-reaction",),
+    )
+    _write_ledger(ledger_path, {"$stop-reaction": pending_cleanup})
+    with pytest.raises(AssertionError, match=r"\$stop-reaction.*incomplete"):
         live_fuzz.read_ledger_records(ledger_path, strict=True)
 
 
