@@ -8,7 +8,6 @@ from typing import Any, Literal, cast
 
 from mindroom.matrix.event_info import EventInfo, event_source_is_state_event, event_source_matches_room
 from mindroom.matrix.large_messages import sidecar_upload_is_usable
-from mindroom.matrix.visible_body import visible_content_from_content
 
 PendingApprovalStatus = Literal["pending", "approved", "denied", "expired"]
 _APPROVAL_STATUSES = frozenset({"approved", "denied", "expired", "pending"})
@@ -23,7 +22,8 @@ def _approval_status(content: dict[str, Any]) -> str | None:
 def valid_approval_replacement(event: dict[str, Any]) -> bool:
     """Return whether one replacement carries a valid approval status."""
     content = event.get("content")
-    return isinstance(content, dict) and _approval_status(visible_content_from_content(content)) is not None
+    new_content = content.get("m.new_content") if isinstance(content, dict) else None
+    return isinstance(new_content, dict) and _approval_status(new_content) is not None
 
 
 @dataclass(frozen=True, slots=True)
@@ -120,14 +120,9 @@ class PendingApproval:
 
     def latest_status(self, latest_edit: dict[str, Any] | None) -> PendingApprovalStatus:
         """Return the visible approval status after applying the latest cached edit."""
-        if latest_edit is None:
+        if latest_edit is None or not valid_approval_replacement(latest_edit):
             return self.initial_status
-        content = latest_edit.get("content")
-        if isinstance(content, dict):
-            status = _approval_status(visible_content_from_content(cast("dict[str, object]", content)))
-            if status is not None:
-                return cast("PendingApprovalStatus", status)
-        return self.initial_status
+        return cast("PendingApprovalStatus", latest_edit["content"]["m.new_content"]["status"])
 
 
 def _approvable(content: dict[str, Any]) -> bool:

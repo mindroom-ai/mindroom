@@ -2094,6 +2094,8 @@ def test_pending_approval_ignores_malformed_edit_status() -> None:
 
     assert pending.latest_status({"content": None}) == "approved"
     assert pending.latest_status({"content": {"status": "invalid"}}) == "approved"
+    assert pending.latest_status({"content": {"status": "denied"}}) == "approved"
+    assert pending.latest_status({"content": {"status": "denied", "m.new_content": []}}) == "approved"
 
 
 @pytest.mark.asyncio

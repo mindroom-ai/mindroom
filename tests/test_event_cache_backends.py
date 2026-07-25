@@ -15,6 +15,7 @@ from urllib.parse import quote
 import psycopg
 import pytest
 
+from mindroom.approval_events import valid_approval_replacement
 from mindroom.config.matrix import CacheConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.logging_config import get_logger
@@ -309,6 +310,51 @@ async def _assert_bundled_and_cached_edits_share_validation(
     )
     assert latest is not None
     assert latest["event_id"] == "$newer-valid"
+
+    approval = {
+        "event_id": "$approval",
+        "sender": "@router:localhost",
+        "origin_server_ts": 1000,
+        "type": "io.mindroom.tool_approval",
+        "content": {"status": "pending"},
+    }
+    valid_approval_edit = {
+        **approval,
+        "event_id": "$valid-approval-edit",
+        "origin_server_ts": 2000,
+        "content": {
+            "status": "denied",
+            "m.new_content": {"status": "denied"},
+            "m.relates_to": {"rel_type": "m.replace", "event_id": "$approval"},
+        },
+    }
+    malformed_approval_edits = [
+        {
+            **valid_approval_edit,
+            "event_id": event_id,
+            "origin_server_ts": timestamp,
+            "content": {
+                "status": "approved",
+                **({"m.new_content": []} if event_id == "$non-object" else {}),
+                "m.relates_to": {"rel_type": "m.replace", "event_id": "$approval"},
+            },
+        }
+        for event_id, timestamp in (("$missing", 3000), ("$non-object", 4000))
+    ]
+    await cache.store_events_batch(
+        [
+            ("$approval", room_id, approval),
+            ("$valid-approval-edit", room_id, valid_approval_edit),
+            *[(str(edit["event_id"]), room_id, edit) for edit in malformed_approval_edits],
+        ],
+    )
+    latest_approval_edit = await cache.get_latest_edit(
+        room_id,
+        approval,
+        validator=valid_approval_replacement,
+    )
+    assert latest_approval_edit is not None
+    assert latest_approval_edit["event_id"] == "$valid-approval-edit"
 
 
 async def _assert_invalid_sidecar_owners_are_rejected(

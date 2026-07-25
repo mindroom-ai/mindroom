@@ -184,3 +184,56 @@ def test_ordered_replacements_rejects_self_replacement() -> None:
         )
         == []
     )
+
+
+@pytest.mark.parametrize(
+    ("candidate_shape", "original_room_id", "candidate_room_id"),
+    [
+        ("explicit", [], None),
+        ("bundled", {}, None),
+        ("explicit", None, []),
+        ("bundled", None, {}),
+    ],
+)
+def test_ordered_replacements_rejects_malformed_explicit_room_ids(
+    candidate_shape: str,
+    original_room_id: object,
+    candidate_room_id: object,
+) -> None:
+    """Untrusted room evidence must fail closed without being hashed."""
+    original: dict[str, object] = {
+        "event_id": "$original",
+        "sender": "@alice:localhost",
+        "origin_server_ts": 1000,
+        "type": "m.room.message",
+        "content": {"body": "Original", "msgtype": "m.text"},
+    }
+    candidate: dict[str, object] = {
+        "event_id": "$edit",
+        "sender": "@alice:localhost",
+        "origin_server_ts": 2000,
+        "type": "m.room.message",
+        "content": {
+            "body": "* Edited",
+            "msgtype": "m.text",
+            "m.new_content": {"body": "Edited", "msgtype": "m.text"},
+            "m.relates_to": {"rel_type": "m.replace", "event_id": "$original"},
+        },
+    }
+    if original_room_id is not None:
+        original["room_id"] = original_room_id
+    if candidate_room_id is not None:
+        candidate["room_id"] = candidate_room_id
+    candidates = [candidate] if candidate_shape == "explicit" else []
+    if candidate_shape == "bundled":
+        original["unsigned"] = {"m.relations": {"m.replace": candidate}}
+
+    assert (
+        ordered_replacements(
+            original,
+            candidates,
+            room_id=None,
+            validator=valid_room_message_replacement,
+        )
+        == []
+    )
