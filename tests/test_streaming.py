@@ -28,6 +28,7 @@ from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import (
     STREAM_STATUS_CANCELLED,
     STREAM_STATUS_COMPLETED,
+    STREAM_STATUS_ERROR,
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
     STREAM_STATUS_STREAMING,
@@ -84,7 +85,9 @@ class _FakeGateway:
         *,
         retry_sync_recovery: bool = False,
     ) -> DeliveredMatrixEvent:
-        assert retry_sync_recovery is (content.get(STREAM_STATUS_KEY) == STREAM_STATUS_COMPLETED)
+        assert retry_sync_recovery is (
+            content.get(STREAM_STATUS_KEY) not in {STREAM_STATUS_CANCELLED, STREAM_STATUS_ERROR}
+        )
         self._record(_GatewayOp(kind="send", content=dict(content), display_text=content["body"]))
         return DeliveredMatrixEvent(event_id="$stream_1", content_sent=dict(content))
 
@@ -98,7 +101,9 @@ class _FakeGateway:
         *,
         retry_sync_recovery: bool = False,
     ) -> DeliveredMatrixEvent:
-        assert retry_sync_recovery is (new_content.get(STREAM_STATUS_KEY) == STREAM_STATUS_COMPLETED)
+        assert retry_sync_recovery is (
+            new_content.get(STREAM_STATUS_KEY) not in {STREAM_STATUS_CANCELLED, STREAM_STATUS_ERROR}
+        )
         self._record(_GatewayOp(kind="edit", content=dict(new_content), display_text=new_text))
         return DeliveredMatrixEvent(event_id=f"$edit_{len(self.ops)}", content_sent=dict(new_content))
 
@@ -256,7 +261,7 @@ async def test_nonterminal_delivery_formats_off_event_loop_thread(config: Config
         *,
         retry_sync_recovery: bool = False,
     ) -> DeliveredMatrixEvent:
-        assert retry_sync_recovery is False
+        assert retry_sync_recovery is True
         delivered_content.update(content)
         return DeliveredMatrixEvent(event_id="$stream_1", content_sent=dict(content))
 

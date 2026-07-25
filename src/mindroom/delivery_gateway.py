@@ -196,6 +196,7 @@ class SendTextRequest:  # noqa: D101
     skip_mentions: bool = False
     tool_trace: list[ToolTraceEntry] | None = None
     extra_content: dict[str, Any] | None = None
+    retry_sync_recovery: bool = False
 
 
 @dataclass(frozen=True)
@@ -205,6 +206,7 @@ class EditTextRequest:  # noqa: D101
     new_text: str
     tool_trace: list[ToolTraceEntry] | None = None
     extra_content: dict[str, Any] | None = None
+    retry_sync_recovery: bool = False
 
 
 @dataclass(frozen=True)
@@ -503,7 +505,12 @@ class DeliveryGateway:
             )
         if request.skip_mentions:
             content[SKIP_MENTIONS_KEY] = True
-        delivered = await send_message_result(client, resolved_target.room_id, content)
+        delivered = await send_message_result(
+            client,
+            resolved_target.room_id,
+            content,
+            retry_sync_recovery=request.retry_sync_recovery,
+        )
         if delivered is not None:
             self.deps.resolver.deps.conversation_cache.notify_outbound_message(
                 resolved_target.room_id,
@@ -560,6 +567,7 @@ class DeliveryGateway:
             request.event_id,
             content,
             request.new_text,
+            retry_sync_recovery=request.retry_sync_recovery,
         )
         if delivered is not None:
             self.deps.resolver.deps.conversation_cache.notify_outbound_message(
@@ -707,6 +715,7 @@ class DeliveryGateway:
                     new_text=display_text,
                     tool_trace=draft.tool_trace,
                     extra_content=draft.extra_content,
+                    retry_sync_recovery=True,
                 ),
             )
             if edited:
@@ -747,6 +756,7 @@ class DeliveryGateway:
                 skip_mentions=request.skip_mentions,
                 tool_trace=draft.tool_trace,
                 extra_content=draft.extra_content,
+                retry_sync_recovery=True,
             ),
         )
         if event_id is None:

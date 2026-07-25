@@ -915,7 +915,7 @@ class StreamingResponse:
                 display_text=prepared_delivery.display_text,
                 retry_on_failure=retry_on_failure,
                 retry_without_backoff=retry_without_backoff,
-                retry_sync_recovery=retry_on_failure and is_final,
+                retry_sync_recovery=not is_final or retry_on_failure,
             )
         finally:
             if self._inflight_nonterminal_capture is capture:

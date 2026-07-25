@@ -98,6 +98,11 @@ IN_PROGRESS_MARKER = " ⋯"
 _INTERRUPTION_SUMMARY = "(turn stopped before completion)"
 
 
+def _expects_sync_recovery_retry(content: dict[str, object]) -> bool:
+    """Return whether one normal streaming payload retries transient recovery."""
+    return content.get(STREAM_STATUS_KEY) not in {STREAM_STATUS_CANCELLED, STREAM_STATUS_ERROR}
+
+
 async def _aiter(*events: object) -> AsyncIterator[object]:
     for event in events:
         yield event
@@ -621,7 +626,7 @@ class TestStreamingBehavior:
             *,
             retry_sync_recovery: bool = False,
         ) -> DeliveredMatrixEvent:
-            assert retry_sync_recovery is False
+            assert retry_sync_recovery is (new_content.get(STREAM_STATUS_KEY) != STREAM_STATUS_COMPLETED)
             return DeliveredMatrixEvent(event_id="$edit", content_sent=dict(new_content))
 
         with (
@@ -1907,7 +1912,7 @@ class TestStreamingBehavior:
             *,
             retry_sync_recovery: bool = False,
         ) -> DeliveredMatrixEvent:
-            assert retry_sync_recovery is (new_content.get(STREAM_STATUS_KEY) == STREAM_STATUS_COMPLETED)
+            assert retry_sync_recovery is _expects_sync_recovery_retry(new_content)
             edited_contents.append((new_content, new_text))
             return DeliveredMatrixEvent(event_id="$edit", content_sent=dict(new_content))
 
@@ -1957,7 +1962,7 @@ class TestStreamingBehavior:
             *,
             retry_sync_recovery: bool = False,
         ) -> DeliveredMatrixEvent:
-            assert retry_sync_recovery is (content.get(STREAM_STATUS_KEY) == STREAM_STATUS_COMPLETED)
+            assert retry_sync_recovery is _expects_sync_recovery_retry(content)
             return DeliveredMatrixEvent(event_id="$stream-send", content_sent=dict(content))
 
         async def record_edit(
@@ -1969,7 +1974,7 @@ class TestStreamingBehavior:
             *,
             retry_sync_recovery: bool = False,
         ) -> DeliveredMatrixEvent:
-            assert retry_sync_recovery is (new_content.get(STREAM_STATUS_KEY) == STREAM_STATUS_COMPLETED)
+            assert retry_sync_recovery is _expects_sync_recovery_retry(new_content)
             return DeliveredMatrixEvent(
                 event_id="$stream-edit",
                 content_sent=build_edit_event_content(
@@ -2122,7 +2127,7 @@ class TestStreamingBehavior:
             *,
             retry_sync_recovery: bool = False,
         ) -> DeliveredMatrixEvent:
-            assert retry_sync_recovery is (content.get(STREAM_STATUS_KEY) == STREAM_STATUS_COMPLETED)
+            assert retry_sync_recovery is _expects_sync_recovery_retry(content)
             sent_contents.append(content)
             return DeliveredMatrixEvent(event_id="$stream_1", content_sent=dict(content))
 
@@ -2135,7 +2140,7 @@ class TestStreamingBehavior:
             *,
             retry_sync_recovery: bool = False,
         ) -> DeliveredMatrixEvent:
-            assert retry_sync_recovery is (_new_content.get(STREAM_STATUS_KEY) == STREAM_STATUS_COMPLETED)
+            assert retry_sync_recovery is _expects_sync_recovery_retry(_new_content)
             return DeliveredMatrixEvent(event_id="$stream_1", content_sent={})
 
         with (
@@ -2180,7 +2185,7 @@ class TestStreamingBehavior:
             *,
             retry_sync_recovery: bool = False,
         ) -> DeliveredMatrixEvent:
-            assert retry_sync_recovery is (content.get(STREAM_STATUS_KEY) == STREAM_STATUS_COMPLETED)
+            assert retry_sync_recovery is _expects_sync_recovery_retry(content)
             sent_messages.append((room_id, content))
             return DeliveredMatrixEvent(event_id="$stream_1", content_sent=dict(content))
 
@@ -2396,7 +2401,7 @@ class TestStreamingBehavior:
             *,
             retry_sync_recovery: bool = False,
         ) -> DeliveredMatrixEvent:
-            assert retry_sync_recovery is (_new_content.get(STREAM_STATUS_KEY) == STREAM_STATUS_COMPLETED)
+            assert retry_sync_recovery is _expects_sync_recovery_retry(_new_content)
             edited_texts.append(new_text)
             return DeliveredMatrixEvent(event_id="$edit", content_sent={})
 
@@ -2438,7 +2443,7 @@ class TestStreamingBehavior:
             *,
             retry_sync_recovery: bool = False,
         ) -> DeliveredMatrixEvent:
-            assert retry_sync_recovery is (_new_content.get(STREAM_STATUS_KEY) == STREAM_STATUS_COMPLETED)
+            assert retry_sync_recovery is _expects_sync_recovery_retry(_new_content)
             edited_texts.append(new_text)
             return DeliveredMatrixEvent(event_id="$edit", content_sent={})
 
@@ -2538,7 +2543,7 @@ class TestStreamingBehavior:
             *,
             retry_sync_recovery: bool = False,
         ) -> DeliveredMatrixEvent:
-            assert retry_sync_recovery is (new_content.get(STREAM_STATUS_KEY) == STREAM_STATUS_COMPLETED)
+            assert retry_sync_recovery is _expects_sync_recovery_retry(new_content)
             edited_messages.append((new_content, new_text))
             return DeliveredMatrixEvent(event_id="$edit", content_sent=dict(new_content))
 
@@ -2591,7 +2596,7 @@ class TestStreamingBehavior:
                 retry_sync_recovery: bool = False,
                 _edited_messages: list[dict[str, object]] = edited_messages,
             ) -> DeliveredMatrixEvent:
-                assert retry_sync_recovery is (new_content.get(STREAM_STATUS_KEY) == STREAM_STATUS_COMPLETED)
+                assert retry_sync_recovery is _expects_sync_recovery_retry(new_content)
                 _edited_messages.append(new_content)
                 return DeliveredMatrixEvent(event_id="$edit", content_sent=new_content)
 
@@ -2637,7 +2642,7 @@ class TestStreamingBehavior:
             *,
             retry_sync_recovery: bool = False,
         ) -> DeliveredMatrixEvent:
-            assert retry_sync_recovery is (_new_content.get(STREAM_STATUS_KEY) == STREAM_STATUS_COMPLETED)
+            assert retry_sync_recovery is _expects_sync_recovery_retry(_new_content)
             edited_texts.append(new_text)
             return DeliveredMatrixEvent(event_id="$edit", content_sent={})
 
@@ -2685,7 +2690,7 @@ class TestStreamingBehavior:
             *,
             retry_sync_recovery: bool = False,
         ) -> DeliveredMatrixEvent:
-            assert retry_sync_recovery is (_new_content.get(STREAM_STATUS_KEY) == STREAM_STATUS_COMPLETED)
+            assert retry_sync_recovery is _expects_sync_recovery_retry(_new_content)
             edited_texts.append(new_text)
             return DeliveredMatrixEvent(event_id="$edit", content_sent={})
 
@@ -2732,7 +2737,7 @@ class TestStreamingBehavior:
             *,
             retry_sync_recovery: bool = False,
         ) -> DeliveredMatrixEvent:
-            assert retry_sync_recovery is (_new_content.get(STREAM_STATUS_KEY) == STREAM_STATUS_COMPLETED)
+            assert retry_sync_recovery is _expects_sync_recovery_retry(_new_content)
             if "Preparing isolated worker" in new_text:
                 msg = "edit blew up"
                 raise RuntimeError(msg)
@@ -2790,7 +2795,7 @@ class TestStreamingBehavior:
             *,
             retry_sync_recovery: bool = False,
         ) -> DeliveredMatrixEvent:
-            assert retry_sync_recovery is (new_content.get(STREAM_STATUS_KEY) == STREAM_STATUS_COMPLETED)
+            assert retry_sync_recovery is _expects_sync_recovery_retry(new_content)
             terminal_statuses.append(str(new_content[STREAM_STATUS_KEY]))
             edited_texts.append(new_text)
             if "Preparing isolated worker" in new_text:
@@ -2850,7 +2855,7 @@ class TestStreamingBehavior:
             *,
             retry_sync_recovery: bool = False,
         ) -> DeliveredMatrixEvent:
-            assert retry_sync_recovery is (_new_content.get(STREAM_STATUS_KEY) == STREAM_STATUS_COMPLETED)
+            assert retry_sync_recovery is _expects_sync_recovery_retry(_new_content)
             edited_texts.append(new_text)
             if "Preparing isolated worker" in new_text:
                 msg = "edit blew up"
@@ -2906,7 +2911,7 @@ class TestStreamingBehavior:
             *,
             retry_sync_recovery: bool = False,
         ) -> DeliveredMatrixEvent:
-            assert retry_sync_recovery is (content.get(STREAM_STATUS_KEY) == STREAM_STATUS_COMPLETED)
+            assert retry_sync_recovery is _expects_sync_recovery_retry(content)
             return DeliveredMatrixEvent(event_id="$event123", content_sent=dict(content))
 
         async def lingering_drain(
@@ -2970,7 +2975,7 @@ class TestStreamingBehavior:
             *,
             retry_sync_recovery: bool = False,
         ) -> DeliveredMatrixEvent:
-            assert retry_sync_recovery is (_new_content.get(STREAM_STATUS_KEY) == STREAM_STATUS_COMPLETED)
+            assert retry_sync_recovery is _expects_sync_recovery_retry(_new_content)
             edited_texts.append(new_text)
             if "Preparing isolated worker" in new_text and "hello" not in new_text and "world" not in new_text:
                 warmup_edit_started.set()
@@ -3043,7 +3048,7 @@ class TestStreamingBehavior:
             *,
             retry_sync_recovery: bool = False,
         ) -> DeliveredMatrixEvent:
-            assert retry_sync_recovery is (_new_content.get(STREAM_STATUS_KEY) == STREAM_STATUS_COMPLETED)
+            assert retry_sync_recovery is _expects_sync_recovery_retry(_new_content)
             await stream_finished.wait()
             if _new_content.get("io.mindroom.stream_status") == "streaming":
                 msg = "late edit blew up"
@@ -3099,7 +3104,7 @@ class TestStreamingBehavior:
             *,
             retry_sync_recovery: bool = False,
         ) -> DeliveredMatrixEvent | None:
-            assert retry_sync_recovery is (_new_content.get(STREAM_STATUS_KEY) == STREAM_STATUS_COMPLETED)
+            assert retry_sync_recovery is _expects_sync_recovery_retry(_new_content)
             terminal_texts.append(new_text)
             return edit_results.pop(0)
 
@@ -3166,7 +3171,7 @@ class TestStreamingBehavior:
             *,
             retry_sync_recovery: bool = False,
         ) -> DeliveredMatrixEvent:
-            assert retry_sync_recovery is (_new_content.get(STREAM_STATUS_KEY) == STREAM_STATUS_COMPLETED)
+            assert retry_sync_recovery is _expects_sync_recovery_retry(_new_content)
             streaming.accumulated_text = "hello"
             return DeliveredMatrixEvent(event_id="$edit", content_sent={})
 
@@ -3397,7 +3402,7 @@ class TestStreamingBehavior:
             *,
             retry_sync_recovery: bool = False,
         ) -> DeliveredMatrixEvent:
-            assert retry_sync_recovery is (_new_content.get(STREAM_STATUS_KEY) == STREAM_STATUS_COMPLETED)
+            assert retry_sync_recovery is _expects_sync_recovery_retry(_new_content)
             nonlocal in_flight, max_in_flight
             in_flight += 1
             max_in_flight = max(max_in_flight, in_flight)
@@ -3687,7 +3692,7 @@ class TestStreamingBehavior:
             *,
             retry_sync_recovery: bool = False,
         ) -> DeliveredMatrixEvent:
-            assert retry_sync_recovery is (_new_content.get(STREAM_STATUS_KEY) == STREAM_STATUS_COMPLETED)
+            assert retry_sync_recovery is _expects_sync_recovery_retry(_new_content)
             captured_texts.append(new_text)
             return DeliveredMatrixEvent(event_id="$edit", content_sent={})
 
@@ -3792,7 +3797,7 @@ class TestStreamingBehavior:
             *,
             retry_sync_recovery: bool = False,
         ) -> DeliveredMatrixEvent:
-            assert retry_sync_recovery is (_new_content.get(STREAM_STATUS_KEY) == STREAM_STATUS_COMPLETED)
+            assert retry_sync_recovery is _expects_sync_recovery_retry(_new_content)
             captured_texts.append(new_text)
             return DeliveredMatrixEvent(event_id="$edit", content_sent={})
 
