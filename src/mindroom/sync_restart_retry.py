@@ -5,8 +5,10 @@ responses are cancelled and their placeholder becomes a terminal
 "[Response interrupted by service restart]" note. The turn controller
 registers a retry here, and the bot flushes the queue once its sync loop
 reports a healthy sync response again. Each source event is retried at
-most once; a retry that is itself interrupted is not requeued. Pending
-room ids also let the orchestrator hand retries to a replacement bot.
+most once; a retry that is itself interrupted is not requeued. A retry
+refused by a config apply is the exception: nothing ran, so it stays
+pending for the next flush. Pending room ids also let the orchestrator
+hand retries to a replacement bot.
 """
 
 from __future__ import annotations
@@ -21,6 +23,7 @@ from agno.run.team import TeamRunOutput
 from mindroom.constants import MATRIX_EVENT_ID_METADATA_KEY, MATRIX_SOURCE_EVENT_IDS_METADATA_KEY
 from mindroom.history.storage import is_model_history_visible_run
 from mindroom.logging_config import get_logger
+from mindroom.response_admission import ResponseAdmissionRefusedError
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
@@ -128,11 +131,23 @@ class SyncRestartRetryQueue:
         """Run every queued retry exactly once in FIFO order, isolating individual failures."""
         while self._pending:
             key = next(iter(self._pending))
-            retry = self._pending.pop(key).callback
+            pending = self._pending.pop(key)
+            retry = pending.callback
             self._mark_attempted(key)
             logger.info("sync_restart_retry_started", source_event_id=key)
             try:
                 await retry()
+            except ResponseAdmissionRefusedError:
+                # A config apply refused the response before any lifecycle work,
+                # so nothing was attempted. Requeue instead of burning the key.
+                # Stop the pass rather than re-raising: the gate stays closed for
+                # the whole apply, so every remaining retry would refuse too, and
+                # they must stay pending for the next flush.
+                self._attempted.pop(key, None)
+                # Reinsert at the front so the next flush keeps FIFO order.
+                self._pending = {key: pending, **self._pending}
+                logger.info("sync_restart_retry_deferred_by_config_apply", source_event_id=key)
+                return
             except asyncio.CancelledError:
                 # The flush task is being torn down mid-retry; the key was already
                 # promoted to attempted, so log the dead end before propagating.

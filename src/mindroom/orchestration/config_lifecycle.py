@@ -185,10 +185,11 @@ class ConfigReloadLifecycle:
         active_response_count: int,
         loop: asyncio.AbstractEventLoop,
     ) -> bool:
-        """Return whether a queued reload should keep waiting for responses to finish."""
-        if active_response_count <= 0:
-            return False
+        """Return whether a queued reload should keep waiting for responses to finish.
 
+        Only called with responses actually in flight: the caller applies
+        immediately when ``close_if_idle()`` succeeds.
+        """
         now = loop.time()
         if not drain_state.waiting_for_idle:
             logger.info(
@@ -224,13 +225,17 @@ class ConfigReloadLifecycle:
         return True
 
     async def _apply_with_closed_admission(self) -> None:
-        """Apply one queued reload with admission closed, then always reopen it.
+        """Apply one queued reload with admission already closed, then always reopen it.
+
+        Callers must close the gate immediately before calling, with no await in
+        between, so nothing can be admitted into the window.
 
         The gate is closed but not held for the duration: applying the plan stops
         bots, and stopping a bot drains its detached responses, so holding the
         gate here would stall that drain until it cancelled the very responses
         this flow exists to protect.
         """
+        assert self.response_admission_gate.closed, "admission must be closed before applying"
         try:
             await self._apply_queued_config_reload()
         finally:

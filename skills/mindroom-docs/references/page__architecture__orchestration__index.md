@@ -79,13 +79,14 @@ Config changes are detected via polling (`watch_paths()` checks watched source-f
 
 1. On change, `ConfigReloadLifecycle.request_reload()` queues a debounced reload that waits until no responses are in flight, logging periodic warnings while it waits
 2. Sampling the in-flight count and closing the shared `ResponseAdmissionGate` happen atomically, so a new response cannot race the decision to apply. The gate covers Matrix-driven response lifecycles only: direct agent-run entry points that bypass the response lifecycle (`mindroom.api.openai_compat` and cascaded voice in `mindroom.matrix_rtc.call_tools`) are not admitted through it, so a reload can still land underneath one of those runs. The gate stays closed (but is not held) across config loading and plan application: applying the plan stops bots, and stopping a bot drains its detached responses, so holding the gate there would stall that drain against itself
-3. While the gate is closed, a response that tries to start is refused immediately and cancelled rather than blocking. The gate is global and the whole apply window is covered, regardless of how narrow the plan turns out to be, so a refused response does not necessarily belong to an entity that is being restarted. A refusal drops the turn and logs `response_refused_during_config_apply`, because nothing re-dispatches it. The refusal path deliberately performs no Matrix I/O: it runs inside the drain that stopping a bot performs, so an untimed send would stall that drain
-4. If responses never drain, the reload stops deferring after `_CONFIG_RELOAD_DRAIN_FORCE_AFTER_SECONDS` and closes the gate over the still-running responses, so a config change cannot be starved forever on a busy install
-5. `ConfigReloadLifecycle.update_config()` loads the new config and `_identify_entities_to_restart()` computes the diff using `model_dump(exclude_none=True)`
-6. The orchestrator applies the resulting plan: affected entities are stopped, recreated, and restarted
-7. Removed entities run `cleanup()` (leave rooms, stop bot)
-8. New/restarted bots go through room setup
-9. The gate reopens once the apply finishes, whether it succeeded or failed
+3. While the gate is closed, a response that tries to start is refused immediately rather than blocking, by raising `ResponseAdmissionRefusedError`. This is deliberately not an `asyncio.CancelledError`: handlers that treat cancellation as teardown would otherwise abort sibling work or swallow the refusal as shutdown noise. The gate is global and the whole apply window is covered, regardless of how narrow the plan turns out to be, so a refused response does not necessarily belong to an entity that is being restarted. A refusal logs `response_refused_during_config_apply`. The refusal path itself performs no Matrix I/O, because it runs inside the drain that stopping a bot performs and an untimed send would stall that drain
+4. Refusal handling depends on how far the turn had progressed. An inbound message stays uncompleted in the turn ledger, so restart replay can still pick it up. A caller that already published a visible placeholder (interactive selection) settles that placeholder itself, so the user is never left watching a "Processing..." message that never resolves. A queued sync-restart retry is put back on the queue rather than consuming its one attempt, since nothing ran
+5. If responses never drain, the reload stops deferring after `_CONFIG_RELOAD_DRAIN_FORCE_AFTER_SECONDS` and closes the gate over the still-running responses, so a config change cannot be starved forever on a busy install
+6. `ConfigReloadLifecycle.update_config()` loads the new config and `_identify_entities_to_restart()` computes the diff using `model_dump(exclude_none=True)`
+7. The orchestrator applies the resulting plan: affected entities are stopped, recreated, and restarted
+8. Removed entities run `cleanup()` (leave rooms, stop bot)
+9. New/restarted bots go through room setup
+10. The gate reopens once the apply finishes, whether it succeeded or failed
 
 Skills are watched separately via `_watch_skills_task()` with cache invalidation.
 

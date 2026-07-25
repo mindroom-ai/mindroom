@@ -84,6 +84,7 @@ from .delivery_gateway import (
     StreamingDeliveryRequest,
 )
 from .media_inputs import MediaInputs
+from .response_admission import ResponseAdmissionRefusedError
 from .response_lifecycle import (
     QueuedHumanNoticeReservation,
     ResponseLifecycle,
@@ -122,7 +123,6 @@ if TYPE_CHECKING:
     from .response_admission import ResponseAdmissionGate
 
 type _MatrixEventId = str
-_CONFIG_APPLY_CANCEL_MESSAGE = "Configuration reload is restarting this entity"
 _ToolContextResult = TypeVar("_ToolContextResult")
 _ToolStreamChunk = TypeVar("_ToolStreamChunk")
 _StateMutationResult = TypeVar("_StateMutationResult")
@@ -506,6 +506,10 @@ class ResponseRunner:
         if task.cancelled():
             return
         error = task.exception()
+        if isinstance(error, ResponseAdmissionRefusedError):
+            # Already reported as a warning at the refusal site, with the room
+            # and thread context this callback does not have.
+            return
         if error is not None:
             self.deps.logger.error(
                 "inbox_response_task_failed",
@@ -798,13 +802,14 @@ class ResponseRunner:
             # or visible placeholder work. Nothing re-dispatches the turn, so log
             # the loss here. Deliberately no Matrix send: this path runs inside
             # the drain that stopping a bot performs, and an untimed room_send
-            # would stall that drain until it cancelled live responses.
+            # would stall that drain until it cancelled live responses. Callers
+            # that already published a placeholder settle it themselves.
             self.deps.logger.warning(
                 "response_refused_during_config_apply",
                 response_kind=response_kind,
                 **request.response_envelope.target.log_context,
             )
-            raise asyncio.CancelledError(_CONFIG_APPLY_CANCEL_MESSAGE)
+            raise ResponseAdmissionRefusedError
         self._in_flight_response_count += 1
         try:
             resolved_target = request.response_envelope.target

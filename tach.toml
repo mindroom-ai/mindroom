@@ -1341,6 +1341,9 @@ visibility = [
     "mindroom.orchestration.config_lifecycle",
     "mindroom.orchestrator",
     "mindroom.response_runner",
+    "mindroom.sync_restart_retry",
+    "mindroom.text_ingress_dispatch",
+    "mindroom.turn_controller",
 ]
 
 [[modules]]
@@ -2038,6 +2041,7 @@ depends_on = []
 [[modules]]
 path = "mindroom.sync_restart_retry"
 depends_on = [
+    "mindroom.response_admission",
     "mindroom.constants",
     "mindroom.history.storage",
     "mindroom.history.types",
@@ -3350,6 +3354,7 @@ visibility = [
 [[modules]]
 path = "mindroom.text_ingress_dispatch"
 depends_on = [
+    "mindroom.response_admission",
     "mindroom.attachments",
     "mindroom.commands.parsing",
     "mindroom.constants",
@@ -3368,6 +3373,7 @@ visibility = ["mindroom.turn_controller"]
 [[modules]]
 path = "mindroom.turn_controller"
 depends_on = [
+    "mindroom.response_admission",
     "mindroom.commands.handler",
     "mindroom.commands.parsing",
     "mindroom.constants",

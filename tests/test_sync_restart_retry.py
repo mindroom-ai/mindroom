@@ -18,6 +18,7 @@ from structlog.testing import capture_logs
 from mindroom.constants import MATRIX_EVENT_ID_METADATA_KEY
 from mindroom.final_delivery import FinalDeliveryOutcome
 from mindroom.history.types import HistoryScope
+from mindroom.response_admission import ResponseAdmissionRefusedError
 from mindroom.response_runner import PostLockRequestPreparationError, ResponseRequest, ResponseRunner
 from mindroom.sync_restart_retry import SyncRestartRetryQueue, interrupted_source_needs_retry
 from tests.conftest import request_envelope, unwrap_extracted_collaborator
@@ -308,6 +309,52 @@ async def test_cancelled_flush_logs_in_flight_key_and_keeps_rest_pending() -> No
     assert queue.register("$in_flight", hanging, room_id="!in-flight:localhost") is False
     # The untouched retry survives for the next healthy sync response.
     assert queue.has_pending
+
+
+@pytest.mark.asyncio
+async def test_config_apply_refusal_requeues_retry_and_keeps_rest_pending() -> None:
+    """A refused retry ran nothing, so it must stay queued instead of burning its one attempt."""
+    queue = SyncRestartRetryQueue()
+    runs: list[str] = []
+
+    gate_closed = True
+
+    async def refused() -> None:
+        runs.append("$refused")
+        if gate_closed:
+            raise ResponseAdmissionRefusedError
+
+    async def later() -> None:
+        runs.append("$later")
+
+    queue.register("$refused", refused, room_id="!room:localhost")
+    queue.register("$later", later, room_id="!later:localhost")
+
+    with capture_logs() as logs:
+        await queue.flush()
+
+    # The pass stops: the gate stays closed for the whole apply, so continuing
+    # would only burn every remaining retry against the same closed gate.
+    assert runs == ["$refused"]
+    assert [
+        entry["source_event_id"] for entry in logs if entry["event"] == "sync_restart_retry_deferred_by_config_apply"
+    ] == [
+        "$refused",
+    ]
+    # Nothing was attempted, so both keys survive for the next flush.
+    assert queue.has_pending
+    assert queue.pending_room_ids == frozenset({"!room:localhost", "!later:localhost"})
+    # Re-registering is still refused because the key is queued, not because it
+    # was burned; the queued callback is the one that runs.
+    assert queue.register("$refused", refused, room_id="!room:localhost") is False
+
+    # Once the apply finishes the gate reopens, so the next flush drains both in
+    # the original FIFO order.
+    gate_closed = False
+    runs.clear()
+    await queue.flush()
+    assert runs == ["$refused", "$later"]
+    assert not queue.has_pending
 
 
 @pytest.mark.asyncio

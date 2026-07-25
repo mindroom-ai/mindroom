@@ -26,6 +26,22 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 
+class ResponseAdmissionRefusedError(Exception):
+    """Raised when a config apply owns the runtime and a response cannot start.
+
+    Deliberately not an ``asyncio.CancelledError``. A refusal happens before any
+    lifecycle work, so it is an admission failure, not a cancellation, and the
+    two must stay distinguishable: cancellation handlers treat their exception as
+    teardown, aborting sibling work (``sync_restart_retry.flush``) or swallowing
+    it as expected shutdown noise (``bot._create_task_wrapper``). Callers that
+    already published a placeholder must be able to catch this specifically and
+    settle that placeholder.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("Configuration reload is restarting this entity")
+
+
 @dataclass
 class ResponseAdmissionGate:
     """Track in-flight responses and close admission while a config apply runs."""
@@ -52,6 +68,7 @@ class ResponseAdmissionGate:
 
     def release(self) -> None:
         """Release one previously admitted response slot."""
+        assert self._in_flight_response_count > 0, "release() without a matching admit()"
         self._in_flight_response_count -= 1
 
     def close_if_idle(self) -> bool:

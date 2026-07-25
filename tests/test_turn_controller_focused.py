@@ -45,6 +45,7 @@ from mindroom.inbound_turn_normalizer import InboundTurnNormalizer, InboundTurnN
 from mindroom.ingress_validation import IngressValidator, IngressValidatorDeps
 from mindroom.logging_config import get_logger
 from mindroom.matrix.cache.thread_history_result import thread_history_result
+from mindroom.response_admission import ResponseAdmissionRefusedError
 from mindroom.response_payload_preparation import DispatchPayloadInputs, ResponsePayloadPreparation
 from mindroom.response_runner import ResponseRequest
 from mindroom.sync_restart_retry import SyncRestartRetryQueue
@@ -1211,6 +1212,58 @@ async def test_interactive_selection_persistence_failure_prevents_ack_and_genera
 
     assert harness.gateway.sent == []
     assert harness.runner.requests == []
+
+
+@pytest.mark.asyncio
+async def test_interactive_selection_refused_by_config_apply_settles_ack_placeholder(
+    config: Config,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A refused selection must terminalize its ack instead of leaving it 'Processing...'.
+
+    The ack is already visible and the refusal path itself does no Matrix I/O,
+    so without this the user watches a placeholder that never resolves.
+    """
+    harness = _build_harness(config, tmp_path)
+    room = nio.MatrixRoom(_ROOM_ID, _entity_user_id(config, "general"))
+    selection = interactive.InteractiveSelection(
+        question_event_id="$question:localhost",
+        question_text="Which option should I use?",
+        selection_key="1",
+        selected_label="Option 1",
+        selected_value="Option 1",
+        thread_id="$thread-root:localhost",
+    )
+    selection_event_id = "$selection:localhost"
+
+    async def refuse(request: ResponseRequest) -> str | None:
+        harness.runner.requests.append(request)
+        raise ResponseAdmissionRefusedError
+
+    monkeypatch.setattr(harness.runner, "generate_response", refuse)
+
+    # The refusal must not escape: it is routine, not a dispatch failure.
+    await harness.controller.handle_interactive_selection(
+        room,
+        selection=selection,
+        user_id=_SENDER,
+        source_event_id=selection_event_id,
+    )
+
+    # The ack was sent, then edited in place to a terminal note.
+    assert len(harness.gateway.sent) == 1
+    assert len(harness.gateway.edited) == 1
+    edit_request = harness.gateway.edited[0]
+    assert edit_request.event_id == "$sent-1:localhost"
+    assert "configuration reload" in edit_request.new_text.lower()
+    assert edit_request.extra_content == {constants.STREAM_STATUS_KEY: constants.STREAM_STATUS_COMPLETED}
+
+    # The turn stays uncompleted so restart replay can still pick it up.
+    record = harness.turn_store.get_turn_record(selection_event_id)
+    assert record is not None
+    assert record.response_event_id is None
+    assert record.completed is False
 
 
 @pytest.mark.asyncio

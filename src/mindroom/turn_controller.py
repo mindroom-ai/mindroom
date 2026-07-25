@@ -90,6 +90,7 @@ from mindroom.matrix.media import (
 from mindroom.matrix.message_content import is_v2_sidecar_text_preview
 from mindroom.matrix.thread_membership import ThreadMembershipLookupError
 from mindroom.prompt_ingress_reservation import PromptIngressReservationOwner as _PromptIngressReservationOwner
+from mindroom.response_admission import ResponseAdmissionRefusedError
 from mindroom.response_payload_preparation import (
     DispatchPayloadInputs,
     ResponsePayloadPreparation,
@@ -143,6 +144,9 @@ if TYPE_CHECKING:
 
 
 _QUEUED_NOTICE_METADATA_KIND = "queued_notice_reservation"
+_CONFIG_APPLY_REFUSAL_NOTE = (
+    "⚠️ A configuration reload restarted this agent before it could answer. Please send your message again."
+)
 
 
 def _room_level_context_event(event: TextDispatchEvent) -> TextDispatchEvent:
@@ -1412,23 +1416,34 @@ class TurnController:
             ),
         )
 
-        response_event_id = await self.deps.response_runner.generate_response(
-            ResponseRequest(
-                prompt=selection_payload.prompt,
-                model_prompt=selection_payload.model_prompt,
-                thread_history=thread_history,
-                existing_event_id=ack_event_id,
-                existing_event_is_placeholder=True,
-                user_id=user_id,
-                attachment_ids=selection_attachment_ids or None,
-                response_envelope=response_envelope,
-                matrix_run_metadata=selection_matrix_run_metadata,
-                prepare_source_turn=lambda: self.deps.turn_store.prepare_response_for_redactions(
-                    target=response_target,
-                    source_event_ids=selection_handled_turn.indexed_event_ids,
+        try:
+            response_event_id = await self.deps.response_runner.generate_response(
+                ResponseRequest(
+                    prompt=selection_payload.prompt,
+                    model_prompt=selection_payload.model_prompt,
+                    thread_history=thread_history,
+                    existing_event_id=ack_event_id,
+                    existing_event_is_placeholder=True,
+                    user_id=user_id,
+                    attachment_ids=selection_attachment_ids or None,
+                    response_envelope=response_envelope,
+                    matrix_run_metadata=selection_matrix_run_metadata,
+                    prepare_source_turn=lambda: self.deps.turn_store.prepare_response_for_redactions(
+                        target=response_target,
+                        source_event_ids=selection_handled_turn.indexed_event_ids,
+                    ),
                 ),
-            ),
-        )
+            )
+        except ResponseAdmissionRefusedError:
+            # The ack placeholder is already visible, and the refusal path itself
+            # does no Matrix I/O, so settle it here or the user watches a
+            # "Processing..." message forever. The turn stays uncompleted in the
+            # ledger so restart replay can still pick it up.
+            await self._settle_placeholder_refused_by_config_apply(
+                target=ack_target,
+                event_id=ack_event_id,
+            )
+            return
         if response_event_id is not None:
             self._mark_source_events_responded(
                 replace(selection_handled_turn, response_event_id=response_event_id),
@@ -1649,6 +1664,27 @@ class TurnController:
                 target=target,
                 response_text=error_text,
                 extra_content=terminal_extra_content,
+            ),
+        )
+
+    async def _settle_placeholder_refused_by_config_apply(
+        self,
+        *,
+        target: MessageTarget,
+        event_id: str,
+    ) -> None:
+        """Give an already-visible placeholder a terminal note after an admission refusal."""
+        self.deps.logger.warning(
+            "response_refused_during_config_apply_settled_placeholder",
+            event_id=event_id,
+            **target.log_context,
+        )
+        await self.deps.delivery_gateway.edit_text(
+            EditTextRequest(
+                target=target,
+                event_id=event_id,
+                new_text=_CONFIG_APPLY_REFUSAL_NOTE,
+                extra_content={STREAM_STATUS_KEY: STREAM_STATUS_COMPLETED},
             ),
         )
 

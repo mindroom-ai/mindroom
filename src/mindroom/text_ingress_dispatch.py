@@ -30,6 +30,7 @@ from mindroom.handled_turns import TurnRecord
 from mindroom.inbound_turn_normalizer import TextNormalizationRequest
 from mindroom.matrix.media import is_audio_message_event, is_matrix_media_dispatch_event
 from mindroom.matrix.rooms import is_dm_room
+from mindroom.response_admission import ResponseAdmissionRefusedError
 from mindroom.response_payload_preparation import DispatchPayloadInputs
 from mindroom.timing import (
     DispatchPipelineTiming,
@@ -466,14 +467,24 @@ async def _apply_turn_plan(
         await asyncio.wait({started_wait, response_task}, return_when=asyncio.FIRST_COMPLETED)
     finally:
         started_wait.cancel()
-    if response_task.done() and not response_task.cancelled() and not response_started.is_set():
-        # Surface pre-lock failures to the caller's containment; post-lock
-        # failures (including a fast failure racing the FIRST_COMPLETED wait)
-        # belong to the runner-owned task. Pre-lock CANCELLATION is
-        # deliberately NOT surfaced: this coroutine was not itself cancelled,
-        # and re-raising CancelledError here would corrupt the gate drain's
-        # own cancellation state. The queued-notice reservation still cancels
-        # in dispatch_text_message's finally, which is the cleanup contract.
+    # Surface pre-lock failures to the caller's containment; post-lock
+    # failures (including a fast failure racing the FIRST_COMPLETED wait)
+    # belong to the runner-owned task. Pre-lock CANCELLATION is
+    # deliberately NOT surfaced: this coroutine was not itself cancelled,
+    # and re-raising CancelledError here would corrupt the gate drain's
+    # own cancellation state. The queued-notice reservation still cancels
+    # in dispatch_text_message's finally, which is the cleanup contract.
+    #
+    # An admission refusal is likewise not surfaced: it is already logged
+    # with full context, the turn stays uncompleted for restart replay, and
+    # raising it here would count a routine config apply as a dispatch
+    # failure in the coalescing gate's drain accounting.
+    if (
+        response_task.done()
+        and not response_task.cancelled()
+        and not response_started.is_set()
+        and not isinstance(response_task.exception(), ResponseAdmissionRefusedError)
+    ):
         response_task.result()
 
 

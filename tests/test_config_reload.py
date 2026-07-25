@@ -36,7 +36,7 @@ from mindroom.orchestration.plugin_watch import (
 )
 from mindroom.orchestration.runtime import log_startup_phase_finished, log_startup_phase_started
 from mindroom.orchestrator import _MultiAgentOrchestrator, _watch_skills_task
-from mindroom.response_admission import ResponseAdmissionGate
+from mindroom.response_admission import ResponseAdmissionGate, ResponseAdmissionRefusedError
 from mindroom.response_runner import ResponseRequest
 from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN
 from mindroom.startup_errors import PermanentStartupError
@@ -2955,7 +2955,10 @@ async def test_tracked_inbox_response_cancelled_during_reload_never_sends_placeh
             is True
         )
 
-        assert task.cancelled()
+        # A refusal is an admission failure, not a cancellation: handlers that
+        # treat CancelledError as teardown must not mistake it for one.
+        assert not task.cancelled()
+        assert isinstance(task.exception(), ResponseAdmissionRefusedError)
         assert bot.in_flight_response_count == 0
         # No Matrix I/O on the refusal path: this runs inside the drain that
         # stopping a bot performs, so an untimed send would stall that drain.
