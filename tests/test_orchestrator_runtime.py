@@ -2101,6 +2101,81 @@ class TestMultiAgentOrchestrator:
             resume.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_bot_recovery_stops_when_shutdown_begins_during_room_setup(self, tmp_path: Path) -> None:
+        """A recovered bot must not restart runtime work after room setup crosses shutdown."""
+        orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
+        orchestrator.config = MagicMock()
+        orchestrator.running = True
+        bot = MagicMock()
+        bot.agent_name = "general"
+        orchestrator.agent_bots = {"general": bot}
+        setup_started = asyncio.Event()
+        finish_setup = asyncio.Event()
+
+        async def setup_rooms(_: list[object]) -> None:
+            setup_started.set()
+            await finish_setup.wait()
+
+        external_trigger_runtime = MagicMock()
+        with (
+            patch.object(orchestrator, "_bots_to_setup_after_background_start", return_value=[bot]),
+            patch.object(orchestrator, "_bind_started_runtime_support_services"),
+            patch.object(orchestrator, "_resolve_bot_room_aliases"),
+            patch.object(orchestrator, "_start_sync_task"),
+            patch.object(orchestrator, "_setup_rooms_and_memberships", new=setup_rooms),
+            patch.object(orchestrator, "_recover_pending_replacement_rooms", new=AsyncMock()) as recover_rooms,
+            patch.object(orchestrator, "_external_trigger_runtime", new=external_trigger_runtime),
+            patch.object(orchestrator._startup_maintenance, "resume_pending_maintenance") as resume,
+        ):
+            recovery_task = asyncio.create_task(orchestrator._finish_recovered_bot_start("general", bot))
+            await setup_started.wait()
+            orchestrator.running = False
+            finish_setup.set()
+            await recovery_task
+
+        recover_rooms.assert_not_awaited()
+        external_trigger_runtime.bind_if_ready.assert_not_called()
+        resume.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_bot_recovery_does_not_rebind_after_replacement_recovery_crosses_shutdown(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Replacement recovery crossing shutdown must not rebind trigger delivery."""
+        orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
+        orchestrator.config = MagicMock()
+        orchestrator.running = True
+        bot = MagicMock()
+        bot.agent_name = "general"
+        orchestrator.agent_bots = {"general": bot}
+        recovery_started = asyncio.Event()
+        finish_recovery = asyncio.Event()
+
+        async def recover_rooms(_: object) -> None:
+            recovery_started.set()
+            await finish_recovery.wait()
+
+        external_trigger_runtime = MagicMock()
+        with (
+            patch.object(orchestrator, "_bots_to_setup_after_background_start", return_value=[]),
+            patch.object(orchestrator, "_bind_started_runtime_support_services"),
+            patch.object(orchestrator, "_resolve_bot_room_aliases"),
+            patch.object(orchestrator, "_start_sync_task"),
+            patch.object(orchestrator, "_recover_pending_replacement_rooms", new=recover_rooms),
+            patch.object(orchestrator, "_external_trigger_runtime", new=external_trigger_runtime),
+            patch.object(orchestrator._startup_maintenance, "resume_pending_maintenance") as resume,
+        ):
+            recovery_task = asyncio.create_task(orchestrator._finish_recovered_bot_start("general", bot))
+            await recovery_started.wait()
+            orchestrator.running = False
+            finish_recovery.set()
+            await recovery_task
+
+        external_trigger_runtime.bind_if_ready.assert_not_called()
+        resume.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_bot_start_retry_scheduling_fails_closed_after_shutdown(self, tmp_path: Path) -> None:
         """A reload racing shutdown must not spawn a retry that survives stop().
 

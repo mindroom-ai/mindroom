@@ -593,8 +593,14 @@ class _MultiAgentOrchestrator:
                 permanent_error_check=is_permanent_startup_error,
                 update_runtime_state=False,
             )
+        if not self.running:
+            logger.info("Stopping recovered bot finalization during shutdown", agent_name=entity_name)
+            return
         if config is not None:
             await self._recover_pending_replacement_rooms(config)
+        if not self.running:
+            logger.info("Stopping recovered bot finalization during shutdown", agent_name=entity_name)
+            return
         self._external_trigger_runtime.bind_if_ready(self.config, self.agent_bots)
         # Mirror the maintenance-debt guard: a recovery landing mid-shutdown
         # (after stop() cancelled maintenance but before retry tasks die)
