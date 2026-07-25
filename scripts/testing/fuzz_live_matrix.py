@@ -68,6 +68,7 @@ if __package__:
         StressRequest,
         aggregate_log_metrics,
         assert_matrix_edit_shape,
+        assert_resource_health,
         current_machine_class,
         latency_summary,
         parse_stress_request,
@@ -90,6 +91,7 @@ else:
         StressRequest,
         aggregate_log_metrics,
         assert_matrix_edit_shape,
+        assert_resource_health,
         current_machine_class,
         latency_summary,
         parse_stress_request,
@@ -5093,7 +5095,7 @@ class LiveMatrixStressRunner:
         events = await self._paginate_canonical_events()
         audits = tuple(self._audit_wave(events, wave, turns) for wave, turns in enumerate(turns_by_wave))
         all_edits = {label: edits for audit in audits for label, edits in audit.edits_by_stream.items()}
-        assert_matrix_edit_shape(self.config, all_edits)
+        matrix_edit_activity = assert_matrix_edit_shape(self.config, all_edits)
         wave_logs = self._wave_log_texts()
         wave_cache_metrics = tuple(aggregate_log_metrics(text) for text in wave_logs)
         self._assert_cache_wave_shape(wave_cache_metrics)
@@ -5118,6 +5120,7 @@ class LiveMatrixStressRunner:
             "per_thread": [metric for audit in audits for metric in audit.thread_metrics],
             "model": self.controller.snapshot(),
             "matrix_edit_count": sum(audit.matrix_edit_count for audit in audits),
+            "matrix_edit_activity": matrix_edit_activity,
             "cache_by_wave": [metrics.summary() for metrics in wave_cache_metrics],
             "runtime_log_metrics": complete_log_metrics.summary(),
             "performance_sample": asdict(performance_sample),
@@ -5615,13 +5618,7 @@ async def _run_stress_live(
                 msg = "live Matrix stress cleanup failed"
                 raise ExceptionGroup(msg, cleanup_errors)
     resources = resource_summary(resource_samples)
-    if resources["tuwunel_unhealthy_samples"] or resources["postgres_unhealthy_samples"]:
-        msg = f"stress dependency health sampling failed: {resources}"
-        raise AssertionError(msg)
-    health_latency = cast("Mapping[str, object]", resources["health_latency_ms"])
-    if health_latency.get("max", 0) > 5000:
-        msg = f"stress API health latency exceeded five-second watchdog boundary: {health_latency}"
-        raise AssertionError(msg)
+    assert_resource_health(resources)
     result["resources"] = resources
     result["resource_samples"] = [asdict(sample) for sample in resource_samples]
     return result

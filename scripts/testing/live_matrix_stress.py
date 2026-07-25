@@ -50,6 +50,8 @@ _UNCAUGHT_SIGNALS = (
     "task exception was never retrieved",
     "traceback (most recent call last)",
 )
+_EVENT_LOOP_PROBE_CEILING_MS = 5000.0
+_SYNC_STARVATION_CEILING_SECONDS = 120.0
 
 
 def _positive(value: float, field_name: str) -> None:
@@ -354,8 +356,15 @@ class StressModelController:
                 {"offset_seconds": round(moment - origin, 3), "active_streams": active}
                 for moment, active in self._active_timeline
             ]
+        barrier_waits = [
+            float(wait)
+            for observation in observations
+            for wait in (observation["barrier_wait_ms"],)
+            if isinstance(wait, int | float)
+        ]
         return {
             "reached_by_wave": {str(wave): self.reached_count(wave) for wave in range(self.config.waves)},
+            "barrier_wait_ms": latency_summary(barrier_waits),
             "max_active_streams": self.max_active_streams,
             "total_pulses": self.total_pulses,
             "active_stream_timeline": timeline,
@@ -984,9 +993,37 @@ def resource_summary(samples: Sequence[ResourceSample]) -> dict[str, object]:
         "rss_bytes": latency_summary(rss),
         "sync_age_seconds": latency_summary(sync_age),
         "health_latency_ms": latency_summary(health_latency),
+        "event_loop_probe_latency_ms": latency_summary(health_latency),
+        "mindroom_health_probe_failures": sum(sample.health_latency_ms is None for sample in samples),
         "tuwunel_unhealthy_samples": sum(not sample.tuwunel_healthy for sample in samples),
         "postgres_unhealthy_samples": sum(not sample.postgres_healthy for sample in samples),
     }
+
+
+def assert_resource_health(summary: Mapping[str, object]) -> None:
+    """Fail on dependency loss, event-loop starvation, or stale Matrix sync."""
+    dependency_failures = (
+        (_integer(summary.get("mindroom_health_probe_failures")), "MindRoom health probe failures"),
+        (_integer(summary.get("tuwunel_unhealthy_samples")), "Tuwunel unhealthy samples"),
+        (_integer(summary.get("postgres_unhealthy_samples")), "PostgreSQL unhealthy samples"),
+    )
+    failures = [f"{count} {label}" for count, label in dependency_failures if count]
+    event_loop_probe = summary.get("event_loop_probe_latency_ms")
+    if isinstance(event_loop_probe, Mapping):
+        maximum = event_loop_probe.get("max")
+        if isinstance(maximum, int | float) and maximum > _EVENT_LOOP_PROBE_CEILING_MS:
+            failures.append(
+                f"event-loop progress probe exceeded {_EVENT_LOOP_PROBE_CEILING_MS:g} ms: {maximum:g} ms",
+            )
+    sync_age = summary.get("sync_age_seconds")
+    if isinstance(sync_age, Mapping):
+        maximum = sync_age.get("max")
+        if isinstance(maximum, int | float) and maximum > _SYNC_STARVATION_CEILING_SECONDS:
+            failures.append(
+                f"Matrix sync age exceeded {_SYNC_STARVATION_CEILING_SECONDS:g} s watchdog boundary: {maximum:g} s",
+            )
+    if failures:
+        raise AssertionError("; ".join(failures))
 
 
 @dataclass(slots=True)
@@ -1169,10 +1206,30 @@ def expected_minimum_matrix_edits(config: StressConfig) -> int:
     return max(2, math.floor(config.stream_seconds / 5.0))
 
 
+def matrix_edit_activity(
+    edits_by_stream: Mapping[str, Sequence[float]],
+) -> dict[str, object]:
+    """Return a relative timeline of simultaneously active Matrix edit streams."""
+    intervals = [(min(edits), max(edits)) for edits in edits_by_stream.values() if edits]
+    edit_times = sorted({time_value for edits in edits_by_stream.values() for time_value in edits})
+    origin = edit_times[0] if edit_times else 0.0
+    timeline = [
+        {
+            "offset_seconds": round(timestamp - origin, 3),
+            "active_streams": sum(start <= timestamp <= end for start, end in intervals),
+        }
+        for timestamp in edit_times
+    ]
+    return {
+        "max_active_streams": max((int(point["active_streams"]) for point in timeline), default=0),
+        "timeline": timeline,
+    }
+
+
 def assert_matrix_edit_shape(
     config: StressConfig,
     edits_by_stream: Mapping[str, Sequence[float]],
-) -> None:
+) -> dict[str, object]:
     """Fail unless every stream produced repeated overlapping Matrix edits."""
     expected_streams = config.threads * config.waves
     if len(edits_by_stream) != expected_streams:
@@ -1183,17 +1240,12 @@ def assert_matrix_edit_shape(
     if sparse:
         msg = f"insufficient Matrix edit activity; minimum={minimum}, streams={sparse}"
         raise AssertionError(msg)
-    intervals = [(min(edits), max(edits)) for edits in edits_by_stream.values() if edits]
-    simultaneous = max(
-        (
-            sum(start <= timestamp <= end for start, end in intervals)
-            for timestamp in sorted({time_value for edits in edits_by_stream.values() for time_value in edits})
-        ),
-        default=0,
-    )
+    activity = matrix_edit_activity(edits_by_stream)
+    simultaneous = int(activity["max_active_streams"])
     if simultaneous < config.threads:
         msg = f"Matrix edit overlap reached {simultaneous}/{config.threads} streams"
         raise AssertionError(msg)
+    return activity
 
 
 def write_replay_command(
@@ -1223,9 +1275,11 @@ __all__ = [
     "StressRequest",
     "aggregate_log_metrics",
     "assert_matrix_edit_shape",
+    "assert_resource_health",
     "current_machine_class",
     "expected_minimum_matrix_edits",
     "latency_summary",
+    "matrix_edit_activity",
     "parse_stress_request",
     "parse_structured_log",
     "percentile",

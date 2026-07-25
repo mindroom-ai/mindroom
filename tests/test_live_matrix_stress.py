@@ -27,6 +27,7 @@ from scripts.testing.live_matrix_stress import (
     StressRequest,
     aggregate_log_metrics,
     assert_matrix_edit_shape,
+    assert_resource_health,
     current_machine_class,
     expected_minimum_matrix_edits,
     latency_summary,
@@ -186,6 +187,7 @@ def test_exact_pulse_count_duration_and_completion_marker() -> None:
     stream = snapshot["streams"][0]
     assert stream["stream_duration_seconds"] == 2.0
     assert stream["pulse_offsets_seconds"] == [0.5, 1.0, 1.5, 2.0]
+    assert snapshot["barrier_wait_ms"]["count"] == 1
     controller.assert_complete()
 
 
@@ -516,7 +518,10 @@ def test_matrix_edit_shape_counts_and_overlap() -> None:
     }
 
     assert expected_minimum_matrix_edits(config) == 2
-    assert_matrix_edit_shape(config, edits)
+    activity = assert_matrix_edit_shape(config, edits)
+
+    assert activity["max_active_streams"] == 2
+    assert activity["timeline"][0] == {"offset_seconds": 0.0, "active_streams": 1}
 
 
 def test_matrix_edit_shape_faults_on_missing_final_edit() -> None:
@@ -543,8 +548,25 @@ def test_resource_summary_reports_cpu_rss_sync_and_health() -> None:
     assert summary["count"] == 2
     assert summary["cpu_percent"]["p50"] == 15
     assert summary["rss_bytes"]["max"] == 200
+    assert summary["event_loop_probe_latency_ms"]["max"] == 5
+    assert summary["mindroom_health_probe_failures"] == 0
     assert summary["tuwunel_unhealthy_samples"] == 1
     assert summary["postgres_unhealthy_samples"] == 0
+
+
+@pytest.mark.parametrize(
+    ("summary", "message"),
+    [
+        ({"mindroom_health_probe_failures": 1}, "MindRoom health probe failures"),
+        ({"tuwunel_unhealthy_samples": 1}, "Tuwunel unhealthy samples"),
+        ({"postgres_unhealthy_samples": 1}, "PostgreSQL unhealthy samples"),
+        ({"event_loop_probe_latency_ms": {"max": 5001}}, "event-loop progress probe"),
+        ({"sync_age_seconds": {"max": 121}}, "Matrix sync age"),
+    ],
+)
+def test_resource_health_safety_ceilings_fail(summary: dict[str, object], message: str) -> None:
+    with pytest.raises(AssertionError, match=message):
+        assert_resource_health(summary)
 
 
 def test_managed_postgres_preflight_never_falls_back(mocker: MockerFixture) -> None:
