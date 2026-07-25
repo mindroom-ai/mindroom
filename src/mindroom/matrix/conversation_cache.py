@@ -984,8 +984,9 @@ class MatrixConversationCache(ConversationCacheProtocol):
                 caller_label=caller_label,
             )
         finally:
-            # The source path can mark cache rows stale before raising or being cancelled.
-            self._evict_turn_thread_reads_for_thread(room_id, thread_id)
+            # Opaque source history can mark every thread in the room stale before
+            # raising or being cancelled.
+            self._evict_turn_thread_reads_for_room(room_id)
             self._evict_turn_event_lookups_for_room(room_id)
 
     async def get_thread_id_for_event(self, room_id: str, event_id: str) -> str | None:
@@ -1070,15 +1071,6 @@ class MatrixConversationCache(ConversationCacheProtocol):
             return
         for cache_key in tuple(turn_cache):
             if cache_key[0] == room_id:
-                turn_cache.pop(cache_key)
-
-    def _evict_turn_thread_reads_for_thread(self, room_id: str, thread_id: str) -> None:
-        """Discard thread reads touched by one explicit source refresh."""
-        turn_cache = self._turn_thread_read_cache.get()
-        if turn_cache is None:
-            return
-        for cache_key in tuple(turn_cache):
-            if cache_key[:2] == (room_id, thread_id):
                 turn_cache.pop(cache_key)
 
     def _evict_turn_event_lookup(self, room_id: str, event_id: str) -> None:

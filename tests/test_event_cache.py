@@ -825,6 +825,9 @@ async def test_strict_source_refresh_bypasses_usable_cache(
     conversation_cache = _conversation_cache_for_thread_reads(tmp_path, event_cache, client=client)
     coordinator = EventCacheWriteCoordinator(logger=conversation_cache.logger)
     conversation_cache.runtime.event_cache_write_coordinator = coordinator
+    conversation_cache._reads.read_thread = AsyncMock(
+        side_effect=AssertionError("explicit source refresh must bypass normal cache selection"),
+    )
     release_write = asyncio.Event()
     write_started = asyncio.Event()
 
@@ -876,6 +879,7 @@ async def test_strict_source_refresh_bypasses_usable_cache(
         event_cache,
     )
     assert refresh_thread_history.await_args.kwargs["allow_stale_fallback"] is False
+    conversation_cache._reads.read_thread.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -983,6 +987,68 @@ async def test_failed_strict_source_refresh_evicts_turn_memoization(tmp_path: Pa
 
     assert [message.event_id for message in before_refresh] == ["$question"]
     assert [message.event_id for message in after_refresh] == ["$question", "$answer"]
+    assert fetch_thread_history.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_room_stale_source_refresh_evicts_sibling_thread_memoization(tmp_path: Path) -> None:
+    """A room-scoped opaque-history failure should evict sibling thread reads."""
+    event_cache = SqliteEventCache(tmp_path / "event_cache.db")
+    await event_cache.initialize()
+    conversation_cache = _conversation_cache_for_thread_reads(tmp_path, event_cache, client=object())
+    conversation_cache.runtime.event_cache_write_coordinator = EventCacheWriteCoordinator(
+        logger=conversation_cache.logger,
+    )
+    stale_sibling = thread_history_result(
+        [ResolvedVisibleMessage.synthetic(sender="@user:localhost", body="Old", event_id="$old")],
+        is_full_history=True,
+    )
+    fresh_sibling = thread_history_result(
+        [
+            *stale_sibling,
+            ResolvedVisibleMessage.synthetic(sender="@user:localhost", body="New", event_id="$new"),
+        ],
+        is_full_history=True,
+    )
+    source_error = RuntimeError("opaque room history")
+
+    async def fail_after_room_invalidation(*_args: object, **_kwargs: object) -> ThreadHistoryResult:
+        await event_cache.mark_room_threads_stale(
+            "!room:localhost",
+            reason="opaque_encrypted_thread_history",
+        )
+        raise source_error
+
+    try:
+        with (
+            patch(
+                "mindroom.matrix.conversation_cache.fetch_dispatch_thread_history",
+                AsyncMock(side_effect=[stale_sibling, fresh_sibling]),
+            ) as fetch_thread_history,
+            patch(
+                "mindroom.matrix.conversation_cache.refresh_thread_history_from_source",
+                fail_after_room_invalidation,
+            ),
+        ):
+            async with conversation_cache.turn_scope():
+                before_refresh = await conversation_cache.get_strict_thread_history(
+                    "!room:localhost",
+                    "$sibling:localhost",
+                )
+                with pytest.raises(RuntimeError, match="opaque room history"):
+                    await conversation_cache.refresh_strict_thread_history_from_source(
+                        "!room:localhost",
+                        "$target:localhost",
+                    )
+                after_refresh = await conversation_cache.get_strict_thread_history(
+                    "!room:localhost",
+                    "$sibling:localhost",
+                )
+    finally:
+        await event_cache.close()
+
+    assert [message.event_id for message in before_refresh] == ["$old"]
+    assert [message.event_id for message in after_refresh] == ["$old", "$new"]
     assert fetch_thread_history.await_count == 2
 
 

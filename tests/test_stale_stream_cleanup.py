@@ -26,6 +26,7 @@ from mindroom.entity_resolution import MissingManagedEntityAccountError, entity_
 from mindroom.matrix import stale_stream_cleanup as stale_stream_cleanup_module
 from mindroom.matrix.cache import ThreadHistoryResult, thread_history_result
 from mindroom.matrix.client import ResolvedVisibleMessage
+from mindroom.matrix.client_thread_history import OpaqueEncryptedThreadHistoryError
 from mindroom.matrix.identity import managed_account_key
 from mindroom.matrix.stale_stream_cleanup import (
     StaleStreamCleanupActor,
@@ -919,7 +920,10 @@ async def test_prior_auto_resume_relay_does_not_suppress_sibling_resume(tmp_path
     mock_send.assert_awaited_once()
 
 
-@pytest.mark.parametrize("history_case", ["missing", "failed", "degraded", "missing_target", "untrusted_sender"])
+@pytest.mark.parametrize(
+    "history_case",
+    ["missing", "failed", "incomplete", "degraded", "opaque", "missing_target", "untrusted_sender"],
+)
 @pytest.mark.asyncio
 async def test_auto_resume_fails_closed_without_authoritative_target_history(
     tmp_path: Path,
@@ -928,16 +932,36 @@ async def test_auto_resume_fails_closed_without_authoritative_target_history(
     """Unusable history or untrusted sender classification should suppress auto-resume."""
     config = _make_config(tmp_path)
     client = AsyncMock(spec=nio.AsyncClient)
-    interrupted = [InterruptedThread(ROOM_ID, "$thread", "$target", "partial", "test_agent")]
+    interrupted = [
+        InterruptedThread(
+            ROOM_ID,
+            "$thread",
+            "$target",
+            "partial",
+            "test_agent",
+            original_sender_id=USER_ID,
+        ),
+    ]
     conversation_cache = None if history_case == "missing" else _auto_resume_conversation_cache(interrupted)
     if conversation_cache is not None and history_case == "failed":
         conversation_cache.refresh_strict_thread_history_from_source.side_effect = RuntimeError("history failed")
-    elif conversation_cache is not None and history_case == "degraded":
+    elif conversation_cache is not None and history_case == "incomplete":
         conversation_cache.refresh_strict_thread_history_from_source.side_effect = None
         conversation_cache.refresh_strict_thread_history_from_source.return_value = thread_history_result(
             [_history_message("$target")],
             is_full_history=False,
-            diagnostics={"thread_read_source": "degraded", "thread_read_degraded": True},
+            diagnostics={"thread_read_source": "homeserver"},
+        )
+    elif conversation_cache is not None and history_case == "degraded":
+        conversation_cache.refresh_strict_thread_history_from_source.side_effect = None
+        conversation_cache.refresh_strict_thread_history_from_source.return_value = thread_history_result(
+            [_history_message("$target")],
+            is_full_history=True,
+            diagnostics={"thread_read_source": "homeserver", "thread_read_degraded": True},
+        )
+    elif conversation_cache is not None and history_case == "opaque":
+        conversation_cache.refresh_strict_thread_history_from_source.side_effect = OpaqueEncryptedThreadHistoryError(
+            "opaque history",
         )
     elif conversation_cache is not None and history_case == "missing_target":
         conversation_cache.refresh_strict_thread_history_from_source.side_effect = None
@@ -965,6 +989,46 @@ async def test_auto_resume_fails_closed_without_authoritative_target_history(
 
     assert resumed_count == 0
     mock_send.assert_not_awaited()
+    if conversation_cache is not None:
+        conversation_cache.refresh_strict_thread_history_from_source.assert_awaited_once_with(
+            ROOM_ID,
+            "$thread",
+            caller_label="startup_auto_resume_freshness",
+        )
+
+
+@pytest.mark.asyncio
+async def test_auto_resume_propagates_cancelled_source_refresh(tmp_path: Path) -> None:
+    """Cancellation should abort recovery without sending an unchecked resume."""
+    config = _make_config(tmp_path)
+    client = AsyncMock(spec=nio.AsyncClient)
+    interrupted = [
+        InterruptedThread(
+            ROOM_ID,
+            "$thread",
+            "$target",
+            "partial",
+            "test_agent",
+            original_sender_id=USER_ID,
+        ),
+    ]
+    conversation_cache = _auto_resume_conversation_cache(interrupted)
+    conversation_cache.refresh_strict_thread_history_from_source.side_effect = asyncio.CancelledError
+
+    with (
+        patch("mindroom.matrix.stale_stream_cleanup.send_message_result", new=AsyncMock()) as mock_send,
+        pytest.raises(asyncio.CancelledError),
+    ):
+        await auto_resume_interrupted_threads(
+            client,
+            interrupted,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            conversation_cache=conversation_cache,
+        )
+
+    mock_send.assert_not_awaited()
+    conversation_cache.refresh_strict_thread_history_from_source.assert_awaited_once()
 
 
 @pytest.mark.asyncio
