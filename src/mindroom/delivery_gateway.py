@@ -32,6 +32,7 @@ from mindroom.hooks import (
 from mindroom.matrix.client_delivery import build_threaded_edit_content, edit_message_result, send_message_result
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import build_message_content
+from mindroom.runtime_protocols import SupportsClientConfigGeneration  # noqa: TC001
 from mindroom.streaming import (
     StreamingResponse,
     build_cancelled_response_update,
@@ -47,7 +48,6 @@ if TYPE_CHECKING:
     import nio
     import structlog
 
-    from mindroom.bot_runtime_view import BotRuntimeView
     from mindroom.constants import RuntimePaths
     from mindroom.conversation_resolver import ConversationResolver
     from mindroom.history.types import (
@@ -302,7 +302,7 @@ class StreamingDeliveryRequest:
 class DeliveryGatewayDeps:
     """Explicit dependencies needed for Matrix delivery."""
 
-    runtime: BotRuntimeView
+    runtime: SupportsClientConfigGeneration
     runtime_paths: RuntimePaths
     agent_name: str
     logger: structlog.stdlib.BoundLogger
@@ -787,7 +787,7 @@ class DeliveryGateway:
         """Edit the in-flight visible response into a terminal cancellation note."""
         cancelled_text, stream_status = build_cancelled_response_update("", cancel_source=request.cancel_source)
         extra_content: dict[str, Any] = {constants.STREAM_STATUS_KEY: stream_status}
-        if request.cancel_source == "sync_restart":
+        if request.cancel_source in {"sync_restart", "interrupted"}:
             extra_content[constants.STREAM_GENERATION_KEY] = self.deps.runtime.runtime_generation
         failure_reason = cancel_failure_reason(request.cancel_source)
         edited = await self.edit_text(

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 from types import SimpleNamespace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import nio
@@ -533,8 +533,21 @@ async def test_delivery_gateway_reads_generation_live_per_delivery(tmp_path: Pat
 
 
 @pytest.mark.asyncio
-async def test_sync_restart_cancellation_edit_keeps_runtime_generation(tmp_path: Path) -> None:
-    """The retry queue must retain ownership of its same-generation interruption note."""
+@pytest.mark.parametrize(
+    ("cancel_source", "expects_generation"),
+    [
+        ("sync_restart", True),
+        ("interrupted", True),
+        ("user_stop", False),
+    ],
+)
+async def test_auto_resumable_cancellation_edit_keeps_runtime_generation(
+    tmp_path: Path,
+    cancel_source: Literal["sync_restart", "interrupted", "user_stop"],
+    *,
+    expects_generation: bool,
+) -> None:
+    """Auto-resumable notes retain ownership; user stops remain unstamped."""
     gateway, _, _ = _gateway_with_mocks(tmp_path)
     gateway.deps.runtime.runtime_generation = "gen-1"
     target = MessageTarget.resolve("!test:server", "$thread", "$root")
@@ -551,18 +564,22 @@ async def test_sync_restart_cancellation_edit_keeps_runtime_generation(tmp_path:
                 target=target,
                 event_id="$response",
                 existing_event_is_placeholder=False,
-                cancel_source="sync_restart",
+                cancel_source=cancel_source,
                 identity=ResponseIdentity(
                     response_kind="ai",
                     response_envelope=_delivery_envelope(),
-                    correlation_id="corr-sync-restart",
+                    correlation_id=f"corr-{cancel_source}",
                 ),
             ),
         )
 
     content = send_result.await_args.args[2]
-    assert content[STREAM_GENERATION_KEY] == "gen-1"
-    assert content["m.new_content"][STREAM_GENERATION_KEY] == "gen-1"
+    if expects_generation:
+        assert content[STREAM_GENERATION_KEY] == "gen-1"
+        assert content["m.new_content"][STREAM_GENERATION_KEY] == "gen-1"
+    else:
+        assert STREAM_GENERATION_KEY not in content
+        assert STREAM_GENERATION_KEY not in content["m.new_content"]
 
 
 @pytest.mark.asyncio

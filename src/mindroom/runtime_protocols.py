@@ -19,6 +19,7 @@ if TYPE_CHECKING:
 __all__ = [
     "OrchestratorRuntime",
     "SupportsClientConfig",
+    "SupportsClientConfigGeneration",
     "SupportsClientConfigOrchestrator",
     "SupportsConfig",
     "SupportsConfigOrchestrator",
@@ -92,6 +93,13 @@ class SupportsClientConfig(Protocol):
 
     @property
     def config(self) -> Config: ...  # noqa: D102
+
+
+class SupportsClientConfigGeneration(SupportsClientConfig, Protocol):
+    """Expose Matrix delivery state with its current runtime generation."""
+
+    @property
+    def runtime_generation(self) -> str: ...  # noqa: D102
 
 
 class SupportsConfigOrchestrator(SupportsConfig, Protocol):

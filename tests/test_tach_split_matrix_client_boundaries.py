@@ -29,6 +29,7 @@ RUNTIME_PROTOCOL_PRIVATE_SYMBOL = "_check_narrow_protocols_are_subsets_of_bot_ru
 RUNTIME_PROTOCOL_PUBLIC_SYMBOLS = [
     "OrchestratorRuntime",
     "SupportsClientConfig",
+    "SupportsClientConfigGeneration",
     "SupportsClientConfigOrchestrator",
     "SupportsConfig",
     "SupportsConfigOrchestrator",
@@ -38,6 +39,7 @@ RUNTIME_PROTOCOL_IMPORTERS = {
     "mindroom.bot_room_lifecycle",
     "mindroom.conversation_resolver",
     "mindroom.conversation_state_writer",
+    "mindroom.delivery_gateway",
     "mindroom.edit_regenerator",
     "mindroom.hooks.context",
     "mindroom.inbound_turn_normalizer",
@@ -47,7 +49,6 @@ RUNTIME_PROTOCOL_IMPORTERS = {
 }
 BOT_RUNTIME_VIEW_ALLOWED_IMPORTERS = {
     "mindroom.bot",
-    "mindroom.delivery_gateway",
     "mindroom.matrix.cache.thread_reads",
     "mindroom.matrix.cache.thread_write_cache_ops",
     "mindroom.matrix.conversation_cache",
