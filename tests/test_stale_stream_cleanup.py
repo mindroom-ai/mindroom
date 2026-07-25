@@ -476,6 +476,80 @@ def test_latest_visible_thread_event_id_by_thread_maps_edited_parent_relation() 
     }
 
 
+def test_latest_visible_thread_event_id_by_thread_merges_visible_state_and_indirect_membership() -> None:
+    """An edited parent keeps separately resolved membership without retaining its raw edit row."""
+    root = ResolvedVisibleMessage.synthetic(
+        sender=USER_ID,
+        body="root",
+        event_id="$thread-root",
+        timestamp=1,
+        content={"body": "root", "msgtype": "m.text"},
+        thread_id="$thread-root",
+    )
+    resolved_parent = ResolvedVisibleMessage.synthetic(
+        sender=BOT_USER_ID,
+        body="parent",
+        event_id="$z-parent",
+        timestamp=2,
+        content={
+            "body": "parent",
+            "msgtype": "m.text",
+            "m.relates_to": {"m.in_reply_to": {"event_id": "$thread-child"}},
+        },
+    )
+    resolved_parent.apply_edit(
+        body="edited parent",
+        latest_event_id="$zz-parent-edit",
+        latest_event_timestamp=3,
+        content={"body": "edited parent", "msgtype": "m.text"},
+    )
+    raw_parent = ResolvedVisibleMessage.synthetic(
+        sender=BOT_USER_ID,
+        body="parent",
+        event_id="$z-parent",
+        timestamp=2,
+        content={
+            "body": "parent",
+            "msgtype": "m.text",
+            "m.relates_to": {"m.in_reply_to": {"event_id": "$thread-child"}},
+        },
+        thread_id="$thread-root",
+    )
+    raw_edit = ResolvedVisibleMessage.synthetic(
+        sender=BOT_USER_ID,
+        body="* edited parent",
+        event_id="$zz-parent-edit",
+        timestamp=3,
+        content={
+            "body": "* edited parent",
+            "msgtype": "m.text",
+            "m.relates_to": {"rel_type": "m.replace", "event_id": "$z-parent"},
+            "m.new_content": {
+                "body": "edited parent",
+                "msgtype": "m.text",
+                "m.relates_to": {"m.in_reply_to": {"event_id": "$thread-child"}},
+            },
+        },
+        thread_id="$thread-root",
+    )
+    child = ResolvedVisibleMessage.synthetic(
+        sender=USER_ID,
+        body="child",
+        event_id="$a-child",
+        timestamp=3,
+        content={
+            "body": "child",
+            "msgtype": "m.text",
+            "m.relates_to": {"m.in_reply_to": {"event_id": "$z-parent"}},
+        },
+        thread_id="$thread-root",
+    )
+
+    assert latest_visible_thread_event_id_by_thread(
+        [child, resolved_parent, raw_parent, raw_edit, root],
+    ) == {"$thread-root": "$a-child"}
+
+
 @pytest.mark.asyncio
 async def test_relations_api_filters_reactions_and_unions_history_ids(tmp_path: Path) -> None:
     """Cleanup should redact valid relation hits plus any history-scanned stop reactions."""

@@ -67,6 +67,7 @@ def _event_is_snapshot_graph_member(event: dict[str, Any]) -> bool:
         event.get("type") == "m.room.message"
         and not event_source_is_state_event(event)
         and isinstance(parse_room_message_event_source(event), nio.RoomMessage)
+        and EventInfo.from_event(event).relation_type != "m.replace"
     )
 
 

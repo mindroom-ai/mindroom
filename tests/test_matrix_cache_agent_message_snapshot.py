@@ -352,6 +352,65 @@ async def test_state_thread_child_cannot_authorize_indirect_snapshot_member(
     assert snapshot is None
 
 
+@pytest.mark.parametrize(
+    "edit_sender",
+    ["@user:localhost", "@attacker:localhost"],
+    ids=["same-sender", "foreign-sender"],
+)
+@pytest.mark.asyncio
+async def test_replacement_relation_cannot_authorize_indirect_snapshot_member(
+    event_cache_factory: Callable[[], ConversationEventCache],
+    edit_sender: str,
+) -> None:
+    """A replacement row cannot create membership independently of its original event."""
+    cache = event_cache_factory()
+    await cache.initialize()
+    try:
+        room_id = "!room:localhost"
+        thread_id = "$thread-root"
+        await _replace_thread(
+            cache,
+            room_id,
+            thread_id,
+            [
+                _message_event(
+                    event_id=thread_id,
+                    sender="@user:localhost",
+                    body="Question",
+                    origin_server_ts=1000,
+                ),
+                _message_event(
+                    event_id="$root-edit",
+                    sender=edit_sender,
+                    body="* Question",
+                    origin_server_ts=1500,
+                    relates_to={"rel_type": "m.replace", "event_id": thread_id},
+                    new_content={
+                        "body": "Edited question",
+                        "m.relates_to": {"rel_type": "m.thread", "event_id": thread_id},
+                    },
+                ),
+                _message_event(
+                    event_id="$indirect-agent-message",
+                    sender="@agent:localhost",
+                    body="Forged membership",
+                    origin_server_ts=2000,
+                    relates_to={"m.in_reply_to": {"event_id": "$root-edit"}},
+                ),
+            ],
+        )
+        snapshot = await cache.get_latest_agent_message_snapshot(
+            room_id,
+            thread_id,
+            "@agent:localhost",
+            runtime_started_at=None,
+        )
+    finally:
+        await cache.close()
+
+    assert snapshot is None
+
+
 @pytest.mark.asyncio
 async def test_get_latest_agent_message_snapshot_returns_streaming_status_for_threaded_message(
     event_cache_factory: Callable[[], ConversationEventCache],

@@ -280,11 +280,9 @@ def _visible_thread_message_is_better_candidate(
 ) -> bool:
     """Return whether one visible message copy should replace the current event winner."""
     return (
-        candidate.thread_id is not None,
         candidate.visible_timestamp,
         candidate.latest_event_id,
     ) > (
-        current.thread_id is not None,
         current.visible_timestamp,
         current.latest_event_id,
     )
@@ -293,10 +291,11 @@ def _visible_thread_message_is_better_candidate(
 def _visible_thread_key(
     message: SupportsVisibleThreadMessage,
     thread_root_ids: set[str],
+    thread_id_by_event_id: Mapping[str, str],
 ) -> str | None:
     """Return the canonical cleanup thread bucket for one visible message."""
-    if message.thread_id is not None:
-        return message.thread_id
+    if (thread_id := message.thread_id or thread_id_by_event_id.get(message.event_id)) is not None:
+        return thread_id
     if message.event_id in thread_root_ids:
         return message.event_id
     return None
@@ -331,18 +330,24 @@ def latest_visible_thread_event_id_by_thread(
     messages: Sequence[SupportsVisibleThreadMessage],
 ) -> dict[str, str]:
     """Return the latest visible event ID for each thread in one cleanup scan."""
-    thread_root_ids = {message.thread_id for message in messages if message.thread_id is not None}
-    best_message_by_visible_event_id: dict[str, SupportsVisibleThreadMessage] = {}
+    visible_messages = [
+        message for message in messages if not EventInfo.from_event({"content": dict(message.content)}).is_edit
+    ]
+    thread_root_ids = {message.thread_id for message in visible_messages if message.thread_id is not None}
+    thread_id_by_event_id: dict[str, str] = {}
+    best_message_by_event_id: dict[str, SupportsVisibleThreadMessage] = {}
     messages_by_thread: dict[str, list[SupportsVisibleThreadMessage]] = {}
 
-    for message in messages:
-        existing_message = best_message_by_visible_event_id.get(message.visible_event_id)
+    for message in visible_messages:
+        if message.thread_id is not None:
+            thread_id_by_event_id.setdefault(message.event_id, message.thread_id)
+        existing_message = best_message_by_event_id.get(message.event_id)
         if existing_message is not None and not _visible_thread_message_is_better_candidate(message, existing_message):
             continue
-        best_message_by_visible_event_id[message.visible_event_id] = message
+        best_message_by_event_id[message.event_id] = message
 
-    for message in best_message_by_visible_event_id.values():
-        thread_key = _visible_thread_key(message, thread_root_ids)
+    for message in best_message_by_event_id.values():
+        thread_key = _visible_thread_key(message, thread_root_ids, thread_id_by_event_id)
         if thread_key is None:
             continue
         messages_by_thread.setdefault(thread_key, []).append(message)
