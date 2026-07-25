@@ -72,6 +72,8 @@ async def test_streaming_e2e_worker_warmup_edit_sequence(tmp_path: Path) -> None
         _client: object,
         _room_id: str,
         content: dict[str, object],
+        *,
+        retry_sync_recovery: bool = False,  # noqa: ARG001
     ) -> DeliveredMatrixEvent:
         deliveries.append(("send", str(content["body"])))
         return DeliveredMatrixEvent(event_id="$stream_1", content_sent=dict(content))
@@ -82,6 +84,8 @@ async def test_streaming_e2e_worker_warmup_edit_sequence(tmp_path: Path) -> None
         _event_id: str,
         new_content: dict[str, object],
         new_text: str,
+        *,
+        retry_sync_recovery: bool = False,  # noqa: ARG001
     ) -> DeliveredMatrixEvent:
         deliveries.append(("edit", new_text))
         return DeliveredMatrixEvent(event_id="$stream_edit", content_sent=dict(new_content))
