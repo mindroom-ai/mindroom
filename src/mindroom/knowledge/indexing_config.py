@@ -122,8 +122,15 @@ class IndexingSettings:
         if mode not in _INDEXING_MODES:
             return None
 
+        # Legacy metadata predating these keys omits them entirely. Normalize the
+        # absent value to whatever ``indexing_settings_key`` emits today, so an
+        # old index is not misread as config-incompatible and needlessly rebuilt.
+        # That producer always emits a filter key for include/exclude_patterns,
+        # but only populates extra_extensions in semantic mode ("" otherwise).
         def _optional_filter_key(name: str, *, empty_value: str = _EMPTY_FILTER_KEY) -> str:
             return settings.get(name, "") or empty_value
+
+        semantic_only_empty = _EMPTY_FILTER_KEY if mode == "semantic" else ""
 
         return cls(
             base_id=settings["base_id"],
@@ -146,10 +153,10 @@ class IndexingSettings:
             exclude_patterns=_optional_filter_key("exclude_patterns"),
             include_extensions=settings["include_extensions"],
             exclude_extensions=settings["exclude_extensions"],
-            extra_extensions=_optional_filter_key(
-                "extra_extensions",
-                empty_value=_EMPTY_FILTER_KEY if mode == "semantic" else "",
-            ),
+            extra_extensions=_optional_filter_key("extra_extensions", empty_value=semantic_only_empty),
+            # Not normalized on purpose: skip_hidden is a bool string rather than
+            # a filter key, and absent metadata must keep failing the corpus match
+            # so pre-skip_hidden indexes are rebuilt (see the field docstring).
             skip_hidden=settings.get("skip_hidden", ""),
         )
 

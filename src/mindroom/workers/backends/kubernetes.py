@@ -580,7 +580,7 @@ class KubernetesWorkerBackend(WorkerBackend):
         deployments: list[resources.KubernetesDeployment],
         *,
         now: float,
-        scaled_down_worker_ids: frozenset[str] = frozenset(),
+        scaled_down_worker_ids: frozenset[str],
     ) -> list[WorkerHandle]:
         """Reconcile drifted workers from one already-loaded Deployment snapshot."""
         reconciled: list[WorkerHandle] = []
@@ -617,16 +617,20 @@ class KubernetesWorkerBackend(WorkerBackend):
             if self.config.reconcile_pod_templates
             else []
         )
-        return WorkerMaintenanceResult(cleaned=cleaned, reconciled=reconciled)
+        return WorkerMaintenanceResult(cleaned=tuple(cleaned), reconciled=tuple(reconciled))
 
     def _is_reconcile_candidate(
         self,
         deployment: resources.KubernetesDeployment,
         *,
         handle: WorkerHandle,
-        scaled_down: bool = False,
+        scaled_down: bool,
     ) -> bool:
-        """Return whether one Deployment is a scaled-down worker with a drifted pod template."""
+        """Return whether one Deployment is a scaled-down worker with a drifted pod template.
+
+        ``scaled_down`` marks workers this same maintenance pass just scaled to
+        zero, whose snapshot still reports the pre-cleanup replica count.
+        """
         if handle.status != "idle" or (not scaled_down and int(deployment.spec.replicas or 0) != 0):
             return False
         annotations = dict(deployment.metadata.annotations or {})
@@ -661,7 +665,7 @@ class KubernetesWorkerBackend(WorkerBackend):
         if live is None:
             return None
         live_handle = self._handle_from_deployment(live, now=now)
-        if not self._is_reconcile_candidate(live, handle=live_handle):
+        if not self._is_reconcile_candidate(live, handle=live_handle, scaled_down=False):
             return None
         annotations = dict(live.metadata.annotations or {})
         try:

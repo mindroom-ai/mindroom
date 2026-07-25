@@ -412,17 +412,39 @@ class _FakeApiClient:
         return self._core_api.patch_namespaced_secret(name, namespace, body)
 
 
-def test_kubernetes_deployment_snapshot_rejects_missing_status() -> None:
-    """Malformed apiserver objects must fail instead of becoming silently unready workers."""
+def test_kubernetes_deployment_snapshot_tolerates_missing_status() -> None:
+    """A Deployment read before the controller writes status is unready, not fatal."""
     payload = {
-        "metadata": {
-            "name": "mindroom-worker",
-            "labels": {},
-        },
+        "metadata": {"name": "mindroom-worker", "labels": {}},
         "spec": {"replicas": 1},
     }
 
-    with pytest.raises(WorkerBackendError, match="object status"):
+    snapshot = kubernetes_resources_module._deployment_snapshot(payload)
+
+    assert snapshot.status.ready_replicas is None
+    assert snapshot.status.observed_generation is None
+
+
+def test_kubernetes_deployment_snapshot_tolerates_missing_labels() -> None:
+    """Labels are carried but never read; their absence must not fail the pass."""
+    payload = {
+        "metadata": {"name": "mindroom-worker"},
+        "spec": {"replicas": 1},
+        "status": {},
+    }
+
+    assert kubernetes_resources_module._deployment_snapshot(payload).metadata.labels == {}
+
+
+def test_kubernetes_deployment_snapshot_rejects_non_object_status() -> None:
+    """A structurally wrong status is still a malformed payload."""
+    payload = {
+        "metadata": {"name": "mindroom-worker", "labels": {}},
+        "spec": {"replicas": 1},
+        "status": "ready",
+    }
+
+    with pytest.raises(WorkerBackendError, match="non-object status"):
         kubernetes_resources_module._deployment_snapshot(payload)
 
 
@@ -2282,7 +2304,7 @@ def test_kubernetes_backend_reconcile_defers_running_workers(tmp_path: Path) -> 
 
     reconciled = updated_backend.maintain_workers(now=10.0).reconciled
 
-    assert reconciled == []
+    assert reconciled == ()
     assert apps_api.deleted_names == []
     assert len(apps_api.created_bodies) == 1
 
@@ -2303,7 +2325,7 @@ def test_kubernetes_backend_reconcile_leaves_unchanged_templates_alone(tmp_path:
 
     reconciled = unchanged_backend.maintain_workers(now=90.0).reconciled
 
-    assert reconciled == []
+    assert reconciled == ()
     assert apps_api.deleted_names == []
     assert len(apps_api.created_bodies) == 1
     assert len(apps_api.patched_bodies) == patch_count_after_cleanup
@@ -2328,7 +2350,7 @@ def test_kubernetes_backend_reconcile_disabled_by_config(tmp_path: Path) -> None
 
     reconciled = updated_backend.maintain_workers(now=90.0).reconciled
 
-    assert reconciled == []
+    assert reconciled == ()
     assert apps_api.deleted_names == []
     assert len(apps_api.created_bodies) == 1
 
@@ -2359,7 +2381,7 @@ def test_kubernetes_backend_reconcile_uses_persisted_private_visibility(tmp_path
 
     unchanged_backend, _, _ = _backend(runtime_paths=runtime_paths)
     _wire_fake_apis(unchanged_backend, apps_api, core_api)
-    assert unchanged_backend.maintain_workers(now=90.0).reconciled == []
+    assert unchanged_backend.maintain_workers(now=90.0).reconciled == ()
 
     updated_backend, _, _ = _backend(runtime_paths=runtime_paths, resource_limits={"memory": "2Gi", "cpu": "1"})
     _wire_fake_apis(updated_backend, apps_api, core_api)
@@ -2404,7 +2426,7 @@ def test_kubernetes_backend_reconcile_revalidates_live_state_before_recreating(t
 
     reconciled = updated_backend.maintain_workers(now=90.0).reconciled
 
-    assert reconciled == []
+    assert reconciled == ()
     live_deployment = apps_api.deployments[handle.worker_id]
     assert int(live_deployment.spec.replicas) == 1
     assert live_deployment.metadata.annotations[ANNOTATION_WORKER_KEY] == _TEST_SCOPED_WORKER_KEY_A
@@ -2448,7 +2470,7 @@ def test_kubernetes_backend_reconcile_defers_user_agent_workers_without_persiste
     with caplog.at_level("WARNING", logger=kubernetes_backend_module.__name__):
         reconciled = updated_backend.maintain_workers(now=90.0).reconciled
 
-    assert reconciled == []
+    assert reconciled == ()
     assert apps_api.deleted_names == []
     assert len(apps_api.created_bodies) == 1
     assert caplog.records == []

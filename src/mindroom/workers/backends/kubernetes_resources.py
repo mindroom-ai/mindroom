@@ -517,9 +517,20 @@ def _required_mapping(payload: Mapping[str, object], field_name: str) -> Mapping
     return cast("Mapping[str, object]", value)
 
 
-def _string_mapping(value: object, *, field_name: str, required: bool = False) -> dict[str, str]:
-    """Read a string-to-string Kubernetes metadata mapping."""
-    if value is None and not required:
+def _optional_mapping(payload: Mapping[str, object], field_name: str) -> Mapping[str, object]:
+    """Read one optional object, treating absence as empty."""
+    value = payload.get(field_name)
+    if value is None:
+        return {}
+    if not isinstance(value, Mapping):
+        msg = f"Kubernetes Deployment list returned a non-object {field_name}."
+        raise WorkerBackendError(msg)
+    return cast("Mapping[str, object]", value)
+
+
+def _string_mapping(value: object, *, field_name: str) -> dict[str, str]:
+    """Read an optional string-to-string Kubernetes metadata mapping."""
+    if value is None:
         return {}
     if not isinstance(value, Mapping) or any(
         not isinstance(key, str) or not isinstance(item, str) for key, item in value.items()
@@ -537,7 +548,10 @@ def _deployment_snapshot(payload: object) -> KubernetesDeployment:
     payload_mapping = cast("Mapping[str, object]", payload)
     metadata = _required_mapping(payload_mapping, "metadata")
     spec = _required_mapping(payload_mapping, "spec")
-    status = _required_mapping(payload_mapping, "status")
+    # status is populated by the deployment controller, so a Deployment read
+    # before that first write has none. Absence means "not ready yet", which the
+    # None fields below already express -- never a reason to fail the whole pass.
+    status = _optional_mapping(payload_mapping, "status")
     name = metadata.get("name")
     if not isinstance(name, str) or not name:
         msg = "Kubernetes Deployment list returned an item without metadata.name."
@@ -551,7 +565,7 @@ def _deployment_snapshot(payload: object) -> KubernetesDeployment:
         metadata=_DeploymentMetadataSnapshot(
             name=name,
             annotations=annotations,
-            labels=_string_mapping(metadata.get("labels"), field_name="metadata.labels", required=True),
+            labels=_string_mapping(metadata.get("labels"), field_name="metadata.labels"),
             generation=_optional_int(metadata.get("generation"), field_name="metadata.generation"),
             uid=uid,
         ),

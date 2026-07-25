@@ -180,29 +180,83 @@ async def test_typing_start_failure_does_not_fail_response_turn() -> None:
         body_entered = True
 
     assert body_entered is True
+    # One failed start plus the best-effort stop; the retry only fires after the
+    # refresh interval, which this turn never reaches.
     assert client.room_typing.await_count == 2
     assert not typing_module._ACTIVE_TYPING
 
 
 @pytest.mark.asyncio
-async def test_typing_refresh_failure_is_logged_and_consumed() -> None:
-    """A dead refresh task should not fail the active turn or escape unobserved."""
+async def test_typing_refresh_failure_is_logged_and_retried() -> None:
+    """A failed refresh must not kill the loop; the next tick retries."""
     client = AsyncMock()
     refresh_failed = asyncio.Event()
-    call_count = 0
+    recovered = asyncio.Event()
+    typing_calls = 0
 
     async def room_typing(_room_id: str, typing: bool, _timeout_ms: int) -> None:
-        nonlocal call_count
-        call_count += 1
-        if typing and call_count == 2:
+        nonlocal typing_calls
+        if not typing:
+            return
+        typing_calls += 1
+        if typing_calls == 2:
             refresh_failed.set()
             message = "refresh failed"
             raise RuntimeError(message)
+        if typing_calls > 2:
+            recovered.set()
 
     client.room_typing.side_effect = room_typing
 
     async with typing_indicator(client, "!room:example.org", timeout_seconds=0):
         await asyncio.wait_for(refresh_failed.wait(), timeout=1)
+        await asyncio.wait_for(recovered.wait(), timeout=1)
 
-    assert call_count == 3
+    assert typing_calls > 2
+    assert not typing_module._ACTIVE_TYPING
+
+
+@pytest.mark.asyncio
+async def test_typing_recovers_for_joiner_after_failed_start() -> None:
+    """A transient start failure must not suppress typing for the whole lease."""
+    client = AsyncMock()
+    room_id = "!room:example.org"
+    start_attempts = 0
+    typing_started = asyncio.Event()
+    let_holders_exit = asyncio.Event()
+
+    async def room_typing(_room_id: str, typing: bool, _timeout_ms: int) -> None:
+        nonlocal start_attempts
+        if not typing:
+            return
+        start_attempts += 1
+        if start_attempts == 1:
+            message = "Matrix unavailable"
+            raise RuntimeError(message)
+        typing_started.set()
+
+    client.room_typing.side_effect = room_typing
+
+    first_entered = asyncio.Event()
+
+    async def holder(entered: asyncio.Event) -> None:
+        async with typing_indicator(client, room_id, timeout_seconds=0):
+            entered.set()
+            await let_holders_exit.wait()
+
+    first_task = asyncio.create_task(holder(first_entered))
+    await asyncio.wait_for(first_entered.wait(), timeout=1)
+
+    # A second turn joins the same lease after the initial start already failed.
+    joiner_entered = asyncio.Event()
+    joiner_task = asyncio.create_task(holder(joiner_entered))
+    await asyncio.wait_for(joiner_entered.wait(), timeout=1)
+
+    # The shared refresh loop must retry so the joiner actually shows as typing.
+    await asyncio.wait_for(typing_started.wait(), timeout=1)
+
+    let_holders_exit.set()
+    await asyncio.gather(first_task, joiner_task)
+
+    assert start_attempts > 1
     assert not typing_module._ACTIVE_TYPING

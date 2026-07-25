@@ -65,30 +65,24 @@ async def _refresh_typing(
     *,
     state: _TypingState,
 ) -> None:
-    """Start and refresh one shared Matrix typing indicator."""
-    try:
-        await _set_typing(client, room_id, True, state.timeout_seconds)
-    except asyncio.CancelledError:
-        if not state.started.done():
-            state.started.cancel()
-        raise
-    except Exception:
-        logger.warning("Failed to start typing indicator", room_id=room_id, exc_info=True)
-        if not state.started.done():
-            state.started.set_result(None)
-        return
-    if not state.started.done():
-        state.started.set_result(None)
+    """Start and keep refreshing one shared Matrix typing indicator.
+
+    The lease outlives individual turns, so a failed request must not end the
+    loop: later holders joining this lease would otherwise never see typing
+    again. Every attempt is best-effort and the next tick simply retries.
+    """
     while True:
-        refresh_interval = min(state.timeout_seconds / 2, 15)
-        await asyncio.sleep(refresh_interval)
         try:
             await _set_typing(client, room_id, True, state.timeout_seconds)
         except asyncio.CancelledError:
+            if not state.started.done():
+                state.started.cancel()
             raise
         except Exception:
-            logger.warning("Failed to refresh typing indicator", room_id=room_id, exc_info=True)
-            return
+            logger.warning("Failed to set typing indicator", room_id=room_id, exc_info=True)
+        if not state.started.done():
+            state.started.set_result(None)
+        await asyncio.sleep(min(state.timeout_seconds / 2, 15))
 
 
 async def _acquire_typing_state(
@@ -132,6 +126,10 @@ async def _release_typing_state(
     state.references -= 1
     if state.references > 0:
         return
+    # Publish the stop intent in the same tick as the decrement. A joiner that
+    # runs before this is set would otherwise see references == 0 with no
+    # stopping future, take the acquire fast path, and bind to a lease that is
+    # already committed to sending typing=False underneath it.
     state.stopping = asyncio.get_running_loop().create_future()
     refresh_task = state.refresh_task
     assert refresh_task is not None

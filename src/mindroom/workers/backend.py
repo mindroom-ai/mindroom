@@ -64,8 +64,8 @@ class WorkerBackend(Protocol):
     def maintain_workers(self, *, now: float | None = None) -> WorkerMaintenanceResult:
         """Run one backend maintenance pass."""
         return WorkerMaintenanceResult(
-            cleaned=self.cleanup_idle_workers(now=now),
-            reconciled=[],
+            cleaned=tuple(self.cleanup_idle_workers(now=now)),
+            reconciled=(),
         )
 
     def record_failure(self, worker_key: str, failure_reason: str, *, now: float | None = None) -> WorkerHandle:

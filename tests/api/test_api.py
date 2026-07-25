@@ -1157,7 +1157,7 @@ def test_worker_cleanup_once_cleans_workers(monkeypatch: pytest.MonkeyPatch) -> 
             ]
 
         def maintain_workers(self) -> WorkerMaintenanceResult:
-            return WorkerMaintenanceResult(cleaned=self.cleanup_idle_workers(), reconciled=[])
+            return WorkerMaintenanceResult(cleaned=tuple(self.cleanup_idle_workers()), reconciled=())
 
     monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "kubernetes")
     monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_IMAGE", "ghcr.io/mindroom-ai/mindroom:latest")
@@ -1198,7 +1198,7 @@ def test_worker_cleanup_once_reconciles_drifted_worker_templates(monkeypatch: py
 
         def maintain_workers(self) -> WorkerMaintenanceResult:
             maintained_managers.append(self)
-            return WorkerMaintenanceResult(cleaned=[], reconciled=[])
+            return WorkerMaintenanceResult(cleaned=(), reconciled=())
 
     worker_manager = _FakeWorkerManager()
     monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "kubernetes")

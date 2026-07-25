@@ -42,8 +42,8 @@ class WorkerHandle:
 class WorkerMaintenanceResult:
     """Workers changed by one backend maintenance pass."""
 
-    cleaned: list[WorkerHandle]
-    reconciled: list[WorkerHandle]
+    cleaned: tuple[WorkerHandle, ...]
+    reconciled: tuple[WorkerHandle, ...]
 
 
 @dataclass(frozen=True, slots=True)
