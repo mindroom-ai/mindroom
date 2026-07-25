@@ -571,6 +571,80 @@ class TestAgentBot(AgentBotTestBase):
         mock_orchestrator.start.assert_awaited_once()
 
     @pytest.mark.asyncio
+    async def test_orchestrator_main_finishes_requested_shutdown_after_duplicate_signal_cancel(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A second SIGINT cancellation must not abort cleanup started by the first signal."""
+        reset_runtime_state()
+        start_released = asyncio.Event()
+        mock_orchestrator = MagicMock()
+        mock_orchestrator.knowledge_refresh_scheduler = None
+
+        async def _start() -> None:
+            await start_released.wait()
+
+        async def _stop() -> None:
+            start_released.set()
+
+        async def _cancel_after_requested_shutdown(**kwargs: object) -> None:
+            shutdown_requested = kwargs["shutdown_requested"]
+            assert isinstance(shutdown_requested, asyncio.Event)
+            shutdown_requested.set()
+            raise asyncio.CancelledError
+
+        async def _blocked_auxiliary_task(*_args: object, **_kwargs: object) -> None:
+            await asyncio.Event().wait()
+
+        mock_orchestrator.start = AsyncMock(side_effect=_start)
+        mock_orchestrator.stop = AsyncMock(side_effect=_stop)
+
+        with (
+            patch("mindroom.orchestrator.setup_logging"),
+            patch("mindroom.orchestrator.sync_env_to_credentials"),
+            patch("mindroom.orchestrator._MultiAgentOrchestrator", return_value=mock_orchestrator),
+            patch("mindroom.orchestrator._run_auxiliary_task_forever", new=_blocked_auxiliary_task),
+            patch(
+                "mindroom.orchestrator._wait_for_runtime_completion",
+                side_effect=_cancel_after_requested_shutdown,
+            ),
+        ):
+            await main(log_level="INFO", runtime_paths=self._runtime_paths(tmp_path), api=False)
+
+        mock_orchestrator.stop.assert_awaited_once()
+        mock_orchestrator.start.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_orchestrator_main_propagates_unrequested_task_cancellation(self, tmp_path: Path) -> None:
+        """Embedding callers must retain cancellation when no shutdown signal was requested."""
+        reset_runtime_state()
+        mock_orchestrator = MagicMock()
+        mock_orchestrator.knowledge_refresh_scheduler = None
+        mock_orchestrator.start = AsyncMock()
+        mock_orchestrator.stop = AsyncMock()
+
+        async def _cancel_without_shutdown(**_kwargs: object) -> None:
+            raise asyncio.CancelledError
+
+        async def _blocked_auxiliary_task(*_args: object, **_kwargs: object) -> None:
+            await asyncio.Event().wait()
+
+        with (
+            patch("mindroom.orchestrator.setup_logging"),
+            patch("mindroom.orchestrator.sync_env_to_credentials"),
+            patch("mindroom.orchestrator._MultiAgentOrchestrator", return_value=mock_orchestrator),
+            patch("mindroom.orchestrator._run_auxiliary_task_forever", new=_blocked_auxiliary_task),
+            patch(
+                "mindroom.orchestrator._wait_for_runtime_completion",
+                side_effect=_cancel_without_shutdown,
+            ),
+            pytest.raises(asyncio.CancelledError),
+        ):
+            await main(log_level="INFO", runtime_paths=self._runtime_paths(tmp_path), api=False)
+
+        mock_orchestrator.stop.assert_awaited_once()
+
+    @pytest.mark.asyncio
     async def test_orchestrator_main_fails_when_api_server_exits_unexpectedly(self, tmp_path: Path) -> None:
         """An unexpected API-server task failure should stop the top-level run non-silently."""
         reset_runtime_state()

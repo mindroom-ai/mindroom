@@ -2151,7 +2151,7 @@ async def _cancel_task_if_pending(task: asyncio.Task | None) -> None:
         await task
 
 
-async def main(  # noqa: PLR0915
+async def main(  # noqa: C901, PLR0912, PLR0915
     log_level: str,
     runtime_paths: RuntimePaths,
     *,
@@ -2233,6 +2233,10 @@ async def main(  # noqa: PLR0915
             api_server=api_server,
         )
 
+    except asyncio.CancelledError:
+        if not shutdown_requested.is_set():
+            raise
+        logger.info("Ignoring duplicate signal cancellation during requested shutdown")
     except KeyboardInterrupt:
         shutdown_requested.set()
         logger.info("Multi-agent bot system stopped by user")
