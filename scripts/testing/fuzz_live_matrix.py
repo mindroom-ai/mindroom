@@ -2493,14 +2493,14 @@ class LiveMatrixClient:
         for room_id in self.room_ids:
             room = joined.get(room_id, {}) if isinstance(joined, dict) else {}
             timeline = room.get("timeline", {}) if isinstance(room, dict) else {}
-            if timeline.get("limited") is True and not allow_limited:
-                msg = "incremental Matrix fuzz sync unexpectedly returned a limited timeline"
-                raise AssertionError(msg)
             events = timeline.get("events", [])
             if not isinstance(events, list):
                 msg = "Matrix sync room timeline events must be a list"
                 raise TypeError(msg)
-            for raw_event in events:
+            recovered_events: list[Mapping[str, Any]] = []
+            if timeline.get("limited") is True and not allow_limited:
+                recovered_events = await self.paginate_room(room_id)
+            for raw_event in [*recovered_events, *events]:
                 if not isinstance(raw_event, dict):
                     continue
                 event = cast("dict[str, Any]", raw_event)
@@ -2952,13 +2952,13 @@ class ExactReplyOracle:
             for room_id in self.client.room_ids:
                 room = joined.get(room_id, {}) if isinstance(joined, dict) else {}
                 timeline = room.get("timeline", {}) if isinstance(room, dict) else {}
-                if timeline.get("limited") is True and not allow_limited:
-                    msg = "live fuzz oracle received a limited timeline; reduce batch size"
-                    raise AssertionError(msg)
                 events = timeline.get("events", [])
                 if not isinstance(events, list):
                     continue
-                for raw_event in events:
+                recovered_events: list[Mapping[str, Any]] = []
+                if timeline.get("limited") is True and not allow_limited:
+                    recovered_events = await self.client.paginate_room(room_id)
+                for raw_event in [*recovered_events, *events]:
                     if isinstance(raw_event, dict):
                         self._ingest_event(raw_event)
 
