@@ -843,6 +843,8 @@ class TurnController:
             finally:
                 command_claim.release(self.deps.turn_store)
             return _IngressAdmissionOutcome.CONSUMED
+        if command_claim is not None:
+            command_claim.release(self.deps.turn_store)
         return await self._enqueue_prepared_text_for_dispatch(
             room=room,
             prepared_event=prepared_event,

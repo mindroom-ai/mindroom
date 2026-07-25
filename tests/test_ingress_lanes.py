@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -15,18 +16,21 @@ from mindroom.cancellation import SYNC_RESTART_CANCEL_MSG
 from mindroom.coalescing import CoalescingGate, IngressAdmissionClosedError, ReadyPendingEvent
 from mindroom.coalescing_batch import CoalescingKey, PendingEvent
 from mindroom.constants import ORIGINAL_SENDER_KEY, SOURCE_KIND_KEY, VISIBLE_ROUTER_VOICE_ECHO_KEY
-from mindroom.dispatch_handoff import PendingDispatchMetadata, PreparedTextEvent
+from mindroom.dispatch_handoff import DispatchIngressMetadata, PendingDispatchMetadata, PreparedTextEvent
 from mindroom.dispatch_source import (
     ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
     EXTERNAL_TRIGGER_SOURCE_KIND,
+    HOOK_DISPATCH_SOURCE_KIND,
     HOOK_SOURCE_KIND,
     SCHEDULED_SOURCE_KIND,
     TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
     VOICE_SOURCE_KIND,
 )
+from mindroom.handled_turns import TurnRecord
 from mindroom.matrix.thread_membership import ThreadMembershipLookupError
 from mindroom.message_target import MessageTarget
 from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN
+from mindroom.turn_policy import _DispatchPlan
 from tests.conftest import prepared_dispatch_result, unwrap_extracted_collaborator
 from tests.test_live_message_coalescing import (
     _enqueue_for_dispatch,
@@ -44,7 +48,6 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.coalescing_batch import CoalescedBatch
-    from mindroom.handled_turns import TurnRecord
 
 
 def _room(room_id: str = "!room:localhost") -> nio.MatrixRoom:
@@ -617,6 +620,115 @@ async def test_duplicate_command_shaped_bypass_sources_both_reach_resolution_fai
     send_text_mock.assert_not_awaited()
     assert not bot._turn_store.is_handled("$synthetic")
     assert not bot._turn_store.is_claimed_in_flight("$synthetic")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "source_kind",
+    [
+        SCHEDULED_SOURCE_KIND,
+        HOOK_SOURCE_KIND,
+        HOOK_DISPATCH_SOURCE_KIND,
+        EXTERNAL_TRIGGER_SOURCE_KIND,
+        TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+    ],
+)
+async def test_command_shaped_bypass_source_dispatches_as_conversation(
+    tmp_path: Path,
+    source_kind: str,
+) -> None:
+    """Every successful bypass source treats command-shaped text as conversation."""
+    bot = _make_bot(tmp_path, agent_name="router")
+    room = _make_room()
+    event = _text_event(
+        event_id="$synthetic",
+        body="!help",
+        sender=bot.matrix_id.full_id,
+        server_timestamp=1000,
+        source_kind=source_kind,
+        original_sender="@user:localhost",
+    )
+    handled_turn = TurnRecord.create([event.event_id], completed=False)
+    assert bot._turn_store.try_claim_turn(handled_turn)
+    prepared = _prepared_dispatch(
+        event_id=event.event_id,
+        requester_user_id="@user:localhost",
+        body=event.body,
+        source_kind=source_kind,
+    )
+    prepare_dispatch = AsyncMock(return_value=prepared_dispatch_result(prepared))
+    plan_turn = AsyncMock(return_value=_DispatchPlan(kind="ignore"))
+
+    with (
+        patch.object(bot._inbound_turn_normalizer, "resolve_text_event", new=AsyncMock(return_value=event)),
+        patch.object(bot._turn_controller, "_prepare_dispatch", new=prepare_dispatch),
+        patch.object(bot._turn_policy, "plan_turn", new=plan_turn),
+        patch.object(bot._turn_controller, "_has_newer_unresponded_in_thread", return_value=False),
+        patch.object(bot._turn_controller, "_execute_command_if_owned", new=AsyncMock()) as execute_command,
+        patch("mindroom.text_ingress_dispatch.is_dm_room", new=AsyncMock(return_value=False)),
+    ):
+        await bot._turn_controller._dispatch_text_message(
+            room,
+            event,
+            "@user:localhost",
+            handled_turn=handled_turn,
+            ingress_metadata=DispatchIngressMetadata(source_kind=source_kind),
+            turn_claim_held=True,
+        )
+
+    assert prepare_dispatch.await_args.kwargs["use_command_context"] is False
+    plan_turn.assert_awaited_once()
+    execute_command.assert_not_awaited()
+    assert not bot._turn_store.is_claimed_in_flight(event.event_id)
+
+
+@pytest.mark.asyncio
+async def test_hydrated_sidecar_noncommand_releases_raw_command_claim_before_gate(tmp_path: Path) -> None:
+    """A sidecar body changing command classification must still reach normal dispatch."""
+    bot = _make_bot(tmp_path, debounce_ms=0)
+    room = _make_room()
+    event = _text_event(event_id="$sidecar", body="!help", server_timestamp=1000)
+    content = event.source["content"]
+    assert isinstance(content, dict)
+    content.update(
+        {
+            "io.mindroom.long_text": {
+                "version": 2,
+                "encoding": "matrix_event_content_json",
+            },
+            "url": "mxc://localhost/sidecar",
+        },
+    )
+    download_response = MagicMock(
+        spec=nio.DownloadResponse,
+        body=json.dumps({"msgtype": "m.text", "body": "ordinary hydrated conversation"}).encode(),
+    )
+    bot.client.download = AsyncMock(return_value=download_response)
+    prepared = _prepared_dispatch(
+        event_id=event.event_id,
+        requester_user_id=event.sender,
+        body="ordinary hydrated conversation",
+    )
+    prepare_dispatch = AsyncMock(return_value=prepared_dispatch_result(prepared))
+    plan_turn = AsyncMock(return_value=_DispatchPlan(kind="ignore"))
+
+    with (
+        patch.object(bot._conversation_resolver, "coalescing_thread_id", new=AsyncMock(return_value=None)),
+        patch.object(bot._turn_controller, "_prepare_dispatch", new=prepare_dispatch),
+        patch.object(bot._turn_policy, "plan_turn", new=plan_turn),
+        patch.object(bot._turn_controller, "_has_newer_unresponded_in_thread", return_value=False),
+        patch.object(bot._turn_controller, "_execute_command_if_owned", new=AsyncMock()) as execute_command,
+        patch("mindroom.text_ingress_dispatch.is_dm_room", new=AsyncMock(return_value=False)),
+    ):
+        await bot._turn_controller.handle_text_event(room, event)
+        await bot._coalescing_gate.drain_all()
+
+    assert bot.client.download.await_count == 2
+    assert all(call.kwargs == {"mxc": "mxc://localhost/sidecar"} for call in bot.client.download.await_args_list)
+    assert prepare_dispatch.await_args.kwargs["use_command_context"] is False
+    plan_turn.assert_awaited_once()
+    execute_command.assert_not_awaited()
+    assert not bot._turn_store.is_claimed_in_flight(event.event_id)
 
 
 @pytest.mark.asyncio

@@ -8,7 +8,6 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from mindroom.attachments import parse_attachment_ids_from_event_source
-from mindroom.commands.parsing import command_parser
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     ORIGINAL_SENDER_KEY,
@@ -25,10 +24,10 @@ from mindroom.dispatch_handoff import (
     merge_payload_metadata,
     payload_metadata_from_source,
 )
-from mindroom.dispatch_source import VOICE_SOURCE_KIND, is_voice_event
+from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
 from mindroom.handled_turns import TurnRecord
 from mindroom.inbound_turn_normalizer import TextNormalizationRequest
-from mindroom.matrix.media import is_audio_message_event, is_matrix_media_dispatch_event
+from mindroom.matrix.media import is_matrix_media_dispatch_event
 from mindroom.matrix.rooms import is_dm_room
 from mindroom.response_payload_preparation import DispatchPayloadInputs
 from mindroom.timing import (
@@ -271,7 +270,7 @@ async def _prepare_text_dispatch(
         refreshed_prompts[event.event_id] = event.body
         handled_turn = replace(handled_turn, source_event_prompts=refreshed_prompts)
 
-    command = _parsed_command_for_event(
+    command = _command_control_input(
         controller,
         event,
         media_events=media_events,
@@ -294,8 +293,6 @@ async def _prepare_text_dispatch(
         dispatch_timing.mark("dispatch_prepare_ready")
     if prepared is None:
         return None
-    if command is not None and prepared.dispatch.envelope.source_kind == VOICE_SOURCE_KIND:
-        command = None
     return _PreparedTextDispatch(
         event=event,
         payload_metadata=payload_metadata,
@@ -311,7 +308,7 @@ async def _prepare_text_dispatch(
     )
 
 
-def _parsed_command_for_event(
+def _command_control_input(
     controller: TurnController,
     event: TextDispatchEvent,
     *,
@@ -320,14 +317,8 @@ def _parsed_command_for_event(
 ) -> Command | None:
     if media_events:
         return None
-    if ingress_metadata is not None and ingress_metadata.source_kind == VOICE_SOURCE_KIND:
-        return None
-    if is_audio_message_event(event) or is_voice_event(
-        event,
-        sender_is_trusted=controller.deps.ingress.sender_is_trusted_for_ingress_metadata,
-    ):
-        return None
-    return command_parser.parse(event.body)
+    source_kind = ingress_metadata.source_kind if ingress_metadata is not None else MESSAGE_SOURCE_KIND
+    return controller.deps.ingress.command_control_input(event, source_kind=source_kind)
 
 
 async def _blocked_before_plan(
