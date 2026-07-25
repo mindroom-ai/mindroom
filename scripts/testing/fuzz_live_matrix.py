@@ -1971,6 +1971,7 @@ class ExactReplyOracle:
         self.reply_events_with_edits: set[str] = set()
         self.response_edit_targets: dict[str, str] = {}
         self.response_edit_bodies: dict[str, str] = {}
+        self.router_edit_targets: dict[str, str] = {}
         self.unexpected_responder_ids: dict[str, str] = {}
         self.seen_event_ids: set[str] = set()
         self.limited_timeline_count = 0
@@ -2259,8 +2260,8 @@ class ExactReplyOracle:
             return
         if relation.get("rel_type") == "m.replace":
             target_event_id = relation.get("event_id")
-            if target_event_id in self.response_event_by_ref.values():
-                self.unexpected_responder_ids[event_id] = cast("str", self.router_id)
+            if isinstance(target_event_id, str):
+                self.router_edit_targets[event_id] = target_event_id
             return
         in_reply_to = relation.get("m.in_reply_to")
         source_event_id = in_reply_to.get("event_id") if isinstance(in_reply_to, dict) else None
@@ -2378,6 +2379,14 @@ class ExactReplyOracle:
             for source, values in self.wrong_thread_roots.items()
         }
         canonical_response_ids = set(self.response_event_by_ref.values())
+        unexpected_responders = {
+            **self.unexpected_responder_ids,
+            **{
+                event_id: cast("str", self.router_id)
+                for event_id, target_event_id in self.router_edit_targets.items()
+                if target_event_id in canonical_response_ids
+            },
+        }
         orphan_edits = {
             event_id: target_event_id
             for event_id, target_event_id in self.response_edit_targets.items()
@@ -2404,14 +2413,14 @@ class ExactReplyOracle:
             or orphan_edits
             or corrupt_stream_edits
             or self.malformed_response_ids
-            or self.unexpected_responder_ids
+            or unexpected_responders
         ):
             msg = (
                 "agent reply invariant failed: "
                 f"duplicates={duplicates}, unexpected={unexpected}, wrong_thread_roots={wrong_roots}, "
                 f"orphan_edits={orphan_edits}, corrupt_stream_edits={sorted(corrupt_stream_edits)}, "
                 f"malformed={sorted(self.malformed_response_ids)}, "
-                f"unexpected_responders={self.unexpected_responder_ids}"
+                f"unexpected_responders={unexpected_responders}"
             )
             raise AssertionError(msg)
 

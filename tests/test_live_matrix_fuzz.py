@@ -1083,6 +1083,25 @@ def test_exact_reply_oracle_rejects_router_duplicate() -> None:
         oracle._assert_no_wrong_replies()
 
 
+def test_exact_reply_oracle_rejects_router_edit_ingested_before_agent_response() -> None:
+    """Backward pagination cannot hide a router edit seen before its agent target."""
+    oracle = ExactReplyOracle(
+        cast("LiveMatrixClient", object()),
+        "@agent:example",
+        "@router:example",
+    )
+    oracle.expect("root:0", "$source")
+    router_edit = _agent_edit_event("$response", "router", event_id="$router-edit")
+    router_edit["sender"] = "@router:example"
+
+    oracle._ingest_event(router_edit)
+    oracle._ingest_event(_agent_reply_event("$source", "$response", "Thinking..."))
+
+    assert oracle.router_edit_targets == {"$router-edit": "$response"}
+    with pytest.raises(AssertionError, match=r"unexpected_responders=.*\$router-edit"):
+        oracle._assert_no_wrong_replies()
+
+
 @pytest.mark.asyncio
 async def test_exact_reply_deadline_bounds_a_stalled_sync(
     monkeypatch: pytest.MonkeyPatch,
