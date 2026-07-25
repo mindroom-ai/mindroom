@@ -17,7 +17,7 @@ from mindroom.handled_turns import TurnRecord, TurnRecordCodec
 from mindroom.streaming import RESTART_INTERRUPTED_RESPONSE_NOTE
 
 if TYPE_CHECKING:
-    from collections.abc import Collection
+    from collections.abc import Callable, Collection
     from pathlib import Path
 
 import pytest
@@ -1462,7 +1462,7 @@ async def test_ledger_attribution_flags_missing_and_orphaned_turns(tmp_path: Pat
         with pytest.raises(AssertionError, match="superseded chain source"):
             auditor._assert_ledger_attribution(replies)
 
-        # An incomplete older record is dropped by the loader, so it also fails.
+        # Final audit rejects an incomplete record directly.
         incomplete_first = TurnRecord(source_event_ids=("$first",), response_event_id=None, completed=False)
         anchor_second = TurnRecord(
             source_event_ids=("$second",),
@@ -1470,7 +1470,7 @@ async def test_ledger_attribution_flags_missing_and_orphaned_turns(tmp_path: Pat
             completed=True,
         )
         _write_ledger(ledger_path, {"$first": incomplete_first, "$second": anchor_second})
-        with pytest.raises(AssertionError, match="superseded chain source"):
+        with pytest.raises(AssertionError, match=r"\$first.*incomplete"):
             auditor._assert_ledger_attribution(replies)
 
         # A completed no-response record for the older source proves supersession.
@@ -1503,6 +1503,62 @@ async def test_ledger_attribution_flags_missing_and_orphaned_turns(tmp_path: Pat
             auditor._assert_ledger_attribution(replies)
     finally:
         await client.close()
+
+
+@pytest.mark.asyncio
+async def test_final_ledger_audit_rejects_one_malformed_projection(tmp_path: Path) -> None:
+    """One corrupt row cannot disappear and let an otherwise valid audit pass."""
+    client = LiveMatrixClient("http://matrix.invalid", "!room:example")
+    oracle = ExactReplyOracle(client, "@agent:example", coalescing_threads=True)
+    ledger_path = tmp_path / "general_responded.json"
+    auditor = FinalStateAuditor(
+        client,
+        oracle,
+        agent_id="@agent:example",
+        expected_body_for=lambda call_id: f"LIVE-FUZZ call={call_id} END call={call_id}",
+        ledger_path=ledger_path,
+    )
+    try:
+        oracle.expect("op:1", "$source", thread=0)
+        record = TurnRecord(source_event_ids=("$source",), response_event_id="$reply", completed=True)
+        ledger_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": TurnRecordCodec.schema_version(),
+                    "records": {
+                        "$source": TurnRecordCodec.to_ledger_record(record),
+                        "$corrupt": {"completed": True},
+                    },
+                },
+            ),
+            encoding="utf-8",
+        )
+
+        # Live settlement remains tolerant while a write may be in flight.
+        assert live_fuzz.read_ledger_records(ledger_path) == {"$source": record}
+        with pytest.raises(AssertionError, match=r"ledger invalid.*\$corrupt.*malformed"):
+            auditor._assert_ledger_attribution({"$source": {"$reply"}})
+    finally:
+        await client.close()
+
+
+def test_strict_ledger_read_rejects_incomplete_record(tmp_path: Path) -> None:
+    """A final audit cannot silently ignore a durable non-terminal turn."""
+    ledger_path = tmp_path / "general_responded.json"
+    _write_ledger(
+        ledger_path,
+        {
+            "$pending": TurnRecord(
+                source_event_ids=("$pending",),
+                response_event_id=None,
+                completed=False,
+            ),
+        },
+    )
+
+    assert live_fuzz.read_ledger_records(ledger_path) == {}
+    with pytest.raises(AssertionError, match=r"\$pending.*incomplete"):
+        live_fuzz.read_ledger_records(ledger_path, strict=True)
 
 
 @pytest.mark.asyncio
@@ -2709,8 +2765,13 @@ def test_stack_close_attempts_every_stage_after_failures(
         lambda *_args, **_kwargs: events.append("instance"),
     )
 
+    def snapshot() -> None:
+        events.append("snapshot")
+        message = "snapshot failed"
+        raise ValueError(message)
+
     with pytest.raises(ExceptionGroup) as raised:
-        stack.close()
+        stack.close(before_destructive_cleanup=snapshot)
 
     assert events == [
         "mindroom",
@@ -2718,12 +2779,13 @@ def test_stack_close_attempts_every_stage_after_failures(
         "shutdown",
         "server_close",
         "thread",
+        "snapshot",
         "instance",
         "temp",
         "manifest",
         "lease",
     ]
-    assert len(raised.value.exceptions) == 2
+    assert len(raised.value.exceptions) == 3
 
 
 def test_host_lease_excludes_second_live_stack(tmp_path: Path) -> None:
@@ -3341,6 +3403,102 @@ def test_main_stop_interrupt_preserves_primary_and_closes_stack(
     cleanup_files = list((tmp_path / "artifacts").glob("*/cleanup_error.txt"))
     assert len(cleanup_files) == 1
     assert "KeyboardInterrupt" in cleanup_files[0].read_text(encoding="utf-8")
+
+
+def test_main_cleanup_failure_retains_pre_teardown_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A passing workload snapshots disposable evidence before failed cleanup."""
+    artifact_root = tmp_path / "artifacts"
+    args = SimpleNamespace(
+        artifact_root=artifact_root,
+        failure_log=None,
+        pending_grace=0.0,
+        reply_timeout=1.0,
+        save_trace=None,
+        seed=1,
+        settle_seconds=0.0,
+        trace=None,
+    )
+    disposable = tmp_path / "disposable"
+    storage_path = disposable / "mindroom_data"
+    ledger_path = storage_path / "tracking" / "general_responded.json"
+    log_path = disposable / "mindroom.log"
+    events: list[str] = []
+
+    class CleanupFailingStack:
+        def __init__(self, **_kwargs: object) -> None:
+            self.runtime_provenance = {"mindroom_revision": "abc", "nio_revision": "def"}
+            ledger_path.parent.mkdir(parents=True)
+            _write_ledger(ledger_path, {})
+            log_path.write_text("complete MindRoom log\n", encoding="utf-8")
+            self.log_path = log_path
+            self.storage_path = storage_path
+
+        def start(self) -> None:
+            events.append("start")
+
+        def diagnostic_counts(self) -> dict[str, int]:
+            events.append("diagnostics")
+            return {"event_loop_stalls": 0}
+
+        def tuwunel_log(self) -> str:
+            events.append("tuwunel_log")
+            return "complete Tuwunel log\n"
+
+        def close(self, *, before_destructive_cleanup: Callable[[], None]) -> None:
+            events.append("stop")
+            before_destructive_cleanup()
+            events.append("remove")
+            shutil.rmtree(disposable)
+            cleanup_message = "cleanup failed"
+            remove_message = "remove Tuwunel instance: failed"
+            lease_message = "release host lease: failed"
+            nested_message = "nested"
+            raise ExceptionGroup(
+                cleanup_message,
+                [
+                    RuntimeError(remove_message),
+                    ExceptionGroup(nested_message, [OSError(lease_message)]),
+                ],
+            )
+
+    async def pass_run(*_args: object, **_kwargs: object) -> dict[str, object]:
+        return {"status": "PASS"}
+
+    monkeypatch.setattr(live_fuzz, "_parse_args", lambda: args)
+    monkeypatch.setattr(live_fuzz, "_scenario_from_args", lambda _args: _bundle_scenario())
+    monkeypatch.setattr(live_fuzz, "_run_provenance", dict)
+    monkeypatch.setattr(live_fuzz, "ManagedTuwunelStack", CleanupFailingStack)
+    monkeypatch.setattr(live_fuzz, "_run_live", pass_run)
+
+    with pytest.raises(ExceptionGroup, match="cleanup failed"):
+        live_fuzz.main()
+
+    assert not disposable.exists()
+    run_directories = [path for path in artifact_root.iterdir() if path.name != "receipts"]
+    assert len(run_directories) == 1
+    directory = run_directories[0]
+    assert {
+        "cleanup_error.txt",
+        "diagnostics.json",
+        "handled_turns.json",
+        "mindroom.log",
+        "model_observations.json",
+        "oracle_snapshot.json",
+        "provenance.json",
+        "realized_journal.jsonl",
+        "scenario.json",
+        "tuwunel.log",
+    } <= {path.name for path in directory.iterdir()}
+    assert "complete MindRoom log" in (directory / "mindroom.log").read_text(encoding="utf-8")
+    assert "complete Tuwunel log" in (directory / "tuwunel.log").read_text(encoding="utf-8")
+    cleanup_errors = (directory / "cleanup_error.txt").read_text(encoding="utf-8")
+    assert "remove Tuwunel instance: failed" in cleanup_errors
+    assert "release host lease: failed" in cleanup_errors
+    assert not (artifact_root / "receipts").exists()
+    assert events == ["start", "diagnostics", "stop", "diagnostics", "tuwunel_log", "remove"]
 
 
 def test_failure_bundle_appends_every_cleanup_error(tmp_path: Path) -> None:

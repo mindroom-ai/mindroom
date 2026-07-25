@@ -1489,7 +1489,11 @@ class ManagedTuwunelStack:
         _run_command("docker", "restart", f"{self.instance_name}-tuwunel")
         self._wait_for_url(f"{self.homeserver}/_matrix/client/versions", timeout=60)
 
-    def close(self) -> None:
+    def close(
+        self,
+        *,
+        before_destructive_cleanup: Callable[[], None] | None = None,
+    ) -> None:
         """Attempt every teardown stage and report all cleanup failures."""
         errors: list[Exception] = []
 
@@ -1511,6 +1515,8 @@ class ManagedTuwunelStack:
                 errors.append(RuntimeError("join model server thread: thread remained alive"))
             else:
                 self._model_thread = None
+        if before_destructive_cleanup is not None:
+            _attempt_cleanup(errors, "snapshot runtime evidence", before_destructive_cleanup)
         if self._created:
             _attempt_cleanup(
                 errors,
@@ -1955,35 +1961,96 @@ class LiveMatrixClient:
         return data
 
 
-def read_ledger_records(ledger_path: Path) -> dict[str, TurnRecord]:
+def read_ledger_records(
+    ledger_path: Path,
+    *,
+    strict: bool = False,
+) -> dict[str, TurnRecord]:
     """Read every completed handled-turn record keyed by its source event.
 
     A completed record with a visible ``response_event_id`` proves that source
     was answered. A completed record with ``response_event_id`` set to ``None``
     is production's exact durable proof that the source was legitimately
     skipped as a superseded replay. Missing, malformed, or ``completed=False``
-    records are omitted, so the oracle can require proof of a terminal outcome
-    rather than inferring supersession from chronology alone.
+    records are omitted during live polling, so the oracle can wait for a
+    terminal outcome rather than inferring supersession from chronology alone.
+    Final audits use strict mode and reject every unreadable, malformed, or
+    non-terminal entry instead of letting corruption look like an empty ledger.
     """
-    if not ledger_path.exists():
+    raw_records = _load_ledger_rows(ledger_path, strict=strict)
+    if raw_records is None:
         return {}
+    return _decode_ledger_rows(ledger_path, raw_records, strict=strict)
+
+
+def _invalid_ledger(ledger_path: Path, reason: str, *, strict: bool) -> None:
+    """Raise for a final audit, or let live polling retry a transient file."""
+    if strict:
+        msg = f"handled-turn ledger invalid at {ledger_path}: {reason}"
+        raise AssertionError(msg)
+
+
+def _load_ledger_rows(
+    ledger_path: Path,
+    *,
+    strict: bool,
+) -> dict[str, object] | None:
+    """Load and validate the versioned ledger envelope."""
+    if not ledger_path.exists():
+        _invalid_ledger(ledger_path, "file is missing", strict=strict)
+        return None
     try:
         payload = json.loads(ledger_path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return {}
-    if not isinstance(payload, dict) or payload.get("schema_version") != TurnRecordCodec.schema_version():
-        return {}
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError) as exc:
+        _invalid_ledger(ledger_path, str(exc), strict=strict)
+        return None
+    if not isinstance(payload, dict):
+        _invalid_ledger(ledger_path, "root must be an object", strict=strict)
+        return None
+    if payload.get("schema_version") != TurnRecordCodec.schema_version():
+        _invalid_ledger(ledger_path, "schema version does not match", strict=strict)
+        return None
     raw_records = payload.get("records")
     if not isinstance(raw_records, dict):
-        return {}
+        _invalid_ledger(ledger_path, "records must be an object", strict=strict)
+        return None
+    return cast("dict[str, object]", raw_records)
+
+
+def _decode_ledger_rows(
+    ledger_path: Path,
+    raw_records: Mapping[str, object],
+    *,
+    strict: bool,
+) -> dict[str, TurnRecord]:
+    """Decode rows, retaining only completed records for oracle use."""
     records: dict[str, TurnRecord] = {}
+    decoded_records: dict[str, TurnRecord] = {}
     for event_id, raw_record in raw_records.items():
-        if not isinstance(event_id, str):
-            continue
         record = TurnRecordCodec.from_ledger_record(event_id, raw_record)
-        if record is not None and record.completed:
-            records[event_id] = record
+        if record is None:
+            _invalid_ledger(ledger_path, f"record {event_id!r} is malformed", strict=strict)
+            continue
+        decoded_records[event_id] = record
+        if not record.completed:
+            _invalid_ledger(ledger_path, f"record {event_id!r} is incomplete", strict=strict)
+            continue
+        records[event_id] = record
+    if strict:
+        conflict = _ledger_projection_conflict(decoded_records)
+        if conflict is not None:
+            _invalid_ledger(ledger_path, conflict, strict=True)
     return records
+
+
+def _ledger_projection_conflict(records: Mapping[str, TurnRecord]) -> str | None:
+    """Describe the first pair of conflicting physical projections."""
+    for event_id, record in records.items():
+        for indexed_event_id in record.indexed_event_ids:
+            projected = records.get(indexed_event_id)
+            if projected is not None and projected != record:
+                return f"record {event_id!r} conflicts with projection {indexed_event_id!r}"
+    return None
 
 
 class ExactReplyOracle:
@@ -2807,7 +2874,7 @@ class FinalStateAuditor:
         if not self.ledger_path.exists():
             msg = f"handled-turn ledger missing at {self.ledger_path}"
             raise AssertionError(msg)
-        records = read_ledger_records(self.ledger_path)
+        records = read_ledger_records(self.ledger_path, strict=True)
 
         problems: list[str] = []
         ledger_response_ids, attributed, optional_problems = self._attribute_optional_replies(replies, records)
@@ -2916,7 +2983,7 @@ class FinalStateAuditor:
         ``redacted_source_event_ids``) — the same contract production uses.
         """
         assert self.ledger_path is not None
-        records = read_ledger_records(self.ledger_path)
+        records = read_ledger_records(self.ledger_path, strict=True)
         expected_sources = self.oracle.expected_sources
         problems: list[str] = []
         for source_event_id, record in records.items():
@@ -4495,7 +4562,7 @@ class FailureBundle:
     def finalize(
         self,
         *,
-        exception: BaseException,
+        exception: BaseException | None,
         log_path: Path,
         ledger_path: Path,
         oracle_snapshot: Mapping[str, object],
@@ -4520,13 +4587,14 @@ class FailureBundle:
 
             return _write
 
-        self._write_isolated(
-            "exception.txt",
-            lambda destination: destination.write_text(
-                f"{type(exception).__name__}: {exception}\n",
-                encoding="utf-8",
-            ),
-        )
+        if exception is not None:
+            self._write_isolated(
+                "exception.txt",
+                lambda destination: destination.write_text(
+                    f"{type(exception).__name__}: {exception}\n",
+                    encoding="utf-8",
+                ),
+            )
         self._write_isolated("mindroom.log", copy_text(log_path))
         self._write_isolated("handled_turns.json", copy_text(ledger_path))
         self._write_isolated("oracle_snapshot.json", write_json(dict(oracle_snapshot)))
@@ -4630,7 +4698,18 @@ def main() -> None:
     except BaseException as exc:
         _capture_failed_run(args, bundle, stack, runner_holder.get("runner"), exc)
         raise
-    stack.close()
+
+    def snapshot_runtime_evidence() -> None:
+        _persist_run_bundle(bundle, stack, runner_holder.get("runner"))
+
+    try:
+        stack.close(
+            before_destructive_cleanup=snapshot_runtime_evidence,
+        )
+    except BaseException as cleanup_error:
+        _record_secondary_failure(bundle, cleanup_error, label="Live Matrix fuzz cleanup error")
+        print(f"Live Matrix fuzz cleanup failure bundle: {bundle.directory}", file=sys.stderr)
+        raise
     provenance = stack.runtime_provenance
     if provenance is None:
         msg = "passing live run omitted child runtime provenance"
@@ -4668,21 +4747,32 @@ def _persist_failure_bundle(
         bundle.record_cleanup_error(stop_exc)
         print(f"MindRoom stop before failure capture failed: {stop_exc}", file=sys.stderr)
     try:
-        oracle_snapshot = _sanitized_oracle_snapshot(runner.oracle) if runner is not None else {}
-        ledger_path = stack.storage_path / "tracking" / f"{AGENT_NAME}_responded.json"
-        path = bundle.finalize(
-            exception=exc,
-            log_path=stack.log_path,
-            ledger_path=ledger_path,
-            oracle_snapshot=oracle_snapshot,
-            model_observations=_ModelHandler.observations_snapshot(),
-            diagnostics=stack.diagnostic_counts(),
-            tuwunel_log=stack.tuwunel_log(),
-        )
+        path = _persist_run_bundle(bundle, stack, runner, exception=exc)
         print(f"Live Matrix fuzz failure bundle: {path}", file=sys.stderr)
     except BaseException as bundle_exc:
         # Evidence-capture errors must never replace the primary fuzz failure.
         print(f"Failure bundle capture error (ignored): {bundle_exc}", file=sys.stderr)
+
+
+def _persist_run_bundle(
+    bundle: FailureBundle,
+    stack: ManagedTuwunelStack,
+    runner: LiveFuzzRunner | None,
+    *,
+    exception: BaseException | None = None,
+) -> Path:
+    """Copy disposable stack evidence before cleanup can remove its sources."""
+    oracle_snapshot = _sanitized_oracle_snapshot(runner.oracle) if runner is not None else {}
+    ledger_path = stack.storage_path / "tracking" / f"{AGENT_NAME}_responded.json"
+    return bundle.finalize(
+        exception=exception,
+        log_path=stack.log_path,
+        ledger_path=ledger_path,
+        oracle_snapshot=oracle_snapshot,
+        model_observations=_ModelHandler.observations_snapshot(),
+        diagnostics=stack.diagnostic_counts(),
+        tuwunel_log=stack.tuwunel_log(),
+    )
 
 
 if __name__ == "__main__":

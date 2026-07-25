@@ -122,6 +122,11 @@ async def test_dispatch_claims_router_relay_alias_up_front(tmp_path: Path) -> No
     )
     prepared = SimpleNamespace(handled_turn=TurnRecord.create(["$relay"], completed=False), event=raw_event)
     observed: dict[str, bool] = {}
+    prepared_turns: list[TurnRecord] = []
+
+    async def capture_prepared(*_args: object, handled_turn: TurnRecord, **_kwargs: object) -> object:
+        prepared_turns.append(handled_turn)
+        return prepared
 
     async def blocked(*_args: object, **_kwargs: object) -> bool:
         observed["routed_in_flight"] = store.is_claimed_in_flight("$routed")
@@ -130,7 +135,7 @@ async def test_dispatch_claims_router_relay_alias_up_front(tmp_path: Path) -> No
     with (
         patch(
             "mindroom.text_ingress_dispatch._prepare_text_dispatch",
-            new=AsyncMock(return_value=prepared),
+            new=capture_prepared,
         ),
         patch(
             "mindroom.text_ingress_dispatch._blocked_before_plan",
@@ -149,6 +154,9 @@ async def test_dispatch_claims_router_relay_alias_up_front(tmp_path: Path) -> No
         )
 
     assert observed["routed_in_flight"] is True
+    assert prepared_turns[0].completed is True
+    assert prepared_turns[0].source_event_ids == ("$relay",)
+    assert prepared_turns[0].discovery_event_ids == ("$routed",)
     assert store.is_claimed_in_flight("$routed") is False
     assert store.is_claimed_in_flight("$relay") is False
 
@@ -176,9 +184,9 @@ async def test_dispatch_leaves_alias_owned_by_another_live_turn(tmp_path: Path) 
         server_timestamp=1_000,
     )
     prepared = SimpleNamespace(handled_turn=TurnRecord.create(["$relay"], completed=False), event=raw_event)
-    prepared_claims: list[TurnRecord] = []
+    prepared_claims: list[TurnRecord | None] = []
 
-    async def capture_prepared(*_args: object, handled_turn: TurnRecord, **_kwargs: object) -> object:
+    async def capture_prepared(*_args: object, handled_turn: TurnRecord | None, **_kwargs: object) -> object:
         prepared_claims.append(handled_turn)
         return prepared
 
@@ -200,7 +208,7 @@ async def test_dispatch_leaves_alias_owned_by_another_live_turn(tmp_path: Path) 
         )
 
     # The relay released only $relay; the routed original still owns $routed.
-    assert prepared_claims[0].indexed_event_ids == ("$relay",)
+    assert prepared_claims == [None]
     assert store.is_claimed_in_flight("$routed") is True
     assert store.is_claimed_in_flight("$relay") is False
 

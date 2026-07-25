@@ -103,6 +103,7 @@ async def dispatch_text_message(
         turn_claim,
         ingress_metadata=ingress_metadata,
     )
+    terminal_handled_turn = _terminal_turn(raw_event.event_id, handled_turn, turn_claim)
     claim_transferred = False
 
     def mark_claim_transferred() -> None:
@@ -118,7 +119,7 @@ async def dispatch_text_message(
             raw_event,
             requester_user_id,
             media_events=media_events,
-            handled_turn=turn_claim,
+            handled_turn=terminal_handled_turn,
             ingress_metadata=ingress_metadata,
             payload_metadata=payload_metadata,
             trust_hydrated_internal_metadata=trust_hydrated_internal_metadata,
@@ -206,6 +207,18 @@ def _claim_router_relay_alias(
         turn_claim,
         discovery_event_ids=(*turn_claim.discovery_event_ids, alias_event_id),
     )
+
+
+def _terminal_turn(
+    event_id: str,
+    handled_turn: TurnRecord | None,
+    turn_claim: TurnRecord,
+) -> TurnRecord | None:
+    """Keep terminal state separate while carrying only aliases this claim owns."""
+    if not turn_claim.discovery_event_ids:
+        return handled_turn
+    terminal = handled_turn or TurnRecord.create([event_id])
+    return replace(terminal, discovery_event_ids=turn_claim.discovery_event_ids)
 
 
 def _try_claim_turn(
