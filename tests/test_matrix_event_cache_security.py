@@ -1245,7 +1245,7 @@ async def test_departed_refill_guard_blocks_point_plaintext_and_thread_writes_af
                 expected_membership_epoch=departed_membership_epoch,
                 fetch_started_at=float("inf"),
             )
-            is ThreadCacheReplaceOutcome.WRITES_UNAVAILABLE
+            is ThreadCacheReplaceOutcome.RETRYABLE_CONFLICT
         )
         assert await _raw_mxc_text_count(refill_cache, room_id, mxc_url) == 0
 
