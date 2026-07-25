@@ -12,7 +12,7 @@ all progress lived in process memory.
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Protocol
 
@@ -2060,3 +2060,81 @@ async def test_vectors_prefetched_before_a_later_fallback_are_still_reused(
     state = _published_state(config, runtime_paths)
     assert state is not None
     assert state.indexed_count == 12
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_naming_a_published_collection_is_rejected_even_if_metadata_is_incomplete(
+    tmp_path: Path,
+) -> None:
+    """The published collection must never be reopened as a candidate.
+
+    The guard compared only the strictly parsed collection name. Metadata that
+    is parseable but missing a required field makes that name null while the
+    raw payload still names the live collection, so a surviving checkpoint
+    could reopen the published collection and write candidate reconciliation
+    into it.
+    """
+    docs_path = tmp_path / "docs"
+    _write_corpus(docs_path, 2)
+    config = _config(tmp_path, docs_path)
+    runtime_paths = runtime_paths_for(config)
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    state = _published_state(config, runtime_paths)
+    assert state is not None
+    published_collection = state.collection
+    assert published_collection is not None
+
+    key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
+    write_index_metadata_payload(
+        published_index_metadata_path(key),
+        settings=state.settings.to_metadata(),
+        status="complete",
+        collection=published_collection,
+    )
+    manager = _manager(config)
+    save_candidate_checkpoint(
+        _storage_path(config, runtime_paths),
+        CandidateCheckpoint(collection=published_collection, settings=manager._indexing_settings),
+    )
+
+    run = await manager._open_candidate_run()
+
+    assert run.checkpoint.collection != published_collection
+    assert run.resumed is False
+    assert published_collection in _FakeVectorDb.store
+
+
+@pytest.mark.asyncio
+async def test_incompatible_checkpoint_never_deletes_a_published_collection(
+    tmp_path: Path,
+) -> None:
+    """Discarding an incompatible candidate must not take the live index with it."""
+    docs_path = tmp_path / "docs"
+    _write_corpus(docs_path, 2)
+    config = _config(tmp_path, docs_path)
+    runtime_paths = runtime_paths_for(config)
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    state = _published_state(config, runtime_paths)
+    assert state is not None
+    published_collection = state.collection
+    assert published_collection is not None
+
+    key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
+    write_index_metadata_payload(
+        published_index_metadata_path(key),
+        settings=state.settings.to_metadata(),
+        status="complete",
+        collection=published_collection,
+    )
+    # A checkpoint naming the published collection, recorded under settings the
+    # current runtime no longer matches.
+    stale_settings = replace(_manager(config)._indexing_settings, embedder_model="text-embedding-3-large")
+    save_candidate_checkpoint(
+        _storage_path(config, runtime_paths),
+        CandidateCheckpoint(collection=published_collection, settings=stale_settings),
+    )
+
+    run = await _manager(config)._open_candidate_run()
+
+    assert published_collection in _FakeVectorDb.store, "the last good collection was deleted"
+    assert run.checkpoint.collection != published_collection

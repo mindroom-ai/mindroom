@@ -1598,8 +1598,13 @@ class KnowledgeManager:
             else None
         )
         live_collection, cleanup_is_safe = await asyncio.to_thread(self._published_collection_for_cleanup)
+        # Both names matter: the strict parser drops the collection when any
+        # required field is missing, while the raw payload still records it.
+        # Trusting only the strict one would let a surviving checkpoint reopen
+        # the published collection, or delete it as an incompatible candidate.
+        published_collections = {name for name in (published_collection, live_collection) if name is not None}
 
-        if checkpoint is not None and checkpoint.collection == published_collection:
+        if checkpoint is not None and checkpoint.collection in published_collections:
             # The candidate already became the published index and the process
             # died before its checkpoint was cleaned up. Writing into it again
             # would mutate a live queryable index.
@@ -1656,10 +1661,7 @@ class KnowledgeManager:
         # Reconcile candidates abandoned by earlier crashed refreshes now, so
         # storage stays bounded even when a build never reaches publication.
         if cleanup_is_safe:
-            preserved = {checkpoint.collection}
-            for collection in (published_collection, live_collection):
-                if collection is not None:
-                    preserved.add(collection)
+            preserved = {checkpoint.collection, *published_collections}
             await asyncio.to_thread(
                 self._cleanup_superseded_collections,
                 preserved=frozenset(preserved),
