@@ -1290,14 +1290,26 @@ async def _store_repaired_thread_snapshot(
     )
     if outcome is not ThreadCacheReplaceOutcome.EXISTING_USABLE:
         return _refill_attempt_for_outcome(outcome)
-    existing_history, _existing_reject = await _load_cached_thread_history_if_usable(
-        client,
-        room_id=room_id,
-        thread_id=thread_id,
-        event_cache=event_cache,
-        hydrate_sidecars=hydrate_sidecars,
-        trusted_sender_ids=trusted_sender_ids,
-    )
+    try:
+        existing_history, _existing_reject = await _load_cached_thread_history_if_usable(
+            client,
+            room_id=room_id,
+            thread_id=thread_id,
+            event_cache=event_cache,
+            hydrate_sidecars=hydrate_sidecars,
+            trusted_sender_ids=trusted_sender_ids,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Failed to load usable concurrent thread snapshot; retrying repair",
+            room_id=room_id,
+            thread_id=thread_id,
+            cache_store_outcome=outcome.value,
+            cache_repair_attempt=repair_attempt,
+            error_type=type(exc).__name__,
+            error=str(exc),
+        )
+        return _refill_attempt_for_outcome(ThreadCacheReplaceOutcome.RETRYABLE_CONFLICT)
     if existing_history is None:
         return _refill_attempt_for_outcome(ThreadCacheReplaceOutcome.RETRYABLE_CONFLICT)
     return _refill_attempt_for_outcome(outcome, existing_history=existing_history)

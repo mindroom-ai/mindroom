@@ -3412,6 +3412,53 @@ class TestThreadHistoryCache:
         assert history.diagnostics["cache_repair_usable"] is True
 
     @pytest.mark.asyncio
+    async def test_refresh_fails_open_when_existing_winner_load_keeps_failing(self) -> None:
+        """A backend read fault after an existing winner must not discard fetched homeserver history."""
+        event_cache = _event_cache()
+        event_cache.replace_thread_if_not_newer.return_value = ThreadCacheReplaceOutcome.EXISTING_USABLE
+        fetched = matrix_client_module._ThreadHistoryFetchResult(
+            history=[
+                ResolvedVisibleMessage.synthetic(
+                    sender="@user:localhost",
+                    body="homeserver fallback",
+                    event_id="$thread_root",
+                    content={"body": "homeserver fallback"},
+                ),
+            ],
+            event_sources=[{"event_id": "$thread_root"}],
+            fetch_ms=1.0,
+            room_scan_pages=1,
+            scanned_event_count=1,
+            resolution_ms=1.0,
+            sidecar_hydration_ms=0.0,
+        )
+
+        with (
+            patch(
+                "mindroom.matrix.client_thread_history._fetch_thread_repair_snapshot",
+                new=AsyncMock(return_value=fetched),
+            ) as fetch,
+            patch(
+                "mindroom.matrix.client_thread_history._load_cached_thread_history_if_usable",
+                new=AsyncMock(side_effect=RuntimeError("cache unavailable")),
+            ) as load_existing,
+        ):
+            history = await matrix_client_module.refresh_thread_history_from_source(
+                AsyncMock(),
+                "!room:localhost",
+                "$thread_root",
+                event_cache=event_cache,
+                allow_stale_fallback=False,
+            )
+
+        assert fetch.await_count == 2
+        assert load_existing.await_count == 2
+        assert [message.body for message in history] == ["homeserver fallback"]
+        assert history.diagnostics["cache_store_outcome"] == ThreadCacheReplaceOutcome.RETRYABLE_CONFLICT.value
+        assert history.diagnostics["cache_repair_attempts"] == 2
+        assert history.diagnostics["cache_repair_usable"] is False
+
+    @pytest.mark.asyncio
     async def test_refresh_reports_unresolved_invalidation_after_bounded_retry(self) -> None:
         """Repeated invalidation must remain explicit and never become reported cache success."""
         event_cache = _event_cache()
