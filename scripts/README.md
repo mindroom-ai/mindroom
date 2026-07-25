@@ -52,6 +52,7 @@ uv run python scripts/testing/fuzz_live_matrix.py --nio-overlay ../mindroom-nio 
 uv run python scripts/testing/fuzz_live_matrix.py --nio-overlay ../mindroom-nio --profile chaos --seed 42 --steps 200 --clients 4 --rooms 2
 uv run python scripts/testing/fuzz_live_matrix.py --nio-overlay ../mindroom-nio --profile stress
 uv run python scripts/testing/fuzz_live_matrix.py --nio-overlay ../mindroom-nio --profile stress --api-port 18765
+uv run python scripts/testing/fuzz_live_matrix.py --nio-overlay ../mindroom-nio --profile stress --api-port 18765 --state-root ~/.mindroom/live-fuzz-stress
 uv run python scripts/testing/fuzz_live_matrix.py --nio-overlay ../mindroom-nio --profile stress --threads 10 --stream-seconds 10 --waves 1
 uv run python scripts/testing/fuzz_live_matrix.py --nio-overlay ../mindroom-nio --mindroom-runtime ../mindroom-main --profile stress --write-baseline artifacts/live-matrix-stress/main-baseline.json
 uv run python scripts/testing/fuzz_live_matrix.py --nio-overlay ../mindroom-nio --profile stress --fault-mode serialize-streams
@@ -59,6 +60,8 @@ uv run python scripts/testing/fuzz_live_matrix.py --nio-overlay ../mindroom-nio 
 
 The live harness requires `--nio-overlay` to name a clean exact Git checkout of mindroom-nio.
 It rejects missing or dirty overlays, revision mismatches, and a child process that imports nio from another checkout.
+The default durable state root serializes live stacks across worktrees.
+Use a separate `--state-root` only when every port and disposable resource is isolated from another active campaign.
 
 The saturation profile uses a 180-second per-reply deadline because its slow 12-way stream workload intentionally queues much more work than normal fuzz runs.
 

@@ -5773,6 +5773,12 @@ def _parse_args() -> argparse.Namespace:
         type=_positive_int,
         help="explicit isolated MindRoom API port; defaults to local instance allocation",
     )
+    parser.add_argument(
+        "--state-root",
+        type=Path,
+        default=DEFAULT_LIVE_FUZZ_STATE_ROOT,
+        help="persistent lease and crash-manifest root; use a separate root only with isolated resources",
+    )
     parser.add_argument("--profile", choices=("fuzz", "saturation", "chaos", "stress"), default="fuzz")
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--steps", type=_positive_int, default=200)
@@ -6944,6 +6950,7 @@ def _run_stress_main(args: argparse.Namespace) -> None:
         runner_revision=runner_revision,
         stress_config=config,
         api_port=args.api_port,
+        state_root=args.state_root,
     )
     result: dict[str, object] | None = None
     baseline_comparison: Mapping[str, object] | None = None
@@ -7054,6 +7061,7 @@ def _run_nonstress_main(args: argparse.Namespace) -> None:
         mindroom_revision=mindroom_revision,
         runner_revision=runner_revision,
         api_port=args.api_port,
+        state_root=args.state_root,
     )
     runner_holder: dict[str, LiveFuzzRunner] = {}
     try:

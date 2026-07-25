@@ -6104,6 +6104,7 @@ def test_main_preserves_base_exception_evidence_and_closes_stack(
     """An interrupted campaign preserves evidence and tears down its stack."""
     args = SimpleNamespace(
         api_port=None,
+        state_root=tmp_path / "state",
         artifact_root=tmp_path / "artifacts",
         profile="fuzz",
         failure_log=None,
@@ -6164,6 +6165,7 @@ def test_main_bad_failure_log_preserves_primary_and_closes_stack(
     mindroom_log.write_text("mindroom output\n", encoding="utf-8")
     args = SimpleNamespace(
         api_port=None,
+        state_root=tmp_path / "state",
         artifact_root=tmp_path / "artifacts",
         profile="fuzz",
         failure_log=failure_log,
@@ -6213,6 +6215,7 @@ def test_main_bundle_capture_failure_preserves_primary_and_closes_stack(
     """Any evidence-capture failure still preserves the run error and teardown."""
     args = SimpleNamespace(
         api_port=None,
+        state_root=tmp_path / "state",
         artifact_root=tmp_path / "artifacts",
         profile="fuzz",
         failure_log=None,
@@ -6267,6 +6270,7 @@ def test_main_stop_interrupt_preserves_primary_and_closes_stack(
     """An interrupted evidence stage cannot mask the run error or skip close."""
     args = SimpleNamespace(
         api_port=None,
+        state_root=tmp_path / "state",
         artifact_root=tmp_path / "artifacts",
         profile="fuzz",
         failure_log=None,
@@ -6337,6 +6341,7 @@ def test_main_rechecks_sources_at_teardown_and_receipt_boundaries(
     """PASS revalidates after runtime work and again after teardown."""
     args = SimpleNamespace(
         api_port=None,
+        state_root=tmp_path / "state",
         artifact_root=tmp_path / "artifacts",
         profile="fuzz",
         failure_log=None,
@@ -6429,6 +6434,7 @@ def test_main_cleanup_failure_retains_pre_teardown_evidence(
     artifact_root = tmp_path / "artifacts"
     args = SimpleNamespace(
         api_port=None,
+        state_root=tmp_path / "state",
         artifact_root=artifact_root,
         profile="fuzz",
         failure_log=None,
@@ -6563,6 +6569,7 @@ def test_main_missing_runtime_provenance_captures_bundle_before_teardown(
     log_path.write_text("runtime without attestation\n", encoding="utf-8")
     args = SimpleNamespace(
         api_port=None,
+        state_root=tmp_path / "state",
         artifact_root=artifact_root,
         profile="fuzz",
         failure_log=None,
