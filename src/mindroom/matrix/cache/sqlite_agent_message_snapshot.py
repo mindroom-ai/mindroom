@@ -6,6 +6,8 @@ import json
 import sqlite3
 from typing import TYPE_CHECKING, Any
 
+from mindroom.matrix.media import valid_room_message_replacement
+
 from . import sqlite_event_cache_events, sqlite_event_cache_threads
 from .agent_message_snapshot import AgentMessageSnapshot, AgentMessageSnapshotUnavailable
 from .agent_message_snapshot_semantics import (
@@ -14,6 +16,7 @@ from .agent_message_snapshot_semantics import (
     snapshot_lookup_result,
     thread_cache_has_no_snapshot,
 )
+from .event_cache_events import decode_cached_event
 
 if TYPE_CHECKING:
     import aiosqlite
@@ -45,8 +48,6 @@ async def _snapshot_from_event(
     principal_id: str,
     room_id: str,
     thread_id: str | None,
-    sender: str,
-    event_id: str,
     event: dict[str, Any],
     cached_at: float | None,
     runtime_started_at: float | None,
@@ -55,9 +56,8 @@ async def _snapshot_from_event(
         db,
         principal_id=principal_id,
         room_id=room_id,
-        original_event_id=event_id,
-        sender=sender,
-        event_type="m.room.message",
+        original=event,
+        validator=valid_room_message_replacement,
     )
     return snapshot_lookup_result(
         event,
@@ -123,12 +123,12 @@ async def _load_scope_snapshot(
             row = await cursor.fetchone()
             if row is None:
                 return None
-            event = json.loads(row[0])
+            decoded = decode_cached_event(row[0], row[2], row[3], room_id=room_id, cached_at=row[1])
+            if decoded is None:
+                continue
+            event = decoded.event
             if not event_matches_snapshot_scope(
                 event,
-                indexed_event_id=row[2],
-                indexed_origin_server_ts=int(row[3]),
-                room_id=room_id,
                 thread_id=thread_id,
                 sender=sender,
             ):
@@ -138,10 +138,8 @@ async def _load_scope_snapshot(
                 principal_id=principal_id,
                 room_id=room_id,
                 thread_id=thread_id,
-                sender=sender,
-                event_id=row[2],
                 event=event,
-                cached_at=None if row[1] is None else float(row[1]),
+                cached_at=decoded.cached_at,
                 runtime_started_at=runtime_started_at,
             )
             if result.stop_scanning:

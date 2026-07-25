@@ -2,18 +2,14 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from mindroom.matrix.event_info import (
-    EventInfo,
-    event_source_is_state_event,
-    event_source_matches_index,
-    latest_valid_replacement,
-    replacement_content_for_original,
-    room_message_content_is_renderable,
-)
+import nio
+
+from mindroom.matrix.event_info import EventInfo, event_source_is_state_event
+from mindroom.matrix.media import parse_room_message_event_source, valid_room_message_replacement
+from mindroom.matrix.replacements import ordered_replacements, replacement_content
 
 from .agent_message_snapshot import AgentMessageSnapshot, AgentMessageSnapshotUnavailable
 from .thread_cache_helpers import thread_cache_rejection_reason
@@ -47,32 +43,19 @@ def thread_cache_has_no_snapshot(cache_state: ThreadCacheState | None) -> bool:
 def event_matches_snapshot_scope(
     event: dict[str, Any],
     *,
-    indexed_event_id: str,
-    indexed_origin_server_ts: int,
-    room_id: str,
     thread_id: str | None,
     sender: str,
 ) -> bool:
     """Return whether one event is a visible message candidate for a snapshot scope."""
-    content = event.get("content")
     if (
         event.get("type") != "m.room.message"
         or event.get("sender") != sender
         or event_source_is_state_event(event)
-        or not event_source_matches_index(
-            event,
-            indexed_event_id,
-            indexed_origin_server_ts,
-            room_id,
-        )
-        or not isinstance(content, Mapping)
-        or not room_message_content_is_renderable(content)
+        or not isinstance(parse_room_message_event_source(event), nio.RoomMessage)
     ):
         return False
     relation_type = EventInfo.from_event(event).relation_type
-    if relation_type == "m.replace":
-        return False
-    return not (thread_id is None and relation_type == "m.thread")
+    return relation_type != "m.replace" and not (thread_id is None and relation_type == "m.thread")
 
 
 def snapshot_lookup_result(
@@ -85,18 +68,14 @@ def snapshot_lookup_result(
     runtime_started_at: float | None,
 ) -> SnapshotLookupResult:
     """Resolve one cached event and optional edit into a visible snapshot outcome."""
-    latest_replacement = latest_valid_replacement(
+    replacements = ordered_replacements(
         event,
         () if latest_edit is None else (latest_edit.event,),
         room_id=room_id,
+        validator=valid_room_message_replacement,
     )
-    latest_edit_event_id = None if latest_edit is None else latest_edit.event.get("event_id")
-    latest_replacement_event_id = None if latest_replacement is None else latest_replacement.get("event_id")
-    visible_cached_at = (
-        latest_edit.cached_at
-        if latest_edit is not None and latest_replacement_event_id == latest_edit_event_id
-        else cached_at
-    )
+    latest_replacement = next(iter(replacements), None)
+    visible_cached_at = latest_edit.cached_at if latest_edit and latest_replacement == latest_edit.event else cached_at
     if (
         thread_id is None
         and runtime_started_at is not None
@@ -104,20 +83,8 @@ def snapshot_lookup_result(
     ):
         return SnapshotLookupResult(snapshot=None, stop_scanning=True)
 
-    timestamp = event.get("origin_server_ts")
-    if not isinstance(timestamp, int) or isinstance(timestamp, bool):
-        return SnapshotLookupResult(snapshot=None)
-    original_content = event.get("content")
-    normalized_original_content = dict(original_content) if isinstance(original_content, dict) else {}
-    visible_content = normalized_original_content
+    visible_content = dict(event["content"])
     if latest_replacement is not None:
-        edit_content = latest_replacement.get("content")
-        new_content = edit_content.get("m.new_content") if isinstance(edit_content, dict) else None
-        if isinstance(new_content, dict):
-            visible_content = replacement_content_for_original(normalized_original_content, new_content)
-    return SnapshotLookupResult(
-        snapshot=AgentMessageSnapshot(
-            content=visible_content,
-            origin_server_ts=timestamp,
-        ),
-    )
+        visible_content = replacement_content(visible_content, latest_replacement["content"]["m.new_content"])
+    snapshot = AgentMessageSnapshot(content=visible_content, origin_server_ts=event["origin_server_ts"])
+    return SnapshotLookupResult(snapshot=snapshot)

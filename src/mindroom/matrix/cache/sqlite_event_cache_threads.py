@@ -29,10 +29,10 @@ import time
 from typing import TYPE_CHECKING, Any, Literal
 
 from .event_cache_events import (
+    decode_cached_events,
     event_id_for_cache,
     serialize_cacheable_events,
     serialize_cached_event,
-    validated_cached_event_payloads,
 )
 from .event_normalization import normalize_event_source_for_cache
 from .sqlite_event_cache_events import (
@@ -87,7 +87,7 @@ async def load_thread_events(
     await cursor.close()
     if not rows:
         return None
-    return validated_cached_event_payloads(rows, room_id=room_id)
+    return decode_cached_events(rows, room_id=room_id)
 
 
 async def load_thread_events_written_between(
@@ -131,7 +131,7 @@ async def load_thread_events_written_between(
     )
     rows = await cursor.fetchall()
     await cursor.close()
-    return validated_cached_event_payloads(rows, room_id=room_id)
+    return decode_cached_events(rows, room_id=room_id)
 
 
 async def load_thread_revision(

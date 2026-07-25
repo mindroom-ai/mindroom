@@ -7,7 +7,7 @@ from typing import Any
 import pytest
 
 from mindroom.matrix.cache import ConversationEventCache
-from tests.event_cache_test_support import replace_thread_unconditionally
+from tests.event_cache_test_support import get_latest_edit, replace_thread_unconditionally
 
 
 def _sidecar_message_event(event_id: str, timestamp: int, *, mxc_url: str) -> dict[str, Any]:
@@ -141,7 +141,8 @@ class TestConversationEventCacheContract:
         assert "com.mindroom.dispatch_pipeline_timing" not in cached_original
         assert [event["event_id"] for event in recent] == ["$latest-edit:localhost", "$other-edit:localhost"]
         assert (
-            await event_cache.get_latest_edit(
+            await get_latest_edit(
+                event_cache,
                 "!room:localhost",
                 "$original:localhost",
                 sender="@user:localhost",
@@ -150,7 +151,8 @@ class TestConversationEventCacheContract:
             == latest_edit
         )
         assert (
-            await event_cache.get_latest_edit(
+            await get_latest_edit(
+                event_cache,
                 "!room:localhost",
                 "$original:localhost",
                 sender="@other:localhost",
@@ -309,7 +311,8 @@ class TestConversationEventCacheContract:
         assert await event_cache.get_event(room_id, original_id) is None
         assert await event_cache.get_event(room_id, edit_id) is None
         assert (
-            await event_cache.get_latest_edit(
+            await get_latest_edit(
+                event_cache,
                 room_id,
                 original_id,
                 sender="@user:localhost",

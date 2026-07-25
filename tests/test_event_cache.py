@@ -46,6 +46,7 @@ from tests.conftest import (
     runtime_paths_for,
     test_runtime_paths,
 )
+from tests.event_cache_test_support import get_latest_edit
 from tests.event_cache_test_support import replace_thread_unconditionally as _replace_thread
 from tests.identity_helpers import entity_ids
 
@@ -1777,7 +1778,8 @@ async def test_refused_opaque_write_keeps_latest_edit_join_readable(
 
     await event_cache.store_event(edit_event_id, room_id, _opaque_payload(edit_event_id, origin_server_ts=2000))
 
-    latest_edit = await event_cache.get_latest_edit(
+    latest_edit = await get_latest_edit(
+        event_cache,
         room_id,
         original_event_id,
         sender="@user:localhost",
@@ -2536,7 +2538,8 @@ async def test_cached_edit_paths_fall_back_from_invalid_newest_event_envelope(
         malformed_source,
     )
 
-    latest_edit = await event_cache.get_latest_edit(
+    latest_edit = await get_latest_edit(
+        event_cache,
         "!room:localhost",
         "$reply",
         sender="@alice:localhost",
@@ -2620,7 +2623,8 @@ async def test_latest_agent_message_snapshot_falls_back_from_empty_new_content(
         ],
     )
 
-    latest_edit = await event_cache.get_latest_edit(
+    latest_edit = await get_latest_edit(
+        event_cache,
         "!room:localhost",
         "$reply",
         sender="@agent:localhost",
@@ -2688,7 +2692,8 @@ async def test_cached_edit_paths_ignore_explicit_other_room(
         ],
     )
 
-    latest_edit = await event_cache.get_latest_edit(
+    latest_edit = await get_latest_edit(
+        event_cache,
         "!room:localhost",
         "$reply",
         sender="@agent:localhost",
@@ -2800,7 +2805,8 @@ async def test_custom_edit_lookup_ignores_explicit_other_room(
         ],
     )
 
-    latest_edit = await event_cache.get_latest_edit(
+    latest_edit = await get_latest_edit(
+        event_cache,
         "!room:localhost",
         "$approval",
         sender="@bot:localhost",
@@ -2857,7 +2863,8 @@ async def test_edit_cache_row_indexes_io_mindroom_tool_approval_edits(
                 ("$approval_edit", "!room:localhost", approval_edit),
             ],
         )
-        latest_edit = await cache.get_latest_edit(
+        latest_edit = await get_latest_edit(
+            cache,
             "!room:localhost",
             "$approval",
             sender="@bot:localhost",
@@ -2903,7 +2910,8 @@ async def test_approval_edit_lookup_falls_back_from_invalid_newest_status(
         ],
     )
 
-    latest_edit = await event_cache.get_latest_edit(
+    latest_edit = await get_latest_edit(
+        event_cache,
         "!room:localhost",
         "$approval",
         sender="@bot:localhost",
@@ -2953,7 +2961,8 @@ async def test_latest_edit_equal_timestamp_uses_greatest_event_id(
     await event_cache.store_event(lowercase_edit.event_id, room_id, _cache_source(lowercase_edit))
     await event_cache.store_event(uppercase_edit.event_id, room_id, _cache_source(uppercase_edit))
 
-    latest_edit = await event_cache.get_latest_edit(
+    latest_edit = await get_latest_edit(
+        event_cache,
         room_id,
         original_event_id,
         sender="@alice:localhost",
@@ -3030,13 +3039,15 @@ async def test_latest_edit_requires_sender_scope_when_newer_edit_is_untrusted(
                 ("$untrusted_edit", "!room:localhost", untrusted_edit),
             ],
         )
-        latest_untrusted_edit = await cache.get_latest_edit(
+        latest_untrusted_edit = await get_latest_edit(
+            cache,
             "!room:localhost",
             "$approval",
             sender="@attacker:localhost",
             event_type="io.mindroom.tool_approval",
         )
-        latest_trusted_edit = await cache.get_latest_edit(
+        latest_trusted_edit = await get_latest_edit(
+            cache,
             "!room:localhost",
             "$approval",
             sender="@bot:localhost",
@@ -3243,7 +3254,8 @@ async def test_redacting_original_removes_dependent_cached_edits_from_thread_his
         history_before = await fetch_thread_history(client, "!room:localhost", "$thread_root", event_cache=cache)
 
         redacted = await cache.redact_event("!room:localhost", "$reply")
-        latest_edit = await cache.get_latest_edit(
+        latest_edit = await get_latest_edit(
+            cache,
             "!room:localhost",
             "$reply",
             sender="@agent:localhost",
@@ -3314,7 +3326,8 @@ async def test_invalidate_thread_preserves_separately_cached_latest_edit(
         await cache.store_event("$reply_edit", "!room:localhost", _cache_source(edit_event))
         await cache.invalidate_thread("!room:localhost", "$thread_root")
 
-        latest_edit = await cache.get_latest_edit(
+        latest_edit = await get_latest_edit(
+            cache,
             "!room:localhost",
             "$reply",
             sender="@agent:localhost",
@@ -3498,13 +3511,15 @@ async def test_store_event_prevents_payload_id_from_retargeting_existing_indexes
     await event_cache.store_event("$legitimate", "!room:localhost", legitimate_edit)
     await event_cache.store_event("$poison", "!room:localhost", contradictory_payload)
 
-    original_edit = await event_cache.get_latest_edit(
+    original_edit = await get_latest_edit(
+        event_cache,
         "!room:localhost",
         "$original",
         sender="@agent:localhost",
         event_type="m.room.message",
     )
-    other_edit = await event_cache.get_latest_edit(
+    other_edit = await get_latest_edit(
+        event_cache,
         "!room:localhost",
         "$other",
         sender="@agent:localhost",
@@ -3628,7 +3643,8 @@ async def test_initialize_resets_stale_old_cache_schema(tmp_path: Path) -> None:
     cache = SqliteEventCache(db_path)
     await cache.initialize()
     try:
-        latest_edit = await cache.get_latest_edit(
+        latest_edit = await get_latest_edit(
+            cache,
             "!room:localhost",
             "$reply",
             sender="@agent:localhost",

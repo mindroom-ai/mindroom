@@ -43,6 +43,7 @@ from mindroom.runtime_support import (
     _initialize_event_cache_best_effort,
     sync_owned_runtime_support,
 )
+from tests.event_cache_test_support import get_latest_edit
 from tests.event_cache_test_support import replace_thread_unconditionally as _replace_thread
 
 if TYPE_CHECKING:
@@ -200,7 +201,8 @@ async def _assert_payload_identity_poison_is_rejected(
     )
     assert snapshot is not None
     assert snapshot.content["body"] == "older"
-    latest_edit = await cache.get_latest_edit(
+    latest_edit = await get_latest_edit(
+        cache,
         room_id,
         "$valid-recent",
         sender="@agent:localhost",
@@ -532,7 +534,8 @@ async def _assert_edit_snapshot_and_mxc_behavior(
         ],
     )
     assert (
-        await cache.get_latest_edit(
+        await get_latest_edit(
+            cache,
             room_id,
             "$reply",
             sender=sender,
@@ -597,7 +600,8 @@ async def _assert_staleness_and_redaction_behavior(
     assert await cache.redact_event(room_id, "$reply") is True
     assert await cache.get_event(room_id, "$reply") is None
     assert (
-        await cache.get_latest_edit(
+        await get_latest_edit(
+            cache,
             room_id,
             "$reply",
             sender=sender,
@@ -611,7 +615,8 @@ async def _assert_staleness_and_redaction_behavior(
 
     await cache.store_event("$edit-latest", room_id, latest_edit)
     assert (
-        await cache.get_latest_edit(
+        await get_latest_edit(
+            cache,
             room_id,
             "$reply",
             sender=sender,
@@ -1892,7 +1897,8 @@ async def test_postgres_latest_edit_query_uses_bytewise_event_id_collation(
             (namespace, room_id),
         )
         locale_winner = await cursor.fetchone()
-        latest_edit = await cache.get_latest_edit(
+        latest_edit = await get_latest_edit(
+            cache,
             room_id,
             "$original",
             sender=sender,

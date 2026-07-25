@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 if TYPE_CHECKING:
     from collections.abc import Collection
 
+    from mindroom.matrix.replacements import ReplacementValidator
+
     from .agent_message_snapshot import AgentMessageSnapshot
 
 
@@ -125,10 +127,9 @@ class ConversationEventCache(Protocol):
     async def get_latest_edit(
         self,
         room_id: str,
-        original_event_id: str,
+        original: dict[str, Any],
         *,
-        sender: str,
-        event_type: str,
+        validator: ReplacementValidator,
     ) -> dict[str, Any] | None:
         """Return the latest cached edit event for one original event."""
 

@@ -40,6 +40,7 @@ from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from mindroom.matrix.cache.thread_write_cache_ops import ThreadMutationCacheOps
 from mindroom.matrix.cache.thread_writes import ThreadSyncWritePolicy
 from mindroom.matrix.event_info import EventInfo
+from mindroom.matrix.media import valid_room_message_replacement
 from mindroom.matrix.thread_bookkeeping import ThreadMutationResolver
 
 if TYPE_CHECKING:
@@ -748,9 +749,8 @@ class CacheFuzzRunner:
             sender, event_type = identity
             latest_edit = await self.cache.get_latest_edit(
                 current_room_id,
-                event_id,
-                sender=sender,
-                event_type=event_type,
+                {"event_id": event_id, "room_id": current_room_id, "sender": sender, "type": event_type},
+                validator=valid_room_message_replacement,
             )
             if latest_edit is None:
                 continue

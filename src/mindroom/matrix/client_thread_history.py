@@ -67,7 +67,6 @@ from mindroom.matrix.client_visible_messages import (
     ResolvedVisibleMessage,
     ThreadEditCandidatesByOriginalEventId,
     apply_latest_edits_to_messages,
-    ordered_valid_bundled_replacements,
     record_thread_edit_candidate,
 )
 from mindroom.matrix.event_info import (
@@ -78,8 +77,8 @@ from mindroom.matrix.event_info import (
     is_thread_affecting_relation,
 )
 from mindroom.matrix.media import (
-    is_encrypted_media_event_source,
-    parse_matrix_media_event_source,
+    parse_room_message_event_source,
+    valid_room_message_replacement,
 )
 from mindroom.matrix.membership_fence import UNCERTIFIED_MEMBERSHIP_EPOCH
 from mindroom.matrix.message_content import (
@@ -89,6 +88,7 @@ from mindroom.matrix.message_content import (
     prepare_sidecar_hydration_batch,
     resolve_event_source_content,
 )
+from mindroom.matrix.replacements import ordered_replacements
 from mindroom.matrix.thread_diagnostics import (
     THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC,
     THREAD_HISTORY_DEGRADED_DIAGNOSTIC,
@@ -308,16 +308,8 @@ def _parse_room_message_event(event_source: dict[str, Any]) -> nio.Event | None:
     """Parse one event dict into a room-message event when possible."""
     if event_source_is_state_event(event_source):
         return None
-    if is_encrypted_media_event_source(event_source):
-        parsed_event = parse_matrix_media_event_source(event_source)
-    else:
-        try:
-            parsed_event = nio.Event.parse_event(event_source)
-        except Exception:
-            return None
-    if not isinstance(parsed_event, nio.Event):
-        return None
-    return parsed_event if _is_room_message_event(parsed_event) else None
+    parsed_event = parse_room_message_event_source(event_source)
+    return parsed_event if isinstance(parsed_event, nio.RoomMessage) and _is_room_message_event(parsed_event) else None
 
 
 def _event_source_for_cache(event: nio.Event) -> dict[str, Any]:
@@ -342,7 +334,13 @@ def _sidecar_hydration_sources(
     for event_source in event_sources:
         if event_source_is_state_event(event_source) or not event_source_matches_room(event_source, room_id):
             continue
-        hydration_sources.extend(ordered_valid_bundled_replacements(event_source, room_id=room_id))
+        hydration_sources.extend(
+            ordered_replacements(
+                event_source,
+                room_id=room_id,
+                validator=valid_room_message_replacement,
+            ),
+        )
         if hydrate_sidecars or EventInfo.from_event(event_source).is_edit:
             hydration_sources.append(event_source)
     return hydration_sources
@@ -358,24 +356,6 @@ class _ResolvedThreadEventSources:
     related_event_id_by_event_id: dict[str, str]
     hydration_complete: bool
     sidecar_texts: dict[tuple[str, str], str]
-
-
-def _record_bundled_thread_edit_candidates(
-    event: nio.Event,
-    *,
-    room_id: str,
-    edit_candidates_by_original_event_id: ThreadEditCandidatesByOriginalEventId,
-) -> None:
-    """Record every valid bundled replacement for deterministic latest selection."""
-    for replacement_source in ordered_valid_bundled_replacements(event.source, room_id=room_id):
-        replacement = _parse_room_message_event(replacement_source)
-        if not isinstance(replacement, nio.RoomMessage):
-            continue
-        record_thread_edit_candidate(
-            replacement,
-            event_info=EventInfo.from_event(replacement.source),
-            edit_candidates_by_original_event_id=edit_candidates_by_original_event_id,
-        )
 
 
 async def _resolve_thread_history_from_event_sources_timed(
@@ -423,14 +403,18 @@ async def _resolve_thread_history_from_event_sources_timed(
     )
     for event in parsed_events:
         event_info = EventInfo.from_event(event.source)
-        _record_bundled_thread_edit_candidates(
-            event,
+        bundled_replacements = ordered_replacements(
+            event.source,
             room_id=room_id,
-            edit_candidates_by_original_event_id=edit_candidates_by_original_event_id,
+            validator=valid_room_message_replacement,
         )
-        if isinstance(event, nio.RoomMessage) and record_thread_edit_candidate(
-            event,
-            event_info=event_info,
+        for replacement_source in bundled_replacements:
+            record_thread_edit_candidate(
+                replacement_source,
+                edit_candidates_by_original_event_id=edit_candidates_by_original_event_id,
+            )
+        if record_thread_edit_candidate(
+            event.source,
             edit_candidates_by_original_event_id=edit_candidates_by_original_event_id,
         ):
             continue
@@ -1183,12 +1167,14 @@ async def _thread_history_cache_rejection_reason(
         return _INVALID_EVENT_SCOPE_REJECTION
     if any(is_opaque_encrypted_event_source(event_source) for event_source in event_sources):
         return _OPAQUE_ENCRYPTED_EVENT_REJECTION
-    sources_by_event_id: dict[str, dict[str, Any]] = {}
-    for event_source in event_sources:
-        event_id = _event_id_from_source(event_source)
-        if not event_id or event_id in sources_by_event_id:
-            return _INVALID_THREAD_EVENT_REJECTION
-        sources_by_event_id[event_id] = event_source
+    event_ids = [_event_id_from_source(event_source) for event_source in event_sources]
+    if any(not event_id for event_id in event_ids) or len(set(event_ids)) != len(event_ids):
+        return _INVALID_THREAD_EVENT_REJECTION
+    sources_by_event_id = {
+        event_id: event_source
+        for event_id, event_source in zip(event_ids, event_sources, strict=True)
+        if event_id is not None
+    }
     root_source = sources_by_event_id.get(thread_id)
     if (
         root_source is None
@@ -1539,16 +1525,16 @@ def _record_scanned_room_message_source(
         return None
 
     event_info = EventInfo.from_event(event.source)
-    if isinstance(event, nio.RoomMessage) and record_thread_edit_candidate(
-        event,
-        event_info=event_info,
+    normalized_event_source = _event_source_for_cache(event)
+    if record_thread_edit_candidate(
+        normalized_event_source,
         edit_candidates_by_original_event_id=edit_candidates_by_original_event_id,
     ):
         return None
     if event_info.is_edit:
         return None
 
-    scanned_message_sources[event.event_id] = _event_source_for_cache(event)
+    scanned_message_sources[event.event_id] = normalized_event_source
     return event.event_id
 
 
@@ -1678,9 +1664,9 @@ async def _group_scanned_sources_by_thread(
         target_roots = {
             root_id for root_id in (original_event_id, resolved_thread_ids.get(original_event_id)) if root_id in grouped
         }
-        for edit_event in edit_candidates:
+        for edit_source in edit_candidates:
             for root_id in target_roots:
-                edits_by_root.setdefault(root_id, []).append(_event_source_for_cache(edit_event))
+                edits_by_root.setdefault(root_id, []).append(edit_source)
 
     grouped_sources = {
         root_id: sort_thread_event_sources_root_first(

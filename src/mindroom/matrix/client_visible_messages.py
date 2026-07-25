@@ -11,17 +11,14 @@ from mindroom.constants import STREAM_STATUS_KEY
 from mindroom.entity_resolution import current_internal_sender_ids
 from mindroom.matrix.event_info import (
     EventInfo,
-    bundled_replacement_candidates,
     event_source_is_state_event,
     event_source_matches_room,
-    is_valid_bundled_replacement,
-    ordered_valid_bundled_replacements,
-    replacement_content_for_original,
-    replacement_content_is_renderable,
+    origin_server_ts_from_event_source,
     reply_to_event_id_from_content,
-    room_message_content_is_renderable,
 )
+from mindroom.matrix.media import valid_room_message_replacement
 from mindroom.matrix.message_content import extract_and_resolve_message, extract_edit_body, resolve_event_source_content
+from mindroom.matrix.replacements import ordered_replacements, replacement_content
 from mindroom.matrix.visible_body import bundled_visible_body_preview, visible_body_from_event_source
 
 if TYPE_CHECKING:
@@ -33,7 +30,7 @@ if TYPE_CHECKING:
     from mindroom.matrix.message_content import SidecarHydrationBatch
 
 _VISIBLE_ROOM_MESSAGE_EVENT_TYPES = (nio.RoomMessageText, nio.RoomMessageNotice)
-type ThreadEditCandidatesByOriginalEventId = dict[str, list[nio.RoomMessage]]
+type ThreadEditCandidatesByOriginalEventId = dict[str, list[dict[str, Any]]]
 
 
 @dataclass(slots=True)
@@ -112,7 +109,7 @@ class ResolvedVisibleMessage:
         self.latest_event_id = latest_event_id
         self.latest_event_timestamp = latest_event_timestamp
         if content is not None:
-            self.content = replacement_content_for_original(self.content, content)
+            self.content = replacement_content(self.content, content)
         self.refresh_stream_status()
 
     @property
@@ -258,7 +255,11 @@ async def bundled_replacement_body(
 ) -> str | None:
     """Return one canonical bundled replacement body using runtime-derived sender trust."""
     trusted_sender_ids = _resolved_trusted_sender_ids(config, runtime_paths, trusted_sender_ids)
-    for candidate in ordered_valid_bundled_replacements(event_source, room_id=room_id):
+    for candidate in ordered_replacements(
+        event_source,
+        room_id=room_id,
+        validator=valid_room_message_replacement,
+    ):
         resolved_candidate = await resolve_event_source_content(
             candidate,
             client,
@@ -358,18 +359,17 @@ def _stream_status_from_content(content: dict[str, Any] | None) -> str | None:
 
 
 def record_thread_edit_candidate(
-    event: nio.RoomMessage,
+    event_source: dict[str, Any],
     *,
-    event_info: EventInfo,
     edit_candidates_by_original_event_id: ThreadEditCandidatesByOriginalEventId,
 ) -> bool:
     """Track one edit candidate, returning True if the event is an edit."""
+    event_info = EventInfo.from_event(event_source)
     if not (event_info.is_edit and event_info.original_event_id):
         return False
-    if not event.event_id:
-        return True
-
-    edit_candidates_by_original_event_id.setdefault(event_info.original_event_id, []).append(event)
+    event_id = event_source.get("event_id")
+    if isinstance(event_id, str) and event_id:
+        edit_candidates_by_original_event_id.setdefault(event_info.original_event_id, []).append(event_source)
     return True
 
 
@@ -390,22 +390,21 @@ async def apply_latest_edits_to_messages(
         if existing_message is None:
             continue
 
-        ordered_candidates = sorted(
+        original_source = {
+            "event_id": existing_message.event_id,
+            "sender": existing_message.sender,
+            "origin_server_ts": existing_message.timestamp,
+            "type": "m.room.message",
+            "content": existing_message.content,
+        }
+        for edit_source in ordered_replacements(
+            original_source,
             edit_candidates,
-            key=lambda edit_event: (edit_event.server_timestamp, edit_event.event_id),
-            reverse=True,
-        )
-        for edit_event in ordered_candidates:
-            if (
-                edit_event.sender != existing_message.sender
-                or event_source_is_state_event(edit_event.source)
-                or (room_id is not None and not event_source_matches_room(edit_event.source, room_id))
-                or not room_message_content_is_renderable(existing_message.content)
-                or not replacement_content_is_renderable("m.room.message", edit_event.source.get("content", {}))
-            ):
-                continue
+            room_id=room_id,
+            validator=valid_room_message_replacement,
+        ):
             edited_body, edited_content = await extract_edit_body(
-                edit_event.source,
+                edit_source,
                 client,
                 event_cache=event_cache,
                 room_id=room_id,
@@ -415,10 +414,14 @@ async def apply_latest_edits_to_messages(
             )
             if edited_body is None:
                 continue
+            edit_event_id = edit_source["event_id"]
+            edit_timestamp = origin_server_ts_from_event_source(edit_source)
+            assert isinstance(edit_event_id, str)
+            assert isinstance(edit_timestamp, int)
             existing_message.apply_edit(
                 body=edited_body,
-                latest_event_id=edit_event.event_id,
-                latest_event_timestamp=edit_event.server_timestamp,
+                latest_event_id=edit_event_id,
+                latest_event_timestamp=edit_timestamp,
                 content=edited_content,
             )
             break
@@ -446,8 +449,7 @@ async def resolve_latest_visible_messages(
 
         event_info = EventInfo.from_event(event.source)
         if record_thread_edit_candidate(
-            event,
-            event_info=event_info,
+            event.source,
             edit_candidates_by_original_event_id=edit_candidates_by_original_event_id,
         ):
             continue
@@ -482,12 +484,9 @@ __all__ = [
     "ThreadEditCandidatesByOriginalEventId",
     "apply_latest_edits_to_messages",
     "bundled_replacement_body",
-    "bundled_replacement_candidates",
     "extract_visible_edit_body",
     "extract_visible_message",
-    "is_valid_bundled_replacement",
     "message_preview",
-    "ordered_valid_bundled_replacements",
     "record_thread_edit_candidate",
     "replace_visible_message",
     "resolve_latest_visible_messages",

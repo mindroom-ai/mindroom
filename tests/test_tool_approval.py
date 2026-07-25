@@ -34,7 +34,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.entity_resolution import entity_identity_registry, mindroom_user_id
 from mindroom.logging_config import get_logger
-from mindroom.matrix.event_info import event_source_is_state_event, event_source_matches_room
+from mindroom.matrix.replacements import ReplacementValidator, ordered_replacements
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.tool_approval import (
     MatrixApprovalAction,
@@ -51,6 +51,7 @@ from mindroom.tool_approval import (
 from mindroom.tools import approved_egress as _approved_egress  # noqa: F401 - registers the approval exemption
 from tests.approval_test_support import resolve_pending_approval as _resolve_pending_approval
 from tests.conftest import bind_runtime_paths, test_runtime_paths
+from tests.event_cache_test_support import get_latest_edit
 from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
@@ -68,38 +69,17 @@ class FakeEventCache:
     async def get_latest_edit(
         self,
         room_id: str,
-        original_event_id: str,
+        original: dict[str, Any],
         *,
-        sender: str,
-        event_type: str,
+        validator: ReplacementValidator,
     ) -> dict[str, Any] | None:
-        edits: list[dict[str, Any]] = []
-        for (event_room_id, _), event in self.events.items():
-            if (
-                event_room_id != room_id
-                or event.get("sender") != sender
-                or event.get("type") != event_type
-                or event_source_is_state_event(event)
-                or not event_source_matches_room(event, room_id)
-            ):
-                continue
-            content = event.get("content")
-            if not isinstance(content, dict):
-                continue
-            relates_to = content.get("m.relates_to")
-            if not isinstance(relates_to, dict):
-                continue
-            if relates_to.get("rel_type") == "m.replace" and relates_to.get("event_id") == original_event_id:
-                edits.append(event)
-        if not edits:
-            return None
-        return max(
-            edits,
-            key=lambda event: (
-                int(event.get("origin_server_ts", 0)),
-                str(event.get("event_id", "")),
-            ),
+        edits = ordered_replacements(
+            original,
+            (event for (event_room_id, _), event in self.events.items() if event_room_id == room_id),
+            room_id=room_id,
+            validator=validator,
         )
+        return edits[0] if edits else None
 
     async def get_recent_room_events(
         self,
@@ -2604,7 +2584,8 @@ async def test_discard_pending_on_startup_emits_replace_for_each_unresolved_card
 
     assert await store.discard_pending_on_startup() == 1
     assert await store.discard_pending_on_startup() == 0
-    latest_edit = await cache.get_latest_edit(
+    latest_edit = await get_latest_edit(
+        cache,
         "!room:localhost",
         "$approval",
         sender="@mindroom_router:localhost",

@@ -8,10 +8,11 @@ from typing import TYPE_CHECKING
 import pytest
 
 from mindroom.matrix.cache import ThreadRevision
-from mindroom.matrix.cache.event_cache_events import validated_cached_edit_row
+from mindroom.matrix.cache.event_cache_events import decode_cached_event
 from mindroom.matrix.cache.event_normalization import normalize_event_source_for_cache
 from mindroom.matrix.cache.thread_cache_state import thread_cache_state_row, thread_revision_row
-from mindroom.matrix.event_info import latest_valid_replacement, room_message_content_is_renderable
+from mindroom.matrix.media import valid_room_message_replacement
+from mindroom.matrix.replacements import ordered_replacements
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -66,7 +67,7 @@ def test_thread_revision_row_normalizes_backend_values() -> None:
     )
 
 
-def test_validated_cached_edit_row_rejects_index_timestamp_mismatch() -> None:
+def test_decode_cached_event_rejects_index_timestamp_mismatch() -> None:
     """Latest-edit ordering must not trust an index timestamp that disagrees with its event."""
     event = {
         "event_id": "$edit",
@@ -82,15 +83,11 @@ def test_validated_cached_edit_row_rejects_index_timestamp_mismatch() -> None:
     }
 
     assert (
-        validated_cached_edit_row(
+        decode_cached_event(
             json.dumps(event),
-            None,
             "$edit",
             3000,
             room_id="!room:localhost",
-            original_event_id="$original",
-            sender="@alice:localhost",
-            event_type="m.room.message",
         )
         is None
     )
@@ -146,75 +143,18 @@ def test_latest_valid_replacement_orders_bundled_and_explicit_candidates_togethe
         "m.relations": {"m.replace": edit("$z", bundled_timestamp)},
     }
 
-    latest = latest_valid_replacement(original, [edit("$a", explicit_timestamp)])
+    latest = ordered_replacements(
+        original,
+        [edit("$a", explicit_timestamp)],
+        room_id=None,
+        validator=valid_room_message_replacement,
+    )[0]
 
     assert latest is not None
     assert latest["event_id"] == expected_event_id
 
 
-_VALID_ENCRYPTED_FILE = {
-    "url": "mxc://localhost/media",
-    "v": "v2",
-    "key": {
-        "alg": "A256CTR",
-        "ext": True,
-        "key_ops": ["encrypt", "decrypt"],
-        "kty": "oct",
-        "k": "a2tra2tra2tra2tra2tra2tra2tra2tra2tra2tra2s",
-    },
-    "iv": "aWlpaWlpaWlpaWlpaWlpaQ",
-    "hashes": {"sha256": "aGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGg"},
-}
-
-
-def test_encrypted_media_file_v2_is_renderable() -> None:
-    """A complete Matrix encrypted-file v2 envelope remains visible."""
-    assert room_message_content_is_renderable(
-        {
-            "body": "image.png",
-            "msgtype": "m.image",
-            "file": _VALID_ENCRYPTED_FILE,
-        },
-    )
-
-
-@pytest.mark.parametrize(
-    ("path", "invalid_value"),
-    [
-        (("url",), "https://localhost/media"),
-        (("v",), "v1"),
-        (("key", "alg"), "wrong"),
-        (("key", "ext"), False),
-        (("key", "key_ops"), ["decrypt"]),
-        (("key", "kty"), "RSA"),
-        (("key", "k"), "not-base64"),
-        (("key", "k"), "+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/s"),
-        (("iv",), "not-base64"),
-        (("hashes",), {}),
-        (("hashes", "sha256"), "not-base64"),
-    ],
-)
-def test_encrypted_media_file_rejects_invalid_v2_fields(
-    path: tuple[str, ...],
-    invalid_value: object,
-) -> None:
-    """Every Matrix encrypted-file v2 and JWK requirement is enforced."""
-    encrypted_file = json.loads(json.dumps(_VALID_ENCRYPTED_FILE))
-    target = encrypted_file
-    for key in path[:-1]:
-        target = target[key]
-    target[path[-1]] = invalid_value
-
-    assert not room_message_content_is_renderable(
-        {
-            "body": "image.png",
-            "msgtype": "m.image",
-            "file": encrypted_file,
-        },
-    )
-
-
-def test_validated_cached_edit_row_rejects_self_replacement() -> None:
+def test_ordered_replacements_rejects_self_replacement() -> None:
     """A replacement event cannot target its own event ID."""
     event = {
         "event_id": "$self",
@@ -230,15 +170,17 @@ def test_validated_cached_edit_row_rejects_self_replacement() -> None:
     }
 
     assert (
-        validated_cached_edit_row(
-            json.dumps(event),
-            None,
-            "$self",
-            2000,
+        ordered_replacements(
+            {
+                "event_id": "$self",
+                "origin_server_ts": 1000,
+                "sender": "@alice:localhost",
+                "type": "m.room.message",
+                "content": {"body": "Original", "msgtype": "m.text"},
+            },
+            [event],
             room_id="!room:localhost",
-            original_event_id="$self",
-            sender="@alice:localhost",
-            event_type="m.room.message",
+            validator=valid_room_message_replacement,
         )
-        is None
+        == []
     )

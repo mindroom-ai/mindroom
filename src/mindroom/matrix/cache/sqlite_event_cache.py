@@ -33,6 +33,8 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Collection
     from pathlib import Path
 
+    from mindroom.matrix.replacements import ReplacementValidator
+
     from .agent_message_snapshot import AgentMessageSnapshot
     from .cache_maintenance import CacheMaintenanceReport
     from .event_cache import ThreadCacheState, ThreadRevision
@@ -967,10 +969,9 @@ class SqliteEventCache:
     async def get_latest_edit(
         self,
         room_id: str,
-        original_event_id: str,
+        original: dict[str, Any],
         *,
-        sender: str,
-        event_type: str,
+        validator: ReplacementValidator,
     ) -> dict[str, Any] | None:
         """Return the latest cached edit event for one original event."""
         return await self._read_operation(
@@ -981,9 +982,8 @@ class SqliteEventCache:
                 db,
                 principal_id=self.principal_id,
                 room_id=room_id,
-                original_event_id=original_event_id,
-                sender=sender,
-                event_type=event_type,
+                original=original,
+                validator=validator,
             ),
         )
 

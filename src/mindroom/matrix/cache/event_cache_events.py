@@ -3,22 +3,14 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from mindroom.matrix.event_info import (
-    EventInfo,
-    event_source_is_state_event,
-    event_source_matches_index,
-    event_source_matches_room,
-    event_type_supports_thread_relations,
-    replacement_content_is_renderable,
-)
+from mindroom.matrix.event_info import EventInfo, event_source_matches_room, event_type_supports_thread_relations
 from mindroom.matrix.sidecar_content import sidecar_mxc_url
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Sequence
+    from collections.abc import Iterable
 
 _EDITABLE_EVENT_TYPES = frozenset({"m.room.message", "io.mindroom.tool_approval"})
 
@@ -43,98 +35,35 @@ class CachedEventRow:
     cached_at: float | None
 
 
-def validated_cached_event_payload(
+def decode_cached_event(
     event_json: str,
     indexed_event_id: str,
     indexed_origin_server_ts: int,
     *,
     room_id: str,
-) -> dict[str, Any] | None:
-    """Return one cached payload only when it matches its authoritative index."""
-    event = json.loads(event_json)
-    if not isinstance(event, dict) or not event_source_matches_index(
-        event,
-        indexed_event_id,
-        indexed_origin_server_ts,
-        room_id,
-    ):
-        return None
-    return event
-
-
-def validated_cached_event_payloads(
-    rows: Iterable[Sequence[object]],
-    *,
-    room_id: str,
-) -> list[dict[str, Any]]:
-    """Return cached payloads only when every row matches its authoritative index."""
-    events: list[dict[str, Any]] = []
-    for row in rows:
-        if (
-            len(row) != 3
-            or not isinstance(row[0], str)
-            or not isinstance(row[1], str)
-            or not isinstance(row[2], int)
-            or isinstance(row[2], bool)
-        ):
-            msg = "Cached event index row is malformed"
-            raise ValueError(msg)
-        event = validated_cached_event_payload(
-            row[0],
-            row[1],
-            row[2],
-            room_id=room_id,
-        )
-        if event is None:
-            msg = "Cached event payload does not match its authoritative index"
-            raise ValueError(msg)
-        events.append(event)
-    return events
-
-
-def validated_cached_edit_row(
-    event_json: str,
-    cached_at: float | None,
-    indexed_event_id: str,
-    indexed_origin_server_ts: int,
-    *,
-    room_id: str,
-    original_event_id: str,
-    sender: str,
-    event_type: str,
+    cached_at: float | None = None,
 ) -> CachedEventRow | None:
-    """Return one cache-index candidate when its Matrix replacement envelope is valid."""
+    """Decode one cached event only when its payload matches its index."""
     event = json.loads(event_json)
-    if not isinstance(event, dict):
-        return None
-    timestamp = event.get("origin_server_ts")
-    content = event.get("content")
+    timestamp = event.get("origin_server_ts") if isinstance(event, dict) else None
     if (
-        event.get("event_id") != indexed_event_id
-        or not indexed_event_id
-        or indexed_event_id == original_event_id
-        or not isinstance(timestamp, int)
-        or isinstance(timestamp, bool)
-        or timestamp != indexed_origin_server_ts
-        or event.get("sender") != sender
-        or event.get("type") != event_type
-        or event_source_is_state_event(event)
+        not indexed_event_id
+        or not isinstance(event, dict)
+        or (event.get("event_id"), timestamp) != (indexed_event_id, indexed_origin_server_ts)
+        or type(timestamp) is not int
         or not event_source_matches_room(event, room_id)
-        or not isinstance(content, Mapping)
     ):
         return None
-    relates_to = content.get("m.relates_to")
-    if (
-        not isinstance(relates_to, Mapping)
-        or relates_to.get("rel_type") != "m.replace"
-        or relates_to.get("event_id") != original_event_id
-        or not replacement_content_is_renderable(event_type, content)
-    ):
-        return None
-    return CachedEventRow(
-        event=event,
-        cached_at=None if cached_at is None else float(cached_at),
-    )
+    return CachedEventRow(event=event, cached_at=None if cached_at is None else float(cached_at))
+
+
+def decode_cached_events(rows: Iterable[Any], *, room_id: str) -> list[dict[str, Any]]:
+    """Decode cached payloads, rejecting any row/index mismatch."""
+    decoded = [decode_cached_event(*row, room_id=room_id) for row in rows]
+    if any(row is None for row in decoded):
+        msg = "Cached event payload does not match its authoritative index"
+        raise ValueError(msg)
+    return [row.event for row in decoded if row is not None]
 
 
 @dataclass(frozen=True, slots=True)

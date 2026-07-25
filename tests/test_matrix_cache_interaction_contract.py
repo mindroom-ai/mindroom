@@ -27,6 +27,7 @@ from mindroom.matrix.thread_diagnostics import (
     THREAD_HISTORY_SOURCE_STALE_CACHE,
 )
 from tests.event_cache_test_support import (
+    get_latest_edit,
     raw_nio_event,
     raw_nio_redaction,
     replace_thread_unconditionally,
@@ -891,7 +892,8 @@ async def test_joined_timeline_thread_relations_indexes_edits_and_visible_histor
         assert await event_cache.get_thread_id_for_event(_ROOM_ID, event_id) == _THREAD_ID
     assert await event_cache.get_thread_id_for_event(_ROOM_ID, "$reaction") is None
     assert (
-        await event_cache.get_latest_edit(
+        await get_latest_edit(
+            event_cache,
             _ROOM_ID,
             _THREAD_ID,
             sender=_SENDER,
@@ -900,7 +902,8 @@ async def test_joined_timeline_thread_relations_indexes_edits_and_visible_histor
         == root_edit
     )
     assert (
-        await event_cache.get_latest_edit(
+        await get_latest_edit(
+            event_cache,
             _ROOM_ID,
             "$explicit-child",
             sender=_SENDER,
@@ -909,7 +912,8 @@ async def test_joined_timeline_thread_relations_indexes_edits_and_visible_histor
         == child_edit
     )
     assert (
-        await event_cache.get_latest_edit(
+        await get_latest_edit(
+            event_cache,
             _ROOM_ID,
             "$plain-reply",
             sender=_SENDER,
@@ -1453,7 +1457,8 @@ async def test_sync_categories_outside_joined_timeline_are_deliberately_excluded
     assert await event_cache.get_thread_events(leave_room_id, "$leave-root") is None
     assert await event_cache.get_thread_cache_state(leave_room_id, "$leave-root") is None
     assert (
-        await event_cache.get_latest_edit(
+        await get_latest_edit(
+            event_cache,
             leave_room_id,
             "$leave-original",
             sender=_SENDER,
@@ -1761,7 +1766,8 @@ async def test_message_and_edit_redaction_contract(
         )
         assert await event_cache.get_event(_ROOM_ID, "$child-edit-to-redact") is None
     assert (
-        await event_cache.get_latest_edit(
+        await get_latest_edit(
+            event_cache,
             _ROOM_ID,
             _THREAD_CHILD_ID,
             sender=_SENDER,

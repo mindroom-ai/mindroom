@@ -4,11 +4,15 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from mindroom.matrix.replacements import ReplacementValidator, ordered_replacements
+
 from .event_cache_events import (
     CachedEventRow,
     SerializedCachedEvent,
     batch_redaction_candidate_ids,
     cache_rows_were_deleted,
+    decode_cached_event,
+    decode_cached_events,
     event_edit_rows,
     event_mxc_urls,
     event_redaction_candidate_ids,
@@ -16,9 +20,6 @@ from .event_cache_events import (
     filter_redacted_events,
     redaction_removal_event_ids,
     serialize_cacheable_events,
-    validated_cached_edit_row,
-    validated_cached_event_payload,
-    validated_cached_event_payloads,
 )
 from .postgres_cursor import fetchall, fetchone, rowcount
 
@@ -101,16 +102,8 @@ async def load_event(
         """,
         (namespace, room_id, event_id),
     )
-    return (
-        None
-        if row is None
-        else validated_cached_event_payload(
-            row[0],
-            event_id,
-            int(row[1]),
-            room_id=room_id,
-        )
-    )
+    decoded = None if row is None else decode_cached_event(row[0], event_id, row[1], room_id=room_id)
+    return None if decoded is None else decoded.event
 
 
 async def load_recent_room_events(
@@ -145,7 +138,7 @@ async def load_recent_room_events(
         """,
         (namespace, room_id, since_ts_ms, event_type, limit),
     )
-    return validated_cached_event_payloads(rows, room_id=room_id)
+    return decode_cached_events(rows, room_id=room_id)
 
 
 async def load_latest_edit(
@@ -153,18 +146,16 @@ async def load_latest_edit(
     *,
     namespace: str,
     room_id: str,
-    original_event_id: str,
-    sender: str,
-    event_type: str,
+    original: dict[str, Any],
+    validator: ReplacementValidator,
 ) -> dict[str, Any] | None:
     """Return the latest cached edit event for one original event."""
     row = await load_latest_edit_row(
         db,
         namespace=namespace,
         room_id=room_id,
-        original_event_id=original_event_id,
-        sender=sender,
-        event_type=event_type,
+        original=original,
+        validator=validator,
     )
     return None if row is None else row.event
 
@@ -174,11 +165,11 @@ async def load_latest_edit_row(
     *,
     namespace: str,
     room_id: str,
-    original_event_id: str,
-    sender: str,
-    event_type: str,
+    original: dict[str, Any],
+    validator: ReplacementValidator,
 ) -> CachedEventRow | None:
     """Return the latest cached edit event plus its lookup-row write time."""
+    original_event_id = original.get("event_id")
     cursor = await db.execute(
         """
         SELECT
@@ -194,25 +185,20 @@ async def load_latest_edit_row(
         WHERE edits.namespace = %s
             AND edits.room_id = %s
             AND edits.original_event_id = %s
-            AND events.event_json::jsonb ->> 'sender' = %s
-            AND events.event_json::jsonb ->> 'type' = %s
         ORDER BY edits.origin_server_ts DESC, edits.edit_event_id COLLATE "C" DESC
         """,
-        (namespace, room_id, original_event_id, sender, event_type),
+        (namespace, room_id, original_event_id),
     )
     try:
         while (row := await cursor.fetchone()) is not None:
-            if validated_row := validated_cached_edit_row(
-                row[0],
-                row[1],
-                row[2],
-                row[3],
+            decoded = decode_cached_event(row[0], row[2], row[3], room_id=room_id, cached_at=row[1])
+            if decoded is not None and ordered_replacements(
+                original,
+                (decoded.event,),
                 room_id=room_id,
-                original_event_id=original_event_id,
-                sender=sender,
-                event_type=event_type,
+                validator=validator,
             ):
-                return validated_row
+                return decoded
         return None
     finally:
         await cursor.close()

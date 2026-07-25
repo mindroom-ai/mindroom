@@ -19,6 +19,7 @@ from mindroom.approval_events import (
     PendingApprovalStatus,
     is_original_approval_card,
     parse_approval_datetime,
+    valid_approval_replacement,
 )
 from mindroom.logging_config import get_logger
 from mindroom.redaction import redact_sensitive_data
@@ -840,8 +841,7 @@ class _ApprovalManager:
             return None
         latest_edit = await self._latest_edit(
             room_id=pending.room_id,
-            card_event_id=pending.card_event_id,
-            sender=pending.card_sender_id,
+            card_event=live_waiter.card_event,
         )
         if pending.latest_status(latest_edit) != "pending":
             return None
@@ -886,8 +886,7 @@ class _ApprovalManager:
             return None
         latest_edit = await self._latest_edit(
             room_id=pending.room_id,
-            card_event_id=pending.card_event_id,
-            sender=pending.card_sender_id,
+            card_event=card_event,
         )
         if pending.latest_status(latest_edit) != "pending":
             return None
@@ -897,16 +896,14 @@ class _ApprovalManager:
         self,
         *,
         room_id: str,
-        card_event_id: str,
-        sender: str,
+        card_event: dict[str, Any],
     ) -> dict[str, Any] | None:
         if self._event_cache is None:
             return None
         return await self._event_cache.get_latest_edit(
             room_id,
-            card_event_id,
-            sender=sender,
-            event_type="io.mindroom.tool_approval",
+            card_event,
+            validator=valid_approval_replacement,
         )
 
     async def _scan_cached_room_cards(

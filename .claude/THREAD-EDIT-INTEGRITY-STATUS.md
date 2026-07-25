@@ -6,7 +6,8 @@
 - Pull request: https://github.com/mindroom-ai/mindroom/pull/1641.
 - Base: `origin/main` at `66dd4f4a68bcfd1a5e43b2cac20a1b464f306ab1`.
 - Rejected frozen head: `abb8d4292672c91c4cb551772d214cdca54378e0`.
-- Current local, remote, and GitHub PR head: `c0552cf5a3e7ad6a535f721623e7ee2cf2b7026a`.
+- Current local, remote, and GitHub PR head: `577d64559eba2ab2e5ce2a973e0a12f3af47c946`.
+- Current production code head: `c0552cf5a3e7ad6a535f721623e7ee2cf2b7026a`.
 - Never merge this pull request.
 - Never amend or force-push.
 
@@ -15,7 +16,7 @@
 - Exact-head GitHub pytest failed `12` tests on `b39029c76e06656d53aced0f921503212cd2bfad`; that candidate is invalid.
 - All independent approvals are stale and non-gating after the review-fix commits.
 - Real-Tuwunel has not run.
-- PR #1646 owns the heavy resource slot; mindroom-nio PR #20 and PR #1639 are ahead of PR #1641.
+- The heavy slot is currently owned by PR #1646's exact real-Tuwunel gate.
 - Every approval, CI result, and live gate before the next pushed head is invalid.
 
 ## Verified blockers
@@ -45,11 +46,31 @@
 
 ## Design and source-minimality reset
 
-- Production growth is concentrated in replacement-domain helpers at net `+282`, durable cache seams at net `+180`, thread resolution and certification at net `+39`, visible point and full projection at net `+19`, approval projection at net `+1`, and call-site wiring at net `+5`.
-- `event_info.py` remains the single source of truth for original scope, replacement validity, bundled extraction, and `(origin_server_ts, event_id)` selection.
-- `client_visible_messages.py`, point projection, snapshots, and cache-row validation must consume that domain seam instead of repeating sender, room, state, content, or ordering predicates.
-- Strict encrypted-media validation should use compact structural parsing while retaining exact Matrix v2, JWK, URL-safe Base64, decoded-size, and MXC constraints.
-- Cached index validation should keep one backend-neutral decoder and remove repeated row-shape and candidate-validity plumbing from backend consumers.
-- Bundled latest and ordered-candidate APIs should share one valid-candidate sequence instead of filtering the same input twice.
-- The simplification target is at most net `+400` production lines against the exact merge base, deleting at least `126` net lines without weakening any regression.
+- Independent source review of exact production head `c0552cf5a3e7ad6a535f721623e7ee2cf2b7026a` is `CHANGES REQUIRED`.
+- Exact c055 growth is concentrated in `event_info.py` at net `+282`, cache common code at net `+105`, read projection at net `+58`, backend parity at net `+41`, and approval, snapshot, and tool plumbing at net `+40`.
+- Restore `event_info.py` to relation facts and small room/state helpers.
+- One approximately 70-80 line `matrix/replacements.py` must own bundled flattening, identity/scope/relation validity, canonical `(origin_server_ts, event_id)` ordering, and content merge.
+- History, bundled preview, point lookup, snapshots, approval, and cleanup must consume that candidate API.
+- Cache edit lookup must accept its owning surface validator, with message validity delegated to nio/media parsing and approval validity delegated to approval parsing.
+- Keep one cache-row decoder; SQLite and PostgreSQL own only SQL plus PostgreSQL bytewise `COLLATE "C"` ordering.
+- Delete the custom encrypted-media/Base64 parser, duplicate selectors/projections/cache predicates, and compatibility re-exports.
+- Preserve same-sender/type, non-state, room-scope, non-synthesized edit-of-edit, malformed-newest fallback, canonical tie-break, immutable original timestamp/relation, visible activity, cache-index, bundled/explicit, media, approval, and raw-only interaction invariants.
+- Hard production target is net `<= +200` lines against the exact merge base, ideally net `+160..+190`, requiring approximately 330-365 lines of deletion from c055.
 - No PostgreSQL fanout, full pytest, independent review, or live gate may start before the simplified source target and focused regressions pass.
+
+## Active source-minimal reset
+
+- The published branch remains `577d64559eba2ab2e5ce2a973e0a12f3af47c946`, and the current worktree contains the uncommitted source-minimal reset.
+- `src/mindroom/matrix/replacements.py` is the 76-line replacement-domain owner for bundled flattening, identity, scope, relation validity, canonical ordering, and content projection.
+- `event_info.py` is restored to relation facts plus the small room and state helpers.
+- Cache edit lookup now receives the full original event and a surface validator, while one cache-row decoder validates durable payload identity.
+- SQLite and PostgreSQL latest-edit SQL now owns only cache scope, joins, and canonical event-ID collation; shared Python owns Matrix validity and malformed-newest fallback.
+- Full history, bundled preview, point lookup, snapshots, approval lookup, sidecar hydration, and cleanup consume the shared candidate seam.
+- The custom encrypted-media and Base64 validator, compatibility re-exports, duplicate selectors, duplicate projections, and schema-v4 migration are removed.
+- PostgreSQL schema v3 intentionally retains `idx_mindroom_event_cache_event_edits_room_original_ts` as the single narrowing index because explicit query-level `COLLATE "C"` owns equal-timestamp correctness.
+- Production source is currently net `+198` against merge base `66dd4f4a68bcfd1a5e43b2cac20a1b464f306ab1`, satisfying the hard `<= +200` gate.
+- Ruff formatting, Ruff lint, `ty`, and diff checks pass for every dirty Python file.
+- The exact non-PostgreSQL prior-CI files pass `15`, `13`, `18`, and `4` tests.
+- Full `tests/test_event_cache.py` and focused thread, approval, and cache-contract regressions pass.
+- That focused cache run unexpectedly exercised the available PostgreSQL parametrization while PR #1646 owned the heavy slot, so no further PostgreSQL, full-suite, hook, or live work may start until explicit release.
+- The next safe step is to update external evidence, commit locally after author verification, and wait for resource ownership before the required exact PostgreSQL replay and push.

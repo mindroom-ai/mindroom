@@ -26,8 +26,13 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage, bundled_replacement_candidates
-from mindroom.matrix.event_info import EventInfo, event_source_is_state_event, event_source_matches_room
+from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
+from mindroom.matrix.event_info import (
+    EventInfo,
+    event_source_is_state_event,
+    event_source_matches_room,
+)
+from mindroom.matrix.replacements import bundled_replacement_candidates
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping, Sequence
