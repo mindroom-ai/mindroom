@@ -2059,6 +2059,82 @@ class TestThreadHistory:
         }
 
     @pytest.mark.asyncio
+    async def test_fetch_thread_history_falls_back_from_invalid_hydrated_edit(self) -> None:
+        """Full history must use an older edit when the newest sidecar hydrates invalid."""
+        client = AsyncMock()
+        root_event = self._make_text_event(
+            event_id="$thread_root",
+            sender="@user:localhost",
+            body="root",
+            server_timestamp=1000,
+            source_content={"body": "root", "msgtype": "m.text"},
+        )
+        thread_message = self._make_text_event(
+            event_id="$agent_msg",
+            sender="@agent:localhost",
+            body="Original",
+            server_timestamp=2000,
+            source_content={
+                "body": "Original",
+                "msgtype": "m.text",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
+            },
+        )
+        older_edit = self._make_text_event(
+            event_id="$older_edit",
+            sender="@agent:localhost",
+            body="* Older valid",
+            server_timestamp=3000,
+            source_content={
+                "body": "* Older valid",
+                "msgtype": "m.text",
+                "m.new_content": {"body": "Older valid", "msgtype": "m.text"},
+                "m.relates_to": {"rel_type": "m.replace", "event_id": "$agent_msg"},
+            },
+        )
+        newest_edit = self._make_text_event(
+            event_id="$newest_edit",
+            sender="@agent:localhost",
+            body="* Preview",
+            server_timestamp=4000,
+            source_content={
+                "body": "* Preview",
+                "msgtype": "m.text",
+                "m.new_content": {
+                    "body": "Preview",
+                    "msgtype": "m.file",
+                    "url": "mxc://server/invalid-edit",
+                    "io.mindroom.long_text": {"version": 2, "encoding": "matrix_event_content_json"},
+                },
+                "m.relates_to": {"rel_type": "m.replace", "event_id": "$agent_msg"},
+            },
+        )
+        response = MagicMock(spec=nio.RoomMessagesResponse)
+        response.chunk = [newest_edit, older_edit, thread_message, root_event]
+        response.end = None
+        client.room_messages.return_value = response
+        client.download = AsyncMock(
+            return_value=MagicMock(
+                spec=nio.DownloadResponse,
+                body=json.dumps(
+                    {
+                        "body": "* Invalid hydrated",
+                        "msgtype": "m.text",
+                        "m.new_content": {"body": "Invalid hydrated"},
+                        "m.relates_to": {"rel_type": "m.replace", "event_id": "$agent_msg"},
+                    },
+                ).encode(),
+            ),
+        )
+
+        history = await fetch_thread_history(client, "!room:localhost", "$thread_root")
+
+        assert [(message.event_id, message.body, message.latest_event_id) for message in history] == [
+            ("$thread_root", "root", "$thread_root"),
+            ("$agent_msg", "Older valid", "$older_edit"),
+        ]
+
+    @pytest.mark.asyncio
     async def test_fetch_thread_history_leaves_legacy_v1_edit_preview_untouched(self) -> None:
         """Unsupported v1 edit sidecars should keep preview body/content coherent."""
         client = AsyncMock()

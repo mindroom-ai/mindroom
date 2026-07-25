@@ -21,6 +21,7 @@ from mindroom.matrix.client_visible_messages import (
     resolve_visible_event_source,
     thread_root_body_preview,
 )
+from mindroom.matrix.media import valid_room_message_replacement
 from mindroom.matrix.membership_fence import UNCERTIFIED_MEMBERSHIP_EPOCH
 from mindroom.matrix.message_content import (
     SidecarHydrationBatch,
@@ -228,6 +229,10 @@ class TestResolvedMessageExtraction:
 
         body, content = await extract_edit_body(
             {
+                "event_id": "$edit",
+                "sender": "@alice:example.com",
+                "origin_server_ts": 2000,
+                "type": "m.room.message",
                 "content": {
                     "msgtype": "m.text",
                     "body": "* Preview edit",
@@ -245,6 +250,7 @@ class TestResolvedMessageExtraction:
                 },
             },
             client,
+            replacement_validator=valid_room_message_replacement,
         )
 
         assert body == "Full edit body"
@@ -298,6 +304,7 @@ class TestResolvedMessageExtraction:
                 },
             },
             client,
+            replacement_validator=valid_room_message_replacement,
         )
 
         assert body == "Preview edit"
@@ -879,6 +886,76 @@ class TestResolvedMessageExtraction:
         assert preview == expected_body
 
     @pytest.mark.asyncio
+    async def test_thread_root_preview_falls_back_from_invalid_hydrated_replacement(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Bundled previews must use an older edit when the newest sidecar hydrates invalid."""
+        config = bind_runtime_paths(
+            Config(agents={"general": AgentConfig(display_name="General Agent")}),
+            test_runtime_paths(tmp_path),
+        )
+        root = _make_message_event(
+            body="Original root",
+            content={"body": "Original root", "msgtype": "m.text"},
+            event_id="$thread-root",
+            sender="@alice:example.com",
+        )
+
+        def replacement(event_id: str, timestamp: int, body: str) -> dict[str, object]:
+            return {
+                "event_id": event_id,
+                "sender": "@alice:example.com",
+                "origin_server_ts": timestamp,
+                "type": "m.room.message",
+                "content": {
+                    "body": f"* {body}",
+                    "msgtype": "m.text",
+                    "m.new_content": {"body": body, "msgtype": "m.text"},
+                    "m.relates_to": {"rel_type": "m.replace", "event_id": "$thread-root"},
+                },
+            }
+
+        newest = replacement("$newest", 3000, "Preview")
+        newest["content"]["m.new_content"] = {
+            "body": "Preview",
+            "msgtype": "m.file",
+            "url": "mxc://server/invalid-edit",
+            "io.mindroom.long_text": {"version": 2, "encoding": "matrix_event_content_json"},
+        }
+        root.source["unsigned"] = {
+            "m.relations": {
+                "m.replace": {
+                    "latest_event": newest,
+                    "event": replacement("$older", 2000, "Older valid"),
+                },
+            },
+        }
+        client = _make_client()
+        client.download = AsyncMock(
+            return_value=MagicMock(
+                spec=nio.DownloadResponse,
+                body=json.dumps(
+                    {
+                        "body": "* Invalid hydrated",
+                        "msgtype": "m.text",
+                        "m.new_content": {"body": "Invalid hydrated"},
+                        "m.relates_to": {"rel_type": "m.replace", "event_id": "$thread-root"},
+                    },
+                ).encode(),
+            ),
+        )
+
+        preview = await thread_root_body_preview(
+            root,
+            client=client,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+        )
+
+        assert preview == "Older valid"
+
+    @pytest.mark.asyncio
     async def test_thread_root_body_preview_passes_precomputed_trusted_sender_ids_to_nested_helpers(
         self,
         tmp_path: Path,
@@ -1449,10 +1526,15 @@ class TestCanonicalContentResolution:
         response = MagicMock(spec=nio.DownloadResponse)
         response.body = (
             b'{"msgtype":"m.text","body":"* Full edit wrapper","m.new_content":{"body":"Full edit body","msgtype":"m.text",'
-            b'"io.mindroom.tool_trace":{"version":1,"events":[{"tool":"web_search"}]}}}'
+            b'"io.mindroom.tool_trace":{"version":1,"events":[{"tool":"web_search"}]}},'
+            b'"m.relates_to":{"rel_type":"m.replace","event_id":"$original"}}'
         )
         client.download.return_value = response
         event_source = {
+            "event_id": "$edit",
+            "sender": "@alice:example.com",
+            "origin_server_ts": 2000,
+            "type": "m.room.message",
             "content": {
                 "body": "* Preview edit",
                 "msgtype": "m.text",
@@ -1467,7 +1549,11 @@ class TestCanonicalContentResolution:
             },
         }
 
-        body, resolved_content = await extract_edit_body(event_source, client)
+        body, resolved_content = await extract_edit_body(
+            event_source,
+            client,
+            replacement_validator=valid_room_message_replacement,
+        )
 
         assert body == "Full edit body"
         assert resolved_content == {
@@ -1495,6 +1581,7 @@ class TestCanonicalContentResolution:
 
         body, resolved_content = await extract_edit_body(
             event_source,
+            replacement_validator=valid_room_message_replacement,
             trusted_sender_ids={"@mindroom_general:localhost"},
         )
 
@@ -1524,6 +1611,7 @@ class TestCanonicalContentResolution:
 
         body, resolved_content = await extract_edit_body(
             event_source,
+            replacement_validator=valid_room_message_replacement,
             trusted_sender_ids={"@mindroom_general:localhost"},
         )
 
@@ -1552,6 +1640,7 @@ class TestCanonicalContentResolution:
 
         body, resolved_content = await extract_edit_body(
             event_source,
+            replacement_validator=valid_room_message_replacement,
             trusted_sender_ids={"@mindroom_general:localhost"},
         )
 

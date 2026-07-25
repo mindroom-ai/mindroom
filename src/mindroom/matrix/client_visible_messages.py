@@ -19,7 +19,7 @@ from mindroom.matrix.event_info import (
 )
 from mindroom.matrix.media import valid_room_message_replacement
 from mindroom.matrix.message_content import extract_and_resolve_message, extract_edit_body, resolve_event_source_content
-from mindroom.matrix.visible_body import bundled_visible_body_preview, visible_body_from_event_source
+from mindroom.matrix.visible_body import visible_body_from_event_source
 
 if TYPE_CHECKING:
     from collections.abc import Collection, Mapping, Sequence
@@ -204,6 +204,7 @@ async def extract_visible_edit_body(
         event_cache=event_cache,
         room_id=room_id,
         trusted_sender_ids=_resolved_trusted_sender_ids(config, runtime_paths, trusted_sender_ids),
+        replacement_validator=valid_room_message_replacement,
     )
 
 
@@ -260,15 +261,13 @@ async def bundled_replacement_body(
         room_id=room_id,
         validator=valid_room_message_replacement,
     ):
-        resolved_candidate = await resolve_event_source_content(
+        body, _content = await extract_edit_body(
             candidate,
             client,
             event_cache=event_cache,
             room_id=room_id,
-        )
-        body = bundled_visible_body_preview(
-            resolved_candidate,
             trusted_sender_ids=trusted_sender_ids,
+            replacement_validator=valid_room_message_replacement,
         )
         if body is not None:
             return body
@@ -411,6 +410,7 @@ async def apply_latest_edits_to_messages(
                 expected_membership_epoch=expected_membership_epoch,
                 hydration_batch=hydration_batch,
                 trusted_sender_ids=trusted_sender_ids,
+                replacement_validator=valid_room_message_replacement,
             )
             if edited_body is None:
                 continue

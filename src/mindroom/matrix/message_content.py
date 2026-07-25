@@ -15,7 +15,7 @@ from mindroom.matrix.sidecar_content import sidecar_mxc_url
 from mindroom.matrix.visible_body import has_trusted_stream_body_metadata, visible_body_from_content
 
 if TYPE_CHECKING:
-    from collections.abc import Collection, Mapping, Sequence
+    from collections.abc import Callable, Collection, Mapping, Sequence
 
     from mindroom.matrix.cache import ConversationEventCache
 
@@ -449,9 +449,10 @@ async def extract_edit_body(
     expected_membership_epoch: int | None = None,
     hydration_batch: SidecarHydrationBatch | None = None,
     trusted_sender_ids: Collection[str] = (),
+    replacement_validator: Callable[[Mapping[str, Any]], bool],
 ) -> tuple[str | None, dict[str, Any] | None]:
     """Extract body/content from an edit event's ``m.new_content`` payload."""
-    resolved_content, _ = await _resolve_event_content(
+    resolved_content, content_changed = await _resolve_event_content(
         event_source,
         client,
         event_cache=event_cache,
@@ -459,6 +460,12 @@ async def extract_edit_body(
         expected_membership_epoch=expected_membership_epoch,
         hydration_batch=hydration_batch,
     )
+    if content_changed and (
+        not replacement_validator({**event_source, "content": resolved_content})
+        or resolved_content.get("m.relates_to")
+        != _normalized_content_dict(event_source.get("content")).get("m.relates_to")
+    ):
+        return None, None
     new_content = _normalized_content_dict(resolved_content.get("m.new_content"))
     body = visible_body_from_content(
         new_content,

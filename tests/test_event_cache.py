@@ -2334,6 +2334,83 @@ async def test_cached_room_get_event_ignores_wrong_event_type_edit(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("invalidity", ["missing-msgtype", "retargeted"])
+async def test_cached_room_get_event_falls_back_from_invalid_hydrated_edit(
+    event_cache: ConversationEventCache,
+    invalidity: str,
+) -> None:
+    """SQLite and PostgreSQL point reads must skip a newest invalid hydrated sidecar."""
+    original_event = _make_text_event(
+        event_id="$reply",
+        sender="@alice:localhost",
+        body="Original reply",
+        server_timestamp=2000,
+        source_content={"body": "Original reply", "msgtype": "m.text"},
+    )
+    valid_edit = _make_text_event(
+        event_id="$valid_edit",
+        sender="@alice:localhost",
+        body="* Older valid",
+        server_timestamp=3000,
+        source_content={
+            "body": "* Older valid",
+            "msgtype": "m.text",
+            "m.new_content": {"body": "Older valid", "msgtype": "m.text"},
+            "m.relates_to": {"rel_type": "m.replace", "event_id": "$reply"},
+        },
+    )
+    sidecar_edit = _make_text_event(
+        event_id="$sidecar_edit",
+        sender="@alice:localhost",
+        body="* Preview",
+        server_timestamp=4000,
+        source_content={
+            "body": "* Preview",
+            "msgtype": "m.text",
+            "m.new_content": {
+                "body": "Preview",
+                "msgtype": "m.file",
+                "url": "mxc://server/invalid-edit",
+                "io.mindroom.long_text": {"version": 2, "encoding": "matrix_event_content_json"},
+            },
+            "m.relates_to": {"rel_type": "m.replace", "event_id": "$reply"},
+        },
+    )
+    client = AsyncMock(spec=nio.AsyncClient)
+    canonical_new_content = {"body": "Invalid hydrated"}
+    if invalidity == "retargeted":
+        canonical_new_content["msgtype"] = "m.text"
+    client.download.return_value = MagicMock(
+        spec=nio.DownloadResponse,
+        body=json.dumps(
+            {
+                "body": "* Invalid hydrated",
+                "msgtype": "m.text",
+                "m.new_content": canonical_new_content,
+                "m.relates_to": {
+                    "rel_type": "m.replace",
+                    "event_id": "$other" if invalidity == "retargeted" else "$reply",
+                },
+            },
+        ).encode(),
+    )
+    await event_cache.store_events_batch(
+        [
+            ("$reply", "!room:localhost", _cache_source(original_event)),
+            ("$valid_edit", "!room:localhost", _cache_source(valid_edit)),
+            ("$sidecar_edit", "!room:localhost", _cache_source(sidecar_edit)),
+        ],
+    )
+
+    response, _ = await _cached_room_get_event(client, event_cache, "!room:localhost", "$reply")
+
+    assert isinstance(response, nio.RoomGetEventResponse)
+    assert response.event.body == "Older valid"
+    assert response.event.server_timestamp == 2000
+    client.download.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "malformed_new_content",
     [

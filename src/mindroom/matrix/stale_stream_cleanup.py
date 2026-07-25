@@ -40,6 +40,7 @@ from mindroom.matrix.client_delivery import edit_message_result, send_message_re
 from mindroom.matrix.client_room_admin import get_joined_rooms
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage, resolve_latest_visible_messages
 from mindroom.matrix.event_info import EventInfo
+from mindroom.matrix.media import valid_room_message_replacement
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import build_message_content, markdown_to_html
 from mindroom.matrix.message_content import extract_and_resolve_message, extract_edit_body
@@ -1353,6 +1354,7 @@ async def _fetch_message_data_for_event_id(
                 event_source,
                 client,
                 trusted_sender_ids=trusted_sender_ids,
+                replacement_validator=valid_room_message_replacement,
             )
             if edited_body is not None and edited_content is not None:
                 message_data = _requester_resolution_message(

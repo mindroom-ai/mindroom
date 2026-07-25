@@ -162,8 +162,7 @@ async def load_latest_edit(
         original=original,
         validator=validator,
     )
-    candidates = () if row is None else (row.event,)
-    return next(iter(ordered_replacements(original, candidates, room_id=room_id, validator=validator)), None)
+    return None if row is None else row.event
 
 
 async def load_latest_edit_row(

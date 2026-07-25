@@ -257,23 +257,27 @@ async def _apply_cached_latest_edit(
     if event_source.get("type") != "m.room.message" or event_source_is_state_event(event_source):
         return event_source
 
-    latest_replacement = await event_cache.get_latest_edit(
+    rejected_event_ids: set[object] = set()
+    while latest_replacement := await event_cache.get_latest_edit(
         room_id,
         event_source,
-        validator=valid_room_message_replacement,
-    )
-    if latest_replacement is None:
-        return event_source
-
-    edited_body, edited_content = await extract_edit_body(
-        latest_replacement,
-        client,
-        event_cache=event_cache,
-        room_id=room_id,
-        expected_membership_epoch=expected_membership_epoch,
-        trusted_sender_ids=trusted_sender_ids,
-    )
-    if edited_body is None or edited_content is None:
+        validator=lambda candidate: (
+            valid_room_message_replacement(candidate) and candidate.get("event_id") not in rejected_event_ids
+        ),
+    ):
+        edited_body, edited_content = await extract_edit_body(
+            latest_replacement,
+            client,
+            event_cache=event_cache,
+            room_id=room_id,
+            expected_membership_epoch=expected_membership_epoch,
+            trusted_sender_ids=trusted_sender_ids,
+            replacement_validator=valid_room_message_replacement,
+        )
+        if edited_body is not None and edited_content is not None:
+            break
+        rejected_event_ids.add(latest_replacement["event_id"])
+    else:
         return event_source
 
     original_content = event_source.get("content", {})
