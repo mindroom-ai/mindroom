@@ -15,6 +15,7 @@ from mindroom.bot import AgentBot
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME, resolve_runtime_paths
 from mindroom.external_triggers.store import ExternalTriggerTarget, TriggerDeliverySnapshot
+from mindroom.matrix.users import AgentMatrixUser
 from mindroom.mcp.manager import MCPServerManager
 from mindroom.orchestration.config_updates import ConfigUpdatePlan, build_config_update_plan
 from mindroom.orchestration.runtime import EntityStartResults
@@ -1060,6 +1061,13 @@ async def test_delayed_replacement_start_retries_pending_room_recovery(tmp_path:
     orchestrator._router_principal_id = "@mindroom_router:localhost"
     replacement_bot = MagicMock(spec=AgentBot)
     replacement_bot.running = False
+    replacement_bot.client = None
+    replacement_bot.agent_user = AgentMatrixUser(
+        agent_name="code",
+        user_id="@mindroom_code:localhost",
+        display_name="Code",
+        password=None,
+    )
     replacement_bot.try_start = AsyncMock(return_value=True)
     orchestrator.agent_bots = {"code": replacement_bot}
     orchestrator._pending_replacement_recovery_room_ids = {

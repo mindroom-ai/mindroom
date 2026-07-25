@@ -356,6 +356,9 @@ class LiveFuzzScenario:
             msg = f"{operation.kind} must not have a target"
             raise ValueError(msg)
         kind = operation.kind
+        if self.profile == "saturation" or (self.profile == "fuzz" and kind is not LiveOperationKind.RESTART_MINDROOM):
+            msg = f"{kind} is not supported by the {self.profile} profile"
+            raise ValueError(msg)
         if kind is LiveOperationKind.START_MINDROOM:
             if state.mindroom_running:
                 msg = "cannot start MindRoom while it is already running"
@@ -2449,6 +2452,15 @@ class ExactReplyOracle:
         record = self._ledger_records.get(event_id)
         return record.response_event_id if record is not None else None
 
+    def source_tombstoned(self, event_id: str) -> bool:
+        """Return whether one source has its exact durable redaction tombstone."""
+        record = self._ledger_records.get(event_id)
+        return record is not None and event_id in record.redacted_source_event_ids
+
+    def source_completed_without_response(self, event_id: str) -> bool:
+        """Return whether one source durably settled without a response."""
+        return self._supersession_proven(event_id)
+
     def _supersession_proven(self, event_id: str) -> bool:
         """Return whether a completed no-response record proves supersession.
 
@@ -3657,6 +3669,12 @@ class LiveFuzzRunner:
         # Maps an edit event id to the source event id it revised so a later
         # redaction targeting that edit knows which source's stack to revert.
         self._edit_event_source: dict[str, str] = {}
+        # Mutation sends complete before MindRoom's asynchronous regeneration
+        # and redaction cleanup. Checkpoints retain the latest owed effect per
+        # source until Matrix exposes the regenerated marker or the ledger
+        # exposes the exact tombstone.
+        self._pending_source_markers: dict[str, str] = {}
+        self._pending_source_tombstones: set[str] = set()
         self.operation_count = 0
         # Monotonic sequence for the realized journal, spanning both mutations
         # and lifecycle boundaries so the durable trace preserves their true
@@ -4207,6 +4225,45 @@ class LiveFuzzRunner:
         except AssertionError as exc:
             msg = f"{exc} at chaos checkpoint (batch {batch_index}, backlog {unsettled})"
             raise AssertionError(msg) from exc
+        await self._wait_for_pending_mutation_effects(
+            deadline_seconds=deadline_seconds,
+            batch_index=batch_index,
+        )
+
+    async def _wait_for_pending_mutation_effects(
+        self,
+        *,
+        deadline_seconds: float,
+        batch_index: int,
+    ) -> None:
+        """Wait for owed regeneration markers and durable source tombstones."""
+        deadline = time.monotonic() + deadline_seconds
+        while self._pending_source_markers or self._pending_source_tombstones:
+            if time.monotonic() >= deadline:
+                msg = (
+                    f"timed out waiting for mutation effects at chaos checkpoint "
+                    f"(batch {batch_index}): markers={self._pending_source_markers}, "
+                    f"tombstones={sorted(self._pending_source_tombstones)}"
+                )
+                raise AssertionError(msg)
+            await self.oracle.pump(timeout_ms=250)
+            self.oracle.refresh_ledger_attributions(min_interval=0.0)
+            for source_event_id, marker in tuple(self._pending_source_markers.items()):
+                response_event_id = self.oracle.ledger_response(source_event_id)
+                if response_event_id is None:
+                    if self.oracle.source_completed_without_response(source_event_id):
+                        del self._pending_source_markers[source_event_id]
+                    continue
+                latest = self.oracle.latest_reply_bodies.get(response_event_id)
+                body = latest[1] if latest is not None else ""
+                call_id = _body_call_id(body)
+                if call_id is not None and marker in _ModelHandler.observed_markers_for(call_id):
+                    del self._pending_source_markers[source_event_id]
+            self._pending_source_tombstones.difference_update(
+                source_event_id
+                for source_event_id in tuple(self._pending_source_tombstones)
+                if self.oracle.source_tombstoned(source_event_id)
+            )
 
     def _saturation_parallel_start(self) -> int:
         """Return the first batch belonging to the parallel saturation phase."""
@@ -4375,6 +4432,7 @@ class LiveFuzzRunner:
             # it, even if a newer edit has since landed on top.
             self._push_source_revision(target_event_id, event_id, edit_marker)
             self._edit_event_source[event_id] = target_event_id
+            self._pending_source_markers[target_event_id] = edit_marker
             return operation, event_id, None
 
         if operation.kind is LiveOperationKind.REACTION:
@@ -4442,6 +4500,12 @@ class LiveFuzzRunner:
             # this as a source redaction so the audit does not demand a
             # revision Matrix itself rolled back.
             self._pop_source_revision(reverted_source, target_event_id)
+            current_marker = self.source_current_markers.get(reverted_source)
+            if current_marker is not None:
+                self._pending_source_markers[reverted_source] = current_marker
+        elif target_event_id in self.oracle.expected_sources:
+            self._pending_source_markers.pop(target_event_id, None)
+            self._pending_source_tombstones.add(target_event_id)
 
         result = (operation, event_id, None)
         if on_landed is not None:

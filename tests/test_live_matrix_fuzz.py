@@ -781,6 +781,29 @@ def test_chaos_validation_rejects_lifecycle_inside_concurrent_batch() -> None:
         scenario.validate()
 
 
+@pytest.mark.parametrize(
+    ("profile", "kind"),
+    [
+        ("fuzz", LiveOperationKind.STOP_MINDROOM),
+        ("fuzz", LiveOperationKind.START_MINDROOM),
+        ("saturation", LiveOperationKind.RESTART_MINDROOM),
+    ],
+)
+def test_non_chaos_validation_rejects_unsupported_lifecycle(
+    profile: str,
+    kind: LiveOperationKind,
+) -> None:
+    """Validated traces cannot reach a profile driver that lacks the lifecycle."""
+    scenario = LiveFuzzScenario(
+        thread_count=1,
+        profile=profile,
+        batches=((LiveOperation(0, kind, 0, None),),),
+    )
+
+    with pytest.raises(ValueError, match=f"not supported by the {profile} profile"):
+        scenario.validate()
+
+
 def test_chaos_validation_tracks_mindroom_lifecycle_state() -> None:
     """Starting a running MindRoom or ending stopped must be rejected."""
     with pytest.raises(ValueError, match="already running"):
@@ -1663,6 +1686,8 @@ async def test_redacting_settled_coalesced_source_does_not_mark_optional(tmp_pat
         runner.redacted_targets = {}
         runner.sent_records = []
         runner._edit_event_source = {}
+        runner._pending_source_markers = {}
+        runner._pending_source_tombstones = set()
         runner._resolve_target = lambda _logical_ref: asyncio.sleep(0, result="$first")  # type: ignore[method-assign]
         runner._client_for_operation = lambda _operation: RedactionClient()  # type: ignore[method-assign]
         runner._room_for_thread = lambda _thread: "!room:example"  # type: ignore[method-assign]
@@ -1715,6 +1740,8 @@ async def test_source_redaction_pumps_visible_reply_before_optional_classificati
         runner.redacted_targets = {}
         runner.sent_records = []
         runner._edit_event_source = {}
+        runner._pending_source_markers = {}
+        runner._pending_source_tombstones = set()
         runner._resolve_target = lambda _logical_ref: asyncio.sleep(0, result="$source")  # type: ignore[method-assign]
         runner._client_for_operation = lambda _operation: RedactionClient()  # type: ignore[method-assign]
         runner._room_for_thread = lambda _thread: "!room:example"  # type: ignore[method-assign]
@@ -2861,6 +2888,44 @@ def test_redacting_non_newest_edit_keeps_newer_surviving_revision() -> None:
     # Redacting the newer edit now falls all the way back to the original.
     runner._pop_source_revision("$root", "$e2")
     assert runner.source_current_markers["$root"] == orig
+
+
+@pytest.mark.asyncio
+async def test_edit_registers_latest_marker_as_pending_checkpoint_effect() -> None:
+    """A landed edit remains owed until its response regeneration is visible."""
+    runner = _revision_runner()
+    runner.source_current_markers["$source"] = _source_marker("op:1", ORIGINAL_REVISION)
+    runner._pending_source_markers = {}
+    runner._pending_source_tombstones = set()
+    runner.sent_records = []
+    runner.stack = SimpleNamespace(agent_id="@agent:example")
+    runner._resolve_target = lambda _logical_ref: asyncio.sleep(0, result="$source")  # type: ignore[method-assign]
+    runner._room_for_thread = lambda _thread: "!room:example"  # type: ignore[method-assign]
+
+    class EditClient:
+        user_id = "@user:example"
+
+        @staticmethod
+        async def send_event(
+            event_type: str,
+            _txn_id: str,
+            content: dict[str, Any],
+            *,
+            room_id: str,
+        ) -> str:
+            assert event_type == "m.room.message"
+            assert content["m.relates_to"] == {"rel_type": "m.replace", "event_id": "$source"}
+            assert room_id == "!room:example"
+            return "$edit"
+
+    runner._client_for_operation = lambda _operation: EditClient()  # type: ignore[method-assign]
+    operation = LiveOperation(7, LiveOperationKind.EDIT, 0, "op:1")
+
+    await runner._apply(operation)
+
+    marker = _source_marker("op:1", "edit:7")
+    assert runner._pending_source_markers == {"$source": marker}
+    assert runner.source_current_markers["$source"] == marker
 
 
 class _FakeStack:
@@ -4447,6 +4512,106 @@ async def test_default_fuzz_restart_uses_shared_lifecycle_owner() -> None:
 
 
 @pytest.mark.asyncio
+async def test_chaos_checkpoint_waits_for_latest_marker_and_tombstone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reply settlement alone cannot release delayed mutation effects."""
+    marker = _source_marker("op:edited", "edit:7")
+    calls: list[str] = []
+
+    class FakeOracle:
+        def __init__(self) -> None:
+            self.latest_reply_bodies = {"$reply": ((0, 0, "$reply"), _short_body_for(1))}
+            self.pumps = 0
+            self.tombstoned = False
+
+        @staticmethod
+        def unsettled_required_sources() -> list[str]:
+            return []
+
+        @staticmethod
+        async def wait_until_exact(*, deadline_seconds: float, settle_seconds: float) -> None:
+            assert (deadline_seconds, settle_seconds) == (12.0, 0.75)
+            calls.append("replies")
+
+        async def pump(self, *, timeout_ms: int) -> None:
+            assert timeout_ms == 250
+            self.pumps += 1
+            calls.append(f"pump:{self.pumps}")
+            if self.pumps == 1:
+                self.tombstoned = True
+            else:
+                self.latest_reply_bodies["$reply"] = ((1, 1, "$edit"), _short_body_for(2))
+
+        @staticmethod
+        def refresh_ledger_attributions(*, min_interval: float) -> None:
+            assert min_interval == 0.0
+
+        @staticmethod
+        def ledger_response(_source_event_id: str) -> str:
+            return "$reply"
+
+        def source_tombstoned(self, _source_event_id: str) -> bool:
+            return self.tombstoned
+
+    monkeypatch.setattr(
+        _ModelHandler,
+        "observed_markers_for",
+        lambda call_id: frozenset({marker}) if call_id == 2 else frozenset(),
+    )
+    runner = object.__new__(LiveFuzzRunner)
+    runner.oracle = FakeOracle()
+    runner.reply_timeout = 12.0
+    runner.settle_seconds = 0.75
+    runner.pending_grace = 1.0
+    runner._pending_source_markers = {"$edited": marker}
+    runner._pending_source_tombstones = {"$redacted"}
+
+    await runner._checkpoint(batch_index=9)
+
+    assert calls == ["replies", "pump:1", "pump:2"]
+    assert runner._pending_source_markers == {}
+    assert runner._pending_source_tombstones == set()
+
+
+@pytest.mark.asyncio
+async def test_chaos_checkpoint_releases_marker_for_no_response_source() -> None:
+    """A durable no-response source has no visible reply mutation to await."""
+
+    class FakeOracle:
+        def __init__(self) -> None:
+            self.latest_reply_bodies: dict[str, tuple[tuple[int, int, str], str]] = {}
+
+        @staticmethod
+        async def pump(*, timeout_ms: int) -> None:
+            assert timeout_ms == 250
+
+        @staticmethod
+        def refresh_ledger_attributions(*, min_interval: float) -> None:
+            assert min_interval == 0.0
+
+        @staticmethod
+        def ledger_response(_source_event_id: str) -> None:
+            return None
+
+        @staticmethod
+        def source_completed_without_response(_source_event_id: str) -> bool:
+            return True
+
+    runner = object.__new__(LiveFuzzRunner)
+    runner.oracle = FakeOracle()
+    runner._pending_source_markers = {"$superseded": _source_marker("op:old", "edit:4")}
+    runner._pending_source_tombstones = set()
+
+    await runner._wait_for_pending_mutation_effects(
+        deadline_seconds=1.0,
+        batch_index=3,
+    )
+
+    assert runner._pending_source_markers == {}
+
+
+@pytest.mark.asyncio
 async def test_startup_phase_failure_prevents_shared_final_audit() -> None:
     """A failed current-generation phase blocks audit for every profile."""
     calls: list[str] = []
@@ -5022,6 +5187,7 @@ def _redaction_accounting_runner(
             return "$redaction"
 
     oracle = SimpleNamespace(
+        expected_sources={"$source": "op:1"},
         pump=pump,
         refresh_ledger_attributions=lambda **_kwargs: None,
         settled_sources=lambda: set(),
@@ -5033,6 +5199,8 @@ def _redaction_accounting_runner(
     runner.redacted_targets = {}
     runner.sent_records = []
     runner._edit_event_source = {}
+    runner._pending_source_markers = {}
+    runner._pending_source_tombstones = set()
     runner.operation_count = 0
     runner._realized_sequence = 0
     runner.event_ids = {}
@@ -5064,6 +5232,7 @@ async def test_redaction_success_journals_once_before_optional_classification() 
     assert runner.operation_count == 1
     assert runner.event_ids == {"op:3": "$redaction"}
     assert runner.redacted_targets == {"$source": "$redaction"}
+    assert runner._pending_source_tombstones == {"$source"}
     assert oracle.optional_sources == {"$source"}
     assert [entry["event_id"] for entry in journal] == ["$redaction"]
 
