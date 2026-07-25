@@ -16,7 +16,6 @@ from .event_cache_events import (
     decode_cached_events,
     event_edit_rows,
     event_mxc_urls,
-    event_redaction_candidate_ids,
     event_thread_rows,
     filter_redacted_events,
     redaction_removal_event_ids,
@@ -445,25 +444,6 @@ async def redact_event_locked(
     )
 
 
-async def event_or_original_is_redacted(
-    db: aiosqlite.Connection,
-    principal_id: str,
-    room_id: str,
-    *,
-    event_id: str,
-    event: dict[str, Any],
-) -> bool:
-    """Return whether this event or its edited original has a tombstone."""
-    return bool(
-        await _redacted_event_ids_for_candidates(
-            db,
-            principal_id,
-            room_id,
-            event_ids=event_redaction_candidate_ids(event_id, event),
-        ),
-    )
-
-
 async def filter_cacheable_events(
     db: aiosqlite.Connection,
     principal_id: str,
@@ -471,13 +451,13 @@ async def filter_cacheable_events(
     room_events: list[tuple[str, dict[str, Any]]],
 ) -> list[tuple[str, dict[str, Any]]]:
     """Drop late events covered by durable ownership-scoped tombstones."""
-    redacted_event_ids = await _redacted_event_ids_for_candidates(
+    tombstoned_event_ids = await redacted_event_ids(
         db,
         principal_id,
         room_id,
-        event_ids=batch_redaction_candidate_ids(room_events),
+        event_ids=batch_redaction_candidate_ids(room_events, room_id),
     )
-    return filter_redacted_events(room_events, redacted_event_ids=redacted_event_ids)
+    return filter_redacted_events(room_events, room_id=room_id, redacted_event_ids=tombstoned_event_ids)
 
 
 async def _thread_ids_for_events(
@@ -935,13 +915,14 @@ async def _record_redacted_events(
     )
 
 
-async def _redacted_event_ids_for_candidates(
+async def redacted_event_ids(
     db: aiosqlite.Connection,
     principal_id: str,
     room_id: str,
     *,
     event_ids: frozenset[str],
 ) -> frozenset[str]:
+    """Return the subset of candidate event IDs that are durably tombstoned."""
     if not event_ids:
         return frozenset()
     placeholders = ",".join("?" for _ in event_ids)

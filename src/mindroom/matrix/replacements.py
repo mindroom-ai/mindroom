@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Collection, Iterable, Mapping
 from operator import itemgetter
 from typing import Any
 
-from mindroom.matrix.event_info import EventInfo, event_source_is_state_event, event_source_matches_room
+from mindroom.matrix.event_info import EventInfo, event_source_is_timeline_in_room
 
 type ReplacementValidator = Callable[[dict[str, Any]], bool]
 
@@ -41,15 +41,15 @@ def ordered_replacements(
     *,
     room_id: str | None,
     validator: ReplacementValidator,
+    excluded_event_ids: Collection[str] = (),
 ) -> list[dict[str, Any]]:
     """Return valid replacements in Matrix latest-first order."""
     original_id, sender, event_type = (original.get(key) for key in ("event_id", "sender", "type"))
     if (
         not all(isinstance(value, str) and value for value in (original_id, sender, event_type))
         or not _valid_explicit_room(original)
-        or event_source_is_state_event(original)
+        or not event_source_is_timeline_in_room(original, room_id)
         or EventInfo.from_event(dict(original)).is_edit
-        or (room_id is not None and not event_source_matches_room(original, room_id))
     ):
         return []
 
@@ -60,11 +60,11 @@ def ordered_replacements(
         return (
             isinstance(event_id, str)
             and event_id not in ("", original_id)
+            and event_id not in excluded_event_ids
             and (candidate.get("sender"), candidate.get("type")) == (sender, event_type)
             and type(timestamp) is int
-            and not event_source_is_state_event(candidate)
+            and event_source_is_timeline_in_room(candidate, room_id)
             and _valid_explicit_room(candidate, original.get("room_id"))
-            and (room_id is None or event_source_matches_room(candidate, room_id))
             and isinstance(relation, Mapping)
             and (relation.get("rel_type"), relation.get("event_id")) == ("m.replace", original_id)
             and validator(candidate)

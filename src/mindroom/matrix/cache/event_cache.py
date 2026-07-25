@@ -114,6 +114,9 @@ class ConversationEventCache(Protocol):
     async def get_event(self, room_id: str, event_id: str) -> dict[str, Any] | None:
         """Return one cached event payload by event ID."""
 
+    async def redacted_event_ids(self, room_id: str, event_ids: Collection[str]) -> frozenset[str]:
+        """Return the requested event IDs that have durable room-scoped tombstones."""
+
     async def get_recent_room_events(
         self,
         room_id: str,

@@ -42,7 +42,11 @@ from typing import TYPE_CHECKING, Any
 import nio
 
 from mindroom.constants import STREAM_STATUS_KEY, STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING
-from mindroom.matrix.event_info import EventInfo, is_thread_affecting_relation
+from mindroom.matrix.event_info import (
+    EventInfo,
+    event_source_supports_thread_relations,
+    is_thread_affecting_relation,
+)
 from mindroom.matrix.sync_certification import SyncCacheWriteResult
 from mindroom.matrix.thread_bookkeeping import (
     MutationResolutionContext,
@@ -91,7 +95,7 @@ def _collect_sync_timeline_cache_updates(
 
     event_info = EventInfo.from_event(event_source)
     event_type = event_source.get("type")
-    if is_thread_affecting_relation(
+    if event_source_supports_thread_relations(event_source, room_id) and is_thread_affecting_relation(
         event_info,
         event_type=event_type if isinstance(event_type, str) else None,
     ):
@@ -399,10 +403,7 @@ class ThreadOutboundWritePolicy:
                     emit_timing=emit_timing,
                 )
                 return
-            if not is_thread_affecting_relation(
-                event_info,
-                event_type=event_type,
-            ):
+            if not is_thread_affecting_relation(event_info, event_type=event_type):
                 persisted_batch = [(event_id, room_id, normalized_event_source)]
                 self._schedule_fail_open_room_update(
                     room_id,

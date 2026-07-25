@@ -782,6 +782,7 @@ def make_event_cache_mock() -> AsyncMock:
     event_cache.cache_generation = "test-cache-generation"
     event_cache.durable_writes_available = True
     event_cache.get_event.return_value = None
+    event_cache.redacted_event_ids.return_value = frozenset()
     event_cache.get_latest_edit.return_value = None
     event_cache.get_mxc_text.return_value = None
     event_cache.get_mxc_texts.return_value = {}

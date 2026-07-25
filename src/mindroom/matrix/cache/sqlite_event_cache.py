@@ -943,6 +943,20 @@ class SqliteEventCache:
             ),
         )
 
+    async def redacted_event_ids(self, room_id: str, event_ids: Collection[str]) -> frozenset[str]:
+        """Return the requested event IDs that have durable room-scoped tombstones."""
+        return await self._read_operation(
+            room_id,
+            operation="redacted_event_ids",
+            disabled_result=frozenset(),
+            reader=lambda db: sqlite_event_cache_events.redacted_event_ids(
+                db,
+                self.principal_id,
+                room_id,
+                event_ids=frozenset(event_ids),
+            ),
+        )
+
     async def get_recent_room_events(
         self,
         room_id: str,

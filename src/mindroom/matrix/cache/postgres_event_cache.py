@@ -1338,6 +1338,20 @@ class PostgresEventCache:
             ),
         )
 
+    async def redacted_event_ids(self, room_id: str, event_ids: Collection[str]) -> frozenset[str]:
+        """Return the requested event IDs that have durable room-scoped tombstones."""
+        return await self._operation(
+            room_id,
+            operation="redacted_event_ids",
+            disabled_result=frozenset(),
+            callback=lambda db: postgres_event_cache_events.redacted_event_ids(
+                db,
+                self._runtime.namespace,
+                room_id,
+                event_ids=frozenset(event_ids),
+            ),
+        )
+
     async def get_recent_room_events(
         self,
         room_id: str,

@@ -35,6 +35,7 @@ from mindroom.matrix.thread_diagnostics import (
 from tests.conftest import (
     runtime_paths_for,
 )
+from tests.event_cache_test_support import raw_nio_event
 from tests.event_cache_test_support import replace_thread_unconditionally as _replace_thread
 from tests.threading_helpers import (
     _conversation_runtime,
@@ -1491,6 +1492,85 @@ class TestMatrixConversationCacheThreadReads:
         assert [cached["event_id"] for cached in room_threaded_events["!test:localhost"]] == ["$reference:localhost"]
         assert room_plain_events == {}
         assert room_redactions == {}
+
+    @pytest.mark.parametrize(
+        "invalid_scope",
+        [{"state_key": ""}, {"room_id": "!other:localhost"}],
+        ids=["state", "wrong-room"],
+    )
+    def test_collect_sync_timeline_cache_updates_keeps_invalid_relations_room_level(
+        self,
+        invalid_scope: dict[str, str],
+    ) -> None:
+        """State and explicit other-room relations must not enter threaded mutation handling."""
+        source = {
+            "content": {
+                "body": "invalid relation",
+                "msgtype": "m.text",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread:localhost"},
+            },
+            "event_id": "$invalid:localhost",
+            "sender": "@user:localhost",
+            "origin_server_ts": 1234567890,
+            "room_id": "!test:localhost",
+            "type": "m.room.message",
+            **invalid_scope,
+        }
+        room_threaded_events: dict[str, list[dict[str, object]]] = {}
+        room_plain_events: dict[str, list[dict[str, object]]] = {}
+
+        _collect_sync_timeline_cache_updates(
+            "!test:localhost",
+            raw_nio_event(source),
+            room_threaded_events=room_threaded_events,
+            room_plain_events=room_plain_events,
+            room_redactions={},
+        )
+
+        assert room_threaded_events == {}
+        assert room_plain_events["!test:localhost"] == [source]
+
+    @pytest.mark.asyncio
+    async def test_sync_resolution_context_excludes_invalid_relation_sources(self) -> None:
+        """Page-local relation resolution must retain invalid points without resolving them as threads."""
+        resolver = thread_bookkeeping.ThreadMutationResolver(
+            logger_getter=MagicMock,
+            runtime=MagicMock(),
+            fetch_event_info_for_thread_resolution=AsyncMock(),
+        )
+        invalid_sources = [
+            {
+                "event_id": "$state",
+                "room_id": "!test:localhost",
+                "state_key": "",
+                "type": "m.room.message",
+                "content": {"m.relates_to": {"rel_type": "m.thread", "event_id": "$thread"}},
+            },
+            {
+                "event_id": "$wrong-room",
+                "room_id": "!other:localhost",
+                "type": "m.room.message",
+                "content": {"m.relates_to": {"rel_type": "m.thread", "event_id": "$thread"}},
+            },
+        ]
+
+        context = await resolver.build_sync_mutation_resolution_context(
+            "!test:localhost",
+            plain_events=invalid_sources,
+            threaded_events=[],
+        )
+
+        assert set(context.page_event_infos) == {"$state", "$wrong-room"}
+        assert all(not event_info.has_relations for event_info in context.page_event_infos.values())
+        assert context.page_resolved_thread_ids == {}
+        for event_id in context.page_event_infos:
+            impact = await resolver.resolve_redaction_thread_impact(
+                "!test:localhost",
+                event_id,
+                failure_message="unexpected",
+                resolution_context=context,
+            )
+            assert impact == MutationThreadImpact.room_level()
 
     @pytest.mark.asyncio
     async def test_get_latest_thread_event_id_fails_open_without_write_coordinator(self) -> None:

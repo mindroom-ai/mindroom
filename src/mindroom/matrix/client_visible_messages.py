@@ -12,8 +12,7 @@ from mindroom.entity_resolution import current_internal_sender_ids
 from mindroom.matrix import replacements
 from mindroom.matrix.event_info import (
     EventInfo,
-    event_source_is_state_event,
-    event_source_matches_room,
+    event_source_is_timeline_in_room,
     origin_server_ts_from_event_source,
     reply_to_event_id_from_content,
 )
@@ -440,10 +439,9 @@ async def resolve_latest_visible_messages(
     edit_candidates_by_original_event_id: ThreadEditCandidatesByOriginalEventId = {}
 
     for event in events:
-        if (
-            (sender is not None and event.sender != sender)
-            or event_source_is_state_event(event.source)
-            or (room_id is not None and not event_source_matches_room(event.source, room_id))
+        if (sender is not None and event.sender != sender) or not event_source_is_timeline_in_room(
+            event.source,
+            room_id,
         ):
             continue
 

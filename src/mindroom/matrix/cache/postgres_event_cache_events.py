@@ -15,7 +15,6 @@ from .event_cache_events import (
     decode_cached_event,
     event_edit_rows,
     event_mxc_urls,
-    event_redaction_candidate_ids,
     event_thread_rows,
     filter_redacted_events,
     redaction_removal_event_ids,
@@ -428,25 +427,6 @@ async def redact_event_locked(
     )
 
 
-async def event_or_original_is_redacted(
-    db: AsyncConnection,
-    namespace: str,
-    room_id: str,
-    *,
-    event_id: str,
-    event: dict[str, Any],
-) -> bool:
-    """Return whether this event or its edited original was durably redacted."""
-    return bool(
-        await _redacted_event_ids_for_candidates(
-            db,
-            namespace,
-            room_id,
-            event_ids=event_redaction_candidate_ids(event_id, event),
-        ),
-    )
-
-
 async def filter_cacheable_events(
     db: AsyncConnection,
     namespace: str,
@@ -454,13 +434,13 @@ async def filter_cacheable_events(
     room_events: list[tuple[str, dict[str, Any]]],
 ) -> list[tuple[str, dict[str, Any]]]:
     """Drop events that target durable redaction tombstones before persisting them."""
-    redacted_event_ids = await _redacted_event_ids_for_candidates(
+    tombstoned_event_ids = await redacted_event_ids(
         db,
         namespace,
         room_id,
-        event_ids=batch_redaction_candidate_ids(room_events),
+        event_ids=batch_redaction_candidate_ids(room_events, room_id),
     )
-    return filter_redacted_events(room_events, redacted_event_ids=redacted_event_ids)
+    return filter_redacted_events(room_events, room_id=room_id, redacted_event_ids=tombstoned_event_ids)
 
 
 async def _thread_ids_for_events(
@@ -823,7 +803,7 @@ async def _record_redacted_events(
         )
 
 
-async def _redacted_event_ids_for_candidates(
+async def redacted_event_ids(
     db: AsyncConnection,
     namespace: str,
     room_id: str,

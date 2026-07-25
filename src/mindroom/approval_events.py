@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal, cast
 
-from mindroom.matrix.event_info import EventInfo, event_source_is_state_event, event_source_matches_room
+from mindroom.matrix.event_info import EventInfo, event_source_is_state_event, event_source_is_timeline_in_room
 from mindroom.matrix.large_messages import sidecar_upload_is_usable
 
 PendingApprovalStatus = Literal["pending", "approved", "denied", "expired"]
@@ -57,7 +57,7 @@ class PendingApproval:
         if event.get("type") != "io.mindroom.tool_approval":
             msg = "Approval card event has the wrong event type."
             raise ValueError(msg)
-        if event_source_is_state_event(event) or not event_source_matches_room(event, room_id):
+        if not event_source_is_timeline_in_room(event, room_id):
             msg = "Approval card event is not a room-scoped timeline event."
             raise ValueError(msg)
         content = event.get("content")

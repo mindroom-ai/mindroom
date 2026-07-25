@@ -1,8 +1,4 @@
-"""Comprehensive event relation analysis for Matrix events.
-
-This module provides a unified API for analyzing all Matrix event relations
-including threads (MSC3440), edits, replies, reactions, and more.
-"""
+"""Matrix event relation analysis."""
 
 from __future__ import annotations
 
@@ -26,6 +22,21 @@ def event_source_is_state_event(event_source: Mapping[str, object]) -> bool:
 def event_source_matches_room(event_source: Mapping[str, object], room_id: str) -> bool:
     """Return whether explicit room evidence agrees with the authoritative room."""
     return "room_id" not in event_source or event_source.get("room_id") == room_id
+
+
+def event_source_is_timeline_in_room(event_source: Mapping[str, object], room_id: str | None) -> bool:
+    """Return whether an event is non-state and belongs to the authoritative room."""
+    return not event_source_is_state_event(event_source) and (
+        room_id is None or event_source_matches_room(event_source, room_id)
+    )
+
+
+def event_source_supports_thread_relations(event_source: Mapping[str, object], room_id: str) -> bool:
+    """Return whether one room-scoped timeline event may affect thread relations."""
+    return event_type_supports_thread_relations(event_source.get("type")) and event_source_is_timeline_in_room(
+        event_source,
+        room_id,
+    )
 
 
 def origin_server_ts_from_event_source(event_source: object) -> int | float | None:
@@ -147,25 +158,7 @@ def is_thread_affecting_relation(
 
 
 def _analyze_event_relations(event_source: dict | None) -> EventInfo:
-    """Analyze complete relation information for a Matrix event.
-
-    This unified function provides all relation-related information in one place,
-    replacing manual extraction of m.relates_to throughout the codebase.
-
-    Per MSC3440:
-    - A thread can only be created from events that don't have any rel_type
-    - Thread messages use rel_type: m.thread
-    - Edits use rel_type: m.replace
-    - Reactions use rel_type: m.annotation
-    - Replies can be within threads or standalone
-
-    Args:
-        event_source: The event source dictionary (e.g., event.source for nio events)
-
-    Returns:
-        EventInfo object with complete relation analysis
-
-    """
+    """Analyze complete relation information for one Matrix event."""
     if not event_source:
         return EventInfo(
             is_thread=False,

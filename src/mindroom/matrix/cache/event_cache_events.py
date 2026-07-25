@@ -3,14 +3,15 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from mindroom.matrix.event_info import (
     EventInfo,
-    event_source_is_state_event,
+    event_source_is_timeline_in_room,
     event_source_matches_room,
-    event_type_supports_thread_relations,
+    event_source_supports_thread_relations,
 )
 from mindroom.matrix.replacements import bundled_replacement_candidates
 from mindroom.matrix.sidecar_content import sidecar_mxc_url
@@ -52,15 +53,18 @@ def decode_cached_event(
     """Decode one cached event only when its payload matches its index."""
     event = json.loads(event_json)
     timestamp = event.get("origin_server_ts") if isinstance(event, dict) else None
-    if (
-        not indexed_event_id
-        or not isinstance(event, dict)
-        or (event.get("event_id"), timestamp) != (indexed_event_id, indexed_origin_server_ts)
-        or type(timestamp) is not int
-        or not event_source_matches_room(event, room_id)
-    ):
-        return None
-    return CachedEventRow(event=event, cached_at=None if cached_at is None else float(cached_at))
+    valid = (
+        bool(indexed_event_id)
+        and isinstance(event, dict)
+        and (event.get("event_id"), timestamp) == (indexed_event_id, indexed_origin_server_ts)
+        and type(timestamp) is int
+        and event_source_matches_room(event, room_id)
+    )
+    return (
+        CachedEventRow(event=event, cached_at=None if cached_at is None else float(cached_at))
+        if valid and isinstance(event, dict)
+        else None
+    )
 
 
 def decode_cached_events(rows: Iterable[Any], *, room_id: str) -> list[dict[str, Any]]:
@@ -129,8 +133,7 @@ def event_mxc_urls(event: dict[str, Any], *, room_id: str) -> frozenset[str]:
     content = event.get("content")
     if (
         event.get("type") != "m.room.message"
-        or event_source_is_state_event(event)
-        or not event_source_matches_room(event, room_id)
+        or not event_source_is_timeline_in_room(event, room_id)
         or not isinstance(content, dict)
     ):
         return frozenset()
@@ -153,45 +156,68 @@ def validated_mxc_text_rows(rows: Iterable[Any], *, room_id: str) -> dict[tuple[
     return {
         (str(event_id), str(mxc_url)): str(text)
         for event_id, mxc_url, text, event_json, timestamp in rows
-        if cached_event_owns_mxc(event_json, event_id, timestamp, room_id=room_id, mxc_url=mxc_url)
+        if (decoded := decode_cached_event(event_json, event_id, timestamp, room_id=room_id)) is not None
+        and mxc_url in event_mxc_urls(decoded.event, room_id=room_id)
     }
 
 
-def event_redaction_candidate_ids(event_id: str, event: dict[str, Any]) -> frozenset[str]:
-    """Return IDs whose tombstones would prevent caching one event."""
-    candidate_ids = {
-        event_id,
-        *(
-            candidate["event_id"]
-            for candidate in bundled_replacement_candidates(event)
-            if isinstance(candidate.get("event_id"), str)
-        ),
-    }
-    event_info = EventInfo.from_event(event)
-    if event_info.is_edit and isinstance(event_info.original_event_id, str):
-        candidate_ids.add(event_info.original_event_id)
-    return frozenset(candidate_ids)
-
-
-def batch_redaction_candidate_ids(events: list[_CachedEventValue]) -> frozenset[str]:
-    """Return IDs whose tombstones would prevent caching any event in a batch."""
+def _bundled_replacement_event_ids(event: dict[str, Any]) -> frozenset[str]:
+    """Return every event ID carried by bundled replacement metadata."""
     return frozenset(
-        candidate_id for event_id, event in events for candidate_id in event_redaction_candidate_ids(event_id, event)
+        candidate["event_id"]
+        for candidate in bundled_replacement_candidates(event)
+        if isinstance(candidate.get("event_id"), str)
     )
+
+
+def _direct_redaction_candidate_ids(event_id: str, event: dict[str, Any], room_id: str) -> frozenset[str]:
+    """Return tombstones that suppress this event rather than only its bundled preview."""
+    original_event_id = EventInfo.from_event(event).original_event_id
+    if (
+        event.get("type") in _EDITABLE_EVENT_TYPES
+        and event_source_is_timeline_in_room(event, room_id)
+        and isinstance(original_event_id, str)
+    ):
+        return frozenset((event_id, original_event_id))
+    return frozenset((event_id,))
+
+
+def batch_redaction_candidate_ids(events: list[_CachedEventValue], room_id: str) -> frozenset[str]:
+    """Return IDs whose tombstones would prevent caching any event in a batch."""
+    return frozenset().union(
+        *(
+            _direct_redaction_candidate_ids(event_id, event, room_id) | _bundled_replacement_event_ids(event)
+            for event_id, event in events
+        ),
+    )
+
+
+def _without_bundled_replacement(event: dict[str, Any]) -> dict[str, Any]:
+    """Return one event with its bundled replacement aggregation removed."""
+    sanitized = deepcopy(event)
+    del sanitized["unsigned"]["m.relations"]["m.replace"]
+    return sanitized
 
 
 def filter_redacted_events(
     events: list[_CachedEventValue],
     *,
+    room_id: str,
     redacted_event_ids: frozenset[str],
 ) -> list[_CachedEventValue]:
-    """Drop redaction envelopes, tombstoned events, and edits of tombstoned originals."""
-    return [
-        (event_id, event)
-        for event_id, event in events
-        if event.get("type") != "m.room.redaction"
-        and event_redaction_candidate_ids(event_id, event).isdisjoint(redacted_event_ids)
-    ]
+    """Drop tombstoned events and sanitize bundled replacements with tombstones."""
+    retained: list[_CachedEventValue] = []
+    for event_id, event in events:
+        direct_ids = _direct_redaction_candidate_ids(event_id, event, room_id)
+        if event.get("type") == "m.room.redaction" or direct_ids & redacted_event_ids:
+            continue
+        sanitized = (
+            _without_bundled_replacement(event)
+            if not _bundled_replacement_event_ids(event).isdisjoint(redacted_event_ids)
+            else event
+        )
+        retained.append((event_id, sanitized))
+    return retained
 
 
 def redaction_removal_event_ids(event_id: str, dependent_edit_ids: list[str]) -> list[str]:
@@ -206,35 +232,29 @@ def cache_rows_were_deleted(*row_counts: int) -> bool:
 
 def _event_thread_row(room_id: str, event: SerializedCachedEvent) -> _EventThreadRow | None:
     """Return an event-to-thread row when thread membership is explicit."""
-    if not event_type_supports_thread_relations(event.event.get("type")):
+    if not event_source_supports_thread_relations(event.event, room_id):
         return None
     event_info = EventInfo.from_event(event.event)
-    thread_id = event_info.thread_id
-    if not isinstance(thread_id, str):
-        thread_id = event_info.thread_id_from_edit
-    if not isinstance(thread_id, str) or not thread_id:
+    thread_id = event_info.thread_id or event_info.thread_id_from_edit
+    if not thread_id:
         return None
     return _EventThreadRow(room_id=room_id, event_id=event.event_id, thread_id=thread_id)
 
 
 def _with_thread_root_self_rows(thread_rows: list[_EventThreadRow]) -> list[_EventThreadRow]:
     """Ensure learned thread membership also records each root's own row."""
-    return list(
-        dict.fromkeys(
-            [
-                *thread_rows,
-                *(
-                    _EventThreadRow(room_id=row.room_id, event_id=row.thread_id, thread_id=row.thread_id)
-                    for row in thread_rows
-                ),
-            ],
-        ),
+    root_rows = (
+        _EventThreadRow(room_id=row.room_id, event_id=row.thread_id, thread_id=row.thread_id) for row in thread_rows
     )
+    return list(dict.fromkeys((*thread_rows, *root_rows)))
 
 
 def _event_edit_row(room_id: str, event: SerializedCachedEvent) -> _EventEditRow | None:
     """Return an edit-index row when one cached event is an editable replacement."""
-    if event.event.get("type") not in _EDITABLE_EVENT_TYPES:
+    if event.event.get("type") not in _EDITABLE_EVENT_TYPES or not event_source_is_timeline_in_room(
+        event.event,
+        room_id,
+    ):
         return None
     event_info = EventInfo.from_event(event.event)
     if not event_info.is_edit or not isinstance(event_info.original_event_id, str):
@@ -263,7 +283,7 @@ def event_thread_rows(
         [
             _EventThreadRow(room_id=room_id, event_id=event.event_id, thread_id=thread_id)
             for event in events
-            if event_type_supports_thread_relations(event.event.get("type"))
+            if event_source_supports_thread_relations(event.event, room_id)
         ]
         if thread_id is not None
         else [row for event in events if (row := _event_thread_row(room_id, event)) is not None]

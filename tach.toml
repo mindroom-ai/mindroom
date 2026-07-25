@@ -3927,7 +3927,9 @@ from = ["mindroom.matrix.conversation_cache"]
 expose = [
     "EventInfo",
     "event_source_is_state_event",
+    "event_source_is_timeline_in_room",
     "event_source_matches_room",
+    "event_source_supports_thread_relations",
     "event_type_supports_thread_relations",
     "is_thread_affecting_relation",
     "origin_server_ts_from_event_source",

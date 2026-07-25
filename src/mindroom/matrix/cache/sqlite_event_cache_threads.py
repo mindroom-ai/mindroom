@@ -40,7 +40,6 @@ from .sqlite_event_cache_events import (
     delete_cached_events,
     delete_event_edit_rows,
     delete_event_thread_rows,
-    event_or_original_is_redacted,
     filter_cacheable_events,
     write_lookup_index_rows,
 )
@@ -710,12 +709,11 @@ async def append_existing_thread_event(
     An opaque ``m.room.encrypted`` payload never replaces stored clear content for the same event ID.
     """
     event_id = event_id_for_cache(normalized_event)
-    if await event_or_original_is_redacted(
+    if not await filter_cacheable_events(
         db,
         principal_id,
         room_id,
-        event_id=event_id,
-        event=normalized_event,
+        [(event_id, normalized_event)],
     ):
         return False
 

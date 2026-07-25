@@ -1235,23 +1235,29 @@ class TestThreadHistory:
         )
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("invalidity", ["state", "other-room"])
+    @pytest.mark.parametrize("invalidity", ["state", "other-room", "relation"])
     async def test_bulk_room_scan_cannot_certify_invalid_thread_root(
         self,
         invalidity: str,
     ) -> None:
-        """State and explicit wrong-room roots must remain missing before cache writes."""
+        """State, wrong-room, and relation-bearing roots must remain missing before cache writes."""
+        root_content = {"body": "Root", "msgtype": "m.text"}
         root_source = {
             "event_id": "$thread_root",
             "sender": "@alice:localhost",
             "origin_server_ts": 1000,
             "type": "m.room.message",
-            "content": {"body": "Root", "msgtype": "m.text"},
+            "content": root_content,
         }
         if invalidity == "state":
             root_source["state_key"] = ""
-        else:
+        elif invalidity == "other-room":
             root_source["room_id"] = "!other:localhost"
+        else:
+            root_content["m.relates_to"] = {
+                "rel_type": "m.thread",
+                "event_id": "$real_root",
+            }
         response = MagicMock(spec=nio.RoomMessagesResponse)
         response.chunk = [raw_nio_event(root_source)]
         response.end = None
@@ -1267,7 +1273,7 @@ class TestThreadHistory:
         )
 
         assert stats.stored_threads == 0
-        assert stats.missing_root_ids == frozenset({"$thread_root"})
+        assert stats.missing_root_ids == (frozenset() if invalidity == "relation" else frozenset({"$thread_root"}))
         event_cache.replace_thread_if_not_newer.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -1276,6 +1282,7 @@ class TestThreadHistory:
         [
             ("state", "cache_missing_thread_root"),
             ("other-room", None),
+            ("relation", "cache_missing_thread_root"),
         ],
     )
     async def test_poisoned_cached_root_is_rejected_before_resolution(
@@ -1285,17 +1292,23 @@ class TestThreadHistory:
         expected_rejection: str | None,
     ) -> None:
         """A previously certified invalid root must force an authoritative refill."""
+        poisoned_content = {"body": "Poison", "msgtype": "m.text"}
         poisoned_root = {
             "event_id": "$thread_root",
             "sender": "@alice:localhost",
             "origin_server_ts": 1000,
             "type": "m.room.message",
-            "content": {"body": "Poison", "msgtype": "m.text"},
+            "content": poisoned_content,
         }
         if invalidity == "state":
             poisoned_root["state_key"] = ""
-        else:
+        elif invalidity == "other-room":
             poisoned_root["room_id"] = "!other:localhost"
+        else:
+            poisoned_content["m.relates_to"] = {
+                "rel_type": "m.thread",
+                "event_id": "$real_root",
+            }
         await _replace_thread(
             event_cache,
             "!room:localhost",
@@ -1427,6 +1440,50 @@ class TestThreadHistory:
 
         assert [(message.event_id, message.body, message.latest_event_id) for message in resolution.messages] == [
             ("$thread_root", expected_body, expected_id),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_thread_resolution_ignores_durably_redacted_bundled_edit(
+        self,
+        event_cache: ConversationEventCache,
+    ) -> None:
+        """A stale homeserver bundle cannot resurrect a durably redacted replacement."""
+        room_id = "!room:localhost"
+        edit = {
+            "event_id": "$edit",
+            "sender": "@alice:localhost",
+            "origin_server_ts": 2000,
+            "type": "m.room.message",
+            "content": {
+                "msgtype": "m.text",
+                "body": "* Redacted",
+                "m.new_content": {"msgtype": "m.text", "body": "Redacted"},
+                "m.relates_to": {
+                    "rel_type": "m.replace",
+                    "event_id": "$thread_root",
+                },
+            },
+        }
+        root = {
+            "event_id": "$thread_root",
+            "sender": "@alice:localhost",
+            "origin_server_ts": 1000,
+            "type": "m.room.message",
+            "content": {"msgtype": "m.text", "body": "Original"},
+            "unsigned": {"m.relations": {"m.replace": {"latest_event": edit}}},
+        }
+        await event_cache.redact_event(room_id, "$edit")
+
+        resolution = await _resolve_thread_history_from_event_sources_timed(
+            AsyncMock(),
+            room_id=room_id,
+            thread_id="$thread_root",
+            event_sources=[root],
+            event_cache=event_cache,
+        )
+
+        assert [(message.body, message.latest_event_id) for message in resolution.messages] == [
+            ("Original", "$thread_root"),
         ]
 
     @pytest.mark.asyncio

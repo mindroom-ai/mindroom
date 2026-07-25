@@ -72,6 +72,7 @@ from mindroom.matrix.client_visible_messages import (
 from mindroom.matrix.event_info import (
     EventInfo,
     event_source_is_state_event,
+    event_source_is_timeline_in_room,
     event_source_matches_room,
     event_type_supports_thread_relations,
     is_thread_affecting_relation,
@@ -88,7 +89,7 @@ from mindroom.matrix.message_content import (
     prepare_sidecar_hydration_batch,
     resolve_event_source_content,
 )
-from mindroom.matrix.replacements import ordered_replacements
+from mindroom.matrix.replacements import bundled_replacement_candidates, ordered_replacements
 from mindroom.matrix.thread_diagnostics import (
     THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC,
     THREAD_HISTORY_DEGRADED_DIAGNOSTIC,
@@ -323,29 +324,6 @@ def _event_id_from_source(event_source: Mapping[str, Any]) -> str | None:
     return event_id if isinstance(event_id, str) else None
 
 
-def _sidecar_hydration_sources(
-    event_sources: Sequence[dict[str, Any]],
-    *,
-    hydrate_sidecars: bool,
-    room_id: str,
-) -> list[dict[str, Any]]:
-    """Return sources whose sidecars this resolution pass may hydrate."""
-    hydration_sources: list[dict[str, Any]] = []
-    for event_source in event_sources:
-        if event_source_is_state_event(event_source) or not event_source_matches_room(event_source, room_id):
-            continue
-        hydration_sources.extend(
-            ordered_replacements(
-                event_source,
-                room_id=room_id,
-                validator=valid_room_message_replacement,
-            ),
-        )
-        if hydrate_sidecars or EventInfo.from_event(event_source).is_edit:
-            hydration_sources.append(event_source)
-    return hydration_sources
-
-
 @dataclass(slots=True)
 class _ResolvedThreadEventSources:
     """One resolution pass over raw thread rows plus the inputs needed to reuse it later."""
@@ -371,6 +349,15 @@ async def _resolve_thread_history_from_event_sources_timed(
     register_sidecar_owners: bool = False,
 ) -> _ResolvedThreadEventSources:
     """Resolve visible thread history and return approximate sidecar hydration time."""
+    redacted_event_ids = await event_cache.redacted_event_ids(
+        room_id,
+        {
+            candidate_id
+            for event_source in event_sources
+            for candidate in (*bundled_replacement_candidates(event_source), event_source)
+            if isinstance(candidate_id := candidate.get("event_id"), str)
+        },
+    )
     input_order_by_event_id: dict[str, int] = {}
     related_event_id_by_event_id: dict[str, str] = {}
     for index, event_source in enumerate(event_sources):
@@ -380,20 +367,33 @@ async def _resolve_thread_history_from_event_sources_timed(
             related_event_id = EventInfo.from_event(event_source).next_related_event_id(event_id)
             if isinstance(related_event_id, str):
                 related_event_id_by_event_id[event_id] = related_event_id
+    eligible_event_sources = [
+        event_source
+        for event_source in event_sources
+        if event_source_is_timeline_in_room(event_source, room_id)
+        and _event_id_from_source(event_source) not in redacted_event_ids
+    ]
     parsed_events = [
         parsed_event
-        for event_source in event_sources
-        if event_source_matches_room(event_source, room_id)
-        and (parsed_event := _parse_room_message_event(event_source)) is not None
+        for event_source in eligible_event_sources
+        if (parsed_event := _parse_room_message_event(event_source)) is not None
     ]
     messages_by_event_id: dict[str, ResolvedVisibleMessage] = {}
     edit_candidates_by_original_event_id: ThreadEditCandidatesByOriginalEventId = {}
     sidecar_hydration_started = time.perf_counter()
-    hydration_sources = _sidecar_hydration_sources(
-        event_sources,
-        hydrate_sidecars=hydrate_sidecars,
-        room_id=room_id,
-    )
+    hydration_sources = [
+        candidate
+        for event_source in eligible_event_sources
+        for candidate in (
+            *ordered_replacements(
+                event_source,
+                room_id=room_id,
+                validator=valid_room_message_replacement,
+                excluded_event_ids=redacted_event_ids,
+            ),
+            *((event_source,) if hydrate_sidecars or EventInfo.from_event(event_source).is_edit else ()),
+        )
+    ]
     hydration_batch = await prepare_sidecar_hydration_batch(
         hydration_sources,
         event_cache=event_cache,
@@ -407,6 +407,7 @@ async def _resolve_thread_history_from_event_sources_timed(
             event.source,
             room_id=room_id,
             validator=valid_room_message_replacement,
+            excluded_event_ids=redacted_event_ids,
         )
         for replacement_source in bundled_replacements:
             record_thread_edit_candidate(
@@ -1186,7 +1187,7 @@ async def _thread_history_cache_rejection_reason(
     if (
         root_source is None
         or _parse_room_message_event(root_source) is None
-        or EventInfo.from_event(root_source).is_edit
+        or not EventInfo.from_event(root_source).can_be_thread_root
     ):
         return _MISSING_THREAD_ROOT_REJECTION
     if any(
@@ -1521,7 +1522,7 @@ def _record_scanned_room_message_source(
 ) -> str | None:
     """Record one scanned room-message source and return the recorded event ID."""
     event_source = event.source if isinstance(event.source, dict) else {}
-    if event_source_is_state_event(event_source) or not event_source_matches_room(event_source, room_id):
+    if not event_source_is_timeline_in_room(event_source, room_id):
         return None
     if _is_opaque_thread_affecting_event_source(event_source):
         # Undecryptable relation-bearing ciphertext is recorded as fail-closed evidence: it resolves
@@ -1767,15 +1768,8 @@ async def bulk_refresh_room_thread_histories(
 ) -> BulkThreadRefreshStats:
     """Warm the durable thread cache for many threads with one backward room scan.
 
-    The per-thread refresh walks room history until it sees that one thread's root, so bulk
-    backfills of dormant rooms degrade to O(threads x history) homeserver work. This performs one
-    O(history) walk, buckets every scanned event with the same canonical resolution rules as the
-    per-thread path, and stores each requested thread through the same guarded
-    ``replace_thread_if_not_newer`` path. Threads whose root never appeared in the scan are
-    reported in ``missing_root_ids`` and never stored. A caller-provided page budget stops the scan
-    with remaining roots reported as missing and ``scan_truncated`` set. Threads whose reconstruction
-    contains still-opaque encrypted evidence are marked stale instead of stored, and a scan holding
-    opaque relations with unresolved impact marks every requested thread stale.
+    One O(history) walk buckets events with canonical resolution rules and guarded snapshot writes.
+    Missing roots and truncated scans are not stored, while opaque evidence marks the affected scope stale.
     """
     fetch_started_at = time.time()
     fetch_membership_epoch = await _capture_membership_epoch(event_cache, room_id)
@@ -1892,8 +1886,7 @@ async def get_room_threads_page(
         event
         for event in response.thread_roots
         if EventInfo.from_event(event.source).can_be_thread_root
-        and not event_source_is_state_event(event.source)
-        and event_source_matches_room(event.source, room_id)
+        and event_source_is_timeline_in_room(event.source, room_id)
     ]
     return thread_roots, response.next_batch
 

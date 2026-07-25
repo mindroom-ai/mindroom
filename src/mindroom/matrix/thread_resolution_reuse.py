@@ -13,8 +13,7 @@ from typing import TYPE_CHECKING, Any
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.matrix.event_info import (
     EventInfo,
-    event_source_is_state_event,
-    event_source_matches_room,
+    event_source_is_timeline_in_room,
 )
 from mindroom.matrix.replacements import bundled_replacement_candidates
 
@@ -177,10 +176,9 @@ def _suffix_is_safely_appendable(
     """Return whether suffix rows can only introduce new messages or edits to new messages."""
     suffix_event_ids: set[str] = set()
     for event_source in suffix:
-        if (
-            event_source.get("type") != "m.room.message"
-            or event_source_is_state_event(event_source)
-            or not event_source_matches_room(event_source, room_id)
+        if event_source.get("type") != "m.room.message" or not event_source_is_timeline_in_room(
+            event_source,
+            room_id,
         ):
             return False
         event_id = event_source.get("event_id")

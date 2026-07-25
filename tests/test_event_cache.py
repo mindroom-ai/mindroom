@@ -2567,8 +2567,93 @@ async def test_cached_point_and_snapshot_reads_apply_bundled_replacement(
     late_edit["event_id"] = "$late_bundled_edit"
     late_edit["content"]["m.relates_to"]["event_id"] = "$late_reply"
     assert not await event_cache.redact_event("!room:localhost", "$late_bundled_edit")
-    await event_cache.store_event("$late_reply", "!room:localhost", late_original)
-    assert await event_cache.get_event("!room:localhost", "$late_reply") is None
+    await _replace_thread(event_cache, "!room:localhost", "$late_reply", [late_original])
+    cached_late_original = await event_cache.get_event("!room:localhost", "$late_reply")
+    cached_late_thread = await event_cache.get_thread_events("!room:localhost", "$late_reply")
+    assert cached_late_original is not None
+    assert cached_late_original["unsigned"]["m.relations"].get("m.replace") is None
+    assert cached_late_thread == [cached_late_original]
+    assert (
+        await event_cache.get_latest_edit(
+            "!room:localhost",
+            cached_late_original,
+            validator=valid_room_message_replacement,
+        )
+        is None
+    )
+    response, _ = await _cached_room_get_event(AsyncMock(), event_cache, "!room:localhost", "$late_reply")
+    assert isinstance(response, nio.RoomGetEventResponse)
+    assert response.event.body == "Original"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "invalid_scope",
+    [{"state_key": ""}, {"room_id": "!other:localhost"}],
+    ids=["state", "wrong-room"],
+)
+async def test_invalid_relation_events_do_not_create_thread_or_edit_indexes(
+    event_cache: ConversationEventCache,
+    invalid_scope: dict[str, str],
+) -> None:
+    """Invalid relation envelopes stay point-only and cannot create dependent tombstones."""
+    original = _cache_source(
+        _make_text_event(
+            event_id="$original",
+            sender="@alice:localhost",
+            body="Original",
+            server_timestamp=1000,
+            source_content={"body": "Original", "msgtype": "m.text"},
+        ),
+    )
+    invalid_reply = _cache_source(
+        _make_text_event(
+            event_id="$invalid_reply",
+            sender="@alice:localhost",
+            body="Reply",
+            server_timestamp=2000,
+            source_content={
+                "body": "Reply",
+                "msgtype": "m.text",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread"},
+            },
+        ),
+    )
+    invalid_edit = _cache_source(
+        _make_text_event(
+            event_id="$invalid_edit",
+            sender="@alice:localhost",
+            body="* Edited",
+            server_timestamp=3000,
+            source_content={
+                "body": "* Edited",
+                "msgtype": "m.text",
+                "m.new_content": {"body": "Edited", "msgtype": "m.text"},
+                "m.relates_to": {"rel_type": "m.replace", "event_id": "$original"},
+            },
+        ),
+    )
+    invalid_reply.update(invalid_scope)
+    invalid_edit.update(invalid_scope)
+    await event_cache.store_events_batch(
+        [
+            ("$original", "!room:localhost", original),
+            ("$invalid_reply", "!room:localhost", invalid_reply),
+            ("$invalid_edit", "!room:localhost", invalid_edit),
+        ],
+    )
+
+    assert await event_cache.get_thread_id_for_event("!room:localhost", "$invalid_reply") is None
+    assert await event_cache.redact_event("!room:localhost", "$original")
+    replacement_point = {
+        "event_id": "$invalid_edit",
+        "sender": "@alice:localhost",
+        "origin_server_ts": 4000,
+        "type": "m.room.message",
+        "content": {"body": "Independent", "msgtype": "m.text"},
+    }
+    await event_cache.store_event("$invalid_edit", "!room:localhost", replacement_point)
+    assert await event_cache.get_event("!room:localhost", "$invalid_edit") == replacement_point
 
 
 @pytest.mark.asyncio

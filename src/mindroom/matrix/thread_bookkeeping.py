@@ -54,7 +54,11 @@ from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import TYPE_CHECKING, Literal, cast
 
-from mindroom.matrix.event_info import EventInfo, event_type_supports_thread_relations
+from mindroom.matrix.event_info import (
+    EventInfo,
+    event_source_supports_thread_relations,
+    event_type_supports_thread_relations,
+)
 from mindroom.matrix.thread_membership import (
     ThreadMembershipAccess,
     ThreadMembershipLookupError,
@@ -231,18 +235,21 @@ class ThreadMutationResolver:
     ) -> MutationResolutionContext:
         """Build one page-local resolution context for a sync batch."""
         page_event_infos: dict[str, EventInfo] = {}
+        relation_event_infos: dict[str, EventInfo] = {}
         ordered_event_ids: list[str] = []
         for event_source in [*plain_events, *threaded_events]:
             event_id = event_source.get("event_id")
             if not isinstance(event_id, str) or not event_id:
                 continue
-            page_event_infos[event_id] = EventInfo.from_event(event_source)
+            event_info = EventInfo.from_event(event_source)
+            supports_relations = event_type_supports_thread_relations(event_info.event_type)
+            if supports_relations and not event_source_supports_thread_relations(event_source, room_id):
+                page_event_infos[event_id] = EventInfo.from_event(None)
+                continue
+            page_event_infos[event_id] = event_info
             ordered_event_ids.append(event_id)
-        relation_event_infos = {
-            event_id: event_info
-            for event_id, event_info in page_event_infos.items()
-            if event_type_supports_thread_relations(event_info.event_type)
-        }
+            if supports_relations:
+                relation_event_infos[event_id] = event_info
         page_resolved_thread_ids = await resolve_thread_ids_for_event_infos(
             room_id,
             event_infos=relation_event_infos,
