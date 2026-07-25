@@ -58,6 +58,7 @@ from mindroom.matrix.thread_bookkeeping import ThreadMutationResolver
 from mindroom.matrix.thread_diagnostics import (
     THREAD_HISTORY_SOURCE_CACHE,
     THREAD_HISTORY_SOURCE_DIAGNOSTIC,
+    THREAD_HISTORY_SOURCE_STALE_CACHE,
     is_thread_history_degraded,
 )
 from mindroom.matrix.thread_membership import resolve_event_thread_membership
@@ -654,6 +655,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
             caller_label=caller_label,
             coordinator_queue_wait_ms=coordinator_queue_wait_ms,
             wants_full_history=True,
+            allows_stale_fallback=True,
         )
 
     async def _fetch_dispatch_thread_history_from_client(
@@ -671,6 +673,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
             caller_label=caller_label,
             coordinator_queue_wait_ms=coordinator_queue_wait_ms,
             wants_full_history=True,
+            allows_stale_fallback=False,
         )
 
     async def _fetch_dispatch_thread_snapshot_from_client(
@@ -688,6 +691,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
             caller_label=caller_label,
             coordinator_queue_wait_ms=coordinator_queue_wait_ms,
             wants_full_history=False,
+            allows_stale_fallback=False,
         )
 
     @staticmethod
@@ -796,6 +800,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
         caller_label: str,
         coordinator_queue_wait_ms: float,
         wants_full_history: bool,
+        allows_stale_fallback: bool,
     ) -> ThreadHistoryResult:
         coordinator = self.runtime.event_cache_write_coordinator
         if coordinator is None:
@@ -859,9 +864,14 @@ class MatrixConversationCache(ConversationCacheProtocol):
                 result_is_usable=self._thread_repair_result_is_usable,
             )
             result = repair_run.value
-            # A joined lightweight snapshot flight cannot answer a full-history read, so run our own.
-            # Every pass either returns or awaits one real repair, so this cannot spin.
-            if not repair_run.joined or result.is_full_history or not wants_full_history:
+            if not repair_run.joined:
+                return result
+            # A joined flight must satisfy this caller's freshness and hydration contract.
+            # Every pass either returns or awaits one real repair, so these retries cannot spin.
+            source = result.diagnostics.get(THREAD_HISTORY_SOURCE_DIAGNOSTIC)
+            if not allows_stale_fallback and source == THREAD_HISTORY_SOURCE_STALE_CACHE:
+                continue
+            if result.is_full_history or not wants_full_history:
                 return result
 
     @staticmethod
@@ -885,6 +895,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
                     caller_label="missing_cache_live_append_repair",
                     coordinator_queue_wait_ms=0.0,
                     wants_full_history=False,
+                    allows_stale_fallback=False,
                 )
             except ThreadRepairBackoffError as exc:
                 self.logger.debug(

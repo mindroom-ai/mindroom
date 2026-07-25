@@ -47,7 +47,12 @@ from mindroom.matrix.client_thread_history import (
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.matrix.conversation_cache import MatrixConversationCache, _cached_room_get_event
 from mindroom.matrix.event_info import EventInfo
-from mindroom.matrix.thread_diagnostics import THREAD_HISTORY_DEGRADED_DIAGNOSTIC, is_thread_history_degraded
+from mindroom.matrix.thread_diagnostics import (
+    THREAD_HISTORY_DEGRADED_DIAGNOSTIC,
+    THREAD_HISTORY_SOURCE_DIAGNOSTIC,
+    THREAD_HISTORY_SOURCE_STALE_CACHE,
+    is_thread_history_degraded,
+)
 from mindroom.timing import DispatchPipelineTiming
 from tests.conftest import (
     agent_response_should_respond,
@@ -100,6 +105,15 @@ def _set_dispatch_thread_read_timeout(conversation_cache: MatrixConversationCach
             **runtime_paths.process_env,
             "MINDROOM_DISPATCH_THREAD_READ_TIMEOUT_SECONDS": str(seconds),
         },
+    )
+
+
+def _stale_thread_history_result() -> ThreadHistoryResult:
+    """Return one labelled stale-cache fallback for repair-sharing tests."""
+    return thread_history_result(
+        [ResolvedVisibleMessage.synthetic(sender="@user:localhost", body="Stale", event_id="$stale")],
+        is_full_history=True,
+        diagnostics={THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_STALE_CACHE},
     )
 
 
@@ -967,6 +981,101 @@ async def test_strict_thread_history_retries_after_joining_unusable_snapshot(tmp
 
 
 @pytest.mark.asyncio
+async def test_strict_thread_history_rejects_joined_advisory_stale_fallback(tmp_path: Path) -> None:
+    """A strict reader must retry rather than inherit stale fallback from an advisory owner."""
+    event_cache = SqliteEventCache(tmp_path / "event_cache.db")
+    await event_cache.initialize()
+    conversation_cache = _conversation_cache_for_thread_reads(tmp_path, event_cache, client=MagicMock())
+    stale_history = _stale_thread_history_result()
+    fresh_history = thread_history_result(
+        [ResolvedVisibleMessage.synthetic(sender="@user:localhost", body="Fresh", event_id="$fresh")],
+        is_full_history=True,
+        diagnostics={"cache_repair_usable": True},
+    )
+    coordinator = MagicMock()
+    coordinator.wait_for_thread_idle = AsyncMock(return_value=None)
+    coordinator.run_thread_repair = AsyncMock(
+        side_effect=[
+            ThreadRepairRunResult(value=stale_history, joined=True),
+            ThreadRepairBackoffError(0.0),
+            ThreadRepairRunResult(value=fresh_history, joined=False),
+        ],
+    )
+    conversation_cache.runtime.event_cache_write_coordinator = coordinator
+
+    try:
+        result = await conversation_cache.get_strict_thread_history(
+            "!room:localhost",
+            "$thread:localhost",
+            caller_label="dispatch_post_lock_refresh",
+        )
+    finally:
+        await event_cache.close()
+
+    assert result == fresh_history
+    assert coordinator.run_thread_repair.await_count == 3
+
+
+@pytest.mark.asyncio
+async def test_advisory_thread_history_accepts_joined_advisory_stale_fallback(tmp_path: Path) -> None:
+    """An advisory reader may share the stale fallback produced by an advisory owner."""
+    event_cache = SqliteEventCache(tmp_path / "event_cache.db")
+    await event_cache.initialize()
+    conversation_cache = _conversation_cache_for_thread_reads(tmp_path, event_cache, client=MagicMock())
+    stale_history = _stale_thread_history_result()
+    coordinator = MagicMock()
+    coordinator.wait_for_thread_idle = AsyncMock(return_value=None)
+    coordinator.run_thread_repair = AsyncMock(
+        return_value=ThreadRepairRunResult(value=stale_history, joined=True),
+    )
+    conversation_cache.runtime.event_cache_write_coordinator = coordinator
+
+    try:
+        result = await conversation_cache.get_thread_history(
+            "!room:localhost",
+            "$thread:localhost",
+            caller_label="advisory_context",
+        )
+    finally:
+        await event_cache.close()
+
+    assert result == stale_history
+    coordinator.run_thread_repair.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_snapshot_rejects_joined_advisory_stale_fallback(tmp_path: Path) -> None:
+    """A dispatch snapshot must degrade rather than inherit stale fallback from an advisory owner."""
+    event_cache = SqliteEventCache(tmp_path / "event_cache.db")
+    await event_cache.initialize()
+    conversation_cache = _conversation_cache_for_thread_reads(tmp_path, event_cache, client=MagicMock())
+    stale_history = _stale_thread_history_result()
+    coordinator = MagicMock()
+    coordinator.wait_for_thread_idle = AsyncMock(return_value=None)
+    coordinator.run_thread_repair = AsyncMock(
+        side_effect=[
+            ThreadRepairRunResult(value=stale_history, joined=True),
+            ThreadRepairBackoffError(30.0),
+        ],
+    )
+    conversation_cache.runtime.event_cache_write_coordinator = coordinator
+
+    try:
+        result = await conversation_cache.get_dispatch_thread_snapshot(
+            "!room:localhost",
+            "$thread:localhost",
+            caller_label="dispatch_context",
+        )
+    finally:
+        await event_cache.close()
+
+    assert list(result) == []
+    assert is_thread_history_degraded(result)
+    assert result.diagnostics["thread_read_error"] == "cache_repair_backoff"
+    assert coordinator.run_thread_repair.await_count == 2
+
+
+@pytest.mark.asyncio
 async def test_stored_repair_releases_replayed_delta_filtered_by_redaction(tmp_path: Path) -> None:
     """A tombstone-filtered replay entered into a stored snapshot must not invalidate every later read."""
     event_cache = MagicMock()
@@ -1014,6 +1123,7 @@ async def test_stored_repair_releases_replayed_delta_filtered_by_redaction(tmp_p
         caller_label="redaction_repair",
         coordinator_queue_wait_ms=0.0,
         wants_full_history=True,
+        allows_stale_fallback=False,
     )
 
     assert result.is_full_history is True
