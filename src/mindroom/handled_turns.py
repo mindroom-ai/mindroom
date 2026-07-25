@@ -626,7 +626,7 @@ class HandledTurnLedger:
             raise
 
     def _persist_pending_records(self) -> None:
-        """Drain FIFO batches, retrying one failed batch without later traffic."""
+        """Drain FIFO batches, retrying one failed batch without failing later traffic."""
         retry_available = True
         while True:
             with self._state.persist_lock:
@@ -635,18 +635,25 @@ class HandledTurnLedger:
                     return
                 requests = tuple(self._state.pending_persists)
                 self._state.pending_persists.clear()
+                # Nothing but already-failed records left to retry: stop rather
+                # than spin against a disk that is still refusing writes.
+                if not retry_available and all(request.completion is None for request in requests):
+                    self._state.pending_persists[0:0] = requests
+                    self._state.persist_active = False
+                    return
             records = tuple(record for request in requests for record in request.records)
             try:
                 if records:
                     self._persist_records(records)
             except Exception as exc:
-                if not self._requeue_failed_persist_batch(
+                self._requeue_failed_persist_batch(
                     requests,
                     records,
                     exc,
                     retry_available=retry_available,
-                ):
-                    return
+                )
+                # One retry per failure: the requeued batch is attempted once more,
+                # and if that also fails its waiters are failed instead of looping.
                 retry_available = False
                 continue
             for request in requests:
@@ -661,31 +668,32 @@ class HandledTurnLedger:
         error: Exception,
         *,
         retry_available: bool,
-    ) -> bool:
-        """Requeue failed records and release every waiter if the retry is exhausted."""
-        for request in requests:
-            if request.completion is not None and not request.completion.done():
-                request.completion.set_exception(error)
-        pending_completions: tuple[Future[None], ...] = ()
+    ) -> None:
+        """Requeue the failed batch, failing only the waiters it actually attempted.
+
+        While a retry is still available the batch is requeued intact so the next
+        attempt can still satisfy its waiters. Once exhausted, the records are kept
+        for a later drain but their waiters are failed. Requests queued *after* this
+        batch were never written, so they always keep their completions: failing them
+        would report a durability error for a write that was never attempted.
+        """
         with self._state.persist_lock:
+            if retry_available:
+                self._state.pending_persists[0:0] = requests
+                return
+            # Keep the records for a later drain, but drop their waiters: the
+            # callers below are about to be told this attempt failed.
             self._state.pending_persists.insert(
                 0,
                 _PersistRequest(records=records, completion=None),
             )
-            if retry_available:
-                return True
-            pending_completions = tuple(
-                request.completion
-                for request in self._state.pending_persists
-                if request.completion is not None and not request.completion.done()
-            )
-            self._state.pending_persists = [
-                _PersistRequest(records=request.records, completion=None) for request in self._state.pending_persists
-            ]
-            self._state.persist_active = False
-        for completion in pending_completions:
+        attempted_completions = tuple(
+            request.completion
+            for request in requests
+            if request.completion is not None and not request.completion.done()
+        )
+        for completion in attempted_completions:
             completion.set_exception(error)
-        return False
 
     def _persist_records(self, turn_records: tuple[TurnRecord, ...]) -> None:
         """Merge one batch of already-applied records from the persistence worker."""

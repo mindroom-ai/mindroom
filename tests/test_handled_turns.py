@@ -547,6 +547,50 @@ def test_exact_persist_waiter_does_not_wait_for_later_batches(temp_dir: Path) ->
     assert not first_thread.is_alive()
 
 
+def test_transient_persist_failure_waiter_resolves_after_retry(temp_dir: Path) -> None:
+    """A waiter must remain blocked until its successful retry persists."""
+    tracker = HandledTurnLedger("test_transient_persist_waiter", base_path=temp_dir)
+    tracker.warm()
+    real_persist = tracker._persist_records
+    retry_started = threading.Event()
+    release_retry = threading.Event()
+    waiter_errors: list[Exception] = []
+    attempts = 0
+
+    def fail_once_then_persist(turn_records: tuple[TurnRecord, ...]) -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            message = "transient persist failure"
+            raise OSError(message)
+        retry_started.set()
+        assert release_retry.wait(timeout=5)
+        real_persist(turn_records)
+
+    def record_and_wait() -> None:
+        try:
+            tracker.update_handled_turn(
+                ("$retry",),
+                lambda _existing: TurnRecord.create(["$retry"], completed=False),
+                wait_for_persist=True,
+            )
+        except Exception as exc:
+            waiter_errors.append(exc)
+
+    with patch.object(tracker, "_persist_records", side_effect=fail_once_then_persist):
+        waiter = threading.Thread(target=record_and_wait)
+        waiter.start()
+        assert retry_started.wait(timeout=5)
+        assert waiter.is_alive()
+        release_retry.set()
+        waiter.join(timeout=5)
+
+    assert not waiter.is_alive()
+    assert waiter_errors == []
+    assert attempts == 2
+    assert "$retry" in _read_persisted_records(tracker)
+
+
 def test_failed_batch_retries_without_new_record_and_remains_flush_visible(temp_dir: Path) -> None:
     """A failed batch should retry once and remain pending for a later flush."""
     tracker = HandledTurnLedger("test_persist_retry", base_path=temp_dir)
@@ -574,8 +618,13 @@ def test_failed_batch_retries_without_new_record_and_remains_flush_visible(temp_
     assert "$retry" in _read_persisted_records(tracker)
 
 
-def test_second_persist_failure_releases_waiter_queued_during_retry(temp_dir: Path) -> None:
-    """Giving up after a retry must fail, not strand, waiters queued during that attempt."""
+def test_second_persist_failure_does_not_fail_waiter_queued_during_retry(temp_dir: Path) -> None:
+    """A waiter queued during a failing retry was never attempted, so it must not inherit that error.
+
+    Only the batch the worker actually tried to write fails. Requests queued behind
+    it keep their completions and are drained normally; reporting a durability
+    failure for a write that was never issued would be a false negative.
+    """
     tracker = HandledTurnLedger("test_persist_retry_waiter", base_path=temp_dir)
     tracker.warm()
     real_persist = tracker._persist_records
@@ -583,7 +632,8 @@ def test_second_persist_failure_releases_waiter_queued_during_retry(temp_dir: Pa
     second_attempt_started = threading.Event()
     release_second_attempt = threading.Event()
     later_scheduled = threading.Event()
-    waiter_errors: list[str] = []
+    waiter_done = threading.Event()
+    waiter_errors: list[Exception] = []
     attempts = 0
     first_failure = "first persist failure"
     second_failure = "second persist failure"
@@ -612,8 +662,10 @@ def test_second_persist_failure_releases_waiter_queued_during_retry(temp_dir: Pa
                 lambda _existing: TurnRecord.create(["$later"], completed=False),
                 wait_for_persist=True,
             )
-        except OSError as exc:
-            waiter_errors.append(str(exc))
+        except Exception as exc:
+            waiter_errors.append(exc)
+        finally:
+            waiter_done.set()
 
     with (
         patch.object(tracker, "_persist_records", side_effect=fail_twice_then_persist),
@@ -625,15 +677,42 @@ def test_second_persist_failure_releases_waiter_queued_during_retry(temp_dir: Pa
         waiter.start()
         assert later_scheduled.wait(timeout=5)
         release_second_attempt.set()
-        waiter.join(timeout=1)
-        assert not waiter.is_alive()
+        assert waiter_done.wait(timeout=5)
+        waiter.join(timeout=5)
         tracker.flush()
 
-    assert waiter_errors == [second_failure]
+    assert waiter_errors == []
     assert attempts == 3
     persisted_records = _read_persisted_records(tracker)
     assert "$retry" in persisted_records
     assert "$later" in persisted_records
+
+
+def test_exhausted_persist_retry_fails_only_the_attempted_waiter(temp_dir: Path) -> None:
+    """The batch the worker actually wrote must still surface its durability failure."""
+    tracker = HandledTurnLedger("test_persist_attempted_waiter", base_path=temp_dir)
+    tracker.warm()
+    real_persist = tracker._persist_records
+    failure = "persist failure"
+
+    def always_fail(_turn_records: tuple[TurnRecord, ...]) -> None:
+        raise OSError(failure)
+
+    with patch.object(tracker, "_persist_records", side_effect=always_fail):
+        with pytest.raises(OSError, match=failure):
+            tracker.update_handled_turn(
+                ("$attempted",),
+                lambda _existing: TurnRecord.create(["$attempted"], completed=False),
+                wait_for_persist=True,
+            )
+        # The drain must not spin against a disk that keeps refusing writes.
+        with tracker._state.persist_lock:
+            assert not tracker._state.persist_active
+
+    # Records survive the failure and reach disk once writes succeed again.
+    tracker._persist_records = real_persist
+    tracker.flush()
+    assert "$attempted" in _read_persisted_records(tracker)
 
 
 def test_slow_ledger_does_not_block_other_ledger_persistence(temp_dir: Path) -> None:
