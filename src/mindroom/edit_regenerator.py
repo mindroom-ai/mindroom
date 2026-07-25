@@ -151,7 +151,10 @@ class EditRegenerator:
             or turn_record.response_owner is None
         ):
             return
-        if turn_record.requester_id != requester_user_id:
+        source_event_id = turn_record.prompt_source_event_id(original_event_id)
+        source_metadata = (turn_record.source_event_metadata or {}).get(source_event_id)
+        source_requester_id = source_metadata.sender if source_metadata is not None else turn_record.requester_id
+        if source_requester_id != requester_user_id:
             return
         context = await self.edit_regeneration_context(
             context,

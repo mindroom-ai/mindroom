@@ -93,6 +93,7 @@ def _turn_record(
     source_event_prompts: dict[str, str] | None = None,
     source_event_metadata: dict[str, SourceEventMetadata] | None = None,
     response_owner: str | None = AGENT_NAME,
+    requester_id: str | None = USER_ID,
     thread_id: str | None = THREAD_ID,
 ) -> TurnRecord:
     anchor = anchor_event_id or source_event_ids[-1]
@@ -105,7 +106,7 @@ def _turn_record(
         source_event_prompts=source_event_prompts,
         source_event_metadata=source_event_metadata,
         response_owner=response_owner,
-        requester_id=USER_ID,
+        requester_id=requester_id,
         history_scope=HistoryScope(kind="agent", scope_id=AGENT_NAME),
         conversation_target=MessageTarget.resolve(ROOM_ID, thread_id, anchor),
     )
@@ -955,9 +956,26 @@ async def test_coalesced_edit_preserves_tagged_source_metadata(tmp_path: Path) -
     )
     harness = _harness(tmp_path, turn_record=record)
     harness.config.timezone = "America/Los_Angeles"
-    event, event_info = _edit_event(original_event_id=first_event_id, new_body="edited ]]> first <message>")
+    event, event_info = _edit_event(
+        original_event_id=first_event_id,
+        new_body="edited ]]> first <message>",
+        sender="@alice:example.org",
+    )
+    harness.resolver.build_message_envelope.return_value = request_envelope(
+        room_id=ROOM_ID,
+        reply_to_event_id=first_event_id,
+        thread_id=THREAD_ID,
+        user_id="@alice:example.org",
+        agent_name=AGENT_NAME,
+        source_kind=EDIT_SOURCE_KIND,
+    )
 
-    await _handle_edit(harness, event, event_info)
+    await harness.regenerator.handle_message_edit(
+        harness.room,
+        event,
+        event_info,
+        event.sender,
+    )
 
     assert harness.generate_response.await_args.args[0].prompt == (
         "The user sent the following messages in quick succession. "
@@ -975,6 +993,63 @@ async def test_coalesced_edit_preserves_tagged_source_metadata(tmp_path: Path) -
     assert handled_turn.source_event_metadata == record.source_event_metadata
     recorded = harness.turn_store.record_turn.call_args.args[0]
     assert recorded.source_event_metadata == record.source_event_metadata
+
+
+@pytest.mark.parametrize(
+    ("original_event_id", "sender", "allowed"),
+    [
+        ("$alice:example.org", "@alice:example.org", True),
+        ("$bob:example.org", "@bob:example.org", True),
+        ("$alice:example.org", "@bob:example.org", False),
+        ("$bob:example.org", "@alice:example.org", False),
+        ("$alice:example.org", "@attacker:example.org", False),
+    ],
+)
+@pytest.mark.asyncio
+async def test_multi_sender_coalesced_source_allows_only_its_sender_to_edit(
+    tmp_path: Path,
+    original_event_id: str,
+    sender: str,
+    allowed: bool,
+) -> None:
+    """Each coalesced source remains editable only by its persisted sender."""
+    alice_event_id = "$alice:example.org"
+    bob_event_id = "$bob:example.org"
+    record = _turn_record(
+        source_event_ids=(alice_event_id, bob_event_id),
+        source_event_prompts={alice_event_id: "alice base", bob_event_id: "bob base"},
+        source_event_metadata={
+            alice_event_id: SourceEventMetadata(sender="@alice:example.org"),
+            bob_event_id: SourceEventMetadata(sender="@bob:example.org"),
+        },
+        requester_id="@bob:example.org",
+    )
+    harness = _harness(tmp_path, turn_record=record)
+    harness.resolver.build_message_envelope.return_value = request_envelope(
+        room_id=ROOM_ID,
+        reply_to_event_id=original_event_id,
+        thread_id=THREAD_ID,
+        user_id=sender,
+        agent_name=AGENT_NAME,
+        source_kind=EDIT_SOURCE_KIND,
+    )
+    event, event_info = _edit_event(
+        original_event_id=original_event_id,
+        sender=sender,
+    )
+
+    await harness.regenerator.handle_message_edit(harness.room, event, event_info, sender)
+
+    if not allowed:
+        _assert_no_regeneration(harness)
+        harness.resolver.build_message_envelope.assert_not_called()
+        return
+    request = harness.generate_response.await_args.args[0]
+    assert request.user_id == sender
+    assert "what is 3+3?" in request.prompt
+    assert harness.turn_store.record_turn.call_args.args[0].source_event_revisions == {
+        original_event_id: (event.server_timestamp, event.event_id),
+    }
 
 
 @pytest.mark.asyncio
