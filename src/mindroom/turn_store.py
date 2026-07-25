@@ -258,7 +258,12 @@ class TurnStore:
         """Return whether durable state tombstones any source in one pending response."""
         return any(
             (record := self._ledger.get_turn_record(source_event_id)) is not None
-            and source_event_id in record.redacted_source_event_ids
+            and (
+                source_event_id in record.redacted_source_event_ids
+                or (
+                    source_event_id in record.source_event_ids and source_event_id not in record.replay_source_event_ids
+                )
+            )
             for source_event_id in source_event_ids
         )
 
@@ -667,10 +672,7 @@ def _has_redaction_cleanup_context(turn_record: TurnRecord) -> bool:
 
 
 def _backfill_missing_turn_facts(authority: TurnRecord, recovery: TurnRecord) -> TurnRecord:
-    """Fill absent optional facts without overriding authoritative ledger values.
-
-    Identity and completion come from ``authority``; recovery only fills missing optional facts.
-    """
+    """Fill absent optional facts from recovery without overriding ledger authority."""
     return replace(
         authority,
         discovery_event_ids=(*authority.discovery_event_ids, *recovery.discovery_event_ids),

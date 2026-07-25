@@ -958,6 +958,8 @@ class TurnController:
             discovery_event_id=self.deps.ingress.router_relay_original_event_id(event),
             dispatch_metadata=dispatch_metadata,
         )
+        if turn_claim is not None:
+            reservation_owner.pending_turn_claim = None
         await reservation_owner.admit(
             resolved_key,
             source_event_id=event.event_id,
@@ -1913,7 +1915,7 @@ class TurnController:
                 handoff.source_event_ids,
                 discovery_event_ids=routed_aliases,
                 source_event_prompts=dict(handoff.source_event_prompts),
-                source_event_metadata=source_metadata if len(handoff.source_event_ids) > 1 else None,
+                source_event_metadata=source_metadata if len(handoff.source_event_ids) > 1 or routed_aliases else None,
             )
             close_pending_event_metadata_once(list(batch.pending_events))
             await self._dispatch_handoff(

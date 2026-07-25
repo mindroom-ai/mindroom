@@ -66,7 +66,6 @@ class _Harness:
     generate_response: AsyncMock
     wait_for_turn_settled: AsyncMock
     restart_retry: SyncRestartRetryQueue
-    logger: MagicMock
     config: Config
     runtime_paths: RuntimePaths
     room: nio.MatrixRoom
@@ -190,11 +189,9 @@ def _harness(tmp_path: Path, *, turn_record: TurnRecord | None) -> _Harness:
 
     wait_for_turn_settled = AsyncMock()
     restart_retry = SyncRestartRetryQueue()
-    logger = MagicMock()
     regenerator = EditRegenerator(
         EditRegeneratorDeps(
             runtime=_RuntimeStub(client=AsyncMock(spec=nio.AsyncClient), config=config),
-            get_logger=lambda: logger,
             runtime_paths=runtime_paths,
             agent_name=AGENT_NAME,
             resolver=resolver,
@@ -214,7 +211,6 @@ def _harness(tmp_path: Path, *, turn_record: TurnRecord | None) -> _Harness:
         generate_response=generate_response,
         wait_for_turn_settled=wait_for_turn_settled,
         restart_retry=restart_retry,
-        logger=logger,
         config=config,
         runtime_paths=runtime_paths,
         room=nio.MatrixRoom(room_id=ROOM_ID, own_user_id=f"@{AGENT_NAME}:example.org"),
@@ -1056,12 +1052,11 @@ async def test_edit_without_original_event_id_returns_early(tmp_path: Path) -> N
     harness.resolver.extract_message_context.assert_not_awaited()
     harness.turn_store.load_turn.assert_not_called()
     _assert_no_regeneration(harness)
-    harness.logger.debug.assert_any_call("Edit event has no original event ID")
 
 
 @pytest.mark.asyncio
 async def test_edit_without_turn_record_returns_early(tmp_path: Path) -> None:
-    """An edit with no durable turn record logs the debug path and does nothing else."""
+    """An edit with no durable turn record does nothing else."""
     harness = _harness(tmp_path, turn_record=None)
     event, event_info = _edit_event()
 
@@ -1069,10 +1064,6 @@ async def test_edit_without_turn_record_returns_early(tmp_path: Path) -> None:
 
     _assert_no_regeneration(harness)
     harness.resolver.build_message_envelope.assert_not_called()
-    harness.logger.debug.assert_any_call(
-        "No handled turn record found for edited message",
-        original_event_id=ORIGINAL_EVENT_ID,
-    )
 
 
 @pytest.mark.asyncio

@@ -19,6 +19,7 @@ import threading
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, fields, replace
 from typing import TYPE_CHECKING, Any, cast
+from unittest.mock import MagicMock
 
 import nio
 import pytest
@@ -26,7 +27,7 @@ import pytest
 from mindroom import constants, interactive
 from mindroom.attachments import register_local_attachment
 from mindroom.bot_runtime_view import BotRuntimeState
-from mindroom.coalescing import CoalescingGate
+from mindroom.coalescing import CoalescingGate, IngressAdmissionClosedError
 from mindroom.coalescing_batch import CoalescedBatch, CoalescingKey, PendingEvent, build_coalesced_batch
 from mindroom.config.agent import AgentConfig
 from mindroom.config.auth import AuthorizationConfig
@@ -574,6 +575,92 @@ async def test_coalesced_router_relays_index_every_human_source_for_edit_lookup(
     assert first_lookup.source_event_metadata is not None
     assert first_lookup.source_event_metadata["$relay-one:localhost"].discovery_event_id == "$human-one:localhost"
     assert first_lookup.source_event_metadata["$relay-two:localhost"].discovery_event_id == "$human-two:localhost"
+
+
+@pytest.mark.asyncio
+async def test_single_router_relay_persists_human_prompt_ownership(config: Config, tmp_path: Path) -> None:
+    """A routed singleton must retain the alias-to-relay prompt mapping for later edits."""
+    harness = _build_harness(config, tmp_path)
+    room = _room_with_members(config, "general", ROUTER_AGENT_NAME)
+    mention = _entity_user_id(config, "general")
+    relay = _router_relay_event(
+        config,
+        event_id="$relay:localhost",
+        original_event_id="$human:localhost",
+        body=f"{mention} single",
+        origin_server_ts=1_000_000,
+    )
+    batch = build_coalesced_batch(
+        CoalescingKey(_ROOM_ID, _THREAD_ROOT, _SENDER),
+        [
+            PendingEvent(
+                event=relay,
+                room=room,
+                source_kind=TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+                requester_user_id=_SENDER,
+                trust_internal_payload_metadata=True,
+                discovery_event_id="$human:localhost",
+            ),
+        ],
+    )
+
+    await harness.controller.handle_coalesced_batch(batch)
+    await harness.runner.settle_inbox_responses()
+
+    record = harness.turn_store.get_turn_record("$human:localhost")
+    assert record is not None
+    assert record.source_event_metadata is not None
+    assert record.source_event_metadata["$relay:localhost"].discovery_event_id == "$human:localhost"
+    assert record.prompt_source_event_id("$human:localhost") == "$relay:localhost"
+
+
+@pytest.mark.asyncio
+async def test_router_relay_ignored_by_this_agent_does_not_index_human_alias(
+    config: Config,
+    tmp_path: Path,
+) -> None:
+    """A relay routed to another agent must not create durable alias ownership."""
+    harness = _build_harness(config, tmp_path)
+    room = _room_with_members(config, "general", "research", ROUTER_AGENT_NAME)
+    relay = _router_relay_event(
+        config,
+        event_id="$relay-research:localhost",
+        original_event_id="$human-research:localhost",
+        body=f"{_entity_user_id(config, 'research')} investigate",
+        origin_server_ts=1_000_000,
+    )
+
+    await harness.deliver(room, relay)
+
+    assert harness.runner.requests == []
+    assert harness.turn_store.get_turn_record("$relay-research:localhost") is None
+    assert harness.turn_store.get_turn_record("$human-research:localhost") is None
+
+
+@pytest.mark.asyncio
+async def test_failed_gate_admission_releases_ingress_claim_once(
+    config: Config,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Rejected gate admission transfers and closes the pending claim exactly once."""
+    harness = _build_harness(config, tmp_path)
+    room = _room_with_members(config, "general")
+    event = _text_event("admission closes")
+    release_claim = MagicMock(wraps=harness.turn_store.release_pending_turn_claim)
+    monkeypatch.setattr(harness.turn_store, "release_pending_turn_claim", release_claim)
+    monkeypatch.setattr(
+        harness.gate,
+        "submit_lane_slot",
+        MagicMock(side_effect=IngressAdmissionClosedError),
+    )
+
+    await harness.controller.handle_text_event(room, event)
+
+    release_claim.assert_called_once()
+    competing_claim = TurnRecord.create([event.event_id], completed=False)
+    assert harness.turn_store.try_claim_turn(competing_claim) is True
+    harness.turn_store.release_pending_turn_claim(competing_claim)
 
 
 @pytest.mark.asyncio

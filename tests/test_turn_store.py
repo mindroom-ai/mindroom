@@ -1195,6 +1195,90 @@ def test_recovery_preserves_newer_ledger_only_sibling_edit(tmp_path: Path) -> No
     assert loaded.response_event_id == "$new-response"
 
 
+def test_recovery_preserves_newer_routed_alias_prompt(tmp_path: Path) -> None:
+    """A newer human-alias revision must carry its owned relay prompt through recovery."""
+    store = _store(tmp_path)
+    source_metadata = {
+        "$relay": SourceEventMetadata(sender="@user:example.org", discovery_event_id="$human"),
+        "$anchor": SourceEventMetadata(sender="@user:example.org"),
+    }
+    store._ledger.record_handled_turn(
+        TurnRecord.create(
+            ["$relay", "$anchor"],
+            discovery_event_ids=["$human"],
+            response_event_id="$old-response",
+            source_event_prompts={"$relay": "new relay", "$anchor": "anchor"},
+            source_event_revisions={"$human": (30, "$new-edit")},
+            source_event_metadata=source_metadata,
+            timestamp=10,
+        ),
+    )
+    recovery_record = TurnRecord.create(
+        ["$relay", "$anchor"],
+        discovery_event_ids=["$human"],
+        response_event_id="$new-response",
+        source_event_prompts={"$relay": "stale relay", "$anchor": "anchor"},
+        source_event_revisions={"$human": (20, "$stale-edit")},
+        source_event_metadata=source_metadata,
+        timestamp=20,
+    )
+
+    loaded = _load_with_recovery(store, original_event_id="$human", recovery_record=recovery_record)
+
+    assert loaded is not None
+    assert loaded.source_event_prompts == {"$relay": "new relay", "$anchor": "anchor"}
+    assert loaded.source_event_revisions == {"$human": (30, "$new-edit")}
+
+
+def test_recovery_without_prompts_preserves_durable_prompt_map(tmp_path: Path) -> None:
+    """A delivered recovery lacking prompt metadata cannot erase durable coalesced bodies."""
+    store = _store(tmp_path)
+    store._ledger.record_handled_turn(
+        TurnRecord.create(
+            ["$first", "$anchor"],
+            response_event_id="$old-response",
+            source_event_prompts={"$first": "first", "$anchor": "anchor"},
+            timestamp=10,
+        ),
+    )
+
+    loaded = _load_with_recovery(
+        store,
+        original_event_id="$first",
+        recovery_record=TurnRecord.create(
+            ["$first", "$anchor"],
+            response_event_id="$new-response",
+            timestamp=20,
+        ),
+    )
+
+    assert loaded is not None
+    assert loaded.source_event_prompts == {"$first": "first", "$anchor": "anchor"}
+
+
+def test_routed_alias_redaction_marks_owning_relay_under_lock(tmp_path: Path) -> None:
+    """Under-lock redaction checks must recognize a physical relay tombstoned by its alias."""
+    store = _store(tmp_path)
+    store._ledger.record_handled_turn(
+        TurnRecord.create(
+            ["$relay", "$anchor"],
+            discovery_event_ids=["$human"],
+            response_event_id="$response",
+            source_event_prompts={"$relay": "secret", "$anchor": "keep"},
+            source_event_metadata={
+                "$relay": SourceEventMetadata(sender="@user:example.org", discovery_event_id="$human"),
+                "$anchor": SourceEventMetadata(sender="@user:example.org"),
+            },
+        ),
+    )
+
+    marked = store.mark_source_redacted("$human")
+
+    assert marked is not None
+    assert marked.source_event_prompts == {"$anchor": "keep"}
+    assert store.any_source_redacted(("$relay",)) is True
+
+
 def test_same_second_delivered_run_repairs_fractional_ledger_timestamp(tmp_path: Path) -> None:
     """Second-resolution run times should still repair a later run from the same second."""
     store = _store(tmp_path)

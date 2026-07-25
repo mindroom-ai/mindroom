@@ -20,7 +20,6 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
     import nio
-    import structlog
 
     from mindroom.constants import RuntimePaths
     from mindroom.conversation_resolver import ConversationResolver
@@ -45,7 +44,6 @@ class EditRegeneratorDeps:
     """Collaborators needed for edit-triggered regeneration."""
 
     runtime: SupportsClientConfig
-    get_logger: Callable[[], structlog.stdlib.BoundLogger]
     runtime_paths: RuntimePaths
     agent_name: str
     resolver: ConversationResolver
@@ -80,9 +78,6 @@ class EditRegenerator:
 
     deps: EditRegeneratorDeps
     _mailboxes: dict[tuple[str, str, str], _Mailbox] = field(default_factory=dict, init=False, repr=False)
-
-    def _logger(self) -> structlog.stdlib.BoundLogger:
-        return self.deps.get_logger()
 
     def _client(self) -> nio.AsyncClient:
         client = self.deps.runtime.client
@@ -129,7 +124,6 @@ class EditRegenerator:
     ) -> None:
         """Handle an edited message by regenerating the owned response."""
         if not event_info.original_event_id:
-            self._logger().debug("Edit event has no original event ID")
             return
         original_event_id = event_info.original_event_id
         registry = entity_identity_registry(self.deps.runtime.config, self.deps.runtime_paths)
@@ -156,17 +150,12 @@ class EditRegenerator:
                 requester_user_id=requester_user_id,
             )
         if turn_record is None:
-            self._logger().debug(
-                "No handled turn record found for edited message",
-                original_event_id=original_event_id,
-            )
             return
         if (
             turn_record.conversation_target is None
             or turn_record.history_scope is None
             or turn_record.response_owner is None
         ):
-            self._logger().warning("Skipping edit without response context", original_event_id=original_event_id)
             return
         if turn_record.requester_id != requester_user_id:
             return
@@ -278,10 +267,6 @@ class EditRegenerator:
         if record.is_coalesced:
             prompt_parts = [prompt_map.get(source_event_id) for source_event_id in record.replay_source_event_ids]
             if record.source_event_prompts is None or any(part is None for part in prompt_parts):
-                self._logger().warning(
-                    "Skipping coalesced edit without prompts",
-                    anchor_event_id=record.anchor_event_id,
-                )
                 return None, None, applied
             prompt = coalesced_prompt([part for part in prompt_parts if part is not None])
             structured = False

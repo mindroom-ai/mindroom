@@ -7,7 +7,7 @@ import json
 import threading
 import time
 from contextlib import contextmanager
-from dataclasses import replace
+from dataclasses import FrozenInstanceError, replace
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
@@ -401,7 +401,8 @@ def test_source_event_metadata_persists_across_reload(temp_dir: Path) -> None:
         ),
     )
 
-    turn_record = _reload_ledger("test_source_metadata_reload", temp_dir).get_turn_record("$second")
+    tracker2 = _reload_ledger("test_source_metadata_reload", temp_dir)
+    turn_record = tracker2.get_turn_record("$second")
 
     assert turn_record is not None
     assert turn_record.source_event_metadata == {
@@ -412,7 +413,23 @@ def test_source_event_metadata_persists_across_reload(temp_dir: Path) -> None:
         ),
         "$second": SourceEventMetadata(sender="@bob:localhost", timestamp_ms=None),
     }
-    assert replace(turn_record, redacted_source_event_ids=("$human-first",)).replay_source_event_ids == ("$second",)
+    redacted = replace(turn_record, redacted_source_event_ids=("$human-first",))
+    assert redacted.replay_source_event_ids == ("$second",)
+    assert redacted.source_event_prompts == {"$second": "second"}
+    tracker2.record_handled_turn(redacted)
+
+    reloaded = _reload_ledger("test_source_metadata_reload", temp_dir).get_turn_record("$human-first")
+    assert reloaded is not None
+    assert reloaded.redacted_source_event_ids == ("$human-first",)
+    assert reloaded.source_event_prompts == {"$second": "second"}
+
+
+def test_turn_record_cannot_mutate_after_ledger_publication() -> None:
+    """Turn records are immutable snapshots once shared with ledger readers and writers."""
+    record = TurnRecord.create(["$source"], response_event_id="$response")
+
+    with pytest.raises(FrozenInstanceError):
+        record.response_event_id = "$replacement"  # type: ignore[misc]
 
 
 def test_source_event_revisions_persist_across_restart_and_run_recovery(temp_dir: Path) -> None:

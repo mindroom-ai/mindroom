@@ -523,7 +523,6 @@ class AgentBot:
         self._edit_regenerator = EditRegenerator(
             EditRegeneratorDeps(
                 runtime=self._runtime_view,
-                get_logger=lambda: self.logger,
                 runtime_paths=self.runtime_paths,
                 agent_name=self.agent_name,
                 resolver=self._conversation_resolver,

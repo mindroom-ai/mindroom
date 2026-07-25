@@ -76,9 +76,17 @@ class SourceEventMetadata:
 SourceEventRevision = tuple[int, str]
 
 
-@dataclass
+def _prompt_source_event_id(source_event_metadata: Mapping[str, SourceEventMetadata] | None, event_id: str) -> str:
+    """Return the physical prompt owner for a source or discovery alias."""
+    for source_id, metadata in (source_event_metadata or {}).items():
+        if metadata.discovery_event_id == event_id:
+            return source_id
+    return event_id
+
+
+@dataclass(frozen=True)
 class TurnRecord:
-    """Canonical identity, outcome, and regeneration facts for one turn."""
+    """Canonical immutable identity, outcome, and regeneration facts for one turn."""
 
     source_event_ids: tuple[str, ...]
     discovery_event_ids: tuple[str, ...] = ()
@@ -126,36 +134,41 @@ class TurnRecord:
         normalized_timestamp = (
             float(timestamp) if isinstance(timestamp, int | float) and not isinstance(timestamp, bool) else 0.0
         )
-        self.source_event_ids = source_event_ids
-        self.discovery_event_ids = discovery_event_ids
-        self.redacted_source_event_ids = redacted_source_event_ids
-        self.pending_redaction_cleanup_event_ids = pending_redaction_cleanup_event_ids
-        self.anchor_event_id = anchor_event_id
-        self.response_event_id = _normalize_string(self.response_event_id)
-        self.visible_echo_event_id = _normalize_string(self.visible_echo_event_id)
-        self.source_event_prompts = _immutable_prompt_map(
-            source_event_ids,
-            self.source_event_prompts,
-            excluded_event_ids=redacted_source_event_id_set,
-        )
-        self.source_event_revisions = _immutable_source_event_revisions(
-            (*source_event_ids, *discovery_event_ids),
-            self.source_event_revisions,
-            excluded_event_ids=redacted_source_event_id_set,
-        )
-        self.source_event_metadata = _immutable_source_event_metadata(
+        source_event_metadata = _immutable_source_event_metadata(
             source_event_ids,
             self.source_event_metadata,
             excluded_event_ids=redacted_source_event_id_set,
         )
-        self.response_owner = _normalize_string(self.response_owner)
-        self.requester_id = _normalize_string(self.requester_id)
-        self.correlation_id = _normalize_string(self.correlation_id)
-        self.history_scope = self.history_scope if isinstance(self.history_scope, HistoryScope) else None
-        self.conversation_target = (
-            self.conversation_target if isinstance(self.conversation_target, MessageTarget) else None
+        source_event_prompts = _immutable_prompt_map(
+            source_event_ids,
+            self.source_event_prompts,
+            excluded_event_ids={
+                _prompt_source_event_id(source_event_metadata, event_id) for event_id in redacted_source_event_ids
+            },
         )
-        self.timestamp = normalized_timestamp
+        source_event_revisions = _immutable_source_event_revisions(
+            (*source_event_ids, *discovery_event_ids),
+            self.source_event_revisions,
+            excluded_event_ids=redacted_source_event_id_set,
+        )
+        history_scope = self.history_scope if isinstance(self.history_scope, HistoryScope) else None
+        conversation_target = self.conversation_target if isinstance(self.conversation_target, MessageTarget) else None
+        object.__setattr__(self, "source_event_ids", source_event_ids)
+        object.__setattr__(self, "discovery_event_ids", discovery_event_ids)
+        object.__setattr__(self, "redacted_source_event_ids", redacted_source_event_ids)
+        object.__setattr__(self, "pending_redaction_cleanup_event_ids", pending_redaction_cleanup_event_ids)
+        object.__setattr__(self, "anchor_event_id", anchor_event_id)
+        object.__setattr__(self, "response_event_id", _normalize_string(self.response_event_id))
+        object.__setattr__(self, "visible_echo_event_id", _normalize_string(self.visible_echo_event_id))
+        object.__setattr__(self, "source_event_prompts", source_event_prompts)
+        object.__setattr__(self, "source_event_revisions", source_event_revisions)
+        object.__setattr__(self, "source_event_metadata", source_event_metadata)
+        object.__setattr__(self, "response_owner", _normalize_string(self.response_owner))
+        object.__setattr__(self, "requester_id", _normalize_string(self.requester_id))
+        object.__setattr__(self, "correlation_id", _normalize_string(self.correlation_id))
+        object.__setattr__(self, "history_scope", history_scope)
+        object.__setattr__(self, "conversation_target", conversation_target)
+        object.__setattr__(self, "timestamp", normalized_timestamp)
 
     @classmethod
     def create(
@@ -212,14 +225,7 @@ class TurnRecord:
 
     def prompt_source_event_id(self, event_id: str) -> str:
         """Return the physical prompt owner for a source or discovery alias."""
-        return next(
-            (
-                source_id
-                for source_id, metadata in (self.source_event_metadata or {}).items()
-                if metadata.discovery_event_id == event_id
-            ),
-            event_id,
-        )
+        return _prompt_source_event_id(self.source_event_metadata, event_id)
 
     @property
     def replay_source_event_ids(self) -> tuple[str, ...]:
@@ -876,13 +882,15 @@ def _immutable_prompt_map(
 
 def merge_edit_facts(ledger: TurnRecord, recovery: TurnRecord) -> tuple[dict[str, str], dict[str, SourceEventRevision]]:
     """Merge source prompts and revisions by canonical Matrix revision."""
-    prompts = dict(recovery.source_event_prompts or {})
+    prompts = dict(ledger.source_event_prompts or {})
+    prompts.update(recovery.source_event_prompts or {})
     revisions = dict(recovery.source_event_revisions or {})
     for event_id, revision in (ledger.source_event_revisions or {}).items():
         if revision >= revisions.get(event_id, revision):
             revisions[event_id] = revision
-            if ledger.source_event_prompts is not None and event_id in ledger.source_event_prompts:
-                prompts[event_id] = ledger.source_event_prompts[event_id]
+            prompt_event_id = ledger.prompt_source_event_id(event_id)
+            if ledger.source_event_prompts is not None and prompt_event_id in ledger.source_event_prompts:
+                prompts[prompt_event_id] = ledger.source_event_prompts[prompt_event_id]
     return prompts, revisions
 
 

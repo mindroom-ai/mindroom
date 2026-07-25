@@ -69,7 +69,7 @@ It no longer sends messages, runs AI, or writes persistence state.
 `TurnController` and `EditRegenerator` read and write through `TurnStore` instead of owning their own persistence helpers.
 Command handling now records terminal outcomes through `TurnStore` as well.
 
-`TurnRecord` is the single canonical schema for turn identity, outcome, and regeneration facts.
+`TurnRecord` is the single immutable schema for turn identity, outcome, and regeneration facts.
 One codec projects that schema into the versioned handled-turn ledger and recoverable Agno run metadata.
 Interactive-selection discovery aliases remain separate from canonical source identity, so recovery can index every triggering event without making one message look coalesced.
 Coalesced router relays persist each human discovery alias on its physical source metadata so later edits and redactions update the owned prompt.
