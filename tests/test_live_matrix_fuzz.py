@@ -13,6 +13,7 @@ from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
+from unittest.mock import MagicMock
 
 from mindroom.constants import SOURCE_KIND_KEY
 from mindroom.dispatch_source import AUTO_RESUME_MESSAGE, TRUSTED_INTERNAL_RELAY_SOURCE_KIND
@@ -4270,6 +4271,21 @@ def test_live_stack_wires_serialization_fault_into_model_controller(tmp_path: Pa
         assert stack.stress_controller._serialization_lock is not None
     finally:
         stack.temp_dir.cleanup()
+
+
+def test_clear_stress_cache_restarts_runtime_without_clearing_sync_checkpoint() -> None:
+    """An empty SQL cache must not leave a stale warm in-memory cache behind."""
+    stack = object.__new__(ManagedTuwunelStack)
+    postgres = MagicMock()
+    stack.stress_postgres = postgres
+    stack.namespace = "synthetic"
+    restart = MagicMock()
+    stack.restart_mindroom = restart  # type: ignore[method-assign]
+
+    stack.clear_stress_cache()
+
+    postgres.clear_cache_namespace.assert_called_once_with("synthetic")
+    restart.assert_called_once_with()
 
 
 def test_live_stack_manifest_is_atomic_and_recoverable(tmp_path: Path) -> None:

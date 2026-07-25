@@ -1980,11 +1980,12 @@ class ManagedTuwunelStack:
             raise RuntimeError(msg)
 
     def clear_stress_cache(self) -> None:
-        """Create a real cold-cache boundary without replacing certification metadata."""
+        """Create a cold cache boundary while preserving sync and certification state."""
         if self.stress_postgres is None:
             msg = "cannot clear stress cache on a non-stress stack"
             raise RuntimeError(msg)
         self.stress_postgres.clear_cache_namespace(self.namespace)
+        self.restart_mindroom()
 
     def stress_postgres_diagnostics(self) -> Mapping[str, object]:
         """Return exact synthetic PostgreSQL diagnostics for artifact capture."""
