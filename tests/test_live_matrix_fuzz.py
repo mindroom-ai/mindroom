@@ -12,7 +12,8 @@ from collections import defaultdict
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
-from mindroom.dispatch_source import AUTO_RESUME_MESSAGE
+from mindroom.constants import SOURCE_KIND_KEY
+from mindroom.dispatch_source import AUTO_RESUME_MESSAGE, TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 from mindroom.handled_turns import TurnRecord, TurnRecordCodec
 from mindroom.streaming import RESTART_INTERRUPTED_RESPONSE_NOTE
 
@@ -571,19 +572,11 @@ async def test_exact_reply_oracle_allows_response_to_internal_restart_relay() ->
         interrupted["content"]["m.relates_to"]["event_id"] = "$root"
         oracle._ingest_event(interrupted)
         oracle._ingest_event(
-            {
-                "event_id": "$resume-relay",
-                "sender": "@router:example",
-                "type": "m.room.message",
-                "content": {
-                    "body": f"@agent {AUTO_RESUME_MESSAGE}",
-                    "m.relates_to": {
-                        "rel_type": "m.thread",
-                        "event_id": "$root",
-                        "m.in_reply_to": {"event_id": "$interrupted"},
-                    },
-                },
-            },
+            _resume_relay_event(
+                event_id="$resume-relay",
+                thread_root="$root",
+                in_reply_to="$interrupted",
+            ),
         )
         oracle._ingest_event(
             {
@@ -646,6 +639,50 @@ async def test_exact_reply_oracle_flags_reply_to_unrelated_router_traffic() -> N
 
 
 @pytest.mark.asyncio
+async def test_exact_reply_oracle_rejects_router_quote_of_resume_message() -> None:
+    """Quoted resume text without the trusted source kind is ordinary traffic."""
+    client = LiveMatrixClient("http://matrix.invalid", "!room:example")
+    oracle = ExactReplyOracle(
+        client,
+        "@agent:example",
+        internal_relay_senders=("@router:example",),
+    )
+    try:
+        oracle.expect("op:1", "$source")
+        interrupted = _agent_reply_event(
+            "$source",
+            "$interrupted",
+            f"LIVE-FUZZ call=1 {RESTART_INTERRUPTED_RESPONSE_NOTE}",
+        )
+        interrupted["content"]["m.relates_to"]["event_id"] = "$root"
+        oracle._ingest_event(interrupted)
+        oracle._ingest_event(
+            _threaded_reply_event(
+                sender="@router:example",
+                event_id="$quoted-resume",
+                thread_root="$root",
+                in_reply_to="$interrupted",
+                body=f"ordinary quote: {AUTO_RESUME_MESSAGE}",
+            ),
+        )
+        oracle._ingest_event(
+            _threaded_reply_event(
+                sender="@agent:example",
+                event_id="$extra",
+                thread_root="$root",
+                in_reply_to="$quoted-resume",
+                body="LIVE-FUZZ call=2 END call=2",
+            ),
+        )
+
+        assert "$quoted-resume" not in oracle.internal_source_ids
+        with pytest.raises(AssertionError, match="unexpected"):
+            oracle._assert_no_wrong_replies()
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
 async def test_exact_reply_oracle_rejects_resume_relay_after_completed_reply() -> None:
     """A resume-shaped relay is internal only when its target is interrupted."""
     client = LiveMatrixClient("http://matrix.invalid", "!room:example")
@@ -660,12 +697,10 @@ async def test_exact_reply_oracle_rejects_resume_relay_after_completed_reply() -
         completed["content"]["m.relates_to"]["event_id"] = "$root"
         oracle._ingest_event(completed)
         oracle._ingest_event(
-            _threaded_reply_event(
-                sender="@router:example",
+            _resume_relay_event(
                 event_id="$false-relay",
                 thread_root="$root",
                 in_reply_to="$completed",
-                body=f"@agent {AUTO_RESUME_MESSAGE}",
             ),
         )
         oracle._ingest_event(
@@ -964,6 +999,24 @@ def _threaded_reply_event(
             },
         },
     }
+
+
+def _resume_relay_event(
+    *,
+    event_id: str,
+    thread_root: str,
+    in_reply_to: str,
+) -> dict[str, Any]:
+    """Build the exact structured router relay production emits."""
+    event = _threaded_reply_event(
+        sender="@router:example",
+        event_id=event_id,
+        thread_root=thread_root,
+        in_reply_to=in_reply_to,
+        body=f"@agent {AUTO_RESUME_MESSAGE}",
+    )
+    event["content"][SOURCE_KIND_KEY] = TRUSTED_INTERNAL_RELAY_SOURCE_KIND
+    return event
 
 
 @pytest.mark.asyncio
@@ -1944,12 +1997,10 @@ async def test_final_body_audit_accepts_exact_resume_relay_chain() -> None:
             auditor._assert_final_bodies_complete(events, replies)
 
         # The relay R replies to the interrupted response I in the same thread.
-        events["$relay"] = _threaded_reply_event(
-            sender="@router:example",
+        events["$relay"] = _resume_relay_event(
             event_id="$relay",
             thread_root="$root",
             in_reply_to="$reply",
-            body=f"@agent {AUTO_RESUME_MESSAGE}",
         )
         # The completed agent response A replies to the relay R in the thread.
         events["$resumed"] = _threaded_reply_event(
@@ -1973,12 +2024,10 @@ async def test_final_body_audit_rejects_relay_for_another_interruption() -> None
         events: dict[str, Any] = {
             "$reply": _interrupted_reply(),
             # Relay points at some other interrupted response, not $reply.
-            "$relay": _threaded_reply_event(
-                sender="@router:example",
+            "$relay": _resume_relay_event(
                 event_id="$relay",
                 thread_root="$root",
                 in_reply_to="$other-interrupted",
-                body=f"@agent {AUTO_RESUME_MESSAGE}",
             ),
             "$resumed": _threaded_reply_event(
                 sender="@agent:example",
@@ -2003,12 +2052,10 @@ async def test_final_body_audit_rejects_agent_reply_to_other_event() -> None:
     try:
         events: dict[str, Any] = {
             "$reply": _interrupted_reply(),
-            "$relay": _threaded_reply_event(
-                sender="@router:example",
+            "$relay": _resume_relay_event(
                 event_id="$relay",
                 thread_root="$root",
                 in_reply_to="$reply",
-                body=f"@agent {AUTO_RESUME_MESSAGE}",
             ),
             # Agent reply targets a bystander event, not the relay.
             "$resumed": _threaded_reply_event(
@@ -2034,12 +2081,10 @@ async def test_final_body_audit_rejects_resume_in_wrong_thread() -> None:
     try:
         events: dict[str, Any] = {
             "$reply": _interrupted_reply(),
-            "$relay": _threaded_reply_event(
-                sender="@router:example",
+            "$relay": _resume_relay_event(
                 event_id="$relay",
                 thread_root="$root",
                 in_reply_to="$reply",
-                body=f"@agent {AUTO_RESUME_MESSAGE}",
             ),
             # Correct reply target but a different thread root.
             "$resumed": _threaded_reply_event(

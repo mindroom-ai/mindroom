@@ -46,7 +46,8 @@ import nio
 import yaml
 
 import mindroom
-from mindroom.dispatch_source import AUTO_RESUME_MESSAGE
+from mindroom.constants import SOURCE_KIND_KEY
+from mindroom.dispatch_source import AUTO_RESUME_MESSAGE, TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 from mindroom.handled_turns import TurnRecord, TurnRecordCodec
 from mindroom.streaming import INTERRUPTED_RESPONSE_NOTE, RESTART_INTERRUPTED_RESPONSE_NOTE
 
@@ -2777,7 +2778,7 @@ def _auto_resume_relay_target(
     if event.get("sender") not in relay_senders or event.get("type") != "m.room.message":
         return None
     content = event.get("content")
-    if not isinstance(content, dict):
+    if not isinstance(content, dict) or content.get(SOURCE_KIND_KEY) != TRUSTED_INTERNAL_RELAY_SOURCE_KIND:
         return None
     body = content.get("body")
     if not isinstance(body, str) or AUTO_RESUME_MESSAGE not in body:
