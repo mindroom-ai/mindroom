@@ -260,7 +260,10 @@ class CompactionOverrideConfig(BaseModel):
     )
     fallback_model: str | None = Field(
         default=None,
-        description="Optional model config name retried once when the summary model refuses for safeguards",
+        description=(
+            "Optional model config name retried once when the summary model refuses for safeguards; summary input "
+            "is rebuilt under the fallback model's context budget when needed"
+        ),
     )
 
     @model_validator(mode="after")
@@ -313,7 +316,10 @@ class CompactionConfig(BaseModel):
     )
     fallback_model: str | None = Field(
         default=None,
-        description="Optional model config name retried once when the summary model refuses for safeguards",
+        description=(
+            "Optional model config name retried once when the summary model refuses for safeguards; summary input "
+            "is rebuilt under the fallback model's context budget when needed"
+        ),
     )
 
     @model_validator(mode="after")

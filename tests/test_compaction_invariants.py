@@ -1520,6 +1520,7 @@ async def test_retry_helper_switches_to_fallback_once_with_unchanged_prompt_and_
             estimate_kind="o200k_base_tokens",
             fallback_model=fallback,
             fallback_model_name="fallback-model",
+            fallback_input_budget=4_000,
         )
 
     assert generated.summary is recovered_summary
@@ -1592,6 +1593,7 @@ async def test_retry_helper_propagates_fallback_refusal_or_failure(fallback_erro
             estimate_kind="o200k_base_tokens",
             fallback_model=fallback,
             fallback_model_name="fallback-model",
+            fallback_input_budget=4_000,
         )
 
     assert raised.value is fallback_error
@@ -1635,6 +1637,7 @@ async def test_retry_helper_refusal_after_transient_retry_propagates_within_atte
             estimate_kind="o200k_base_tokens",
             fallback_model=fallback,
             fallback_model_name="fallback-model",
+            fallback_input_budget=4_000,
         )
 
     assert raised.value is refusal
@@ -1678,7 +1681,7 @@ async def test_compaction_fallback_serves_later_chunks_state_and_outcome(tmp_pat
             state=read_scope_state(session, _SCOPE),
             history_settings=_HISTORY_SETTINGS,
             available_history_budget=None,
-            summary_input_budget=10_000,
+            summary_input_budget=100_000,
             summary_model=primary,
             summary_model_name="summary-model",
             replay_window_tokens=64_000,
@@ -1686,13 +1689,17 @@ async def test_compaction_fallback_serves_later_chunks_state_and_outcome(tmp_pat
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
             fallback_summary_model=fallback,
             fallback_summary_model_name="fallback-model",
+            fallback_summary_input_budget=10_000,
         )
 
     assert outcome is not None
-    # Chunk 1 refuses on the primary and resends the unchanged prompt and
-    # input to the fallback; chunk 2 goes straight to the fallback.
+    # The primary sees both runs. Its smaller-context fallback rebuilds the
+    # refused chunk with run 1, then keeps its own budget for run 2.
     assert [model_id for model_id, _ in attempts] == ["summary-model", "fallback-model-id", "fallback-model-id"]
-    assert attempts[1][1] == attempts[0][1]
+    assert "RUN1-MARKER" in attempts[0][1]
+    assert "RUN2-MARKER" in attempts[0][1]
+    assert "RUN1-MARKER" in attempts[1][1]
+    assert "RUN2-MARKER" not in attempts[1][1]
     assert "RUN2-MARKER" in attempts[2][1]
     assert outcome.summary_model == "fallback-model"
     persisted = get_agent_session(storage, "session-1")

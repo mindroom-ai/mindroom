@@ -669,6 +669,45 @@ def test_resolve_history_execution_plan_carries_fallback_model_name(tmp_path: Pa
 
     assert execution_plan.compaction_model_name == "summary-model"
     assert execution_plan.compaction_fallback_model_name == "fallback-model"
+    assert execution_plan.compaction_fallback_summary_input_budget_tokens == 10_800
+
+
+def test_resolve_history_execution_plan_uses_each_compaction_model_window_for_summary_budget(
+    tmp_path: Path,
+) -> None:
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={"test_agent": AgentConfig(display_name="Test Agent")},
+            defaults=DefaultsConfig(
+                tools=[],
+                compaction=CompactionConfig(
+                    model="summary-model",
+                    fallback_model="fallback-model",
+                    replay_window_tokens=200_000,
+                ),
+            ),
+            models={
+                "default": ModelConfig(provider="openai", id="default-model", context_window=1_000_000),
+                "summary-model": ModelConfig(provider="openai", id="summary-model-id", context_window=1_000_000),
+                "fallback-model": ModelConfig(provider="openai", id="fallback-model-id", context_window=200_000),
+            },
+        ),
+        runtime_paths,
+    )
+
+    execution_plan = resolve_history_execution_plan(
+        config=config,
+        compaction_config=config.resolve_entity("test_agent").compaction_config,
+        has_authored_compaction_config=True,
+        active_model_name="default",
+        active_context_window=1_000_000,
+        static_prompt_tokens=10_000,
+    )
+
+    assert execution_plan.replay_window_tokens == 200_000
+    assert execution_plan.summary_input_budget_tokens == 881_616
+    assert execution_plan.compaction_fallback_summary_input_budget_tokens == 161_616
 
 
 def test_compaction_fallback_is_distinct_guards_same_alias_and_same_target(tmp_path: Path) -> None:

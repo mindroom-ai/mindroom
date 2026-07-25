@@ -43,6 +43,10 @@ def resolve_history_execution_plan(
         compaction_context_window=compaction_context_window,
         reserve_tokens=compaction_config.reserve_tokens,
     )
+    fallback_summary_input_budget_tokens = _resolve_fallback_summary_input_budget(
+        config=config,
+        compaction_config=compaction_config,
+    )
 
     threshold_tokens = None
     replay_budget_tokens = None
@@ -80,6 +84,7 @@ def resolve_history_execution_plan(
         unavailable_reason=unavailable_reason,
         hard_replay_budget_tokens=hard_replay_budget_tokens,
         compaction_fallback_model_name=compaction_config.fallback_model,
+        compaction_fallback_summary_input_budget_tokens=fallback_summary_input_budget_tokens,
     )
 
 
@@ -219,6 +224,22 @@ def _resolve_summary_input_budget(
     if summary_input_budget_tokens <= 2 * COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS:
         return summary_input_budget_tokens, "summary_input_budget_without_retry_headroom"
     return summary_input_budget_tokens, None
+
+
+def _resolve_fallback_summary_input_budget(
+    *,
+    config: Config,
+    compaction_config: CompactionConfig,
+) -> int | None:
+    """Return a usable summary budget for the optional fallback model."""
+    fallback_model_name = compaction_config.fallback_model
+    if fallback_model_name is None:
+        return None
+    fallback_budget, unavailable_reason = _resolve_summary_input_budget(
+        compaction_context_window=config.get_model_context_window(fallback_model_name),
+        reserve_tokens=compaction_config.reserve_tokens,
+    )
+    return fallback_budget if unavailable_reason is None else None
 
 
 def context_budget_after_reserve(context_window_tokens: int, reserve_tokens: int, spent_tokens: int = 0) -> int:

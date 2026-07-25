@@ -113,7 +113,7 @@ You can tune team-scoped compaction behavior with these settings:
 - Use `replay_window_tokens` to cap persisted replay and required-compaction planning below the model's real context window without lowering the provider request limit.
 - Use `reserve_tokens` to leave hard-budget headroom.
 - Use `model` to choose the summary model.
-- Use `fallback_model` to name a different model config that resends the unchanged summary prompt and input once (only the target model differs) when the summary model refuses for safeguards; after a successful fallback, that model serves the remaining compaction chunks and is reported as the summary model.
+- Use `fallback_model` to name a different model config retried once when the summary model refuses for safeguards; the same input is reused when it fits, otherwise it is rebuilt under the fallback model's own context budget, and after success that model serves the remaining chunks.
 - Set `enabled: false` to disable automatic pre-reply compaction for a team.
 
 When the active team model window is known, replay safety uses the smaller of it and `replay_window_tokens`.
