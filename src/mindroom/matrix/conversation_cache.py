@@ -803,6 +803,8 @@ class MatrixConversationCache(ConversationCacheProtocol):
             thread_ids,
         )
         already_warm = len(thread_ids) - len(untrusted_thread_ids)
+        if is_shutting_down() or not self.runtime.event_cache.durable_writes_available:
+            return False
         if not untrusted_thread_ids:
             self._log_startup_thread_prewarm_complete(
                 room_id,
@@ -827,8 +829,6 @@ class MatrixConversationCache(ConversationCacheProtocol):
                 error=str(exc),
             )
             return False
-        if is_shutting_down() or not self.runtime.event_cache.durable_writes_available:
-            return False
 
         threads_warmed = already_warm + stats.stored_threads
         threads_failed = len(untrusted_thread_ids) - stats.stored_threads
@@ -838,7 +838,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
             threads_warmed=threads_warmed,
             threads_failed=threads_failed,
         )
-        return True
+        return not is_shutting_down() and self.runtime.event_cache.durable_writes_available
 
     async def get_thread_history(
         self,

@@ -1004,6 +1004,43 @@ async def test_startup_thread_prewarm_bulk_refreshes_once_under_room_barrier(tmp
 
 
 @pytest.mark.asyncio
+async def test_startup_thread_prewarm_rechecks_shutdown_before_bulk_scan(tmp_path: Path) -> None:
+    """Startup prewarm should not begin a bulk scan when shutdown starts during the cache probe."""
+    bot = _agent_bot(tmp_path)
+    thread_ids = ["$thread:localhost"]
+    shutting_down = False
+
+    async def probe_untrusted_threads(*_args: object, **_kwargs: object) -> tuple[str, ...]:
+        nonlocal shutting_down
+        shutting_down = True
+        return tuple(thread_ids)
+
+    with (
+        patch.object(
+            bot._conversation_cache,
+            "_startup_thread_prewarm_ids",
+            new=AsyncMock(return_value=thread_ids),
+        ),
+        patch(
+            "mindroom.matrix.conversation_cache.untrusted_cached_thread_ids",
+            new=AsyncMock(side_effect=probe_untrusted_threads),
+        ),
+        patch.object(
+            bot._conversation_cache,
+            "_bulk_refresh_startup_threads",
+            new=AsyncMock(),
+        ) as mock_bulk_refresh,
+    ):
+        completed = await bot._conversation_cache.prewarm_recent_room_threads(
+            "!room:localhost",
+            is_shutting_down=lambda: shutting_down,
+        )
+
+    assert completed is False
+    mock_bulk_refresh.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_startup_thread_prewarm_skips_when_cache_writes_are_unavailable(tmp_path: Path) -> None:
     """Startup prewarm must not scan Matrix when its snapshots cannot be persisted."""
     bot = _agent_bot(tmp_path)
@@ -1334,6 +1371,7 @@ async def test_shutdown_mid_room_prewarm_releases_claim_for_later_joined_bot(tmp
     router_bot = _agent_bot(tmp_path, agent_name="router")
     router_bot.client = make_matrix_client_mock(user_id=router_bot.agent_user.user_id or "@mindroom_router:localhost")
     router_bot.client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=["!room:localhost"])
+    router_bot._conversation_cache.logger = MagicMock()
     agent_bot = _agent_bot(tmp_path)
     agent_bot.client = make_matrix_client_mock(user_id=agent_bot.agent_user.user_id or "@mindroom_code:localhost")
     agent_bot.client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=["!room:localhost"])
@@ -1373,6 +1411,13 @@ async def test_shutdown_mid_room_prewarm_releases_claim_for_later_joined_bot(tmp
     router_bot._conversation_cache._bulk_refresh_startup_threads.assert_awaited_once_with(
         "!room:localhost",
         ("$thread-a:localhost", "$thread-b:localhost"),
+    )
+    router_bot._conversation_cache.logger.info.assert_any_call(
+        "startup_thread_prewarm_complete",
+        room_id="!room:localhost",
+        threads_warmed=2,
+        threads_failed=0,
+        elapsed_ms=ANY,
     )
     agent_bot._conversation_cache._bulk_refresh_startup_threads.assert_awaited_once_with(
         "!room:localhost",
