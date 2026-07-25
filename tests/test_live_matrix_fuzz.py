@@ -4430,6 +4430,30 @@ def test_stress_stack_bounds_model_timeout_beyond_barrier_and_disables_retries(
         stack.temp_dir.cleanup()
 
 
+def test_cache_wave_gate_records_unresolved_warm_scans_without_accepting_duplicates() -> None:
+    """Warm invalidation scans remain metrics until cache self-healing lands."""
+    runner = object.__new__(live_fuzz.LiveMatrixStressRunner)
+    runner.config = live_fuzz.StressConfig(
+        threads=2,
+        stream_seconds=1,
+        edit_interval=0.5,
+        waves=2,
+        history_turns=0,
+    )
+    cold = live_fuzz.StressLogMetrics(full_scans=2)
+    warm = live_fuzz.StressLogMetrics(
+        full_scans=2,
+        cache_hits=2,
+        repair_fetches_by_thread={"thread-0": 1, "thread-1": 1},
+    )
+
+    runner._assert_cache_wave_shape((cold, warm))
+
+    warm.repair_fetches_by_thread["thread-0"] = 2
+    with pytest.raises(AssertionError, match="duplicate repair scans"):
+        runner._assert_cache_wave_shape((cold, warm))
+
+
 def test_resource_sampler_rebinds_after_managed_runtime_restart(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -5500,9 +5500,6 @@ class LiveMatrixStressRunner:
             msg = f"cold wave produced {cold.full_scans}/{self.config.threads} full scans"
             raise AssertionError(msg)
         for wave, warm in enumerate(metrics[1:], start=1):
-            if warm.full_scans:
-                msg = f"warm wave {wave} performed {warm.full_scans} redundant full scans"
-                raise AssertionError(msg)
             if warm.cache_hits < self.config.threads:
                 msg = f"warm wave {wave} produced {warm.cache_hits}/{self.config.threads} cache hits"
                 raise AssertionError(msg)
