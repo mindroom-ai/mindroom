@@ -75,7 +75,9 @@ jobs:
           -k "synthetic or stress or barrier or baseline"
 
   smoke:
-    if: github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.tier == 'smoke')
+    if: >-
+      (github.event_name == 'pull_request' && github.base_ref == 'main') ||
+      (github.event_name == 'workflow_dispatch' && inputs.tier == 'smoke')
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
@@ -83,15 +85,7 @@ jobs:
       - name: Checkout MindRoom
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
-          fetch-depth: 0
           lfs: true
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
-
-      - name: Integrate pull request with current main
-        if: github.event_name == 'pull_request'
-        run: |
-          git fetch --no-tags origin main
-          git -c user.name=mindroom-ci -c user.email=ci@mindroom.local merge --no-edit --no-ff FETCH_HEAD
 
       - name: Checkout mindroom-nio
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
