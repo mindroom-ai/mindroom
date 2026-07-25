@@ -2812,6 +2812,7 @@ async def test_orphan_edit_does_not_create_thread_index_from_replacement_content
         "missing-body",
         "missing-msgtype",
         "missing-media-transport",
+        "malformed-plain-media-url",
         "malformed-encrypted-file",
         "wrong-target",
     ],
@@ -2871,6 +2872,14 @@ async def test_cached_edit_paths_fall_back_from_invalid_newest_event_envelope(
     elif invalidity == "missing-media-transport":
         malformed_content["msgtype"] = "m.image"
         malformed_content["m.new_content"]["msgtype"] = "m.image"
+    elif invalidity == "malformed-plain-media-url":
+        malformed_content["msgtype"] = "m.image"
+        malformed_content["url"] = "not-an-mxc-uri"
+        malformed_content["m.new_content"] = {
+            "body": "Invalid newest",
+            "msgtype": "m.image",
+            "url": "not-an-mxc-uri",
+        }
     elif invalidity == "malformed-encrypted-file":
         malformed_content["msgtype"] = "m.image"
         malformed_content["file"] = {

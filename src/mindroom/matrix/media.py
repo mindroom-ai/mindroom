@@ -114,7 +114,7 @@ def valid_room_message_replacement(event_source: Mapping[str, Any]) -> bool:
         parsed = parse_room_message_event_source({**event_source, "content": layer})
         if not isinstance(parsed, nio.RoomMessage):
             return False
-        if isinstance(parsed, nio.RoomEncryptedMedia) and nio.Api.mxc_to_http(parsed.url) is None:
+        if isinstance(parsed, MATRIX_MEDIA_EVENT_TYPES) and nio.Api.mxc_to_http(parsed.url) is None:
             return False
     return True
 

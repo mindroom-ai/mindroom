@@ -195,6 +195,37 @@ def test_custom_message_with_encrypted_file_is_not_dropped(
     _assert_synthetic_secrets_absent(caplog)
 
 
+@pytest.mark.parametrize("msgtype", ["m.image", "m.audio", "m.video", "m.file"])
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [("mxc://example.test/plain-media", True), ("not-an-mxc-uri", False)],
+)
+def test_plain_media_replacement_requires_mxc_url(msgtype: str, url: str, expected: bool) -> None:
+    """Every plaintext media replacement layer must carry a valid Matrix content URI."""
+    event_source = {
+        "type": "m.room.message",
+        "event_id": "$plain-media-edit:example.test",
+        "sender": "@synthetic:example.test",
+        "origin_server_ts": 3,
+        "content": {
+            "msgtype": msgtype,
+            "body": "* synthetic-media.bin",
+            "url": url,
+            "m.new_content": {
+                "msgtype": msgtype,
+                "body": "synthetic-media.bin",
+                "url": url,
+            },
+            "m.relates_to": {
+                "rel_type": "m.replace",
+                "event_id": "$plain-media:example.test",
+            },
+        },
+    }
+
+    assert media_module.valid_room_message_replacement(event_source) is expected
+
+
 @pytest.mark.asyncio
 async def test_text_message_with_file_extension_uses_cached_response() -> None:
     """A non-media extension field should not bypass cached point reconstruction."""
