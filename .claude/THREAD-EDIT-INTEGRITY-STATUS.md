@@ -4,7 +4,7 @@
 
 - PR: `https://github.com/mindroom-ai/mindroom/pull/1641`.
 - Branch: `fix/thread-edit-integrity`.
-- Exact pushed code head: `a5a26be16c33c7684f14a9b753b40a4445b14d73`.
+- Exact pushed code head: `78aca38cc9e542776c15d50960f7c426f672474d`.
 - Production source is `+966/-766`, net `+200` against exact `origin/main` `5f062224a1f490a91a72c555bf2fa0ca59c096b3`.
 - Git author and committer must resolve to `Bas Nijholt <bas@nijho.lt>` before every commit.
 - Never amend, force-push, merge, or open the PR as draft.
@@ -109,3 +109,18 @@
 - Ruff, formatting, `ty`, Tach dependencies/interfaces, and diff checks pass.
 - Production remains at the hard source ceiling: `+966/-766`, net `+200`.
 - The source correction is pushed; commit this handoff, refresh external ledgers, then start exact-head gates.
+
+## Exact-381 GitHub pytest correction
+
+- Exact GitHub pytest job `89657791742` failed `19` intended-valid regeneration tests after `11686` passed and `14` skipped.
+- Local reproduction confirms one shared fixture defect: valid durable turns omitted requester ownership, and coalesced turns omitted per-source ownership metadata.
+- Production must not fall back for a coalesced turn with no per-source ownership.
+- Commit `78aca38cc9e542776c15d50960f7c426f672474d` makes wholly absent coalesced ownership fail closed while retaining solo-turn requester fallback.
+- Shared test fixtures now persist requester ownership, production-shaped coalesced source metadata, and tagged prompts.
+- The full two owning CI files pass all `55` tests, including every exact failed test.
+- All `130` edit-regenerator, handled-turn, and turn-store tests pass.
+- Ruff, formatting, `ty`, Tach dependency/interface checks, and diff checks pass.
+- Production source remains `+966/-766`, net `+200`.
+- The exact-`381016c06` native review and all CI become stale after the correction is committed.
+- The correction is pushed; commit this handoff, refresh exact ledgers and PR body, then launch another fresh native Codex review and CI.
+- Heavy gates remain closed behind PR #1646.
