@@ -559,7 +559,15 @@ By default it writes to `<storage>/thread_exports`.
 A thread file is only rewritten when its content changed, so `exported_at` reflects the last content-changing export.
 Each thread document includes the latest MindRoom thread summary as `thread.summary` when one exists.
 Each room directory also gets an `index.json` mapping every thread file to its message count, participants, latest summary, and last activity, sorted by most recent activity.
-Complete passes remove exported room and thread files that are no longer present or authorized; a `--room` pass only reconciles the selected room.
+Complete passes normally remove exported room and thread files that are no longer present or authorized; a `--room` pass only reconciles the selected room.
+The zero-room guard skips only final directory-wide reconciliation of rooms absent from the pass, while definitive per-room category or membership revocations still delete their exports.
+A warning is logged when that guard preserves existing target state because the pass has no positive room evidence.
+A complete room enumeration that returns zero threads preserves existing YAML exports for that room and logs a warning because an anomalous empty response cannot be distinguished from deletion of the final thread.
+After either warning, verify the source state and remove the preserved export manually only when the deletion is confirmed; workspace git history remains the recovery path for mistaken cleanup.
+Enabled targets whose resolved output directories are equal or nested are all skipped before Matrix work.
+MindRoom automatically adds a `.mindroom-thread-exports` ownership marker to empty roots and recognizable existing export trees.
+Destructive cleanup requires that marker and removes only recognizable room directories and thread YAML files, leaving unrelated entries untouched.
+Output paths with a terminal `.`, `..`, or empty leaf are rejected, as are symlinked final output and room directories.
 With `--prefer-cache` thread bodies are served from the durable event cache and only fetched from the homeserver on miss or invalidation; use it alongside a running MindRoom that keeps the cache fresh.
 
 <!-- CODE:START -->
@@ -614,7 +622,7 @@ With `--prefer-cache` thread bodies are served from the durable event cache and 
 <!-- OUTPUT:END -->
 
 ```bash
-mindroom threads export --storage-path mindroom_data --output /tmp/mindroom-thread-exports
+mindroom threads export --storage-path mindroom_data --output "$HOME/mindroom-thread-exports"
 mindroom threads export --storage-path mindroom_data --room lobby
 mindroom threads export --storage-path mindroom_data --watch --interval 300
 mindroom threads export --storage-path mindroom_data --prefer-cache
