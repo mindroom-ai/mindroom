@@ -14,7 +14,7 @@ PendingApprovalStatus = Literal["pending", "approved", "denied", "expired"]
 _APPROVAL_STATUSES = frozenset({"approved", "denied", "expired", "pending"})
 
 
-def _approval_status_from_content(content: dict[str, Any]) -> str | None:
+def _approval_status(content: dict[str, Any]) -> str | None:
     """Return one valid approval-card status."""
     status = content.get("status")
     return status if isinstance(status, str) and status in _APPROVAL_STATUSES else None
@@ -23,9 +23,7 @@ def _approval_status_from_content(content: dict[str, Any]) -> str | None:
 def valid_approval_replacement(event: dict[str, Any]) -> bool:
     """Return whether one replacement carries a valid approval status."""
     content = event.get("content")
-    return (
-        isinstance(content, dict) and _approval_status_from_content(visible_content_from_content(content)) is not None
-    )
+    return isinstance(content, dict) and _approval_status(visible_content_from_content(content)) is not None
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,7 +76,7 @@ class PendingApproval:
         if approval_id is None or tool_name is None or approver_user_id is None:
             msg = "Approval card event is missing required approval fields."
             raise ValueError(msg)
-        status = _approval_status_from_content(content)
+        status = _approval_status(content)
         if status is None:
             msg = "Approval card event has an invalid status."
             raise ValueError(msg)
@@ -126,7 +124,7 @@ class PendingApproval:
             return self.initial_status
         content = latest_edit.get("content")
         if isinstance(content, dict):
-            status = _approval_status_from_content(visible_content_from_content(cast("dict[str, object]", content)))
+            status = _approval_status(visible_content_from_content(cast("dict[str, object]", content)))
             if status is not None:
                 return cast("PendingApprovalStatus", status)
         return self.initial_status
