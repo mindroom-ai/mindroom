@@ -1589,6 +1589,7 @@ class KnowledgeManager:
             if persisted_state is not None and persisted_state.status == _INDEXING_STATUS_COMPLETE
             else None
         )
+        live_collection, cleanup_is_safe = await asyncio.to_thread(self._published_collection_for_cleanup)
 
         if checkpoint is not None and checkpoint.collection == published_collection:
             # The candidate already became the published index and the process
@@ -1644,17 +1645,41 @@ class KnowledgeManager:
             failed=dict(checkpoint.failed),
             resumed=resumed,
         )
-        preserved = {checkpoint.collection}
-        if published_collection is not None:
-            preserved.add(published_collection)
         # Reconcile candidates abandoned by earlier crashed refreshes now, so
         # storage stays bounded even when a build never reaches publication.
-        await asyncio.to_thread(
-            self._cleanup_superseded_collections,
-            preserved=frozenset(preserved),
-            candidates_only=True,
-        )
+        if cleanup_is_safe:
+            preserved = {checkpoint.collection}
+            for collection in (published_collection, live_collection):
+                if collection is not None:
+                    preserved.add(collection)
+            await asyncio.to_thread(
+                self._cleanup_superseded_collections,
+                preserved=frozenset(preserved),
+                candidates_only=True,
+            )
+        else:
+            logger.warning(
+                "Skipping knowledge candidate cleanup because published metadata is unreadable",
+                base_id=self.base_id,
+            )
         return run
+
+    def _published_collection_for_cleanup(self) -> tuple[str | None, bool]:
+        """Return the live collection to protect, and whether cleanup may run at all.
+
+        A published collection is itself candidate-named, so the only proof of
+        which candidate-prefixed collections are superseded is the published
+        metadata. The strict state parser rejects metadata that is merely
+        incomplete, which would silently drop that proof, so the collection
+        name is read straight from the payload. If the file exists but yields
+        no payload at all, nothing can be proven and cleanup is skipped rather
+        than risking the last good index.
+        """
+        payload = load_index_metadata_payload(self._indexing_settings_path)
+        if payload is None:
+            return None, not self._indexing_settings_path.exists()
+        collection = payload.get("collection")
+        return (collection if isinstance(collection, str) and collection else None), True
 
     async def _delete_candidate_collection(self, collection_name: str) -> None:
         try:

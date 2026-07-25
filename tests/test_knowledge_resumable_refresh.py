@@ -1476,3 +1476,58 @@ async def test_compaction_decision_does_not_reread_the_journal(
 
     # Ten batches, none of which may parse the journal just to decide.
     assert reads == 0, f"journal was re-read {reads} times while deciding whether to compact"
+
+
+@pytest.mark.asyncio
+async def test_unreadable_published_metadata_never_costs_the_live_collection(
+    tmp_path: Path,
+) -> None:
+    """Candidate GC must not delete the published index when metadata is unreadable.
+
+    A published collection is itself candidate-named, so proving which
+    candidate-prefixed collections are superseded depends entirely on readable
+    published metadata. Without it, reclaiming storage would delete the last
+    good index.
+    """
+    docs_path = tmp_path / "docs"
+    _write_corpus(docs_path, 2)
+    config = _config(tmp_path, docs_path)
+    runtime_paths = runtime_paths_for(config)
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    published_collection = _published_state(config, runtime_paths).collection
+    assert "_candidate_" in published_collection
+
+    key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
+    published_index_metadata_path(key).write_text("{ truncated", encoding="utf-8")
+
+    await _manager(config)._open_candidate_run()
+
+    assert published_collection in _FakeVectorDb.store
+
+
+@pytest.mark.asyncio
+async def test_incomplete_published_metadata_still_preserves_its_collection(
+    tmp_path: Path,
+) -> None:
+    """A parseable-but-incomplete metadata file still names the live collection."""
+    docs_path = tmp_path / "docs"
+    _write_corpus(docs_path, 2)
+    config = _config(tmp_path, docs_path)
+    runtime_paths = runtime_paths_for(config)
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    state = _published_state(config, runtime_paths)
+    assert state is not None
+    published_collection = state.collection
+
+    # Drop the fields the strict parser demands, keeping the collection name.
+    key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
+    write_index_metadata_payload(
+        published_index_metadata_path(key),
+        settings=state.settings.to_metadata(),
+        status="complete",
+        collection=published_collection,
+    )
+
+    await _manager(config)._open_candidate_run()
+
+    assert published_collection in _FakeVectorDb.store
