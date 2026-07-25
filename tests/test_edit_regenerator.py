@@ -1160,6 +1160,28 @@ async def test_sync_restart_cancellation_retries_without_committing_interrupted_
 
 
 @pytest.mark.asyncio
+async def test_restart_replays_durably_committed_interrupted_edit(tmp_path: Path) -> None:
+    """Matrix replay must recheck a committed edit whose generation was interrupted."""
+    event, event_info = _edit_event(new_body="latest after process restart")
+    revision = (event.server_timestamp, event.event_id)
+    record = replace(
+        _turn_record(),
+        source_event_prompts={ORIGINAL_EVENT_ID: "latest after process restart"},
+        source_event_revisions={ORIGINAL_EVENT_ID: revision},
+    )
+    harness = _harness(tmp_path, turn_record=record)
+
+    await _handle_edit(harness, event, event_info)
+
+    harness.generate_response.assert_awaited_once()
+    request = harness.generate_response.await_args.args[0]
+    assert request.prompt == "latest after process restart"
+    assert request.sync_restart_retry_source_event_id == ORIGINAL_EVENT_ID
+    recorded = harness.turn_store.record_turn.call_args.args[0]
+    assert recorded.source_event_revisions == {ORIGINAL_EVENT_ID: revision}
+
+
+@pytest.mark.asyncio
 async def test_swallowed_sync_restart_keeps_mailbox_snapshot_for_retry(tmp_path: Path) -> None:
     """A runner-returned interruption marker must not consume the queued edit."""
     harness = _harness(tmp_path, turn_record=_turn_record())

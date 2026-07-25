@@ -170,7 +170,7 @@ class EditRegenerator:
             return
         revision = (event.server_timestamp, event.event_id)
         committed = (turn_record.source_event_revisions or {}).get(original_event_id)
-        if committed is not None and revision <= committed:
+        if committed is not None and revision < committed:
             return
 
         edited_content, _ = await extract_visible_edit_body(
@@ -241,10 +241,11 @@ class EditRegenerator:
         applied: dict[str, SourceEventRevision] = {}
         eligible: dict[str, _Edit] = {}
         active: dict[str, _Edit] = {}
+        retrying = True
         for source_event_id, edit in mailbox.pending.items():
             committed = revisions.get(source_event_id)
             if source_event_id in record.redacted_source_event_ids or (
-                committed is not None and edit.revision <= committed
+                committed is not None and edit.revision < committed
             ):
                 applied[source_event_id] = edit.revision
                 continue
@@ -253,6 +254,7 @@ class EditRegenerator:
             eligible[source_event_id] = edit
             if not edit.suppressed:
                 active[source_event_id] = edit
+                retrying &= edit.revision == committed
         prompt_map = dict(record.source_event_prompts or {})
         prompt_map.update(
             {record.prompt_source_event_id(source_event_id): edit.body for source_event_id, edit in eligible.items()},
@@ -264,6 +266,7 @@ class EditRegenerator:
             return None, None, applied
 
         driving_edit = max(active.values(), key=lambda edit: edit.revision)
+        retry_source_event_id = record.prompt_source_event_id(driving_edit.original_event_id) if retrying else None
         if record.is_coalesced:
             prompt_parts = [prompt_map.get(source_event_id) for source_event_id in record.replay_source_event_ids]
             if record.source_event_prompts is None or any(part is None for part in prompt_parts):
@@ -323,6 +326,7 @@ class EditRegenerator:
                     ),
                 ),
                 on_sync_restart_cancelled=retry_after_sync_restart,
+                sync_restart_retry_source_event_id=retry_source_event_id,
                 on_deferred_outcome_handled=lambda response_event_id: (
                     self.deps.turn_store.record_turn(replace(record, response_event_id=response_event_id))
                     if applied

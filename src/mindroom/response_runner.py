@@ -1113,6 +1113,12 @@ class ResponseRunner:
     ) -> ResponseRequest | None:
         """Expose a locked turn before running its potentially slow preparation."""
         placeholder_state = early_placeholder_state or _EarlyPlaceholderState()
+        if not self._sync_restart_retry_is_current(
+            request,
+            history_scope=history_scope,
+            execution_identity=execution_identity,
+        ):
+            return None
         if request.on_lifecycle_lock_acquired is not None:
             request.on_lifecycle_lock_acquired()
         request = self._request_with_locked_target(request, resolved_target)
@@ -1136,12 +1142,6 @@ class ResponseRunner:
                         ),
                     ),
                 )
-            return None
-        if not self._sync_restart_retry_is_current(
-            request,
-            history_scope=history_scope,
-            execution_identity=execution_identity,
-        ):
             return None
         placeholder_event_id = None
         if (
