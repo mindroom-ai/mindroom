@@ -9,6 +9,7 @@ import shutil
 import signal
 import sys
 from collections import defaultdict
+from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
@@ -19,7 +20,6 @@ from mindroom.streaming import RESTART_INTERRUPTED_RESPONSE_NOTE
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection
-    from pathlib import Path
 
 import pytest
 
@@ -36,10 +36,12 @@ from scripts.testing.fuzz_live_matrix import (
     LiveOperation,
     LiveOperationKind,
     ManagedTuwunelStack,
+    NioOverlay,
     _body_call_id,
     _ModelHandler,
     _parse_markers,
     _persist_failure_bundle,
+    _prepare_nio_overlay,
     _run_command,
     _sanitized_oracle_snapshot,
     _SentPayload,
@@ -3022,6 +3024,58 @@ def test_successful_run_discards_its_failure_bundle(tmp_path: Path) -> None:
     bundle.discard()
 
 
+def test_nio_overlay_preflight_rejects_missing_checkout() -> None:
+    """A gate-quality run cannot reach stack creation without an explicit overlay."""
+    with pytest.raises(RuntimeError, match="requires --nio-overlay"):
+        _prepare_nio_overlay(None)
+
+
+def test_stack_rejects_missing_nio_overlay_before_live_setup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Programmatic callers also fail before a lease, Docker, or Matrix traffic."""
+    stack = ManagedTuwunelStack(state_root=tmp_path / "state")
+    acquired: list[bool] = []
+    monkeypatch.setattr(stack, "_acquire_host_lease", lambda: acquired.append(True))
+    try:
+        with pytest.raises(RuntimeError, match="requires an explicit clean exact"):
+            stack.start()
+    finally:
+        stack.temp_dir.cleanup()
+
+    assert acquired == []
+
+
+@pytest.mark.parametrize("dirty", [False, True])
+def test_nio_overlay_preflight_requires_clean_exact_git(
+    dirty: bool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Overlay preflight captures one exact clean revision before any live work."""
+    overlay = tmp_path / "mindroom-nio"
+    module = overlay / "src" / "nio" / "__init__.py"
+    module.parent.mkdir(parents=True)
+    module.write_text("", encoding="utf-8")
+    monkeypatch.setattr(live_fuzz, "_git_root_for_path", lambda _path: overlay)
+    monkeypatch.setattr(
+        live_fuzz,
+        "_git_state_for_file",
+        lambda *_args, **_kwargs: ("nio-head", dirty),
+    )
+
+    if dirty:
+        with pytest.raises(RuntimeError, match="clean exact mindroom-nio overlay"):
+            _prepare_nio_overlay(overlay)
+        return
+
+    assert _prepare_nio_overlay(overlay) == NioOverlay(
+        path=overlay.resolve(),
+        revision="nio-head",
+    )
+
+
 def test_child_provenance_uses_loaded_overlay(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -3057,12 +3111,49 @@ def test_child_provenance_uses_loaded_overlay(
 
     provenance = _validated_child_provenance(
         attestation,
-        overlay=str(tmp_path / "overlay"),
+        overlay=NioOverlay(path=tmp_path / "overlay", revision="nio-head"),
     )
 
     assert provenance["nio_module_path"] == str((tmp_path / "overlay" / "nio" / "__init__.py").resolve())
     assert provenance["nio_revision"] == "nio-head"
     assert provenance["nio_expected_revision"] == "nio-head"
+
+
+def test_child_provenance_rejects_revision_changed_after_preflight(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A checkout moved after preflight cannot produce gate-quality evidence."""
+    project_root = tmp_path / "mindroom"
+    overlay = tmp_path / "overlay"
+    attestation = tmp_path / "runtime-attestation.json"
+    attestation.write_text(
+        json.dumps(
+            {
+                "mindroom_module_path": str(project_root / "src" / "mindroom" / "__init__.py"),
+                "nio_module_path": str(overlay / "src" / "nio" / "__init__.py"),
+            },
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(live_fuzz, "PROJECT_ROOT", project_root)
+    monkeypatch.setattr(
+        live_fuzz,
+        "_git_root_for_path",
+        lambda path: overlay if "overlay" in str(path) else project_root,
+    )
+    monkeypatch.setattr(
+        live_fuzz,
+        "_git_state_for_file",
+        lambda path, **_kwargs: ("actual-nio-head", False) if "overlay" in str(path) else ("mindroom-head", False),
+    )
+    monkeypatch.setattr(live_fuzz, "_git_revision", lambda _path: "mindroom-head")
+
+    with pytest.raises(RuntimeError, match="expected pinned-nio-head, loaded actual-nio-head"):
+        _validated_child_provenance(
+            attestation,
+            overlay=NioOverlay(path=overlay, revision="pinned-nio-head"),
+        )
 
 
 @pytest.mark.parametrize(
@@ -3111,7 +3202,10 @@ def test_child_provenance_rejects_dirty_stack_inputs(
     monkeypatch.setattr("scripts.testing.fuzz_live_matrix._git_state_for_file", git_state)
 
     with pytest.raises(RuntimeError, match="clean loaded MindRoom checkout"):
-        _validated_child_provenance(attestation, overlay=None)
+        _validated_child_provenance(
+            attestation,
+            overlay=NioOverlay(path=tmp_path / "nio", revision="nio-head"),
+        )
 
 
 def test_child_provenance_rejects_nested_mindroom_checkout(
@@ -3135,7 +3229,10 @@ def test_child_provenance_rejects_nested_mindroom_checkout(
     monkeypatch.setattr("scripts.testing.fuzz_live_matrix._git_root_for_path", lambda _path: nested_root)
 
     with pytest.raises(RuntimeError, match="nested or different Git checkout"):
-        _validated_child_provenance(attestation, overlay=None)
+        _validated_child_provenance(
+            attestation,
+            overlay=NioOverlay(path=tmp_path / "nio", revision="nio-head"),
+        )
 
 
 def test_child_provenance_rejects_same_head_from_other_mindroom_checkout(
@@ -3158,14 +3255,17 @@ def test_child_provenance_rejects_same_head_from_other_mindroom_checkout(
     )
 
     with pytest.raises(RuntimeError, match="outside the live runner checkout"):
-        _validated_child_provenance(attestation, overlay=None)
+        _validated_child_provenance(
+            attestation,
+            overlay=NioOverlay(path=tmp_path / "nio", revision="nio-head"),
+        )
 
 
-def test_child_provenance_rejects_same_head_from_other_checkout(
+def test_child_provenance_rejects_pythonpath_checkout_override(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Commit equality cannot substitute for the requested editable checkout."""
+    """PYTHONPATH cannot substitute another checkout even at the same commit."""
     project_root = tmp_path / "mindroom"
     monkeypatch.setattr(live_fuzz, "PROJECT_ROOT", project_root)
     overlay = tmp_path / "requested-overlay"
@@ -3192,9 +3292,13 @@ def test_child_provenance_rejects_same_head_from_other_checkout(
         "scripts.testing.fuzz_live_matrix._git_root_for_path",
         lambda path: project_root if "mindroom" in str(path) else other,
     )
+    monkeypatch.setenv("PYTHONPATH", str(other / "src"))
 
     with pytest.raises(RuntimeError, match="outside requested editable overlay"):
-        _validated_child_provenance(attestation, overlay=str(overlay))
+        _validated_child_provenance(
+            attestation,
+            overlay=NioOverlay(path=overlay, revision="same-head"),
+        )
 
 
 def test_start_mindroom_uses_editable_overlay_and_persists_each_pid(
@@ -3202,7 +3306,10 @@ def test_start_mindroom_uses_editable_overlay_and_persists_each_pid(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The attested nio path must remain inside its requested Git checkout."""
-    stack = ManagedTuwunelStack(state_root=tmp_path / "state")
+    stack = ManagedTuwunelStack(
+        state_root=tmp_path / "state",
+        nio_overlay=NioOverlay(path=Path("/persistent/mindroom-nio"), revision="nio-head"),
+    )
     commands: list[list[str]] = []
     manifests: list[dict[str, object]] = []
 
@@ -3228,7 +3335,6 @@ def test_start_mindroom_uses_editable_overlay_and_persists_each_pid(
         stack._wait_for_runtime_attestation = lambda: None  # type: ignore[method-assign]
         stack._wait_for_url = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
         stack._write_manifest = lambda **kwargs: manifests.append(kwargs)  # type: ignore[method-assign]
-        monkeypatch.setenv("MINDROOM_LIVE_FUZZ_UV_WITH", "/persistent/mindroom-nio")
         monkeypatch.setattr("scripts.testing.fuzz_live_matrix.subprocess.Popen", popen)
 
         stack._start_mindroom()
@@ -3413,6 +3519,8 @@ def test_pass_receipt_survives_bundle_discard(tmp_path: Path) -> None:
         "matrix_server_implementation": "tuwunel",
         "matrix_server_name": "m-fuzz.localhost",
         "mindroom_revision": "abc",
+        "nio_dirty": False,
+        "nio_expected_revision": "def",
         "nio_revision": "def",
         "tuwunel_container": "fuzz-tuwunel",
         "tuwunel_image_id": "sha256:1234",
@@ -3430,6 +3538,37 @@ def test_pass_receipt_survives_bundle_discard(tmp_path: Path) -> None:
     assert len(payload["scenario_sha256"]) == 64
 
 
+@pytest.mark.parametrize(
+    ("nio_fields", "message"),
+    [
+        ({"nio_revision": "actual", "nio_expected_revision": ""}, "omitted the expected"),
+        ({"nio_revision": "actual", "nio_expected_revision": "expected"}, "used mindroom-nio actual"),
+        (
+            {"nio_revision": "actual", "nio_expected_revision": "actual", "nio_dirty": True},
+            "did not prove a clean",
+        ),
+    ],
+)
+def test_pass_receipt_rejects_unproven_nio(
+    nio_fields: dict[str, object],
+    message: str,
+    tmp_path: Path,
+) -> None:
+    """Receipt creation independently enforces exact clean nio provenance."""
+    bundle = FailureBundle.create(
+        tmp_path / "artifacts",
+        "run-rejected",
+        scenario=_bundle_scenario(),
+        provenance={},
+    )
+    provenance = {"nio_dirty": False, **nio_fields}
+
+    with pytest.raises(RuntimeError, match=message):
+        bundle.retain_pass_receipt({"status": "PASS"}, provenance)
+
+    assert not (tmp_path / "artifacts" / "receipts").exists()
+
+
 def test_runtime_provenance_identifies_tuwunel_server(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -3439,6 +3578,7 @@ def test_runtime_provenance_identifies_tuwunel_server(
     stack = ManagedTuwunelStack(
         state_root=tmp_path / "state",
         provenance_sink=lambda provenance: sink.append(dict(provenance)),
+        nio_overlay=NioOverlay(path=tmp_path / "nio", revision="nio-head"),
     )
     try:
         stack.attestation_path.write_text("{}", encoding="utf-8")
@@ -3652,7 +3792,10 @@ def test_create_failure_retains_exact_cleanup_obligation(
     remove_fails: bool,
 ) -> None:
     """A partially successful create stays recoverable until exact removal."""
-    stack = ManagedTuwunelStack(state_root=tmp_path / "state")
+    stack = ManagedTuwunelStack(
+        state_root=tmp_path / "state",
+        nio_overlay=NioOverlay(path=tmp_path / "nio", revision="nio-head"),
+    )
     commands: list[tuple[str, ...]] = []
 
     def run_command(*command: str, **_kwargs: object) -> str:
@@ -5038,6 +5181,7 @@ def test_main_preserves_base_exception_evidence_and_closes_stack(
     args = SimpleNamespace(
         artifact_root=tmp_path / "artifacts",
         failure_log=None,
+        nio_overlay=NioOverlay(path=tmp_path / "nio", revision="nio-head"),
         pending_grace=0.0,
         reply_timeout=1.0,
         save_trace=None,
@@ -5094,6 +5238,7 @@ def test_main_bad_failure_log_preserves_primary_and_closes_stack(
     args = SimpleNamespace(
         artifact_root=tmp_path / "artifacts",
         failure_log=failure_log,
+        nio_overlay=NioOverlay(path=tmp_path / "nio", revision="nio-head"),
         pending_grace=0.0,
         reply_timeout=1.0,
         save_trace=None,
@@ -5139,6 +5284,7 @@ def test_main_bundle_capture_failure_preserves_primary_and_closes_stack(
     args = SimpleNamespace(
         artifact_root=tmp_path / "artifacts",
         failure_log=None,
+        nio_overlay=NioOverlay(path=tmp_path / "nio", revision="nio-head"),
         pending_grace=0.0,
         reply_timeout=1.0,
         save_trace=None,
@@ -5189,6 +5335,7 @@ def test_main_stop_interrupt_preserves_primary_and_closes_stack(
     args = SimpleNamespace(
         artifact_root=tmp_path / "artifacts",
         failure_log=None,
+        nio_overlay=NioOverlay(path=tmp_path / "nio", revision="nio-head"),
         pending_grace=0.0,
         reply_timeout=1.0,
         save_trace=None,
@@ -5256,6 +5403,7 @@ def test_main_cleanup_failure_retains_pre_teardown_evidence(
     args = SimpleNamespace(
         artifact_root=artifact_root,
         failure_log=None,
+        nio_overlay=NioOverlay(path=tmp_path / "nio", revision="nio-head"),
         pending_grace=0.0,
         reply_timeout=1.0,
         save_trace=None,
@@ -5271,7 +5419,12 @@ def test_main_cleanup_failure_retains_pre_teardown_evidence(
 
     class CleanupFailingStack:
         def __init__(self, **_kwargs: object) -> None:
-            self.runtime_provenance = {"mindroom_revision": "abc", "nio_revision": "def"}
+            self.runtime_provenance = {
+                "mindroom_revision": "abc",
+                "nio_dirty": False,
+                "nio_expected_revision": "nio-head",
+                "nio_revision": "nio-head",
+            }
             ledger_path.parent.mkdir(parents=True)
             _write_ledger(ledger_path, {})
             log_path.write_text("complete MindRoom log\n", encoding="utf-8")
@@ -5360,6 +5513,7 @@ def test_main_missing_runtime_provenance_captures_bundle_before_teardown(
     args = SimpleNamespace(
         artifact_root=artifact_root,
         failure_log=None,
+        nio_overlay=NioOverlay(path=tmp_path / "nio", revision="nio-head"),
         pending_grace=0.0,
         reply_timeout=1.0,
         save_trace=None,

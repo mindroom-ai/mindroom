@@ -6,7 +6,8 @@ isolated Tuwunel, a deterministic OpenAI-compatible stub, and the current
 worktree's MindRoom process. Every run uses disposable Matrix accounts and
 removes the isolated stack afterward.
 
-Run with ``uv run python scripts/testing/fuzz_live_matrix.py --seed 42``.
+Run with ``uv run python scripts/testing/fuzz_live_matrix.py --nio-overlay
+/path/to/clean/mindroom-nio --seed 42``.
 Use ``--save-trace`` and ``--trace`` to replay the same logical event history
 on a new disposable server.
 """
@@ -1310,6 +1311,14 @@ class StreamProfile:
     first_token_delay: float = 0.0
 
 
+@dataclass(frozen=True, slots=True)
+class NioOverlay:
+    """Clean exact mindroom-nio checkout required by one live gate."""
+
+    path: Path
+    revision: str
+
+
 class ManagedTuwunelStack:
     """Disposable Tuwunel plus the current worktree's MindRoom runtime."""
 
@@ -1321,6 +1330,7 @@ class ManagedTuwunelStack:
         provenance_sink: Callable[[Mapping[str, object]], None] | None = None,
         artifact_directory: Path | None = None,
         state_root: Path = DEFAULT_LIVE_FUZZ_STATE_ROOT,
+        nio_overlay: NioOverlay | None = None,
     ) -> None:
         token = secrets.token_hex(4)
         self._stream_profile = stream_profile or StreamProfile()
@@ -1351,8 +1361,16 @@ class ManagedTuwunelStack:
         self._log_handle: TextIOWrapper | None = None
         self._env: dict[str, str] = {}
         self._provenance_sink = provenance_sink
+        self.nio_overlay = nio_overlay
         self._host_lease: TextIOWrapper | None = None
         self._mindroom_start_log_offset = 0
+
+    def _required_nio_overlay(self) -> NioOverlay:
+        """Return the preflighted overlay or reject live stack creation."""
+        if self.nio_overlay is None:
+            msg = "live fuzz requires an explicit clean exact mindroom-nio overlay"
+            raise RuntimeError(msg)
+        return self.nio_overlay
 
     def _acquire_host_lease(self) -> None:
         """Serialize live stacks across worktrees and retain crash ownership."""
@@ -1509,6 +1527,7 @@ class ManagedTuwunelStack:
 
     def start(self) -> None:
         """Create every live dependency and wait for the managed room."""
+        self._required_nio_overlay()
         self._acquire_host_lease()
         self._recover_abandoned_runs()
         self._write_manifest(
@@ -1773,17 +1792,15 @@ class ManagedTuwunelStack:
 
     def _start_mindroom(self) -> None:
         assert self._log_handle is not None
-        # MINDROOM_LIVE_FUZZ_UV_WITH overlays one dependency (for example a
-        # pinned mindroom-nio checkout) without touching pyproject or uv.lock.
-        overlay = os.environ.get("MINDROOM_LIVE_FUZZ_UV_WITH")
-        overlay_args = ("--with-editable", overlay) if overlay else ()
+        overlay = self._required_nio_overlay()
         self.attestation_path.unlink(missing_ok=True)
         self._mindroom_start_log_offset = self.log_path.stat().st_size if self.log_path.exists() else 0
         self._mindroom_process = subprocess.Popen(
             [
                 "uv",
                 "run",
-                *overlay_args,
+                "--with-editable",
+                str(overlay.path),
                 "python",
                 str(Path(__file__).resolve()),
                 "__mindroom_runtime_child__",
@@ -1836,13 +1853,14 @@ class ManagedTuwunelStack:
 
     def _wait_for_runtime_attestation(self) -> None:
         """Capture and validate the exact modules loaded by the spawned child."""
+        overlay = self._required_nio_overlay()
         deadline = time.monotonic() + 20
         while time.monotonic() < deadline:
             if self.attestation_path.exists():
                 self.runtime_provenance = {
                     **_validated_child_provenance(
                         self.attestation_path,
-                        overlay=os.environ.get("MINDROOM_LIVE_FUZZ_UV_WITH"),
+                        overlay=overlay,
                     ),
                     **self._tuwunel_provenance(),
                 }
@@ -4516,6 +4534,12 @@ def _non_negative_int(value: str) -> int:
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--nio-overlay",
+        type=_nio_overlay_arg,
+        required=True,
+        help="clean exact mindroom-nio Git checkout loaded by the live MindRoom child",
+    )
     parser.add_argument("--profile", choices=("fuzz", "saturation", "chaos"), default="fuzz")
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--steps", type=_positive_int, default=200)
@@ -4726,6 +4750,42 @@ def _git_revision(path: Path) -> str | None:
     return result.stdout.strip() if result.returncode == 0 else None
 
 
+def _prepare_nio_overlay(path: Path | None) -> NioOverlay:
+    """Fail closed before stack startup unless nio has a clean exact checkout."""
+    if path is None:
+        msg = "live fuzz requires --nio-overlay pointing to a clean exact mindroom-nio Git checkout"
+        raise RuntimeError(msg)
+    root = path.resolve()
+    module_path = root / "src" / "nio" / "__init__.py"
+    if not module_path.is_file():
+        msg = f"mindroom-nio overlay does not contain src/nio/__init__.py: {root}"
+        raise RuntimeError(msg)
+    _require_git_root(module_path, root, "mindroom-nio")
+    revision, dirty = _git_state_for_file(
+        module_path,
+        scopes=(
+            root / "src",
+            root / "pyproject.toml",
+            root / "uv.lock",
+        ),
+    )
+    if revision is None:
+        msg = f"could not verify exact mindroom-nio overlay revision: {root}"
+        raise RuntimeError(msg)
+    if dirty:
+        msg = f"live fuzz requires a clean exact mindroom-nio overlay: {root}"
+        raise RuntimeError(msg)
+    return NioOverlay(path=root, revision=revision)
+
+
+def _nio_overlay_arg(value: str) -> NioOverlay:
+    """Parse one exact overlay while preserving argparse's concise CLI errors."""
+    try:
+        return _prepare_nio_overlay(Path(value))
+    except RuntimeError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+
+
 def _require_path_within(path: Path, root: Path, message: str) -> None:
     """Fail closed unless an attested module belongs to its required checkout."""
     if not path.is_relative_to(root):
@@ -4743,7 +4803,7 @@ def _require_git_root(path: Path, expected_root: Path, module_name: str) -> None
 def _validated_child_provenance(
     attestation_path: Path,
     *,
-    overlay: str | None,
+    overlay: NioOverlay,
 ) -> dict[str, object]:
     """Validate actual child imports against the runner and requested overlay."""
     raw = json.loads(attestation_path.read_text(encoding="utf-8"))
@@ -4788,38 +4848,35 @@ def _validated_child_provenance(
             f"expected {expected_mindroom_revision}, loaded {mindroom_revision}"
         )
         raise RuntimeError(msg)
-    expected_nio_revision: str | None = None
-    if overlay is not None:
-        overlay_path = Path(overlay).resolve()
-        if not nio_path.is_relative_to(overlay_path):
-            msg = f"loaded mindroom-nio path is outside requested editable overlay: {nio_path}"
-            raise RuntimeError(msg)
-        _require_git_root(nio_path, overlay_path, "mindroom-nio")
-        nio_revision, nio_dirty = _git_state_for_file(
-            nio_path,
-            scopes=(
-                overlay_path / "src",
-                overlay_path / "pyproject.toml",
-                overlay_path / "uv.lock",
-            ),
+    overlay_path = overlay.path.resolve()
+    if not nio_path.is_relative_to(overlay_path):
+        msg = f"loaded mindroom-nio path is outside requested editable overlay: {nio_path}"
+        raise RuntimeError(msg)
+    _require_git_root(nio_path, overlay_path, "mindroom-nio")
+    nio_revision, nio_dirty = _git_state_for_file(
+        nio_path,
+        scopes=(
+            overlay_path / "src",
+            overlay_path / "pyproject.toml",
+            overlay_path / "uv.lock",
+        ),
+    )
+    if nio_revision != overlay.revision:
+        msg = (
+            "loaded mindroom-nio revision does not match the requested overlay: "
+            f"expected {overlay.revision}, loaded {nio_revision} from {nio_path}"
         )
-        expected_nio_revision = _git_revision(overlay_path)
-        if expected_nio_revision is None or nio_revision != expected_nio_revision:
-            msg = (
-                "loaded mindroom-nio revision does not match the requested overlay: "
-                f"expected {expected_nio_revision}, loaded {nio_revision} from {nio_path}"
-            )
-            raise RuntimeError(msg)
-        if nio_dirty:
-            msg = "live fuzz requires a clean loaded mindroom-nio overlay"
-            raise RuntimeError(msg)
+        raise RuntimeError(msg)
+    if nio_dirty:
+        msg = "live fuzz requires a clean loaded mindroom-nio overlay"
+        raise RuntimeError(msg)
     return {
         **raw,
         "mindroom_revision": mindroom_revision,
         "mindroom_expected_revision": expected_mindroom_revision,
         "mindroom_dirty": mindroom_dirty,
         "nio_revision": nio_revision or "unverified",
-        "nio_expected_revision": expected_nio_revision or "",
+        "nio_expected_revision": overlay.revision,
         "nio_dirty": nio_dirty,
     }
 
@@ -4952,6 +5009,7 @@ class FailureBundle:
         provenance: Mapping[str, object],
     ) -> Path:
         """Keep compact exact-head PASS evidence after deleting bulky run inputs."""
+        _require_exact_nio_provenance(provenance)
         receipts = self.directory.parent / "receipts"
         receipts.mkdir(parents=True, exist_ok=True)
         destination = receipts / f"{self.directory.name}.json"
@@ -5136,12 +5194,45 @@ def _capture_failed_run(
             _record_secondary_failure(bundle, cleanup_error, label="Live Matrix fuzz cleanup error")
 
 
-def _require_runtime_provenance(stack: ManagedTuwunelStack) -> Mapping[str, object]:
+def _require_exact_nio_provenance(
+    provenance: Mapping[str, object],
+    *,
+    required_revision: str | None = None,
+) -> None:
+    """Reject PASS evidence unless actual clean nio matches its exact expectation."""
+    revision = provenance.get("nio_revision")
+    expected_revision = provenance.get("nio_expected_revision")
+    dirty = provenance.get("nio_dirty")
+    if not isinstance(revision, str) or not revision:
+        msg = "passing live run omitted the imported mindroom-nio revision"
+        raise RuntimeError(msg)
+    if not isinstance(expected_revision, str) or not expected_revision:
+        msg = "passing live run omitted the expected mindroom-nio revision"
+        raise RuntimeError(msg)
+    if revision != expected_revision:
+        msg = f"passing live run used mindroom-nio {revision}, expected {expected_revision}"
+        raise RuntimeError(msg)
+    if required_revision is not None and expected_revision != required_revision:
+        msg = f"passing live run expected mindroom-nio {expected_revision}, required {required_revision}"
+        raise RuntimeError(msg)
+    if dirty is not False:
+        msg = "passing live run did not prove a clean mindroom-nio checkout"
+        raise RuntimeError(msg)
+
+
+def _require_runtime_provenance(
+    stack: ManagedTuwunelStack,
+    nio_overlay: NioOverlay,
+) -> Mapping[str, object]:
     """Return child-attested provenance or fail before destructive cleanup."""
     provenance = stack.runtime_provenance
     if provenance is None:
         msg = "passing live run omitted child runtime provenance"
         raise RuntimeError(msg)
+    _require_exact_nio_provenance(
+        provenance,
+        required_revision=nio_overlay.revision,
+    )
     return provenance
 
 
@@ -5151,6 +5242,7 @@ def main() -> None:
         _run_mindroom_runtime_child(Path(sys.argv[2]), sys.argv[3:])
         return
     args = _parse_args()
+    nio_overlay: NioOverlay = args.nio_overlay
     scenario = _scenario_from_args(args)
     if args.save_trace is not None:
         args.save_trace.write_text(scenario.to_json() + "\n", encoding="utf-8")
@@ -5170,6 +5262,7 @@ def main() -> None:
         room_keys=_room_keys_for(scenario),
         provenance_sink=bundle.update_provenance,
         artifact_directory=bundle.directory,
+        nio_overlay=nio_overlay,
     )
     runner_holder: dict[str, LiveFuzzRunner] = {}
     try:
@@ -5189,7 +5282,7 @@ def main() -> None:
         result["seed"] = args.seed if args.trace is None else "trace"
         result["wall_seconds"] = round(time.monotonic() - started_at, 1)
         result.update(stack.diagnostic_counts())
-        provenance = _require_runtime_provenance(stack)
+        provenance = _require_runtime_provenance(stack, nio_overlay)
     except BaseException as exc:
         _capture_failed_run(args, bundle, stack, runner_holder.get("runner"), exc)
         raise
