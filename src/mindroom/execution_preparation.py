@@ -449,8 +449,9 @@ def _build_unseen_context_messages(
     attachment_context: _ThreadAttachmentContext | None = None,
 ) -> tuple[tuple[Message, ...], list[str]]:
     """Return canonical request messages for unseen thread context plus the current turn."""
+    history_before_current = _thread_history_before_current_event(thread_history, current_event_id)
     unseen_messages, partial_reply_kinds, in_progress_event_ids = _get_unseen_messages_for_sender(
-        thread_history,
+        history_before_current or (),
         sender_id=response_sender_id,
         seen_event_ids=seen_event_ids,
         current_event_id=current_event_id,

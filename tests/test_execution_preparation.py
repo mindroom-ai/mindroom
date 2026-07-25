@@ -1146,6 +1146,51 @@ def test_unseen_context_keeps_self_sent_relayed_user_message() -> None:
     )
 
 
+def test_unseen_context_stops_at_current_thread_event() -> None:
+    """A backlog turn must not include newer events from its hydrated thread."""
+    thread_history = [
+        make_visible_message(
+            sender="@alice:localhost",
+            body="Older message",
+            event_id="$older",
+            thread_id="$root",
+        ),
+        make_visible_message(
+            sender="@alice:localhost",
+            body="Current message",
+            event_id="$current",
+            thread_id="$root",
+        ),
+        make_visible_message(
+            sender="@bob:localhost",
+            body="Newer message",
+            event_id="$newer",
+            thread_id="$root",
+        ),
+    ]
+
+    messages, unseen_event_ids = _build_unseen_context_messages(
+        "Current message",
+        thread_history,
+        seen_event_ids=set(),
+        current_event_id="$current",
+        active_event_ids=(),
+        response_sender_id="@mindroom_code:localhost",
+        current_sender_id="@alice:localhost",
+        config=_config(),
+    )
+
+    assert unseen_event_ids == ["$older"]
+    assert len(messages) == 2
+    assert messages[0].content == render_msg_tag(
+        sender="@alice:localhost",
+        body="Older message",
+        event_id="$older",
+    )
+    assert messages[1].content == 'Current message:\n<msg from="@alice:localhost"><![CDATA[Current message]]></msg>'
+    assert all("$newer" not in str(message.content) for message in messages)
+
+
 def test_unseen_context_keeps_unpersisted_self_sent_message() -> None:
     """A self-sent Matrix event not known to persisted history should remain visible context."""
     thread_history = [
