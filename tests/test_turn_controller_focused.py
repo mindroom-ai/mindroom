@@ -1368,6 +1368,62 @@ async def test_deferred_sync_restart_records_handled_outcome_before_rethrow(
 
 
 @pytest.mark.asyncio
+async def test_sync_restart_retry_reloads_relay_after_alias_owner_completes(
+    config: Config,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Retry the physical relay after its advisory human alias settles independently."""
+    harness = _build_harness(config, tmp_path)
+    harness.runner.deferred_sync_restart_error = asyncio.CancelledError("sync_restart")
+    room = _room_with_members(config, "general", ROUTER_AGENT_NAME)
+    human_event_id = "$human:localhost"
+    relay = _router_relay_event(
+        config,
+        event_id="$relay:localhost",
+        original_event_id=human_event_id,
+        body=f"{_entity_user_id(config, 'general')} respond",
+        origin_server_ts=1_000_000,
+    )
+    response_started = asyncio.Event()
+    release_response = asyncio.Event()
+    generate_response = harness.runner.generate_response
+
+    async def generate_with_barrier(request: ResponseRequest) -> str | None:
+        response_started.set()
+        await release_response.wait()
+        return await generate_response(request)
+
+    monkeypatch.setattr(harness.runner, "generate_response", generate_with_barrier)
+    delivery = asyncio.create_task(harness.deliver(room, relay))
+    await response_started.wait()
+    harness.turn_store.record_turn(
+        TurnRecord.create([human_event_id], response_event_id="$original-response:localhost"),
+    )
+    release_response.set()
+    with pytest.raises(asyncio.CancelledError, match="sync_restart"):
+        await delivery
+
+    relay_record = harness.turn_store.get_turn_record(relay.event_id)
+    assert relay_record is not None
+    assert relay_record.discovery_event_ids == ()
+    harness.runner.deferred_sync_restart_error = None
+
+    async def unexpected_wait(_event_ids: tuple[str, ...]) -> None:
+        msg = "canonical relay retry must not wait on its detached alias"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(harness.turn_store, "wait_for_turn_settled", unexpected_wait)
+    await harness.restart_retry.flush()
+
+    assert len(harness.runner.requests) == 2
+    assert harness.runner.requests[1].sync_restart_retry_source_event_id == relay.event_id
+    retried_record = harness.turn_store.get_turn_record(relay.event_id)
+    assert retried_record is not None
+    assert retried_record.response_event_id == "$response:localhost"
+
+
+@pytest.mark.asyncio
 async def test_sync_restart_retry_skips_prompt_after_waiting_edit_commits(
     config: Config,
     tmp_path: Path,

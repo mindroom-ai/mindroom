@@ -76,6 +76,7 @@ from mindroom.user_turn_time import prefix_user_turn_time
 from .delivery_gateway import (
     CancelledVisibleNoteRequest,
     DeliveryGateway,
+    EditTextRequest,
     FinalDeliveryRequest,
     FinalizeStreamedResponseRequest,
     MatrixCompactionLifecycle,
@@ -443,6 +444,7 @@ class _TeamResponseRequest:
     team_agents: tuple[MatrixID, ...]
     team_mode: str
     reason_prefix: str = "Team request"
+    resolution_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1497,6 +1499,7 @@ class ResponseRunner:
         team_agents: list[MatrixID],
         team_mode: str,
         reason_prefix: str = "Team request",
+        resolution_reason: str | None = None,
     ) -> str | None:
         """Generate a team response with lifecycle locking and queued-message state."""
         team_request = _TeamResponseRequest(
@@ -1504,6 +1507,7 @@ class ResponseRunner:
             team_agents=tuple(team_agents),
             team_mode=team_mode,
             reason_prefix=reason_prefix,
+            resolution_reason=resolution_reason,
         )
         return await self._run_locked_response_lifecycle(
             request,
@@ -1570,6 +1574,17 @@ class ResponseRunner:
             return None
         request = prepared_request
         team_request = replace(team_request, request=request)
+        reason = team_request.resolution_reason
+        if reason is not None:
+            event_id = request.existing_event_id
+            if event_id is None:
+                return await self.deps.delivery_gateway.send_text(
+                    SendTextRequest(target=resolved_target, response_text=reason),
+                )
+            edited = await self.deps.delivery_gateway.edit_text(
+                EditTextRequest(target=resolved_target, event_id=event_id, new_text=reason),
+            )
+            return event_id if edited else None
         requester_user_id = request.user_id or ""
         _memory_prompt, _memory_thread_history, prepared_prompt, model_thread_history = (
             prepare_memory_and_model_context(

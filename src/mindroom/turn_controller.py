@@ -1684,8 +1684,12 @@ class TurnController:
 
         def register_sync_restart_retry() -> None:
             async def retry() -> None:
-                while not self.deps.turn_store.try_claim_turn(handled_turn):
-                    await self.deps.turn_store.wait_for_turn_settled(handled_turn.indexed_event_ids)
+                retry_turn = self.deps.turn_store.get_turn_record(event.event_id)
+                while retry_turn is not None and not self.deps.turn_store.try_claim_turn(retry_turn):
+                    await self.deps.turn_store.wait_for_turn_settled(retry_turn.indexed_event_ids)
+                    retry_turn = self.deps.turn_store.get_turn_record(event.event_id)
+                if retry_turn is None:
+                    return
                 try:
                     current_record = self.deps.turn_store.get_turn_record(event.event_id)
                     if (
@@ -1702,13 +1706,13 @@ class TurnController:
                         payload_inputs,
                         processing_log="Retrying response interrupted by sync restart",
                         dispatch_started_at=time.monotonic(),
-                        handled_turn=handled_turn,
+                        handled_turn=retry_turn,
                         matrix_run_metadata=matrix_run_metadata,
                         retry_team_mode=retry_team_mode,
                         sync_restart_retry_source_event_id=event.event_id,
                     )
                 finally:
-                    self.deps.turn_store.release_pending_turn_claim(handled_turn)
+                    self.deps.turn_store.release_pending_turn_claim(retry_turn)
 
             self.deps.restart_retry.register(event.event_id, retry, room_id=room.room_id)
 

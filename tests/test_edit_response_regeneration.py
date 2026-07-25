@@ -1123,16 +1123,12 @@ async def test_bot_ignores_edit_without_previous_response(tmp_path: Path) -> Non
     # Mock the methods
     mock_generate = AsyncMock()
     install_generate_response_mock(bot, mock_generate)
-    with (
-        patch.object(bot._conversation_resolver, "extract_message_context", new_callable=AsyncMock),
-        patch.object(bot, "_edit_message", new_callable=AsyncMock) as mock_edit,
-    ):
+    with patch.object(bot._conversation_resolver, "extract_message_context", new_callable=AsyncMock):
         # Process the edit event
         await bot._on_message(room, edit_event)
 
         # Verify that the bot did NOT attempt to regenerate
         mock_generate.assert_not_called()
-        mock_edit.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -1258,10 +1254,11 @@ async def test_bot_ignores_agent_edits(tmp_path: Path) -> None:
     }
 
     # Mock the methods
-    with (
-        patch.object(bot._conversation_resolver, "extract_message_context", new_callable=AsyncMock) as mock_context,
-        patch.object(bot, "_edit_message", new_callable=AsyncMock) as mock_edit,
-    ):
+    with patch.object(
+        bot._conversation_resolver,
+        "extract_message_context",
+        new_callable=AsyncMock,
+    ) as mock_context:
         mock_context.return_value = MagicMock(
             am_i_mentioned=False,
             is_thread=False,
@@ -1279,7 +1276,6 @@ async def test_bot_ignores_agent_edits(tmp_path: Path) -> None:
 
         # Both edits should be ignored before any regeneration work begins.
         mock_context.assert_not_called()
-        mock_edit.assert_not_called()
 
 
 @pytest.mark.asyncio

@@ -1174,6 +1174,7 @@ async def test_restart_replays_durably_committed_interrupted_edit(tmp_path: Path
     await _handle_edit(harness, event, event_info)
 
     harness.generate_response.assert_awaited_once()
+    harness.ingress_hook_runner.emit_message_received_hooks.assert_not_awaited()
     request = harness.generate_response.await_args.args[0]
     assert request.prompt == "latest after process restart"
     assert request.sync_restart_retry_source_event_id == ORIGINAL_EVENT_ID

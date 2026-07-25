@@ -885,12 +885,12 @@ def merge_edit_facts(ledger: TurnRecord, recovery: TurnRecord) -> tuple[dict[str
     prompts = dict(ledger.source_event_prompts or {})
     prompts.update(recovery.source_event_prompts or {})
     revisions = dict(recovery.source_event_revisions or {})
+    ledger_prompts = ledger.source_event_prompts or {}
     for event_id, revision in (ledger.source_event_revisions or {}).items():
-        if revision >= revisions.get(event_id, revision):
+        prompt_event_id = ledger.prompt_source_event_id(event_id)
+        if revision >= revisions.get(event_id, revision) and prompt_event_id in ledger_prompts:
             revisions[event_id] = revision
-            prompt_event_id = ledger.prompt_source_event_id(event_id)
-            if ledger.source_event_prompts is not None and prompt_event_id in ledger.source_event_prompts:
-                prompts[prompt_event_id] = ledger.source_event_prompts[prompt_event_id]
+            prompts[prompt_event_id] = ledger_prompts[prompt_event_id]
     return prompts, revisions
 
 

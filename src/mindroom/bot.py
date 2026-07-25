@@ -78,7 +78,6 @@ from .conversation_state_writer import ConversationStateWriter, ConversationStat
 from .delivery_gateway import (
     DeliveryGateway,
     DeliveryGatewayDeps,
-    EditTextRequest,
     ResponseHookService,
     SendTextRequest,
 )
@@ -130,7 +129,6 @@ if TYPE_CHECKING:
     from mindroom.matrix.media import MatrixMediaEvent
     from mindroom.runtime_protocols import OrchestratorRuntime
     from mindroom.runtime_support import StartupThreadPrewarmRegistry
-    from mindroom.tool_system.events import ToolTraceEntry
 
 type _MatrixEventId = str
 
@@ -2127,35 +2125,6 @@ class AgentBot:
             runtime_started_at=runtime_started_at,
         )
 
-    async def _edit_message(
-        self,
-        room_id: str,
-        event_id: str,
-        new_text: str,
-        thread_id: str | None,
-        tool_trace: list[ToolTraceEntry] | None = None,
-        extra_content: dict[str, Any] | None = None,
-    ) -> bool:
-        """Edit an existing message.
-
-        Returns:
-            True if edit was successful, False otherwise.
-
-        """
-        return await self._delivery_gateway.edit_text(
-            EditTextRequest(
-                target=self._conversation_resolver.build_message_target(
-                    room_id=room_id,
-                    thread_id=thread_id,
-                    reply_to_event_id=None,
-                ),
-                event_id=event_id,
-                new_text=new_text,
-                tool_trace=tool_trace,
-                extra_content=extra_content,
-            ),
-        )
-
     async def _redact_message_event(
         self,
         *,
@@ -2249,23 +2218,12 @@ class TeamBot(AgentBot):
         )
         if team_resolution.outcome is not TeamOutcome.TEAM:
             assert team_resolution.reason is not None
-            response_event_id: str | None
-            if request.existing_event_id:
-                edited = await self._edit_message(
-                    room_id=target.room_id,
-                    event_id=request.existing_event_id,
-                    new_text=team_resolution.reason,
-                    thread_id=target.resolved_thread_id,
-                )
-                response_event_id = request.existing_event_id if edited else None
-            else:
-                response_event_id = await self._delivery_gateway.send_text(
-                    SendTextRequest(
-                        target=target,
-                        response_text=team_resolution.reason,
-                    ),
-                )
-            return response_event_id
+            return await self._response_runner.generate_team_response_helper(
+                request,
+                team_agents=[],
+                team_mode=configured_mode.value,
+                resolution_reason=team_resolution.reason,
+            )
         assert team_resolution.mode is not None
 
         registry = entity_identity_registry(self.config, self.runtime_paths)
@@ -2278,22 +2236,23 @@ class TeamBot(AgentBot):
             target=target,
             user_id=request.user_id,
         )
-        with tool_execution_identity(execution_identity):
-            create_background_task(
-                store_conversation_memory(
-                    memory_prompt,
-                    agent_names,
-                    self.storage_path,
-                    session_id,
-                    self.config,
-                    self.runtime_paths,
-                    memory_thread_history,
-                    request.user_id,
-                    execution_identity=execution_identity,
-                ),
-                name=f"memory_save_team_{session_id}",
-                owner=self._runtime_view,
-            )
+        if request.sync_restart_retry_source_event_id is None:
+            with tool_execution_identity(execution_identity):
+                create_background_task(
+                    store_conversation_memory(
+                        memory_prompt,
+                        agent_names,
+                        self.storage_path,
+                        session_id,
+                        self.config,
+                        self.runtime_paths,
+                        memory_thread_history,
+                        request.user_id,
+                        execution_identity=execution_identity,
+                    ),
+                    name=f"memory_save_team_{session_id}",
+                    owner=self._runtime_view,
+                )
 
         return await self._response_runner.generate_team_response_helper(
             replace(

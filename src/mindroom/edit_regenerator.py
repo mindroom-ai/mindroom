@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING
 
 from mindroom.coalescing_batch import coalesced_prompt, tagged_coalesced_prompt
 from mindroom.conversation_resolver import MessageContext
@@ -32,13 +32,6 @@ if TYPE_CHECKING:
     from mindroom.turn_store import TurnStore
 
 
-class _GenerateResponse(Protocol):
-    """Minimal response-generation surface needed for edit regeneration."""
-
-    async def __call__(self, request: ResponseRequest) -> str | None:
-        """Generate or regenerate a response for one handled turn."""
-
-
 @dataclass(frozen=True)
 class EditRegeneratorDeps:
     """Collaborators needed for edit-triggered regeneration."""
@@ -49,7 +42,7 @@ class EditRegeneratorDeps:
     resolver: ConversationResolver
     turn_store: TurnStore
     ingress_hook_runner: IngressHookRunner
-    generate_response: _GenerateResponse
+    generate_response: Callable[[ResponseRequest], Awaitable[str | None]]
     wait_for_turn_settled: Callable[[tuple[str, ...]], Awaitable[None]]
     restart_retry: SyncRestartRetryQueue
     timestamp_formatter: Callable[[float | None], str | None]
@@ -195,7 +188,8 @@ class EditRegenerator:
             context=context,
             envelope=envelope,
             revision=revision,
-            suppressed=await self.deps.ingress_hook_runner.emit_message_received_hooks(
+            suppressed=revision != committed
+            and await self.deps.ingress_hook_runner.emit_message_received_hooks(
                 envelope=envelope,
                 correlation_id=event.event_id,
                 policy=hook_ingress_policy(envelope),
@@ -239,8 +233,8 @@ class EditRegenerator:
             return None, None, {}
         revisions = dict(record.source_event_revisions or {})
         applied: dict[str, SourceEventRevision] = {}
-        eligible: dict[str, _Edit] = {}
         active: dict[str, _Edit] = {}
+        prompt_map = dict(record.source_event_prompts or {})
         retrying = True
         for source_event_id, edit in mailbox.pending.items():
             committed = revisions.get(source_event_id)
@@ -251,14 +245,10 @@ class EditRegenerator:
                 continue
             revisions[source_event_id] = edit.revision
             applied[source_event_id] = edit.revision
-            eligible[source_event_id] = edit
+            prompt_map[record.prompt_source_event_id(source_event_id)] = edit.body
             if not edit.suppressed:
                 active[source_event_id] = edit
                 retrying &= edit.revision == committed
-        prompt_map = dict(record.source_event_prompts or {})
-        prompt_map.update(
-            {record.prompt_source_event_id(source_event_id): edit.body for source_event_id, edit in eligible.items()},
-        )
         if not active:
             if revisions != dict(record.source_event_revisions or {}):
                 record = replace(record, source_event_prompts=prompt_map, source_event_revisions=revisions)
@@ -269,7 +259,7 @@ class EditRegenerator:
         retry_source_event_id = record.prompt_source_event_id(driving_edit.original_event_id) if retrying else None
         if record.is_coalesced:
             prompt_parts = [prompt_map.get(source_event_id) for source_event_id in record.replay_source_event_ids]
-            if record.source_event_prompts is None or any(part is None for part in prompt_parts):
+            if any(part is None for part in prompt_parts):
                 return None, None, applied
             prompt = coalesced_prompt([part for part in prompt_parts if part is not None])
             structured = False

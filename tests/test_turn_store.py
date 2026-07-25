@@ -1450,6 +1450,32 @@ def test_interrupted_recovery_does_not_mix_prompt_and_revision(tmp_path: Path) -
     assert loaded.response_event_id == "$response"
 
 
+def test_recovery_does_not_adopt_revision_without_its_prompt(tmp_path: Path) -> None:
+    """A ledger edit revision is unusable unless its matching durable prompt survived."""
+    store = _store(tmp_path)
+    store._ledger.record_handled_turn(
+        TurnRecord.create(
+            ["$event"],
+            response_event_id="$old-response",
+            source_event_revisions={"$event": (20, "$new-edit")},
+            timestamp=10,
+        ),
+    )
+    recovery_record = TurnRecord.create(
+        ["$event"],
+        response_event_id="$new-response",
+        source_event_prompts={"$event": "old prompt"},
+        source_event_revisions={"$event": (10, "$old-edit")},
+        timestamp=20,
+    )
+
+    loaded = _load_with_recovery(store, original_event_id="$event", recovery_record=recovery_record)
+
+    assert loaded is not None
+    assert loaded.source_event_prompts == {"$event": "old prompt"}
+    assert loaded.source_event_revisions == {"$event": (10, "$old-edit")}
+
+
 def test_terminal_write_refreshes_ledger_precedence_timestamp(tmp_path: Path) -> None:
     """A successful terminal write should become newer than its recovered input."""
     store = _store(tmp_path)
