@@ -3216,9 +3216,9 @@ class FinalStateAuditor:
                 continue
             elif not oracle.coalescing_threads:
                 problems.append(f"source {logical_ref} has {count} canonical replies in /messages")
-            elif not self._visible_chain_reply_ids(source_event_id, replies):
+            elif not self._visible_thread_reply_ids(source_event_id, replies):
                 problems.append(
-                    f"source {logical_ref} has no canonical reply in its requester chain",
+                    f"source {logical_ref} has no canonical reply in its Matrix thread",
                 )
         for source_event_id, reply_ids in replies.items():
             if source_event_id in oracle.expected_sources or source_event_id in oracle.internal_source_ids:
@@ -3403,17 +3403,19 @@ class FinalStateAuditor:
                 response_ids.add(record.response_event_id)
         return response_ids, len(response_ids), problems
 
-    def _visible_chain_reply_ids(
+    def _visible_thread_reply_ids(
         self,
         source_event_id: str,
         replies: Mapping[str, set[str]],
     ) -> set[str]:
-        """Return canonical replies attached anywhere in one requester chain."""
-        chain = next(
-            (candidate for candidate in self.oracle.chains.values() if source_event_id in candidate),
-            (),
-        )
-        return {reply_id for chain_source_event_id in chain for reply_id in replies.get(chain_source_event_id, ())}
+        """Return canonical replies attached anywhere in one logical Matrix thread."""
+        source_thread = self.oracle.source_threads.get(source_event_id)
+        return {
+            reply_id
+            for candidate_event_id, candidate_thread in self.oracle.source_threads.items()
+            if candidate_thread == source_thread
+            for reply_id in replies.get(candidate_event_id, ())
+        }
 
     @staticmethod
     def _visible_record_reply_ids(

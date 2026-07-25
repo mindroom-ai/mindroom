@@ -5075,8 +5075,8 @@ async def test_final_messages_cardinality_rejects_delayed_duplicate() -> None:
 
 
 @pytest.mark.asyncio
-async def test_chaos_cardinality_allows_zero_direct_reply_only_within_same_chain() -> None:
-    """Coalescing may cover same-chain sources, never another requester chain."""
+async def test_chaos_cardinality_allows_zero_direct_reply_only_within_same_thread() -> None:
+    """Coalescing may cover different requesters in one thread, never another thread."""
     client = LiveMatrixClient("http://matrix.invalid", "!room:example")
     oracle = ExactReplyOracle(client, "@agent:example", coalescing_threads=True)
     auditor = FinalStateAuditor(
@@ -5087,11 +5087,11 @@ async def test_chaos_cardinality_allows_zero_direct_reply_only_within_same_chain
     )
     try:
         oracle.expect("op:1", "$first", thread=0, client=0)
-        oracle.expect("op:2", "$second", thread=0, client=0)
+        oracle.expect("op:2", "$second", thread=0, client=1)
         auditor._assert_reply_cardinality({"$second": {"$combined"}})
 
         oracle.expect("op:3", "$other-chain", thread=1, client=1)
-        with pytest.raises(AssertionError, match="op:3 has no canonical reply in its requester chain"):
+        with pytest.raises(AssertionError, match="op:3 has no canonical reply in its Matrix thread"):
             auditor._assert_reply_cardinality({"$second": {"$combined"}})
     finally:
         await client.close()
