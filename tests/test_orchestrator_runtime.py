@@ -2058,6 +2058,53 @@ class TestMultiAgentOrchestrator:
             await orchestrator._run_bot_start_retry("general")
 
     @pytest.mark.asyncio
+    async def test_late_bot_recovery_gets_actor_targeted_stale_stream_sweep(self, tmp_path: Path) -> None:
+        """A bot recovering after completed maintenance still receives its own sweep."""
+        orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
+        config = MagicMock()
+        orchestrator.config = config
+        orchestrator.running = True
+
+        router_bot = MagicMock()
+        router_bot.agent_name = ROUTER_AGENT_NAME
+        router_bot.running = True
+        recovered_bot = MagicMock()
+        recovered_bot.agent_name = "general"
+        recovered_bot.running = True
+        orchestrator.agent_bots = {
+            ROUTER_AGENT_NAME: router_bot,
+            "general": recovered_bot,
+        }
+
+        initial_recovery = AsyncMock()
+        orchestrator._startup_maintenance.recover_stale_streams = initial_recovery
+        orchestrator._startup_maintenance.setup_rooms_and_memberships = AsyncMock()
+        orchestrator._startup_maintenance.sync_runtime_support = AsyncMock()
+        orchestrator._startup_maintenance.mark_runtime_support_ready = AsyncMock()
+        orchestrator._startup_maintenance.start([router_bot], config)
+        maintenance_task = orchestrator._startup_maintenance.task
+        assert maintenance_task is not None
+        await maintenance_task
+        assert initial_recovery.await_count == 2
+        assert orchestrator._startup_maintenance.replay_pending is False
+
+        late_recovery = AsyncMock()
+        with (
+            patch.object(orchestrator, "_bots_to_setup_after_background_start", return_value=[recovered_bot]),
+            patch.object(orchestrator, "_bind_started_runtime_support_services"),
+            patch.object(orchestrator, "_resolve_bot_room_aliases"),
+            patch.object(orchestrator, "_start_sync_task"),
+            patch.object(orchestrator, "_setup_rooms_and_memberships", new=AsyncMock()),
+            patch.object(orchestrator, "_recover_stale_streams_after_restart", new=late_recovery),
+            patch.object(orchestrator, "_recover_pending_replacement_rooms", new=AsyncMock()),
+            patch.object(orchestrator._startup_maintenance, "resume_pending_maintenance") as resume,
+        ):
+            await orchestrator._finish_recovered_bot_start("general", recovered_bot)
+
+        late_recovery.assert_awaited_once_with([recovered_bot], config, set())
+        resume.assert_called_once()
+
+    @pytest.mark.asyncio
     async def test_bot_recovery_mid_shutdown_does_not_resume_maintenance_debt(self, tmp_path: Path) -> None:
         """A recovery finishing after stop() must not resume maintenance debt.
 
