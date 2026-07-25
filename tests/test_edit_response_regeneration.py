@@ -2724,6 +2724,7 @@ async def test_edit_regenerator_preserves_interactive_selection_run_metadata(tmp
     assert request.response_envelope.target.reply_to_event_id == "$selection:example.com"
     assert request.matrix_run_metadata == {
         MATRIX_SOURCE_EVENT_IDS_METADATA_KEY: ["$selection:example.com"],
+        "matrix_source_event_prompts": {"$selection:example.com": "2"},
         "matrix_source_event_revisions": {
             "$selection:example.com": [1000000, "$edit:example.com"],
         },

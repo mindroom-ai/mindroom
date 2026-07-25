@@ -270,9 +270,7 @@ class EditRegenerator:
         prompt_map.update({source_event_id: edit.body for source_event_id, edit in eligible.items()})
         if not active:
             if revisions != dict(record.source_event_revisions or {}):
-                record = replace(record, source_event_revisions=revisions)
-                if record.is_coalesced:
-                    record = replace(record, source_event_prompts=prompt_map)
+                record = replace(record, source_event_prompts=prompt_map, source_event_revisions=revisions)
                 self.deps.turn_store.record_turn(record)
             return None, None, applied
 
@@ -296,10 +294,9 @@ class EditRegenerator:
                 )
                 if tagged_prompt is not None:
                     prompt, structured = tagged_prompt, True
-            record = replace(record, source_event_prompts=prompt_map)
         else:
             prompt, structured = driving_edit.body, False
-        record = replace(record, source_event_revisions=revisions)
+        record = replace(record, source_event_prompts=prompt_map, source_event_revisions=revisions)
         assert record.conversation_target is not None
         target = record.conversation_target
         requester_id = driving_edit.envelope.requester_id

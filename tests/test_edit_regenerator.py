@@ -284,6 +284,7 @@ async def test_lifecycle_lock_callback_removes_stale_runs(tmp_path: Path) -> Non
     assert removal_kwargs["requester_user_id"] == USER_ID
     assert removal_kwargs["turn_record"] == replace(
         record,
+        source_event_prompts={ORIGINAL_EVENT_ID: "what is 3+3?"},
         source_event_revisions={
             ORIGINAL_EVENT_ID: (event.server_timestamp, event.event_id),
         },
@@ -327,6 +328,7 @@ async def test_newer_same_source_edit_rejects_older_callback_during_generation(t
     harness.generate_response.assert_awaited_once()
     assert harness.generate_response.await_args.args[0].prompt == "newest body"
     recorded = harness.turn_store.record_turn.call_args.args[0]
+    assert recorded.source_event_prompts == {ORIGINAL_EVENT_ID: "newest body"}
     assert recorded.source_event_revisions == {
         ORIGINAL_EVENT_ID: (1_000_010, "$edit-z:example.org"),
     }
@@ -545,6 +547,7 @@ async def test_newer_edit_arriving_under_response_lock_is_drained(tmp_path: Path
         "newest body",
     ]
     recorded = harness.turn_store.record_turn.call_args.args[0]
+    assert recorded.source_event_prompts == {ORIGINAL_EVENT_ID: "newest body"}
     assert recorded.source_event_revisions == {
         ORIGINAL_EVENT_ID: (1_000_020, "$edit-new:example.org"),
     }
@@ -1038,7 +1041,7 @@ async def test_edit_without_turn_record_returns_early(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_hook_suppression_records_turn_without_regeneration(tmp_path: Path) -> None:
-    """Suppressing ingress hooks records the unchanged turn record and skips regeneration."""
+    """Suppressing ingress hooks persists edit facts without regenerating."""
     record = _turn_record()
     harness = _harness(tmp_path, turn_record=record)
     harness.ingress_hook_runner.emit_message_received_hooks.return_value = True
@@ -1055,6 +1058,10 @@ async def test_hook_suppression_records_turn_without_regeneration(tmp_path: Path
     recorded = harness.turn_store.record_turn.call_args.args[0]
     assert recorded.response_event_id == RESPONSE_EVENT_ID
     assert recorded.source_event_ids == (ORIGINAL_EVENT_ID,)
+    assert recorded.source_event_prompts == {ORIGINAL_EVENT_ID: "what is 3+3?"}
+    assert recorded.source_event_revisions == {
+        ORIGINAL_EVENT_ID: (event.server_timestamp, event.event_id),
+    }
 
 
 @pytest.mark.asyncio
@@ -1111,6 +1118,7 @@ async def test_sync_restart_cancellation_retries_without_committing_interrupted_
     harness.turn_store.remove_stale_runs_for_edit.assert_called_once_with(
         turn_record=replace(
             record,
+            source_event_prompts={ORIGINAL_EVENT_ID: "latest after restart"},
             source_event_revisions={
                 ORIGINAL_EVENT_ID: (event.server_timestamp, event.event_id),
             },
