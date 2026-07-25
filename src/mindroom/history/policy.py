@@ -41,7 +41,6 @@ def resolve_history_execution_plan(
     )
     summary_input_budget_tokens, unavailable_reason = _resolve_summary_input_budget(
         compaction_context_window=compaction_context_window,
-        replay_window_tokens=replay_window_tokens,
         reserve_tokens=compaction_config.reserve_tokens,
     )
 
@@ -195,11 +194,12 @@ def describe_compaction_unavailability(plan: ResolvedHistoryExecutionPlan) -> st
 def _resolve_summary_input_budget(
     *,
     compaction_context_window: int | None,
-    replay_window_tokens: int | None,
     reserve_tokens: int,
 ) -> tuple[int | None, CompactionAvailabilityReason | None]:
     """Resolve a summary budget large enough for the request envelope and one degradation retry.
 
+    Summary input uses the selected compaction model's real context window.
+    The smaller replay window controls persisted replay and trigger planning only.
     Plans require more than twice the shared retry floor so halving leaves a
     genuinely smaller target with room for the request envelope and run content.
     """
@@ -214,8 +214,6 @@ def _resolve_summary_input_budget(
         compaction_context_window,
         reserve_tokens=normalized_reserve_tokens,
     )
-    if replay_window_tokens is not None:
-        summary_input_budget_tokens = min(summary_input_budget_tokens, replay_window_tokens)
     if summary_input_budget_tokens <= 0:
         return summary_input_budget_tokens, "non_positive_summary_input_budget"
     if summary_input_budget_tokens <= 2 * COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS:

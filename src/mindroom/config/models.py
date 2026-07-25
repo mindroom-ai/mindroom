@@ -245,8 +245,8 @@ class CompactionOverrideConfig(BaseModel):
         default=None,
         ge=1,
         description=(
-            "Optional operational cap for persisted replay, required-compaction planning, and summary input chunks; "
-            "destructive compaction requires the resolved summary input budget to exceed 2,000 tokens"
+            "Optional operational cap for persisted replay and required-compaction planning; compaction summary "
+            "input is instead budgeted from the selected compaction model's context window"
         ),
     )
     reserve_tokens: int | None = Field(
@@ -298,8 +298,8 @@ class CompactionConfig(BaseModel):
         default=None,
         ge=1,
         description=(
-            "Optional operational cap for persisted replay, required-compaction planning, and summary input chunks; "
-            "destructive compaction requires the resolved summary input budget to exceed 2,000 tokens"
+            "Optional operational cap for persisted replay and required-compaction planning; compaction summary "
+            "input is instead budgeted from the selected compaction model's context window"
         ),
     )
     reserve_tokens: int = Field(
@@ -566,9 +566,10 @@ class ModelConfig(BaseModel):
         default=None,
         ge=1,
         description=(
-            "Actual provider context window size in tokens. MindRoom uses it as the default replay-planning "
-            "window unless compaction.replay_window_tokens sets a smaller cap. An explicit compaction.model "
-            "or compaction.fallback_model also needs its own context_window for summary generation. "
+            "Actual provider context window size in tokens. MindRoom uses it for compaction summary input and as "
+            "the default replay-planning window unless compaction.replay_window_tokens sets a smaller replay cap. "
+            "An explicit compaction.model or compaction.fallback_model also needs its own context_window for "
+            "summary generation. "
             "On vertexai_claude models it additionally "
             "enables request-time fitting that trims replayed history when a request would exceed the window"
         ),

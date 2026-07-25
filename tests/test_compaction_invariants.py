@@ -167,6 +167,7 @@ def _make_config(
     tmp_path: Path,
     *,
     compaction: CompactionConfig | None = None,
+    context_window: int = 64_000,
 ) -> tuple[Config, RuntimePaths]:
     runtime_paths = resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",
@@ -186,7 +187,7 @@ def _make_config(
             },
             defaults=DefaultsConfig(tools=[], compaction=compaction or CompactionConfig()),
             models={
-                "default": ModelConfig(provider="openai", id="test-model", context_window=64_000),
+                "default": ModelConfig(provider="openai", id="test-model", context_window=context_window),
             },
         ),
         runtime_paths,
@@ -1814,7 +1815,7 @@ async def test_near_cap_durable_summary_with_tiny_budget_is_unavailable_without_
     summary_input_budget = COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS + 1
     config, runtime_paths = _make_config(
         tmp_path,
-        compaction=CompactionConfig(replay_window_tokens=summary_input_budget),
+        context_window=10_000,
     )
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     previous_summary = ("word " * 975) + "TAIL-FACT-MUST-SURVIVE"
