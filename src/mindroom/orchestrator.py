@@ -2195,8 +2195,12 @@ async def _wait_for_runtime_shutdown_cleanup(
                 return
             if not shutdown_was_requested:
                 cleanup_task.cancel()
-                with suppress(asyncio.CancelledError):
+                try:
                     await cleanup_task
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    logger.exception("Runtime cleanup failed while propagating caller cancellation")
                 raise
             # Once orderly shutdown starts, later cancellation is duplicate
             # shutdown pressure; cleanup must finish before main returns.

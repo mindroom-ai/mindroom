@@ -51,6 +51,7 @@ from mindroom.orchestrator import (
     _run_auxiliary_task_forever,
     _SignalAwareUvicornServer,
     _wait_for_runtime_completion,
+    _wait_for_runtime_shutdown_cleanup,
     main,
 )
 from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
@@ -571,87 +572,64 @@ class TestAgentBot(AgentBotTestBase):
         mock_orchestrator.start.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_orchestrator_main_finishes_requested_shutdown_after_repeated_signal_cancels(
+    async def test_runtime_cleanup_finishes_requested_shutdown_after_repeated_signal_cancels(
         self,
-        tmp_path: Path,
     ) -> None:
         """Repeated SIGINT cancellation must not abort cleanup started by the first signal."""
-        reset_runtime_state()
-        stop_started = asyncio.Event()
-        stop_released = asyncio.Event()
-        mock_orchestrator = MagicMock()
-        mock_orchestrator.knowledge_refresh_scheduler = None
+        cleanup_started = asyncio.Event()
+        cleanup_released = asyncio.Event()
 
-        async def _start() -> None:
-            await asyncio.Event().wait()
+        async def _cleanup() -> None:
+            cleanup_started.set()
+            await cleanup_released.wait()
 
-        async def _stop() -> None:
-            stop_started.set()
-            await stop_released.wait()
-
-        async def _request_shutdown(**kwargs: object) -> None:
-            shutdown_requested = kwargs["shutdown_requested"]
-            assert isinstance(shutdown_requested, asyncio.Event)
-            shutdown_requested.set()
-
-        async def _blocked_auxiliary_task(*_args: object, **_kwargs: object) -> None:
-            await asyncio.Event().wait()
-
-        mock_orchestrator.start = AsyncMock(side_effect=_start)
-        mock_orchestrator.stop = AsyncMock(side_effect=_stop)
-
-        with (
-            patch("mindroom.orchestrator.setup_logging"),
-            patch("mindroom.orchestrator.sync_env_to_credentials"),
-            patch("mindroom.orchestrator._MultiAgentOrchestrator", return_value=mock_orchestrator),
-            patch("mindroom.orchestrator._run_auxiliary_task_forever", new=_blocked_auxiliary_task),
-            patch(
-                "mindroom.orchestrator._wait_for_runtime_completion",
-                side_effect=_request_shutdown,
+        cleanup_task = asyncio.create_task(_cleanup())
+        wait_task = asyncio.create_task(
+            _wait_for_runtime_shutdown_cleanup(
+                cleanup_task,
+                shutdown_was_requested=True,
             ),
-        ):
-            main_task = asyncio.create_task(
-                main(log_level="INFO", runtime_paths=self._runtime_paths(tmp_path), api=False),
-            )
-            await asyncio.wait_for(stop_started.wait(), timeout=1)
-            main_task.cancel()
-            await asyncio.sleep(0)
-            main_task.cancel()
-            stop_released.set()
-            await asyncio.wait_for(main_task, timeout=1)
+        )
+        await asyncio.wait_for(cleanup_started.wait(), timeout=1)
+        await asyncio.sleep(0)
+        wait_task.cancel()
+        await asyncio.sleep(0)
+        wait_task.cancel()
+        cleanup_released.set()
+        await asyncio.wait_for(wait_task, timeout=1)
 
-        mock_orchestrator.stop.assert_awaited_once()
-        mock_orchestrator.start.assert_awaited_once()
+        assert cleanup_task.done()
 
     @pytest.mark.asyncio
-    async def test_orchestrator_main_propagates_unrequested_task_cancellation(self, tmp_path: Path) -> None:
-        """Embedding callers must retain cancellation when no shutdown signal was requested."""
-        reset_runtime_state()
-        mock_orchestrator = MagicMock()
-        mock_orchestrator.knowledge_refresh_scheduler = None
-        mock_orchestrator.start = AsyncMock()
-        mock_orchestrator.stop = AsyncMock()
+    async def test_runtime_cleanup_preserves_unrequested_cancellation_after_cleanup_failure(
+        self,
+    ) -> None:
+        """Cleanup failure must not replace cancellation from an embedding caller."""
+        cleanup_started = asyncio.Event()
 
-        async def _cancel_without_shutdown(**_kwargs: object) -> None:
-            raise asyncio.CancelledError
+        async def _failing_cleanup() -> None:
+            cleanup_started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError as exc:
+                msg = "cleanup failed"
+                raise RuntimeError(msg) from exc
 
-        async def _blocked_auxiliary_task(*_args: object, **_kwargs: object) -> None:
-            await asyncio.Event().wait()
-
-        with (
-            patch("mindroom.orchestrator.setup_logging"),
-            patch("mindroom.orchestrator.sync_env_to_credentials"),
-            patch("mindroom.orchestrator._MultiAgentOrchestrator", return_value=mock_orchestrator),
-            patch("mindroom.orchestrator._run_auxiliary_task_forever", new=_blocked_auxiliary_task),
-            patch(
-                "mindroom.orchestrator._wait_for_runtime_completion",
-                side_effect=_cancel_without_shutdown,
+        cleanup_task = asyncio.create_task(_failing_cleanup())
+        wait_task = asyncio.create_task(
+            _wait_for_runtime_shutdown_cleanup(
+                cleanup_task,
+                shutdown_was_requested=False,
             ),
-            pytest.raises(asyncio.CancelledError),
-        ):
-            await main(log_level="INFO", runtime_paths=self._runtime_paths(tmp_path), api=False)
+        )
+        await asyncio.wait_for(cleanup_started.wait(), timeout=1)
+        await asyncio.sleep(0)
+        wait_task.cancel()
 
-        mock_orchestrator.stop.assert_awaited_once()
+        with pytest.raises(asyncio.CancelledError):
+            await wait_task
+        with pytest.raises(RuntimeError, match="cleanup failed"):
+            cleanup_task.result()
 
     @pytest.mark.asyncio
     async def test_orchestrator_main_fails_when_api_server_exits_unexpectedly(self, tmp_path: Path) -> None:
