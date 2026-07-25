@@ -19,6 +19,7 @@ from mindroom.config.main import Config, load_config
 from mindroom.config.yaml_includes import ConfigIncludeError, load_yaml_config_source, partial_source_files
 from mindroom.constants import resolve_runtime_paths
 from mindroom.orchestration.config_lifecycle import ConfigReloadLifecycle
+from mindroom.response_admission import ResponseAdmissionGate
 
 runner = CliRunner()
 
@@ -653,9 +654,9 @@ def _reload_lifecycle(config_path: Path) -> ConfigReloadLifecycle:
         is_running=lambda: True,
         current_config=lambda: None,
         agent_bots=dict,
-        in_flight_response_count=lambda: 0,
         load_initial_config=_load_initial,
         apply_update_plan=_apply_plan,
+        response_admission_gate=ResponseAdmissionGate(),
     )
 
 

@@ -110,6 +110,7 @@ class ThreadMutationCacheOps:
             emit_timing=emit_timing,
             coalesce_key=scoped_coalesce_key,
             coalesce_log_context=coalesce_log_context,
+            coordination_scope=event_cache.principal_id,
         )
 
     def queue_thread_cache_update(
@@ -137,6 +138,7 @@ class ThreadMutationCacheOps:
             emit_timing=emit_timing,
             coalesce_key=scoped_coalesce_key,
             coalesce_log_context=coalesce_log_context,
+            coordination_scope=event_cache.principal_id,
         )
 
     async def store_events_batch(

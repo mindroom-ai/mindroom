@@ -29,7 +29,6 @@ from mindroom.knowledge.registry import (
     KnowledgeSourceRoot,
     PublishedIndexKey,
     PublishedIndexState,
-    indexing_settings_metadata_equal,
     load_published_index_state,
     mark_knowledge_source_changed_async,
     mark_published_index_refresh_failed_preserving_last_good,
@@ -808,7 +807,7 @@ async def _publish_unchanged_index(
         state is None
         or state.status != "complete"
         or state.source_signature is None
-        or not indexing_settings_metadata_equal(state.settings, key.indexing_settings)
+        or state.settings != key.indexing_settings
         or not await asyncio.to_thread(published_index_collection_exists_for_state, key, state)
     ):
         return None

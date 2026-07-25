@@ -57,6 +57,7 @@ _TRANSIENT_SQLSTATES: frozenset[str] = frozenset(
     },
 )
 _TRANSIENT_ERROR_TEXT: tuple[str, ...] = (
+    "another command is already in progress",
     "connection is closed",
     "connection already closed",
     "connection refused",

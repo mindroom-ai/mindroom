@@ -1291,6 +1291,7 @@ depends_on = [
     "mindroom.orchestration.external_trigger_runtime",
     "mindroom.orchestration.runtime",
     "mindroom.orchestration.todo_poke_runtime",
+    "mindroom.response_admission",
     "mindroom.runtime_support",
     "mindroom.scheduling_executor",
     "mindroom.tool_system.plugins",
@@ -1317,6 +1318,7 @@ depends_on = [
     "mindroom.memory",
     "mindroom.orchestration.runtime",
     "mindroom.post_response_effects",
+    "mindroom.response_admission",
     "mindroom.response_attempt",
     "mindroom.response_lifecycle",
     "mindroom.response_terminal",
@@ -1328,6 +1330,20 @@ depends_on = [
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.worker_routing",
     "mindroom.user_turn_time",
+]
+
+[[modules]]
+path = "mindroom.response_admission"
+depends_on = []
+visibility = [
+    "mindroom.bot",
+    "mindroom.bot_runtime_view",
+    "mindroom.orchestration.config_lifecycle",
+    "mindroom.orchestrator",
+    "mindroom.response_runner",
+    "mindroom.sync_restart_retry",
+    "mindroom.text_ingress_dispatch",
+    "mindroom.turn_controller",
 ]
 
 [[modules]]
@@ -1982,7 +1998,7 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.bot_runtime_view"
-depends_on = ["mindroom.matrix.cache"]
+depends_on = ["mindroom.matrix.cache", "mindroom.response_admission"]
 visibility = [
     "mindroom.bot",
     "mindroom.matrix.cache.thread_reads",
@@ -2025,6 +2041,7 @@ depends_on = []
 [[modules]]
 path = "mindroom.sync_restart_retry"
 depends_on = [
+    "mindroom.response_admission",
     "mindroom.constants",
     "mindroom.history.storage",
     "mindroom.history.types",
@@ -3337,6 +3354,7 @@ visibility = [
 [[modules]]
 path = "mindroom.text_ingress_dispatch"
 depends_on = [
+    "mindroom.response_admission",
     "mindroom.attachments",
     "mindroom.commands.parsing",
     "mindroom.constants",
@@ -3355,6 +3373,7 @@ visibility = ["mindroom.turn_controller"]
 [[modules]]
 path = "mindroom.turn_controller"
 depends_on = [
+    "mindroom.response_admission",
     "mindroom.commands.handler",
     "mindroom.commands.parsing",
     "mindroom.constants",

@@ -466,14 +466,14 @@ async def _apply_turn_plan(
         await asyncio.wait({started_wait, response_task}, return_when=asyncio.FIRST_COMPLETED)
     finally:
         started_wait.cancel()
+    # Surface pre-lock failures to the caller's containment; post-lock
+    # failures (including a fast failure racing the FIRST_COMPLETED wait)
+    # belong to the runner-owned task. Pre-lock CANCELLATION is
+    # deliberately NOT surfaced: this coroutine was not itself cancelled,
+    # and re-raising CancelledError here would corrupt the gate drain's
+    # own cancellation state. The queued-notice reservation still cancels
+    # in dispatch_text_message's finally, which is the cleanup contract.
     if response_task.done() and not response_task.cancelled() and not response_started.is_set():
-        # Surface pre-lock failures to the caller's containment; post-lock
-        # failures (including a fast failure racing the FIRST_COMPLETED wait)
-        # belong to the runner-owned task. Pre-lock CANCELLATION is
-        # deliberately NOT surfaced: this coroutine was not itself cancelled,
-        # and re-raising CancelledError here would corrupt the gate drain's
-        # own cancellation state. The queued-notice reservation still cancels
-        # in dispatch_text_message's finally, which is the cleanup contract.
         response_task.result()
 
 

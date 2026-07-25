@@ -182,6 +182,9 @@ def _blocking_adapter(
     def _persist(_scope: ScopeSessionContext | None, snapshot: StandaloneReplaySnapshot) -> None:
         log.persisted.append(snapshot)
 
+    async def _finalize(_scope: ScopeSessionContext | None) -> None:
+        _bump(log, "finalized")
+
     return BlockingTurnAdapter(
         open_scope=_open_scope_factory(log),
         run_attempt=run_attempt,
@@ -189,7 +192,7 @@ def _blocking_adapter(
         release_attempt_entity=lambda _scope: _bump(log, "released"),
         close_runtime_dbs=lambda _scope: _bump(log, "closed"),
         discard_empty_run=lambda _scope, discard: log.discards.append(discard),
-        finalize_attempt=lambda _scope: _bump(log, "finalized"),
+        finalize_attempt=_finalize,
         unexpected_error_text=unexpected_error_text,
         persist_standalone_replay=_persist if with_standalone_replay else None,
     )
@@ -208,6 +211,9 @@ def _streaming_adapter(
     def _persist(_scope: ScopeSessionContext | None, snapshot: StandaloneReplaySnapshot) -> None:
         log.persisted.append(snapshot)
 
+    async def _finalize(_scope: ScopeSessionContext | None) -> None:
+        _bump(log, "finalized")
+
     return StreamingTurnAdapter[str](
         open_scope=_open_scope_factory(log),
         run_attempt=run_attempt,
@@ -216,7 +222,7 @@ def _streaming_adapter(
         close_runtime_dbs=lambda _scope: _bump(log, "closed"),
         discard_empty_run=lambda _scope, discard: log.discards.append(discard),
         make_text_chunk=lambda text: f"notice:{text}",
-        finalize_attempt=lambda _scope: _bump(log, "finalized"),
+        finalize_attempt=_finalize,
         unexpected_error_text=unexpected_error_text,
         persist_standalone_replay=_persist if with_standalone_replay else None,
     )
