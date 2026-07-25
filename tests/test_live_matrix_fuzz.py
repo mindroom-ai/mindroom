@@ -4551,8 +4551,8 @@ async def test_chaos_checkpoint_waits_for_latest_marker_and_tombstone(
         def ledger_response(_source_event_id: str) -> str:
             return "$reply"
 
-        def source_tombstoned(self, _source_event_id: str) -> bool:
-            return self.tombstoned
+        def source_tombstoned(self, source_event_id: str) -> bool:
+            return source_event_id == "$redacted" and self.tombstoned
 
     monkeypatch.setattr(
         _ModelHandler,
@@ -4595,6 +4595,10 @@ async def test_chaos_checkpoint_releases_marker_for_no_response_source() -> None
             return None
 
         @staticmethod
+        def source_tombstoned(_source_event_id: str) -> bool:
+            return False
+
+        @staticmethod
         def source_completed_without_response(_source_event_id: str) -> bool:
             return True
 
@@ -4609,6 +4613,47 @@ async def test_chaos_checkpoint_releases_marker_for_no_response_source() -> None
     )
 
     assert runner._pending_source_markers == {}
+
+
+@pytest.mark.asyncio
+async def test_chaos_checkpoint_tombstone_releases_same_source_marker() -> None:
+    """A source tombstone supersedes a concurrently landed edit obligation."""
+
+    class FakeOracle:
+        def __init__(self) -> None:
+            self.latest_reply_bodies = {"$reply": ((0, 0, "$reply"), _short_body_for(1))}
+            self.tombstoned = False
+            self.pumps = 0
+
+        async def pump(self, *, timeout_ms: int) -> None:
+            assert timeout_ms == 250
+            self.pumps += 1
+            self.tombstoned = True
+
+        @staticmethod
+        def refresh_ledger_attributions(*, min_interval: float) -> None:
+            assert min_interval == 0.0
+
+        @staticmethod
+        def ledger_response(_source_event_id: str) -> str:
+            return "$reply"
+
+        def source_tombstoned(self, _source_event_id: str) -> bool:
+            return self.tombstoned
+
+    runner = object.__new__(LiveFuzzRunner)
+    runner.oracle = FakeOracle()
+    runner._pending_source_markers = {"$source": _source_marker("root:41", "edit:183")}
+    runner._pending_source_tombstones = {"$source"}
+
+    await runner._wait_for_pending_mutation_effects(
+        deadline_seconds=1.0,
+        batch_index=26,
+    )
+
+    assert runner.oracle.pumps == 1
+    assert runner._pending_source_markers == {}
+    assert runner._pending_source_tombstones == set()
 
 
 @pytest.mark.asyncio

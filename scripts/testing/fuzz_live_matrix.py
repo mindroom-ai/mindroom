@@ -4249,6 +4249,9 @@ class LiveFuzzRunner:
             await self.oracle.pump(timeout_ms=250)
             self.oracle.refresh_ledger_attributions(min_interval=0.0)
             for source_event_id, marker in tuple(self._pending_source_markers.items()):
+                if self.oracle.source_tombstoned(source_event_id):
+                    del self._pending_source_markers[source_event_id]
+                    continue
                 response_event_id = self.oracle.ledger_response(source_event_id)
                 if response_event_id is None:
                     if self.oracle.source_completed_without_response(source_event_id):
