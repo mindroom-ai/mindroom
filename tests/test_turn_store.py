@@ -166,9 +166,9 @@ async def test_dispatch_claims_router_relay_alias_up_front(tmp_path: Path) -> No
     )
     prepared = SimpleNamespace(handled_turn=TurnRecord.create(["$relay"], completed=False), event=raw_event)
     observed: dict[str, bool] = {}
-    prepared_turns: list[TurnRecord] = []
+    prepared_turns: list[TurnRecord | None] = []
 
-    async def capture_prepared(*_args: object, handled_turn: TurnRecord, **_kwargs: object) -> object:
+    async def capture_prepared(*_args: object, handled_turn: TurnRecord | None, **_kwargs: object) -> object:
         prepared_turns.append(handled_turn)
         return prepared
 
@@ -198,9 +198,7 @@ async def test_dispatch_claims_router_relay_alias_up_front(tmp_path: Path) -> No
         )
 
     assert observed["routed_in_flight"] is True
-    assert prepared_turns[0].completed is True
-    assert prepared_turns[0].source_event_ids == ("$relay",)
-    assert prepared_turns[0].discovery_event_ids == ("$routed",)
+    assert prepared_turns == [None]
     assert store.is_claimed_in_flight("$routed") is False
     assert store.is_claimed_in_flight("$relay") is False
 
@@ -344,6 +342,85 @@ async def test_degraded_replay_guard_receives_every_current_turn_event_id() -> N
         is False
     )
     assert cached_guard.await_args.kwargs["current_turn_event_ids"] == handled_turn.indexed_event_ids
+
+
+@pytest.mark.asyncio
+async def test_router_relay_response_persists_collided_alias_and_redaction(tmp_path: Path) -> None:
+    """A responding relay keeps its routed alias durable without stealing its live claim."""
+    store = _store(tmp_path)
+    assert store.try_claim_turn(TurnRecord.create(["$routed"], completed=False))
+    marked = store.mark_source_redacted("$routed")
+    assert marked is not None
+
+    target = MessageTarget.resolve("!room:example.org", "$thread", "$relay")
+    raw_event = PreparedTextEvent(
+        sender="@router:example.org",
+        event_id="$relay",
+        body="relayed",
+        source={},
+        server_timestamp=1_000,
+    )
+    prepared = SimpleNamespace(
+        event=raw_event,
+        payload_metadata=None,
+        handled_turn=TurnRecord.create(["$relay"]),
+        dispatch=SimpleNamespace(
+            requester_user_id="@user:example.org",
+            target=target,
+            scheduled_history_budget=None,
+        ),
+        dispatch_started_at=1.0,
+    )
+    plan = SimpleNamespace(
+        kind="respond",
+        response_action=SimpleNamespace(kind="reject"),
+    )
+    controller = cast(
+        "TurnController",
+        SimpleNamespace(
+            deps=SimpleNamespace(
+                turn_store=store,
+                ingress=SimpleNamespace(router_relay_original_event_id=lambda _event: "$routed"),
+                turn_policy=SimpleNamespace(plan_turn=AsyncMock(return_value=plan)),
+                response_runner=SimpleNamespace(has_active_response_for_target=MagicMock()),
+            ),
+            _client=lambda: MagicMock(),
+        ),
+    )
+
+    with (
+        patch(
+            "mindroom.text_ingress_dispatch._prepare_text_dispatch",
+            new=AsyncMock(return_value=prepared),
+        ),
+        patch(
+            "mindroom.text_ingress_dispatch._blocked_before_plan",
+            new=AsyncMock(return_value=False),
+        ),
+        patch(
+            "mindroom.text_ingress_dispatch.is_dm_room",
+            new=AsyncMock(return_value=False),
+        ),
+    ):
+        await dispatch_text_message(
+            controller,
+            MagicMock(room_id="!room:example.org"),
+            raw_event,
+            "@user:example.org",
+        )
+
+    persisted = store.get_turn_record("$relay")
+    assert persisted is not None
+    assert persisted.discovery_event_ids == ("$routed",)
+    assert persisted.redacted_source_event_ids == ("$routed",)
+    # The relay released only its own claim; the overlapping original still owns its alias.
+    assert store.is_claimed_in_flight("$routed") is True
+    assert store.is_claimed_in_flight("$relay") is False
+
+    store._ledger.flush()
+    _reset_handled_turn_ledger_runtime()
+    restarted = _store(tmp_path)
+    assert restarted.get_turn_record("$routed") == persisted
 
 
 def test_try_claim_turn_subset_claims_only_unowned_sources(tmp_path: Path) -> None:

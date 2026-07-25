@@ -105,13 +105,12 @@ async def dispatch_text_message(
 
     timing_scope_token = None
     try:
-        turn_claim = _claim_router_relay_alias(
+        turn_claim, router_relay_alias = _claim_router_relay_alias(
             controller,
             raw_event,
             turn_claim,
             ingress_metadata=ingress_metadata,
         )
-        terminal_handled_turn = _terminal_turn(raw_event.event_id, handled_turn, turn_claim)
         dispatch_timing = get_dispatch_pipeline_timing(raw_event.source)
         prepared = await _prepare_text_dispatch(
             controller,
@@ -119,7 +118,7 @@ async def dispatch_text_message(
             raw_event,
             requester_user_id,
             media_events=media_events,
-            handled_turn=terminal_handled_turn,
+            handled_turn=handled_turn,
             ingress_metadata=ingress_metadata,
             payload_metadata=payload_metadata,
             trust_hydrated_internal_metadata=trust_hydrated_internal_metadata,
@@ -163,6 +162,7 @@ async def dispatch_text_message(
             media_events=media_events,
             queued_notice_reservation=queued_notice_reservation,
             turn_claim=turn_claim,
+            router_relay_alias=router_relay_alias,
             mark_claim_transferred=mark_claim_transferred,
         )
     finally:
@@ -180,7 +180,7 @@ def _claim_router_relay_alias(
     turn_claim: TurnRecord,
     *,
     ingress_metadata: DispatchIngressMetadata | None,
-) -> TurnRecord:
+) -> tuple[TurnRecord, str | None]:
     """Claim the routed-human alias a trusted router relay replies to, up front.
 
     The relay knows the routed human event id from its own reply relation
@@ -200,26 +200,16 @@ def _claim_router_relay_alias(
         else controller.deps.ingress.router_relay_original_event_id(raw_event)
     )
     if alias_event_id is None or alias_event_id in turn_claim.indexed_event_ids:
-        return turn_claim
-    claimed_turn = replace(
-        turn_claim,
-        discovery_event_ids=(*turn_claim.discovery_event_ids, alias_event_id),
-    )
+        return turn_claim, alias_event_id
     if not controller.deps.turn_store.try_claim_turn_alias(alias_event_id):
-        return turn_claim
-    return claimed_turn
-
-
-def _terminal_turn(
-    event_id: str,
-    handled_turn: TurnRecord | None,
-    turn_claim: TurnRecord,
-) -> TurnRecord | None:
-    """Keep terminal state separate while carrying only aliases this claim owns."""
-    if not turn_claim.discovery_event_ids:
-        return handled_turn
-    terminal = handled_turn or TurnRecord.create([event_id])
-    return replace(terminal, discovery_event_ids=turn_claim.discovery_event_ids)
+        return turn_claim, alias_event_id
+    return (
+        replace(
+            turn_claim,
+            discovery_event_ids=(*turn_claim.discovery_event_ids, alias_event_id),
+        ),
+        alias_event_id,
+    )
 
 
 def _try_claim_turn(
@@ -438,6 +428,7 @@ async def _apply_turn_plan(
     media_events: list[MediaDispatchEvent] | None,
     queued_notice_reservation: QueuedHumanNoticeReservation | None,
     turn_claim: TurnRecord,
+    router_relay_alias: str | None,
     mark_claim_transferred: Callable[[], None],
 ) -> None:
     if plan.kind == "ignore":
@@ -451,6 +442,12 @@ async def _apply_turn_plan(
         return
 
     assert plan.response_action is not None
+    handled_turn = prepared.handled_turn
+    if router_relay_alias is not None and router_relay_alias not in handled_turn.indexed_event_ids:
+        handled_turn = replace(
+            handled_turn,
+            discovery_event_ids=(*handled_turn.discovery_event_ids, router_relay_alias),
+        )
     response_history_scope = (
         controller.deps.turn_store.response_history_scope(
             plan.response_action,
@@ -460,7 +457,7 @@ async def _apply_turn_plan(
         else None
     )
     handled_turn = controller.deps.turn_store.attach_response_context(
-        prepared.handled_turn,
+        handled_turn,
         history_scope=response_history_scope,
         conversation_target=prepared.dispatch.target,
     )

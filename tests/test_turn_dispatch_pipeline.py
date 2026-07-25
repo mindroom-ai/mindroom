@@ -1069,12 +1069,12 @@ class TestAgentBot(AgentBotTestBase):
         )
 
     @pytest.mark.asyncio
-    async def test_router_relay_dispatch_indexes_routed_original_event(
+    async def test_router_relay_dispatch_does_not_index_alias_before_response(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Routed turns must stay discoverable by the human event the router relayed."""
+        """A relay that never reaches RESPOND must not persist the routed-human alias."""
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         _wrap_extracted_collaborators(bot)
@@ -1102,7 +1102,7 @@ class TestAgentBot(AgentBotTestBase):
 
         handled_turn = mock_prepare.await_args.kwargs["handled_turn"]
         assert handled_turn.source_event_ids == ("$relay:localhost",)
-        assert "$user_msg:localhost" in handled_turn.discovery_event_ids
+        assert handled_turn.discovery_event_ids == ()
 
     @pytest.mark.asyncio
     async def test_router_relay_original_event_requires_explicit_router_reply(
