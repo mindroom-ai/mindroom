@@ -209,8 +209,6 @@ class _CandidateReconciliation:
 
     expected: frozenset[str]
     pending: tuple[Path, ...]
-    removed: tuple[str, ...]
-    reused: int
 
 
 @dataclass
@@ -1313,8 +1311,7 @@ class KnowledgeManager:
                 self._indexed_signatures.pop(relative_path, None)
         return False
 
-    def _record_embedding_retry(self, attempt: object) -> None:
-        _ = attempt
+    def _record_embedding_retry(self) -> None:
         self._embedding_retry_count += 1
 
     def _chunk_texts_for_prefetch(self, resolved_path: Path) -> tuple[str, ...]:
@@ -1734,12 +1731,7 @@ class KnowledgeManager:
             for relative_path, (_signature, file_path) in sorted(signatures.items())
             if relative_path not in run.completed_paths or relative_path in run.failed
         )
-        return _CandidateReconciliation(
-            expected=frozenset(present),
-            pending=pending,
-            removed=removed,
-            reused=len(run.completed_paths),
-        )
+        return _CandidateReconciliation(expected=frozenset(present), pending=pending)
 
     async def _persist_candidate_batch(self, run: _CandidateRun, batch: Sequence[Path]) -> None:
         """Durably record finished files' outcomes on the candidate."""

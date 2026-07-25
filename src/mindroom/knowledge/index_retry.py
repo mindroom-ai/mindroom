@@ -19,10 +19,12 @@ from mindroom.embedding_errors import (
     embedder_failure_is_transient,
     embedder_retry_after_seconds,
 )
+from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
+logger = get_logger(__name__)
 _T = TypeVar("_T")
 
 
@@ -50,22 +52,13 @@ class EmbeddingRetryPolicy:
         return max(clamped + jitter, 0.0)
 
 
-@dataclass(frozen=True, slots=True)
-class _EmbeddingRetryAttempt:
-    """One exhausted attempt, reported to callers for progress accounting."""
-
-    attempt: int
-    delay_seconds: float
-    detail: str
-
-
 async def run_with_embedding_retry(
     operation: Callable[[], Awaitable[_T]],
     *,
     policy: EmbeddingRetryPolicy,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     jitter: Callable[[], float] = random.random,
-    on_retry: Callable[[_EmbeddingRetryAttempt], None] | None = None,
+    on_retry: Callable[[], None] | None = None,
 ) -> _T:
     """Run ``operation``, retrying only transient embedding failures."""
     last_error: BaseException | None = None
@@ -84,13 +77,13 @@ async def run_with_embedding_retry(
                 jitter_unit=jitter(),
             )
             if on_retry is not None:
-                on_retry(
-                    _EmbeddingRetryAttempt(
-                        attempt=attempt,
-                        delay_seconds=delay_seconds,
-                        detail=describe_embedder_error(exc),
-                    ),
-                )
+                on_retry()
+            logger.debug(
+                "Retrying knowledge embedding after a transient failure",
+                attempt=attempt,
+                delay_seconds=round(delay_seconds, 3),
+                detail=describe_embedder_error(exc),
+            )
             await sleep(delay_seconds)
     # Unreachable: the loop either returns or raises, but keeps type checkers
     # honest about the non-returning tail.

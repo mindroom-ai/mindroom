@@ -97,10 +97,6 @@ class BatchPrefetchEmbedder(Embedder):
         """Return whether the wrapped embedder can embed a batch in one request."""
         return isinstance(self.inner, _SupportsBatchEmbedding)
 
-    def cached_texts(self) -> frozenset[str]:
-        """Return the chunk texts currently served without a provider request."""
-        return frozenset(self._cache)
-
     def clear_cache(self) -> None:
         """Drop prefetched vectors once their batch has been written."""
         self._cache.clear()
