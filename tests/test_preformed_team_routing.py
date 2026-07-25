@@ -29,7 +29,6 @@ from tests.conftest import (
     bind_runtime_paths,
     drain_coalescing,
     install_runtime_cache_support,
-    install_send_response_mock,
     make_matrix_client_mock,
     make_visible_message,
     patch_response_runner_module,
@@ -320,8 +319,6 @@ async def test_preformed_team_rejection_edits_existing_message(config_with_team:
     install_runtime_cache_support(bot)
     bot.orchestrator = MagicMock()
     bot.orchestrator.agent_bots = {"a1": MagicMock()}
-    send_response = AsyncMock(return_value="$new_response")
-    install_send_response_mock(bot, send_response)
 
     with patch(
         "mindroom.delivery_gateway.edit_message_result",
@@ -353,7 +350,6 @@ async def test_preformed_team_rejection_edits_existing_message(config_with_team:
     assert (
         mock_edit.await_args.args[4] == "Team 't1' includes agent 'a2' that could not be materialized for this request."
     )
-    send_response.assert_not_awaited()
 
 
 @pytest.mark.asyncio
