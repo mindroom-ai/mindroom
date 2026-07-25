@@ -183,6 +183,7 @@ class EditRegenerator:
             self._client(),
             config=self.deps.runtime.config,
             runtime_paths=self.deps.runtime_paths,
+            room_id=room.room_id,
         )
         if edited_content is None:
             self._logger().debug("Edited message missing resolved body", event_id=event.event_id)

@@ -2387,6 +2387,7 @@ visibility = [
 [[modules]]
 path = "mindroom.matrix.message_content"
 depends_on = [
+    "mindroom.matrix.event_info",
     "mindroom.matrix.membership_fence",
     "mindroom.matrix.sidecar_content",
     "mindroom.matrix.visible_body",

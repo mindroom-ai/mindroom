@@ -10,6 +10,7 @@ import nio
 from nio import crypto
 
 from mindroom.logging_config import get_logger
+from mindroom.matrix.event_info import event_source_matches_room
 from mindroom.matrix.membership_fence import UNCERTIFIED_MEMBERSHIP_EPOCH
 from mindroom.matrix.sidecar_content import sidecar_mxc_url
 from mindroom.matrix.visible_body import has_trusted_stream_body_metadata, visible_body_from_content
@@ -452,6 +453,8 @@ async def extract_edit_body(
     replacement_validator: Callable[[Mapping[str, Any]], bool],
 ) -> tuple[str | None, dict[str, Any] | None]:
     """Extract body/content from an edit event's ``m.new_content`` payload."""
+    if room_id is not None and not event_source_matches_room(event_source, room_id):
+        return None, None
     resolved_content, content_changed = await _resolve_event_content(
         event_source,
         client,
