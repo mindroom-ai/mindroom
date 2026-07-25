@@ -183,6 +183,54 @@ def test_stop_mindroom_kills_group_after_leader_already_exited(
     assert stack._mindroom_process is None
 
 
+def test_startup_maintenance_wait_uses_only_current_process_generation(tmp_path: Path) -> None:
+    """A stale completion marker from the prior process cannot release restart audit."""
+
+    class FakeProcess:
+        @staticmethod
+        def poll() -> None:
+            return None
+
+    log_path = tmp_path / "mindroom.log"
+    log_path.write_text(
+        "startup_phase_finished phase=startup_maintenance.runtime_support status=failed\n",
+        encoding="utf-8",
+    )
+    current_generation_offset = log_path.stat().st_size
+    with log_path.open("a", encoding="utf-8") as log:
+        for phase in sorted(live_fuzz._STARTUP_MAINTENANCE_PHASES):
+            log.write(f"startup_phase_finished phase={phase} status=completed\n")
+
+    stack = object.__new__(ManagedTuwunelStack)
+    stack.log_path = log_path
+    stack._mindroom_start_log_offset = current_generation_offset
+    stack._mindroom_process = FakeProcess()
+
+    stack.wait_for_startup_maintenance(timeout_seconds=0.1)
+
+
+def test_startup_maintenance_wait_rejects_failed_current_phase(tmp_path: Path) -> None:
+    """A terminal failed phase cannot be mistaken for completed maintenance."""
+
+    class FakeProcess:
+        @staticmethod
+        def poll() -> None:
+            return None
+
+    log_path = tmp_path / "mindroom.log"
+    log_path.write_text(
+        "startup_phase_finished phase=startup_maintenance.stale_stream_recovery.initial status=failed\n",
+        encoding="utf-8",
+    )
+    stack = object.__new__(ManagedTuwunelStack)
+    stack.log_path = log_path
+    stack._mindroom_start_log_offset = 0
+    stack._mindroom_process = FakeProcess()
+
+    with pytest.raises(AssertionError, match="did not complete cleanly"):
+        stack.wait_for_startup_maintenance(timeout_seconds=0.1)
+
+
 def test_live_scenario_is_deterministic_and_json_replayable() -> None:
     """A seed must produce a stable trace that survives JSON round-tripping."""
     scenario = live_scenario_from_seed(
@@ -2013,6 +2061,72 @@ async def test_duplicate_canonical_reply_inside_edit_window_is_detected() -> Non
         await oracle.client.close()
 
 
+@pytest.mark.asyncio
+async def test_matrix_quiet_window_rejects_limited_sync_without_advancing_cursor() -> None:
+    """A truncated saturation window fails instead of silently skipping events."""
+    client = LiveMatrixClient("http://matrix.invalid", "!room:example")
+
+    async def limited_sync(_since: str | None, *, timeout_ms: int) -> dict[str, Any]:
+        assert timeout_ms > 0
+        return {
+            "next_batch": "truncated",
+            "rooms": {
+                "join": {
+                    "!room:example": {
+                        "timeline": {
+                            "limited": True,
+                            "events": [],
+                        },
+                    },
+                },
+            },
+        }
+
+    client.sync = limited_sync  # type: ignore[method-assign]
+    try:
+        with pytest.raises(AssertionError, match="limited timeline"):
+            await client.wait_until_quiet(deadline_seconds=1.0, quiet_seconds=0.0)
+        assert client.next_batch is None
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_matrix_quiet_window_restarts_after_late_duplicate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An event after an initially quiet poll requires a fresh full window."""
+    client = LiveMatrixClient("http://matrix.invalid", "!room:example")
+    clock = 0.0
+    calls = 0
+    original_monotonic = live_fuzz.time.monotonic
+
+    def monotonic() -> float:
+        return clock
+
+    async def sync_incremental(*, timeout_ms: int, allow_limited: bool) -> int:
+        nonlocal calls, clock
+        assert timeout_ms > 0
+        assert allow_limited is False
+        calls += 1
+        advances = (0.6, 0.2, 0.6, 0.5)
+        clock += advances[calls - 1]
+        if calls == 2:
+            client.seen_events["$late-duplicate"] = {"event_id": "$late-duplicate"}
+            return 1
+        return 0
+
+    client.sync_incremental = sync_incremental  # type: ignore[method-assign]
+    monkeypatch.setattr(live_fuzz.time, "monotonic", monotonic)
+    try:
+        await client.wait_until_quiet(deadline_seconds=10.0, quiet_seconds=1.0)
+    finally:
+        monkeypatch.setattr(live_fuzz.time, "monotonic", original_monotonic)
+        await client.close()
+
+    assert calls == 4
+
+
 def _marker_payload(*bodies: str) -> dict[str, Any]:
     """Build a chat-completions payload whose messages carry the given bodies in order."""
     return {"messages": [{"role": "user", "content": body} for body in bodies]}
@@ -3312,6 +3426,104 @@ async def test_every_live_profile_runs_the_shared_final_audit(profile: str) -> N
 
     assert calls[-2:] == [profile, "audit"]
     assert result == {"status": "PASS", "audited_events": 7}
+
+
+@pytest.mark.asyncio
+async def test_restart_recovery_waits_for_maintenance_before_oracle_quiet() -> None:
+    """The final restart audit is driven by runtime completion, then Matrix sync."""
+    calls: list[str] = []
+
+    class FakeStack:
+        @staticmethod
+        def wait_for_startup_maintenance(*, timeout_seconds: float) -> None:
+            assert timeout_seconds == 12.0
+            calls.append("maintenance")
+
+    class FakeOracle:
+        @staticmethod
+        async def wait_until_exact(*, deadline_seconds: float, settle_seconds: float) -> None:
+            assert (deadline_seconds, settle_seconds) == (12.0, 0.75)
+            calls.append("oracle-quiet")
+
+    runner = object.__new__(LiveFuzzRunner)
+    runner.stack = FakeStack()
+    runner.oracle = FakeOracle()
+    runner.reply_timeout = 12.0
+    runner.settle_seconds = 0.75
+    runner._startup_maintenance_pending = True
+
+    await runner._wait_for_restart_recovery_window()
+
+    assert calls == ["maintenance", "oracle-quiet"]
+    assert runner._startup_maintenance_pending is False
+
+
+@pytest.mark.asyncio
+async def test_final_messages_cardinality_rejects_delayed_duplicate() -> None:
+    """The canonical `/messages` view remains the final saturation authority."""
+    client = LiveMatrixClient("http://matrix.invalid", "!room:example")
+    oracle = ExactReplyOracle(client, "@agent:example")
+    oracle.expect("root:0", "$source")
+    auditor = FinalStateAuditor(
+        client,
+        oracle,
+        agent_id="@agent:example",
+        expected_body_for=_short_body_for,
+    )
+    try:
+        with pytest.raises(AssertionError, match="2 direct replies in /messages"):
+            auditor._assert_reply_cardinality(
+                {"$source": {"$first", "$delayed-duplicate"}},
+            )
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_saturation_requires_oracle_and_sender_quiet_windows() -> None:
+    """Saturation cannot check cardinality before both sync views are quiet."""
+    calls: list[str] = []
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.seen_events: dict[str, dict[str, Any]] = {}
+
+        @staticmethod
+        async def wait_until_quiet(*, deadline_seconds: float, quiet_seconds: float) -> None:
+            assert (deadline_seconds, quiet_seconds) == (12.0, 0.75)
+            calls.append("sender-quiet")
+
+    class FakeOracle:
+        @staticmethod
+        async def wait_until_exact(*, deadline_seconds: float, settle_seconds: float) -> None:
+            assert (deadline_seconds, settle_seconds) == (12.0, 0.75)
+            calls.append("oracle-quiet")
+
+    async def saturation_turn(
+        _client: FakeClient,
+        **kwargs: object,
+    ) -> tuple[str, str]:
+        expected_sources = kwargs["expected_sources"]
+        assert isinstance(expected_sources, set)
+        expected_sources.add("$source")
+        calls.append("turn")
+        return "$root", "$reply"
+
+    runner = object.__new__(LiveFuzzRunner)
+    runner.clients = (FakeClient(),)
+    runner.scenario = LiveFuzzScenario(thread_count=1, batches=(), profile="saturation")
+    runner.oracle = FakeOracle()
+    runner.reply_timeout = 12.0
+    runner.settle_seconds = 0.75
+    runner.operation_count = 0
+    runner.executed_batches = 0
+    runner._saturation_turn = saturation_turn  # type: ignore[method-assign]
+    runner._canonical_response_ids = lambda _events: {"$source": {"$reply"}}  # type: ignore[method-assign]
+
+    result = await runner._run_saturation()
+
+    assert calls == ["turn", "oracle-quiet", "sender-quiet"]
+    assert result["status"] == "PASS"
 
 
 @pytest.mark.asyncio

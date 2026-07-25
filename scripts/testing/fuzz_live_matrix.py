@@ -61,6 +61,16 @@ MODEL_ID = "mindroom-live-fuzz"
 AGENT_NAME = "general"
 ROOM_KEY = "lobby"
 LIFECYCLE_COMMAND_TIMEOUT_SECONDS = 180.0
+_STARTUP_MAINTENANCE_PHASES = frozenset(
+    {
+        "startup_maintenance.rooms_and_memberships",
+        "startup_maintenance.runtime_support",
+        "startup_maintenance.stale_stream_recovery.initial",
+        "startup_maintenance.stale_stream_recovery.joined_room_delta",
+    },
+)
+_STARTUP_PHASE_PATTERN = re.compile(r"\bphase=(startup_maintenance\.[^\s\]]+)")
+_STARTUP_STATUS_PATTERN = re.compile(r"\bstatus=([a-z_]+)")
 
 
 def _required_int(value: Mapping[str, object], key: str) -> int:
@@ -1341,6 +1351,7 @@ class ManagedTuwunelStack:
         self._env: dict[str, str] = {}
         self._provenance_sink = provenance_sink
         self._host_lease: TextIOWrapper | None = None
+        self._mindroom_start_log_offset = 0
 
     def _acquire_host_lease(self) -> None:
         """Serialize live stacks across worktrees and retain crash ownership."""
@@ -1544,6 +1555,43 @@ class ManagedTuwunelStack:
         _run_command("docker", "restart", f"{self.instance_name}-tuwunel")
         self._wait_for_url(f"{self.homeserver}/_matrix/client/versions", timeout=60)
 
+    def wait_for_startup_maintenance(self, *, timeout_seconds: float) -> None:
+        """Wait for every phase of the current MindRoom generation to complete."""
+        deadline = time.monotonic() + timeout_seconds
+        while time.monotonic() < deadline:
+            process = self._mindroom_process
+            if process is None or process.poll() is not None:
+                msg = f"MindRoom exited before startup maintenance completed:\n{self.log_tail()}"
+                raise RuntimeError(msg)
+            statuses = self._startup_maintenance_statuses()
+            failed = {phase: status for phase, status in statuses.items() if status != "completed"}
+            if failed:
+                msg = f"MindRoom startup maintenance did not complete cleanly: {failed}"
+                raise AssertionError(msg)
+            if statuses.keys() >= _STARTUP_MAINTENANCE_PHASES:
+                return
+            time.sleep(0.1)
+        missing = sorted(_STARTUP_MAINTENANCE_PHASES - self._startup_maintenance_statuses().keys())
+        msg = f"timed out waiting for MindRoom startup maintenance phases: {missing}"
+        raise TimeoutError(msg)
+
+    def _startup_maintenance_statuses(self) -> dict[str, str]:
+        """Read terminal startup phases emitted after the current process start."""
+        if not self.log_path.exists():
+            return {}
+        with self.log_path.open("rb") as log:
+            log.seek(self._mindroom_start_log_offset)
+            generation_log = log.read().decode("utf-8", errors="replace")
+        statuses: dict[str, str] = {}
+        for line in generation_log.splitlines():
+            if "startup_phase_finished" not in line:
+                continue
+            phase_match = _STARTUP_PHASE_PATTERN.search(line)
+            status_match = _STARTUP_STATUS_PATTERN.search(line)
+            if phase_match is not None and status_match is not None:
+                statuses[phase_match.group(1)] = status_match.group(1)
+        return statuses
+
     def close(
         self,
         *,
@@ -1698,6 +1746,7 @@ class ManagedTuwunelStack:
         overlay = os.environ.get("MINDROOM_LIVE_FUZZ_UV_WITH")
         overlay_args = ("--with-editable", overlay) if overlay else ()
         self.attestation_path.unlink(missing_ok=True)
+        self._mindroom_start_log_offset = self.log_path.stat().st_size if self.log_path.exists() else 0
         self._mindroom_process = subprocess.Popen(
             [
                 "uv",
@@ -1980,13 +2029,14 @@ class LiveMatrixClient:
         *,
         timeout_ms: int,
         allow_limited: bool = False,
-    ) -> None:
+    ) -> int:
         """Advance this client's private sync cursor and retain room events."""
         data = await self.sync(self.next_batch, timeout_ms=timeout_ms)
         next_batch = data.get("next_batch")
         if not isinstance(next_batch, str):
             msg = "Matrix sync omitted next_batch"
             raise TypeError(msg)
+        new_event_count = 0
         joined = data.get("rooms", {}).get("join", {})
         for room_id in self.room_ids:
             room = joined.get(room_id, {}) if isinstance(joined, dict) else {}
@@ -2004,8 +2054,37 @@ class LiveMatrixClient:
                 event = cast("dict[str, Any]", raw_event)
                 event_id = event.get("event_id")
                 if isinstance(event_id, str):
+                    new_event_count += event_id not in self.seen_events
                     self.seen_events[event_id] = event
         self.next_batch = next_batch
+        return new_event_count
+
+    async def wait_until_quiet(
+        self,
+        *,
+        deadline_seconds: float,
+        quiet_seconds: float,
+    ) -> None:
+        """Require strict incremental syncs to observe one exact quiet window."""
+        if deadline_seconds <= 0 or quiet_seconds < 0:
+            msg = "Matrix quiet-window deadline must be positive and duration non-negative"
+            raise ValueError(msg)
+        deadline = time.monotonic() + deadline_seconds
+        quiet_since = time.monotonic()
+        while time.monotonic() < deadline:
+            remaining = deadline - time.monotonic()
+            timeout_ms = max(1, min(250, int(remaining * 1000)))
+            new_event_count = await self.sync_incremental(
+                timeout_ms=timeout_ms,
+                allow_limited=False,
+            )
+            now = time.monotonic()
+            if new_event_count:
+                quiet_since = now
+            if now - quiet_since >= quiet_seconds:
+                return
+        msg = f"Matrix room did not stay quiet for {quiet_seconds:.3f}s"
+        raise TimeoutError(msg)
 
     async def _request(
         self,
@@ -3331,7 +3410,7 @@ class LiveFuzzRunner:
         self.executed_batches = 0
         self.max_unsettled = 0
         self._mindroom_running = True
-        self._last_mindroom_start_at: float | None = None
+        self._startup_maintenance_pending = False
 
     async def run(self) -> dict[str, object]:
         """Execute every batch and enforce the reply invariant after each."""
@@ -3412,11 +3491,20 @@ class LiveFuzzRunner:
         )
         self.executed_batches += len(parallel_batches)
 
-        # A duplicate response may finish just after its twin. Let all model
-        # streams settle, then audit the union of every sender's sync history.
-        await asyncio.sleep(max(self.settle_seconds, 1.0))
+        await self.oracle.wait_until_exact(
+            deadline_seconds=self.reply_timeout,
+            settle_seconds=self.settle_seconds,
+        )
+        # Every sender must observe a complete, non-limited sync stream through
+        # one full quiet window before the canonical `/messages` audit runs.
         await asyncio.gather(
-            *(client.sync_incremental(timeout_ms=0, allow_limited=True) for client in self.clients),
+            *(
+                client.wait_until_quiet(
+                    deadline_seconds=self.reply_timeout,
+                    quiet_seconds=self.settle_seconds,
+                )
+                for client in self.clients
+            ),
         )
         all_events = {event_id: event for client in self.clients for event_id, event in client.seen_events.items()}
         response_ids = self._canonical_response_ids(all_events.values())
@@ -3438,10 +3526,6 @@ class LiveFuzzRunner:
             )
             raise AssertionError(msg)
 
-        await self.oracle.wait_until_exact(
-            deadline_seconds=self.reply_timeout,
-            settle_seconds=self.settle_seconds,
-        )
         return {
             "batches": self.executed_batches,
             "canonical_agent_replies": len(expected_sources),
@@ -3534,7 +3618,7 @@ class LiveFuzzRunner:
                 response_event_id = next(iter(response_ids))
                 if "END call=" in self._latest_event_body(client.seen_events.values(), response_event_id):
                     return response_event_id
-            await client.sync_incremental(timeout_ms=1000, allow_limited=True)
+            await client.sync_incremental(timeout_ms=1000)
         msg = f"agent response timeout for {source_event_id}"
         raise TimeoutError(msg)
 
@@ -3795,15 +3879,15 @@ class LiveFuzzRunner:
         if kind is LiveOperationKind.RESTART_MINDROOM:
             self.stack.restart_mindroom()
             self.restart_count += 1
-            self._last_mindroom_start_at = time.monotonic()
+            self._startup_maintenance_pending = True
         elif kind is LiveOperationKind.KILL_RESTART_MINDROOM:
             self.stack.kill_restart_mindroom()
             self.restart_count += 1
-            self._last_mindroom_start_at = time.monotonic()
+            self._startup_maintenance_pending = True
         elif kind is LiveOperationKind.COLD_RESTART_MINDROOM:
             self.stack.cold_restart_mindroom()
             self.restart_count += 1
-            self._last_mindroom_start_at = time.monotonic()
+            self._startup_maintenance_pending = True
         elif kind is LiveOperationKind.RESTART_TUWUNEL:
             self.stack.restart_tuwunel()
             self.tuwunel_restart_count += 1
@@ -3814,7 +3898,7 @@ class LiveFuzzRunner:
         elif kind is LiveOperationKind.START_MINDROOM:
             self.stack.start_mindroom()
             self._mindroom_running = True
-            self._last_mindroom_start_at = time.monotonic()
+            self._startup_maintenance_pending = True
         else:  # pragma: no cover - validation rejects unknown lifecycle kinds
             msg = f"unsupported lifecycle operation {kind}"
             raise AssertionError(msg)
@@ -3823,22 +3907,18 @@ class LiveFuzzRunner:
         self._record_lifecycle(kind)
 
     async def _wait_for_restart_recovery_window(self) -> None:
-        """Give delayed startup recovery time to settle after a late restart.
-
-        Streams interrupted by a restart are cleaned and auto-resumed by a
-        delayed startup pass, so the final audit must not run before that
-        designed recovery latency has elapsed.
-        """
-        if self._last_mindroom_start_at is None:
+        """Wait for current-generation maintenance and observed Matrix quiet."""
+        if not self._startup_maintenance_pending:
             return
-        recovery_wait = 16.0 - (time.monotonic() - self._last_mindroom_start_at)
-        if recovery_wait <= 0:
-            return
-        await asyncio.sleep(recovery_wait)
+        await asyncio.to_thread(
+            self.stack.wait_for_startup_maintenance,
+            timeout_seconds=self.reply_timeout,
+        )
         await self.oracle.wait_until_exact(
             deadline_seconds=self.reply_timeout,
             settle_seconds=self.settle_seconds,
         )
+        self._startup_maintenance_pending = False
 
     async def _checkpoint(self, batch_index: int) -> None:
         """Require full exact settlement, scaling the deadline with backlog."""
