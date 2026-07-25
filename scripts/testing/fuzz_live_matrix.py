@@ -2103,7 +2103,12 @@ class ManagedTuwunelStack:
                     "startup_thread_prewarm": self.stress_config is None,
                 },
             },
-            "defaults": {"tools": [], "enable_streaming": True, "markdown": False},
+            "defaults": {
+                "tools": [],
+                "enable_streaming": True,
+                "markdown": False,
+                "thread_summary_first_threshold": 1_000_000 if self.stress_config is not None else 1,
+            },
             "memory": {"backend": "file"},
             "router": {
                 "model": "default",

@@ -4462,6 +4462,7 @@ def test_stress_stack_bounds_model_timeout_beyond_barrier_and_disables_retries(
             "max_retries": 0,
             "timeout": 165,
         }
+        assert payload["defaults"]["thread_summary_first_threshold"] == 1_000_000
     finally:
         stack.temp_dir.cleanup()
 
