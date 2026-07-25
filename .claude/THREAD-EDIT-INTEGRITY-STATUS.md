@@ -4,78 +4,52 @@
 
 - Branch: `fix/thread-edit-integrity`.
 - Pull request: https://github.com/mindroom-ai/mindroom/pull/1641.
-- Base: `origin/main` at `66dd4f4a68bcfd1a5e43b2cac20a1b464f306ab1`.
-- Rejected frozen head: `abb8d4292672c91c4cb551772d214cdca54378e0`.
-- Current production source-reset head: `6a69cfd6daa88880b047c0675148612cb5ac4003`.
-- Rejected review head: `fae7ddad0b5242396565b2069a439875718d12d5`.
-- Current pushed branch and production code head: `c850dc41af8a04fc5164edc0bedf8aeb52a5762c`.
-- Never merge this pull request.
+- Merge base: `66dd4f4a68bcfd1a5e43b2cac20a1b464f306ab1`.
+- Rejected review head: `50bb003fb3408f052e6f97d1b7d189f3aece92c0`.
+- Current pushed code head: `5aa167b24aa8fa7f2bbb7a61cfbd72aac356aa5c`.
 - Never amend or force-push.
+- Never merge this pull request from the agent task.
 
 ## Current gate state
 
-- Fresh native Codex xhigh and Claude Opus 5 high both returned `CHANGES REQUIRED` on exact `fae7ddad0b5242396565b2069a439875718d12d5`.
-- Follow-up commits through `c850dc41a` fix the verified blockers and invalidate every review and CI result from `fae7ddad0`.
-- GitHub CI on the new pushed head is pending.
+- Fresh native Codex `gpt-5.6-sol` at `xhigh` returned `CHANGES REQUIRED` on exact head `50bb003fb3408f052e6f97d1b7d189f3aece92c0`.
+- The review reproduced an unhashable explicit `room_id` crash and acceptance of approval replacements without an object `m.new_content`.
+- Follow-up commit `5aa167b24aa8fa7f2bbb7a61cfbd72aac356aa5c` fixes both code blockers and invalidates every earlier review, CI, and live result.
+- The tracked living handoff remains only for crash recovery while implementation is active.
+- Remove this file before freezing the next exact review and live candidate.
+- Fresh native Codex and explicit Claude Opus 5 high reviews have not started on the corrected head.
 - Real-Tuwunel has not run.
-- PR #1646 owns the heavy resource slot, and PR #1641 must not run full pytest, PostgreSQL fanout, Docker, all-file hooks, or live validation.
-- Every approval, CI result, and live gate before the next pushed head is invalid.
 
-## Verified blockers
+## Current implementation
 
-- Cached latest-edit lookup could accept an invalid explicit row when the original carried any valid bundled replacement.
-- PostgreSQL latest-edit fallback used an unbounded client-side cursor, and recent-event `LIMIT` could let numeric JSON poison hide later valid rows.
-- Wrong-room and state events could create sidecar ownership, and `/threads` could expose wrong-room or state roots.
-- Tach omitted the replacement owner and retained stale interface names.
-- Event-cache security and storage docs omitted the shared replacement-validity contract.
-- Bounded stale-stream cleanup lacked an explicit edit-only missing-original regression.
+- `src/mindroom/matrix/replacements.py` owns bundled flattening, identity and scope validation, canonical `(origin_server_ts, event_id)` ordering, and content projection.
+- Replacement scope now validates explicit room IDs as non-empty strings and compares scalar room evidence without hashing untrusted JSON.
+- Approval replacement validation now requires an object `content.m.new_content` and reads status only from that replacement content.
+- Missing or non-object approval replacement content falls back to an older valid edit or the original status.
+- SQLite and PostgreSQL latest-edit SQL owns cache scope, joins, and bytewise tie ordering while shared Python owns Matrix validity and malformed-newest fallback.
+- Legacy sidecar persistence and reads revalidate their indexed event owner, including state and explicit wrong-room rejection.
+- Full history, bundled preview, point lookup, snapshots, approval lookup, sidecar hydration, and cleanup consume the shared replacement seam.
+- PostgreSQL schema v3 retains `idx_mindroom_event_cache_event_edits_room_original_ts` as its single narrowing index because query-level `COLLATE "C"` owns equal-timestamp correctness.
+
+## Validation
+
+- Focused replacement semantics, approval fallback, and SQLite cache coverage pass.
+- The corrected focused selection reports `24 passed`.
+- Approval startup fallback reports `6 passed`.
+- Ruff formatting, Ruff lint, `ty`, Vulture, Tach dependency and interface checks, module privacy, commit hooks, and diff checks pass.
+- Production source is `+752/-557`, net `+195` against the merge base, satisfying the hard net `<= +200` gate.
+- No PostgreSQL, full pytest, Docker, all-file pre-commit, or real-Tuwunel run has been started for the corrected head.
 
 ## Required next steps
 
-- Cache lookup now validates the explicit row itself, combines it with bundled candidates only after validation, and preserves malformed-newest fallback.
-- PostgreSQL latest-edit and recent-event fallback use server-side cursors, while canonical equal-timestamp ordering remains explicit `COLLATE "C"`.
-- Sidecar ownership and `/threads` roots reject state events and explicit room conflicts.
-- Sidecar plaintext persistence and reads revalidate legacy reference rows through the shared indexed-event decoder and ownership predicate.
-- Bounded stale-stream cleanup proves edit-only history does not synthesize a visible original.
-- Focused replacement, approval, thread-page, stale-cleanup, Ruff, formatting, commit-hook, and Tach checks pass.
-- One focused selector unintentionally expanded to PostgreSQL parametrizations while the resource slot was unavailable; all `37` cases passed, and no further PostgreSQL work may run before ownership.
-- Current pushed production source diff is `+745/-553`, net `+192` against the exact merge base.
-- Commit and push Tach, docs, and this handoff, then refresh the PR body and campaign evidence for the exact new head.
-- Re-run the owning cache suites, full pytest, all-file pre-commit, and real-Tuwunel only under resource ownership.
-- Remove this file only when a new exact head is frozen.
-- Run fresh exact-head native Codex and Claude with explicit `--model=claude-opus-5 --effort=high` after every code commit sequence.
-- Start the fresh Claude review only when an Opus slot is free.
-- Run real-Tuwunel only after both fresh reviews approve the same unchanged head.
-
-## Design and source-minimality reset
-
-- Independent source review of exact production head `c0552cf5a3e7ad6a535f721623e7ee2cf2b7026a` is `CHANGES REQUIRED`.
-- Exact c055 growth is concentrated in `event_info.py` at net `+282`, cache common code at net `+105`, read projection at net `+58`, backend parity at net `+41`, and approval, snapshot, and tool plumbing at net `+40`.
-- Restore `event_info.py` to relation facts and small room/state helpers.
-- One approximately 70-80 line `matrix/replacements.py` must own bundled flattening, identity/scope/relation validity, canonical `(origin_server_ts, event_id)` ordering, and content merge.
-- History, bundled preview, point lookup, snapshots, approval, and cleanup must consume that candidate API.
-- Cache edit lookup must accept its owning surface validator, with message validity delegated to nio/media parsing and approval validity delegated to approval parsing.
-- Keep one cache-row decoder; SQLite and PostgreSQL own only SQL plus PostgreSQL bytewise `COLLATE "C"` ordering.
-- Delete the custom encrypted-media/Base64 parser, duplicate selectors/projections/cache predicates, and compatibility re-exports.
-- Preserve same-sender/type, non-state, room-scope, non-synthesized edit-of-edit, malformed-newest fallback, canonical tie-break, immutable original timestamp/relation, visible activity, cache-index, bundled/explicit, media, approval, and raw-only interaction invariants.
-- Hard production target is net `<= +200` lines against the exact merge base, ideally net `+160..+190`, requiring approximately 330-365 lines of deletion from c055.
-- No PostgreSQL fanout, full pytest, independent review, or live gate may start before the simplified source target and focused regressions pass.
-
-## Active source-minimal reset
-
-- The source-minimal reset and review corrections are published through `c850dc41af8a04fc5164edc0bedf8aeb52a5762c`.
-- `src/mindroom/matrix/replacements.py` is the 76-line replacement-domain owner for bundled flattening, identity, scope, relation validity, canonical ordering, and content projection.
-- `event_info.py` is restored to relation facts plus the small room and state helpers.
-- Cache edit lookup now receives the full original event and a surface validator, while one cache-row decoder validates durable payload identity.
-- SQLite and PostgreSQL latest-edit SQL now owns only cache scope, joins, and canonical event-ID collation; shared Python owns Matrix validity and malformed-newest fallback.
-- Full history, bundled preview, point lookup, snapshots, approval lookup, sidecar hydration, and cleanup consume the shared candidate seam.
-- The custom encrypted-media and Base64 validator, compatibility re-exports, duplicate selectors, duplicate projections, and schema-v4 migration are removed.
-- PostgreSQL schema v3 intentionally retains `idx_mindroom_event_cache_event_edits_room_original_ts` as the single narrowing index because explicit query-level `COLLATE "C"` owns equal-timestamp correctness.
-- Production source is currently `+745/-553`, net `+192` against merge base `66dd4f4a68bcfd1a5e43b2cac20a1b464f306ab1`, satisfying the hard `<= +200` gate.
-- Ruff formatting, Ruff lint, `ty`, and diff checks pass for every dirty Python file.
-- The exact non-PostgreSQL prior-CI files pass `15`, `13`, `18`, and `4` tests.
-- Full `tests/test_event_cache.py` and focused thread, approval, and cache-contract regressions pass.
-- That focused cache run unexpectedly exercised the available PostgreSQL parametrization while PR #1646 owned the heavy slot, so no further PostgreSQL, full-suite, hook, or live work may start until explicit release.
-- No durable live instructions, worktrees, handoffs, or evidence may use a temporary directory.
-- The next safe steps are to push this status-only update, refresh PR evidence, inspect current AI feedback, and start fresh exact-head reviews only when an Opus slot is free.
-- PostgreSQL, full pytest, all-file hooks, Docker, and real-Tuwunel remain prohibited until explicit resource ownership.
+- Commit and push this living status.
+- Refresh the PR body and campaign evidence with the exact corrected head and source counts.
+- Inspect current GitHub CI and AI feedback against the exact code.
+- Remove this living handoff and push the final freeze commit.
+- Start fresh exact-head native Codex `gpt-5.6-sol` at `xhigh`.
+- Start fresh Claude with explicit `--model=claude-opus-5 --effort=high` only when an Opus slot is free.
+- Claim the serialized heavy resource gate before PostgreSQL fanout, full pytest, all-file hooks, Docker, or real-Tuwunel.
+- Read the complete live instructions immediately before exact-head real-Tuwunel validation.
+- Preserve every live artifact in the persistent campaign or repository artifact area.
+- Restart all review and live gates if the branch head changes.
+- Never merge.
