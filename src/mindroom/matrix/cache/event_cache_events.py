@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -222,10 +223,30 @@ def batch_redaction_candidate_ids(events: list[_CachedEventValue], room_id: str)
     )
 
 
-def _without_bundled_replacement(event: dict[str, Any]) -> dict[str, Any]:
-    """Return one event with its bundled replacement aggregation removed."""
+def _without_tombstoned_bundled_replacements(
+    event: dict[str, Any],
+    redacted_event_ids: frozenset[str],
+) -> dict[str, Any]:
+    """Return one event whose bundled aggregation keeps only its untombstoned shapes.
+
+    ``bundled_replacement_candidates`` treats the nested ``latest_event`` and ``event`` shapes and
+    the aggregation itself as candidates that compete on their own identity, so redaction has to
+    tombstone them the same way. Dropping the whole aggregation because one shape died would hide
+    a surviving replacement that selection would otherwise have chosen.
+    """
     sanitized = deepcopy(event)
-    del sanitized["unsigned"]["m.relations"]["m.replace"]
+    relations = sanitized["unsigned"]["m.relations"]
+    bundled = relations["m.replace"]
+    for key in ("latest_event", "event"):
+        nested = bundled.get(key)
+        if isinstance(nested, Mapping) and nested.get("event_id") in redacted_event_ids:
+            del bundled[key]
+    if bundled.get("event_id") in redacted_event_ids:
+        # Strip only the dead wrapper identity. Rewriting the aggregation to one surviving nested
+        # shape would silently pick a winner instead of letting the survivors compete on timestamp.
+        del bundled["event_id"]
+    if not _bundled_replacement_event_ids(sanitized):
+        del relations["m.replace"]
     return sanitized
 
 
@@ -242,7 +263,7 @@ def filter_redacted_events(
         if event.get("type") == "m.room.redaction" or direct_ids & redacted_event_ids:
             continue
         sanitized = (
-            _without_bundled_replacement(event)
+            _without_tombstoned_bundled_replacements(event, redacted_event_ids)
             if not _bundled_replacement_event_ids(event).isdisjoint(redacted_event_ids)
             else event
         )

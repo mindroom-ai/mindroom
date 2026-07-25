@@ -102,6 +102,7 @@ from mindroom.matrix.thread_diagnostics import (
 from mindroom.matrix.thread_membership import (
     ThreadResolutionState,
     ThreadRoomScanRootNotFoundError,
+    local_events_prove_thread_root,
     map_backed_thread_membership_access,
     resolve_event_thread_membership,
 )
@@ -1205,7 +1206,9 @@ async def _thread_history_cache_rejection_reason(
         room_id,
         event_infos=event_infos,
         ordered_event_ids=ordered_event_ids_from_scanned_event_sources(event_sources),
-        resolved_thread_ids={thread_id: thread_id},
+        # Seed the root only once these events prove it is one, so a payload holding nothing but
+        # the root and plain replies to it cannot certify as a thread snapshot.
+        resolved_thread_ids={thread_id: thread_id} if local_events_prove_thread_root(thread_id, event_infos) else None,
     )
     return (
         _INVALID_THREAD_MEMBERSHIP_REJECTION

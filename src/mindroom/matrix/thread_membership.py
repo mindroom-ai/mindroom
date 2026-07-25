@@ -391,6 +391,24 @@ def page_event_info_counts_as_thread_child_proof(
     )
 
 
+def local_events_prove_thread_root(thread_root_id: str, event_infos: Mapping[str, EventInfo]) -> bool:
+    """Return whether local event facts alone prove one candidate is a real thread root.
+
+    Per MSC3440 a relation-free event becomes a root only once it has a real ``m.thread`` child.
+    Callers seeding a root into a local resolution must prove it here first, otherwise a plain
+    reply to that event would inherit thread membership the thread never actually established.
+    """
+    root_info = event_infos.get(thread_root_id)
+    return (
+        root_info is not None
+        and root_info.can_be_thread_root
+        and any(
+            page_event_info_counts_as_thread_child_proof(thread_root_id, event_id=event_id, event_info=event_info)
+            for event_id, event_info in event_infos.items()
+        )
+    )
+
+
 def _is_thread_root_not_found_error(error: Exception) -> bool:
     """Return whether one proof failure means the candidate root simply does not exist."""
     return isinstance(error, ThreadRoomScanRootNotFoundError)

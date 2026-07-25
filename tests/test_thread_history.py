@@ -3608,6 +3608,53 @@ class TestThreadHistoryCache:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
+        ("has_thread_child", "expected_rejection"),
+        [(False, "invalid_thread_membership"), (True, None)],
+    )
+    async def test_cache_certification_requires_real_thread_child_before_seeding_root(
+        self,
+        has_thread_child: bool,
+        expected_rejection: str | None,
+    ) -> None:
+        """A plain reply only inherits the thread once a real ``m.thread`` child proves the root.
+
+        Per MSC3440 a relation-free event becomes a thread root only when it has a real threaded
+        child. Treating the requested root as a member unconditionally would certify a payload of
+        nothing but the root and room-level replies to it as an authoritative thread snapshot.
+        """
+        room_id = "!room:localhost"
+        thread_id = "$thread_root"
+
+        def source(event_id: str, timestamp: int, relates_to: dict[str, object] | None = None) -> dict[str, object]:
+            content: dict[str, object] = {"msgtype": "m.text", "body": event_id}
+            if relates_to is not None:
+                content["m.relates_to"] = relates_to
+            return {
+                "event_id": event_id,
+                "room_id": room_id,
+                "sender": "@user:localhost",
+                "type": "m.room.message",
+                "origin_server_ts": timestamp,
+                "content": content,
+            }
+
+        event_sources: list[dict[str, object]] = [
+            source(thread_id, 1000),
+            source("$plain_reply", 3000, {"m.in_reply_to": {"event_id": thread_id}}),
+        ]
+        if has_thread_child:
+            event_sources.insert(1, source("$thread_child", 2000, {"rel_type": "m.thread", "event_id": thread_id}))
+
+        rejection = await matrix_client_module._thread_history_cache_rejection_reason(
+            event_sources,
+            room_id=room_id,
+            thread_id=thread_id,
+        )
+
+        assert rejection == expected_rejection
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
         ("invalidity", "expected_rejection"),
         [
             ("malformed", "cache_invalid_thread_event"),

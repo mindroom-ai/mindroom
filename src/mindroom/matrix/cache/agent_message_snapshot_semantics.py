@@ -10,6 +10,7 @@ import nio
 from mindroom.matrix.event_info import EventInfo, event_source_is_state_event
 from mindroom.matrix.media import parse_room_message_event_source, valid_room_message_replacement
 from mindroom.matrix.replacements import ordered_replacements, replacement_content
+from mindroom.matrix.thread_membership import local_events_prove_thread_root
 from mindroom.matrix.thread_projection import resolve_thread_ids_for_event_infos
 
 from .agent_message_snapshot import AgentMessageSnapshot, AgentMessageSnapshotUnavailable
@@ -77,12 +78,13 @@ async def _resolved_snapshot_thread_event_ids(
         for event in events
         if isinstance(event_id := event.get("event_id"), str) and event_id
     }
-    root_info = event_infos.get(thread_id)
     resolved = await resolve_thread_ids_for_event_infos(
         room_id,
         event_infos=event_infos,
         ordered_event_ids=list(event_infos),
-        resolved_thread_ids={thread_id: thread_id} if root_info is not None and root_info.can_be_thread_root else None,
+        # Seed the root only once these events prove it is one. Seeding unconditionally would let a
+        # plain reply to the root inherit membership in a thread that never established one.
+        resolved_thread_ids={thread_id: thread_id} if local_events_prove_thread_root(thread_id, event_infos) else None,
     )
     return frozenset(event_id for event_id, resolved_thread_id in resolved.items() if resolved_thread_id == thread_id)
 

@@ -8,11 +8,15 @@ from typing import TYPE_CHECKING
 import pytest
 
 from mindroom.matrix.cache import ThreadRevision
-from mindroom.matrix.cache.event_cache_events import decode_cached_event
+from mindroom.matrix.cache.event_cache_events import decode_cached_event, filter_redacted_events
 from mindroom.matrix.cache.event_normalization import normalize_event_source_for_cache
 from mindroom.matrix.cache.thread_cache_state import thread_cache_state_row, thread_revision_row
 from mindroom.matrix.media import valid_room_message_replacement
-from mindroom.matrix.replacements import is_valid_replacement, ordered_replacements
+from mindroom.matrix.replacements import (
+    bundled_replacement_candidates,
+    is_valid_replacement,
+    ordered_replacements,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -317,3 +321,80 @@ def test_is_valid_replacement_honors_excluded_event_ids() -> None:
         validator=valid_room_message_replacement,
         excluded_event_ids={"$edit"},
     )
+
+
+def test_redacting_one_bundled_shape_keeps_the_surviving_replacement() -> None:
+    """A tombstone on one bundled shape must not delete a different surviving replacement.
+
+    ``bundled_replacement_candidates`` treats the nested shapes as candidates that compete on
+    their own identity, so redaction has to tombstone them individually. Dropping the whole
+    aggregation would hide a replacement that selection would otherwise have chosen.
+    """
+    room_id = "!room:localhost"
+    original = _replaceable_original(room_id=room_id)
+    dead, good = _replacement("$dead", 2000, room_id=room_id), _replacement("$good", 3000, room_id=room_id)
+    original["unsigned"] = {"m.relations": {"m.replace": {**dead, "latest_event": good}}}
+
+    retained = filter_redacted_events(
+        [("$original", original)],
+        room_id=room_id,
+        redacted_event_ids=frozenset({"$dead"}),
+    )
+
+    surviving = [
+        event_id
+        for candidate in bundled_replacement_candidates(retained[0][1])
+        if isinstance(event_id := candidate.get("event_id"), str)
+    ]
+    assert surviving == ["$good"]
+
+
+def test_redacting_the_bundled_wrapper_lets_surviving_shapes_compete() -> None:
+    """A dead wrapper identity must not pick a winner among the surviving nested shapes.
+
+    Rewriting the aggregation to one surviving shape would silently choose it; stripping only the
+    dead wrapper identity leaves both survivors to compete on canonical timestamp ordering.
+    """
+    room_id = "!room:localhost"
+    original = _replaceable_original(room_id=room_id)
+    original["unsigned"] = {
+        "m.relations": {
+            "m.replace": {
+                **_replacement("$dead", 2000, room_id=room_id),
+                "latest_event": _replacement("$low", 1500, room_id=room_id),
+                "event": _replacement("$high", 4000, room_id=room_id),
+            },
+        },
+    }
+
+    retained = filter_redacted_events(
+        [("$original", original)],
+        room_id=room_id,
+        redacted_event_ids=frozenset({"$dead"}),
+    )
+    sanitized = retained[0][1]
+    surviving = sorted(
+        event_id
+        for candidate in bundled_replacement_candidates(sanitized)
+        if isinstance(event_id := candidate.get("event_id"), str)
+    )
+
+    assert surviving == ["$high", "$low"]
+    selected = ordered_replacements(sanitized, room_id=room_id, validator=valid_room_message_replacement)
+    assert selected[0]["event_id"] == "$high"
+
+
+def test_redacting_every_bundled_shape_drops_the_aggregation() -> None:
+    """When no bundled shape survives its tombstones the aggregation is removed outright."""
+    room_id = "!room:localhost"
+    original = _replaceable_original(room_id=room_id)
+    edit = _replacement("$edit", 2000, room_id=room_id)
+    original["unsigned"] = {"m.relations": {"m.replace": {**edit, "latest_event": edit}}}
+
+    retained = filter_redacted_events(
+        [("$original", original)],
+        room_id=room_id,
+        redacted_event_ids=frozenset({"$edit"}),
+    )
+
+    assert bundled_replacement_candidates(retained[0][1]) == []
