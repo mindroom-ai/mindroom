@@ -620,7 +620,10 @@ def test_stress_sync_fence_waits_for_exact_principal_event(mocker: MockerFixture
     assert any(field.startswith("namespace=synthetic:principal:") for field in command)
     assert "room_id=!room:localhost" in command
     assert "event_id=$event" in command
-    assert "WHERE namespace = :'namespace' AND room_id = :'room_id' AND event_id = :'event_id'" in command[-1]
+    assert (
+        "WHERE namespace = :'namespace' AND room_id = :'room_id' AND event_id = :'event_id'"
+        in run.call_args.kwargs["input"]
+    )
 
 
 def test_replay_command_uses_only_repository_relative_paths() -> None:

@@ -1232,11 +1232,11 @@ class ManagedStressPostgres:
                     f"room_id={room_id}",
                     "-v",
                     f"event_id={event_id}",
-                    "-Atc",
-                    query,
+                    "-At",
                 ),
                 check=False,
                 capture_output=True,
+                input=query,
                 text=True,
                 timeout=30,
             )
