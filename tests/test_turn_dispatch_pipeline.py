@@ -1986,7 +1986,7 @@ class TestAgentBot(AgentBotTestBase):
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         _wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
-        tracker = _set_turn_store_tracker(bot, MagicMock())
+        _set_turn_store_tracker(bot, MagicMock())
         bot.logger = MagicMock()
         _replace_turn_policy_deps(bot, logger=bot.logger)
 
@@ -2031,9 +2031,6 @@ class TestAgentBot(AgentBotTestBase):
 
         async def generate_team_response(request: ResponseRequest, **_kwargs: object) -> str:
             team_requests.append(request)
-            if len(team_requests) == 1:
-                assert request.on_sync_restart_cancelled is not None
-                request.on_sync_restart_cancelled()
             return "$team-response"
 
         mock_generate_team_response = AsyncMock(side_effect=generate_team_response)
@@ -2060,11 +2057,6 @@ class TestAgentBot(AgentBotTestBase):
                 dispatch_started_at=0.0,
                 handled_turn=TurnRecord.create([event.event_id]),
             )
-            tracker.get_turn_record.return_value = TurnRecord.create(
-                [event.event_id],
-                response_event_id="$team-response",
-            )
-            await bot._restart_retry_queue.flush()
 
         assert action.form_team is not None
         mock_select_team_mode.assert_awaited_once_with(
@@ -2073,8 +2065,7 @@ class TestAgentBot(AgentBotTestBase):
             bot._turn_controller.deps.runtime.config,
             bot._turn_controller.deps.runtime_paths,
         )
-        assert [request.sync_restart_retry_source_event_id for request in team_requests] == [None, event.event_id]
-        assert mock_generate_team_response.await_count == 2
+        assert mock_generate_team_response.await_count == 1
         assert mock_generate_team_response.await_args.kwargs["team_mode"] == "coordinate"
         assert mock_generate_team_response.await_args.kwargs["team_agents"] == action.form_team.eligible_members
 

@@ -13,23 +13,17 @@ from agno.run.base import RunStatus
 from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
-from structlog.testing import capture_logs
 
 from mindroom.constants import MATRIX_EVENT_ID_METADATA_KEY
 from mindroom.final_delivery import FinalDeliveryOutcome
 from mindroom.history.types import HistoryScope
-from mindroom.response_admission import ResponseAdmissionRefusedError
 from mindroom.response_runner import PostLockRequestPreparationError, ResponseRequest, ResponseRunner
-from mindroom.sync_restart_retry import (
-    _MAX_ATTEMPTED_KEYS,
-    SyncRestartRetryQueue,
-    interrupted_source_needs_retry,
-)
+from mindroom.sync_restart_retry import InterruptedTurnRooms, interrupted_source_needs_retry
 from tests.conftest import delivered_matrix_event, request_envelope, unwrap_extracted_collaborator
 from tests.response_runner_helpers import _bot, _plain_request, _target
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Callable
     from pathlib import Path
 
 
@@ -305,258 +299,56 @@ def test_notify_uses_only_the_canonical_final_delivery_outcome() -> None:
     assert calls == []
 
 
-@pytest.mark.asyncio
-async def test_queue_runs_each_retry_exactly_once() -> None:
-    """Flushing must run queued retries once and refuse re-registration."""
-    queue = SyncRestartRetryQueue()
-    runs: list[str] = []
+def test_interrupted_turn_rooms_record_each_source_once() -> None:
+    """One interrupted source must claim exactly one room-scoped recovery slot."""
+    rooms = InterruptedTurnRooms()
 
-    async def retry() -> None:
-        runs.append("ran")
-
-    assert queue.register("$event", retry, room_id="!room:localhost") is True
-    assert queue.register("$event", retry, room_id="!room:localhost") is False
-    assert queue.has_pending
-    assert queue.pending_room_ids == {"!room:localhost"}
-
-    await queue.flush()
-    assert runs == ["ran"]
-    assert not queue.has_pending
-    assert not queue.pending_room_ids
-
-    # Already-attempted keys never requeue, so a second stall cannot loop.
-    assert queue.register("$event", retry, room_id="!room:localhost") is False
-    await queue.flush()
-    assert runs == ["ran"]
+    assert rooms.register("$event", room_id="!room:localhost") is True
+    assert rooms.register("$event", room_id="!other:localhost") is False
+    assert rooms.pending_room_ids == {"!room:localhost"}
 
 
-@pytest.mark.asyncio
-async def test_concurrent_flushes_share_one_serial_retry_pass() -> None:
-    """Overlapping healthy sync callbacks must not run the same retry twice."""
-    queue = SyncRestartRetryQueue()
-    started = asyncio.Event()
-    release = asyncio.Event()
-    runs = 0
+def test_interrupted_turn_rooms_collect_every_interrupted_room() -> None:
+    """The orchestrator hands the replacement bot every room holding a terminal note."""
+    rooms = InterruptedTurnRooms()
 
-    async def retry() -> None:
-        nonlocal runs
-        runs += 1
-        started.set()
-        await release.wait()
+    rooms.register("$first", room_id="!one:localhost")
+    rooms.register("$second", room_id="!two:localhost")
+    rooms.register("$third", room_id="!one:localhost")
 
-    assert queue.register("$event", retry, room_id="!room:localhost") is True
-    first = asyncio.create_task(queue.flush())
-    await started.wait()
-    second = asyncio.create_task(queue.flush())
-    await asyncio.sleep(0)
-    assert not second.done()
-
-    release.set()
-    await asyncio.gather(first, second)
-
-    assert runs == 1
-    assert not queue.has_pending
+    assert rooms.pending_room_ids == {"!one:localhost", "!two:localhost"}
 
 
-@pytest.mark.asyncio
-async def test_queue_isolates_individual_retry_failures() -> None:
-    """One failing retry must not block the others."""
-    queue = SyncRestartRetryQueue()
-    runs: list[str] = []
-
-    async def failing() -> None:
-        msg = "deliberate test error"
-        raise RuntimeError(msg)
-
-    async def succeeding() -> None:
-        runs.append("ok")
-
-    queue.register("$a", failing, room_id="!a:localhost")
-    queue.register("$b", succeeding, room_id="!b:localhost")
-    await queue.flush()
-    assert runs == ["ok"]
-
-
-@pytest.mark.asyncio
-async def test_queue_flushes_in_registration_order() -> None:
-    """Retries must run FIFO so older interrupted turns answer first."""
-    queue = SyncRestartRetryQueue()
-    runs: list[str] = []
-
-    def make_retry(key: str) -> Callable[[], Awaitable[None]]:
-        async def retry() -> None:
-            runs.append(key)
-
-        return retry
-
-    for key in ("$first", "$second", "$third"):
-        queue.register(key, make_retry(key), room_id="!room:localhost")
-
-    await queue.flush()
-    assert runs == ["$first", "$second", "$third"]
-
-
-@pytest.mark.asyncio
-async def test_cancelled_flush_logs_in_flight_key_and_keeps_rest_pending() -> None:
-    """Cancelling a flush mid-retry must log the lost key, propagate, and keep later retries queued."""
-    queue = SyncRestartRetryQueue()
-    started = asyncio.Event()
-
-    async def hanging() -> None:
-        started.set()
-        await asyncio.Event().wait()
-
-    async def later() -> None:
-        pass
-
-    queue.register("$in_flight", hanging, room_id="!in-flight:localhost")
-    queue.register("$later", later, room_id="!later:localhost")
-    flush_task = asyncio.create_task(queue.flush())
-    await started.wait()
-
-    flush_task.cancel()
-    with capture_logs() as logs, pytest.raises(asyncio.CancelledError):
-        await flush_task
-
-    assert [entry["source_event_id"] for entry in logs if entry["event"] == "sync_restart_retry_cancelled"] == [
-        "$in_flight",
-    ]
-    # The interrupted key was already promoted to attempted and never requeues.
-    assert queue.register("$in_flight", hanging, room_id="!in-flight:localhost") is False
-    # The untouched retry survives for the next healthy sync response.
-    assert queue.has_pending
-
-
-@pytest.mark.asyncio
-async def test_config_apply_refusal_requeues_retry_and_keeps_rest_pending() -> None:
-    """A refused retry ran nothing, so it must stay queued instead of burning its one attempt."""
-    queue = SyncRestartRetryQueue()
-    runs: list[str] = []
-
-    gate_closed = True
-
-    async def refused() -> None:
-        runs.append("$refused")
-        if gate_closed:
-            raise ResponseAdmissionRefusedError
-
-    async def later() -> None:
-        runs.append("$later")
-
-    queue.register("$refused", refused, room_id="!room:localhost")
-    queue.register("$later", later, room_id="!later:localhost")
-
-    with capture_logs() as logs:
-        await queue.flush()
-
-    # The pass stops: the gate stays closed for the whole apply, so continuing
-    # would only burn every remaining retry against the same closed gate.
-    assert runs == ["$refused"]
-    assert [
-        entry["source_event_id"] for entry in logs if entry["event"] == "sync_restart_retry_deferred_by_config_apply"
-    ] == [
-        "$refused",
-    ]
-    # Nothing was attempted, so both keys survive for the next flush.
-    assert queue.has_pending
-    assert queue.pending_room_ids == frozenset({"!room:localhost", "!later:localhost"})
-    # Re-registering is still refused because the key is queued, not because it
-    # was burned; the queued callback is the one that runs.
-    assert queue.register("$refused", refused, room_id="!room:localhost") is False
-
-    # Once the apply finishes the gate reopens, so the next flush drains both in
-    # the original FIFO order.
-    gate_closed = False
-    runs.clear()
-    await queue.flush()
-    assert runs == ["$refused", "$later"]
-    assert not queue.has_pending
-
-
-@pytest.mark.asyncio
-async def test_config_apply_refusal_at_attempted_bound_keeps_every_key_burned() -> None:
-    """A refusal must not evict an older attempted key and let it run a second time.
-
-    _mark_attempted evicts the oldest key once it reaches its bound, and that
-    eviction cannot be undone. Promoting a key only after its retry actually ran
-    is what keeps the "retried at most once" contract at the bound.
-    """
-    queue = SyncRestartRetryQueue()
-
-    async def noop() -> None:
-        return
-
-    # Fill the attempted ledger exactly to its bound by running real retries.
-    for index in range(_MAX_ATTEMPTED_KEYS):
-        key = f"$attempted-{index}"
-        assert queue.register(key, noop, room_id="!room:localhost") is True
-    await queue.flush()
-
-    oldest_key = "$attempted-0"
-    assert queue.register(oldest_key, noop, room_id="!room:localhost") is False
-
-    async def refused() -> None:
-        raise ResponseAdmissionRefusedError
-
-    queue.register("$refused", refused, room_id="!room:localhost")
-    await queue.flush()
-
-    # The refusal promoted nothing, so no older key was evicted to make room and
-    # the oldest attempted key is still burned.
-    assert queue.register(oldest_key, noop, room_id="!room:localhost") is False
-    assert queue.has_pending
-
-
-@pytest.mark.asyncio
-async def test_watchdog_cancelled_response_is_redispatched_once_and_answers() -> None:
-    """The dispatch/retry seam answers on the retry and never retries twice."""
-    queue = SyncRestartRetryQueue()
-    runner = ResponseRunner(deps=MagicMock())
-    answers: list[str] = []
-    attempts = 0
-
-    async def execute_action() -> None:
-        nonlocal attempts
-        attempts += 1
-
-        def register_retry() -> None:
-            queue.register("$source", execute_action, room_id="!room:localhost")
-
-        if attempts == 1:
-            # First attempt: cancelled mid-generation by stall recovery.
-            _notify(
-                runner,
-                _request(on_sync_restart_cancelled=register_retry),
-                _cancelled_outcome(failure_reason="sync_restart_cancelled"),
-            )
-        else:
-            answers.append("pong")
-
-    await execute_action()
-    assert queue.has_pending
-    assert answers == []
-
-    await queue.flush()  # The sync loop reported a healthy response again.
-    assert answers == ["pong"]
-    assert attempts == 2
-
-    await queue.flush()
-    assert attempts == 2
-
-
-@pytest.mark.asyncio
-async def test_user_stopped_response_is_not_retried() -> None:
-    """A user stop must leave the retry queue empty."""
-    queue = SyncRestartRetryQueue()
+def test_bot_replacement_cancellation_records_the_interrupted_room() -> None:
+    """The dispatch seam hands a replacement-cancelled turn to room-scoped recovery."""
+    rooms = InterruptedTurnRooms()
     runner = ResponseRunner(deps=MagicMock())
 
-    def register_retry() -> None:
-        queue.register("$source", MagicMock(), room_id="!room:localhost")
+    def record_interrupted_turn() -> None:
+        rooms.register("$source", room_id="!room:localhost")
 
     _notify(
         runner,
-        _request(on_sync_restart_cancelled=register_retry),
+        _request(on_sync_restart_cancelled=record_interrupted_turn),
+        _cancelled_outcome(failure_reason="sync_restart_cancelled"),
+    )
+
+    assert rooms.pending_room_ids == {"!room:localhost"}
+
+
+@pytest.mark.asyncio
+async def test_user_stopped_response_is_not_recovered() -> None:
+    """A user stop must leave no room queued for replacement recovery."""
+    rooms = InterruptedTurnRooms()
+    runner = ResponseRunner(deps=MagicMock())
+
+    def record_interrupted_turn() -> None:
+        rooms.register("$source", room_id="!room:localhost")
+
+    _notify(
+        runner,
+        _request(on_sync_restart_cancelled=record_interrupted_turn),
         _cancelled_outcome(failure_reason="cancelled_by_user"),
     )
 
-    assert not queue.has_pending
+    assert not rooms.pending_room_ids

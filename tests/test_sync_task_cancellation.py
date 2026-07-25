@@ -50,7 +50,6 @@ from mindroom.runtime_shutdown import (
     RuntimeShutdownIntent,
     shutdown_intent_for_entity,
 )
-from mindroom.sync_restart_retry import SyncRestartRetryQueue
 from tests.conftest import (
     TEST_PASSWORD,
     make_event_cache_mock,
@@ -138,9 +137,6 @@ class _ResponseOwningBot(_FakeBot):
         self.response_tasks: list[asyncio.Task[None]] = []
         self.response_cancel_sources: list[str] = []
         self.response_completions = 0
-        self.final_messages = 0
-        self.interruption_messages = 0
-        self.retries_queued = 0
 
     @property
     def in_flight_response_count(self) -> int:
@@ -157,14 +153,9 @@ class _ResponseOwningBot(_FakeBot):
         try:
             await self.response_finish.wait()
         except asyncio.CancelledError as exc:
-            cancel_source = classify_cancel_source(exc)
-            self.response_cancel_sources.append(cancel_source)
-            if cancel_source == "sync_restart":
-                self.interruption_messages += 1
-                self.retries_queued += 1
+            self.response_cancel_sources.append(classify_cancel_source(exc))
             raise
         self.response_completions += 1
-        self.final_messages += 1
 
     async def sync_forever(self) -> None:
         self.sync_calls += 1
@@ -349,21 +340,20 @@ async def test_watchdog_restart_preserves_one_active_response(monkeypatch: pytes
         assert bot.live_sync_count == 1
         assert bot.in_flight_response_count == 1
         assert not bot.response_tasks[0].done()
-        assert bot.interruption_messages == 0
-        assert bot.retries_queued == 0
+        assert bot.response_cancel_sources == []
 
         await _finish_responses_and_stop_transport(bot, final_sync_iteration=2, supervisor=supervisor)
 
     assert bot.response_completions == 1
-    assert bot.final_messages == 1
-    assert bot.interruption_messages == 0
-    assert bot.retries_queued == 0
+    assert bot.response_cancel_sources == []
     restart_logs = [entry for entry in logs if entry["event"] == "matrix_sync_transport_restart"]
     assert len(restart_logs) == 1
     assert restart_logs[0]["active_response_count"] == 1
     assert restart_logs[0]["restart_reason_category"] == "watchdog_stall"
     assert restart_logs[0]["resulting_action"] == "restart_receive_loop"
-    assert not {"agent", "agent_name", "room_id", "event_id", "user_id"} & restart_logs[0].keys()
+    # Attribute the flapping entity without naming any Matrix conversation.
+    assert restart_logs[0]["agent"] == "test_agent"
+    assert not {"room_id", "event_id", "user_id"} & restart_logs[0].keys()
 
 
 @pytest.mark.asyncio
@@ -379,15 +369,12 @@ async def test_watchdog_restart_preserves_several_active_responses(monkeypatch: 
 
     assert bot.in_flight_response_count == 3
     assert all(not task.done() for task in bot.response_tasks)
-    assert bot.interruption_messages == 0
-    assert bot.retries_queued == 0
+    assert bot.response_cancel_sources == []
 
     await _finish_responses_and_stop_transport(bot, final_sync_iteration=2, supervisor=supervisor)
 
     assert bot.response_completions == 3
-    assert bot.final_messages == 3
-    assert bot.interruption_messages == 0
-    assert bot.retries_queued == 0
+    assert bot.response_cancel_sources == []
 
 
 @pytest.mark.asyncio
@@ -406,16 +393,13 @@ async def test_repeated_watchdog_restarts_keep_one_sync_loop_and_response_owner(
     assert bot.live_sync_count == 1
     assert bot.max_live_sync_count == 1
     assert bot.in_flight_response_count == 2
-    assert bot.interruption_messages == 0
-    assert bot.retries_queued == 0
+    assert bot.response_cancel_sources == []
 
     await _finish_responses_and_stop_transport(bot, final_sync_iteration=4, supervisor=supervisor)
 
     assert bot.live_sync_count == 0
     assert bot.response_completions == 2
-    assert bot.final_messages == 2
-    assert bot.interruption_messages == 0
-    assert bot.retries_queued == 0
+    assert bot.response_cancel_sources == []
 
 
 @pytest.mark.asyncio
@@ -435,8 +419,6 @@ async def test_config_reload_cancellation_keeps_interruption_and_retry_semantics
 
     assert bot.in_flight_response_count == 0
     assert bot.response_completions == 0
-    assert bot.interruption_messages == 1
-    assert bot.retries_queued == 1
     assert bot.response_cancel_sources == ["sync_restart"]
     assert bot.prepare_for_sync_shutdown_cancel_messages == ["sync_restart"]
 
@@ -458,8 +440,6 @@ async def test_process_shutdown_cancellation_stays_prompt_without_sync_retry() -
 
     assert bot.in_flight_response_count == 0
     assert bot.response_completions == 0
-    assert bot.interruption_messages == 0
-    assert bot.retries_queued == 0
     assert bot.response_cancel_sources == ["interrupted"]
     assert bot.prepare_for_sync_shutdown_cancel_messages == [None]
 
@@ -534,26 +514,23 @@ async def test_replacement_start_failure_is_visible_bounded_and_preserves_respon
     assert bot.prepare_for_sync_shutdown_calls == 0
     assert bot.in_flight_response_count == 1
     assert not bot.response_tasks[0].done()
-    assert bot.interruption_messages == 0
-    assert bot.retries_queued == 0
-    logger.error.assert_any_call(
+    assert bot.response_cancel_sources == []
+    logger.exception.assert_any_call(
         "sync_loop_failed",
-        exception_type="RuntimeError",
+        agent="test_agent",
         retry_count=2,
     )
     logger.error.assert_any_call(
         "sync_loop_retries_exhausted",
-        active_response_count=1,
+        agent="test_agent",
         retry_count=2,
         max_retries=2,
         restart_reason_category="sync_failure",
-        resulting_action="preserve_response_runtime",
     )
 
     bot.response_finish.set()
     await asyncio.gather(*bot.response_tasks)
     assert bot.response_completions == 1
-    assert bot.final_messages == 1
 
 
 @pytest.mark.asyncio
@@ -1146,7 +1123,6 @@ async def test_full_state_only_after_successful_first_sync() -> None:
     bot._room_member_join_hooks_armed = False
     bot.config = Config(matrix_sync=MatrixSyncConfig(mode="classic"))
     bot.rooms = []
-    bot._restart_retry_queue = SyncRestartRetryQueue()
     bot.client = FakeClient()
     bot.orchestrator = None
     bot._runtime_view = BotRuntimeState(
@@ -1286,7 +1262,6 @@ async def test_sliding_sync_response_marks_sync_success() -> None:
     bot._sync_shutting_down = False
     bot._calls_reconcile_pending = False
     bot._room_member_join_hooks_armed = False
-    bot._restart_retry_queue = SyncRestartRetryQueue()
     bot.orchestrator = None
 
     await AgentBot._on_sync_response(bot, nio.SlidingSyncResponse("pos"))
@@ -1356,7 +1331,6 @@ async def test_sliding_sync_remote_departure_fences_and_purges() -> None:
     bot._sync_shutting_down = False
     bot._calls_reconcile_pending = False
     bot._room_member_join_hooks_armed = True
-    bot._restart_retry_queue = SyncRestartRetryQueue()
     bot.orchestrator = None
     bot._local_departures_awaiting_sync = set()
     bot._sync_cache_trust = MagicMock()
@@ -2374,11 +2348,10 @@ async def test_running_bot_logs_when_sync_retries_exhausted(monkeypatch: pytest.
     assert bot.prepare_for_sync_shutdown_calls == 0
     logger.error.assert_called_once_with(
         "sync_loop_retries_exhausted",
-        active_response_count=0,
+        agent="test_agent",
         retry_count=2,
         max_retries=2,
         restart_reason_category="unexpected_sync_return",
-        resulting_action="preserve_response_runtime",
     )
 
 
@@ -2455,10 +2428,6 @@ async def test_single_failure_no_duplicate_cleanup_logs(
         await sync_forever_with_restart(bot, max_retries=1)
 
     cleanup_warnings = [entry for entry in logs if entry["event"] == "sync_iteration_cleanup_failed"]
-    assert cleanup_warnings == [
-        {
-            "event": "sync_iteration_cleanup_failed",
-            "exception_type": "RuntimeError",
-            "log_level": "warning",
-        },
-    ]
+    assert len(cleanup_warnings) == 1
+    assert cleanup_warnings[0]["agent"] == "test_agent"
+    assert cleanup_warnings[0]["exc_info"] is True

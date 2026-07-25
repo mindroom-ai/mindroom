@@ -17,7 +17,7 @@ from __future__ import annotations
 import asyncio
 import threading
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field, fields, replace
+from dataclasses import dataclass, field, fields
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import MagicMock
 
@@ -55,7 +55,7 @@ from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.response_admission import ResponseAdmissionRefusedError
 from mindroom.response_payload_preparation import DispatchPayloadInputs, ResponsePayloadPreparation
 from mindroom.response_runner import ResponseRequest
-from mindroom.sync_restart_retry import SyncRestartRetryQueue
+from mindroom.sync_restart_retry import InterruptedTurnRooms
 from mindroom.tool_system.runtime_context import ToolRuntimeSupport
 from mindroom.turn_controller import TurnController, TurnControllerDeps
 from mindroom.turn_origin import TurnIntent
@@ -245,7 +245,7 @@ class _Harness:
     runner: _RecordingResponseRunner
     gateway: _RecordingDeliveryGateway
     turn_store: TurnStore
-    restart_retry: SyncRestartRetryQueue
+    interrupted_turn_rooms: InterruptedTurnRooms
     gate: CoalescingGate
     gate_batches: list[CoalescedBatch]
     conversation_cache: AsyncMock
@@ -357,7 +357,7 @@ def _build_harness(
     )
     runner = _RecordingResponseRunner()
     gateway = _RecordingDeliveryGateway()
-    restart_retry = SyncRestartRetryQueue()
+    interrupted_turn_rooms = InterruptedTurnRooms()
     controller_ref: list[TurnController] = []
     gate_batches: list[CoalescedBatch] = []
 
@@ -398,7 +398,7 @@ def _build_harness(
             coalescing_gate=gate,
             edit_regenerator=_UnusedEditRegenerator(),
             ingress=ingress_validator,
-            restart_retry=restart_retry,
+            interrupted_turn_rooms=interrupted_turn_rooms,
         ),
     )
     controller_ref.append(controller)
@@ -408,7 +408,7 @@ def _build_harness(
         runner=runner,
         gateway=gateway,
         turn_store=turn_store,
-        restart_retry=restart_retry,
+        interrupted_turn_rooms=interrupted_turn_rooms,
         gate=gate,
         gate_batches=gate_batches,
         conversation_cache=conversation_cache,
@@ -1319,9 +1319,8 @@ async def test_user_message_cannot_spoof_scheduled_thread_promotion(tmp_path: Pa
 async def test_deferred_sync_restart_records_handled_outcome_before_rethrow(
     config: Config,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A queued retry must not race normal replay of the same visibly settled source turn."""
+    """A turn interrupted by bot replacement must settle durably before rethrowing."""
     harness = _build_harness(config, tmp_path)
     harness.runner.deferred_sync_restart_error = asyncio.CancelledError("sync_restart")
     room = _room_with_members(config, "general")
@@ -1330,56 +1329,21 @@ async def test_deferred_sync_restart_records_handled_outcome_before_rethrow(
     with pytest.raises(asyncio.CancelledError, match="sync_restart"):
         await harness.deliver(room, event)
 
-    assert harness.restart_retry.has_pending
+    assert harness.interrupted_turn_rooms.pending_room_ids == {room.room_id}
     assert harness.runner.requests[0].sync_restart_retry_source_event_id is None
     assert harness.turn_store.is_handled(event.event_id) is True
     record = harness.turn_store.get_turn_record(event.event_id)
     assert record is not None
     assert record.response_event_id == "$response:localhost"
 
-    harness.runner.deferred_sync_restart_error = None
-    retry_started = asyncio.Event()
-    release_retry = asyncio.Event()
-    generate_response = harness.runner.generate_response
-
-    async def generate_retry_with_barrier(request: ResponseRequest) -> str | None:
-        if request.sync_restart_retry_source_event_id is not None:
-            harness.runner.response_event_id = "$retried-response:localhost"
-            retry_started.set()
-            await release_retry.wait()
-        return await generate_response(request)
-
-    monkeypatch.setattr(harness.runner, "generate_response", generate_retry_with_barrier)
-    retry = asyncio.create_task(harness.restart_retry.flush())
-    await retry_started.wait()
-    settlement_started = asyncio.Event()
-
-    async def wait_for_settlement() -> None:
-        settlement_started.set()
-        await harness.turn_store.wait_for_turn_settled((event.event_id,))
-
-    waiter = asyncio.create_task(wait_for_settlement())
-    await settlement_started.wait()
-    try:
-        assert not waiter.done()
-    finally:
-        release_retry.set()
-        await retry
-        await waiter
-
-    assert harness.runner.requests[1].sync_restart_retry_source_event_id == event.event_id
-    retried_record = harness.turn_store.get_turn_record(event.event_id)
-    assert retried_record is not None
-    assert retried_record.response_event_id == "$retried-response:localhost"
-
 
 @pytest.mark.asyncio
-async def test_sync_restart_retry_reloads_relay_after_alias_owner_completes(
+async def test_interrupted_router_relay_detaches_its_advisory_human_alias(
     config: Config,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Retry the physical relay after its advisory human alias settles independently."""
+    """An interrupted relay must drop an alias whose owner settled independently."""
     harness = _build_harness(config, tmp_path)
     harness.runner.deferred_sync_restart_error = asyncio.CancelledError("sync_restart")
     room = _room_with_members(config, "general", ROUTER_AGENT_NAME)
@@ -1413,66 +1377,7 @@ async def test_sync_restart_retry_reloads_relay_after_alias_owner_completes(
     relay_record = harness.turn_store.get_turn_record(relay.event_id)
     assert relay_record is not None
     assert relay_record.discovery_event_ids == ()
-    harness.runner.deferred_sync_restart_error = None
-
-    async def unexpected_wait(_event_ids: tuple[str, ...]) -> None:
-        msg = "canonical relay retry must not wait on its detached alias"
-        raise AssertionError(msg)
-
-    monkeypatch.setattr(harness.turn_store, "wait_for_turn_settled", unexpected_wait)
-    await harness.restart_retry.flush()
-
-    assert len(harness.runner.requests) == 2
-    assert harness.runner.requests[1].sync_restart_retry_source_event_id == relay.event_id
-    retried_record = harness.turn_store.get_turn_record(relay.event_id)
-    assert retried_record is not None
-    assert retried_record.response_event_id == "$response:localhost"
-
-
-@pytest.mark.asyncio
-async def test_sync_restart_retry_skips_prompt_after_waiting_edit_commits(
-    config: Config,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A queued normal retry must not replay its stale prompt after an edit wins."""
-    harness = _build_harness(config, tmp_path)
-    harness.runner.deferred_sync_restart_error = asyncio.CancelledError("sync_restart")
-    room = _room_with_members(config, "general")
-    event = _text_event("stale original prompt")
-
-    with pytest.raises(asyncio.CancelledError, match="sync_restart"):
-        await harness.deliver(room, event)
-
-    record = harness.turn_store.get_turn_record(event.event_id)
-    assert record is not None
-    assert harness.turn_store.try_claim_turn(record)
-    wait_started = asyncio.Event()
-    wait_for_turn_settled = harness.turn_store.wait_for_turn_settled
-
-    async def wait_with_barrier(event_ids: tuple[str, ...]) -> None:
-        wait_started.set()
-        await wait_for_turn_settled(event_ids)
-
-    monkeypatch.setattr(harness.turn_store, "wait_for_turn_settled", wait_with_barrier)
-    harness.runner.deferred_sync_restart_error = None
-    retry = asyncio.create_task(harness.restart_retry.flush())
-    await wait_started.wait()
-    assert not retry.done()
-
-    edited_record = replace(
-        record,
-        response_event_id="$edited-response:localhost",
-        source_event_revisions={event.event_id: (event.server_timestamp + 1, "$edit:localhost")},
-    )
-    harness.turn_store.record_turn(edited_record)
-    harness.turn_store.release_pending_turn_claim(record)
-    await retry
-
-    assert len(harness.runner.requests) == 1
-    settled_record = harness.turn_store.get_turn_record(event.event_id)
-    assert settled_record is not None
-    assert settled_record.response_event_id == "$edited-response:localhost"
+    assert harness.interrupted_turn_rooms.pending_room_ids == {room.room_id}
 
 
 @pytest.mark.asyncio

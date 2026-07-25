@@ -1147,13 +1147,13 @@ class ResponseRunner:
         request: ResponseRequest,
         final_outcome: FinalDeliveryOutcome,
     ) -> None:
-        """Tell the dispatcher when stall recovery interrupted a marked-handled turn.
+        """Tell the dispatcher when a bot replacement interrupted a marked-handled turn.
 
         Only turns that end as a visible interrupted note are reported: they get
-        recorded in the handled-turn ledger, so the post-restart sync replay
-        dedups them away and an explicit retry is their only recovery. Unmarked
-        turns are recovered by that replay instead; retrying them too would
-        answer twice.
+        recorded in the handled-turn ledger, so the replacement runtime's sync
+        replay dedups them away and room-scoped recovery is their only route back.
+        Unmarked turns are recovered by that replay instead; recovering them too
+        would answer twice.
         """
         if request.on_sync_restart_cancelled is None or final_outcome.terminal_status != "cancelled":
             return
