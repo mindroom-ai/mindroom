@@ -141,87 +141,24 @@ async def test_transport_retry_terminal_send_with_no_event_id_retries_until_send
 
 
 @pytest.mark.asyncio
-async def test_completed_terminal_edit_waits_for_sync_recovery_and_reuses_content(tmp_path: Path) -> None:
-    """A transient recovery barrier should retry the frozen terminal payload."""
+async def test_completed_terminal_edit_opts_into_sync_recovery_retry(tmp_path: Path) -> None:
+    """Completed terminal delivery should opt into the bounded recovery retry."""
     streaming = _streaming_response(_config(tmp_path))
     streaming.event_id = "$placeholder"
     streaming.accumulated_text = "complete answer"
-    attempted_content: list[dict[str, Any]] = []
     delivered = DeliveredMatrixEvent(
         event_id="$terminal-edit",
         content_sent={"body": "complete answer"},
     )
+    edit = AsyncMock(return_value=delivered)
 
-    async def edit(*args: object, **_kwargs: object) -> DeliveredMatrixEvent:
-        content = args[3]
-        assert isinstance(content, dict)
-        attempted_content.append(content)
-        if len(attempted_content) == 1:
-            message = "Room timeline recovery is still pending."
-            raise nio.SendRetryError(message)
-        return delivered
-
-    sleep_mock = AsyncMock()
-    with (
-        patch("mindroom.streaming.edit_message_result", new=edit),
-        patch("mindroom.streaming.asyncio.sleep", new=sleep_mock),
-    ):
+    with patch("mindroom.streaming.edit_message_result", new=edit):
         outcome = await streaming.finalize(_client())
 
     assert outcome.terminal_status == "completed"
     assert outcome.failure_reason is None
-    assert len(attempted_content) == 2
-    assert attempted_content[0] is attempted_content[1]
-    sleep_mock.assert_awaited_once_with(0.05)
-
-
-@pytest.mark.asyncio
-async def test_completed_terminal_sync_recovery_retry_is_bounded(tmp_path: Path) -> None:
-    """A persistent recovery barrier should fail within the delivery deadline."""
-    streaming = _streaming_response(_config(tmp_path))
-    streaming.event_id = "$placeholder"
-    streaming.accumulated_text = "complete answer"
-    edit = AsyncMock(side_effect=nio.SendRetryError("Room timeline recovery is still pending."))
-
-    with (
-        patch("mindroom.streaming.edit_message_result", new=edit),
-        patch("mindroom.streaming._SYNC_RECOVERY_RETRY_TIMEOUT_SECONDS", new=0.01),
-        patch("mindroom.streaming._SYNC_RECOVERY_RETRY_INITIAL_DELAY_SECONDS", new=0.002),
-        patch("mindroom.streaming._SYNC_RECOVERY_RETRY_MAX_DELAY_SECONDS", new=0.002),
-    ):
-        outcome = await asyncio.wait_for(streaming.finalize(_client()), 0.5)
-
-    assert edit.await_count >= 2
-    assert outcome.terminal_status == "completed"
-    assert outcome.failure_reason == "terminal_update_exception:SendRetryError"
-
-
-@pytest.mark.asyncio
-async def test_completed_terminal_sync_recovery_wait_is_cancellation_aware(tmp_path: Path) -> None:
-    """Cancellation should interrupt recovery backoff immediately."""
-    streaming = _streaming_response(_config(tmp_path))
-    streaming.event_id = "$placeholder"
-    streaming.accumulated_text = "complete answer"
-    sleep_started = asyncio.Event()
-
-    async def wait_forever(_delay: float) -> None:
-        sleep_started.set()
-        await asyncio.Event().wait()
-
-    with (
-        patch(
-            "mindroom.streaming.edit_message_result",
-            new=AsyncMock(side_effect=nio.SendRetryError("Room timeline recovery is still pending.")),
-        ),
-        patch("mindroom.streaming.asyncio.sleep", new=wait_forever),
-    ):
-        task = asyncio.create_task(streaming.finalize(_client()))
-        await sleep_started.wait()
-        task.cancel()
-        outcome = await task
-
-    assert outcome.terminal_status == "completed"
-    assert outcome.failure_reason == "terminal_update_cancelled"
+    edit.assert_awaited_once()
+    assert edit.call_args.kwargs["retry_sync_recovery"] is True
 
 
 @pytest.mark.asyncio
@@ -240,6 +177,7 @@ async def test_cancelled_terminal_sync_recovery_error_does_not_backoff(tmp_path:
         outcome = await streaming.finalize(_client(), cancelled=True)
 
     edit.assert_awaited_once()
+    assert edit.call_args.kwargs["retry_sync_recovery"] is False
     sleep_mock.assert_not_awaited()
     assert outcome.terminal_status == "cancelled"
     assert outcome.failure_reason == "cancelled_by_user"

@@ -98,38 +98,6 @@ StreamInputChunk = (
 )
 _STREAM_DELIVERY_DRAIN_TIMEOUT_SECONDS = 5.0
 _STREAM_DELIVERY_CANCEL_TIMEOUT_SECONDS = 5.0
-# Allow one default nio recovery pump, while keeping terminal delivery bounded.
-_SYNC_RECOVERY_RETRY_TIMEOUT_SECONDS = 30.0
-_SYNC_RECOVERY_RETRY_INITIAL_DELAY_SECONDS = 0.05
-_SYNC_RECOVERY_RETRY_MAX_DELAY_SECONDS = 0.5
-
-
-async def _wait_before_sync_recovery_retry(
-    error: SendRetryError,
-    *,
-    deadline: float | None,
-    delay: float,
-    event_id: str | None,
-    room_id: str,
-) -> tuple[float, float]:
-    """Wait once before retrying a terminal delivery blocked by sync recovery."""
-    loop = asyncio.get_running_loop()
-    deadline = deadline or loop.time() + _SYNC_RECOVERY_RETRY_TIMEOUT_SECONDS
-    remaining = deadline - loop.time()
-    if remaining <= 0:
-        raise error
-    delay = min(delay, remaining)
-    logger.warning(
-        "Waiting to retry terminal delivery after Matrix sync recovery",
-        event_id=event_id,
-        room_id=room_id,
-        retry_in_seconds=delay,
-    )
-    await asyncio.sleep(delay)
-    return deadline, min(
-        delay * 2,
-        _SYNC_RECOVERY_RETRY_MAX_DELAY_SECONDS,
-    )
 
 
 class _NonTerminalDeliveryError(Exception):
@@ -947,7 +915,7 @@ class StreamingResponse:
                 display_text=prepared_delivery.display_text,
                 retry_on_failure=retry_on_failure,
                 retry_without_backoff=retry_without_backoff,
-                retry_sync_recovery=retry_on_failure,
+                retry_sync_recovery=retry_on_failure and is_final,
             )
         finally:
             if self._inflight_nonterminal_capture is capture:
@@ -1114,9 +1082,20 @@ class StreamingResponse:
         if self.pipeline_timing is not None and self.accumulated_text.strip():
             self.pipeline_timing.mark_first_visible_reply("stream_update")
 
-    async def _send_initial_content(self, client: nio.AsyncClient, *, content: dict[str, Any]) -> bool:
+    async def _send_initial_content(
+        self,
+        client: nio.AsyncClient,
+        *,
+        content: dict[str, Any],
+        retry_sync_recovery: bool = False,
+    ) -> bool:
         """Send the initial streaming event."""
-        delivered = await send_message_result(client, self.room_id, content)
+        delivered = await send_message_result(
+            client,
+            self.room_id,
+            content,
+            retry_sync_recovery=retry_sync_recovery,
+        )
         if delivered is None:
             return False
         self.event_id = delivered.event_id
@@ -1134,6 +1113,7 @@ class StreamingResponse:
         *,
         content: dict[str, Any],
         display_text: str,
+        retry_sync_recovery: bool = False,
     ) -> bool:
         """Send one streaming edit event for the existing message."""
         assert self.event_id is not None
@@ -1143,6 +1123,7 @@ class StreamingResponse:
             self.event_id,
             content,
             display_text,
+            retry_sync_recovery=retry_sync_recovery,
         )
         if delivered is None:
             return False
@@ -1163,31 +1144,29 @@ class StreamingResponse:
         """Send a new event or edit the existing one."""
         total_attempts = 2 if retry_on_failure or retry_without_backoff else 1
         attempt = 1
-        recovery_deadline: float | None = None
-        recovery_delay = _SYNC_RECOVERY_RETRY_INITIAL_DELAY_SECONDS
         while attempt <= total_attempts:
             try:
                 if self.event_id is None:
                     logger.debug("Sending initial streaming message", attempt=attempt)
-                    if await self._send_initial_content(client, content=content):
+                    if await self._send_initial_content(
+                        client,
+                        content=content,
+                        retry_sync_recovery=retry_sync_recovery,
+                    ):
                         return True
                     logger.error("Failed to send initial streaming message", attempt=attempt)
                 else:
                     logger.debug("Editing streaming message", event_id=self.event_id, attempt=attempt)
-                    if await self._edit_existing_content(client, content=content, display_text=display_text):
+                    if await self._edit_existing_content(
+                        client,
+                        content=content,
+                        display_text=display_text,
+                        retry_sync_recovery=retry_sync_recovery,
+                    ):
                         return True
                     logger.error("Failed to edit streaming message", attempt=attempt)
-            except SendRetryError as error:
-                if not retry_sync_recovery:
-                    raise
-                recovery_deadline, recovery_delay = await _wait_before_sync_recovery_retry(
-                    error,
-                    deadline=recovery_deadline,
-                    delay=recovery_delay,
-                    event_id=self.event_id,
-                    room_id=self.room_id,
-                )
-                continue
+            except SendRetryError:
+                raise
             except Exception:
                 logger.warning(
                     "Streaming update attempt raised an exception",
