@@ -755,6 +755,13 @@ class MatrixConversationCache(ConversationCacheProtocol):
         is_shutting_down: Callable[[], bool],
     ) -> bool:
         """Warm one room's recent thread roots and report whether the room-level pass finished."""
+        if not self.runtime.event_cache.durable_writes_available:
+            self.logger.warning(
+                "startup_thread_prewarm_skipped",
+                room_id=room_id,
+                reason="event_cache_writes_unavailable",
+            )
+            return False
         started_at = time.perf_counter()
         threads_warmed = 0
         threads_failed = 0
@@ -804,7 +811,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
         is_shutting_down: Callable[[], bool],
     ) -> _StartupThreadPrewarmOutcome:
         """Refresh one startup thread snapshot and return its room-level prewarm outcome."""
-        if is_shutting_down():
+        if is_shutting_down() or not self.runtime.event_cache.durable_writes_available:
             return "aborted"
         if not thread_id:
             self.logger.warning(

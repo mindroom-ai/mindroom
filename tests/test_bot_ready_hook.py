@@ -984,6 +984,29 @@ async def test_startup_thread_prewarm_refreshes_threads_concurrently(tmp_path: P
 
 
 @pytest.mark.asyncio
+async def test_startup_thread_prewarm_skips_when_cache_writes_are_unavailable(tmp_path: Path) -> None:
+    """Startup prewarm must not scan Matrix when its snapshots cannot be persisted."""
+    bot = _agent_bot(tmp_path)
+    bot._conversation_cache.logger = MagicMock()
+    bot.event_cache.durable_writes_available = False
+    bot._conversation_cache._startup_thread_prewarm_ids = AsyncMock(
+        side_effect=AssertionError("prewarm should not enumerate threads when cache writes are unavailable"),
+    )
+
+    completed = await bot._conversation_cache.prewarm_recent_room_threads(
+        "!room:localhost",
+        is_shutting_down=lambda: False,
+    )
+
+    assert completed is False
+    bot._conversation_cache.logger.warning.assert_called_once_with(
+        "startup_thread_prewarm_skipped",
+        room_id="!room:localhost",
+        reason="event_cache_writes_unavailable",
+    )
+
+
+@pytest.mark.asyncio
 async def test_startup_thread_prewarm_limits_room_work_across_bots(tmp_path: Path) -> None:
     """Startup prewarm should not let many enabled bots warm different rooms at the same time."""
     first_bot = _agent_bot(tmp_path, agent_name="router")
