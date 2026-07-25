@@ -417,6 +417,52 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         }
 
     @pytest.mark.asyncio
+    async def test_local_graph_edit_inherits_original_membership_not_replacement_content(self) -> None:
+        """A replacement row follows its original even when new content claims another thread."""
+        room_id = "!test:localhost"
+        thread_root_id = "$thread_root:localhost"
+        thread_reply_id = "$thread_reply:localhost"
+        edit_id = "$thread_reply_edit:localhost"
+        event_infos = {
+            thread_reply_id: EventInfo.from_event(
+                {
+                    "type": "m.room.message",
+                    "content": {
+                        "body": "Thread reply",
+                        "msgtype": "m.text",
+                        "m.relates_to": {"rel_type": "m.thread", "event_id": thread_root_id},
+                    },
+                },
+            ),
+            edit_id: EventInfo.from_event(
+                {
+                    "type": "m.room.message",
+                    "content": {
+                        "body": "* forged relation",
+                        "msgtype": "m.text",
+                        "m.new_content": {
+                            "body": "forged relation",
+                            "msgtype": "m.text",
+                            "m.relates_to": {"rel_type": "m.thread", "event_id": "$other_thread:localhost"},
+                        },
+                        "m.relates_to": {"rel_type": "m.replace", "event_id": thread_reply_id},
+                    },
+                },
+            ),
+        }
+
+        resolved_thread_ids = await resolve_thread_ids_for_event_infos(
+            room_id,
+            event_infos=event_infos,
+            ordered_event_ids=[edit_id, thread_reply_id],
+        )
+
+        assert resolved_thread_ids == {
+            thread_reply_id: thread_root_id,
+            edit_id: thread_root_id,
+        }
+
+    @pytest.mark.asyncio
     async def test_resolve_event_thread_membership_follows_reaction_target_transitively(
         self,
     ) -> None:

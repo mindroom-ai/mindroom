@@ -11,10 +11,12 @@ Invariants enforced here (every resolver in the repo must go through this module
 
 1. An event is THREADED if and only if one of the following holds:
    it carries a native ``m.thread`` relation (``EventInfo.thread_id``);
-   it is an edit whose ``m.new_content`` carries an ``m.thread`` relation (``thread_id_from_edit``);
+   it is a live edit whose ``m.new_content`` carries an ``m.thread`` relation (``thread_id_from_edit``);
    a relation walk from it reaches an event satisfying either of the above;
    or the walk terminates at a relation-free event that is proven to have at least one real threaded child,
    in which case that terminal event is itself the thread root.
+   Local history graphs validate replacement membership through the original event rather than treating
+   replacement content as independent proof.
    Per MSC3440 only relation-free events (``can_be_thread_root``) may become roots.
 
 2. The relation walk follows ``EventInfo.next_related_event_id``: edit original, then reaction target,
@@ -382,13 +384,7 @@ def page_event_info_counts_as_thread_child_proof(
     """Return whether one page-local event proves a root has thread children."""
     if event_id == thread_root_id or not event_type_supports_thread_relations(event_info.event_type):
         return False
-    return any(
-        candidate_thread_id == thread_root_id
-        for candidate_thread_id in (
-            event_info.thread_id,
-            event_info.thread_id_from_edit,
-        )
-    )
+    return event_info.thread_id == thread_root_id
 
 
 def local_events_prove_thread_root(thread_root_id: str, event_infos: Mapping[str, EventInfo]) -> bool:

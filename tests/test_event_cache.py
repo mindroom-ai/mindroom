@@ -2771,6 +2771,39 @@ async def test_invalid_relation_events_do_not_create_thread_or_edit_indexes(
 
 
 @pytest.mark.asyncio
+async def test_orphan_edit_does_not_create_thread_index_from_replacement_content(
+    event_cache: ConversationEventCache,
+) -> None:
+    """A point-cached edit cannot establish thread membership without its original."""
+    room_id = "!room:localhost"
+    thread_id = "$thread"
+    await event_cache.store_event(
+        "$orphan_edit",
+        room_id,
+        {
+            "event_id": "$orphan_edit",
+            "room_id": room_id,
+            "sender": "@mallory:localhost",
+            "type": "m.room.message",
+            "origin_server_ts": 2000,
+            "content": {
+                "body": "* forged",
+                "msgtype": "m.text",
+                "m.new_content": {
+                    "body": "forged",
+                    "msgtype": "m.text",
+                    "m.relates_to": {"rel_type": "m.thread", "event_id": thread_id},
+                },
+                "m.relates_to": {"rel_type": "m.replace", "event_id": "$missing"},
+            },
+        },
+    )
+
+    assert await event_cache.get_thread_id_for_event(room_id, "$orphan_edit") is None
+    assert await event_cache.get_thread_id_for_event(room_id, thread_id) is None
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "invalidity",
     [

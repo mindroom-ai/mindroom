@@ -3654,6 +3654,59 @@ class TestThreadHistoryCache:
         assert rejection == expected_rejection
 
     @pytest.mark.asyncio
+    async def test_cache_certification_rejects_orphan_edit_claiming_thread_membership(self) -> None:
+        """Replacement content cannot make its missing original a member of the requested thread."""
+        room_id = "!room:localhost"
+        thread_id = "$thread_root"
+        event_sources = [
+            {
+                "event_id": thread_id,
+                "room_id": room_id,
+                "sender": "@alice:localhost",
+                "type": "m.room.message",
+                "origin_server_ts": 1000,
+                "content": {"body": "Root", "msgtype": "m.text"},
+            },
+            {
+                "event_id": "$orphan_edit",
+                "room_id": room_id,
+                "sender": "@mallory:localhost",
+                "type": "m.room.message",
+                "origin_server_ts": 2000,
+                "content": {
+                    "body": "* forged",
+                    "msgtype": "m.text",
+                    "m.new_content": {
+                        "body": "forged",
+                        "msgtype": "m.text",
+                        "m.relates_to": {"rel_type": "m.thread", "event_id": thread_id},
+                    },
+                    "m.relates_to": {"rel_type": "m.replace", "event_id": "$missing"},
+                },
+            },
+            {
+                "event_id": "$plain_reply",
+                "room_id": room_id,
+                "sender": "@alice:localhost",
+                "type": "m.room.message",
+                "origin_server_ts": 3000,
+                "content": {
+                    "body": "Plain reply",
+                    "msgtype": "m.text",
+                    "m.relates_to": {"m.in_reply_to": {"event_id": thread_id}},
+                },
+            },
+        ]
+
+        rejection = await matrix_client_module._thread_history_cache_rejection_reason(
+            event_sources,
+            room_id=room_id,
+            thread_id=thread_id,
+        )
+
+        assert rejection == "invalid_thread_membership"
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize(
         ("invalidity", "expected_rejection"),
         [

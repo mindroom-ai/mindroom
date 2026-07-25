@@ -123,7 +123,7 @@ def test_page_event_info_counts_as_thread_child_proof_preserves_thread_semantics
         event_id="$reply:localhost",
         event_info=explicit_child,
     )
-    assert page_event_info_counts_as_thread_child_proof(
+    assert not page_event_info_counts_as_thread_child_proof(
         thread_root_id,
         event_id="$reply-edit:localhost",
         event_info=edit_child,

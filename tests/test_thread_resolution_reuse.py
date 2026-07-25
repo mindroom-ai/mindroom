@@ -584,18 +584,6 @@ class TestSuffixSafetyGuards:
         assert duplicated_new is None
 
     @pytest.mark.asyncio
-    async def test_rejects_suffix_row_reusing_synthesized_edit_target(self) -> None:
-        """A suffix row must not reuse the original ID of a prefix edit whose original was missing."""
-        rows = [
-            _message_row(THREAD, 1000, "root"),
-            _edit_row("$e1", 2000, target="$missing_original", body="synthesized"),
-        ]
-        snapshot = await self._snapshot(rows)
-
-        suffix = _guard_suffix(snapshot, [_message_row("$missing_original", 3000, "late arrival")])
-        assert suffix is None
-
-    @pytest.mark.asyncio
     async def test_rejects_bundled_replacement_targeting_prefix_message(self) -> None:
         """A bundled ``m.replace`` aggregation targeting a prefix message rejects reuse."""
         rows = [_message_row(THREAD, 1000, "root"), _message_row("$m1", 2000, "draft")]

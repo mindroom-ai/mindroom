@@ -295,7 +295,7 @@ def _event_thread_row(room_id: str, event: SerializedCachedEvent) -> _EventThrea
     if not event_source_supports_thread_relations(event.event, room_id):
         return None
     event_info = EventInfo.from_event(event.event)
-    thread_id = event_info.thread_id or event_info.thread_id_from_edit
+    thread_id = event_info.thread_id
     if not thread_id:
         return None
     return _EventThreadRow(room_id=room_id, event_id=event.event_id, thread_id=thread_id)

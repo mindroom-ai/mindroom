@@ -10,7 +10,9 @@ Ordering and projection invariants:
 3. ``resolve_thread_ids_for_event_infos`` derives membership for a local event graph by iterating the
    canonical resolver (``thread_membership``) to a fixpoint, so transitive implied membership (reply to
    a reply to a threaded event) resolves regardless of input order.
-   It is the only sanctioned way to batch-resolve membership; it adds no rules of its own.
+   Replacements inherit the resolved membership of their original event rather than trusting relations
+   from replacement content.
+   It is the only sanctioned way to batch-resolve membership.
 """
 
 from __future__ import annotations
@@ -396,6 +398,13 @@ async def resolve_thread_ids_for_event_infos(
                 continue
             event_info = event_infos.get(event_id)
             if event_info is None:
+                continue
+            if event_info.is_edit:
+                original_event_id = event_info.original_event_id
+                if original_event_id is None or (thread_id := resolved.get(original_event_id)) is None:
+                    continue
+                resolved[event_id] = thread_id
+                progress_made = True
                 continue
             resolution = await resolve_event_thread_membership(
                 room_id,
