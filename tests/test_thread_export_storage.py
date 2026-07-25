@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 from unittest.mock import patch
 
 import pytest
+import yaml
 
 from mindroom.thread_export.models import ThreadExportRoom
 from mindroom.thread_export.storage import (
@@ -44,6 +45,24 @@ def _thread_filename(thread_id: str) -> str:
     return f"{_safe_path_segment(thread_id)}.yaml"
 
 
+def _write_thread_export(room_dir: Path, thread_id: str = "$thread:localhost") -> Path:
+    """Write one structurally valid thread export, as ownership evidence requires."""
+    path = room_dir / _thread_filename(thread_id)
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "version": 1,
+                "room": {"key": "lobby", "id": "!lobby:localhost", "name": "Lobby", "alias": "#lobby:localhost"},
+                "thread": {"id": thread_id, "source": "matrix", "message_count": 0},
+                "messages": [],
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
 def test_safe_path_segment_blocks_dot_directory_segments() -> None:
     """Path segments should not allow current or parent directory traversal."""
     assert _safe_path_segment(".") == "%2E"
@@ -66,7 +85,7 @@ def test_exporter_marks_a_recognizable_legacy_root_automatically(tmp_path: Path)
     room_dir = output_dir / "lobby"
     room_dir.mkdir(parents=True)
     (room_dir / "index.json").write_text("{}\n", encoding="utf-8")
-    (room_dir / _thread_filename("$thread:localhost")).write_text("version: 1\n", encoding="utf-8")
+    _write_thread_export(room_dir)
 
     prepare_export_root(output_dir)
 
@@ -79,7 +98,7 @@ def test_exporter_replaces_an_invalid_marker_on_a_recognizable_legacy_root(tmp_p
     room_dir = output_dir / "lobby"
     room_dir.mkdir(parents=True)
     (room_dir / "index.json").write_text("{}\n", encoding="utf-8")
-    (room_dir / _thread_filename("$thread:localhost")).write_text("version: 1\n", encoding="utf-8")
+    _write_thread_export(room_dir)
     (output_dir / _ROOT_MARKER_FILENAME).write_text("invalid\n", encoding="utf-8")
 
     prepare_export_root(output_dir)
@@ -93,7 +112,7 @@ def test_exporter_ignores_its_atomic_write_residue_when_claiming_a_legacy_root(t
     room_dir = output_dir / "lobby"
     room_dir.mkdir(parents=True)
     (room_dir / "index.json").write_text("{}\n", encoding="utf-8")
-    (room_dir / _thread_filename("$thread:localhost")).write_text("version: 1\n", encoding="utf-8")
+    _write_thread_export(room_dir)
     room_temp = room_dir / f".index.json.{'a' * 32}.tmp"
     root_temp = output_dir / f".{_ROOT_MARKER_FILENAME}.{'b' * 32}.tmp"
     room_temp.write_text('{"version":', encoding="utf-8")
@@ -119,7 +138,7 @@ def test_exporter_claims_a_legacy_root_beside_a_foreign_file(tmp_path: Path, for
     room_dir = output_dir / "lobby"
     room_dir.mkdir(parents=True)
     (room_dir / "index.json").write_text("{}\n", encoding="utf-8")
-    (room_dir / _thread_filename("$thread:localhost")).write_text("version: 1\n", encoding="utf-8")
+    _write_thread_export(room_dir)
     foreign = output_dir / foreign_entry
     foreign.write_text("unrelated", encoding="utf-8")
 
@@ -135,7 +154,7 @@ def test_exporter_claims_a_legacy_root_beside_a_foreign_directory(tmp_path: Path
     room_dir = output_dir / "lobby"
     room_dir.mkdir(parents=True)
     (room_dir / "index.json").write_text("{}\n", encoding="utf-8")
-    (room_dir / _thread_filename("$thread:localhost")).write_text("version: 1\n", encoding="utf-8")
+    _write_thread_export(room_dir)
     keep = output_dir / ".git" / "HEAD"
     keep.parent.mkdir()
     keep.write_text("ref: refs/heads/main\n", encoding="utf-8")
@@ -151,7 +170,7 @@ def test_exporter_claims_a_room_left_without_an_index_by_an_interrupted_pass(tmp
     output_dir = tmp_path / "thread_exports"
     room_dir = output_dir / "lobby"
     room_dir.mkdir(parents=True)
-    (room_dir / _thread_filename("$thread:localhost")).write_text("version: 1\n", encoding="utf-8")
+    _write_thread_export(room_dir)
 
     prepare_export_root(output_dir)
 
@@ -173,6 +192,21 @@ def test_a_stray_index_json_does_not_make_a_project_directory_adoptable(tmp_path
     assert not (project / _ROOT_MARKER_FILENAME).exists()
     assert (build_dir / "index.json").read_text(encoding="utf-8") == '{"build":1}\n'
     assert source.read_text(encoding="utf-8") == "my project"
+
+
+def test_a_thread_shaped_filename_alone_does_not_make_a_directory_adoptable(tmp_path: Path) -> None:
+    """Ownership evidence must read the document, not trust a percent-encoded filename."""
+    notes = tmp_path / "notes"
+    archive = notes / "archive"
+    archive.mkdir(parents=True)
+    decoy = archive / _thread_filename("$notes")
+    decoy.write_text("shopping:\n  - milk\n  - eggs\n", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="unowned thread export root"):
+        prepare_export_root(notes)
+
+    assert not (notes / _ROOT_MARKER_FILENAME).exists()
+    assert decoy.read_text(encoding="utf-8") == "shopping:\n  - milk\n  - eggs\n"
 
 
 def test_unrecognized_root_is_not_marked(tmp_path: Path) -> None:

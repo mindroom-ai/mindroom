@@ -193,6 +193,38 @@ def _contains_thread_export_file(room_fd: int) -> bool:
     return any(_is_thread_export_filename(name) and _regular_file_at(room_fd, name) for name in names)
 
 
+def _is_thread_export_payload(room_fd: int, filename: str) -> bool:
+    """Return whether one file parses as a MindRoom thread export document."""
+    text = _read_text_at(room_fd, filename)
+    if text is None:
+        return False
+    try:
+        payload = yaml_io.safe_load(text)
+    except yaml.YAMLError:
+        return False
+    if not isinstance(payload, dict) or not isinstance(payload.get("room"), dict):
+        return False
+    if not isinstance(payload.get("messages"), list):
+        return False
+    thread = payload.get("thread")
+    return isinstance(thread, dict) and isinstance(thread.get("id"), str)
+
+
+def _contains_valid_thread_export(room_fd: int) -> bool:
+    """Return whether one pinned directory holds a thread export with MindRoom's own payload.
+
+    Ownership evidence reads the document instead of trusting the filename, because a
+    percent-encoded name like ``%24notes.yaml`` is something an unrelated directory can hold.
+    """
+    names = os.listdir(room_fd)
+    return any(
+        _is_thread_export_filename(name)
+        and _regular_file_at(room_fd, name)
+        and _is_thread_export_payload(room_fd, name)
+        for name in names
+    )
+
+
 def _open_canonical_room_directory(root_fd: int, output_dir: Path, name: str) -> int | None:
     """Open one canonically named, non-symlinked room directory below a pinned root."""
     if not _is_encoded_room_segment(name):
@@ -224,12 +256,12 @@ def _recognizable_room_directory(root_fd: int, output_dir: Path, name: str) -> b
 
 
 def _room_directory_with_thread_exports(root_fd: int, output_dir: Path, name: str) -> bool:
-    """Return whether one root entry is a canonically named room holding a thread export."""
+    """Return whether one root entry is a canonically named room holding a real thread export."""
     room_fd = _open_canonical_room_directory(root_fd, output_dir, name)
     if room_fd is None:
         return False
     try:
-        return _contains_thread_export_file(room_fd)
+        return _contains_valid_thread_export(room_fd)
     finally:
         os.close(room_fd)
 
@@ -237,10 +269,11 @@ def _room_directory_with_thread_exports(root_fd: int, output_dir: Path, name: st
 def _root_has_export_evidence(root_fd: int, output_dir: Path) -> bool:
     """Return whether an empty root, or one holding a thread export, proves exporter ownership.
 
-    Evidence is a percent-encoded room directory containing a ``$``-prefixed Matrix thread
-    export, which no unrelated directory produces by accident. A generic ``index.json`` is
-    deliberately not evidence: a build or data directory can hold one, and adopting on that
-    alone would expose it to reconciliation.
+    Evidence is a percent-encoded room directory holding a document that parses as one of this
+    exporter's thread exports. Neither a generic ``index.json`` nor a thread-shaped filename is
+    enough on its own, because a build directory can hold the former and any directory can hold
+    a file named ``%24notes.yaml``; adopting on either would expose unrelated data to
+    reconciliation.
     Unrelated entries beside real evidence do not veto ownership, because a stray ``.DS_Store``,
     ``.git`` directory, or operator note must not strand a real corpus, and every destructive
     path is independently scoped to exporter-owned entries.
