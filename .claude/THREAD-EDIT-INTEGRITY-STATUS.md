@@ -4,8 +4,8 @@
 
 - PR: `https://github.com/mindroom-ai/mindroom/pull/1641`.
 - Branch: `fix/thread-edit-integrity`.
-- Exact pushed code head: `78aca38cc9e542776c15d50960f7c426f672474d`.
-- Production source is `+966/-766`, net `+200` against exact `origin/main` `5f062224a1f490a91a72c555bf2fa0ca59c096b3`.
+- Exact pushed code head: `f974264c701c8d0f86d2d17a1d2dee748b9591ae`.
+- Production source is `+972/-772`, net `+200` against exact `origin/main` `5f062224a1f490a91a72c555bf2fa0ca59c096b3`.
 - Git author and committer must resolve to `Bas Nijholt <bas@nijho.lt>` before every commit.
 - Never amend, force-push, merge, or open the PR as draft.
 - Preserve the three untracked `.claude/TASK-*.md` files.
@@ -124,3 +124,17 @@
 - The exact-`381016c06` native review and all CI become stale after the correction is committed.
 - The correction is pushed; commit this handoff, refresh exact ledgers and PR body, then launch another fresh native Codex review and CI.
 - Heavy gates remain closed behind PR #1646.
+
+## Exact-381 incremental-append review blocker
+
+- The stale exact-`381016c06` native Codex review returned `CHANGES REQUIRED` with two independently reproduced blockers.
+- Its missing coalesced ownership blocker is fixed by commit `78aca38cc9e542776c15d50960f7c426f672474d`.
+- SQLite and PostgreSQL incremental thread append filtered a late event but serialized the original unsanitized payload.
+- A late original carrying a durably tombstoned bundled edit could therefore resurrect that edit only through incremental append.
+- Commit `f974264c701c8d0f86d2d17a1d2dee748b9591ae` serializes the exact event returned by `filter_cacheable_events()` in both backends.
+- A backend-parametrized contract regression proves the append stores the original without the tombstoned bundle and returns no latest edit.
+- The exact SQLite regression and all `100` non-PostgreSQL event-cache tests pass.
+- Ruff, formatting, `ty`, Tach dependency/interface checks, and diff checks pass.
+- Production remains at the hard source ceiling: `+972/-772`, net `+200`.
+- PostgreSQL execution remains queued behind the serialized heavy owner.
+- The correction is pushed; commit this handoff, then refresh exact ledgers, PR body, native Codex, and CI again.
