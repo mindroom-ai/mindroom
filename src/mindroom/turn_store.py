@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import math
 import threading
 from dataclasses import dataclass, field, replace
@@ -14,7 +15,7 @@ from agno.run.team import TeamRunOutput
 
 from mindroom.agent_storage import get_agent_session, get_team_session
 from mindroom.agents import remove_run_by_event_id
-from mindroom.handled_turns import HandledTurnLedger, TurnRecord, TurnRecordCodec, same_turn_identity
+from mindroom.handled_turns import HandledTurnLedger, TurnRecord, TurnRecordCodec, merge_edit_facts, same_turn_identity
 from mindroom.history.storage import invalidate_compacted_replay, read_scope_seen_event_ids
 from mindroom.session_ids import create_session_id
 
@@ -67,6 +68,7 @@ class TurnStore:
     deps: TurnStoreDeps
     _ledger: HandledTurnLedger = field(init=False, repr=False)
     _pending_claim_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
+    _pending_claim_changed: asyncio.Event = field(default_factory=asyncio.Event, init=False, repr=False)
     _pending_claimed_event_ids: set[str] = field(default_factory=set, init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -212,6 +214,17 @@ class TurnStore:
         """Release a response claim after terminal settlement or failure."""
         with self._pending_claim_lock:
             self._pending_claimed_event_ids.difference_update(turn_record.indexed_event_ids)
+            claim_changed, self._pending_claim_changed = self._pending_claim_changed, asyncio.Event()
+        claim_changed.set()
+
+    async def wait_for_turn_settled(self, event_ids: tuple[str, ...]) -> None:
+        """Wait asynchronously until dispatch releases ownership after settlement."""
+        while True:
+            with self._pending_claim_lock:
+                if not self._pending_claimed_event_ids.intersection(event_ids):
+                    return
+                claim_changed = self._pending_claim_changed
+            await claim_changed.wait()
 
     def mark_source_redacted(
         self,
@@ -678,6 +691,7 @@ def _backfill_missing_turn_facts(authority: TurnRecord, recovery: TurnRecord) ->
             if authority.source_event_prompts is not None
             else recovery.source_event_prompts
         ),
+        source_event_revisions=authority.source_event_revisions or recovery.source_event_revisions,
         source_event_metadata=(
             authority.source_event_metadata
             if authority.source_event_metadata is not None
@@ -713,6 +727,7 @@ def _reconcile_ledger_and_recovery(
             if backfilled_record != ledger_record
             else ledger_record
         )
+    source_event_prompts, source_event_revisions = merge_edit_facts(ledger_record, recovery_record)
     recovered_record = replace(
         ledger_record,
         discovery_event_ids=(*ledger_record.discovery_event_ids, *recovery_record.discovery_event_ids),
@@ -722,7 +737,8 @@ def _reconcile_ledger_and_recovery(
         ),
         response_event_id=recovery_record.response_event_id,
         completed=recovery_record.completed,
-        source_event_prompts=recovery_record.source_event_prompts or ledger_record.source_event_prompts,
+        source_event_prompts=source_event_prompts,
+        source_event_revisions=source_event_revisions,
         source_event_metadata=recovery_record.source_event_metadata or ledger_record.source_event_metadata,
         response_owner=recovery_record.response_owner or ledger_record.response_owner,
         requester_id=recovery_record.requester_id or ledger_record.requester_id,

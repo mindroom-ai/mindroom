@@ -61,6 +61,7 @@ from mindroom.response_runner import (
     _ResponseGenerationOutcome,
 )
 from mindroom.teams import TeamIntent, TeamMode, TeamResolution
+from mindroom.text_ingress_dispatch import _run_claimed_response
 from mindroom.turn_controller import _IngressAdmissionOutcome, _PrecheckedEvent
 from mindroom.turn_policy import PreparedDispatch, ResponseAction, _DispatchPlan
 from tests.bot_helpers import (
@@ -94,6 +95,7 @@ from tests.conftest import (
     replace_delivery_gateway_deps,
     replace_turn_controller_deps,
     runtime_paths_for,
+    unwrap_extracted_collaborator,
     wrap_extracted_collaborators,
 )
 from tests.identity_helpers import entity_ids
@@ -158,20 +160,49 @@ class TestAgentBot(AgentBotTestBase):
             kind="reject",
             rejection_message="Team request includes private agent 'mind'; private agents are only supported in explicit Matrix ad hoc teams with requester identity",
         )
+        handled_turn = TurnRecord.create([event.event_id], completed=False)
+        turn_store = unwrap_extracted_collaborator(bot._turn_store)
+        controller = unwrap_extracted_collaborator(bot._turn_controller)
+        assert turn_store.try_claim_turn(handled_turn)
+        send_started = asyncio.Event()
+        release_send = asyncio.Event()
+        wait_started = asyncio.Event()
 
         bot.client = AsyncMock(spec=nio.AsyncClient)
 
-        with patch.object(DeliveryGateway, "send_text", new=AsyncMock(return_value="$reply")) as send_text:
-            await bot._turn_controller._execute_response_action(
-                room,
-                event,
-                dispatch,
-                action,
-                DispatchPayloadInputs((), (), ()),
-                processing_log="processing",
-                dispatch_started_at=0.0,
-                handled_turn=TurnRecord.create([event.event_id]),
+        async def send_rejection(_request: SendTextRequest) -> str:
+            send_started.set()
+            await release_send.wait()
+            return "$reply"
+
+        async def wait_for_settlement() -> None:
+            wait_started.set()
+            await turn_store.wait_for_turn_settled(handled_turn.indexed_event_ids)
+
+        with patch.object(DeliveryGateway, "send_text", new=AsyncMock(side_effect=send_rejection)) as send_text:
+            response_task = asyncio.create_task(
+                _run_claimed_response(
+                    controller,
+                    handled_turn,
+                    controller._execute_response_action(
+                        room,
+                        event,
+                        dispatch,
+                        action,
+                        DispatchPayloadInputs((), (), ()),
+                        processing_log="processing",
+                        dispatch_started_at=0.0,
+                        handled_turn=handled_turn,
+                    ),
+                ),
             )
+            waiter = asyncio.create_task(wait_for_settlement())
+            await send_started.wait()
+            await wait_started.wait()
+            assert not waiter.done()
+            release_send.set()
+            await response_task
+            await waiter
 
         send_text.assert_awaited_once()
         delivered_request = send_text.await_args.args[0]
@@ -1269,6 +1300,91 @@ class TestAgentBot(AgentBotTestBase):
         assert generate_kwargs["response_envelope"].requester_id == "@mallory:localhost"
 
     @pytest.mark.asyncio
+    async def test_text_ingress_claims_source_before_first_async_preparation(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """An edit must see source ownership before normal ingress can yield."""
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = _make_matrix_client_mock()
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!room:localhost"
+        event = nio.RoomMessageText.from_dict(
+            {
+                "event_id": "$source",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567890,
+                "room_id": room.room_id,
+                "type": "m.room.message",
+                "content": {"msgtype": "m.text", "body": "before edit"},
+            },
+        )
+        ingress_started = asyncio.Event()
+        release_ingress = asyncio.Event()
+
+        async def hold_ingress(*_args: object, **_kwargs: object) -> None:
+            ingress_started.set()
+            await release_ingress.wait()
+
+        with (
+            patch.object(
+                bot._turn_controller,
+                "_precheck_dispatch_event",
+                return_value=_PrecheckedEvent(event=event, requester_user_id="@user:localhost"),
+            ),
+            patch.object(bot._turn_controller, "_ingest_live_text_event", side_effect=hold_ingress),
+        ):
+            task = asyncio.create_task(bot._on_message(room, event))
+            await ingress_started.wait()
+            competing_claim = TurnRecord.create([event.event_id], completed=False)
+            assert bot._turn_store.try_claim_turn(competing_claim) is False
+            release_ingress.set()
+            await task
+
+        assert bot._turn_store.try_claim_turn(competing_claim) is True
+        bot._turn_store.release_pending_turn_claim(competing_claim)
+
+    @pytest.mark.asyncio
+    async def test_router_relay_claims_original_alias_before_first_async_preparation(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """An edit of a routed original must see its relay claim before ingress can yield."""
+        config = self._config_for_storage(tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = _make_matrix_client_mock()
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!room:localhost"
+        event = self._router_relay_event()
+        ingress_started = asyncio.Event()
+        release_ingress = asyncio.Event()
+
+        async def hold_ingress(*_args: object, **_kwargs: object) -> None:
+            ingress_started.set()
+            await release_ingress.wait()
+
+        with (
+            patch.object(
+                bot._turn_controller,
+                "_precheck_dispatch_event",
+                return_value=_PrecheckedEvent(event=event, requester_user_id="@user:localhost"),
+            ),
+            patch.object(bot._turn_controller, "_ingest_live_text_event", side_effect=hold_ingress),
+        ):
+            task = asyncio.create_task(bot._on_message(room, event))
+            await ingress_started.wait()
+            competing_claim = TurnRecord.create(["$user_msg:localhost"], completed=False)
+            assert bot._turn_store.try_claim_turn(competing_claim) is False
+            release_ingress.set()
+            await task
+
+        assert bot._turn_store.try_claim_turn(competing_claim) is True
+        bot._turn_store.release_pending_turn_claim(competing_claim)
+
+    @pytest.mark.asyncio
     async def test_handle_message_inner_enqueues_active_thread_follow_up_as_coalescible_gate_event(
         self,
         mock_agent_user: AgentMatrixUser,
@@ -1379,8 +1495,11 @@ class TestAgentBot(AgentBotTestBase):
         assert pending_event.event is event
         assert pending_event.source_kind == MESSAGE_SOURCE_KIND
         assert pending_event.dispatch_policy_source_kind is None
-        assert len(pending_event.dispatch_metadata) == 1
-        metadata = pending_event.dispatch_metadata[0]
+        assert {item.kind for item in pending_event.dispatch_metadata} == {
+            "pending_turn_claim",
+            "queued_notice_reservation",
+        }
+        metadata = next(item for item in pending_event.dispatch_metadata if item.kind == "queued_notice_reservation")
         assert metadata.kind == "queued_notice_reservation"
         assert metadata.payload is mock_reserve_waiting_human_message.return_value
         assert metadata.requires_solo_batch is False
@@ -1861,7 +1980,7 @@ class TestAgentBot(AgentBotTestBase):
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         _wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
-        _set_turn_store_tracker(bot, MagicMock())
+        tracker = _set_turn_store_tracker(bot, MagicMock())
         bot.logger = MagicMock()
         _replace_turn_policy_deps(bot, logger=bot.logger)
 
@@ -1934,6 +2053,10 @@ class TestAgentBot(AgentBotTestBase):
                 processing_log="processing",
                 dispatch_started_at=0.0,
                 handled_turn=TurnRecord.create([event.event_id]),
+            )
+            tracker.get_turn_record.return_value = TurnRecord.create(
+                [event.event_id],
+                response_event_id="$team-response",
             )
             await bot._restart_retry_queue.flush()
 
