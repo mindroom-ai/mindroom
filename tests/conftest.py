@@ -69,6 +69,7 @@ from mindroom.hooks import EnrichmentItem, MessageEnvelope
 from mindroom.ingress_validation import IngressValidator
 from mindroom.interactive import InteractiveMetadata
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
+from mindroom.matrix.cache.thread_cache_state import ThreadCacheReplaceOutcome
 from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
 from mindroom.matrix.client import DeliveredMatrixEvent, ResolvedVisibleMessage
@@ -497,6 +498,18 @@ def _remove_postgres_container(docker: str, container_name: str) -> None:
     raise RuntimeError(msg)
 
 
+def pytest_configure(config: pytest.Config) -> None:  # noqa: ARG001
+    """Keep CLI output uncolored so console assertions never depend on the developer's terminal.
+
+    Rich caches ``FORCE_COLOR`` when a module-level ``Console`` is constructed, so this must run
+    before any test module imports the CLI. An agent or CI shell exporting it would otherwise make
+    passing assertions fail on ANSI escapes that never appear in a clean environment.
+    """
+    os.environ.pop("FORCE_COLOR", None)
+    os.environ.pop("CLICOLOR_FORCE", None)
+    os.environ["TERM"] = "dumb"
+
+
 def pytest_configure_node(node: "WorkerController") -> None:
     """Remember the shared Postgres container name in the xdist controller."""
     node.config.stash[_POSTGRES_CONTAINER_NAME_STASH_KEY] = _postgres_container_name(
@@ -808,6 +821,7 @@ def make_event_cache_mock() -> AsyncMock:
     event_cache.append_event.return_value = True
     event_cache.redact_event.return_value = False
     event_cache.store_mxc_text.return_value = True
+    event_cache.replace_thread_if_not_newer.return_value = ThreadCacheReplaceOutcome.STORED
     return event_cache
 
 
