@@ -65,7 +65,7 @@ from mindroom.dispatch_source import (
 )
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.error_handling import get_user_friendly_error_message
-from mindroom.handled_turns import TurnRecord, same_turn_identity
+from mindroom.handled_turns import TurnRecord
 from mindroom.hooks import MessageEnvelope, build_hook_matrix_admin, hook_ingress_policy
 from mindroom.inbound_turn_normalizer import (
     DispatchPayloadWithAttachmentsRequest,
@@ -137,7 +137,7 @@ if TYPE_CHECKING:
     from mindroom.message_target import MessageTarget
     from mindroom.response_lifecycle import QueuedHumanNoticeReservation
     from mindroom.response_runner import ResponseRunner
-    from mindroom.sync_restart_retry import SyncRestartRetryQueue
+    from mindroom.sync_restart_retry import InterruptedTurnRooms
     from mindroom.tool_system.runtime_context import ToolRuntimeSupport
     from mindroom.turn_store import TurnStore
 
@@ -327,7 +327,7 @@ class TurnControllerDeps:
     coalescing_gate: CoalescingGate
     edit_regenerator: _EditRegenerator
     ingress: IngressValidator
-    restart_retry: SyncRestartRetryQueue
+    interrupted_turn_rooms: InterruptedTurnRooms
 
 
 @dataclass
@@ -1672,54 +1672,18 @@ class TurnController:
         self,
         room: nio.MatrixRoom,
         event: DispatchEvent,
-        dispatch: PreparedDispatch,
-        action: ResponseAction,
-        payload_inputs: DispatchPayloadInputs,
         *,
         handled_turn: TurnRecord,
-        matrix_run_metadata: dict[str, Any] | None,
-        retry_team_mode: TeamMode | None,
     ) -> tuple[Callable[[], None], Callable[[str], None]]:
-        """Build callbacks for sync-restart retry and deferred handled recording."""
+        """Build callbacks for interrupted-turn recording and deferred handled recording."""
 
-        def register_sync_restart_retry() -> None:
-            async def retry() -> None:
-                retry_turn = self.deps.turn_store.get_turn_record(event.event_id)
-                while retry_turn is not None and not self.deps.turn_store.try_claim_turn(retry_turn):
-                    await self.deps.turn_store.wait_for_turn_settled(retry_turn.indexed_event_ids)
-                    retry_turn = self.deps.turn_store.get_turn_record(event.event_id)
-                if retry_turn is None:
-                    return
-                try:
-                    current_record = self.deps.turn_store.get_turn_record(event.event_id)
-                    if (
-                        current_record is None
-                        or not same_turn_identity(current_record, handled_turn)
-                        or current_record.source_event_revisions != handled_turn.source_event_revisions
-                    ):
-                        return
-                    await self._execute_response_action(
-                        room,
-                        event,
-                        dispatch,
-                        action,
-                        payload_inputs,
-                        processing_log="Retrying response interrupted by sync restart",
-                        dispatch_started_at=time.monotonic(),
-                        handled_turn=retry_turn,
-                        matrix_run_metadata=matrix_run_metadata,
-                        retry_team_mode=retry_team_mode,
-                        sync_restart_retry_source_event_id=event.event_id,
-                    )
-                finally:
-                    self.deps.turn_store.release_pending_turn_claim(retry_turn)
-
-            self.deps.restart_retry.register(event.event_id, retry, room_id=room.room_id)
+        def record_interrupted_turn() -> None:
+            self.deps.interrupted_turn_rooms.register(event.event_id, room_id=room.room_id)
 
         def record_deferred_outcome(response_event_id: str) -> None:
             self._mark_source_events_responded(replace(handled_turn, response_event_id=response_event_id))
 
-        return register_sync_restart_retry, record_deferred_outcome
+        return record_interrupted_turn, record_deferred_outcome
 
     async def _execute_response_action(  # noqa: C901, PLR0912, PLR0915
         self,
@@ -1735,8 +1699,6 @@ class TurnController:
         matrix_run_metadata: dict[str, Any] | None = None,
         queued_notice_reservation: QueuedHumanNoticeReservation | None = None,
         on_lifecycle_lock_acquired: Callable[[], None] | None = None,
-        retry_team_mode: TeamMode | None = None,
-        sync_restart_retry_source_event_id: str | None = None,
     ) -> None:
         """Execute one final response path for a prepared dispatch action."""
         if room.room_id != dispatch.target.room_id:
@@ -1805,8 +1767,8 @@ class TurnController:
             if action.kind == "team":
                 assert action.form_team is not None
                 assert action.form_team.mode is not None
-                team_mode = retry_team_mode or action.form_team.mode
-                if retry_team_mode is None and action.form_team.intent is not TeamIntent.CONFIGURED_TEAM and event.body:
+                team_mode = action.form_team.mode
+                if action.form_team.intent is not TeamIntent.CONFIGURED_TEAM and event.body:
                     team_mode = await select_ad_hoc_team_mode(
                         event.body,
                         action.form_team.eligible_members,
@@ -1814,15 +1776,10 @@ class TurnController:
                         self.deps.runtime_paths,
                     )
 
-            register_sync_restart_retry, record_deferred_outcome = self._build_response_settlement_callbacks(
+            record_interrupted_turn, record_deferred_outcome = self._build_response_settlement_callbacks(
                 room,
                 event,
-                dispatch,
-                action,
-                payload_inputs,
                 handled_turn=handled_turn,
-                matrix_run_metadata=matrix_run_metadata,
-                retry_team_mode=team_mode,
             )
             try:
                 if action.kind == "team":
@@ -1848,8 +1805,7 @@ class TurnController:
                                 target=dispatch.target,
                                 source_event_ids=handled_turn.indexed_event_ids,
                             ),
-                            on_sync_restart_cancelled=register_sync_restart_retry,
-                            sync_restart_retry_source_event_id=sync_restart_retry_source_event_id,
+                            on_sync_restart_cancelled=record_interrupted_turn,
                             on_deferred_outcome_handled=record_deferred_outcome,
                         ),
                         team_agents=action.form_team.eligible_members,
@@ -1876,8 +1832,7 @@ class TurnController:
                                 target=dispatch.target,
                                 source_event_ids=handled_turn.indexed_event_ids,
                             ),
-                            on_sync_restart_cancelled=register_sync_restart_retry,
-                            sync_restart_retry_source_event_id=sync_restart_retry_source_event_id,
+                            on_sync_restart_cancelled=record_interrupted_turn,
                             on_deferred_outcome_handled=record_deferred_outcome,
                         ),
                     )

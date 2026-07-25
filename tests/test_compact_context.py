@@ -373,8 +373,7 @@ async def test_compact_context_requires_summary_input_budget_with_retry_headroom
     """Manual compaction should not set the force flag when the summary budget cannot shrink."""
     config, runtime_paths = _make_config_with_context_window(
         tmp_path,
-        context_window=48_000,
-        compaction=CompactionConfig(replay_window_tokens=800),
+        context_window=10_000,
     )
     identity = _execution_identity()
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=identity)

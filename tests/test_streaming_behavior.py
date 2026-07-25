@@ -618,6 +618,8 @@ class TestStreamingBehavior:
             _event_id: str,
             new_content: dict[str, object],
             _new_text: str,
+            *,
+            retry_sync_recovery: bool = False,  # noqa: ARG001
         ) -> DeliveredMatrixEvent:
             return DeliveredMatrixEvent(event_id="$edit", content_sent=dict(new_content))
 
@@ -1901,6 +1903,8 @@ class TestStreamingBehavior:
             _event_id: str,
             new_content: dict[str, object],
             new_text: str,
+            *,
+            retry_sync_recovery: bool = False,  # noqa: ARG001
         ) -> DeliveredMatrixEvent:
             edited_contents.append((new_content, new_text))
             return DeliveredMatrixEvent(event_id="$edit", content_sent=dict(new_content))
@@ -1938,6 +1942,8 @@ class TestStreamingBehavior:
         mock_client = _make_matrix_client_mock()
         conversation_cache = AsyncMock()
         conversation_cache.notify_outbound_message = Mock()
+        conversation_cache.reserve_outbound_thread = Mock()
+        conversation_cache.release_outbound_thread = Mock()
 
         async def one_chunk_stream() -> AsyncIterator[str]:
             yield "Hello from stream"
@@ -1946,6 +1952,8 @@ class TestStreamingBehavior:
             _client: object,
             _room_id: str,
             content: dict[str, object],
+            *,
+            retry_sync_recovery: bool = False,  # noqa: ARG001
         ) -> DeliveredMatrixEvent:
             return DeliveredMatrixEvent(event_id="$stream-send", content_sent=dict(content))
 
@@ -1955,6 +1963,8 @@ class TestStreamingBehavior:
             event_id: str,
             new_content: dict[str, object],
             new_text: str,
+            *,
+            retry_sync_recovery: bool = False,  # noqa: ARG001
         ) -> DeliveredMatrixEvent:
             return DeliveredMatrixEvent(
                 event_id="$stream-edit",
@@ -1992,6 +2002,53 @@ class TestStreamingBehavior:
         assert second_call[:2] == ("!test:localhost", "$stream-edit")
         assert second_call[2]["m.relates_to"]["rel_type"] == "m.replace"
         assert second_call[2]["m.relates_to"]["event_id"] == "$stream-send"
+        conversation_cache.reserve_outbound_thread.assert_called_once_with(
+            "!test:localhost",
+            "$stream-send",
+            "$thread_root",
+        )
+        conversation_cache.release_outbound_thread.assert_called_once_with(
+            "!test:localhost",
+            "$stream-send",
+        )
+
+    @pytest.mark.asyncio
+    async def test_adopted_event_header_failure_releases_thread_reservation(self) -> None:
+        """A header edit failure must not retain an adopted response reservation."""
+        mock_client = _make_matrix_client_mock()
+        conversation_cache = MagicMock()
+
+        async def empty_stream() -> AsyncIterator[str]:
+            if False:
+                yield ""
+
+        with (
+            patch(
+                "mindroom.streaming.edit_message_result",
+                new=AsyncMock(side_effect=RuntimeError("header edit failed")),
+            ),
+            pytest.raises(RuntimeError, match="header edit failed"),
+        ):
+            await send_streaming_response(
+                client=mock_client,
+                target=MessageTarget.resolve("!test:localhost", "$thread_root", "$original_123"),
+                config=self.config,
+                runtime_paths=runtime_paths_for(self.config),
+                response_stream=empty_stream(),
+                header="Header",
+                existing_event_id="$thinking_123",
+                conversation_cache=conversation_cache,
+            )
+
+        conversation_cache.reserve_outbound_thread.assert_called_once_with(
+            "!test:localhost",
+            "$thinking_123",
+            "$thread_root",
+        )
+        conversation_cache.release_outbound_thread.assert_called_once_with(
+            "!test:localhost",
+            "$thinking_123",
+        )
 
     @pytest.mark.asyncio
     async def test_streaming_first_send_uses_resolved_thread_root(
@@ -2058,6 +2115,8 @@ class TestStreamingBehavior:
             _client: object,
             _room_id: str,
             content: dict[str, object],
+            *,
+            retry_sync_recovery: bool = False,  # noqa: ARG001
         ) -> DeliveredMatrixEvent:
             sent_contents.append(content)
             return DeliveredMatrixEvent(event_id="$stream_1", content_sent=dict(content))
@@ -2068,6 +2127,8 @@ class TestStreamingBehavior:
             _event_id: str,
             _new_content: dict[str, object],
             _new_text: str,
+            *,
+            retry_sync_recovery: bool = False,  # noqa: ARG001
         ) -> DeliveredMatrixEvent:
             return DeliveredMatrixEvent(event_id="$stream_1", content_sent={})
 
@@ -2110,6 +2171,8 @@ class TestStreamingBehavior:
             _client: object,
             room_id: str,
             content: dict[str, object],
+            *,
+            retry_sync_recovery: bool = False,  # noqa: ARG001
         ) -> DeliveredMatrixEvent:
             sent_messages.append((room_id, content))
             return DeliveredMatrixEvent(event_id="$stream_1", content_sent=dict(content))
@@ -2323,6 +2386,8 @@ class TestStreamingBehavior:
             _event_id: str,
             _new_content: dict[str, object],
             new_text: str,
+            *,
+            retry_sync_recovery: bool = False,  # noqa: ARG001
         ) -> DeliveredMatrixEvent:
             edited_texts.append(new_text)
             return DeliveredMatrixEvent(event_id="$edit", content_sent={})
@@ -2362,6 +2427,8 @@ class TestStreamingBehavior:
             _event_id: str,
             _new_content: dict[str, object],
             new_text: str,
+            *,
+            retry_sync_recovery: bool = False,  # noqa: ARG001
         ) -> DeliveredMatrixEvent:
             edited_texts.append(new_text)
             return DeliveredMatrixEvent(event_id="$edit", content_sent={})
@@ -2459,6 +2526,8 @@ class TestStreamingBehavior:
             _event_id: str,
             new_content: dict[str, object],
             new_text: str,
+            *,
+            retry_sync_recovery: bool = False,  # noqa: ARG001
         ) -> DeliveredMatrixEvent:
             edited_messages.append((new_content, new_text))
             return DeliveredMatrixEvent(event_id="$edit", content_sent=dict(new_content))
@@ -2509,6 +2578,7 @@ class TestStreamingBehavior:
                 new_content: dict[str, object],
                 _new_text: str,
                 *,
+                retry_sync_recovery: bool = False,  # noqa: ARG001
                 _edited_messages: list[dict[str, object]] = edited_messages,
             ) -> DeliveredMatrixEvent:
                 _edited_messages.append(new_content)
@@ -2553,6 +2623,8 @@ class TestStreamingBehavior:
             _event_id: str,
             _new_content: dict[str, object],
             new_text: str,
+            *,
+            retry_sync_recovery: bool = False,  # noqa: ARG001
         ) -> DeliveredMatrixEvent:
             edited_texts.append(new_text)
             return DeliveredMatrixEvent(event_id="$edit", content_sent={})
@@ -2598,6 +2670,8 @@ class TestStreamingBehavior:
             _event_id: str,
             _new_content: dict[str, object],
             new_text: str,
+            *,
+            retry_sync_recovery: bool = False,  # noqa: ARG001
         ) -> DeliveredMatrixEvent:
             edited_texts.append(new_text)
             return DeliveredMatrixEvent(event_id="$edit", content_sent={})
@@ -2642,6 +2716,8 @@ class TestStreamingBehavior:
             _event_id: str,
             _new_content: dict[str, object],
             new_text: str,
+            *,
+            retry_sync_recovery: bool = False,  # noqa: ARG001
         ) -> DeliveredMatrixEvent:
             if "Preparing isolated worker" in new_text:
                 msg = "edit blew up"
@@ -2697,6 +2773,8 @@ class TestStreamingBehavior:
             _event_id: str,
             new_content: dict[str, object],
             new_text: str,
+            *,
+            retry_sync_recovery: bool = False,  # noqa: ARG001
         ) -> DeliveredMatrixEvent:
             terminal_statuses.append(str(new_content[STREAM_STATUS_KEY]))
             edited_texts.append(new_text)
@@ -2754,6 +2832,8 @@ class TestStreamingBehavior:
             _event_id: str,
             _new_content: dict[str, object],
             new_text: str,
+            *,
+            retry_sync_recovery: bool = False,  # noqa: ARG001
         ) -> DeliveredMatrixEvent:
             edited_texts.append(new_text)
             if "Preparing isolated worker" in new_text:
@@ -2807,6 +2887,8 @@ class TestStreamingBehavior:
             _client: object,
             _room_id: str,
             content: dict[str, object],
+            *,
+            retry_sync_recovery: bool = False,  # noqa: ARG001
         ) -> DeliveredMatrixEvent:
             return DeliveredMatrixEvent(event_id="$event123", content_sent=dict(content))
 
@@ -2868,6 +2950,8 @@ class TestStreamingBehavior:
             _event_id: str,
             _new_content: dict[str, object],
             new_text: str,
+            *,
+            retry_sync_recovery: bool = False,  # noqa: ARG001
         ) -> DeliveredMatrixEvent:
             edited_texts.append(new_text)
             if "Preparing isolated worker" in new_text and "hello" not in new_text and "world" not in new_text:
@@ -2938,6 +3022,8 @@ class TestStreamingBehavior:
             _event_id: str,
             _new_content: dict[str, object],
             _new_text: str,
+            *,
+            retry_sync_recovery: bool = False,  # noqa: ARG001
         ) -> DeliveredMatrixEvent:
             await stream_finished.wait()
             if _new_content.get("io.mindroom.stream_status") == "streaming":
@@ -2991,6 +3077,8 @@ class TestStreamingBehavior:
             _event_id: str,
             _new_content: dict[str, object],
             new_text: str,
+            *,
+            retry_sync_recovery: bool = False,  # noqa: ARG001
         ) -> DeliveredMatrixEvent | None:
             terminal_texts.append(new_text)
             return edit_results.pop(0)
@@ -3055,6 +3143,8 @@ class TestStreamingBehavior:
             _event_id: str,
             _new_content: dict[str, object],
             _new_text: str,
+            *,
+            retry_sync_recovery: bool = False,  # noqa: ARG001
         ) -> DeliveredMatrixEvent:
             streaming.accumulated_text = "hello"
             return DeliveredMatrixEvent(event_id="$edit", content_sent={})
@@ -3283,6 +3373,8 @@ class TestStreamingBehavior:
             _event_id: str,
             _new_content: dict[str, object],
             new_text: str,
+            *,
+            retry_sync_recovery: bool = False,  # noqa: ARG001
         ) -> DeliveredMatrixEvent:
             nonlocal in_flight, max_in_flight
             in_flight += 1
@@ -3570,6 +3662,8 @@ class TestStreamingBehavior:
             _event_id: str,
             _new_content: dict[str, object],
             new_text: str,
+            *,
+            retry_sync_recovery: bool = False,  # noqa: ARG001
         ) -> DeliveredMatrixEvent:
             captured_texts.append(new_text)
             return DeliveredMatrixEvent(event_id="$edit", content_sent={})
@@ -3672,6 +3766,8 @@ class TestStreamingBehavior:
             _event_id: str,
             _new_content: dict[str, object],
             new_text: str,
+            *,
+            retry_sync_recovery: bool = False,  # noqa: ARG001
         ) -> DeliveredMatrixEvent:
             captured_texts.append(new_text)
             return DeliveredMatrixEvent(event_id="$edit", content_sent={})

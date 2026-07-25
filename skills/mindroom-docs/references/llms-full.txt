@@ -1246,7 +1246,7 @@ defaults:
   compaction:
     enabled: true
     threshold_percent: 0.8
-    # The effective replay window also caps compaction summary input chunks.
+    # Summary input chunks use the selected compaction model's context window.
     # Destructive compaction requires a resolved summary input budget greater than 2,000 tokens.
     replay_window_tokens: null     # Optional operational cap; does not change the model's real context window
     reserve_tokens: 16384
@@ -1846,15 +1846,15 @@ Crossing that soft trigger while still within the hard budget leaves the stored 
 
 You can tune compaction behavior with these settings:
 
-- Use `replay_window_tokens` to cap persisted replay, required-compaction planning, and summary input chunks below the model's real context window without lowering the provider request limit.
+- Use `replay_window_tokens` to cap persisted replay and required-compaction planning below the model's real context window without lowering the provider request limit.
 - Use `reserve_tokens` to leave hard-budget headroom.
 - Use `model` to choose the summary model.
-- Use `fallback_model` to name a different model config that resends the unchanged summary prompt and input once (only the target model differs) when the summary model refuses for safeguards; after a successful fallback, that model serves the remaining compaction chunks and is reported as the summary model.
+- Use `fallback_model` to name a different model config retried once when the summary model refuses for safeguards; the same input is reused when it fits, otherwise it is rebuilt under the fallback model's own context budget, and after success that model serves the remaining chunks.
 - Set `enabled: false` to disable automatic pre-reply compaction for this agent.
 
 When the active runtime model window is known, replay safety uses the smaller of it and `replay_window_tokens`.
 When that model window is unknown, an explicit `replay_window_tokens` still supplies the replay-planning window.
-The effective replay window also caps each compaction summary input chunk.
+Each compaction summary input chunk is sized independently from the selected compaction model's real `context_window`, after reserve, prompt overhead, and a safety margin.
 Destructive compaction requires the resolved summary input budget to exceed 2,000 tokens.
 With the default `reserve_tokens`, this makes destructive compaction unavailable when the compaction model's context window is roughly 10,000 tokens or smaller; lowering `reserve_tokens` restores availability for such small windows.
 If you set `compaction.model`, that summary model must also define its own `context_window`, but only for the durable summary-generation pass.
@@ -2358,7 +2358,7 @@ Each model configuration supports the following fields:
 | `host` | No | `null` | Host URL for self-hosted models (e.g., Ollama) |
 | `api_key` | No | `null` | API key (usually read from environment variables) |
 | `extra_kwargs` | No | `null` | Additional provider-specific parameters |
-| `context_window` | No | `null` | Actual provider context window size in tokens; MindRoom uses it as the default replay-planning window unless compaction sets a smaller `replay_window_tokens`; an explicit `compaction.model` or `compaction.fallback_model` needs its own `context_window` for summary generation; on `vertexai_claude` it also enables request-time fitting |
+| `context_window` | No | `null` | Actual provider context window size in tokens; MindRoom uses it for compaction summary input and as the default replay-planning window unless compaction sets a smaller `replay_window_tokens`; an explicit `compaction.model` or `compaction.fallback_model` needs its own `context_window` for summary generation; on `vertexai_claude` it also enables request-time fitting |
 
 ## Configuration Examples
 
@@ -2583,13 +2583,13 @@ It runs only when history exceeds the hard replay budget for the next reply.
 You can tune compaction behavior with these settings:
 
 - Use `threshold_tokens` or `threshold_percent` to set the soft trigger budget. Crossing this soft trigger while still within the hard budget leaves the stored session unchanged and relies on replay fitting for that reply.
-- Use `replay_window_tokens` to keep persisted replay, required-compaction planning, and summary input chunks within a smaller operational window without presenting that smaller value as the provider's request limit.
+- Use `replay_window_tokens` to keep persisted replay and required-compaction planning within a smaller operational window without presenting that smaller value as the provider's request limit.
 - Use `reserve_tokens` to leave hard-budget headroom for the current prompt and output.
-- Use `model` to choose the summary model, and `fallback_model` to name a different model config that resends the unchanged summary prompt and input once (only the target model differs) when the summary model refuses for safeguards; after a successful fallback, that model serves the remaining compaction chunks and is reported as the summary model.
+- Use `model` to choose the summary model, and `fallback_model` to name a different model config retried once when the summary model refuses for safeguards; the same input is reused when it fits, otherwise it is rebuilt under the fallback model's own context budget, and after success that model serves the remaining chunks.
 
 When the active runtime model window is known, replay safety uses the smaller of it and `replay_window_tokens`.
 When that model window is unknown, an explicit `replay_window_tokens` still supplies the replay-planning window.
-The effective replay window also caps each compaction summary input chunk.
+Each compaction summary input chunk is sized independently from the selected compaction model's real `context_window`, after reserve, prompt overhead, and a safety margin.
 Destructive compaction requires the resolved summary input budget to exceed 2,000 tokens.
 With the default `reserve_tokens`, this makes destructive compaction unavailable when the compaction model's context window is roughly 10,000 tokens or smaller; lowering `reserve_tokens` restores availability for such small windows.
 
@@ -2617,7 +2617,7 @@ models:
 
 defaults:
   compaction:
-    replay_window_tokens: 200000  # Cap persisted replay and compaction summary chunks
+    replay_window_tokens: 200000  # Compact persisted replay around a smaller operational window
 ```
 
 This is useful for models with smaller context windows or long-running conversations that accumulate persisted history.
@@ -2799,15 +2799,15 @@ Crossing that soft trigger while still within the hard budget leaves the stored 
 
 You can tune team-scoped compaction behavior with these settings:
 
-- Use `replay_window_tokens` to cap persisted replay, required-compaction planning, and summary input chunks below the model's real context window without lowering the provider request limit.
+- Use `replay_window_tokens` to cap persisted replay and required-compaction planning below the model's real context window without lowering the provider request limit.
 - Use `reserve_tokens` to leave hard-budget headroom.
 - Use `model` to choose the summary model.
-- Use `fallback_model` to name a different model config that resends the unchanged summary prompt and input once (only the target model differs) when the summary model refuses for safeguards; after a successful fallback, that model serves the remaining compaction chunks and is reported as the summary model.
+- Use `fallback_model` to name a different model config retried once when the summary model refuses for safeguards; the same input is reused when it fits, otherwise it is rebuilt under the fallback model's own context budget, and after success that model serves the remaining chunks.
 - Set `enabled: false` to disable automatic pre-reply compaction for a team.
 
 When the active team model window is known, replay safety uses the smaller of it and `replay_window_tokens`.
 When that model window is unknown, an explicit `replay_window_tokens` still supplies the replay-planning window.
-The effective replay window also caps each compaction summary input chunk.
+Each compaction summary input chunk is sized independently from the selected compaction model's real `context_window`, after reserve, prompt overhead, and a safety margin.
 Destructive compaction requires the resolved summary input budget to exceed 2,000 tokens.
 With the default `reserve_tokens`, this makes destructive compaction unavailable when the compaction model's context window is roughly 10,000 tokens or smaller; lowering `reserve_tokens` restores availability for such small windows.
 If you set `compaction.model`, that summary model must also define its own `context_window`, but only for the durable summary-generation pass.
@@ -16161,6 +16161,11 @@ Outgoing encrypted Matrix sends always deliver to unverified devices.
 MindRoom bots have no interactive device-verification flow, so enforcing nio's device-trust checks would fail every send to an encrypted room with an `OlmUnverifiedDeviceError` and the agent would appear to silently ignore messages.
 A configurable trust policy only becomes meaningful once a device-verification mechanism exists (for example trust-on-first-use, a verification command, or cross-signing support).
 
+While a room's timeline is still recovering from a limited sync, nio rejects sends to that room with `SendRetryError` until the gap closes, so MindRoom retries the affected delivery in place instead of dropping it.
+Streaming progress updates and completed terminal deliveries reuse the identical prepared payload and retry for up to 30 seconds — one recovery pump — backing off from 50ms to 500ms between attempts.
+Cancelled and errored terminal updates never wait on recovery, so a stopped or failed turn still settles immediately.
+If the window expires the delivery is reported as failed, the placeholder settles as a delivery failure, and the failure update itself is sent without waiting on recovery again.
+
 ## End-to-End Encryption
 
 Agents fully participate in encrypted rooms: they decrypt inbound text and media, reply encrypted, and re-fetch and decrypt thread history from the homeserver.
@@ -16289,7 +16294,6 @@ Config changes are detected via polling (`watch_paths()` checks watched source-f
 4. A runtime being replaced wakes its pre-admission waiters with `ResponseAdmissionRefusedError`.
    This is deliberately not an `asyncio.CancelledError`, because the Matrix callback must fail and invalidate the old sync checkpoint so the replacement runtime replays the source event.
    The refusal path performs no Matrix I/O, so replacement shutdown cannot stall on an untimed send.
-   A queued sync-restart retry is put back on the queue rather than consuming its one attempt.
    Auto-resume messages received by replacement bots during the apply wait for the gate to reopen instead of being dropped
 5. If responses never drain, the reload stops deferring after ten minutes and closes the gate over the still-running responses, so a config change cannot be starved forever on a busy install
 6. `ConfigReloadLifecycle.update_config()` loads the new config and `_identify_entities_to_restart()` computes the diff using `model_dump(exclude_none=True)`
@@ -16358,6 +16362,9 @@ Non-MindRoom bots listed in `bot_accounts` are excluded from this detection.
 - Each bot runs its own sync loop via `sync_forever_with_restart()`
 - Sync loop failures trigger automatic restart with linear backoff (5s, 10s, 15s, ... up to 60s max)
 - Watchdog-driven restarts of stalled sync loops add 0–10s of random jitter on top of the backoff so a loop-wide stall does not restart every sync loop as one thundering herd
+- An automatic receive-loop restart replaces only the sync task and its watchdog, so in-flight responses keep their original owner and finish across the restart
+- The response runtime is drained and cancelled only when the bot itself stops: a config reload replacing the entity, entity removal, or process shutdown
+- Each of those lifecycle events logs `restart_reason_category` and `resulting_action`, so `matrix_sync_transport_restart` is distinguishable from `matrix_agent_response_runtime_shutdown` in logs
 - Event callbacks run as background tasks (never block the sync loop)
 - `ResponseTracker` prevents duplicate replies
 - `StopManager` handles cancellation of in-progress responses
@@ -19144,7 +19151,20 @@ By default it writes to `<storage>/thread_exports`.
 A thread file is only rewritten when its content changed, so `exported_at` reflects the last content-changing export.
 Each thread document includes the latest MindRoom thread summary as `thread.summary` when one exists.
 Each room directory also gets an `index.json` mapping every thread file to its message count, participants, latest summary, and last activity, sorted by most recent activity.
-Complete passes remove exported room and thread files that are no longer present or authorized; a `--room` pass only reconciles the selected room.
+Complete passes normally remove exported room and thread files that are no longer present or authorized; a `--room` pass only reconciles the selected room.
+The zero-room guard skips only final directory-wide reconciliation of rooms absent from the pass, while definitive per-room category or membership revocations still delete their exports.
+A warning is logged when that guard preserves existing target state because the pass has no positive room evidence.
+A complete room enumeration that returns zero threads preserves existing YAML exports for that room and logs a warning because an anomalous empty response cannot be distinguished from deletion of the final thread.
+After either warning, verify the source state and remove the preserved export manually only when the deletion is confirmed; workspace git history remains the recovery path for mistaken cleanup.
+Enabled targets whose resolved output directories are equal or nested are all skipped before Matrix work.
+MindRoom claims an output root by writing a `.mindroom-thread-exports` ownership marker, and it claims automatically when the root is empty or already holds a room directory containing an exported thread file.
+A directory that merely contains an `index.json` is not treated as evidence, so pointing `--output` at an unrelated project or build directory is refused rather than adopted.
+Unrelated entries beside those room directories, such as `.DS_Store`, a `.git` directory, or your own notes, neither block the claim nor ever get deleted.
+A root MindRoom cannot recognize is skipped for the entire pass, so it is neither exported to nor cleaned up, and the skip is reported as a target failure.
+Adopt such a root by creating `.mindroom-thread-exports` inside it containing exactly `{"format":"mindroom-thread-exports","version":1}` followed by a newline.
+Cleanup then removes only recognizable room directories and thread YAML files, leaving unrelated entries untouched and logged.
+Retracting a room whose directory still holds unrelated entries removes only the exported files and leaves the directory in place, and repeating the pass stays a quiet no-op.
+Output paths with a terminal `.`, `..`, or empty leaf are rejected, as are symlinked final output and room directories.
 With `--prefer-cache` thread bodies are served from the durable event cache and only fetched from the homeserver on miss or invalidation; use it alongside a running MindRoom that keeps the cache fresh.
 
 <!-- CODE:START -->
@@ -19199,7 +19219,7 @@ With `--prefer-cache` thread bodies are served from the durable event cache and 
 <!-- OUTPUT:END -->
 
 ```bash
-mindroom threads export --storage-path mindroom_data --output /tmp/mindroom-thread-exports
+mindroom threads export --storage-path mindroom_data --output "$HOME/mindroom-thread-exports"
 mindroom threads export --storage-path mindroom_data --room lobby
 mindroom threads export --storage-path mindroom_data --watch --interval 300
 mindroom threads export --storage-path mindroom_data --prefer-cache

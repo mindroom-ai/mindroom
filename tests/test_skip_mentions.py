@@ -381,15 +381,17 @@ async def test_delivery_gateway_send_text_records_threaded_outbound_message(tmp_
     with patch(
         "mindroom.delivery_gateway.send_message_result",
         new=AsyncMock(side_effect=delivered_matrix_side_effect("$response")),
-    ):
+    ) as send:
         event_id = await gateway.send_text(
             SendTextRequest(
                 target=target,
                 response_text="formatted response",
+                retry_sync_recovery=True,
             ),
         )
 
     assert event_id == "$response"
+    assert send.await_args.kwargs["retry_sync_recovery"] is True
     gateway.deps.resolver.deps.conversation_cache.notify_outbound_message.assert_called_once()
     record_args = gateway.deps.resolver.deps.conversation_cache.notify_outbound_message.call_args.args
     assert record_args[0] == "!test:server"
@@ -416,16 +418,18 @@ async def test_delivery_gateway_edit_text_records_threaded_outbound_edit(tmp_pat
     with patch(
         "mindroom.delivery_gateway.edit_message_result",
         new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit-event")),
-    ):
+    ) as edit:
         edited = await gateway.edit_text(
             EditTextRequest(
                 target=target,
                 event_id="$original",
                 new_text="updated response",
+                retry_sync_recovery=True,
             ),
         )
 
     assert edited is True
+    assert edit.await_args.kwargs["retry_sync_recovery"] is True
     gateway.deps.resolver.deps.conversation_cache.notify_outbound_message.assert_called_once()
     record_args = gateway.deps.resolver.deps.conversation_cache.notify_outbound_message.call_args.args
     assert record_args[0] == "!test:server"
@@ -546,6 +550,7 @@ async def test_delivery_gateway_deliver_final_uses_send_text_for_new_messages(tm
         )
 
     mock_send_text.assert_awaited_once()
+    assert mock_send_text.await_args.args[0].retry_sync_recovery is True
     after_hooks.assert_not_awaited()
     assert result.event_id == "$response"
     assert result.delivery_kind == "sent"
@@ -588,6 +593,7 @@ async def test_delivery_gateway_deliver_final_uses_edit_text_for_existing_messag
         )
 
     mock_edit_text.assert_awaited_once()
+    assert mock_edit_text.await_args.args[0].retry_sync_recovery is True
     after_hooks.assert_not_awaited()
     assert result.event_id == "$existing"
     assert result.delivery_kind == "edited"

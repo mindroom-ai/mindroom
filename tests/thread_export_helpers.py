@@ -11,6 +11,7 @@ from mindroom.config.main import Config
 from mindroom.matrix.invited_rooms_store import invited_rooms_path
 from mindroom.matrix.state import MatrixAccount, MatrixRoom, MatrixState
 from mindroom.thread_export.models import ThreadExportAccumulator
+from mindroom.thread_export.storage import _ROOT_MARKER_FILENAME, _ROOT_MARKER_TEXT
 from tests.conftest import bind_runtime_paths, test_runtime_paths
 
 if TYPE_CHECKING:
@@ -30,21 +31,27 @@ def thread_export_config(tmp_path: Path) -> Config:
     )
 
 
-def write_thread_export_matrix_state(tmp_path: Path, *, account_keys: tuple[str, ...] = ()) -> None:
-    """Persist two rooms and the requested Matrix account fixtures."""
+def write_thread_export_matrix_state(
+    tmp_path: Path,
+    *,
+    account_keys: tuple[str, ...] = (),
+    include_rooms: bool = True,
+) -> None:
+    """Persist optional room and requested Matrix account fixtures."""
     state = MatrixState()
-    state.rooms = {
-        "lobby": MatrixRoom(
-            room_id="!lobby:localhost",
-            alias="#lobby:localhost",
-            name="Lobby",
-        ),
-        "dev": MatrixRoom(
-            room_id="!dev:localhost",
-            alias="#dev:localhost",
-            name="Dev",
-        ),
-    }
+    if include_rooms:
+        state.rooms = {
+            "lobby": MatrixRoom(
+                room_id="!lobby:localhost",
+                alias="#lobby:localhost",
+                name="Lobby",
+            ),
+            "dev": MatrixRoom(
+                room_id="!dev:localhost",
+                alias="#dev:localhost",
+                name="Dev",
+            ),
+        }
     state.accounts = {
         account_key: MatrixAccount(
             username=account_key,
@@ -62,6 +69,12 @@ def write_invited_rooms(runtime_paths: RuntimePaths, entity_name: str, room_ids:
     path = invited_rooms_path(runtime_paths.storage_root, entity_name)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(room_ids), encoding="utf-8")
+
+
+def mark_thread_export_root(output_dir: Path) -> None:
+    """Mark one manually assembled thread-export test root as owned."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / _ROOT_MARKER_FILENAME).write_text(_ROOT_MARKER_TEXT, encoding="utf-8")
 
 
 def mock_runtime_support() -> Mock:

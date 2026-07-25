@@ -1124,6 +1124,7 @@ async def test_prepare_history_for_run_failure_notice_reports_serving_fallback_m
         hard_replay_budget_tokens=1,
         summary_input_budget_tokens=summary_input_budget,
         compaction_fallback_model_name="fallback-model",
+        compaction_fallback_summary_input_budget_tokens=summary_input_budget,
     )
     # Chunk 1: primary refuses, the fallback serves the retry; chunk 2 then
     # fails hard on the fallback.
@@ -1203,6 +1204,7 @@ async def test_prepare_history_for_run_compacts_on_primary_when_fallback_constru
         hard_replay_budget_tokens=1,
         summary_input_budget_tokens=16_000,
         compaction_fallback_model_name="fallback-model",
+        compaction_fallback_summary_input_budget_tokens=16_000,
     )
 
     def _load_model(_config: object, _paths: object, name: str = "default", **_kwargs: object) -> FakeModel:

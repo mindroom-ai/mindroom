@@ -50,7 +50,6 @@ from mindroom.runtime_shutdown import (
     RuntimeShutdownIntent,
     shutdown_intent_for_entity,
 )
-from mindroom.sync_restart_retry import SyncRestartRetryQueue
 from tests.conftest import (
     TEST_PASSWORD,
     make_event_cache_mock,
@@ -100,6 +99,11 @@ class _FakeBot:
             return None
         return time.monotonic() - self._last_sync_monotonic
 
+    @property
+    def in_flight_response_count(self) -> int:
+        """Return the fake bot's active response count."""
+        return 0
+
     async def sync_forever(self) -> None:
         self.sync_calls += 1
         try:
@@ -118,6 +122,110 @@ class _FakeBot:
         self._sync_shutting_down = True
         self.prepare_for_sync_shutdown_calls += 1
         self.prepare_for_sync_shutdown_cancel_messages.append(shutdown_intent.cancel_source)
+
+
+class _ResponseOwningBot(_FakeBot):
+    """Fake sync transport plus independently owned response tasks."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.live_sync_count = 0
+        self.max_live_sync_count = 0
+        self.sync_starts: asyncio.Queue[int] = asyncio.Queue()
+        self.sync_releases: dict[int, asyncio.Event] = {}
+        self.response_finish = asyncio.Event()
+        self.response_tasks: list[asyncio.Task[None]] = []
+        self.response_cancel_sources: list[str] = []
+        self.response_completions = 0
+
+    @property
+    def in_flight_response_count(self) -> int:
+        """Return response tasks whose single owner has not settled them."""
+        return sum(not task.done() for task in self.response_tasks)
+
+    def start_responses(self, count: int) -> None:
+        """Start deterministic responses blocked on one shared completion event."""
+        self.response_tasks.extend(
+            asyncio.create_task(self._run_response(), name=f"owned_response_{index}") for index in range(count)
+        )
+
+    async def _run_response(self) -> None:
+        try:
+            await self.response_finish.wait()
+        except asyncio.CancelledError as exc:
+            self.response_cancel_sources.append(classify_cancel_source(exc))
+            raise
+        self.response_completions += 1
+
+    async def sync_forever(self) -> None:
+        self.sync_calls += 1
+        iteration = self.sync_calls
+        release = self.sync_releases.setdefault(iteration, asyncio.Event())
+        self.live_sync_count += 1
+        self.max_live_sync_count = max(self.max_live_sync_count, self.live_sync_count)
+        await self.sync_starts.put(iteration)
+        try:
+            await release.wait()
+        finally:
+            self.live_sync_count -= 1
+
+    async def prepare_for_sync_shutdown(
+        self,
+        *,
+        shutdown_intent: RuntimeShutdownIntent = GENERIC_SHUTDOWN,
+    ) -> None:
+        await super().prepare_for_sync_shutdown(shutdown_intent=shutdown_intent)
+        cancel_message = cancel_message_for_source(shutdown_intent.cancel_source)
+        active_responses = [task for task in self.response_tasks if not task.done()]
+        for task in active_responses:
+            if cancel_message is None:
+                task.cancel()
+            else:
+                task.cancel(msg=cancel_message)
+        await asyncio.gather(*active_responses, return_exceptions=True)
+
+
+def _install_deterministic_stalls(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    stall_count: int,
+) -> None:
+    """Replace watchdog timing with a fixed number of immediate stalls."""
+    remaining_stalls = stall_count
+
+    async def watch(
+        _bot: _FakeBot,
+        sync_task: asyncio.Task[object],
+        watchdog_cancelled_sync: asyncio.Event,
+    ) -> None:
+        nonlocal remaining_stalls
+        if remaining_stalls == 0:
+            await sync_task
+            return
+        remaining_stalls -= 1
+        watchdog_cancelled_sync.set()
+        sync_task.cancel(msg=SYNC_RESTART_CANCEL_MSG)
+        await asyncio.gather(sync_task, return_exceptions=True)
+        msg = "Matrix sync loop stalled"
+        raise _MatrixSyncStalledError(msg)
+
+    monkeypatch.setattr(_SyncIteration, "_watch", staticmethod(watch))
+    monkeypatch.setattr(runtime_helpers, "retry_delay_seconds", lambda *_args, **_kwargs: 0.0)
+    monkeypatch.setattr(runtime_helpers, "_stalled_restart_jitter_seconds", lambda: 0.0)
+
+
+async def _finish_responses_and_stop_transport(
+    bot: _ResponseOwningBot,
+    *,
+    final_sync_iteration: int,
+    supervisor: asyncio.Task[None],
+) -> None:
+    """Complete responses once, then stop the final receive loop cleanly."""
+    bot.response_finish.set()
+    await asyncio.gather(*bot.response_tasks)
+    bot.running = False
+    bot.sync_releases[final_sync_iteration].set()
+    await supervisor
 
 
 @pytest.mark.asyncio
@@ -213,8 +321,216 @@ async def test_sync_forever_with_restart_restarts_stalled_sync(monkeypatch: pyte
     assert bot.first_call_cancelled is True
     assert bot.first_call_cancel_args == (SYNC_RESTART_CANCEL_MSG,)
     assert bot.sync_calls == 1  # sync_forever called once, then sync_then_stop stopped
-    assert bot.prepare_for_sync_shutdown_calls == 2
-    assert bot.prepare_for_sync_shutdown_cancel_messages == [SYNC_RESTART_CANCEL_MSG, None]
+    assert bot.prepare_for_sync_shutdown_calls == 1
+    assert bot.prepare_for_sync_shutdown_cancel_messages == [None]
+
+
+@pytest.mark.asyncio
+async def test_watchdog_restart_preserves_one_active_response(monkeypatch: pytest.MonkeyPatch) -> None:
+    """One stalled receive loop must not cancel, retry, or duplicate an active response."""
+    bot = _ResponseOwningBot()
+    bot.start_responses(1)
+    _install_deterministic_stalls(monkeypatch, stall_count=1)
+
+    with capture_logs() as logs:
+        supervisor = asyncio.create_task(sync_forever_with_restart(bot, max_retries=3))
+        assert await bot.sync_starts.get() == 1
+        assert await bot.sync_starts.get() == 2
+
+        assert bot.live_sync_count == 1
+        assert bot.in_flight_response_count == 1
+        assert not bot.response_tasks[0].done()
+        assert bot.response_cancel_sources == []
+
+        await _finish_responses_and_stop_transport(bot, final_sync_iteration=2, supervisor=supervisor)
+
+    assert bot.response_completions == 1
+    assert bot.response_cancel_sources == []
+    restart_logs = [entry for entry in logs if entry["event"] == "matrix_sync_transport_restart"]
+    assert len(restart_logs) == 1
+    assert restart_logs[0]["active_response_count"] == 1
+    assert restart_logs[0]["restart_reason_category"] == "watchdog_stall"
+    assert restart_logs[0]["resulting_action"] == "restart_receive_loop"
+    # Attribute the flapping entity without naming any Matrix conversation.
+    assert restart_logs[0]["agent"] == "test_agent"
+    assert not {"room_id", "event_id", "user_id"} & restart_logs[0].keys()
+
+
+@pytest.mark.asyncio
+async def test_watchdog_restart_preserves_several_active_responses(monkeypatch: pytest.MonkeyPatch) -> None:
+    """One receive-loop restart must leave every active response with its original owner."""
+    bot = _ResponseOwningBot()
+    bot.start_responses(3)
+    _install_deterministic_stalls(monkeypatch, stall_count=1)
+
+    supervisor = asyncio.create_task(sync_forever_with_restart(bot, max_retries=3))
+    assert await bot.sync_starts.get() == 1
+    assert await bot.sync_starts.get() == 2
+
+    assert bot.in_flight_response_count == 3
+    assert all(not task.done() for task in bot.response_tasks)
+    assert bot.response_cancel_sources == []
+
+    await _finish_responses_and_stop_transport(bot, final_sync_iteration=2, supervisor=supervisor)
+
+    assert bot.response_completions == 3
+    assert bot.response_cancel_sources == []
+
+
+@pytest.mark.asyncio
+async def test_repeated_watchdog_restarts_keep_one_sync_loop_and_response_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Repeated stalls must replace receive loops serially without touching responses."""
+    bot = _ResponseOwningBot()
+    bot.start_responses(2)
+    _install_deterministic_stalls(monkeypatch, stall_count=3)
+
+    supervisor = asyncio.create_task(sync_forever_with_restart(bot, max_retries=5))
+    assert [await bot.sync_starts.get() for _ in range(4)] == [1, 2, 3, 4]
+
+    assert bot.sync_calls == 4
+    assert bot.live_sync_count == 1
+    assert bot.max_live_sync_count == 1
+    assert bot.in_flight_response_count == 2
+    assert bot.response_cancel_sources == []
+
+    await _finish_responses_and_stop_transport(bot, final_sync_iteration=4, supervisor=supervisor)
+
+    assert bot.live_sync_count == 0
+    assert bot.response_completions == 2
+    assert bot.response_cancel_sources == []
+
+
+@pytest.mark.asyncio
+async def test_config_reload_cancellation_keeps_interruption_and_retry_semantics() -> None:
+    """Full bot replacement must still cancel and queue recovery for active responses."""
+    bot = _ResponseOwningBot()
+    bot.start_responses(1)
+
+    supervisor = asyncio.create_task(sync_forever_with_restart(bot))
+    assert await bot.sync_starts.get() == 1
+    supervisor.cancel(msg=SYNC_RESTART_CANCEL_MSG)
+    await supervisor
+    assert bot.live_sync_count == 0
+    assert bot.in_flight_response_count == 1
+
+    await bot.prepare_for_sync_shutdown(shutdown_intent=SYNC_RESTART_SHUTDOWN)
+
+    assert bot.in_flight_response_count == 0
+    assert bot.response_completions == 0
+    assert bot.response_cancel_sources == ["sync_restart"]
+    assert bot.prepare_for_sync_shutdown_cancel_messages == ["sync_restart"]
+
+
+@pytest.mark.asyncio
+async def test_process_shutdown_cancellation_stays_prompt_without_sync_retry() -> None:
+    """Process shutdown must still cancel active work without mislabeling it as transport recovery."""
+    bot = _ResponseOwningBot()
+    bot.start_responses(1)
+
+    supervisor = asyncio.create_task(sync_forever_with_restart(bot))
+    assert await bot.sync_starts.get() == 1
+    supervisor.cancel()
+    await supervisor
+    assert bot.live_sync_count == 0
+    assert bot.in_flight_response_count == 1
+
+    await bot.prepare_for_sync_shutdown(shutdown_intent=ORDERLY_SHUTDOWN)
+
+    assert bot.in_flight_response_count == 0
+    assert bot.response_completions == 0
+    assert bot.response_cancel_sources == ["interrupted"]
+    assert bot.prepare_for_sync_shutdown_cancel_messages == [None]
+
+
+@pytest.mark.asyncio
+async def test_cancellation_during_replacement_leaves_no_sync_or_response_tasks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancellation after one replacement starts must settle every owned task."""
+    bot = _ResponseOwningBot()
+    bot.start_responses(2)
+    _install_deterministic_stalls(monkeypatch, stall_count=1)
+
+    supervisor = asyncio.create_task(sync_forever_with_restart(bot, max_retries=3))
+    assert await bot.sync_starts.get() == 1
+    assert await bot.sync_starts.get() == 2
+    supervisor.cancel()
+    await supervisor
+
+    assert bot.live_sync_count == 0
+    assert bot.in_flight_response_count == 2
+    await bot.prepare_for_sync_shutdown()
+
+    assert bot.in_flight_response_count == 0
+    assert all(task.done() for task in bot.response_tasks)
+    assert bot.response_cancel_sources == ["interrupted", "interrupted"]
+    assert not [
+        task
+        for task in asyncio.all_tasks()
+        if not task.done() and task.get_name() in {"matrix_sync_test_agent", "matrix_sync_watchdog_test_agent"}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_replacement_start_failure_is_visible_bounded_and_preserves_response_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed replacement start must exhaust visibly without duplicating response ownership."""
+    bot = _ResponseOwningBot()
+    bot.start_responses(1)
+    start_calls = 0
+    cleanup_calls = 0
+
+    class StalledIteration:
+        async def wait(self) -> None:
+            msg = "Matrix sync loop stalled"
+            raise _MatrixSyncStalledError(msg)
+
+        async def cancel(self, *, shutdown_intent: RuntimeShutdownIntent = GENERIC_SHUTDOWN) -> None:
+            nonlocal cleanup_calls
+            assert shutdown_intent == GENERIC_SHUTDOWN
+            cleanup_calls += 1
+
+    def start_iteration(_bot: _ResponseOwningBot) -> StalledIteration:
+        nonlocal start_calls
+        start_calls += 1
+        if start_calls == 1:
+            return StalledIteration()
+        msg = "replacement sync start failed"
+        raise RuntimeError(msg)
+
+    logger = MagicMock()
+    monkeypatch.setattr(_SyncIteration, "start", start_iteration)
+    monkeypatch.setattr(runtime_helpers, "logger", logger)
+    monkeypatch.setattr(runtime_helpers, "retry_delay_seconds", lambda *_args, **_kwargs: 0.0)
+    monkeypatch.setattr(runtime_helpers, "_stalled_restart_jitter_seconds", lambda: 0.0)
+
+    await sync_forever_with_restart(bot, max_retries=2)
+
+    assert start_calls == 2
+    assert cleanup_calls == 1
+    assert bot.prepare_for_sync_shutdown_calls == 0
+    assert bot.in_flight_response_count == 1
+    assert not bot.response_tasks[0].done()
+    assert bot.response_cancel_sources == []
+    logger.exception.assert_any_call(
+        "sync_loop_failed",
+        agent="test_agent",
+        retry_count=2,
+    )
+    logger.error.assert_any_call(
+        "sync_loop_retries_exhausted",
+        agent="test_agent",
+        retry_count=2,
+        max_retries=2,
+        restart_reason_category="sync_failure",
+    )
+
+    bot.response_finish.set()
+    await asyncio.gather(*bot.response_tasks)
+    assert bot.response_completions == 1
 
 
 @pytest.mark.asyncio
@@ -285,7 +601,7 @@ async def test_failed_restart_does_not_add_jitter(monkeypatch: pytest.MonkeyPatc
     await sync_forever_with_restart(bot, max_retries=2)
 
     assert jitter_calls == []
-    assert bot.prepare_for_sync_shutdown_cancel_messages == [SYNC_RESTART_CANCEL_MSG, None]
+    assert bot.prepare_for_sync_shutdown_cancel_messages == [None]
 
 
 def test_stalled_restart_jitter_spreads_restarts() -> None:
@@ -339,7 +655,7 @@ async def test_sync_forever_with_restart_retries_on_sync_restart_cancel(
     assert bot.first_call_cancelled is True
     assert bot.first_call_cancel_args == (SYNC_RESTART_CANCEL_MSG,)
     assert bot.sync_calls == 1
-    assert bot.prepare_for_sync_shutdown_calls == 2
+    assert bot.prepare_for_sync_shutdown_calls == 1
 
 
 @pytest.mark.asyncio
@@ -540,10 +856,10 @@ def test_log_cancelled_response_source_logs_interrupted_with_traceback() -> None
 
 
 @pytest.mark.asyncio
-async def test_sync_forever_with_restart_cancels_deferred_work_before_retry_backoff(
+async def test_sync_forever_with_restart_preserves_runtime_before_retry_backoff(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Restart backoff should only happen after deferred overdue drain cleanup."""
+    """Receive-loop restart must not tear down response runtime before backoff."""
     bot = _FakeBot()
     call_order: list[str] = []
     call_count = 0
@@ -575,7 +891,7 @@ async def test_sync_forever_with_restart_cancels_deferred_work_before_retry_back
 
     await sync_forever_with_restart(bot, max_retries=2)
 
-    assert call_order[:2] == ["prepare", "retry_delay"]
+    assert call_order == ["retry_delay", "prepare"]
 
 
 @pytest.mark.asyncio
@@ -807,7 +1123,6 @@ async def test_full_state_only_after_successful_first_sync() -> None:
     bot._room_member_join_hooks_armed = False
     bot.config = Config(matrix_sync=MatrixSyncConfig(mode="classic"))
     bot.rooms = []
-    bot._restart_retry_queue = SyncRestartRetryQueue()
     bot.client = FakeClient()
     bot.orchestrator = None
     bot._runtime_view = BotRuntimeState(
@@ -947,7 +1262,6 @@ async def test_sliding_sync_response_marks_sync_success() -> None:
     bot._sync_shutting_down = False
     bot._calls_reconcile_pending = False
     bot._room_member_join_hooks_armed = False
-    bot._restart_retry_queue = SyncRestartRetryQueue()
     bot.orchestrator = None
 
     await AgentBot._on_sync_response(bot, nio.SlidingSyncResponse("pos"))
@@ -1017,7 +1331,6 @@ async def test_sliding_sync_remote_departure_fences_and_purges() -> None:
     bot._sync_shutting_down = False
     bot._calls_reconcile_pending = False
     bot._room_member_join_hooks_armed = True
-    bot._restart_retry_queue = SyncRestartRetryQueue()
     bot.orchestrator = None
     bot._local_departures_awaiting_sync = set()
     bot._sync_cache_trust = MagicMock()
@@ -1252,11 +1565,8 @@ async def test_stop_entities_completes_with_real_supervisor_task(monkeypatch: py
 
     assert elapsed <= 2.0
     assert supervisor_task.done()
-    assert bot.prepare_for_sync_shutdown_calls >= 2
-    assert bot.prepare_for_sync_shutdown_cancel_messages[:2] == [
-        "sync_restart",
-        "sync_restart",
-    ]
+    assert bot.prepare_for_sync_shutdown_calls == 1
+    assert bot.prepare_for_sync_shutdown_cancel_messages == ["sync_restart"]
     bot.stop.assert_awaited_once_with(shutdown_intent=SYNC_RESTART_SHUTDOWN)
 
 
@@ -2012,8 +2322,8 @@ async def test_clean_sync_return_while_running_restarts(monkeypatch: pytest.Monk
     await sync_forever_with_restart(bot, max_retries=3)
 
     assert bot.sync_calls == 2
-    assert bot.prepare_for_sync_shutdown_calls == 2
-    assert bot.prepare_for_sync_shutdown_cancel_messages == [SYNC_RESTART_CANCEL_MSG, None]
+    assert bot.prepare_for_sync_shutdown_calls == 1
+    assert bot.prepare_for_sync_shutdown_cancel_messages == [None]
     assert retry_attempts == [1]
 
 
@@ -2035,12 +2345,13 @@ async def test_running_bot_logs_when_sync_retries_exhausted(monkeypatch: pytest.
 
     assert bot.running is True
     assert bot.sync_calls == 2
-    assert bot.prepare_for_sync_shutdown_calls == 2
+    assert bot.prepare_for_sync_shutdown_calls == 0
     logger.error.assert_called_once_with(
         "sync_loop_retries_exhausted",
         agent="test_agent",
         retry_count=2,
         max_retries=2,
+        restart_reason_category="unexpected_sync_return",
     )
 
 
@@ -2116,5 +2427,7 @@ async def test_single_failure_no_duplicate_cleanup_logs(
     with capture_logs() as logs:
         await sync_forever_with_restart(bot, max_retries=1)
 
-    cleanup_warnings = [entry for entry in logs if entry["event"] == "Suppressed error during sync iteration cleanup"]
-    assert len(cleanup_warnings) == 1, f"Expected exactly 1 cleanup warning, got {len(cleanup_warnings)}"
+    cleanup_warnings = [entry for entry in logs if entry["event"] == "sync_iteration_cleanup_failed"]
+    assert len(cleanup_warnings) == 1
+    assert cleanup_warnings[0]["agent"] == "test_agent"
+    assert cleanup_warnings[0]["exc_info"] is True

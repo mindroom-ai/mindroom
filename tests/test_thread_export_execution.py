@@ -13,6 +13,7 @@ import yaml
 
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.thread_export import ThreadExportTarget
+from mindroom.thread_export import storage as thread_export_storage
 from mindroom.thread_export.execution import (
     export_threads_for_targets_for_client as _export_threads_for_targets_for_client,
 )
@@ -20,7 +21,11 @@ from mindroom.thread_export.models import (
     ThreadExportRoom as _ThreadExportRoom,
 )
 from mindroom.thread_export.selection import export_rooms as _export_rooms
+from mindroom.thread_export.storage import write_room_index, write_thread_payload
 from tests.conftest import runtime_paths_for
+from tests.thread_export_helpers import (
+    mark_thread_export_root,
+)
 from tests.thread_export_helpers import (
     thread_export_config as _config,
 )
@@ -291,7 +296,7 @@ async def test_export_writes_room_index_with_summary_and_participants(tmp_path: 
 
 @pytest.mark.asyncio
 async def test_room_index_not_rewritten_when_unchanged(tmp_path: Path) -> None:
-    """A second pass with identical content should leave index.json untouched."""
+    """A second unchanged pass should skip both index rebuild parsing and replacement."""
     config = _config(tmp_path)
     runtime_paths = runtime_paths_for(config)
     _write_matrix_state(tmp_path)
@@ -325,7 +330,10 @@ async def test_room_index_not_rewritten_when_unchanged(tmp_path: Path) -> None:
         )
         index_path = tmp_path / "exports" / "lobby" / "index.json"
         first_mtime = index_path.stat().st_mtime_ns
-        with patch("mindroom.thread_export.execution.write_room_index") as write_index:
+        with patch(
+            "mindroom.thread_export.storage._room_index_payload",
+            wraps=thread_export_storage._room_index_payload,
+        ) as build_index:
             await _export_threads_for_client(
                 client=Mock(),
                 config=config,
@@ -336,7 +344,86 @@ async def test_room_index_not_rewritten_when_unchanged(tmp_path: Path) -> None:
             )
 
     assert index_path.stat().st_mtime_ns == first_mtime
-    write_index.assert_not_called()
+    build_index.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_nonempty_enumeration_repairs_index_after_committed_yaml_removal(tmp_path: Path) -> None:
+    """An unchanged pass must remove an index entry left stale by an interrupted prior pass."""
+    config = _config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    _write_matrix_state(tmp_path)
+    output_dir = tmp_path / "exports"
+    rooms = _export_rooms(runtime_paths, "lobby")
+    retained_thread_id = "$retained:localhost"
+    removed_thread_id = "$removed:localhost"
+    histories = {
+        retained_thread_id: [
+            ResolvedVisibleMessage.synthetic(
+                sender="@alice:localhost",
+                body="Retained",
+                event_id=retained_thread_id,
+            ),
+        ],
+        removed_thread_id: [
+            ResolvedVisibleMessage.synthetic(
+                sender="@alice:localhost",
+                body="Removed",
+                event_id=removed_thread_id,
+            ),
+        ],
+    }
+
+    async def fetch_history(*args: object, **_kwargs: object) -> object:
+        return histories[str(args[2])]
+
+    with (
+        patch(
+            "mindroom.thread_export.execution.enumerate_room_thread_root_ids",
+            new=AsyncMock(return_value=([retained_thread_id, removed_thread_id], False)),
+        ),
+        patch(
+            "mindroom.thread_export.execution.refresh_thread_history_from_source",
+            new=AsyncMock(side_effect=fetch_history),
+        ),
+    ):
+        await _export_threads_for_client(
+            client=Mock(),
+            config=config,
+            runtime_paths=runtime_paths,
+            event_cache=Mock(),
+            output_dir=output_dir,
+            rooms=rooms,
+        )
+
+    room_dir = output_dir / "lobby"
+    removed_file = room_dir / f"{quote(removed_thread_id, safe='')}.yaml"
+    removed_file.unlink()
+    index_path = room_dir / "index.json"
+    assert json.loads(index_path.read_text(encoding="utf-8"))["thread_count"] == 2
+
+    with (
+        patch(
+            "mindroom.thread_export.execution.enumerate_room_thread_root_ids",
+            new=AsyncMock(return_value=([retained_thread_id], False)),
+        ),
+        patch(
+            "mindroom.thread_export.execution.refresh_thread_history_from_source",
+            new=AsyncMock(return_value=histories[retained_thread_id]),
+        ),
+    ):
+        stats = await _export_threads_for_client(
+            client=Mock(),
+            config=config,
+            runtime_paths=runtime_paths,
+            event_cache=Mock(),
+            output_dir=output_dir,
+            rooms=rooms,
+        )
+
+    assert stats.threads_unchanged == 1
+    index = json.loads(index_path.read_text(encoding="utf-8"))
+    assert [entry["thread_id"] for entry in index["threads"]] == [retained_thread_id]
 
 
 @pytest.mark.asyncio
@@ -462,6 +549,7 @@ async def test_export_threads_rewrites_when_existing_file_corrupt(tmp_path: Path
         ),
     ]
     corrupt_path = tmp_path / "exports" / "lobby" / f"{quote('$fresh:localhost', safe='')}.yaml"
+    mark_thread_export_root(tmp_path / "exports")
     corrupt_path.parent.mkdir(parents=True)
     corrupt_path.write_text("{not: [valid yaml", encoding="utf-8")
 
@@ -497,6 +585,7 @@ async def test_export_threads_rewrites_existing_file_with_invalid_utf8(tmp_path:
     runtime_paths = runtime_paths_for(config)
     _write_matrix_state(tmp_path)
     export_path = tmp_path / "exports" / "lobby" / f"{quote('$fresh:localhost', safe='')}.yaml"
+    mark_thread_export_root(tmp_path / "exports")
     export_path.parent.mkdir(parents=True)
     export_path.write_bytes(b"\x80")
     history = [
@@ -630,8 +719,145 @@ async def test_complete_room_export_removes_stale_thread_files(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
-async def test_member_filter_exports_only_rooms_with_member(tmp_path: Path) -> None:
-    """required_member_user_id should skip rooms the user is not currently joined to."""
+async def test_empty_complete_enumeration_preserves_existing_thread_exports(tmp_path: Path) -> None:
+    """An empty complete enumeration must not erase an existing on-disk room corpus."""
+    config = _config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    _write_matrix_state(tmp_path)
+    output_dir = tmp_path / "exports"
+    room = _export_rooms(runtime_paths, "lobby")
+    history = [
+        ResolvedVisibleMessage.synthetic(
+            sender="@alice:localhost",
+            body="Retain me",
+            event_id="$existing:localhost",
+        ),
+    ]
+
+    with (
+        patch(
+            "mindroom.thread_export.execution.enumerate_room_thread_root_ids",
+            new=AsyncMock(return_value=(["$existing:localhost"], False)),
+        ),
+        patch(
+            "mindroom.thread_export.execution.refresh_thread_history_from_source",
+            new=AsyncMock(return_value=history),
+        ),
+    ):
+        await _export_threads_for_client(
+            client=Mock(),
+            config=config,
+            runtime_paths=runtime_paths,
+            event_cache=Mock(),
+            output_dir=output_dir,
+            rooms=room,
+        )
+
+    exported_file = next((output_dir / "lobby").glob("*.yaml"))
+    original_bytes = exported_file.read_bytes()
+    with (
+        patch(
+            "mindroom.thread_export.execution.enumerate_room_thread_root_ids",
+            new=AsyncMock(return_value=([], False)),
+        ),
+        patch("mindroom.thread_export.execution.logger.warning") as warning,
+    ):
+        for _ in range(2):
+            stats = await _export_threads_for_client(
+                client=Mock(),
+                config=config,
+                runtime_paths=runtime_paths,
+                event_cache=Mock(),
+                output_dir=output_dir,
+                rooms=room,
+            )
+
+    assert stats.rooms_exported == 1
+    assert stats.threads_seen == 0
+    assert exported_file.read_bytes() == original_bytes
+    assert warning.call_count == 2
+    for warning_call in warning.call_args_list:
+        assert warning_call.args == ("Skipping stale thread reconciliation after empty enumeration",)
+        assert warning_call.kwargs == {
+            "output_dir": str(output_dir),
+            "room_key": "lobby",
+            "room_id": "!lobby:localhost",
+        }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("existing_index", [False, True], ids=["missing-index", "stale-index"])
+async def test_empty_complete_enumeration_repairs_index_after_committed_yaml_addition(
+    tmp_path: Path,
+    *,
+    existing_index: bool,
+) -> None:
+    """Preserved YAML must repair missing or stale index state after an interrupted prior pass."""
+    config = _config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    _write_matrix_state(tmp_path)
+    output_dir = tmp_path / "exports"
+    rooms = _export_rooms(runtime_paths, "lobby")
+    room = rooms[0]
+    indexed_thread_id = "$indexed:localhost"
+    committed_thread_id = "$committed:localhost"
+
+    def payload(thread_id: str) -> dict[str, object]:
+        return {
+            "version": 1,
+            "room": {
+                "key": room.key,
+                "id": room.room_id,
+                "name": room.name,
+                "alias": room.alias,
+            },
+            "thread": {
+                "id": thread_id,
+                "message_count": 1,
+            },
+            "messages": [
+                {
+                    "sender": "@alice:localhost",
+                    "timestamp": 1_700_000_000_000,
+                },
+            ],
+        }
+
+    assert write_thread_payload(output_dir, room, indexed_thread_id, payload(indexed_thread_id)) is True
+    index_path = output_dir / "lobby" / "index.json"
+    if existing_index:
+        write_room_index(output_dir, room)
+        assert json.loads(index_path.read_text(encoding="utf-8"))["thread_count"] == 1
+    else:
+        assert not index_path.exists()
+    assert write_thread_payload(output_dir, room, committed_thread_id, payload(committed_thread_id)) is True
+
+    with patch(
+        "mindroom.thread_export.execution.enumerate_room_thread_root_ids",
+        new=AsyncMock(return_value=([], False)),
+    ):
+        stats = await _export_threads_for_client(
+            client=Mock(),
+            config=config,
+            runtime_paths=runtime_paths,
+            event_cache=Mock(),
+            output_dir=output_dir,
+            rooms=rooms,
+        )
+
+    assert stats.failures == 0
+    index = json.loads(index_path.read_text(encoding="utf-8"))
+    assert {entry["thread_id"] for entry in index["threads"]} == {
+        indexed_thread_id,
+        committed_thread_id,
+    }
+
+
+@pytest.mark.asyncio
+async def test_definitive_non_member_on_non_aliased_target_removes_room_export(
+    tmp_path: Path,
+) -> None:
+    """A fresh non-membership answer should still retract a non-aliased target's room."""
     config = _config(tmp_path)
     runtime_paths = runtime_paths_for(config)
     _write_matrix_state(tmp_path)
@@ -649,9 +875,11 @@ async def test_member_filter_exports_only_rooms_with_member(tmp_path: Path) -> N
 
     client = Mock()
     client.joined_members = AsyncMock(side_effect=joined_members)
+    mark_thread_export_root(tmp_path / "exports")
     stale_dev_dir = tmp_path / "exports" / "dev"
     stale_dev_dir.mkdir(parents=True)
-    (stale_dev_dir / "old.yaml").write_text("secret", encoding="utf-8")
+    (stale_dev_dir / "index.json").write_text("{}\n", encoding="utf-8")
+    (stale_dev_dir / f"{quote('$old:localhost', safe='')}.yaml").write_text("secret", encoding="utf-8")
     history = [
         ResolvedVisibleMessage.synthetic(
             sender="@alice:localhost",
@@ -685,6 +913,121 @@ async def test_member_filter_exports_only_rooms_with_member(tmp_path: Path) -> N
     enumerate_threads.assert_awaited_once_with(client, "!lobby:localhost", max_thread_roots=2000)
     assert (tmp_path / "exports" / "lobby").is_dir()
     assert not (tmp_path / "exports" / "dev").exists()
+
+
+@pytest.mark.asyncio
+async def test_admitted_empty_root_handles_retraction_and_zero_thread_export_without_failures(
+    tmp_path: Path,
+) -> None:
+    """An admitted empty root should handle rejected and empty-room operations."""
+    config = _config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    output_dir = tmp_path / "exports"
+    mark_thread_export_root(output_dir)
+    client = Mock()
+    rooms = (
+        _ThreadExportRoom(
+            key="!invited:localhost",
+            room_id="!invited:localhost",
+            alias="",
+            name="Invited",
+            invited=True,
+        ),
+        _ThreadExportRoom(
+            key="lobby",
+            room_id="!lobby:localhost",
+            alias="#lobby:localhost",
+            name="Lobby",
+        ),
+    )
+
+    with patch(
+        "mindroom.thread_export.execution.enumerate_room_thread_root_ids",
+        new=AsyncMock(return_value=([], False)),
+    ) as enumerate_threads:
+        accumulators = await _export_threads_for_targets_for_client(
+            client=client,
+            config=config,
+            runtime_paths=runtime_paths,
+            event_cache=Mock(),
+            rooms=rooms,
+            targets=(
+                ThreadExportTarget(
+                    output_dir=output_dir,
+                    include_invited_rooms=False,
+                ),
+            ),
+        )
+
+    stats = accumulators[0].stats()
+    assert stats.rooms_exported == 1
+    assert stats.threads_seen == 0
+    assert stats.failures == 0
+    enumerate_threads.assert_awaited_once_with(client, "!lobby:localhost", max_thread_roots=2000)
+    assert (output_dir / ".mindroom-thread-exports").is_file()
+
+
+@pytest.mark.parametrize(
+    ("invited", "required_member_user_id"),
+    [
+        pytest.param(True, None, id="excluded-invited-room"),
+        pytest.param(False, "@alice:localhost", id="definitive-non-member"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_room_removal_failure_is_scoped_to_the_rejected_target(
+    tmp_path: Path,
+    *,
+    invited: bool,
+    required_member_user_id: str | None,
+) -> None:
+    """A failed retraction should not prevent another target from exporting the room."""
+    config = _config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    room = _ThreadExportRoom(
+        key="room",
+        room_id="!room:localhost",
+        alias="#room:localhost",
+        name="Room",
+        invited=invited,
+    )
+    client = Mock()
+    if required_member_user_id is not None:
+        client.joined_members = AsyncMock(
+            return_value=nio.JoinedMembersResponse(members=[], room_id=room.room_id),
+        )
+    rejected_target = ThreadExportTarget(
+        output_dir=tmp_path / "rejected",
+        required_member_user_id=required_member_user_id,
+        include_invited_rooms=not invited,
+    )
+    healthy_target = ThreadExportTarget(output_dir=tmp_path / "healthy")
+
+    with (
+        patch(
+            "mindroom.thread_export.execution.remove_room_export",
+            side_effect=RuntimeError("storage unavailable"),
+        ) as remove_export,
+        patch(
+            "mindroom.thread_export.execution.enumerate_room_thread_root_ids",
+            new=AsyncMock(return_value=([], False)),
+        ) as enumerate_threads,
+    ):
+        accumulators = await _export_threads_for_targets_for_client(
+            client=client,
+            config=config,
+            runtime_paths=runtime_paths,
+            event_cache=Mock(),
+            rooms=(room,),
+            targets=(rejected_target, healthy_target),
+        )
+
+    remove_export.assert_called_once_with(rejected_target.output_dir, room)
+    enumerate_threads.assert_awaited_once_with(client, room.room_id, max_thread_roots=2000)
+    assert accumulators[0].rooms_exported == 0
+    assert accumulators[0].failed_items[0].error == "Room removal failed: storage unavailable"
+    assert accumulators[1].rooms_exported == 1
+    assert accumulators[1].failed_items == []
 
 
 @pytest.mark.asyncio
@@ -772,6 +1115,7 @@ async def test_member_filter_lookup_failure_keeps_exports_and_records_failure(tm
     _write_matrix_state(tmp_path)
     client = Mock()
     client.joined_members = AsyncMock(return_value=Mock())
+    mark_thread_export_root(tmp_path / "exports")
     for room_key in ("lobby", "dev"):
         stale_room_dir = tmp_path / "exports" / room_key
         stale_room_dir.mkdir(parents=True)

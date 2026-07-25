@@ -57,7 +57,12 @@ from mindroom.matrix_rtc.call_manager import CallManager, maybe_build_call_manag
 from mindroom.memory import store_conversation_memory
 from mindroom.message_target import MessageTarget  # noqa: TC001
 from mindroom.post_response_effects import PostResponseEffectsSupport
-from mindroom.runtime_shutdown import ENTITY_REMOVED_SHUTDOWN, GENERIC_SHUTDOWN, RuntimeShutdownIntent
+from mindroom.runtime_shutdown import (
+    ENTITY_REMOVED_SHUTDOWN,
+    GENERIC_SHUTDOWN,
+    RuntimeShutdownIntent,
+    restart_reason_category_for,
+)
 from mindroom.stop import StopManager
 from mindroom.teams import TeamMode, TeamOutcome, resolve_configured_team
 from mindroom.timestamp_formatting import format_timestamp_ms
@@ -109,7 +114,7 @@ from .scheduling import (
     restore_scheduled_tasks,
 )
 from .startup_errors import PermanentStartupError
-from .sync_restart_retry import SyncRestartRetryQueue
+from .sync_restart_retry import InterruptedTurnRooms
 from .turn_controller import TurnController, TurnControllerDeps
 from .turn_policy import IngressHookRunner, TurnPolicy, TurnPolicyDeps
 from .turn_store import TurnStore, TurnStoreDeps
@@ -330,7 +335,7 @@ class AgentBot:
         self.config_path = config_path
         self.logger = logger.bind(agent=self.agent_name)
         self.stop_manager = StopManager()
-        self._restart_retry_queue = SyncRestartRetryQueue()
+        self._interrupted_turn_rooms = InterruptedTurnRooms()
         self.running = False
         self.last_sync_time = None
         self._last_sync_monotonic = None
@@ -529,7 +534,7 @@ class AgentBot:
                 ingress_hook_runner=self._ingress_hook_runner,
                 generate_response=lambda request: self._run_regenerated_response(request),
                 wait_for_turn_settled=self._turn_store.wait_for_turn_settled,
-                restart_retry=self._restart_retry_queue,
+                interrupted_turn_rooms=self._interrupted_turn_rooms,
                 timestamp_formatter=lambda timestamp_ms: format_timestamp_ms(
                     timestamp_ms,
                     timezone=self.config.timezone,
@@ -579,7 +584,7 @@ class AgentBot:
                 coalescing_gate=self._coalescing_gate,
                 edit_regenerator=self._edit_regenerator,
                 ingress=self._ingress_validator,
-                restart_retry=self._restart_retry_queue,
+                interrupted_turn_rooms=self._interrupted_turn_rooms,
             ),
         )
 
@@ -742,8 +747,8 @@ class AgentBot:
 
     @property
     def pending_sync_restart_retry_room_ids(self) -> frozenset[str]:
-        """Return rooms with interrupted turns awaiting same-bot retry."""
-        return self._restart_retry_queue.pending_room_ids
+        """Return rooms with interrupted turns awaiting replacement recovery."""
+        return self._interrupted_turn_rooms.pending_room_ids
 
     @property
     def agent_name(self) -> str:
@@ -1177,15 +1182,6 @@ class AgentBot:
 
         if self._sync_shutting_down:
             return
-
-        if self._restart_retry_queue.has_pending:
-            # The sync loop is healthy again: re-dispatch turns whose responses
-            # were cancelled by stall recovery, once each.
-            create_background_task(
-                self._restart_retry_queue.flush(),
-                name=f"sync_restart_retry_{self.agent_name}",
-                owner=self._runtime_view,
-            )
 
         if isinstance(_response, nio.SyncResponse):
             await self._apply_own_room_membership_from_sync(_response)
@@ -1694,6 +1690,13 @@ class AgentBot:
         shutdown_intent: RuntimeShutdownIntent = GENERIC_SHUTDOWN,
     ) -> None:
         """Cancel work that must not outlive the Matrix sync loop."""
+        if not self._sync_shutting_down:
+            self.logger.info(
+                "matrix_agent_response_runtime_shutdown",
+                active_response_count=self.in_flight_response_count,
+                restart_reason_category=restart_reason_category_for(shutdown_intent),
+                resulting_action="drain_then_cancel_response_runtime",
+            )
         self._sync_shutting_down = True
         self._response_runner.refuse_pending_admissions()
         await self._cancel_startup_thread_prewarm()

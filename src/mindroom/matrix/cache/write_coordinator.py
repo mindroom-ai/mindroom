@@ -325,8 +325,6 @@ class EventCacheWriteCoordinator:
     def _log_coalesced_update_if_needed(
         self,
         *,
-        room_id: str,
-        thread_id: str | None,
         kind: typing.Literal["room", "thread"],
         name: str,
         update_state: _QueuedUpdateState,
@@ -335,15 +333,12 @@ class EventCacheWriteCoordinator:
         if dropped_update_count <= 0:
             return
         log_context = {
-            "room_id": room_id,
             "barrier_kind": kind,
             "operation": name,
             "coalesced_update_count": dropped_update_count,
             "dropped_update_count": dropped_update_count,
             **update_state.coalesce_log_context,
         }
-        if thread_id is not None:
-            log_context["thread_id"] = thread_id
         self.logger.info("Coalesced outbound streaming edit cache updates", **log_context)
 
     def _release_active_entry(
@@ -442,8 +437,6 @@ class EventCacheWriteCoordinator:
             assert current_task is not None
             with bound_log_context(task_name=current_task.get_name()):
                 self._log_coalesced_update_if_needed(
-                    room_id=room_id,
-                    thread_id=thread_id,
                     kind=kind,
                     name=name,
                     update_state=update_state,
@@ -491,8 +484,6 @@ class EventCacheWriteCoordinator:
                     emit_timing_event(
                         "Event cache update timing",
                         barrier_kind=kind,
-                        room_id=room_id,
-                        thread_id=thread_id,
                         operation=name,
                         predecessor_count=predecessor_count,
                         queued_behind_predecessor=predecessor_count > 0,

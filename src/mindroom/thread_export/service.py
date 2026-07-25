@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from mindroom.constants import runtime_matrix_homeserver
 from mindroom.logging_config import get_logger
 from mindroom.matrix.users import login_agent_user
 from mindroom.runtime_support import build_owned_runtime_support, close_owned_runtime_support
-from mindroom.thread_export.execution import export_threads_for_targets_for_client
+from mindroom.thread_export.execution import export_threads_for_targets_for_client, retract_room_export
 from mindroom.thread_export.models import (
     ThreadExportAccumulator,
     ThreadExportGroup,
@@ -17,6 +18,7 @@ from mindroom.thread_export.models import (
     ThreadExportStats,
     ThreadExportTarget,
     failure_for_room,
+    failure_for_target,
 )
 from mindroom.thread_export.policy import target_accepts_room
 from mindroom.thread_export.selection import (
@@ -25,7 +27,11 @@ from mindroom.thread_export.selection import (
     invited_export_rooms,
     select_export_account,
 )
-from mindroom.thread_export.storage import reconcile_room_directories, remove_room_export
+from mindroom.thread_export.storage import (
+    canonicalize_output_dir,
+    prepare_export_root,
+    reconcile_room_directories,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -65,19 +71,117 @@ def _record_group_failure(
         for accumulator in accumulators:
             target = accumulator.target
             if not target_accepts_room(target, room):
-                remove_room_export(target.output_dir, room)
+                retract_room_export(accumulator, room)
                 continue
             accumulator.retained_room_keys.add(room.key)
             accumulator.failed_items.append(failure_for_room(room, error))
 
 
+def _requested_invited_groups(
+    discovered_groups: Sequence[tuple[str, Sequence[ThreadExportRoom]]],
+    accumulators: Sequence[ThreadExportAccumulator],
+) -> list[tuple[str, list[ThreadExportRoom]]]:
+    """Retract rooms excluded by every target and return groups that need Matrix work."""
+    requested_groups: list[tuple[str, list[ThreadExportRoom]]] = []
+    for entity_name, rooms in discovered_groups:
+        accepted_rooms: list[ThreadExportRoom] = []
+        for room in rooms:
+            if any(target_accepts_room(accumulator.target, room) for accumulator in accumulators):
+                accepted_rooms.append(room)
+            else:
+                for accumulator in accumulators:
+                    retract_room_export(accumulator, room)
+        if accepted_rooms:
+            requested_groups.append((entity_name, accepted_rooms))
+    return requested_groups
+
+
 def _reconcile_full_pass(accumulators: Sequence[ThreadExportAccumulator]) -> None:
     """Remove room directories that the completed full pass did not retain."""
     for accumulator in accumulators:
-        reconcile_room_directories(
-            accumulator.target.output_dir,
-            accumulator.retained_room_keys,
-        )
+        output_dir = accumulator.target.output_dir
+        try:
+            if accumulator.rooms_exported == 0:
+                logger.warning(
+                    "Skipping thread export directory reconciliation without exported rooms",
+                    output_dir=str(output_dir),
+                    retained_rooms=len(accumulator.retained_room_keys),
+                    failures=len(accumulator.failed_items),
+                )
+                continue
+            reconcile_room_directories(
+                output_dir,
+                accumulator.retained_room_keys,
+            )
+        except (OSError, RuntimeError) as exc:
+            accumulator.failed_items.append(
+                failure_for_target(f"Target reconciliation failed: {exc}"),
+            )
+
+
+def _validated_targets(
+    accumulators: Sequence[ThreadExportAccumulator],
+) -> tuple[ThreadExportAccumulator, ...]:
+    """Reject every resolved overlap, then prepare only disjoint roots."""
+    candidates: list[tuple[ThreadExportAccumulator, Path]] = []
+    for accumulator in accumulators:
+        authored_output_dir = accumulator.target.output_dir
+        try:
+            output_dir = canonicalize_output_dir(authored_output_dir)
+            resolved_output_dir = output_dir.resolve()
+        except (OSError, RuntimeError) as exc:
+            accumulator.failed_items.append(failure_for_target(f"output directory validation failed: {exc}"))
+            logger.warning(
+                "Skipping thread export target whose output directory could not be validated",
+                output_dir=str(authored_output_dir),
+                error=str(exc),
+            )
+            continue
+        accumulator.target = replace(accumulator.target, output_dir=output_dir)
+        candidates.append((accumulator, resolved_output_dir))
+
+    overlaps: dict[int, list[Path]] = {}
+    for index, (_, resolved_output_dir) in enumerate(candidates):
+        for other_index in range(index + 1, len(candidates)):
+            other_accumulator, other_resolved_output_dir = candidates[other_index]
+            if not (
+                resolved_output_dir == other_resolved_output_dir
+                or resolved_output_dir.is_relative_to(other_resolved_output_dir)
+                or other_resolved_output_dir.is_relative_to(resolved_output_dir)
+            ):
+                continue
+            overlaps.setdefault(index, []).append(other_accumulator.target.output_dir)
+            overlaps.setdefault(other_index, []).append(candidates[index][0].target.output_dir)
+
+    prepared: list[ThreadExportAccumulator] = []
+    for index, (accumulator, resolved_output_dir) in enumerate(candidates):
+        if overlapping := overlaps.get(index):
+            conflicting = ", ".join(str(path) for path in overlapping)
+            accumulator.failed_items.append(
+                failure_for_target(
+                    f"output directory resolving to {resolved_output_dir} "
+                    f"overlaps another enabled target: {conflicting}",
+                ),
+            )
+            logger.warning(
+                "Skipping thread export target with overlapping output directory",
+                output_dir=str(accumulator.target.output_dir),
+                resolved_output_dir=str(resolved_output_dir),
+                overlapping_output_dirs=[str(path) for path in overlapping],
+            )
+            continue
+        try:
+            prepare_export_root(accumulator.target.output_dir)
+        except (OSError, RuntimeError) as exc:
+            accumulator.failed_items.append(failure_for_target(f"output directory preparation failed: {exc}"))
+            logger.warning(
+                "Skipping thread export target with unusable output directory",
+                output_dir=str(accumulator.target.output_dir),
+                error=str(exc),
+            )
+            continue
+        prepared.append(accumulator)
+    return tuple(prepared)
 
 
 async def _run_export_group(
@@ -87,7 +191,6 @@ async def _run_export_group(
     config: Config,
     runtime_paths: RuntimePaths,
     event_cache: SharedConversationEventCache,
-    targets: Sequence[ThreadExportTarget],
     accumulators: Sequence[ThreadExportAccumulator],
     max_thread_roots: int,
     prefer_cache: bool,
@@ -105,7 +208,7 @@ async def _run_export_group(
             runtime_paths=runtime_paths,
             event_cache=event_cache.for_principal(group.user.user_id),
             rooms=group.rooms,
-            targets=targets,
+            targets=tuple(accumulator.target for accumulator in accumulators),
             max_thread_roots=max_thread_roots,
             prefer_cache=prefer_cache,
         )
@@ -129,8 +232,7 @@ async def export_threads_to_targets_once(
 ) -> tuple[ThreadExportStats, ...]:
     """Login with persisted Matrix accounts and export once to every target.
 
-    Rooms come from ``matrix_state.yaml`` plus every entity's persisted invited rooms when at least
-    one target includes invited rooms.
+    Rooms come from ``matrix_state.yaml`` plus every entity's persisted invited rooms.
     Invited rooms are exported with the invited entity's own account, because the primary export
     account is not necessarily a member of user-created rooms.
 
@@ -144,21 +246,22 @@ async def export_threads_to_targets_once(
     A failed membership check leaves prior exports untouched, records a failure, and writes nothing new.
     A successful check that proves the member absent removes the prior room export.
     """
-    resolved_targets = tuple(targets)
-    if not resolved_targets:
+    if not targets:
         return ()
+    accumulators = tuple(ThreadExportAccumulator(target=target) for target in targets)
+    validated_targets = _validated_targets(accumulators)
+    if not validated_targets:
+        return tuple(accumulator.stats() for accumulator in accumulators)
+
     homeserver = runtime_matrix_homeserver(runtime_paths=runtime_paths)
     state_rooms = export_rooms(runtime_paths, room_filter)
-    invited_groups = (
-        invited_export_rooms(
-            config,
-            runtime_paths,
-            room_filter,
-            known_room_ids={room.room_id for room in state_rooms},
-        )
-        if any(target.include_invited_rooms for target in resolved_targets)
-        else []
+    discovered_invited_groups = invited_export_rooms(
+        config,
+        runtime_paths,
+        room_filter,
+        known_room_ids={room.room_id for room in state_rooms},
     )
+    invited_groups = _requested_invited_groups(discovered_invited_groups, validated_targets)
     export_groups = build_export_groups(
         runtime_paths=runtime_paths,
         homeserver=homeserver,
@@ -166,17 +269,16 @@ async def export_threads_to_targets_once(
         invited_groups=invited_groups,
     )
 
-    accumulators = tuple(ThreadExportAccumulator(target=target) for target in resolved_targets)
     if not export_groups:
         select_export_account(runtime_paths, homeserver)
         if room_filter is None:
-            _reconcile_full_pass(accumulators)
+            _reconcile_full_pass(validated_targets)
         return tuple(accumulator.stats() for accumulator in accumulators)
 
     ready_groups: list[ThreadExportGroup] = []
     for group in export_groups:
         if isinstance(group, ThreadExportGroupFailure):
-            _record_group_failure(accumulators, group.rooms, group.error)
+            _record_group_failure(validated_targets, group.rooms, group.error)
         else:
             ready_groups.append(group)
 
@@ -196,8 +298,7 @@ async def export_threads_to_targets_once(
                     config=config,
                     runtime_paths=runtime_paths,
                     event_cache=support.event_cache,
-                    targets=resolved_targets,
-                    accumulators=accumulators,
+                    accumulators=validated_targets,
                     max_thread_roots=max_thread_roots,
                     prefer_cache=prefer_cache,
                 )
@@ -205,7 +306,7 @@ async def export_threads_to_targets_once(
             await close_owned_runtime_support(support, logger=logger)
 
     if room_filter is None:
-        _reconcile_full_pass(accumulators)
+        _reconcile_full_pass(validated_targets)
     return tuple(accumulator.stats() for accumulator in accumulators)
 
 

@@ -46,6 +46,7 @@ from mindroom.model_defaults import (
 )
 from mindroom.startup_errors import PermanentStartupError
 from mindroom.thread_export import ThreadExportStats
+from mindroom.thread_export.models import ThreadExportRoom, failure_for_room, failure_for_target
 from tests.conftest import load_config_yaml, normalize_console_output
 
 if TYPE_CHECKING:
@@ -2205,6 +2206,44 @@ class TestVersionAndHelp:
         assert export_kwargs["prefer_cache"] is False
         assert export_kwargs["include_invited_rooms"] is True
         assert export_kwargs["runtime_paths"].storage_root == storage_path.resolve()
+
+    def test_threads_export_formats_target_and_thread_failures(self, tmp_path: Path) -> None:
+        """Thread export output should render target failures without fake room placeholders."""
+        config_path = tmp_path / "config.yaml"
+        output_path = tmp_path / "exports"
+        _write_minimal_runtime_config(config_path)
+        room = ThreadExportRoom(
+            key="lobby",
+            room_id="!lobby:localhost",
+            alias="#lobby:localhost",
+            name="Lobby",
+        )
+        stats = ThreadExportStats(
+            output_dir=output_path,
+            failed_items=(
+                failure_for_target("overlapping output directory"),
+                failure_for_room(
+                    room,
+                    "history fetch failed",
+                    thread_id="$thread:localhost",
+                ),
+            ),
+        )
+
+        with patch(
+            "mindroom.thread_export.export_threads_once",
+            new=AsyncMock(return_value=stats),
+        ):
+            result = _invoke_with_runtime(
+                ["threads", "export", "--output", str(output_path)],
+                config_path,
+            )
+
+        output = normalize_console_output(result.output)
+        assert result.exit_code == 1
+        assert "Failed target: overlapping output directory" in output
+        assert "Failed: lobby $thread:localhost: history fetch failed" in output
+        assert "None" not in output
 
     def test_threads_export_forwards_no_invited_rooms_flag(self, tmp_path: Path) -> None:
         """The --no-invited-rooms flag should reach the exporter."""
