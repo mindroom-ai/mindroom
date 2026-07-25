@@ -322,6 +322,8 @@ async def test_aliased_target_output_directories_are_all_skipped(tmp_path: Path)
     assert [item.failures for item in stats] == [1, 1]
     assert all(item.failed_items[0].room_key is None for item in stats)
     assert all("overlaps another enabled target" in item.failed_items[0].error for item in stats)
+    assert str(targets[1].output_dir) in stats[0].failed_items[0].error
+    assert str(targets[0].output_dir) in stats[1].failed_items[0].error
     assert warning.call_count == 2
     build_export_groups.assert_not_called()
 
@@ -349,6 +351,8 @@ async def test_nested_target_output_directories_are_all_skipped(
     assert tuple(item.output_dir for item in stats) == ordered_dirs
     assert [item.failures for item in stats] == [1, 1]
     assert all("overlaps another enabled target" in item.failed_items[0].error for item in stats)
+    assert str(ordered_dirs[1]) in stats[0].failed_items[0].error
+    assert str(ordered_dirs[0]) in stats[1].failed_items[0].error
     assert not parent_output_dir.exists()
 
 

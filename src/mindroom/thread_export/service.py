@@ -141,28 +141,33 @@ def _validated_targets(
         candidates.append((accumulator, resolved_output_dir))
 
     overlaps: dict[int, list[Path]] = {}
-    for index, (accumulator, resolved_output_dir) in enumerate(candidates):
-        for other_accumulator, other_resolved_output_dir in candidates[index + 1 :]:
+    for index, (_, resolved_output_dir) in enumerate(candidates):
+        for other_index in range(index + 1, len(candidates)):
+            other_accumulator, other_resolved_output_dir = candidates[other_index]
             if not (
                 resolved_output_dir == other_resolved_output_dir
                 or resolved_output_dir.is_relative_to(other_resolved_output_dir)
                 or other_resolved_output_dir.is_relative_to(resolved_output_dir)
             ):
                 continue
-            overlaps.setdefault(id(accumulator), []).append(other_accumulator.target.output_dir)
-            overlaps.setdefault(id(other_accumulator), []).append(accumulator.target.output_dir)
+            overlaps.setdefault(index, []).append(other_accumulator.target.output_dir)
+            overlaps.setdefault(other_index, []).append(candidates[index][0].target.output_dir)
 
     prepared: list[ThreadExportAccumulator] = []
-    for accumulator, resolved_output_dir in candidates:
-        if overlapping := overlaps.get(id(accumulator)):
+    for index, (accumulator, resolved_output_dir) in enumerate(candidates):
+        if overlapping := overlaps.get(index):
+            conflicting = ", ".join(str(path) for path in overlapping)
             accumulator.failed_items.append(
-                failure_for_target(f"output directory overlaps another enabled target: {resolved_output_dir}"),
+                failure_for_target(
+                    f"output directory resolving to {resolved_output_dir} "
+                    f"overlaps another enabled target: {conflicting}",
+                ),
             )
             logger.warning(
                 "Skipping thread export target with overlapping output directory",
                 output_dir=str(accumulator.target.output_dir),
-                comparison_output_dir=str(resolved_output_dir),
-                overlapping_output_dirs=[str(accumulator.target.output_dir), *map(str, overlapping)],
+                resolved_output_dir=str(resolved_output_dir),
+                overlapping_output_dirs=[str(path) for path in overlapping],
             )
             continue
         try:
