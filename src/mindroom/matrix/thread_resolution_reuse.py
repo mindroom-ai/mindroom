@@ -1,23 +1,7 @@
-"""Process-local reuse of resolved thread history across repeated durable-cache reads.
+"""Reuse one fully hydrated thread resolution when a durable suffix is provably append-only.
 
-Long agent threads accumulate one raw ``m.replace`` event per streaming edit, so the durable
-row count grows 10-50x faster than the visible message count. Re-parsing and re-resolving every
-raw row on each turn is the measured post-lock hotspot. This module keeps the last complete
-resolution for one thread per bot and only re-resolves newly written durable rows.
-
-Safety model (any doubt falls back to full resolution by returning ``None``):
-
-1. A snapshot is only comparable when the trusted internal sender set and the durable room
-   membership epoch are identical to the ones the snapshot was resolved under.
-2. The durable event count plus monotonic payload and thread-index write sequences prove whether
-   the thread is unchanged or whether every changed row is present in a bounded delta read. Any
-   deletion, replacement, or in-place update forces full resolution.
-3. Suffix rows must be plain ``m.room.message`` events with new, unique event IDs that were never
-   seen by the snapshot, including every previously observed relation target, and every suffix
-   edit - explicit or bundled - must target a suffix-local event, so no suffix row can mutate or
-   duplicate an already-resolved message.
-4. Snapshots are only stored by the caller when sidecar hydration was fully served from the
-   durable cache, so degraded preview bodies are never frozen into future turns.
+Trust, membership, row revisions, unique IDs, and suffix-local replacement targets must all match.
+Any doubt falls back to full resolution instead of mutating an existing visible message.
 """
 
 from __future__ import annotations

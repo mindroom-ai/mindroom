@@ -12,7 +12,6 @@ from .event_cache_events import (
     batch_redaction_candidate_ids,
     cache_rows_were_deleted,
     decode_cached_event,
-    decode_cached_events,
     event_edit_rows,
     event_mxc_urls,
     event_redaction_candidate_ids,
@@ -118,8 +117,8 @@ async def load_recent_room_events(
     """Return recent cached room events of one type, newest first."""
     if limit <= 0:
         return []
-    rows = await fetchall(
-        db,
+    cursor = db.cursor(name="mindroom_recent_room_events")
+    await cursor.execute(
         """
         SELECT event_json, event_id, origin_server_ts
         FROM mindroom_event_cache_events
@@ -134,11 +133,17 @@ async def load_recent_room_events(
                 OR event_json::jsonb ->> 'room_id' = room_id
             )
         ORDER BY origin_server_ts DESC, write_seq DESC
-        LIMIT %s
         """,
-        (namespace, room_id, since_ts_ms, event_type, limit),
+        (namespace, room_id, since_ts_ms, event_type),
     )
-    return decode_cached_events(rows, room_id=room_id)
+    events: list[dict[str, Any]] = []
+    try:
+        while len(events) < limit and (row := await cursor.fetchone()) is not None:
+            if decoded := decode_cached_event(row[0], row[1], row[2], room_id=room_id):
+                events.append(decoded.event)
+        return events
+    finally:
+        await cursor.close()
 
 
 async def load_latest_edit(
@@ -157,7 +162,8 @@ async def load_latest_edit(
         original=original,
         validator=validator,
     )
-    return None if row is None else row.event
+    candidates = () if row is None else (row.event,)
+    return next(iter(ordered_replacements(original, candidates, room_id=room_id, validator=validator)), None)
 
 
 async def load_latest_edit_row(
@@ -170,7 +176,8 @@ async def load_latest_edit_row(
 ) -> CachedEventRow | None:
     """Return the latest cached edit event plus its lookup-row write time."""
     original_event_id = original.get("event_id")
-    cursor = await db.execute(
+    cursor = db.cursor(name="mindroom_latest_edit")
+    await cursor.execute(
         """
         SELECT
             events.event_json,
@@ -192,7 +199,7 @@ async def load_latest_edit_row(
     try:
         while (row := await cursor.fetchone()) is not None:
             decoded = decode_cached_event(row[0], row[2], row[3], room_id=room_id, cached_at=row[1])
-            if decoded is not None and ordered_replacements(
+            if decoded is not None and decoded.event in ordered_replacements(
                 original,
                 (decoded.event,),
                 room_id=room_id,
@@ -574,7 +581,7 @@ async def write_lookup_index_rows(
         (namespace, room_id, accepted_event_ids),
     )
     for event in accepted_events:
-        for mxc_url in event_mxc_urls(event.event):
+        for mxc_url in event_mxc_urls(event.event, room_id=room_id):
             await db.execute(
                 """
                 INSERT INTO mindroom_event_cache_event_mxc_references(

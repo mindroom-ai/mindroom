@@ -34,6 +34,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.entity_resolution import entity_identity_registry, mindroom_user_id
 from mindroom.logging_config import get_logger
+from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from mindroom.matrix.replacements import ReplacementValidator, ordered_replacements
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.tool_approval import (
@@ -2207,6 +2208,45 @@ async def test_startup_discard_uses_trusted_cached_terminal_edit_despite_newer_u
 
     assert await store.discard_pending_on_startup() == 0
     editor.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_startup_discard_uses_bundled_terminal_status_over_invalid_cached_edit(
+    tmp_path: Path,
+) -> None:
+    """The production cache must not let a forged row hide a bundled terminal approval."""
+    cache = SqliteEventCache(tmp_path / "event-cache.db")
+    await cache.initialize()
+    try:
+        card = _approval_card(sender="@mindroom_router:localhost")
+        bundled_edit = _approval_edit(card, event_id="$bundled-approved", status="approved")
+        card["unsigned"] = {"m.relations": {"m.replace": bundled_edit}}
+        forged_pending = _approval_edit(
+            card,
+            event_id="$forged-pending",
+            sender="@attacker:localhost",
+            status="pending",
+        )
+        forged_pending["origin_server_ts"] = int(bundled_edit["origin_server_ts"]) + 1
+        await cache.store_events_batch(
+            [
+                ("$approval", "!room:localhost", card),
+                ("$forged-pending", "!room:localhost", forged_pending),
+            ],
+        )
+        editor = AsyncMock(return_value=True)
+        store = _ApprovalManager(
+            test_runtime_paths(tmp_path),
+            editor=editor,
+            event_cache=cache,
+            approval_room_ids=lambda: {"!room:localhost"},
+            transport_sender=lambda: "@mindroom_router:localhost",
+        )
+
+        assert await store.discard_pending_on_startup() == 0
+        editor.assert_not_awaited()
+    finally:
+        await cache.close()
 
 
 @pytest.mark.asyncio

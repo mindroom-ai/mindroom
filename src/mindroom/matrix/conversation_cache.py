@@ -53,7 +53,7 @@ from mindroom.matrix.media import (
 )
 from mindroom.matrix.membership_fence import UNCERTIFIED_MEMBERSHIP_EPOCH
 from mindroom.matrix.message_content import extract_edit_body
-from mindroom.matrix.replacements import ordered_replacements, replacement_content
+from mindroom.matrix.replacements import replacement_content
 from mindroom.matrix.thread_bookkeeping import ThreadMutationResolver
 from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
 from mindroom.matrix.thread_membership import resolve_event_thread_membership
@@ -257,18 +257,11 @@ async def _apply_cached_latest_edit(
     if event_source.get("type") != "m.room.message" or event_source_is_state_event(event_source):
         return event_source
 
-    latest_edit_source = await event_cache.get_latest_edit(
+    latest_replacement = await event_cache.get_latest_edit(
         room_id,
         event_source,
         validator=valid_room_message_replacement,
     )
-    replacements = ordered_replacements(
-        event_source,
-        () if latest_edit_source is None else (latest_edit_source,),
-        room_id=room_id,
-        validator=valid_room_message_replacement,
-    )
-    latest_replacement = replacements[0] if replacements else None
     if latest_replacement is None:
         return event_source
 

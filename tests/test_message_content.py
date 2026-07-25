@@ -92,7 +92,9 @@ class TestResolvedMessageExtraction:
         }
 
         assert sidecar_mxc_url(content) == "mxc://server/encrypted-sidecar"
-        assert event_mxc_urls({"content": content}) == frozenset({"mxc://server/encrypted-sidecar"})
+        assert event_mxc_urls({"content": content}, room_id="!room:example") == frozenset(
+            {"mxc://server/encrypted-sidecar"},
+        )
 
     @pytest.mark.parametrize("malformed_url", ["mxc://", "mxc://server"])
     def test_sidecar_url_validation_rejects_incomplete_mxc_uris(self, malformed_url: str) -> None:
@@ -112,8 +114,8 @@ class TestResolvedMessageExtraction:
 
         assert sidecar_mxc_url(direct_content) is None
         assert sidecar_mxc_url(encrypted_content) is None
-        assert event_mxc_urls({"content": direct_content}) == frozenset()
-        assert event_mxc_urls({"content": encrypted_content}) == frozenset()
+        assert event_mxc_urls({"content": direct_content}, room_id="!room:example") == frozenset()
+        assert event_mxc_urls({"content": encrypted_content}, room_id="!room:example") == frozenset()
 
     @pytest.mark.asyncio
     async def test_extract_and_resolve_message_hydrates_v2_sidecar_content(self) -> None:

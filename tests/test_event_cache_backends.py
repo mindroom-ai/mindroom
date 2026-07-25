@@ -8,7 +8,7 @@ import sqlite3
 import uuid
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, Mock
 from urllib.parse import quote
 
@@ -34,6 +34,7 @@ from mindroom.matrix.cache.thread_cache_state import (
     THREAD_HISTORY_TRUST_VERSION,
 )
 from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
+from mindroom.matrix.media import valid_room_message_replacement
 from mindroom.runtime_support import (
     OwnedRuntimeSupport,
     StartupThreadPrewarmRegistry,
@@ -114,7 +115,13 @@ async def _seed_payload_identity_rows(
     *,
     room_id: str,
     thread_id: str,
-) -> tuple[dict[str, object], dict[str, object], dict[str, object], dict[str, object]]:
+) -> tuple[
+    dict[str, object],
+    dict[str, object],
+    dict[str, object],
+    dict[str, object],
+    dict[str, object],
+]:
     """Seed thread, point, recent, and edit rows for raw corruption tests."""
     root = _message_event(
         event_id=thread_id,
@@ -147,6 +154,12 @@ async def _seed_payload_identity_rows(
         body="poisoned",
         origin_server_ts=8000,
     )
+    numeric_poison = _message_event(
+        event_id="$numeric-poison",
+        sender="@agent:localhost",
+        body="numeric poison",
+        origin_server_ts=9000,
+    )
     older_edit = _edit_event(
         event_id="$older-edit",
         sender="@agent:localhost",
@@ -167,11 +180,12 @@ async def _seed_payload_identity_rows(
             ("$poisoned-point", room_id, poisoned_point),
             ("$valid-recent", room_id, valid_recent),
             ("$poisoned-recent", room_id, poisoned_recent),
+            ("$numeric-poison", room_id, numeric_poison),
             ("$older-edit", room_id, older_edit),
             ("$poisoned-edit", room_id, poisoned_edit),
         ],
     )
-    return root, poisoned_point, poisoned_recent, poisoned_edit
+    return root, poisoned_point, poisoned_recent, poisoned_edit, numeric_poison
 
 
 async def _assert_payload_identity_poison_is_rejected(
@@ -210,6 +224,123 @@ async def _assert_payload_identity_poison_is_rejected(
     )
     assert latest_edit is not None
     assert latest_edit["event_id"] == "$older-edit"
+
+
+async def _assert_bundled_and_cached_edits_share_validation(
+    cache: ConversationEventCache,
+    *,
+    room_id: str,
+) -> None:
+    """Assert bundled candidates neither bless invalid rows nor hide older valid rows."""
+    original = _message_event(
+        event_id="$bundled-original",
+        sender="@alice:localhost",
+        body="Original",
+        origin_server_ts=1000,
+    )
+    bundled = _edit_event(
+        event_id="$bundled-edit",
+        sender="@alice:localhost",
+        original_event_id="$bundled-original",
+        body="Bundled",
+        origin_server_ts=3000,
+    )
+    original["unsigned"] = {"m.relations": {"m.replace": bundled}}
+    await cache.store_event("$bundled-original", room_id, original)
+
+    latest = await cache.get_latest_edit(
+        room_id,
+        cast("dict[str, Any]", original),
+        validator=valid_room_message_replacement,
+    )
+    assert latest is not None
+    assert latest["event_id"] == "$bundled-edit"
+
+    older = _edit_event(
+        event_id="$older-valid",
+        sender="@alice:localhost",
+        original_event_id="$bundled-original",
+        body="Older",
+        origin_server_ts=2000,
+    )
+    wrong_sender = _edit_event(
+        event_id="$wrong-sender",
+        sender="@mallory:localhost",
+        original_event_id="$bundled-original",
+        body="Forged",
+        origin_server_ts=5000,
+    )
+    malformed = _edit_event(
+        event_id="$malformed-newest",
+        sender="@alice:localhost",
+        original_event_id="$bundled-original",
+        body="Malformed",
+        origin_server_ts=6000,
+    )
+    cast("dict[str, Any]", malformed["content"])["m.new_content"].pop("msgtype")
+    await cache.store_events_batch(
+        [
+            ("$older-valid", room_id, older),
+            ("$wrong-sender", room_id, wrong_sender),
+            ("$malformed-newest", room_id, malformed),
+        ],
+    )
+
+    latest = await cache.get_latest_edit(
+        room_id,
+        cast("dict[str, Any]", original),
+        validator=valid_room_message_replacement,
+    )
+    assert latest is not None
+    assert latest["event_id"] == "$bundled-edit"
+
+    newer_valid = _edit_event(
+        event_id="$newer-valid",
+        sender="@alice:localhost",
+        original_event_id="$bundled-original",
+        body="Newer",
+        origin_server_ts=4000,
+    )
+    await cache.store_event("$newer-valid", room_id, newer_valid)
+    latest = await cache.get_latest_edit(
+        room_id,
+        cast("dict[str, Any]", original),
+        validator=valid_room_message_replacement,
+    )
+    assert latest is not None
+    assert latest["event_id"] == "$newer-valid"
+
+
+async def _assert_invalid_sidecar_owners_are_rejected(
+    cache: ConversationEventCache,
+    *,
+    room_id: str,
+) -> None:
+    """Assert state and explicit other-room events cannot own durable plaintext."""
+    mxc_url = "mxc://localhost/sidecar"
+    for event_id, invalid_scope in (
+        ("$wrong-room", {"room_id": "!other:localhost"}),
+        ("$state", {"state_key": ""}),
+    ):
+        event = _message_event(
+            event_id=event_id,
+            sender="@alice:localhost",
+            body="Preview",
+            origin_server_ts=1000,
+        )
+        event.update(invalid_scope)
+        event["content"] = {
+            "body": "Preview",
+            "msgtype": "m.file",
+            "url": mxc_url,
+            "io.mindroom.long_text": {
+                "version": 2,
+                "encoding": "matrix_event_content_json",
+            },
+        }
+        await cache.store_event(event_id, room_id, event)
+        assert not await cache.store_mxc_text(room_id, event_id, mxc_url, "plaintext")
+        assert await cache.get_mxc_text(room_id, event_id, mxc_url) is None
 
 
 def _postgres_schema_url(database_url: str, schema_name: str) -> str:
@@ -1920,7 +2051,7 @@ async def test_sqlite_cache_rejects_raw_payload_identity_poison(tmp_path: Path) 
     cache = SqliteEventCache(tmp_path / "event-cache.db")
     await cache.initialize()
     try:
-        root, poisoned_point, poisoned_recent, poisoned_edit = await _seed_payload_identity_rows(
+        root, poisoned_point, poisoned_recent, poisoned_edit, numeric_poison = await _seed_payload_identity_rows(
             cache,
             room_id=room_id,
             thread_id=thread_id,
@@ -1957,6 +2088,12 @@ async def test_sqlite_cache_rejects_raw_payload_identity_poison(tmp_path: Path) 
                     room_id,
                     "$poisoned-edit",
                 ),
+                (
+                    json.dumps({**numeric_poison, "origin_server_ts": 9000.0}),
+                    cache.principal_id,
+                    room_id,
+                    "$numeric-poison",
+                ),
             ],
         )
         await cache._runtime.db.commit()
@@ -1965,6 +2102,19 @@ async def test_sqlite_cache_rejects_raw_payload_identity_poison(tmp_path: Path) 
             room_id=room_id,
             thread_id=thread_id,
         )
+    finally:
+        await cache.close()
+
+
+@pytest.mark.asyncio
+async def test_sqlite_cache_validates_bundled_edits_and_sidecar_owners(tmp_path: Path) -> None:
+    """SQLite must share replacement validity and reject non-timeline plaintext owners."""
+    room_id = "!room:localhost"
+    cache = SqliteEventCache(tmp_path / "event-cache.db")
+    await cache.initialize()
+    try:
+        await _assert_bundled_and_cached_edits_share_validation(cache, room_id=room_id)
+        await _assert_invalid_sidecar_owners_are_rejected(cache, room_id=room_id)
     finally:
         await cache.close()
 
@@ -1983,7 +2133,7 @@ async def test_postgres_cache_rejects_raw_payload_identity_poison(
     )
     await cache.initialize()
     try:
-        root, poisoned_point, poisoned_recent, poisoned_edit = await _seed_payload_identity_rows(
+        root, poisoned_point, poisoned_recent, poisoned_edit, numeric_poison = await _seed_payload_identity_rows(
             cache,
             room_id=room_id,
             thread_id=thread_id,
@@ -1994,6 +2144,7 @@ async def test_postgres_cache_rejects_raw_payload_identity_poison(
             ("$poisoned-point", {**poisoned_point, "event_id": "$forged-point"}),
             ("$poisoned-recent", {**poisoned_recent, "event_id": "$forged-recent"}),
             ("$poisoned-edit", {**poisoned_edit, "event_id": "$forged-edit"}),
+            ("$numeric-poison", {**numeric_poison, "origin_server_ts": 9000.0}),
         ):
             await cache._runtime.db.execute(
                 """
@@ -2009,6 +2160,24 @@ async def test_postgres_cache_rejects_raw_payload_identity_poison(
             room_id=room_id,
             thread_id=thread_id,
         )
+    finally:
+        await cache.close()
+
+
+@pytest.mark.asyncio
+async def test_postgres_cache_validates_bundled_edits_and_sidecar_owners(
+    postgres_event_cache_url: str,
+) -> None:
+    """PostgreSQL must share replacement validity and reject non-timeline plaintext owners."""
+    room_id = "!room:localhost"
+    cache = PostgresEventCache(
+        database_url=postgres_event_cache_url,
+        namespace=f"tenant_{uuid.uuid4().hex}",
+    )
+    await cache.initialize()
+    try:
+        await _assert_bundled_and_cached_edits_share_validation(cache, room_id=room_id)
+        await _assert_invalid_sidecar_owners_are_rejected(cache, room_id=room_id)
     finally:
         await cache.close()
 

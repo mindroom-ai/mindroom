@@ -6,7 +6,12 @@ import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from mindroom.matrix.event_info import EventInfo, event_source_matches_room, event_type_supports_thread_relations
+from mindroom.matrix.event_info import (
+    EventInfo,
+    event_source_is_state_event,
+    event_source_matches_room,
+    event_type_supports_thread_relations,
+)
 from mindroom.matrix.sidecar_content import sidecar_mxc_url
 
 if TYPE_CHECKING:
@@ -118,22 +123,19 @@ def serialize_cacheable_events(cacheable_events: list[_CachedEventValue]) -> lis
     return [serialize_cached_event(event_id, event) for event_id, event in cacheable_events]
 
 
-def event_mxc_urls(event: dict[str, Any]) -> frozenset[str]:
-    """Return room-scoped sidecar MXCs visibly referenced by one event.
-
-    Both the top-level content and an edit's ``m.new_content`` are inspected so
-    plaintext ownership follows every supported long-text representation.
-    """
+def event_mxc_urls(event: dict[str, Any], *, room_id: str) -> frozenset[str]:
+    """Return room-scoped sidecar MXCs referenced by one visible event."""
     content = event.get("content")
-    if not isinstance(content, dict):
+    if (
+        event_source_is_state_event(event)
+        or not event_source_matches_room(event, room_id)
+        or not isinstance(content, dict)
+    ):
         return frozenset()
-    candidate_contents = [content]
-    new_content = content.get("m.new_content")
-    if isinstance(new_content, dict):
-        candidate_contents.append(new_content)
     return frozenset(
         mxc_url
-        for candidate_content in candidate_contents
+        for candidate_content in (content, content.get("m.new_content"))
+        if isinstance(candidate_content, dict)
         if (mxc_url := sidecar_mxc_url(candidate_content)) is not None
     )
 

@@ -160,7 +160,8 @@ async def load_latest_edit(
         original=original,
         validator=validator,
     )
-    return None if row is None else row.event
+    candidates = () if row is None else (row.event,)
+    return next(iter(ordered_replacements(original, candidates, room_id=room_id, validator=validator)), None)
 
 
 async def load_latest_edit_row(
@@ -195,7 +196,7 @@ async def load_latest_edit_row(
     try:
         while (row := await cursor.fetchone()) is not None:
             decoded = decode_cached_event(row[0], row[2], row[3], room_id=room_id, cached_at=row[1])
-            if decoded is not None and ordered_replacements(
+            if decoded is not None and decoded.event in ordered_replacements(
                 original,
                 (decoded.event,),
                 room_id=room_id,
@@ -614,7 +615,7 @@ async def write_lookup_index_rows(
     reference_rows = [
         (principal_id, room_id, event.event_id, mxc_url)
         for event in accepted_events
-        for mxc_url in event_mxc_urls(event.event)
+        for mxc_url in event_mxc_urls(event.event, room_id=room_id)
     ]
     if reference_rows:
         await db.executemany(
