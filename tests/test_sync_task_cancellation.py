@@ -2454,5 +2454,11 @@ async def test_single_failure_no_duplicate_cleanup_logs(
     with capture_logs() as logs:
         await sync_forever_with_restart(bot, max_retries=1)
 
-    cleanup_warnings = [entry for entry in logs if entry["event"] == "Suppressed error during sync iteration cleanup"]
-    assert len(cleanup_warnings) == 1, f"Expected exactly 1 cleanup warning, got {len(cleanup_warnings)}"
+    cleanup_warnings = [entry for entry in logs if entry["event"] == "sync_iteration_cleanup_failed"]
+    assert cleanup_warnings == [
+        {
+            "event": "sync_iteration_cleanup_failed",
+            "exception_type": "RuntimeError",
+            "log_level": "warning",
+        },
+    ]

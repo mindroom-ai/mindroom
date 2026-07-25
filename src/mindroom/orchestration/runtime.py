@@ -345,8 +345,11 @@ class _SyncIteration:
                 await task
             except (asyncio.CancelledError, _MatrixSyncStalledError):
                 pass
-            except Exception:
-                logger.warning("Suppressed error during sync iteration cleanup", exc_info=True)
+            except Exception as exc:
+                logger.warning(
+                    "sync_iteration_cleanup_failed",
+                    exception_type=type(exc).__name__,
+                )
 
 
 @dataclass(frozen=True, slots=True)
