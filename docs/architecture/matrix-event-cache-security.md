@@ -44,7 +44,7 @@ Durable invalidation prevents reuse through the normal freshness gate, resolutio
 
 Hydration without complete principal, room, event, and MXC identity may return freshly downloaded content to the current call, but it cannot read or populate the durable cache.
 
-Every durable plaintext hit revalidates the requesting event's surviving room-scoped MXC reference.
+Every durable plaintext hit revalidates the requesting event's surviving room-scoped MXC reference, indexed payload identity, non-state status, explicit room scope, and current sidecar metadata.
 
 Redaction runs in the same database transaction as event, dependent-edit, thread-index, edit-index, and reference removal.
 

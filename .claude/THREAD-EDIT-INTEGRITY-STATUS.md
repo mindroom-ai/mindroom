@@ -8,14 +8,14 @@
 - Rejected frozen head: `abb8d4292672c91c4cb551772d214cdca54378e0`.
 - Current production source-reset head: `6a69cfd6daa88880b047c0675148612cb5ac4003`.
 - Rejected review head: `fae7ddad0b5242396565b2069a439875718d12d5`.
-- Current pushed branch and production code head: `83442e9914ced7cf02f8915d75c0f63131b92b4d`.
+- Current pushed branch and production code head: `c850dc41af8a04fc5164edc0bedf8aeb52a5762c`.
 - Never merge this pull request.
 - Never amend or force-push.
 
 ## Current gate state
 
 - Fresh native Codex xhigh and Claude Opus 5 high both returned `CHANGES REQUIRED` on exact `fae7ddad0b5242396565b2069a439875718d12d5`.
-- Follow-up commits `8fbc4b033` and `83442e991` fix the verified blockers and invalidate every review and CI result from `fae7ddad0`.
+- Follow-up commits through `c850dc41a` fix the verified blockers and invalidate every review and CI result from `fae7ddad0`.
 - GitHub CI on the new pushed head is pending.
 - Real-Tuwunel has not run.
 - PR #1646 owns the heavy resource slot, and PR #1641 must not run full pytest, PostgreSQL fanout, Docker, all-file hooks, or live validation.
@@ -35,10 +35,11 @@
 - Cache lookup now validates the explicit row itself, combines it with bundled candidates only after validation, and preserves malformed-newest fallback.
 - PostgreSQL latest-edit and recent-event fallback use server-side cursors, while canonical equal-timestamp ordering remains explicit `COLLATE "C"`.
 - Sidecar ownership and `/threads` roots reject state events and explicit room conflicts.
+- Sidecar plaintext persistence and reads revalidate legacy reference rows through the shared indexed-event decoder and ownership predicate.
 - Bounded stale-stream cleanup proves edit-only history does not synthesize a visible original.
 - Focused replacement, approval, thread-page, stale-cleanup, Ruff, formatting, commit-hook, and Tach checks pass.
 - One focused selector unintentionally expanded to PostgreSQL parametrizations while the resource slot was unavailable; all `37` cases passed, and no further PostgreSQL work may run before ownership.
-- Current pushed production source diff is `+693/-503`, net `+190` against the exact merge base.
+- Current pushed production source diff is `+745/-553`, net `+192` against the exact merge base.
 - Commit and push Tach, docs, and this handoff, then refresh the PR body and campaign evidence for the exact new head.
 - Re-run the owning cache suites, full pytest, all-file pre-commit, and real-Tuwunel only under resource ownership.
 - Remove this file only when a new exact head is frozen.
@@ -62,7 +63,7 @@
 
 ## Active source-minimal reset
 
-- The source-minimal reset and review corrections are published through `83442e9914ced7cf02f8915d75c0f63131b92b4d`.
+- The source-minimal reset and review corrections are published through `c850dc41af8a04fc5164edc0bedf8aeb52a5762c`.
 - `src/mindroom/matrix/replacements.py` is the 76-line replacement-domain owner for bundled flattening, identity, scope, relation validity, canonical ordering, and content projection.
 - `event_info.py` is restored to relation facts plus the small room and state helpers.
 - Cache edit lookup now receives the full original event and a surface validator, while one cache-row decoder validates durable payload identity.
@@ -70,7 +71,7 @@
 - Full history, bundled preview, point lookup, snapshots, approval lookup, sidecar hydration, and cleanup consume the shared candidate seam.
 - The custom encrypted-media and Base64 validator, compatibility re-exports, duplicate selectors, duplicate projections, and schema-v4 migration are removed.
 - PostgreSQL schema v3 intentionally retains `idx_mindroom_event_cache_event_edits_room_original_ts` as the single narrowing index because explicit query-level `COLLATE "C"` owns equal-timestamp correctness.
-- Production source is currently `+693/-503`, net `+190` against merge base `66dd4f4a68bcfd1a5e43b2cac20a1b464f306ab1`, satisfying the hard `<= +200` gate.
+- Production source is currently `+745/-553`, net `+192` against merge base `66dd4f4a68bcfd1a5e43b2cac20a1b464f306ab1`, satisfying the hard `<= +200` gate.
 - Ruff formatting, Ruff lint, `ty`, and diff checks pass for every dirty Python file.
 - The exact non-PostgreSQL prior-CI files pass `15`, `13`, `18`, and `4` tests.
 - Full `tests/test_event_cache.py` and focused thread, approval, and cache-contract regressions pass.
