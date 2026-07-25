@@ -45,7 +45,6 @@ from urllib.parse import quote
 
 import httpx
 import nio
-import psutil
 import yaml
 
 import mindroom
@@ -104,6 +103,8 @@ else:
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
     from io import TextIOWrapper
+
+    import psutil
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 INSTANCE_REGISTRY = PROJECT_ROOT / "local" / "instances" / "deploy" / "instances.json"
@@ -5607,16 +5608,18 @@ def _sample_mindroom_process(
     process: psutil.Process | None,
 ) -> tuple[psutil.Process, float, int]:
     """Sample the current runtime process, rebinding after managed restarts."""
+    import psutil as psutil_module  # noqa: PLC0415
+
     pid = stack.mindroom_pid
     if pid is None:
         msg = "MindRoom process missing during stress resource sampling"
         raise RuntimeError(msg)
     if process is None or process.pid != pid:
-        process = psutil.Process(pid)
+        process = psutil_module.Process(pid)
         process.cpu_percent(None)
     try:
         return process, process.cpu_percent(None), process.memory_info().rss
-    except psutil.Error as exc:
+    except psutil_module.Error as exc:
         msg = f"MindRoom process {pid} disappeared during stress resource sampling"
         raise RuntimeError(msg) from exc
 

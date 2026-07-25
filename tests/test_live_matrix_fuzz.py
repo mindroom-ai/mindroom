@@ -23,6 +23,7 @@ from mindroom.streaming import RESTART_INTERRUPTED_RESPONSE_NOTE
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection
 
+import psutil
 import pytest
 
 import scripts.testing.fuzz_live_matrix as live_fuzz
@@ -4410,7 +4411,7 @@ def test_resource_sampler_rebinds_after_managed_runtime_restart(
     current_process.cpu_percent.side_effect = [None, 37.5]
     current_process.memory_info.return_value = SimpleNamespace(rss=123456)
     process_factory = MagicMock(return_value=current_process)
-    monkeypatch.setattr(live_fuzz.psutil, "Process", process_factory)
+    monkeypatch.setattr(psutil, "Process", process_factory)
 
     process, cpu_percent, rss_bytes = live_fuzz._sample_mindroom_process(
         stack,  # type: ignore[arg-type]
