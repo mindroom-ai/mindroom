@@ -126,7 +126,9 @@ class TerminalDeliveryWorker:
 
     async def _wait_for_work(self) -> None:
         """Wait for a wakeup or the next scheduled attempt, whichever comes first."""
-        timeout = await asyncio.to_thread(self._seconds_until_next_attempt)
+        # Reading the schedule only touches already-warmed in-memory state, so it
+        # stays on the loop; every mutating store call still runs off it.
+        timeout = self._seconds_until_next_attempt()
         with contextlib.suppress(TimeoutError):
             await asyncio.wait_for(self._wake.wait(), timeout)
         self._wake.clear()

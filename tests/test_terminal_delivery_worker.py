@@ -25,6 +25,7 @@ if TYPE_CHECKING:
 
 
 ROOM_ID = "!room:localhost"
+_STATE_WAIT_TIMEOUT_SECONDS = 5.0
 
 
 class _Clock:
@@ -91,6 +92,16 @@ def _worker(
 
 def _store(tmp_path: Path, clock: _Clock) -> TerminalDeliveryStore:
     return TerminalDeliveryStore(agent_name="helper", base_path=tmp_path / "tracking", clock=clock)
+
+
+async def _wait_for_state(store: TerminalDeliveryStore, delivery_id: str, state: str) -> None:
+    """Wait until one durable record reaches an expected state."""
+    async with asyncio.timeout(_STATE_WAIT_TIMEOUT_SECONDS):
+        while True:
+            item = store.get(delivery_id)
+            if item is not None and item.state == state:
+                return
+            await asyncio.sleep(0.01)
 
 
 class TestRecoveryConvergence:
@@ -353,6 +364,7 @@ class TestLifecycle:
         try:
             worker.wake(reason="sync_response_applied")
             await asyncio.wait_for(delivered.wait(), timeout=5.0)
+            await _wait_for_state(store, recorded.delivery_id, "delivered")
         finally:
             await worker.stop()
 
