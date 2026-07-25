@@ -469,7 +469,7 @@ async def replace_thread_locked_if_not_newer(
         fetch_started_at=fetch_started_at,
         has_snapshot_rows=False,
     )
-    if conflict is not None and conflict.outcome is ThreadCacheReplaceOutcome.RETRYABLE_CONFLICT:
+    if conflict is not None:
         conflict = guarded_thread_replacement_conflict(
             cache_state_row,
             fetch_started_at=fetch_started_at,
