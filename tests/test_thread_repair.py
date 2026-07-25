@@ -44,7 +44,9 @@ async def test_twenty_missing_thread_callers_share_one_repair_and_converge(  # n
     room_id = "!room:localhost"
     thread_id = "$thread"
     principal_id = "@agent:localhost"
-    cache = SqliteEventCache(tmp_path / "event_cache.db").for_principal(principal_id)
+    # Only the root owner closes the shared aiosqlite connection, whose thread is non-daemon.
+    root_cache = SqliteEventCache(tmp_path / "event_cache.db")
+    cache = root_cache.for_principal(principal_id)
     await cache.initialize()
     coordinator = EventCacheWriteCoordinator(logger=MagicMock())
     repair_started = asyncio.Event()
@@ -125,7 +127,7 @@ async def test_twenty_missing_thread_callers_share_one_repair_and_converge(  # n
         subsequent_result = await read_or_repair()
     finally:
         release_repair.set()
-        await cache.close()
+        await root_cache.close()
 
     assert fetch_count == 1
     assert all(result == expected_ids for result in results)
@@ -318,3 +320,34 @@ def test_retained_deltas_expire_once_any_new_scan_would_observe_them() -> None:
     registry.retain_delta(key, _event("$new", 2000, thread_id="$thread"))
 
     assert [source["event_id"] for source in registry.pending_deltas(key)] == ["$new"]
+
+
+@pytest.mark.asyncio
+async def test_retained_delta_survives_a_scan_that_outlives_the_retention_window() -> None:
+    """A scan started before the event must still replay it, however long pagination takes."""
+    now = 100.0
+    registry = ThreadRepairRegistry(delta_retention_seconds=30.0, clock=lambda: now)
+    key = ("@agent:localhost", "!room:localhost", "$thread")
+    scan_started = asyncio.Event()
+    release_scan = asyncio.Event()
+    replayed_event_ids: list[str] = []
+
+    async def repair() -> str:
+        scan_started.set()
+        await release_scan.wait()
+        replayed_event_ids.extend(str(source["event_id"]) for source in registry.pending_deltas(key))
+        return "stored"
+
+    flight = asyncio.create_task(registry.run(key, schedule=_schedule, repair=repair))
+    try:
+        await scan_started.wait()
+        registry.retain_delta(key, _event("$live", 2000, thread_id="$thread"))
+        # Observed scans in issue #1648 reach 77s, well past the retention window.
+        now = 200.0
+    finally:
+        release_scan.set()
+        await flight
+
+    assert replayed_event_ids == ["$live"]
+    now = 300.0
+    assert registry.pending_deltas(key) == ()

@@ -127,6 +127,11 @@ class ThreadRepairRegistry:
     def _drop_expired_deltas(self) -> None:
         cutoff = self.clock() - self.delta_retention_seconds
         for key, deltas in list(self._deltas.items()):
+            if self._active_task(key) is not None:
+                # Retention assumes a later scan already observes the event, which only holds for a
+                # scan that starts after it. A running scan may have started earlier and paginate past
+                # the window, so its deltas stay until that flight ends and a fresh scan can see them.
+                continue
             for event_id, delta in list(deltas.items()):
                 if delta.retained_at <= cutoff:
                     del deltas[event_id]

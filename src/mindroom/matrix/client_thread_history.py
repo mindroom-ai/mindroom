@@ -1119,9 +1119,18 @@ class _ThreadCacheRefillAttempt:
     """One completed reconstruct-and-store attempt and any already-usable winner."""
 
     cache_store_outcome: str
-    usable: bool
-    retryable: bool
+    replace_outcome: ThreadCacheReplaceOutcome | None
     existing_history: ThreadHistoryResult | None = None
+
+    @property
+    def usable(self) -> bool:
+        """Return whether this attempt left a usable durable snapshot."""
+        return self.replace_outcome is not None and self.replace_outcome.usable
+
+    @property
+    def retryable(self) -> bool:
+        """Return whether another bounded reconstruction may still install a snapshot."""
+        return self.replace_outcome is not None and self.replace_outcome.retryable
 
 
 async def _fetch_thread_repair_snapshot(
@@ -1232,8 +1241,7 @@ def _refill_attempt_for_outcome(
 ) -> _ThreadCacheRefillAttempt:
     return _ThreadCacheRefillAttempt(
         cache_store_outcome=outcome.value,
-        usable=outcome.usable,
-        retryable=outcome.retryable,
+        replace_outcome=outcome,
         existing_history=existing_history,
     )
 
@@ -1259,7 +1267,7 @@ async def _store_repaired_thread_snapshot(
         fetch_result=fetch_result,
     )
     if skipped_reason is not None:
-        return _ThreadCacheRefillAttempt(cache_store_outcome=skipped_reason, usable=False, retryable=False)
+        return _ThreadCacheRefillAttempt(cache_store_outcome=skipped_reason, replace_outcome=None)
     outcome = await _store_thread_history_cache(
         event_cache,
         room_id=room_id,
@@ -1426,7 +1434,9 @@ async def refresh_thread_history_from_source(
 
     assert fetch_result is not None
     assert attempt is not None
-    if attempt.retryable:
+    if attempt.replace_outcome is not None and not attempt.usable:
+        # Covers durable-write faults too, not just conflicts: a cache that cannot accept writes is
+        # the condition operators most need to see, and it is otherwise only logged at INFO.
         logger.warning(
             "Thread cache repair did not install a usable snapshot",
             room_id=room_id,
