@@ -476,10 +476,14 @@ async def test_dispatch_thread_read_timeout_does_not_cancel_pending_cache_write(
 
 
 @pytest.mark.asyncio
-async def test_dispatch_thread_read_joins_singleflight_repair_after_idle_wait(
+async def test_dispatch_thread_read_enters_repair_ownership_once_after_idle_wait(
     tmp_path: Path,
 ) -> None:
-    """Dispatch fetches should enter single-flight repair after the bounded idle wait."""
+    """Dispatch fetches should claim repair ownership exactly once, after the bounded idle wait.
+
+    Joining an existing flight is owned by the registry and covered in ``test_thread_repair``; this
+    read-path test stubs the coordinator, so it can only observe that ownership is claimed once.
+    """
     event_cache = SqliteEventCache(tmp_path / "event_cache.db")
     await event_cache.initialize()
     client = MagicMock()
