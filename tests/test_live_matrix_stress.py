@@ -329,6 +329,7 @@ def test_duplicate_cache_repair_scan_fails_gate() -> None:
         "event": "matrix_cache_thread_history_refreshed",
         "mode": "full_scan",
         "thread_id": "thread-001",
+        "caller_label": "dispatch_context",
     }
 
     metrics.ingest(event)
@@ -336,6 +337,21 @@ def test_duplicate_cache_repair_scan_fails_gate() -> None:
 
     with pytest.raises(AssertionError, match="duplicate repair scans"):
         metrics.assert_healthy()
+
+
+def test_different_full_scan_callers_are_not_duplicate_repairs() -> None:
+    metrics = StressLogMetrics()
+    event = {
+        "event": "matrix_cache_thread_history_refreshed",
+        "mode": "full_scan",
+        "thread_id": "thread-001",
+    }
+
+    metrics.ingest({**event, "caller_label": "dispatch_context"})
+    metrics.ingest({**event, "caller_label": "thread_summary_background"})
+
+    assert metrics.repair_fetches_by_thread == {"thread-001": 2}
+    metrics.assert_healthy()
 
 
 def test_whole_run_health_can_exclude_intentional_cross_phase_repairs() -> None:

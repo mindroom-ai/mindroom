@@ -4495,11 +4495,16 @@ def test_cache_wave_gate_records_unresolved_warm_scans_without_accepting_duplica
         full_scans=2,
         cache_hits=2,
         repair_fetches_by_thread={"thread-0": 1, "thread-1": 1},
+        repair_fetches_by_thread_and_caller={
+            ("thread-0", "dispatch_context"): 1,
+            ("thread-1", "dispatch_context"): 1,
+        },
     )
 
     runner._assert_cache_wave_shape((cold, warm))
 
     warm.repair_fetches_by_thread["thread-0"] = 2
+    warm.repair_fetches_by_thread_and_caller[("thread-0", "dispatch_context")] = 2
     with pytest.raises(AssertionError, match="duplicate repair scans"):
         runner._assert_cache_wave_shape((cold, warm))
 

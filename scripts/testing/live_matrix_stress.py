@@ -418,6 +418,7 @@ class StressLogMetrics:
     live_append_successes: int = 0
     live_append_failures: int = 0
     repair_fetches_by_thread: Counter[str] = field(default_factory=Counter)
+    repair_fetches_by_thread_and_caller: Counter[tuple[str, str]] = field(default_factory=Counter)
     reservation_created: int = 0
     reservation_alias_transitions: int = 0
     reservation_released: int = 0
@@ -491,6 +492,8 @@ class StressLogMetrics:
                 self.full_scans += 1
                 thread_label = str(event.get("thread_id", "<unknown-thread>"))
                 self.repair_fetches_by_thread[thread_label] += 1
+                caller_label = str(event.get("caller_label", "<unknown-caller>"))
+                self.repair_fetches_by_thread_and_caller[(thread_label, caller_label)] += 1
             reject_reason = event.get("cache_reject_reason")
             if isinstance(reject_reason, str) and reject_reason:
                 self.cache_invalidated_reasons[reject_reason] += 1
@@ -616,7 +619,11 @@ class StressLogMetrics:
         )
         failures.extend(f"{count} {label}" for count, label in health_counts if count)
         if check_duplicate_repairs:
-            duplicate_repairs = {thread: count for thread, count in self.repair_fetches_by_thread.items() if count > 1}
+            duplicate_repairs = {
+                f"{thread} ({caller})": count
+                for (thread, caller), count in self.repair_fetches_by_thread_and_caller.items()
+                if count > 1
+            }
             if duplicate_repairs:
                 failures.append(f"duplicate repair scans: {duplicate_repairs}")
         if failures:
