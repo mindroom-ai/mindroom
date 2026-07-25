@@ -2180,7 +2180,32 @@ async def _finish_runtime_shutdown(
         shutdown_primary_worker_manager()
 
 
-async def main(  # noqa: PLR0915
+async def _wait_for_runtime_shutdown_cleanup(
+    cleanup_task: asyncio.Task[None],
+    *,
+    shutdown_was_requested: bool,
+) -> None:
+    """Wait for cleanup while preserving caller cancellation semantics."""
+    while True:
+        try:
+            await asyncio.shield(cleanup_task)
+        except asyncio.CancelledError:
+            if cleanup_task.done():
+                await cleanup_task
+                return
+            if not shutdown_was_requested:
+                cleanup_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await cleanup_task
+                raise
+            # Once orderly shutdown starts, later cancellation is duplicate
+            # shutdown pressure; cleanup must finish before main returns.
+            logger.info("Ignoring repeated signal cancellation during runtime cleanup")
+        else:
+            return
+
+
+async def main(
     log_level: str,
     runtime_paths: RuntimePaths,
     *,
@@ -2265,6 +2290,8 @@ async def main(  # noqa: PLR0915
     except asyncio.CancelledError:
         if not shutdown_requested.is_set():
             raise
+        # After an explicit shutdown request, cancellation is shutdown pressure
+        # rather than caller cancellation and must not bypass orderly cleanup.
         logger.info("Ignoring duplicate signal cancellation during requested shutdown")
     except KeyboardInterrupt:
         shutdown_requested.set()
@@ -2291,13 +2318,7 @@ async def main(  # noqa: PLR0915
             ),
             name="runtime_shutdown",
         )
-        try:
-            await asyncio.shield(cleanup_task)
-        except asyncio.CancelledError:
-            if not shutdown_was_requested:
-                cleanup_task.cancel()
-                with suppress(asyncio.CancelledError):
-                    await cleanup_task
-                raise
-            logger.info("Ignoring duplicate signal cancellation during runtime cleanup")
-            await cleanup_task
+        await _wait_for_runtime_shutdown_cleanup(
+            cleanup_task,
+            shutdown_was_requested=shutdown_was_requested,
+        )

@@ -571,11 +571,11 @@ class TestAgentBot(AgentBotTestBase):
         mock_orchestrator.start.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_orchestrator_main_finishes_requested_shutdown_after_duplicate_signal_cancel(
+    async def test_orchestrator_main_finishes_requested_shutdown_after_repeated_signal_cancels(
         self,
         tmp_path: Path,
     ) -> None:
-        """A second SIGINT cancellation must not abort cleanup started by the first signal."""
+        """Repeated SIGINT cancellation must not abort cleanup started by the first signal."""
         reset_runtime_state()
         stop_started = asyncio.Event()
         stop_released = asyncio.Event()
@@ -614,6 +614,8 @@ class TestAgentBot(AgentBotTestBase):
                 main(log_level="INFO", runtime_paths=self._runtime_paths(tmp_path), api=False),
             )
             await asyncio.wait_for(stop_started.wait(), timeout=1)
+            main_task.cancel()
+            await asyncio.sleep(0)
             main_task.cancel()
             stop_released.set()
             await asyncio.wait_for(main_task, timeout=1)
