@@ -140,32 +140,45 @@ async def test_new_typing_lease_waits_for_prior_stop_request() -> None:
 
 @pytest.mark.asyncio
 async def test_shared_typing_lease_uses_longest_requested_timeout() -> None:
-    """Mixed callers should explicitly converge on the longest active lease timeout."""
+    """A joiner asking for a longer timeout must re-send typing at that timeout.
+
+    Recording the raised timeout is not enough: the creating turn already sent its
+    shorter one and is sleeping on it, so without an explicit re-send the longer
+    turn silently keeps the short lease and stops showing as typing early.
+    """
     client = AsyncMock()
     room_id = "!room:example.org"
-    both_entered = asyncio.Event()
+    first_entered = asyncio.Event()
     release_turns = asyncio.Event()
-    entered_count = 0
+    raised_timeout_sent = asyncio.Event()
 
-    async def turn(timeout_seconds: int) -> None:
-        nonlocal entered_count
+    async def room_typing(_room_id: str, typing: bool, timeout_ms: int) -> None:
+        if typing and timeout_ms == 60_000:
+            raised_timeout_sent.set()
+
+    client.room_typing.side_effect = room_typing
+
+    async def turn(timeout_seconds: int, entered: asyncio.Event) -> None:
         async with typing_indicator(client, room_id, timeout_seconds=timeout_seconds):
-            entered_count += 1
-            if entered_count == 2:
-                both_entered.set()
+            entered.set()
             await release_turns.wait()
 
-    tasks = [
-        asyncio.create_task(turn(10)),
-        asyncio.create_task(turn(60)),
-    ]
-    await asyncio.wait_for(both_entered.wait(), timeout=1)
+    short_task = asyncio.create_task(turn(10, first_entered))
+    await asyncio.wait_for(first_entered.wait(), timeout=1)
+
+    long_entered = asyncio.Event()
+    long_task = asyncio.create_task(turn(60, long_entered))
+    await asyncio.wait_for(long_entered.wait(), timeout=1)
 
     state = next(iter(typing_module._ACTIVE_TYPING.values()))
     assert state.timeout_seconds == 60
+    # The raised timeout must actually reach Matrix, not just the lease state.
+    await asyncio.wait_for(raised_timeout_sent.wait(), timeout=1)
+    sent_timeouts = [call.args[2] for call in client.room_typing.await_args_list if call.args[1]]
+    assert sent_timeouts == [10_000, 60_000]
 
     release_turns.set()
-    await asyncio.gather(*tasks)
+    await asyncio.gather(short_task, long_task)
     assert not typing_module._ACTIVE_TYPING
 
 

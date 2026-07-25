@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager, suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import nio
@@ -16,6 +16,8 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
+_MAX_REFRESH_INTERVAL_SECONDS = 15
+
 
 @dataclass
 class _TypingState:
@@ -26,6 +28,10 @@ class _TypingState:
     started: asyncio.Future[None]
     refresh_task: asyncio.Task[None] | None = None
     stopping: asyncio.Future[None] | None = None
+    # Set when a joiner raises ``timeout_seconds``. The refresh loop waits on it
+    # instead of a bare sleep so a longer-lived turn re-sends typing at its own
+    # timeout immediately rather than inheriting the creating turn's shorter one.
+    timeout_raised: asyncio.Event = field(default_factory=asyncio.Event)
 
 
 _ACTIVE_TYPING: dict[tuple[nio.AsyncClient, str], _TypingState] = {}
@@ -70,10 +76,16 @@ async def _refresh_typing(
     The lease outlives individual turns, so a failed request must not end the
     loop: later holders joining this lease would otherwise never see typing
     again. Every attempt is best-effort and the next tick simply retries.
+
+    A joiner asking for a longer timeout sets ``timeout_raised``, which cuts the
+    current sleep short so the next request goes out at the new timeout instead
+    of leaving a long turn on the creating turn's shorter one.
     """
     while True:
+        state.timeout_raised.clear()
+        sent_timeout_seconds = state.timeout_seconds
         try:
-            await _set_typing(client, room_id, True, state.timeout_seconds)
+            await _set_typing(client, room_id, True, sent_timeout_seconds)
         except asyncio.CancelledError:
             if not state.started.done():
                 state.started.cancel()
@@ -82,7 +94,11 @@ async def _refresh_typing(
             logger.warning("Failed to set typing indicator", room_id=room_id, exc_info=True)
         if not state.started.done():
             state.started.set_result(None)
-        await asyncio.sleep(min(state.timeout_seconds / 2, 15))
+        with suppress(TimeoutError):
+            await asyncio.wait_for(
+                state.timeout_raised.wait(),
+                timeout=min(sent_timeout_seconds / 2, _MAX_REFRESH_INTERVAL_SECONDS),
+            )
 
 
 async def _acquire_typing_state(
@@ -98,7 +114,9 @@ async def _acquire_typing_state(
             await asyncio.shield(state.stopping)
             continue
         state.references += 1
-        state.timeout_seconds = max(state.timeout_seconds, timeout_seconds)
+        if timeout_seconds > state.timeout_seconds:
+            state.timeout_seconds = timeout_seconds
+            state.timeout_raised.set()
         return key, state
 
     started = asyncio.get_running_loop().create_future()
