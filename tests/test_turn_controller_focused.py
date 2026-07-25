@@ -1215,17 +1215,24 @@ async def test_interactive_selection_persistence_failure_prevents_ack_and_genera
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(("edit_succeeds", "expected_send_count"), [(True, 1), (False, 2)])
 async def test_interactive_selection_refused_by_config_apply_settles_ack_placeholder(
     config: Config,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    edit_succeeds: bool,
+    expected_send_count: int,
 ) -> None:
     """A refused selection must terminalize its ack instead of leaving it 'Processing...'.
 
     The ack is already visible and the refusal path itself does no Matrix I/O,
-    so without this the user watches a placeholder that never resolves.
+    so without this the user watches a placeholder that never resolves. The edit
+    is parametrized because this runs while an apply is stopping entities, which
+    is exactly when an edit is most likely to fail; the fallback send is what
+    keeps the placeholder from being stranded anyway.
     """
     harness = _build_harness(config, tmp_path)
+    harness.gateway.edit_succeeds = edit_succeeds
     room = nio.MatrixRoom(_ROOM_ID, _entity_user_id(config, "general"))
     selection = interactive.InteractiveSelection(
         question_event_id="$question:localhost",
@@ -1252,12 +1259,18 @@ async def test_interactive_selection_refused_by_config_apply_settles_ack_placeho
     )
 
     # The ack was sent, then edited in place to a terminal note.
-    assert len(harness.gateway.sent) == 1
+    assert len(harness.gateway.sent) == expected_send_count
     assert len(harness.gateway.edited) == 1
     edit_request = harness.gateway.edited[0]
     assert edit_request.event_id == "$sent-1:localhost"
     assert "configuration reload" in edit_request.new_text.lower()
     assert edit_request.extra_content == {constants.STREAM_STATUS_KEY: constants.STREAM_STATUS_COMPLETED}
+    if not edit_succeeds:
+        # The edit failed, so the note must still reach the room as a new message
+        # rather than leaving the placeholder on "Processing...".
+        fallback_request = harness.gateway.sent[1]
+        assert fallback_request.response_text == edit_request.new_text
+        assert fallback_request.extra_content == edit_request.extra_content
 
     # The turn stays uncompleted so restart replay can still pick it up.
     record = harness.turn_store.get_turn_record(selection_event_id)

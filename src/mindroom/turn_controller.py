@@ -1679,12 +1679,26 @@ class TurnController:
             event_id=event_id,
             **target.log_context,
         )
-        await self.deps.delivery_gateway.edit_text(
+        terminal_extra_content = {STREAM_STATUS_KEY: STREAM_STATUS_COMPLETED}
+        edited = await self.deps.delivery_gateway.edit_text(
             EditTextRequest(
                 target=target,
                 event_id=event_id,
                 new_text=_CONFIG_APPLY_REFUSAL_NOTE,
-                extra_content={STREAM_STATUS_KEY: STREAM_STATUS_COMPLETED},
+                extra_content=terminal_extra_content,
+            ),
+        )
+        if edited:
+            return
+        # The edit failed, so the placeholder still reads "Processing...". Fall back
+        # to a fresh message: this runs while an apply is tearing entities down,
+        # which is exactly when an edit is most likely to fail, and leaving the
+        # placeholder unsettled is the defect this helper exists to prevent.
+        await self.deps.delivery_gateway.send_text(
+            SendTextRequest(
+                target=target,
+                response_text=_CONFIG_APPLY_REFUSAL_NOTE,
+                extra_content=terminal_extra_content,
             ),
         )
 

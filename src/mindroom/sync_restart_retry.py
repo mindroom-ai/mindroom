@@ -133,25 +133,31 @@ class SyncRestartRetryQueue:
             key = next(iter(self._pending))
             pending = self._pending.pop(key)
             retry = pending.callback
-            self._mark_attempted(key)
             logger.info("sync_restart_retry_started", source_event_id=key)
+            # Burn the key unless admission refused it. Promoting only after the
+            # retry actually ran means there is no rollback to get wrong:
+            # _mark_attempted evicts the oldest key once it hits its bound, and
+            # that eviction cannot be undone.
+            attempted = True
             try:
                 await retry()
             except ResponseAdmissionRefusedError:
                 # A config apply refused the response before any lifecycle work,
-                # so nothing was attempted. Requeue instead of burning the key.
-                # Stop the pass rather than re-raising: the gate stays closed for
-                # the whole apply, so every remaining retry would refuse too, and
-                # they must stay pending for the next flush.
-                self._attempted.pop(key, None)
-                # Reinsert at the front so the next flush keeps FIFO order.
+                # so nothing ran. Stop the pass rather than re-raising: the gate
+                # stays closed for the whole apply, so every remaining retry
+                # would refuse too, and they must stay pending for the next
+                # flush. Reinsert at the front so that flush keeps FIFO order.
+                attempted = False
                 self._pending = {key: pending, **self._pending}
                 logger.info("sync_restart_retry_deferred_by_config_apply", source_event_id=key)
                 return
             except asyncio.CancelledError:
-                # The flush task is being torn down mid-retry; the key was already
-                # promoted to attempted, so log the dead end before propagating.
+                # The flush task is being torn down mid-retry; the retry did run,
+                # so log the dead end before propagating.
                 logger.warning("sync_restart_retry_cancelled", source_event_id=key)
                 raise
             except Exception:
                 logger.exception("sync_restart_retry_failed", source_event_id=key)
+            finally:
+                if attempted:
+                    self._mark_attempted(key)
