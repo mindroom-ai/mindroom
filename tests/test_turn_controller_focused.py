@@ -615,6 +615,36 @@ async def test_single_router_relay_persists_human_prompt_ownership(config: Confi
 
 
 @pytest.mark.asyncio
+async def test_router_relay_is_admitted_while_original_ingress_claim_is_active(
+    config: Config,
+    tmp_path: Path,
+) -> None:
+    """A human alias claim cannot veto its distinct physical router relay."""
+    harness = _build_harness(config, tmp_path)
+    room = _room_with_members(config, "general", ROUTER_AGENT_NAME)
+    original_event_id = "$human-active:localhost"
+    original_claim = TurnRecord.create([original_event_id], completed=False)
+    relay = _router_relay_event(
+        config,
+        event_id="$relay-active:localhost",
+        original_event_id=original_event_id,
+        body=f"{_entity_user_id(config, 'general')} respond",
+        origin_server_ts=1_000_000,
+    )
+    assert harness.turn_store.try_claim_turn(original_claim) is True
+
+    try:
+        await harness.deliver(room, relay)
+    finally:
+        harness.turn_store.release_pending_turn_claim(original_claim)
+
+    assert len(harness.runner.requests) == 1
+    metadata = harness.runner.requests[0].matrix_run_metadata
+    assert metadata is not None
+    assert metadata[constants.MATRIX_SOURCE_EVENT_IDS_METADATA_KEY] == ["$relay-active:localhost"]
+
+
+@pytest.mark.asyncio
 async def test_router_relay_ignored_by_this_agent_does_not_index_human_alias(
     config: Config,
     tmp_path: Path,
@@ -894,7 +924,7 @@ async def test_scheduled_router_handoff_history_limit_reaches_response_request(
 
 
 @pytest.mark.asyncio
-async def test_router_relay_keeps_original_alias_claim_through_gate_handoff(
+async def test_router_relay_keeps_original_alias_unsettled_through_gate_handoff(
     config: Config,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -939,14 +969,20 @@ async def test_router_relay_keeps_original_alias_claim_through_gate_handoff(
     delivery = asyncio.create_task(harness.deliver(room, event))
     await normalization_started.wait()
 
-    competing_claim = TurnRecord.create([original_event_id], completed=False)
+    wait_started = asyncio.Event()
+
+    async def wait_for_alias() -> None:
+        wait_started.set()
+        await harness.turn_store.wait_for_turn_settled((original_event_id,))
+
+    waiter = asyncio.create_task(wait_for_alias())
+    await wait_started.wait()
     try:
-        assert harness.turn_store.try_claim_turn(competing_claim) is False
+        assert not waiter.done()
     finally:
         release_normalization.set()
         await delivery
-    assert harness.turn_store.try_claim_turn(competing_claim) is True
-    harness.turn_store.release_pending_turn_claim(competing_claim)
+    await waiter
 
 
 @pytest.mark.asyncio

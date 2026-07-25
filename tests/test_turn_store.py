@@ -176,6 +176,33 @@ async def test_turn_settlement_waits_for_pending_claim_release(tmp_path: Path) -
     await waiter
 
 
+@pytest.mark.asyncio
+async def test_distinct_physical_claims_can_share_alias_until_both_settle(tmp_path: Path) -> None:
+    """A discovery alias coordinates settlement without rejecting its physical relay."""
+    store = _store(tmp_path)
+    original = TurnRecord.create(["$human"], completed=False)
+    relay = TurnRecord.create(["$relay"], discovery_event_ids=["$human"], completed=False)
+    assert store.try_claim_turn(original) is True
+    assert store.try_claim_turn(relay) is True
+    first_wait_started = asyncio.Event()
+
+    async def wait_for_alias(started: asyncio.Event) -> None:
+        started.set()
+        await store.wait_for_turn_settled(("$human",))
+
+    waiter = asyncio.create_task(wait_for_alias(first_wait_started))
+    await first_wait_started.wait()
+    assert not waiter.done()
+
+    store.release_pending_turn_claim(original)
+    second_wait_started = asyncio.Event()
+    second_waiter = asyncio.create_task(wait_for_alias(second_wait_started))
+    await second_wait_started.wait()
+    assert not second_waiter.done()
+    store.release_pending_turn_claim(relay)
+    await asyncio.gather(waiter, second_waiter)
+
+
 def test_turn_settlement_wait_does_not_consume_default_executor(tmp_path: Path) -> None:
     """Claim settlement must progress while every default-executor worker is occupied."""
     store = _store(tmp_path)

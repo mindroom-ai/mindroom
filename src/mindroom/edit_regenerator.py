@@ -1,4 +1,4 @@
-"""Own the edited-message regeneration workflow for previously handled turns."""
+"""Regenerate edited turns through a per-response newest-wins mailbox."""
 
 from __future__ import annotations
 

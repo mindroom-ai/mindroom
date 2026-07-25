@@ -69,7 +69,7 @@ class TurnStore:
     _ledger: HandledTurnLedger = field(init=False, repr=False)
     _pending_claim_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
     _pending_claim_changed: asyncio.Event = field(default_factory=asyncio.Event, init=False, repr=False)
-    _pending_claimed_event_ids: set[str] = field(default_factory=set, init=False, repr=False)
+    _pending_turn_claims: list[TurnRecord] = field(default_factory=list, init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Construct the private handled-turn ledger for this runtime entity."""
@@ -200,28 +200,29 @@ class TurnStore:
         )
 
     def try_claim_turn(self, turn_record: TurnRecord) -> bool:
-        """Claim source processing before any expensive dispatch resolution."""
-        event_ids = turn_record.indexed_event_ids
+        """Claim exclusive physical sources while aliases remain advisory."""
         if not turn_record.source_event_ids:
             return False
+        source_ids = set(turn_record.source_event_ids)
         with self._pending_claim_lock:
-            if self._pending_claimed_event_ids.intersection(event_ids):
+            if any(source_ids.intersection(claim.source_event_ids) for claim in self._pending_turn_claims):
                 return False
-            self._pending_claimed_event_ids.update(event_ids)
+            self._pending_turn_claims.append(turn_record)
         return True
 
     def release_pending_turn_claim(self, turn_record: TurnRecord) -> None:
         """Release a response claim after terminal settlement or failure."""
         with self._pending_claim_lock:
-            self._pending_claimed_event_ids.difference_update(turn_record.indexed_event_ids)
+            self._pending_turn_claims = [claim for claim in self._pending_turn_claims if claim != turn_record]
             claim_changed, self._pending_claim_changed = self._pending_claim_changed, asyncio.Event()
         claim_changed.set()
 
     async def wait_for_turn_settled(self, event_ids: tuple[str, ...]) -> None:
-        """Wait asynchronously until dispatch releases ownership after settlement."""
+        """Wait until every claim indexed by a source or alias settles."""
+        event_id_set = set(event_ids)
         while True:
             with self._pending_claim_lock:
-                if not self._pending_claimed_event_ids.intersection(event_ids):
+                if not any(event_id_set.intersection(claim.indexed_event_ids) for claim in self._pending_turn_claims):
                     return
                 claim_changed = self._pending_claim_changed
             await claim_changed.wait()

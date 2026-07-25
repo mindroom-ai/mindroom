@@ -1347,7 +1347,7 @@ class TestAgentBot(AgentBotTestBase):
         bot._turn_store.release_pending_turn_claim(competing_claim)
 
     @pytest.mark.asyncio
-    async def test_router_relay_claims_original_alias_before_first_async_preparation(
+    async def test_router_relay_marks_original_alias_unsettled_before_first_async_preparation(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
@@ -1376,13 +1376,19 @@ class TestAgentBot(AgentBotTestBase):
         ):
             task = asyncio.create_task(bot._on_message(room, event))
             await ingress_started.wait()
-            competing_claim = TurnRecord.create(["$user_msg:localhost"], completed=False)
-            assert bot._turn_store.try_claim_turn(competing_claim) is False
+            wait_started = asyncio.Event()
+
+            async def wait_for_alias() -> None:
+                wait_started.set()
+                await bot._turn_store.wait_for_turn_settled(("$user_msg:localhost",))
+
+            waiter = asyncio.create_task(wait_for_alias())
+            await wait_started.wait()
+            assert not waiter.done()
             release_ingress.set()
             await task
 
-        assert bot._turn_store.try_claim_turn(competing_claim) is True
-        bot._turn_store.release_pending_turn_claim(competing_claim)
+        await waiter
 
     @pytest.mark.asyncio
     async def test_handle_message_inner_enqueues_active_thread_follow_up_as_coalescible_gate_event(
