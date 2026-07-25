@@ -1524,6 +1524,38 @@ async def test_postgres_runtime_rolls_back_cancelled_advisory_lock() -> None:
     db.rollback.assert_awaited_once()
 
 
+@pytest.mark.asyncio
+async def test_postgres_event_cache_reconnects_and_retries_connection_busy_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A connection poisoned by cancellation must be replaced instead of disabling cache writes."""
+    cache = PostgresEventCache(database_url="postgresql://cache:test@localhost/mindroom", namespace="tenant-a")
+    busy_error = psycopg.OperationalError("sending prepared query failed: another command is already in progress")
+    run_attempt = AsyncMock(
+        side_effect=[
+            busy_error,
+            ("recovered", _FlushedPendingWrites()),
+        ],
+    )
+    handle_transient_failure = AsyncMock()
+    monkeypatch.setattr(cache, "_run_operation_attempt", run_attempt)
+    monkeypatch.setattr(cache._runtime, "handle_transient_failure", handle_transient_failure)
+
+    result = await cache._operation(
+        "!room:example.test",
+        operation="recover_busy_connection",
+        disabled_result=None,
+        callback=AsyncMock(),
+    )
+
+    assert result == "recovered"
+    assert run_attempt.await_count == 2
+    handle_transient_failure.assert_awaited_once_with(
+        busy_error,
+        operation="recover_busy_connection",
+    )
+
+
 def test_build_event_cache_auto_installs_postgres_extra_before_import(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1962,6 +1994,13 @@ def test_postgres_transient_classifier_accepts_startup_connection_refused() -> N
 def test_postgres_transient_classifier_accepts_connection_timeout() -> None:
     """Startup connection timeouts should retry later instead of disabling the cache."""
     assert _is_transient_postgres_failure(psycopg.errors.ConnectionTimeout("connection timeout expired"))
+
+
+def test_postgres_transient_classifier_accepts_connection_busy_after_cancellation() -> None:
+    """A connection left busy by cancellation must be replaced before retrying cache work."""
+    assert _is_transient_postgres_failure(
+        psycopg.OperationalError("sending prepared query failed: another command is already in progress"),
+    )
 
 
 def test_postgres_transient_classifier_accepts_dns_resolution_failure() -> None:

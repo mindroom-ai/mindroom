@@ -1088,11 +1088,18 @@ async def refresh_thread_history_from_source(
             expected_membership_epoch=fetch_membership_epoch,
             fetch_started_at=fetch_started_at,
         )
+        cache_store_outcome = (
+            "stored"
+            if cache_store_written
+            else "writes_unavailable"
+            if not event_cache.durable_writes_available
+            else "not_replaced"
+        )
         logger.info(
             "Thread history cache store completed",
             room_id=room_id,
             thread_id=thread_id,
-            cache_store_outcome="stored" if cache_store_written else "not_replaced",
+            cache_store_outcome=cache_store_outcome,
             cache_store_written=cache_store_written,
             event_count=len(fetch_result.event_sources),
             homeserver_scan_pages=fetch_result.room_scan_pages,

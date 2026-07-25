@@ -510,31 +510,18 @@ def _indexing_settings_query_compatible(
     return published_settings.query_compatibility_key() == current_settings.query_compatibility_key()
 
 
-def _indexing_settings_corpus_compatible(
-    published_settings: IndexingSettings,
-    current_settings: IndexingSettings,
-) -> bool:
-    """Return whether published content is safe for the current corpus config."""
-    return published_settings.corpus_compatibility_key() == current_settings.corpus_compatibility_key()
-
-
-def indexing_settings_metadata_equal(
-    published_settings: IndexingSettings,
-    current_settings: IndexingSettings,
-) -> bool:
-    """Return whether persisted metadata exactly matches current indexing settings."""
-    return published_settings == current_settings
-
-
 def published_index_settings_compatible(
     published_settings: IndexingSettings,
     current_settings: IndexingSettings,
 ) -> bool:
     """Return whether a published index can be queried under the current config."""
-    return _indexing_settings_query_compatible(
-        published_settings,
-        current_settings,
-    ) and _indexing_settings_corpus_compatible(published_settings, current_settings)
+    return (
+        _indexing_settings_query_compatible(
+            published_settings,
+            current_settings,
+        )
+        and published_settings.corpus_compatibility_key() == current_settings.corpus_compatibility_key()
+    )
 
 
 def _published_index_state_queryable(key: PublishedIndexKey, state: PublishedIndexState) -> bool:
@@ -560,10 +547,13 @@ def _published_index_availability(
         )
     elif state.collection is None and refresh_state == "refresh_failed":
         availability = KnowledgeAvailability.REFRESH_FAILED
-    elif not published_index_settings_compatible(
-        state.settings,
-        key.indexing_settings,
-    ) or not indexing_settings_metadata_equal(state.settings, key.indexing_settings):
+    elif (
+        not published_index_settings_compatible(
+            state.settings,
+            key.indexing_settings,
+        )
+        or state.settings != key.indexing_settings
+    ):
         availability = KnowledgeAvailability.CONFIG_MISMATCH
     elif refresh_state == "refresh_failed":
         availability = KnowledgeAvailability.REFRESH_FAILED

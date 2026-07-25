@@ -7,6 +7,7 @@ import json
 import sys
 import tempfile
 from contextlib import suppress
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -35,6 +36,9 @@ from mindroom.orchestration.plugin_watch import (
 )
 from mindroom.orchestration.runtime import log_startup_phase_finished, log_startup_phase_started
 from mindroom.orchestrator import _MultiAgentOrchestrator, _watch_skills_task
+from mindroom.response_admission import ResponseAdmissionGate, ResponseAdmissionRefusedError
+from mindroom.response_runner import ResponseRequest
+from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN
 from mindroom.startup_errors import PermanentStartupError
 from mindroom.tool_system.plugins import PluginReloadResult
 from mindroom.tool_system.skills import _get_plugin_skill_roots, set_plugin_skill_roots
@@ -45,8 +49,10 @@ from tests.conftest import (
     make_event_cache_mock,
     make_event_cache_write_coordinator_mock,
     orchestrator_runtime_paths,
+    request_envelope,
     runtime_paths_for,
     test_runtime_paths,
+    unwrap_extracted_collaborator,
 )
 
 if TYPE_CHECKING:
@@ -1554,18 +1560,41 @@ async def test_queued_config_reload_waits_for_in_flight_response_without_event_i
         response_started.set()
         await release_response.wait()
 
-    response_task = asyncio.create_task(
-        bot._response_runner.run_cancellable_response(
-            target=MessageTarget.resolve("!room:localhost", None, "$reply"),
-            response_function=response_function,
-            thinking_message="Thinking...",
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    request = ResponseRequest(
+        thread_history=(),
+        prompt="Hello",
+        response_envelope=request_envelope(
+            room_id="!room:localhost",
+            reply_to_event_id="$reply",
+            agent_name=bot.agent_name,
         ),
     )
+
+    async def run_response(
+        target: MessageTarget,
+        _early_placeholder: object,
+    ) -> str | None:
+        return await runner.run_cancellable_response(
+            target=target,
+            response_function=response_function,
+            thinking_message="Thinking...",
+        )
 
     orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
     orchestrator.running = True
     orchestrator.agent_bots["agent1"] = bot
+    # The orchestrator owns one shared gate that every managed bot admits through.
+    bot.admission_gate = orchestrator.config_reload.response_admission_gate
     orchestrator.config_reload.update_config = AsyncMock(return_value=True)
+
+    response_task = asyncio.create_task(
+        runner._run_locked_response_lifecycle(
+            request,
+            response_kind="ai",
+            locked_operation=run_response,
+        ),
+    )
 
     try:
         await asyncio.wait_for(response_started.wait(), timeout=1)
@@ -2757,33 +2786,125 @@ async def test_in_flight_response_count_nonzero_during_send_response(
     async def response_function(message_id: str | None) -> None:
         pass
 
-    task = asyncio.create_task(
-        bot._response_runner.run_cancellable_response(
-            target=MessageTarget.resolve("!room:localhost", None, "$reply"),
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    request = ResponseRequest(
+        thread_history=(),
+        prompt="Hello",
+        response_envelope=request_envelope(
+            room_id="!room:localhost",
+            reply_to_event_id="$reply",
+            agent_name=bot.agent_name,
+        ),
+    )
+
+    async def run_response(
+        target: MessageTarget,
+        _early_placeholder: object,
+    ) -> str | None:
+        return await runner.run_cancellable_response(
+            target=target,
             response_function=response_function,
             thinking_message="Thinking...",
+        )
+
+    task = asyncio.create_task(
+        runner._run_locked_response_lifecycle(
+            request,
+            response_kind="ai",
+            locked_operation=run_response,
         ),
     )
 
     try:
         await asyncio.wait_for(send_entered.wait(), timeout=1)
-        # The visible send is blocked, but the pre-tracking sentinel must be visible
-        assert bot.in_flight_response_count >= 1
+        assert bot.in_flight_response_count == 1
     finally:
         release_send.set()
         await asyncio.gather(task, return_exceptions=True)
-        for t in bot.stop_manager.cleanup_tasks:
-            t.cancel()
+        for cleanup_task in bot.stop_manager.cleanup_tasks:
+            cleanup_task.cancel()
         await asyncio.gather(*bot.stop_manager.cleanup_tasks, return_exceptions=True)
 
 
 @pytest.mark.asyncio
-async def test_run_cancellable_response_does_not_depend_on_current_task_lookup(
-    monkeypatch: pytest.MonkeyPatch,
+async def test_in_flight_response_count_stays_per_entity_across_bots(
     tmp_path: Path,
     mock_agent_users: dict[str, AgentMatrixUser],
 ) -> None:
-    """Response tracking should not depend on asyncio ambient task lookup."""
+    """One bot's active response must not make a different bot look busy.
+
+    Every bot shares one admission gate, whose count is process-wide. Callers
+    like the todo-poke idle check ask whether *this* entity is busy, so the
+    per-bot count must stay distinct from the gate total.
+    """
+    config = _runtime_bound_config(
+        Config(
+            agents={"agent1": AgentConfig(display_name="Agent 1"), "agent2": AgentConfig(display_name="Agent 2")},
+            router=RouterConfig(model="default"),
+        ),
+        tmp_path,
+    )
+    bots = {}
+    for agent_name in ("agent1", "agent2"):
+        bot = AgentBot(
+            agent_user=mock_agent_users[agent_name],
+            storage_path=tmp_path,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+        )
+        setup_test_bot(bot, AsyncMock())
+        bots[agent_name] = bot
+
+    shared_gate = ResponseAdmissionGate()
+    for bot in bots.values():
+        bot.admission_gate = shared_gate
+
+    busy, idle = bots["agent1"], bots["agent2"]
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def blocked_response(_target: MessageTarget, _early_placeholder: object) -> str | None:
+        entered.set()
+        await release.wait()
+        return None
+
+    busy_runner = unwrap_extracted_collaborator(busy._response_runner)
+    task = asyncio.create_task(
+        busy_runner._run_locked_response_lifecycle(
+            ResponseRequest(
+                thread_history=(),
+                prompt="Hello",
+                response_envelope=request_envelope(
+                    room_id="!room:localhost",
+                    reply_to_event_id="$reply",
+                    agent_name=busy.agent_name,
+                ),
+            ),
+            response_kind="ai",
+            locked_operation=blocked_response,
+        ),
+    )
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=1)
+        assert busy.in_flight_response_count == 1
+        # The shared gate sees the response, so a reload correctly defers...
+        assert shared_gate.in_flight_response_count == 1
+        # ...but the unrelated bot is still idle.
+        assert idle.in_flight_response_count == 0
+    finally:
+        release.set()
+        await asyncio.gather(task, return_exceptions=True)
+
+    assert busy.in_flight_response_count == 0
+    assert shared_gate.in_flight_response_count == 0
+
+
+@pytest.mark.asyncio
+async def test_closed_admission_defers_response_until_gate_reopens(
+    tmp_path: Path,
+    mock_agent_users: dict[str, AgentMatrixUser],
+) -> None:
+    """A response arriving during config apply should run after the gate reopens."""
     config = _runtime_bound_config(
         Config(
             agents={"agent1": AgentConfig(display_name="Agent 1")},
@@ -2798,20 +2919,120 @@ async def test_run_cancellable_response_does_not_depend_on_current_task_lookup(
         runtime_paths=runtime_paths_for(config),
     )
     setup_test_bot(bot, AsyncMock())
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    admission_gate = ResponseAdmissionGate()
+    bot.admission_gate = admission_gate
+    response_started = asyncio.Event()
 
-    def fail_current_task() -> None:
-        msg = "_run_cancellable_response should not call asyncio.current_task()"
-        raise AssertionError(msg)
+    async def run_response(_target: MessageTarget, _early_placeholder: object) -> str:
+        response_started.set()
+        return "$response"
 
-    monkeypatch.setattr("mindroom.bot.asyncio.current_task", fail_current_task)
-
-    async def response_function(message_id: str | None) -> None:
-        assert message_id is None
-
-    await bot._response_runner.run_cancellable_response(
-        target=MessageTarget.resolve("!room:localhost", None, "$reply"),
-        response_function=response_function,
+    assert admission_gate.close_if_idle()
+    task = asyncio.create_task(
+        runner._run_locked_response_lifecycle(
+            ResponseRequest(
+                thread_history=(),
+                prompt="Hello",
+                response_envelope=request_envelope(
+                    room_id="!room:localhost",
+                    reply_to_event_id="$reply",
+                    agent_name=bot.agent_name,
+                ),
+            ),
+            response_kind="ai",
+            locked_operation=run_response,
+        ),
     )
+    try:
+        await asyncio.sleep(0)
+        assert not task.done()
+        assert not response_started.is_set()
+        assert bot.in_flight_response_count == 0
+
+        admission_gate.reopen()
+
+        assert await asyncio.wait_for(task, timeout=1) == "$response"
+        assert response_started.is_set()
+        assert bot.in_flight_response_count == 0
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_replaced_runtime_refuses_deferred_response_without_matrix_io(
+    tmp_path: Path,
+    mock_agent_users: dict[str, AgentMatrixUser],
+) -> None:
+    """A replaced runtime should fail its waiter so checkpoint replay owns recovery."""
+    config = _runtime_bound_config(
+        Config(
+            agents={"agent1": AgentConfig(display_name="Agent 1")},
+            router=RouterConfig(model="default"),
+        ),
+        tmp_path,
+    )
+    bot = AgentBot(
+        agent_user=mock_agent_users["agent1"],
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+    )
+    setup_test_bot(bot, AsyncMock())
+    send_response = AsyncMock(return_value="$thinking")
+    install_send_response_mock(bot, send_response)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    admission_gate = ResponseAdmissionGate()
+    bot.admission_gate = admission_gate
+    refusal_logger = MagicMock()
+    runner.deps = replace(runner.deps, logger=refusal_logger)
+
+    # Stand where a config apply stands: admission closed, plan in progress.
+    assert admission_gate.close_if_idle()
+    assert bot.admission_gate is admission_gate
+    task = bot._response_runner.track_inbox_response(
+        bot._response_runner.generate_response(
+            ResponseRequest(
+                thread_history=(),
+                prompt="Hello",
+                response_envelope=request_envelope(
+                    room_id="!room:localhost",
+                    reply_to_event_id="$reply",
+                    agent_name=bot.agent_name,
+                ),
+            ),
+        ),
+        name="test_reload_admission_race",
+    )
+    try:
+        await asyncio.sleep(0)
+        assert not task.done()
+        assert bot.in_flight_response_count == 0
+        send_response.assert_not_awaited()
+
+        # Replacement shutdown wakes pre-admission waiters without cancelling
+        # them, so the callback failure poisons the old sync checkpoint.
+        await bot.prepare_for_sync_shutdown(shutdown_intent=SYNC_RESTART_SHUTDOWN)
+
+        # A refusal is an admission failure, not a cancellation: handlers that
+        # treat CancelledError as teardown must not mistake it for one.
+        assert task.done()
+        assert not task.cancelled()
+        assert isinstance(task.exception(), ResponseAdmissionRefusedError)
+        assert bot.in_flight_response_count == 0
+        send_response.assert_not_awaited()
+        assert any(
+            call.args and call.args[0] == "response_deferred_during_config_apply"
+            for call in refusal_logger.info.call_args_list
+        )
+        assert any(
+            call.args and call.args[0] == "response_refused_after_runtime_replacement"
+            for call in refusal_logger.warning.call_args_list
+        )
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
 
 @pytest.mark.asyncio
@@ -2881,9 +3102,10 @@ async def test_shutdown_during_active_drain_cancels_reload(
     orchestrator.running = True
 
     mock_bot = MagicMock(spec=AgentBot)
-    mock_bot.in_flight_response_count = 1  # Never drains
     mock_bot.stop = AsyncMock()
     orchestrator.agent_bots["agent1"] = mock_bot
+    # An admitted response that never finishes, so the drain never goes idle.
+    assert orchestrator.config_reload.response_admission_gate.admit()
     orchestrator.config_reload.update_config = AsyncMock(return_value=True)
     orchestrator.config_reload.request_reload()
     task = orchestrator.config_reload._reload_task

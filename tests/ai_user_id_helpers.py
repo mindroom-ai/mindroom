@@ -399,6 +399,7 @@ def _build_response_runner(
         orchestrator=bot.orchestrator,
         event_cache=make_event_cache_mock(),
         event_cache_write_coordinator=None,
+        response_admission_gate=bot.admission_gate,
         runtime_started_at=0.0,
         runtime_generation="test-generation",
     )

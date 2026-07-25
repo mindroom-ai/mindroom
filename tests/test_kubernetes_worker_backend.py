@@ -178,6 +178,7 @@ class _FakeAppsApi:
         self.patched_bodies: list[tuple[str, dict[str, object]]] = []
         self.deleted_names: list[str] = []
         self.list_label_selectors: list[str] = []
+        self.raw_list_count = 0
         self.delete_read_lag_by_name: dict[str, int] = {}
         self._active_delete_read_lag_by_name: dict[str, int] = {}
 
@@ -237,7 +238,13 @@ class _FakeAppsApi:
             return
         self.deployments.pop(name, None)
 
-    def list_namespaced_deployment(self, namespace: str, label_selector: str) -> object:
+    def list_namespaced_deployment(
+        self,
+        namespace: str,
+        *,
+        label_selector: str,
+        _preload_content: bool = True,
+    ) -> object:
         _ = namespace
         self.list_label_selectors.append(label_selector)
         selectors = {}
@@ -251,9 +258,39 @@ class _FakeAppsApi:
             labels = deployment.metadata.labels
             return all(labels.get(key) == value for key, value in selectors.items())
 
-        return SimpleNamespace(
-            items=[deployment for deployment in self.deployments.values() if matches_selector(deployment)],
-        )
+        deployments = [deployment for deployment in self.deployments.values() if matches_selector(deployment)]
+        if _preload_content:
+            return SimpleNamespace(items=deployments)
+        self.raw_list_count += 1
+        payload = {
+            "items": [
+                {
+                    "metadata": {
+                        "name": deployment.metadata.name,
+                        "annotations": deployment.metadata.annotations,
+                        "labels": deployment.metadata.labels,
+                        "generation": deployment.metadata.generation,
+                        "uid": deployment.metadata.uid,
+                    },
+                    "spec": {"replicas": deployment.spec.replicas},
+                    "status": {
+                        "readyReplicas": deployment.status.ready_replicas,
+                        "observedGeneration": deployment.status.observed_generation,
+                    },
+                }
+                for deployment in deployments
+            ],
+        }
+        return _FakeRawResponse(json.dumps(payload).encode())
+
+
+class _FakeRawResponse:
+    def __init__(self, data: bytes) -> None:
+        self.data = data
+        self.released = False
+
+    def release_conn(self) -> None:
+        self.released = True
 
 
 class _FakeCoreApi:
@@ -373,6 +410,42 @@ class _FakeApiClient:
         name = path_params["name"]
         namespace = path_params["namespace"]
         return self._core_api.patch_namespaced_secret(name, namespace, body)
+
+
+def test_kubernetes_deployment_snapshot_tolerates_missing_status() -> None:
+    """A Deployment read before the controller writes status is unready, not fatal."""
+    payload = {
+        "metadata": {"name": "mindroom-worker", "labels": {}},
+        "spec": {"replicas": 1},
+    }
+
+    snapshot = kubernetes_resources_module._deployment_snapshot(payload)
+
+    assert snapshot.status.ready_replicas is None
+    assert snapshot.status.observed_generation is None
+
+
+def test_kubernetes_deployment_snapshot_tolerates_missing_labels() -> None:
+    """Labels are carried but never read; their absence must not fail the pass."""
+    payload = {
+        "metadata": {"name": "mindroom-worker"},
+        "spec": {"replicas": 1},
+        "status": {},
+    }
+
+    assert kubernetes_resources_module._deployment_snapshot(payload).metadata.labels == {}
+
+
+def test_kubernetes_deployment_snapshot_rejects_non_object_status() -> None:
+    """A structurally wrong status is still a malformed payload."""
+    payload = {
+        "metadata": {"name": "mindroom-worker", "labels": {}},
+        "spec": {"replicas": 1},
+        "status": "ready",
+    }
+
+    with pytest.raises(WorkerBackendError, match="non-object status"):
+        kubernetes_resources_module._deployment_snapshot(payload)
 
 
 def _backend(
@@ -2184,7 +2257,7 @@ def test_kubernetes_backend_reconciles_drifted_idle_worker_template(tmp_path: Pa
     updated_backend, _, _ = _backend(runtime_paths=runtime_paths, resource_limits={"memory": "2Gi", "cpu": "1"})
     _wire_fake_apis(updated_backend, apps_api, core_api)
 
-    reconciled = updated_backend.reconcile_drifted_workers(now=90.0)
+    reconciled = updated_backend.maintain_workers(now=90.0).reconciled
 
     assert [worker.worker_key for worker in reconciled] == [_TEST_SCOPED_WORKER_KEY_A]
     assert reconciled[0].status == "idle"
@@ -2195,6 +2268,26 @@ def test_kubernetes_backend_reconciles_drifted_idle_worker_template(tmp_path: Pa
     container = recreated["spec"]["template"]["spec"]["containers"][0]
     assert container["resources"]["limits"] == {"memory": "2Gi", "cpu": "1"}
     assert recreated["metadata"]["annotations"]["mindroom.ai/created-at"] == "0.0"
+
+
+def test_kubernetes_backend_maintenance_lists_deployments_once(tmp_path: Path) -> None:
+    """Cleanup and reconciliation should share one lightweight Kubernetes list response."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=Path("config.yaml"),
+        storage_path=tmp_path / "mindroom-test-storage",
+    )
+    backend, apps_api, core_api = _backend(runtime_paths=runtime_paths)
+    backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=0.0)
+    updated_backend, _, _ = _backend(runtime_paths=runtime_paths, resource_limits={"memory": "2Gi", "cpu": "1"})
+    _wire_fake_apis(updated_backend, apps_api, core_api)
+    list_count_before = len(apps_api.list_label_selectors)
+
+    maintenance = updated_backend.maintain_workers(now=80.0)
+
+    assert len(apps_api.list_label_selectors) == list_count_before + 1
+    assert apps_api.raw_list_count == 1
+    assert [worker.worker_key for worker in maintenance.cleaned] == [_TEST_SCOPED_WORKER_KEY_A]
+    assert [worker.worker_key for worker in maintenance.reconciled] == [_TEST_SCOPED_WORKER_KEY_A]
 
 
 def test_kubernetes_backend_reconcile_defers_running_workers(tmp_path: Path) -> None:
@@ -2209,9 +2302,9 @@ def test_kubernetes_backend_reconcile_defers_running_workers(tmp_path: Path) -> 
     updated_backend, _, _ = _backend(runtime_paths=runtime_paths, resource_limits={"memory": "2Gi", "cpu": "1"})
     _wire_fake_apis(updated_backend, apps_api, core_api)
 
-    reconciled = updated_backend.reconcile_drifted_workers(now=10.0)
+    reconciled = updated_backend.maintain_workers(now=10.0).reconciled
 
-    assert reconciled == []
+    assert reconciled == ()
     assert apps_api.deleted_names == []
     assert len(apps_api.created_bodies) == 1
 
@@ -2230,9 +2323,9 @@ def test_kubernetes_backend_reconcile_leaves_unchanged_templates_alone(tmp_path:
     unchanged_backend, _, _ = _backend(runtime_paths=runtime_paths)
     _wire_fake_apis(unchanged_backend, apps_api, core_api)
 
-    reconciled = unchanged_backend.reconcile_drifted_workers(now=90.0)
+    reconciled = unchanged_backend.maintain_workers(now=90.0).reconciled
 
-    assert reconciled == []
+    assert reconciled == ()
     assert apps_api.deleted_names == []
     assert len(apps_api.created_bodies) == 1
     assert len(apps_api.patched_bodies) == patch_count_after_cleanup
@@ -2255,9 +2348,9 @@ def test_kubernetes_backend_reconcile_disabled_by_config(tmp_path: Path) -> None
     )
     _wire_fake_apis(updated_backend, apps_api, core_api)
 
-    reconciled = updated_backend.reconcile_drifted_workers(now=90.0)
+    reconciled = updated_backend.maintain_workers(now=90.0).reconciled
 
-    assert reconciled == []
+    assert reconciled == ()
     assert apps_api.deleted_names == []
     assert len(apps_api.created_bodies) == 1
 
@@ -2288,12 +2381,12 @@ def test_kubernetes_backend_reconcile_uses_persisted_private_visibility(tmp_path
 
     unchanged_backend, _, _ = _backend(runtime_paths=runtime_paths)
     _wire_fake_apis(unchanged_backend, apps_api, core_api)
-    assert unchanged_backend.reconcile_drifted_workers(now=90.0) == []
+    assert unchanged_backend.maintain_workers(now=90.0).reconciled == ()
 
     updated_backend, _, _ = _backend(runtime_paths=runtime_paths, resource_limits={"memory": "2Gi", "cpu": "1"})
     _wire_fake_apis(updated_backend, apps_api, core_api)
 
-    reconciled = updated_backend.reconcile_drifted_workers(now=100.0)
+    reconciled = updated_backend.maintain_workers(now=100.0).reconciled
 
     assert [worker.worker_key for worker in reconciled] == [worker_key]
     recreated = apps_api.created_bodies[-1]
@@ -2331,9 +2424,9 @@ def test_kubernetes_backend_reconcile_revalidates_live_state_before_recreating(t
 
     updated_backend._resources.list_deployments = _stale_snapshot
 
-    reconciled = updated_backend.reconcile_drifted_workers(now=90.0)
+    reconciled = updated_backend.maintain_workers(now=90.0).reconciled
 
-    assert reconciled == []
+    assert reconciled == ()
     live_deployment = apps_api.deployments[handle.worker_id]
     assert int(live_deployment.spec.replicas) == 1
     assert live_deployment.metadata.annotations[ANNOTATION_WORKER_KEY] == _TEST_SCOPED_WORKER_KEY_A
@@ -2375,9 +2468,9 @@ def test_kubernetes_backend_reconcile_defers_user_agent_workers_without_persiste
     _wire_fake_apis(updated_backend, apps_api, core_api)
 
     with caplog.at_level("WARNING", logger=kubernetes_backend_module.__name__):
-        reconciled = updated_backend.reconcile_drifted_workers(now=90.0)
+        reconciled = updated_backend.maintain_workers(now=90.0).reconciled
 
-    assert reconciled == []
+    assert reconciled == ()
     assert apps_api.deleted_names == []
     assert len(apps_api.created_bodies) == 1
     assert caplog.records == []
