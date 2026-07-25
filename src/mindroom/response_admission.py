@@ -40,7 +40,16 @@ class ResponseAdmissionGate:
             return True
 
     def release(self) -> None:
-        """Release one previously admitted response slot."""
+        """Release one previously admitted response slot.
+
+        Deliberately synchronous and lock-free, unlike every other mutation
+        here. Releasing runs in a ``finally`` on the cancellation path, and an
+        ``await`` there can itself be interrupted, which would leak a slot and
+        wedge config reload forever. A bare decrement cannot be interrupted, and
+        it is safe against the lock because releasing only ever lowers the count:
+        it can never turn a closed gate's idle sample back into a busy one, so no
+        reader can observe a torn state.
+        """
         self._in_flight_response_count -= 1
 
     async def close_if_idle(self) -> bool:

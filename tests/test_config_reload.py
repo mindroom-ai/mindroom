@@ -2881,7 +2881,12 @@ async def test_tracked_inbox_response_cancelled_during_reload_never_sends_placeh
 
         assert task.cancelled()
         assert bot.in_flight_response_count == 0
-        send_response.assert_not_awaited()
+        # No placeholder or response is generated, but the dropped turn is not
+        # silent: the room gets one notice telling the user to resend.
+        send_response.assert_awaited_once()
+        notice_text = send_response.await_args.kwargs["response_text"]
+        assert "configuration reload" in notice_text.lower()
+        assert "again" in notice_text.lower()
     finally:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
