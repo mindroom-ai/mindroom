@@ -1245,6 +1245,7 @@ class CacheFuzzRunner:
     async def run(self) -> ObservableCacheState:
         """Execute all batches and return stable observable state."""
         self.scenario.validate()
+        await self.cache.initialize()
         self.cache_generation = self.cache.cache_generation
         assert self.cache_generation is not None
         await self.seed()
@@ -1654,6 +1655,7 @@ class CacheFuzzRunner:
 
     async def assert_invariants(self) -> None:
         """Assert cache consistency through only the public storage contract."""
+        await self.cache.initialize()
         assert self.cache.cache_generation == self.cache_generation
         await self._assert_tombstone_invariants()
         await self._assert_isolation_and_reaction_invariants()

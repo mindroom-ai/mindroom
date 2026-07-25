@@ -289,13 +289,15 @@ async def test_reference_model_preserves_tombstoned_reaction_and_ciphertext_sema
 
 
 @pytest.mark.asyncio
-async def test_runner_certifies_the_bound_principal_generation(tmp_path: Path) -> None:
-    """Restart checks must bind cache generation to the fuzz Matrix principal."""
-    root = SqliteEventCache(tmp_path / "principal-generation.db")
+async def test_runner_initializes_and_certifies_the_bound_principal_generation(
+    event_cache_factory: Callable[[], ConversationEventCache],
+) -> None:
+    """The selected fuzz principal must be initialized before generation checks."""
+    root = event_cache_factory()
     await root.initialize()
     runner = CacheFuzzRunner(
         root,
-        lambda: SqliteEventCache(tmp_path / "principal-generation.db"),
+        event_cache_factory,
         FuzzScenario(batches=()),
         room_count=1,
         thread_count=1,
@@ -303,6 +305,7 @@ async def test_runner_certifies_the_bound_principal_generation(tmp_path: Path) -
 
     try:
         await runner.run()
+        assert runner.cache.is_initialized
         assert runner.cache_generation == root.for_principal(FUZZ_PRINCIPAL).cache_generation
         assert runner.cache_generation != root.cache_generation
     finally:
