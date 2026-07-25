@@ -164,6 +164,39 @@ async def test_transport_cancelled_terminal_update_does_not_sleep_behind_retry_b
 
 
 @pytest.mark.asyncio
+async def test_failed_terminal_update_releases_existing_thread_reservation(tmp_path: Path) -> None:
+    """Terminal failure should release an adopted response claim even when no edit lands."""
+    config = _config(tmp_path)
+    conversation_cache = MagicMock()
+    streaming = StreamingResponse(
+        target=MessageTarget.resolve("!room:localhost", "$thread", "$reply"),
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        conversation_cache=conversation_cache,
+    )
+    streaming.event_id = "$placeholder"
+    streaming.accumulated_text = "partial answer"
+    streaming._reserve_thread_write_reservation()
+
+    with patch(
+        "mindroom.streaming.edit_message_result",
+        new=AsyncMock(return_value=None),
+    ):
+        outcome = await streaming.finalize(_client(), error=RuntimeError("delivery failed"))
+
+    assert outcome.terminal_status == "error"
+    conversation_cache.reserve_outbound_thread.assert_called_once_with(
+        "!room:localhost",
+        "$placeholder",
+        "$thread",
+    )
+    conversation_cache.release_outbound_thread.assert_called_once_with(
+        "!room:localhost",
+        "$placeholder",
+    )
+
+
+@pytest.mark.asyncio
 async def test_transport_restart_interrupted_terminal_update_does_not_sleep_behind_retry_backoff(
     tmp_path: Path,
 ) -> None:

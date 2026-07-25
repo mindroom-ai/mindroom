@@ -282,9 +282,6 @@ def test_notify_outbound_message_marks_cache_schedule() -> None:
             {
                 "operation": "matrix_cache_notify_outbound_event",
                 "barrier_kind": "thread",
-                "room_id": "!room:localhost",
-                "thread_id": "$thread",
-                "event_id": "$tool_use",
                 "event_type": "m.room.message",
                 "is_edit": False,
                 "is_reaction": False,

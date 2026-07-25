@@ -1938,6 +1938,8 @@ class TestStreamingBehavior:
         mock_client = _make_matrix_client_mock()
         conversation_cache = AsyncMock()
         conversation_cache.notify_outbound_message = Mock()
+        conversation_cache.reserve_outbound_thread = Mock()
+        conversation_cache.release_outbound_thread = Mock()
 
         async def one_chunk_stream() -> AsyncIterator[str]:
             yield "Hello from stream"

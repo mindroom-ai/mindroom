@@ -642,7 +642,28 @@ class StreamingResponse:
             return stream_status
         return STREAM_STATUS_COMPLETED
 
-    async def finalize(  # noqa: C901, PLR0911, PLR0912
+    async def finalize(
+        self,
+        client: nio.AsyncClient,
+        *,
+        cancelled: bool = False,
+        restart_interrupted: bool = False,
+        cancel_source: Literal["user_stop", "sync_restart", "interrupted"] | None = None,
+        error: Exception | None = None,
+    ) -> StreamTransportOutcome:
+        """Send one terminal update and always release its thread reservation."""
+        try:
+            return await self._finalize(
+                client,
+                cancelled=cancelled,
+                restart_interrupted=restart_interrupted,
+                cancel_source=cancel_source,
+                error=error,
+            )
+        finally:
+            self._release_thread_write_reservation()
+
+    async def _finalize(  # noqa: C901, PLR0911, PLR0912
         self,
         client: nio.AsyncClient,
         *,
@@ -1038,6 +1059,22 @@ class StreamingResponse:
             return
         self.conversation_cache.notify_outbound_message(self.room_id, edit_event_id, content_sent)
 
+    def _reserve_thread_write_reservation(self) -> None:
+        """Retain known thread identity for later edits whose envelope only carries m.replace."""
+        if self.conversation_cache is None or self.event_id is None or self.thread_id is None:
+            return
+        self.conversation_cache.reserve_outbound_thread(
+            self.room_id,
+            self.event_id,
+            self.thread_id,
+        )
+
+    def _release_thread_write_reservation(self) -> None:
+        """Release thread identity after terminal success, failure, or cancellation."""
+        if self.conversation_cache is None or self.event_id is None:
+            return
+        self.conversation_cache.release_outbound_thread(self.room_id, self.event_id)
+
     def _mark_first_visible_reply_if_needed(self) -> None:
         """Mark first visible reply timing once visible text exists."""
         if self.pipeline_timing is not None and self.accumulated_text.strip():
@@ -1049,6 +1086,7 @@ class StreamingResponse:
         if delivered is None:
             return False
         self.event_id = delivered.event_id
+        self._reserve_thread_write_reservation()
         if self.visible_event_id_callback is not None:
             self.visible_event_id_callback(delivered.event_id)
         await self._record_streaming_send(delivered.event_id, delivered.content_sent)
@@ -1763,6 +1801,7 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
 
     if existing_event_id:
         streaming.event_id = existing_event_id
+        streaming._reserve_thread_write_reservation()
         if visible_event_id_callback is not None:
             visible_event_id_callback(existing_event_id)
         streaming.accumulated_text = ""
@@ -1903,6 +1942,7 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
                 )
             if tool_trace_collector is not None:
                 tool_trace_collector[:] = streaming.tool_trace
+            streaming._release_thread_write_reservation()
 
     assert transport_outcome is not None
     return transport_outcome
