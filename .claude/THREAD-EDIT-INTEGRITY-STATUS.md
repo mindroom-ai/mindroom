@@ -4,8 +4,8 @@
 
 - PR: `https://github.com/mindroom-ai/mindroom/pull/1641`.
 - Branch: `fix/thread-edit-integrity`.
-- Exact local and remote head: `6dbf6fbf555026708feb2182297087d659d73f27`.
-- Production source is `+960/-763`, net `+197` against exact `origin/main` `5f062224a1f490a91a72c555bf2fa0ca59c096b3`.
+- Exact pushed code head: `a5a26be16c33c7684f14a9b753b40a4445b14d73`.
+- Production source is `+966/-766`, net `+200` against exact `origin/main` `5f062224a1f490a91a72c555bf2fa0ca59c096b3`.
 - Git author and committer must resolve to `Bas Nijholt <bas@nijho.lt>` before every commit.
 - Never amend, force-push, merge, or open the PR as draft.
 - Preserve the three untracked `.claude/TASK-*.md` files.
@@ -97,3 +97,15 @@
 - Every approval, CI result, and live result before exact `6dbf6fbf5` is stale.
 - Fresh exact-head Codex review, GitHub CI, PostgreSQL fanout, full pytest, all-file hooks, and real-Tuwunel remain required.
 - Merge gate: CLOSED.
+
+## Exact source requester correction
+
+- The PR #1646 real-Tuwunel ledger independently reproduces a valid coalesced edit whose source requester differs from the turn anchor requester.
+- The exact-`dfceccb29` anti-hijack finding requires binding an edit to the requester of the exact source event, not the anchor requester.
+- Commit `a5a26be16c33c7684f14a9b753b40a4445b14d73` adds `TurnRecord.requester_id_for_source()` as the durable source-ownership seam.
+- Solo turns use the turn requester, coalesced turns use persisted per-source metadata, and missing or mismatched coalesced ownership fails closed.
+- Exact regressions cover a valid non-anchor requester, a cross-requester hijack, and incomplete ownership metadata.
+- All `27` edit-regenerator tests, all `104` handled-turn and turn-store tests, and the `160`-test replacement/reuse/edit/media selection pass.
+- Ruff, formatting, `ty`, Tach dependencies/interfaces, and diff checks pass.
+- Production remains at the hard source ceiling: `+966/-766`, net `+200`.
+- The source correction is pushed; commit this handoff, refresh external ledgers, then start exact-head gates.
