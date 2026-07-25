@@ -363,9 +363,10 @@ async def _assert_invalid_sidecar_owners_are_rejected(
     room_id: str,
     seed_legacy_owner: Callable[[str, str], Awaitable[None]],
 ) -> None:
-    """Assert state and explicit other-room events cannot own durable plaintext."""
+    """Assert non-message, state, and other-room events cannot own durable plaintext."""
     mxc_url = "mxc://localhost/sidecar"
     for event_id, invalid_scope in (
+        ("$generic-timeline", {"type": "com.example.generic"}),
         ("$wrong-room", {"room_id": "!other:localhost"}),
         ("$state", {"state_key": ""}),
     ):

@@ -93,8 +93,18 @@ class TestResolvedMessageExtraction:
         }
 
         assert sidecar_mxc_url(content) == "mxc://server/encrypted-sidecar"
-        assert event_mxc_urls({"content": content}, room_id="!room:example") == frozenset(
+        assert event_mxc_urls(
+            {"type": "m.room.message", "content": content},
+            room_id="!room:example",
+        ) == frozenset(
             {"mxc://server/encrypted-sidecar"},
+        )
+        assert (
+            event_mxc_urls(
+                {"type": "com.example.generic", "content": content},
+                room_id="!room:example",
+            )
+            == frozenset()
         )
 
     @pytest.mark.parametrize("malformed_url", ["mxc://", "mxc://server"])
@@ -115,8 +125,20 @@ class TestResolvedMessageExtraction:
 
         assert sidecar_mxc_url(direct_content) is None
         assert sidecar_mxc_url(encrypted_content) is None
-        assert event_mxc_urls({"content": direct_content}, room_id="!room:example") == frozenset()
-        assert event_mxc_urls({"content": encrypted_content}, room_id="!room:example") == frozenset()
+        assert (
+            event_mxc_urls(
+                {"type": "m.room.message", "content": direct_content},
+                room_id="!room:example",
+            )
+            == frozenset()
+        )
+        assert (
+            event_mxc_urls(
+                {"type": "m.room.message", "content": encrypted_content},
+                room_id="!room:example",
+            )
+            == frozenset()
+        )
 
     @pytest.mark.asyncio
     async def test_extract_and_resolve_message_hydrates_v2_sidecar_content(self) -> None:

@@ -128,7 +128,8 @@ def event_mxc_urls(event: dict[str, Any], *, room_id: str) -> frozenset[str]:
     """Return room-scoped sidecar MXCs referenced by one visible event."""
     content = event.get("content")
     if (
-        event_source_is_state_event(event)
+        event.get("type") != "m.room.message"
+        or event_source_is_state_event(event)
         or not event_source_matches_room(event, room_id)
         or not isinstance(content, dict)
     ):
