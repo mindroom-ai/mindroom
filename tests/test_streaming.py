@@ -81,6 +81,8 @@ class _FakeGateway:
         _client: object,
         _room_id: str,
         content: dict[str, Any],
+        *,
+        retry_sync_recovery: bool = False,  # noqa: ARG002
     ) -> DeliveredMatrixEvent:
         self._record(_GatewayOp(kind="send", content=dict(content), display_text=content["body"]))
         return DeliveredMatrixEvent(event_id="$stream_1", content_sent=dict(content))
@@ -92,6 +94,8 @@ class _FakeGateway:
         _event_id: str,
         new_content: dict[str, Any],
         new_text: str,
+        *,
+        retry_sync_recovery: bool = False,  # noqa: ARG002
     ) -> DeliveredMatrixEvent:
         self._record(_GatewayOp(kind="edit", content=dict(new_content), display_text=new_text))
         return DeliveredMatrixEvent(event_id=f"$edit_{len(self.ops)}", content_sent=dict(new_content))
@@ -247,6 +251,8 @@ async def test_nonterminal_delivery_formats_off_event_loop_thread(config: Config
         _client: object,
         _room_id: str,
         content: dict[str, Any],
+        *,
+        retry_sync_recovery: bool = False,  # noqa: ARG001
     ) -> DeliveredMatrixEvent:
         delivered_content.update(content)
         return DeliveredMatrixEvent(event_id="$stream_1", content_sent=dict(content))

@@ -27,7 +27,7 @@ if TYPE_CHECKING:
     from mindroom.hooks import MessageEnvelope
     from mindroom.matrix.event_info import EventInfo
     from mindroom.message_target import MessageTarget
-    from mindroom.sync_restart_retry import SyncRestartRetryQueue
+    from mindroom.sync_restart_retry import InterruptedTurnRooms
     from mindroom.turn_policy import IngressHookRunner
     from mindroom.turn_store import TurnStore
 
@@ -44,7 +44,7 @@ class EditRegeneratorDeps:
     ingress_hook_runner: IngressHookRunner
     generate_response: Callable[[ResponseRequest], Awaitable[str | None]]
     wait_for_turn_settled: Callable[[tuple[str, ...]], Awaitable[None]]
-    restart_retry: SyncRestartRetryQueue
+    interrupted_turn_rooms: InterruptedTurnRooms
     timestamp_formatter: Callable[[float | None], str | None]
 
 
@@ -318,11 +318,10 @@ class EditRegenerator:
             ),
         )
 
-        async def retry_mailbox() -> None:
-            await self._drain(room, record, mailbox)
-
-        def retry_after_sync_restart() -> None:
-            if self.deps.restart_retry.register(driving_edit.revision[1], retry_mailbox, room_id=room.room_id):
+        def record_interrupted_turn() -> None:
+            # The interrupted revision must stay uncommitted so the replacement
+            # runtime's recovery re-drives it instead of treating it as applied.
+            if self.deps.interrupted_turn_rooms.register(driving_edit.revision[1], room_id=room.room_id):
                 applied.clear()
 
         return (
@@ -346,7 +345,7 @@ class EditRegenerator:
                         dict.fromkeys((*record.replay_source_event_ids, driving_edit.original_event_id)),
                     ),
                 ),
-                on_sync_restart_cancelled=retry_after_sync_restart,
+                on_sync_restart_cancelled=record_interrupted_turn,
                 sync_restart_retry_source_event_id=retry_source_event_id,
                 on_deferred_outcome_handled=lambda response_event_id: (
                     self.deps.turn_store.record_turn(replace(record, response_event_id=response_event_id))

@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, NoReturn
 
 from agno.run.agent import RunCompletedEvent, RunContentEvent, ToolCallCompletedEvent, ToolCallStartedEvent
+from nio.exceptions import SendRetryError
 
 from mindroom import interactive
 from mindroom.constants import (
@@ -914,6 +915,7 @@ class StreamingResponse:
                 display_text=prepared_delivery.display_text,
                 retry_on_failure=retry_on_failure,
                 retry_without_backoff=retry_without_backoff,
+                retry_sync_recovery=not is_final or retry_on_failure,
             )
         finally:
             if self._inflight_nonterminal_capture is capture:
@@ -1080,9 +1082,20 @@ class StreamingResponse:
         if self.pipeline_timing is not None and self.accumulated_text.strip():
             self.pipeline_timing.mark_first_visible_reply("stream_update")
 
-    async def _send_initial_content(self, client: nio.AsyncClient, *, content: dict[str, Any]) -> bool:
+    async def _send_initial_content(
+        self,
+        client: nio.AsyncClient,
+        *,
+        content: dict[str, Any],
+        retry_sync_recovery: bool,
+    ) -> bool:
         """Send the initial streaming event."""
-        delivered = await send_message_result(client, self.room_id, content)
+        delivered = await send_message_result(
+            client,
+            self.room_id,
+            content,
+            retry_sync_recovery=retry_sync_recovery,
+        )
         if delivered is None:
             return False
         self.event_id = delivered.event_id
@@ -1100,6 +1113,7 @@ class StreamingResponse:
         *,
         content: dict[str, Any],
         display_text: str,
+        retry_sync_recovery: bool,
     ) -> bool:
         """Send one streaming edit event for the existing message."""
         assert self.event_id is not None
@@ -1109,6 +1123,7 @@ class StreamingResponse:
             self.event_id,
             content,
             display_text,
+            retry_sync_recovery=retry_sync_recovery,
         )
         if delivered is None:
             return False
@@ -1124,6 +1139,7 @@ class StreamingResponse:
         display_text: str,
         retry_on_failure: bool = False,
         retry_without_backoff: bool = False,
+        retry_sync_recovery: bool = False,
     ) -> bool:
         """Send a new event or edit the existing one."""
         total_attempts = 2 if retry_on_failure or retry_without_backoff else 1
@@ -1131,14 +1147,25 @@ class StreamingResponse:
             try:
                 if self.event_id is None:
                     logger.debug("Sending initial streaming message", attempt=attempt)
-                    if await self._send_initial_content(client, content=content):
+                    if await self._send_initial_content(
+                        client,
+                        content=content,
+                        retry_sync_recovery=retry_sync_recovery,
+                    ):
                         return True
                     logger.error("Failed to send initial streaming message", attempt=attempt)
                 else:
                     logger.debug("Editing streaming message", event_id=self.event_id, attempt=attempt)
-                    if await self._edit_existing_content(client, content=content, display_text=display_text):
+                    if await self._edit_existing_content(
+                        client,
+                        content=content,
+                        display_text=display_text,
+                        retry_sync_recovery=retry_sync_recovery,
+                    ):
                         return True
                     logger.error("Failed to edit streaming message", attempt=attempt)
+            except SendRetryError:
+                raise
             except Exception:
                 logger.warning(
                     "Streaming update attempt raised an exception",

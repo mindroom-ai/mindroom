@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from html import escape as html_escape
 from typing import TYPE_CHECKING, Any, Literal
 
+from nio.exceptions import SendRetryError
+
 from mindroom import constants, interactive
 from mindroom.constants import SKIP_MENTIONS_KEY
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
@@ -196,6 +198,7 @@ class SendTextRequest:  # noqa: D101
     skip_mentions: bool = False
     tool_trace: list[ToolTraceEntry] | None = None
     extra_content: dict[str, Any] | None = None
+    retry_sync_recovery: bool = False
 
 
 @dataclass(frozen=True)
@@ -205,6 +208,7 @@ class EditTextRequest:  # noqa: D101
     new_text: str
     tool_trace: list[ToolTraceEntry] | None = None
     extra_content: dict[str, Any] | None = None
+    retry_sync_recovery: bool = False
 
 
 @dataclass(frozen=True)
@@ -503,7 +507,17 @@ class DeliveryGateway:
             )
         if request.skip_mentions:
             content[SKIP_MENTIONS_KEY] = True
-        delivered = await send_message_result(client, resolved_target.room_id, content)
+        failure_reason = "send_message_result returned None"
+        try:
+            delivered = await send_message_result(
+                client,
+                resolved_target.room_id,
+                content,
+                retry_sync_recovery=request.retry_sync_recovery,
+            )
+        except SendRetryError:
+            delivered = None
+            failure_reason = "matrix timeline recovery still blocked the send"
         if delivered is not None:
             self.deps.resolver.deps.conversation_cache.notify_outbound_message(
                 resolved_target.room_id,
@@ -512,7 +526,11 @@ class DeliveryGateway:
             )
             self.deps.logger.info("Sent response", event_id=delivered.event_id, **resolved_target.log_context)
             return delivered.event_id
-        self.deps.logger.error("Failed to send response to room", **resolved_target.log_context)
+        self.deps.logger.error(
+            "Failed to send response to room",
+            error=failure_reason,
+            **resolved_target.log_context,
+        )
         return None
 
     async def edit_text(self, request: EditTextRequest) -> bool:
@@ -554,13 +572,19 @@ class DeliveryGateway:
                 latest_thread_event_id=latest_thread_event_id,
             )
 
-        delivered = await edit_message_result(
-            client,
-            target.room_id,
-            request.event_id,
-            content,
-            request.new_text,
-        )
+        failure_reason = "edit_message_result returned None"
+        try:
+            delivered = await edit_message_result(
+                client,
+                target.room_id,
+                request.event_id,
+                content,
+                request.new_text,
+                retry_sync_recovery=request.retry_sync_recovery,
+            )
+        except SendRetryError:
+            delivered = None
+            failure_reason = "matrix timeline recovery still blocked the edit"
         if delivered is not None:
             self.deps.resolver.deps.conversation_cache.notify_outbound_message(
                 target.room_id,
@@ -572,7 +596,7 @@ class DeliveryGateway:
         self.deps.logger.error(
             "Failed to edit message",
             event_id=request.event_id,
-            error="edit_message_result returned None",
+            error=failure_reason,
             **target.log_context,
         )
         return False
@@ -707,6 +731,7 @@ class DeliveryGateway:
                     new_text=display_text,
                     tool_trace=draft.tool_trace,
                     extra_content=draft.extra_content,
+                    retry_sync_recovery=True,
                 ),
             )
             if edited:
@@ -747,6 +772,7 @@ class DeliveryGateway:
                 skip_mentions=request.skip_mentions,
                 tool_trace=draft.tool_trace,
                 extra_content=draft.extra_content,
+                retry_sync_recovery=True,
             ),
         )
         if event_id is None:

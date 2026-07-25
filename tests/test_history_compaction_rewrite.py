@@ -94,6 +94,7 @@ async def _rewrite_single_run(
     summary_model: FakeModel | None = None,
     fallback_summary_model: FakeModel | None = None,
     fallback_summary_model_name: str | None = None,
+    fallback_summary_input_budget: int | None = None,
     progress_callback: Callable[[CompactionLifecycleProgress], Awaitable[None]] | None = None,
 ) -> _CompactionRewriteResult | None:
     return await _rewrite_working_session_for_compaction(
@@ -104,6 +105,13 @@ async def _rewrite_single_run(
         summary_model_name="summary-model",
         fallback_summary_model=fallback_summary_model,
         fallback_summary_model_name=fallback_summary_model_name,
+        fallback_summary_input_budget=(
+            fallback_summary_input_budget
+            if fallback_summary_input_budget is not None
+            else summary_input_budget
+            if fallback_summary_model is not None
+            else None
+        ),
         session_id=working_session.session_id,
         scope=HistoryScope(kind="agent", scope_id="test_agent"),
         state=HistoryScopeState(force_compact_before_next_run=True),

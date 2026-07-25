@@ -568,11 +568,16 @@ async def _run_scope_compaction(
         execution_plan.compaction_model_name,
     )
     fallback_model_name = execution_plan.compaction_fallback_model_name
+    fallback_summary_input_budget = execution_plan.compaction_fallback_summary_input_budget_tokens
     fallback_model: Model | None = None
-    if fallback_model_name is not None and _compaction_fallback_is_distinct(
-        config,
-        primary_model_name=execution_plan.compaction_model_name,
-        fallback_model_name=fallback_model_name,
+    if (
+        fallback_model_name is not None
+        and fallback_summary_input_budget is not None
+        and _compaction_fallback_is_distinct(
+            config,
+            primary_model_name=execution_plan.compaction_model_name,
+            fallback_model_name=fallback_model_name,
+        )
     ):
         # The fallback is an optional resilience knob: when its construction
         # fails (missing SDK, credentials, client setup), compaction still
@@ -603,6 +608,7 @@ async def _run_scope_compaction(
         summary_prompt=config.get_prompt("COMPACTION_SUMMARY_PROMPT"),
         fallback_summary_model=fallback_model,
         fallback_summary_model_name=fallback_model_name if fallback_model is not None else None,
+        fallback_summary_input_budget=fallback_summary_input_budget if fallback_model is not None else None,
         lifecycle_notice_event_id=lifecycle_notice_event_id,
         progress_callback=progress_callback,
     )

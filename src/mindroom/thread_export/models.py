@@ -24,10 +24,10 @@ class ThreadExportRoom:
 
 @dataclass(frozen=True)
 class _ThreadExportFailure:
-    """One room or thread export failure."""
+    """One target, room, or thread export failure."""
 
-    room_key: str
-    room_id: str
+    room_key: str | None
+    room_id: str | None
     thread_id: str | None
     error: str
 
@@ -47,6 +47,16 @@ def failure_for_room(
     )
 
 
+def failure_for_target(error: str) -> _ThreadExportFailure:
+    """Build one target-scoped export failure."""
+    return _ThreadExportFailure(
+        room_key=None,
+        room_id=None,
+        thread_id=None,
+        error=error,
+    )
+
+
 @dataclass(frozen=True)
 class ThreadExportStats:
     """Summary for one export pass."""
@@ -61,7 +71,7 @@ class ThreadExportStats:
 
     @property
     def failures(self) -> int:
-        """Return failed room/thread count."""
+        """Return failed target, room, or thread count."""
         return len(self.failed_items)
 
 
