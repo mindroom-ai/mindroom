@@ -653,6 +653,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
             thread_id,
             caller_label=caller_label,
             coordinator_queue_wait_ms=coordinator_queue_wait_ms,
+            wants_full_history=True,
         )
 
     async def _fetch_dispatch_thread_history_from_client(
@@ -669,6 +670,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
             thread_id,
             caller_label=caller_label,
             coordinator_queue_wait_ms=coordinator_queue_wait_ms,
+            wants_full_history=True,
         )
 
     async def _fetch_dispatch_thread_snapshot_from_client(
@@ -685,6 +687,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
             thread_id,
             caller_label=caller_label,
             coordinator_queue_wait_ms=coordinator_queue_wait_ms,
+            wants_full_history=False,
         )
 
     @staticmethod
@@ -792,6 +795,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
         *,
         caller_label: str,
         coordinator_queue_wait_ms: float,
+        wants_full_history: bool,
     ) -> ThreadHistoryResult:
         coordinator = self.runtime.event_cache_write_coordinator
         if coordinator is None:
@@ -841,28 +845,23 @@ class MatrixConversationCache(ConversationCacheProtocol):
                     thread_id,
                     principal_id=principal_id,
                     replayed_event_ids=retained_event_source_provider.provided_event_ids,
-                    snapshot_stored=(result.diagnostics.get("cache_store_outcome") == ThreadCacheReplaceOutcome.STORED),
+                    snapshot_stored=result.diagnostics.get("cache_store_outcome")
+                    == ThreadCacheReplaceOutcome.STORED.value,
                 )
             return result
 
-        repair_run = await coordinator.run_thread_repair(
-            room_id,
-            thread_id,
-            repair,
-            result_is_usable=self._thread_repair_result_is_usable,
-            acknowledged_event_ids=lambda _result: (),
-            coordination_scope=principal_id,
-        )
-        result = repair_run.value
-        if not repair_run.joined or result.is_full_history or fetcher is fetch_dispatch_thread_snapshot:
-            return result
-        return await self._fetch_thread_from_client(
-            fetcher,
-            room_id,
-            thread_id,
-            caller_label=caller_label,
-            coordinator_queue_wait_ms=coordinator_queue_wait_ms,
-        )
+        while True:
+            repair_run = await coordinator.run_thread_repair(
+                room_id,
+                thread_id,
+                repair,
+                coordination_scope=principal_id,
+            )
+            result = repair_run.value
+            # A joined lightweight snapshot flight cannot answer a full-history read, so run our own.
+            # Every pass either returns or awaits one real repair, so this cannot spin.
+            if not repair_run.joined or result.is_full_history or not wants_full_history:
+                return result
 
     @staticmethod
     def _thread_repair_result_is_usable(result: ThreadHistoryResult) -> bool:
@@ -884,6 +883,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
                     thread_id,
                     caller_label="missing_cache_live_append_repair",
                     coordinator_queue_wait_ms=0.0,
+                    wants_full_history=False,
                 )
             except ThreadRepairBackoffError as exc:
                 self.logger.debug(
@@ -916,18 +916,14 @@ class MatrixConversationCache(ConversationCacheProtocol):
         thread_ids: Collection[str],
     ) -> BulkThreadRefreshStats:
         """Refresh startup threads without occupying the live write coordinator during the scan."""
-
-        async def refresh_room_threads() -> BulkThreadRefreshStats:
-            return await bulk_refresh_room_thread_histories(
-                self._require_client(),
-                room_id,
-                self.runtime.event_cache,
-                thread_root_ids=thread_ids,
-                caller_label="startup_thread_prewarm",
-                max_scan_pages=_STARTUP_PREWARM_MAX_SCAN_PAGES,
-            )
-
-        return await refresh_room_threads()
+        return await bulk_refresh_room_thread_histories(
+            self._require_client(),
+            room_id,
+            self.runtime.event_cache,
+            thread_root_ids=thread_ids,
+            caller_label="startup_thread_prewarm",
+            max_scan_pages=_STARTUP_PREWARM_MAX_SCAN_PAGES,
+        )
 
     def _log_startup_thread_prewarm_complete(
         self,

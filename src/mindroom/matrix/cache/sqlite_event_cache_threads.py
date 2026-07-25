@@ -45,12 +45,12 @@ from .sqlite_event_cache_events import (
 )
 from .thread_cache_state import (
     ThreadCacheReplaceOutcome,
-    ThreadCacheReplaceResult,
     ThreadCacheStateRow,
     can_revalidate_after_incremental_update,
     guarded_thread_replacement_conflict,
     incremental_thread_revalidation_reasons,
     is_incremental_thread_revalidation_reason,
+    thread_cache_state_changed_after,
     thread_cache_state_row,
     thread_revision_row,
 )
@@ -456,7 +456,7 @@ async def replace_thread_locked_if_not_newer(
     events: list[dict[str, Any]],
     fetch_started_at: float,
     validated_at: float,
-) -> ThreadCacheReplaceResult:
+) -> ThreadCacheReplaceOutcome:
     """Replace one thread snapshot or classify the newer state that won."""
     cache_state_row = await _load_thread_cache_state_row(
         db,
@@ -464,13 +464,9 @@ async def replace_thread_locked_if_not_newer(
         room_id=room_id,
         thread_id=thread_id,
     )
-    conflict = guarded_thread_replacement_conflict(
-        cache_state_row,
-        fetch_started_at=fetch_started_at,
-        has_snapshot_rows=False,
-    )
-    if conflict is not None:
-        conflict = guarded_thread_replacement_conflict(
+    # The snapshot-row lookup only distinguishes conflict outcomes, so unchanged state skips it.
+    conflict = (
+        guarded_thread_replacement_conflict(
             cache_state_row,
             fetch_started_at=fetch_started_at,
             has_snapshot_rows=await _thread_has_snapshot_rows_for_thread(
@@ -480,6 +476,9 @@ async def replace_thread_locked_if_not_newer(
                 thread_id=thread_id,
             ),
         )
+        if thread_cache_state_changed_after(cache_state_row, fetch_started_at=fetch_started_at)
+        else None
+    )
     if conflict is not None:
         return conflict
     await _replace_thread_locked(
@@ -490,7 +489,7 @@ async def replace_thread_locked_if_not_newer(
         events=events,
         validated_at=validated_at,
     )
-    return ThreadCacheReplaceResult(ThreadCacheReplaceOutcome.STORED)
+    return ThreadCacheReplaceOutcome.STORED
 
 
 async def invalidate_thread_locked(

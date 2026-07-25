@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, Mock
 import nio
 import pytest
 
-from mindroom.matrix.cache import ThreadCacheReplaceOutcome, ThreadCacheReplaceResult
+from mindroom.matrix.cache import ThreadCacheReplaceOutcome
 from mindroom.matrix.client_thread_history import bulk_refresh_room_thread_histories
 
 _ROOM_ID = "!room:localhost"
@@ -100,8 +100,8 @@ async def test_bulk_refresh_scans_room_once_and_stores_each_thread() -> None:
     event_cache.room_membership_epoch = AsyncMock(return_value=7)
     event_cache.replace_thread_if_not_newer = AsyncMock(
         side_effect=[
-            ThreadCacheReplaceResult(ThreadCacheReplaceOutcome.STORED),
-            ThreadCacheReplaceResult(ThreadCacheReplaceOutcome.EXISTING_USABLE),
+            ThreadCacheReplaceOutcome.STORED,
+            ThreadCacheReplaceOutcome.EXISTING_USABLE,
         ],
     )
 
@@ -151,7 +151,7 @@ async def test_bulk_refresh_reports_missing_roots_without_storing_partial_thread
     event_cache = AsyncMock()
     event_cache.room_departure_epoch = Mock(return_value=3)
     event_cache.replace_thread_if_not_newer = AsyncMock(
-        return_value=ThreadCacheReplaceResult(ThreadCacheReplaceOutcome.STORED),
+        return_value=ThreadCacheReplaceOutcome.STORED,
     )
 
     stats = await bulk_refresh_room_thread_histories(
@@ -190,7 +190,7 @@ async def test_bulk_refresh_page_budget_stores_found_threads_and_reports_remaini
     event_cache = AsyncMock()
     event_cache.room_membership_epoch = AsyncMock(return_value=7)
     event_cache.replace_thread_if_not_newer = AsyncMock(
-        return_value=ThreadCacheReplaceResult(ThreadCacheReplaceOutcome.STORED),
+        return_value=ThreadCacheReplaceOutcome.STORED,
     )
 
     stats = await bulk_refresh_room_thread_histories(

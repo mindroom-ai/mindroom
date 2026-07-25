@@ -1,4 +1,4 @@
-"""Deterministic single-flight and connection-ownership tests for thread repair."""
+"""Deterministic single-flight, backoff, and retained-delta tests for thread repair."""
 
 from __future__ import annotations
 
@@ -10,7 +10,6 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from mindroom.matrix.cache import ThreadCacheReplaceOutcome, thread_cache_rejection_reason
-from mindroom.matrix.cache.postgres_event_cache import _PostgresEventCacheRuntime
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from mindroom.matrix.cache.thread_repair import ThreadRepairBackoffError, ThreadRepairRegistry
 from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
@@ -18,6 +17,10 @@ from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
     from pathlib import Path
+
+
+def _schedule[T](repair_factory: Callable[[], Awaitable[T]]) -> asyncio.Task[T]:
+    return asyncio.create_task(repair_factory())
 
 
 def _event(event_id: str, timestamp: int, *, thread_id: str | None = None) -> dict[str, object]:
@@ -66,14 +69,13 @@ async def test_twenty_missing_thread_callers_share_one_repair_and_converge(  # n
             _event("$initial", 1500, thread_id=thread_id),
             *retained,
         ]
-        result = await cache.replace_thread_if_not_newer(
+        return await cache.replace_thread_if_not_newer(
             room_id,
             thread_id,
             events,
             expected_membership_epoch=await cache.room_membership_epoch(room_id),
             fetch_started_at=time.time(),
         )
-        return result.outcome
 
     async def read_or_repair() -> tuple[str, ...]:
         nonlocal participant_count
@@ -87,10 +89,12 @@ async def test_twenty_missing_thread_callers_share_one_repair_and_converge(  # n
                 room_id,
                 thread_id,
                 repair,
-                result_is_usable=lambda outcome: (
-                    outcome in {ThreadCacheReplaceOutcome.STORED, ThreadCacheReplaceOutcome.EXISTING_USABLE}
-                ),
-                acknowledged_event_ids=lambda _outcome: expected_ids,
+                coordination_scope=principal_id,
+            )
+            coordinator.acknowledge_thread_repair_deltas(
+                room_id,
+                thread_id,
+                expected_ids,
                 coordination_scope=principal_id,
             )
         final_state = await cache.get_thread_cache_state(room_id, thread_id)
@@ -148,8 +152,6 @@ async def test_repairs_are_principal_scoped_and_unrelated_threads_run_concurrent
             "!room:localhost",
             thread_id,
             repair,
-            result_is_usable=lambda _result: True,
-            acknowledged_event_ids=lambda _result: (),
             coordination_scope=principal_id,
         )
         return repair_run.value
@@ -187,26 +189,19 @@ async def test_cancelled_waiter_does_not_cancel_repair_or_leak_ownership() -> No
         await release.wait()
         return "usable"
 
-    def schedule(repair_factory: Callable[[], Awaitable[str]]) -> asyncio.Task[str]:
-        return asyncio.create_task(repair_factory())
-
     owner = asyncio.create_task(
         registry.run(
             key,
-            schedule=schedule,
+            schedule=_schedule,
             repair=repair,
-            result_is_usable=lambda _result: True,
-            acknowledged_event_ids=lambda _result: (),
         ),
     )
     await repair_started.wait()
     waiter = asyncio.create_task(
         registry.run(
             key,
-            schedule=schedule,
+            schedule=_schedule,
             repair=repair,
-            result_is_usable=lambda _result: True,
-            acknowledged_event_ids=lambda _result: (),
         ),
     )
     owner.cancel()
@@ -216,10 +211,8 @@ async def test_cancelled_waiter_does_not_cancel_repair_or_leak_ownership() -> No
     joined = await waiter
     second = await registry.run(
         key,
-        schedule=schedule,
+        schedule=_schedule,
         repair=repair,
-        result_is_usable=lambda _result: True,
-        acknowledged_event_ids=lambda _result: (),
     )
 
     assert joined.value == "usable"
@@ -268,8 +261,6 @@ async def test_repair_bypasses_cancelled_room_fence_without_crossing_same_thread
             "!room:localhost",
             "$thread",
             repair,
-            result_is_usable=lambda _result: True,
-            acknowledged_event_ids=lambda _result: (),
             coordination_scope="@agent:localhost",
         ),
     )
@@ -286,76 +277,44 @@ async def test_repair_bypasses_cancelled_room_fence_without_crossing_same_thread
 
 
 @pytest.mark.asyncio
-async def test_unusable_repair_enters_bounded_backoff_without_hot_retry() -> None:
-    """An explicit unusable result should suppress immediate repeated repairs."""
+async def test_failing_repair_enters_bounded_backoff_without_hot_retry() -> None:
+    """A raising repair should suppress immediate repeated repairs."""
     now = 10.0
     registry = ThreadRepairRegistry(failure_backoff_seconds=2.0, clock=lambda: now)
-    repair = AsyncMock(return_value="homeserver_only")
+    repair = AsyncMock(side_effect=RuntimeError("homeserver unavailable"))
     key = ("@agent:localhost", "!room:localhost", "$thread")
 
-    def schedule(repair_factory: Callable[[], Awaitable[str]]) -> asyncio.Task[str]:
-        return asyncio.create_task(repair_factory())
-
-    first = await registry.run(
-        key,
-        schedule=schedule,
-        repair=repair,
-        result_is_usable=lambda _result: False,
-        acknowledged_event_ids=lambda _result: (),
-    )
+    with pytest.raises(RuntimeError, match="homeserver unavailable"):
+        await registry.run(key, schedule=_schedule, repair=repair)
     with pytest.raises(ThreadRepairBackoffError) as error:
-        await registry.run(
-            key,
-            schedule=schedule,
-            repair=repair,
-            result_is_usable=lambda _result: False,
-            acknowledged_event_ids=lambda _result: (),
-        )
+        await registry.run(key, schedule=_schedule, repair=repair)
 
-    assert first.value == "homeserver_only"
     assert error.value.retry_after_seconds == 2.0
     repair.assert_awaited_once()
 
 
 @pytest.mark.asyncio
-async def test_postgres_runtime_serializes_shared_connection_operations() -> None:
-    """One principal runtime must never drive its psycopg connection concurrently."""
-    runtime = _PostgresEventCacheRuntime(
-        "postgresql://cache:test@localhost/mindroom",
-        namespace="tenant-a",
-    )
-    first_entered = asyncio.Event()
-    release_first = asyncio.Event()
-    second_entered = asyncio.Event()
-    active_operations = 0
-    max_active_operations = 0
+async def test_repair_that_cannot_install_a_snapshot_does_not_throttle_later_reads() -> None:
+    """Fail-open history from an uninstallable snapshot must not degrade the next read."""
+    registry = ThreadRepairRegistry(failure_backoff_seconds=2.0, clock=lambda: 10.0)
+    repair = AsyncMock(return_value="homeserver_only")
+    key = ("@agent:localhost", "!room:localhost", "$thread")
 
-    class _FakeConnection:
-        closed = False
+    first = await registry.run(key, schedule=_schedule, repair=repair)
+    second = await registry.run(key, schedule=_schedule, repair=repair)
 
-        async def execute(self, _query: str, _params: object) -> None:
-            return None
+    assert (first.value, second.value) == ("homeserver_only", "homeserver_only")
+    assert registry.retry_after_seconds(key) == 0.0
 
-    runtime._db = _FakeConnection()
 
-    async def operation(name: str) -> None:
-        nonlocal active_operations, max_active_operations
-        async with runtime.acquire_db_operation(operation=name):
-            active_operations += 1
-            max_active_operations = max(max_active_operations, active_operations)
-            if name == "first":
-                first_entered.set()
-                await release_first.wait()
-            else:
-                second_entered.set()
-            active_operations -= 1
+def test_retained_deltas_expire_once_any_new_scan_would_observe_them() -> None:
+    """Unacknowledged deltas must not accumulate for threads that never install a snapshot."""
+    now = 100.0
+    registry = ThreadRepairRegistry(delta_retention_seconds=30.0, clock=lambda: now)
+    key = ("@agent:localhost", "!room:localhost", "$thread")
 
-    first = asyncio.create_task(operation("first"))
-    await first_entered.wait()
-    second = asyncio.create_task(operation("second"))
-    assert second_entered.is_set() is False
-    release_first.set()
-    await asyncio.gather(first, second)
+    registry.retain_delta(key, _event("$old", 1000, thread_id="$thread"))
+    now = 140.0
+    registry.retain_delta(key, _event("$new", 2000, thread_id="$thread"))
 
-    assert second_entered.is_set() is True
-    assert max_active_operations == 1
+    assert [source["event_id"] for source in registry.pending_deltas(key)] == ["$new"]

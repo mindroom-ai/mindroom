@@ -16,9 +16,7 @@ from mindroom.logging_config import get_logger
 
 from . import sqlite_event_cache_events, sqlite_event_cache_threads
 from .event_batching import group_lookup_events_by_room
-from .event_cache import (
-    EventCacheBackendUnavailableError,
-)
+from .event_cache import EventCacheBackendUnavailableError
 from .event_normalization import normalize_event_source_for_cache
 from .sqlite_agent_message_snapshot import load_sqlite_agent_message_snapshot
 from .sqlite_cache_maintenance import (
@@ -29,7 +27,6 @@ from .thread_cache_state import (
     THREAD_HISTORY_TRUST_METADATA_KEY,
     THREAD_HISTORY_TRUST_VERSION,
     ThreadCacheReplaceOutcome,
-    ThreadCacheReplaceResult,
     replacement_validated_at,
 )
 
@@ -1129,7 +1126,7 @@ class SqliteEventCache:
         expected_membership_epoch: int,
         fetch_started_at: float,
         validated_at: float | None = None,
-    ) -> ThreadCacheReplaceResult:
+    ) -> ThreadCacheReplaceOutcome:
         """Replace a fetched snapshot and classify any guarded non-installation."""
         replacement_timestamp = replacement_validated_at(
             fetch_started_at=fetch_started_at,
@@ -1139,7 +1136,7 @@ class SqliteEventCache:
         return await self._write_operation(
             room_id,
             operation="replace_thread_if_not_newer",
-            disabled_result=ThreadCacheReplaceResult(ThreadCacheReplaceOutcome.WRITES_UNAVAILABLE),
+            disabled_result=ThreadCacheReplaceOutcome.WRITES_UNAVAILABLE,
             writer=lambda db: sqlite_event_cache_threads.replace_thread_locked_if_not_newer(
                 db,
                 principal_id=self.principal_id,

@@ -119,7 +119,7 @@ async def test_sqlite_guarded_replace_fast_path_skips_snapshot_row_lookup(
         validated_at=100.0,
     )
 
-    assert result.outcome is ThreadCacheReplaceOutcome.STORED
+    assert result is ThreadCacheReplaceOutcome.STORED
     has_snapshot_rows.assert_not_awaited()
     replace_thread.assert_awaited_once()
 
@@ -158,7 +158,7 @@ async def test_postgres_guarded_replace_fast_path_skips_snapshot_row_lookup(
         validated_at=100.0,
     )
 
-    assert result.outcome is ThreadCacheReplaceOutcome.STORED
+    assert result is ThreadCacheReplaceOutcome.STORED
     has_snapshot_rows.assert_not_awaited()
     replace_thread.assert_awaited_once()
 
@@ -197,7 +197,7 @@ async def test_sqlite_guarded_replace_recognizes_newer_usable_snapshot(
         validated_at=100.0,
     )
 
-    assert result.outcome is ThreadCacheReplaceOutcome.EXISTING_USABLE
+    assert result is ThreadCacheReplaceOutcome.EXISTING_USABLE
     has_snapshot_rows.assert_awaited_once()
     replace_thread.assert_not_awaited()
 
@@ -236,7 +236,7 @@ async def test_postgres_guarded_replace_recognizes_newer_usable_snapshot(
         validated_at=100.0,
     )
 
-    assert result.outcome is ThreadCacheReplaceOutcome.EXISTING_USABLE
+    assert result is ThreadCacheReplaceOutcome.EXISTING_USABLE
     has_snapshot_rows.assert_awaited_once()
     replace_thread.assert_not_awaited()
 
@@ -1924,7 +1924,7 @@ async def test_postgres_event_cache_flushes_pending_invalidations_before_guarded
             fetch_started_at=150.0,
         )
 
-        assert replaced.outcome is ThreadCacheReplaceOutcome.INVALIDATED
+        assert replaced is ThreadCacheReplaceOutcome.INVALIDATED
         state = await cache.get_thread_cache_state(room_id, thread_id)
         assert state is not None
         assert state.invalidated_at == 200.0
@@ -1979,7 +1979,7 @@ async def test_postgres_event_cache_flushes_newer_thread_marker_with_pending_roo
             fetch_started_at=150.0,
         )
 
-        assert replaced.outcome is ThreadCacheReplaceOutcome.INVALIDATED
+        assert replaced is ThreadCacheReplaceOutcome.INVALIDATED
         state = await cache.get_thread_cache_state(room_id, thread_id)
         assert state is not None
         assert state.room_invalidated_at == 100.0
@@ -2054,7 +2054,7 @@ async def test_postgres_event_cache_preserves_pending_marker_recorded_during_flu
             fetch_started_at=150.0,
         )
 
-        assert replaced.outcome is ThreadCacheReplaceOutcome.INVALIDATED
+        assert replaced is ThreadCacheReplaceOutcome.INVALIDATED
         assert injected_newer_pending_marker is True
         diagnostics = cache.runtime_diagnostics()
         assert diagnostics["cache_postgres_pending_thread_invalidations"] == 1

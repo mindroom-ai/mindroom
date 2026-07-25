@@ -13,7 +13,7 @@ import pytest
 import mindroom.matrix.cache as matrix_cache
 import mindroom.matrix.cache.sqlite_event_cache_threads as sqlite_event_cache_threads_module
 from mindroom.background_tasks import wait_for_background_tasks
-from mindroom.matrix.cache import ThreadCacheReplaceOutcome, ThreadCacheReplaceResult
+from mindroom.matrix.cache import ThreadCacheReplaceOutcome
 from mindroom.matrix.cache.event_cache import ThreadCacheState
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
@@ -938,7 +938,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         finally:
             await event_cache.close()
 
-        assert replaced.outcome is ThreadCacheReplaceOutcome.EXISTING_USABLE
+        assert replaced is ThreadCacheReplaceOutcome.EXISTING_USABLE
         assert cached_history is not None
         assert [event["event_id"] for event in cached_history] == [thread_id, "$reply_new:localhost"]
 
@@ -1205,7 +1205,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         allow_write_commit = asyncio.Event()
         original_replace = sqlite_event_cache_threads_module.replace_thread_locked_if_not_newer
 
-        async def blocked_replace(*args: object, **kwargs: object) -> ThreadCacheReplaceResult:
+        async def blocked_replace(*args: object, **kwargs: object) -> ThreadCacheReplaceOutcome:
             write_entered.set()
             await allow_write_commit.wait()
             return await original_replace(*args, **kwargs)
@@ -1240,7 +1240,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             allow_write_commit.set()
             await _close_bound_runtime_support(bot, support)
 
-        assert replaced.outcome is ThreadCacheReplaceOutcome.STORED
+        assert replaced is ThreadCacheReplaceOutcome.STORED
         assert [message.body for message in history] == ["Old root", "Old reply"]
         assert history.diagnostics[THREAD_HISTORY_SOURCE_DIAGNOSTIC] == THREAD_HISTORY_SOURCE_CACHE
         assert THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC not in history.diagnostics

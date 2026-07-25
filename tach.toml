@@ -3805,7 +3805,6 @@ expose = [
     "SharedConversationEventCache",
     "ThreadCacheState",
     "ThreadCacheReplaceOutcome",
-    "ThreadCacheReplaceResult",
     "ThreadHistoryResult",
     "ThreadRevision",
     "is_opaque_encrypted_event_source",

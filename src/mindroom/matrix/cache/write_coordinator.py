@@ -12,7 +12,9 @@ All ordering is scoped to one ``(principal, room)`` lane.
 
 3. A room update cancelled before it started leaves a fence in its lane: later thread updates still wait
    for the earlier queue segment to drain, so cancellation cannot reorder writes.
-   Read-style operations may opt in to ``ignore_cancelled_room_fences`` because they mutate nothing.
+   Thread-cache repair (``run_thread_repair``) opts out via ``ignore_cancelled_room_fences``: it rebuilds
+   its snapshot from the homeserver under a membership-epoch guard rather than extending queued state, and
+   it still waits for same-thread predecessors, so it cannot reorder same-thread writes.
 
 4. Readers establish the write-read barrier with ``wait_for_thread_idle``: a thread read started after a
    mutation was queued in the same lane never observes cache state older than that mutation.
@@ -33,7 +35,7 @@ from mindroom.timing import elapsed_ms_between, emit_timing_event, timing_enable
 from .thread_repair import ThreadRepairRegistry, ThreadRepairRunResult
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Collection
+    from collections.abc import Awaitable, Callable, Collection
 
     import structlog
 
@@ -648,10 +650,8 @@ class EventCacheWriteCoordinator:
         self,
         room_id: str,
         thread_id: str,
-        repair_coro_factory: Callable[[], typing.Awaitable[T]],
+        repair_coro_factory: Callable[[], Awaitable[T]],
         *,
-        result_is_usable: Callable[[T], bool],
-        acknowledged_event_ids: Callable[[T], Collection[str]],
         coordination_scope: str,
     ) -> ThreadRepairRunResult[T]:
         """Join or start one principal-scoped repair under the same-thread barrier."""
@@ -675,8 +675,6 @@ class EventCacheWriteCoordinator:
                 ),
             ),
             repair=repair_coro_factory,
-            result_is_usable=result_is_usable,
-            acknowledged_event_ids=acknowledged_event_ids,
         )
 
     def retain_thread_repair_delta(

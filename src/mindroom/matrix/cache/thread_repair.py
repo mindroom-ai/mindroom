@@ -12,12 +12,24 @@ if TYPE_CHECKING:
 
 type _ThreadRepairKey = tuple[str, str, str]
 
+# Retained deltas only cover the window where a homeserver scan can miss a just-certified event.
+# Once a delta is older than this, any new scan already observes it, so keeping it only wastes memory.
+_DELTA_RETENTION_SECONDS = 60.0
 
-def _delta_order(item: tuple[str, dict[str, Any]]) -> tuple[int, str]:
-    """Return stable Matrix ordering fields for one retained delta."""
-    event_id, event_source = item
-    timestamp = event_source.get("origin_server_ts")
-    return (timestamp if isinstance(timestamp, int) and not isinstance(timestamp, bool) else 0), event_id
+
+@dataclass(frozen=True, slots=True)
+class _RetainedDelta:
+    """One certified event source held until a scan or append is proven to include it."""
+
+    event_source: dict[str, Any]
+    retained_at: float
+
+    @property
+    def order(self) -> tuple[int, str]:
+        """Return stable Matrix ordering fields for this delta."""
+        timestamp = self.event_source.get("origin_server_ts")
+        event_id = str(self.event_source["event_id"])
+        return (timestamp if isinstance(timestamp, int) and not isinstance(timestamp, bool) else 0), event_id
 
 
 class ThreadRepairBackoffError(RuntimeError):
@@ -41,10 +53,11 @@ class ThreadRepairRegistry:
     """Own principal-scoped repair flights, failure backoff, and certified deltas."""
 
     failure_backoff_seconds: float = 1.0
+    delta_retention_seconds: float = _DELTA_RETENTION_SECONDS
     clock: Callable[[], float] = time.monotonic
     _tasks: dict[_ThreadRepairKey, asyncio.Task[object]] = field(default_factory=dict, init=False)
     _retry_after: dict[_ThreadRepairKey, float] = field(default_factory=dict, init=False)
-    _deltas: dict[_ThreadRepairKey, dict[str, dict[str, Any]]] = field(default_factory=dict, init=False)
+    _deltas: dict[_ThreadRepairKey, dict[str, _RetainedDelta]] = field(default_factory=dict, init=False)
 
     def _active_task(self, key: _ThreadRepairKey) -> asyncio.Task[object] | None:
         task = self._tasks.get(key)
@@ -60,10 +73,9 @@ class ThreadRepairRegistry:
             self._tasks.pop(key, None)
 
     def _record_failure(self, key: _ThreadRepairKey) -> None:
-        self._retry_after[key] = self.clock() + self.failure_backoff_seconds
-
-    def _clear_failure(self, key: _ThreadRepairKey) -> None:
-        self._retry_after.pop(key, None)
+        now = self.clock()
+        self._retry_after = {expired: until for expired, until in self._retry_after.items() if until > now}
+        self._retry_after[key] = now + self.failure_backoff_seconds
 
     def retry_after_seconds(self, key: _ThreadRepairKey) -> float:
         """Return remaining repair backoff for one key."""
@@ -82,10 +94,8 @@ class ThreadRepairRegistry:
         *,
         schedule: Callable[[Callable[[], Awaitable[T]]], asyncio.Task[T]],
         repair: Callable[[], Awaitable[T]],
-        result_is_usable: Callable[[T], bool],
-        acknowledged_event_ids: Callable[[T], Collection[str]],
     ) -> ThreadRepairRunResult[T]:
-        """Join or start one shielded repair and update backoff from its exact outcome."""
+        """Join or start one shielded repair, throttling only a repair that raised."""
         active = self._active_task(key)
         if active is not None:
             value = cast("T", await asyncio.shield(active))
@@ -101,13 +111,11 @@ class ThreadRepairRegistry:
             except asyncio.CancelledError:
                 raise
             except BaseException:
+                # A repair that completes without installing a snapshot still returns usable
+                # history to its caller, so only a raising repair is worth throttling.
                 self._record_failure(key)
                 raise
-            if result_is_usable(value):
-                self._clear_failure(key)
-                self.acknowledge_deltas(key, acknowledged_event_ids(value))
-            else:
-                self._record_failure(key)
+            self._retry_after.pop(key, None)
             return value
 
         task = schedule(run_repair)
@@ -116,23 +124,31 @@ class ThreadRepairRegistry:
         value = await asyncio.shield(task)
         return ThreadRepairRunResult(value=value, joined=False)
 
+    def _drop_expired_deltas(self) -> None:
+        cutoff = self.clock() - self.delta_retention_seconds
+        for key, deltas in list(self._deltas.items()):
+            for event_id, delta in list(deltas.items()):
+                if delta.retained_at <= cutoff:
+                    del deltas[event_id]
+            if not deltas:
+                self._deltas.pop(key, None)
+
     def retain_delta(self, key: _ThreadRepairKey, event_source: dict[str, Any]) -> None:
         """Retain one certified thread event until append or repair durably includes it."""
         event_id = event_source.get("event_id")
         if not isinstance(event_id, str) or not event_id:
             return
-        self._deltas.setdefault(key, {})[event_id] = dict(event_source)
+        self._drop_expired_deltas()
+        self._deltas.setdefault(key, {})[event_id] = _RetainedDelta(
+            event_source=dict(event_source),
+            retained_at=self.clock(),
+        )
 
     def pending_deltas(self, key: _ThreadRepairKey) -> tuple[dict[str, Any], ...]:
         """Return retained deltas in deterministic event order."""
+        self._drop_expired_deltas()
         deltas = self._deltas.get(key, {})
-        return tuple(
-            dict(event_source)
-            for event_id, event_source in sorted(
-                deltas.items(),
-                key=_delta_order,
-            )
-        )
+        return tuple(dict(delta.event_source) for delta in sorted(deltas.values(), key=lambda delta: delta.order))
 
     def acknowledge_deltas(self, key: _ThreadRepairKey, event_ids: Collection[str]) -> None:
         """Forget retained deltas proven present in a usable snapshot."""

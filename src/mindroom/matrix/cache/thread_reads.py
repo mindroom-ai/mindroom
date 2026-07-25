@@ -43,13 +43,10 @@ from mindroom.matrix.thread_diagnostics import (
 from mindroom.timing import elapsed_ms_since
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
-
     import structlog
 
     from mindroom.bot_runtime_view import BotRuntimeView
     from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
-    from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 
 
 _CACHE_COORDINATOR_TIMEOUT = "cache_coordinator_timeout"
@@ -153,18 +150,6 @@ class ThreadReadPolicy:
             coordination_scope=self.runtime.event_cache.principal_id,
         )
 
-    def _full_history_result(
-        self,
-        history: Sequence[ResolvedVisibleMessage],
-    ) -> ThreadHistoryResult:
-        if isinstance(history, ThreadHistoryResult):
-            return thread_history_result(
-                history,
-                is_full_history=history.is_full_history,
-                diagnostics=history.diagnostics,
-            )
-        return thread_history_result(list(history), is_full_history=True)
-
     def _degraded_dispatch_timeout_result(
         self,
         *,
@@ -222,29 +207,23 @@ class ThreadReadPolicy:
         thread_id: str,
         *,
         fetcher: _ThreadHistoryFetcher,
-        full_history: bool,
         caller_label: str,
         queue_wait_started: float,
     ) -> ThreadHistoryResult:
         coordinator_queue_wait_ms = elapsed_ms_since(queue_wait_started, clock=time.perf_counter)
-        try:
-            thread_history = await fetcher(
-                room_id,
-                thread_id,
-                caller_label=caller_label,
-                coordinator_queue_wait_ms=coordinator_queue_wait_ms,
-            )
-        except ThreadRepairBackoffError as exc:
-            await asyncio.sleep(exc.retry_after_seconds)
-            thread_history = await fetcher(
-                room_id,
-                thread_id,
-                caller_label=caller_label,
-                coordinator_queue_wait_ms=coordinator_queue_wait_ms,
-            )
-        if full_history:
-            return self._full_history_result(thread_history)
-        return thread_history
+        while True:
+            try:
+                return await fetcher(
+                    room_id,
+                    thread_id,
+                    caller_label=caller_label,
+                    coordinator_queue_wait_ms=coordinator_queue_wait_ms,
+                )
+            except ThreadRepairBackoffError as exc:
+                # Non-dispatch reads have no timeout, so they wait the throttle out rather than leak
+                # this internal signal to turn execution. Each pass sleeps before retrying, so a
+                # repair that keeps failing surfaces its own error instead of spinning.
+                await asyncio.sleep(exc.retry_after_seconds)
 
     async def _load_dispatch_thread_read(
         self,
@@ -252,7 +231,6 @@ class ThreadReadPolicy:
         thread_id: str,
         *,
         fetcher: _ThreadHistoryFetcher,
-        full_history: bool,
         caller_label: str,
         queue_wait_started: float,
         dispatch_timeout_seconds: float,
@@ -277,7 +255,6 @@ class ThreadReadPolicy:
                     room_id,
                     thread_id,
                     fetcher=fetcher,
-                    full_history=full_history,
                     caller_label=caller_label,
                     queue_wait_started=queue_wait_started,
                 ),
@@ -340,7 +317,6 @@ class ThreadReadPolicy:
                 room_id,
                 thread_id,
                 fetcher=fetcher,
-                full_history=mode.full_history,
                 caller_label=caller_label,
                 queue_wait_started=queue_wait_started,
                 dispatch_timeout_seconds=dispatch_timeout_seconds,
@@ -350,7 +326,6 @@ class ThreadReadPolicy:
             room_id,
             thread_id,
             fetcher=fetcher,
-            full_history=mode.full_history,
             caller_label=caller_label,
             queue_wait_started=queue_wait_started,
         )

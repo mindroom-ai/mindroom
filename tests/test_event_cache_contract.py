@@ -269,7 +269,7 @@ class TestConversationEventCacheContract:
 
         assert appended is True
         assert revalidated is True
-        assert guarded_replacement.outcome is ThreadCacheReplaceOutcome.EXISTING_USABLE
+        assert guarded_replacement is ThreadCacheReplaceOutcome.EXISTING_USABLE
         assert cached_events is not None
         assert [event["event_id"] for event in cached_events] == [
             "$thread:localhost",

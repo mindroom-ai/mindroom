@@ -882,7 +882,7 @@ async def test_stored_repair_releases_replayed_delta_filtered_by_redaction(tmp_p
             [],
             is_full_history=True,
             diagnostics={
-                "cache_store_outcome": ThreadCacheReplaceOutcome.STORED,
+                "cache_store_outcome": ThreadCacheReplaceOutcome.STORED.value,
                 "cache_repair_usable": True,
                 "thread_read_source": "homeserver",
             },
@@ -898,6 +898,7 @@ async def test_stored_repair_releases_replayed_delta_filtered_by_redaction(tmp_p
         "$thread:localhost",
         caller_label="redaction_repair",
         coordinator_queue_wait_ms=0.0,
+        wants_full_history=True,
     )
 
     assert result.is_full_history is True
@@ -1251,12 +1252,12 @@ async def test_replace_thread_if_not_newer_refuses_after_midflight_invalidation(
     finally:
         await cache.close()
 
-    assert replaced_behind_marker.outcome is ThreadCacheReplaceOutcome.INVALIDATED
+    assert replaced_behind_marker is ThreadCacheReplaceOutcome.INVALIDATED
     assert state_after_refusal is not None
     assert state_after_refusal.invalidated_at == 200.0
     assert thread_cache_rejection_reason(state_after_refusal) == "thread_invalidated_after_validation"
 
-    assert replaced_after_marker.outcome is ThreadCacheReplaceOutcome.STORED
+    assert replaced_after_marker is ThreadCacheReplaceOutcome.STORED
     assert state_after_replace is not None
     # The stored validation time is clamped to fetch start, so an invalidation landing during the
     # fetch still outranks this snapshot at read time even if it slipped past the replace guard.
@@ -1295,7 +1296,7 @@ async def test_replace_thread_if_not_newer_refuses_after_midflight_room_invalida
     finally:
         await cache.close()
 
-    assert replaced.outcome is ThreadCacheReplaceOutcome.INVALIDATED
+    assert replaced is ThreadCacheReplaceOutcome.INVALIDATED
     assert state is not None
     assert state.room_invalidated_at == 200.0
     assert thread_cache_rejection_reason(state) == "room_invalidated_after_validation"

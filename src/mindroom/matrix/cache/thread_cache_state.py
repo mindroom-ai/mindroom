@@ -6,10 +6,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING
 
-from .event_cache import (
-    ThreadCacheState,
-    ThreadRevision,
-)
+from .event_cache import ThreadCacheState, ThreadRevision
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -33,29 +30,26 @@ class ThreadCacheReplaceOutcome(StrEnum):
     WRITES_UNAVAILABLE = "writes_unavailable"
     HARD_FAILURE = "hard_failure"
 
-
-@dataclass(frozen=True, slots=True)
-class ThreadCacheReplaceResult:
-    """Typed guarded-replacement result used by refill conflict handling."""
-
-    outcome: ThreadCacheReplaceOutcome
-
     @property
     def written(self) -> bool:
         """Return whether this operation installed the supplied snapshot."""
-        return self.outcome is ThreadCacheReplaceOutcome.STORED
+        return self is ThreadCacheReplaceOutcome.STORED
 
     @property
     def usable(self) -> bool:
         """Return whether a trusted snapshot exists after this operation."""
-        return self.outcome in {
+        return self in {
             ThreadCacheReplaceOutcome.STORED,
             ThreadCacheReplaceOutcome.EXISTING_USABLE,
         }
 
-    def __bool__(self) -> bool:
-        """Preserve historical truth testing for an installed snapshot."""
-        return self.written
+    @property
+    def retryable(self) -> bool:
+        """Return whether another bounded reconstruction may still install a snapshot."""
+        return self in {
+            ThreadCacheReplaceOutcome.INVALIDATED,
+            ThreadCacheReplaceOutcome.RETRYABLE_CONFLICT,
+        }
 
 
 def incremental_thread_revalidation_reasons() -> tuple[str, ...]:
@@ -140,7 +134,7 @@ def thread_revision_row(values: Sequence[float | int | None] | None) -> ThreadRe
     )
 
 
-def _thread_cache_state_changed_after(
+def thread_cache_state_changed_after(
     cache_state: ThreadCacheStateRow | None,
     *,
     fetch_started_at: float,
@@ -159,27 +153,24 @@ def guarded_thread_replacement_conflict(
     *,
     fetch_started_at: float,
     has_snapshot_rows: bool,
-) -> ThreadCacheReplaceResult | None:
+) -> ThreadCacheReplaceOutcome | None:
     """Classify state changed after one snapshot fetch, if any."""
-    if not _thread_cache_state_changed_after(cache_state, fetch_started_at=fetch_started_at):
+    if cache_state is None or not thread_cache_state_changed_after(cache_state, fetch_started_at=fetch_started_at):
         return None
-    if cache_state is None:
-        return ThreadCacheReplaceResult(ThreadCacheReplaceOutcome.RETRYABLE_CONFLICT)
-    public_state = cache_state.as_public_state()
     trusted_existing = (
-        public_state.validated_at is not None
-        and (public_state.invalidated_at is None or public_state.invalidated_at < public_state.validated_at)
-        and (public_state.room_invalidated_at is None or public_state.room_invalidated_at < public_state.validated_at)
+        cache_state.validated_at is not None
+        and (cache_state.invalidated_at is None or cache_state.invalidated_at < cache_state.validated_at)
+        and (cache_state.room_invalidated_at is None or cache_state.room_invalidated_at < cache_state.validated_at)
     )
     if trusted_existing and has_snapshot_rows:
-        return ThreadCacheReplaceResult(ThreadCacheReplaceOutcome.EXISTING_USABLE)
+        return ThreadCacheReplaceOutcome.EXISTING_USABLE
     invalidated_after_fetch = any(
         timestamp is not None and timestamp > fetch_started_at
         for timestamp in (cache_state.invalidated_at, cache_state.room_invalidated_at)
     )
     if invalidated_after_fetch:
-        return ThreadCacheReplaceResult(ThreadCacheReplaceOutcome.INVALIDATED)
-    return ThreadCacheReplaceResult(ThreadCacheReplaceOutcome.RETRYABLE_CONFLICT)
+        return ThreadCacheReplaceOutcome.INVALIDATED
+    return ThreadCacheReplaceOutcome.RETRYABLE_CONFLICT
 
 
 def can_revalidate_after_incremental_update(cache_state: ThreadCacheStateRow | None) -> bool:

@@ -21,7 +21,6 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.matrix.cache import (
     ThreadCacheReplaceOutcome,
-    ThreadCacheReplaceResult,
     ThreadHistoryResult,
     thread_cache_rejection_reason,
 )
@@ -3237,8 +3236,8 @@ class TestThreadHistoryCache:
         """A mid-flight invalidation should trigger one bounded authoritative retry."""
         event_cache = _event_cache()
         event_cache.replace_thread_if_not_newer.side_effect = [
-            ThreadCacheReplaceResult(ThreadCacheReplaceOutcome.INVALIDATED),
-            ThreadCacheReplaceResult(ThreadCacheReplaceOutcome.STORED),
+            ThreadCacheReplaceOutcome.INVALIDATED,
+            ThreadCacheReplaceOutcome.STORED,
         ]
         fetch_result = matrix_client_module._ThreadHistoryFetchResult(
             history=[
@@ -3278,9 +3277,7 @@ class TestThreadHistoryCache:
     async def test_refresh_recognizes_existing_newer_usable_cache_winner(self) -> None:
         """A newer trusted snapshot should win without another fetch or generic failure."""
         event_cache = _event_cache()
-        event_cache.replace_thread_if_not_newer.return_value = ThreadCacheReplaceResult(
-            ThreadCacheReplaceOutcome.EXISTING_USABLE,
-        )
+        event_cache.replace_thread_if_not_newer.return_value = ThreadCacheReplaceOutcome.EXISTING_USABLE
         fetched = matrix_client_module._ThreadHistoryFetchResult(
             history=[
                 ResolvedVisibleMessage.synthetic(
@@ -3337,9 +3334,7 @@ class TestThreadHistoryCache:
     async def test_refresh_reports_unresolved_invalidation_after_bounded_retry(self) -> None:
         """Repeated invalidation must remain explicit and never become reported cache success."""
         event_cache = _event_cache()
-        event_cache.replace_thread_if_not_newer.return_value = ThreadCacheReplaceResult(
-            ThreadCacheReplaceOutcome.INVALIDATED,
-        )
+        event_cache.replace_thread_if_not_newer.return_value = ThreadCacheReplaceOutcome.INVALIDATED
         fetch_result = matrix_client_module._ThreadHistoryFetchResult(
             history=[
                 ResolvedVisibleMessage.synthetic(
@@ -4189,9 +4184,7 @@ class TestThreadHistoryCache:
         """Authoritative history remains available while every derived cache write is rejected."""
         event_cache = _event_cache()
         event_cache.room_membership_epoch.side_effect = RuntimeError("cache unavailable")
-        event_cache.replace_thread_if_not_newer.return_value = ThreadCacheReplaceResult(
-            ThreadCacheReplaceOutcome.WRITES_UNAVAILABLE,
-        )
+        event_cache.replace_thread_if_not_newer.return_value = ThreadCacheReplaceOutcome.WRITES_UNAVAILABLE
         fetch_result = matrix_client_module._ThreadHistoryFetchResult(
             history=[
                 ResolvedVisibleMessage.synthetic(

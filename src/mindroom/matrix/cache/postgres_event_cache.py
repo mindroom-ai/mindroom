@@ -16,9 +16,7 @@ from mindroom.logging_config import get_logger
 
 from . import postgres_event_cache_events, postgres_event_cache_threads
 from .event_batching import group_lookup_events_by_room
-from .event_cache import (
-    EventCacheBackendUnavailableError,
-)
+from .event_cache import EventCacheBackendUnavailableError
 from .event_normalization import normalize_event_source_for_cache
 from .postgres_agent_message_snapshot import load_postgres_agent_message_snapshot
 from .postgres_cache_maintenance import migrate_postgres_schema, run_startup_maintenance
@@ -27,7 +25,6 @@ from .thread_cache_state import (
     THREAD_HISTORY_TRUST_METADATA_KEY,
     THREAD_HISTORY_TRUST_VERSION,
     ThreadCacheReplaceOutcome,
-    ThreadCacheReplaceResult,
     incoming_thread_invalidation_takes_precedence,
     replacement_validated_at,
 )
@@ -1524,7 +1521,7 @@ class PostgresEventCache:
         expected_membership_epoch: int,
         fetch_started_at: float,
         validated_at: float | None = None,
-    ) -> ThreadCacheReplaceResult:
+    ) -> ThreadCacheReplaceOutcome:
         """Replace a fetched snapshot and classify any guarded non-installation."""
         replacement_timestamp = replacement_validated_at(
             fetch_started_at=fetch_started_at,
@@ -1534,7 +1531,7 @@ class PostgresEventCache:
         return await self._operation(
             room_id,
             operation="replace_thread_if_not_newer",
-            disabled_result=ThreadCacheReplaceResult(ThreadCacheReplaceOutcome.WRITES_UNAVAILABLE),
+            disabled_result=ThreadCacheReplaceOutcome.WRITES_UNAVAILABLE,
             callback=lambda db: postgres_event_cache_threads.replace_thread_locked_if_not_newer(
                 db,
                 namespace=self._runtime.namespace,
