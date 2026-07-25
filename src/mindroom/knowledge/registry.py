@@ -258,6 +258,11 @@ def _published_index_storage_path(key: PublishedIndexKey) -> Path:
     return (Path(key.storage_root) / "knowledge_db" / storage_key_for_base(key.base_id, knowledge_path)).resolve()
 
 
+def published_index_storage_path(key: PublishedIndexKey) -> Path:
+    """Return the private storage directory backing one resolved knowledge base."""
+    return _published_index_storage_path(key)
+
+
 def published_index_metadata_path(key: PublishedIndexKey) -> Path:
     """Return the single persisted state file for one knowledge base."""
     return _published_index_storage_path(key) / "indexing_settings.json"
