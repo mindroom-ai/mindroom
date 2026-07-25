@@ -1808,7 +1808,13 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
         streaming.placeholder_progress_sent = adopt_existing_placeholder
 
     if header:
-        await streaming.update_content(header, client)
+        header_delivered = False
+        try:
+            await streaming.update_content(header, client)
+            header_delivered = True
+        finally:
+            if not header_delivered:
+                streaming._release_thread_write_reservation()
 
     worker_progress_queue: asyncio.Queue[WorkerProgressEvent] = asyncio.Queue()
     delivery_queue: asyncio.Queue[_DeliveryRequest | None] = asyncio.Queue()
@@ -1816,6 +1822,7 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
     delivery_task: asyncio.Task[None] | None = None
     loop = asyncio.get_running_loop()
     transport_outcome: StreamTransportOutcome | None = None
+    finalization_started = False
     with worker_progress_pump_scope(loop, worker_progress_queue) as pump:
         delivery_task = asyncio.create_task(_drive_stream_delivery(client, streaming, delivery_queue))
         progress_task = asyncio.create_task(
@@ -1874,6 +1881,7 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
                 user_stop_message="Streaming response cancelled by user",
                 interrupted_message="Streaming response interrupted — traceback for diagnosis",
             )
+            finalization_started = True
             transport_outcome = await streaming.finalize(client, cancel_source=cancel_source)
             raise StreamingDeliveryError(
                 exc,
@@ -1917,6 +1925,7 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
                 ) from shutdown_timeout
             if isinstance(exc, _NonTerminalDeliveryError):
                 streaming.restore_last_delivered_state()
+            finalization_started = True
             transport_outcome = await streaming.finalize(client, error=delivery_error)
             raise StreamingDeliveryError(
                 delivery_error,
@@ -1926,6 +1935,7 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
                 transport_outcome=transport_outcome,
             ) from delivery_error
         else:
+            finalization_started = True
             transport_outcome = await streaming.finalize(client)
         finally:
             cleanup_error = await _shutdown_worker_progress_drain(pump, progress_task)
@@ -1942,7 +1952,8 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
                 )
             if tool_trace_collector is not None:
                 tool_trace_collector[:] = streaming.tool_trace
-            streaming._release_thread_write_reservation()
+            if not finalization_started:
+                streaming._release_thread_write_reservation()
 
     assert transport_outcome is not None
     return transport_outcome

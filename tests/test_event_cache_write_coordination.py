@@ -550,6 +550,25 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
 
         now = 16.0
         assert reservations.active_count == 0
+        assert reservations.resolve("principal-a", "!room-a", "$event") is None
+
+    def test_thread_reservations_evict_soonest_expiring_claim_at_capacity(self) -> None:
+        """Capacity cleanup should evict the claim nearest expiration."""
+        now = 10.0
+        reservations = OutboundThreadReservations(
+            ttl_seconds=5.0,
+            max_reservations=2,
+            clock=lambda: now,
+        )
+        reservations.reserve("principal-a", "!room", "$oldest", "$thread-oldest")
+        now = 11.0
+        reservations.reserve("principal-a", "!room", "$newer", "$thread-newer")
+        reservations.reserve("principal-a", "!room", "$newest", "$thread-newest")
+
+        assert reservations.active_count == 2
+        assert reservations.resolve("principal-a", "!room", "$oldest") is None
+        assert reservations.resolve("principal-a", "!room", "$newer") == "$thread-newer"
+        assert reservations.resolve("principal-a", "!room", "$newest") == "$thread-newest"
 
     @pytest.mark.asyncio
     async def test_outbound_nonterminal_streaming_edits_coalesce_pending_cache_updates(
