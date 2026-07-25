@@ -1864,7 +1864,9 @@ async def get_room_threads_page(
     thread_roots = [
         event
         for event in response.thread_roots
-        if not event_source_is_state_event(event.source) and event_source_matches_room(event.source, room_id)
+        if EventInfo.from_event(event.source).can_be_thread_root
+        and not event_source_is_state_event(event.source)
+        and event_source_matches_room(event.source, room_id)
     ]
     return thread_roots, response.next_batch
 

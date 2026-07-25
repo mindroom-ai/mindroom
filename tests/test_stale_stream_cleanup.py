@@ -545,6 +545,42 @@ async def test_cleanup_skips_completed_stream_status_even_with_trailing_marker(t
 
 
 @pytest.mark.asyncio
+async def test_cleanup_skips_bundled_completed_stream_replacement(tmp_path: Path) -> None:
+    """Cleanup must project a bundled terminal replacement before stale classification."""
+    config = _make_config(tmp_path)
+    client = AsyncMock(spec=nio.AsyncClient)
+    original = _make_message_event(
+        event_id="$original",
+        body="Partial answer",
+        timestamp_ms=NOW_MS - (STALE_AGE_MS + 10_000),
+        extra_content={STREAM_STATUS_KEY: "streaming"},
+    )
+    completed_edit = _make_message_event(
+        event_id="$completed-edit",
+        body="* Finished answer",
+        timestamp_ms=NOW_MS - STALE_AGE_MS,
+        relates_to={"rel_type": "m.replace", "event_id": "$original"},
+        new_content={
+            "body": "Finished answer",
+            "msgtype": "m.text",
+            STREAM_STATUS_KEY: "completed",
+        },
+    )
+    original.source["unsigned"] = {"m.relations": {"m.replace": completed_edit.source}}
+    client.room_messages.return_value = _room_messages_response(original)
+
+    with patch(
+        "mindroom.matrix.stale_stream_cleanup.edit_message_result",
+        new=AsyncMock(side_effect=delivered_matrix_side_effect("$cleanup-edit")),
+    ) as mock_edit:
+        cleaned, interrupted = await _run_cleanup(client, config, joined_rooms=[ROOM_ID])
+
+    assert cleaned == 0
+    assert interrupted == []
+    mock_edit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_cleanup_scans_until_history_end_for_deep_stale_messages(tmp_path: Path) -> None:
     """Cleanup should keep paginating until history ends, not stop after an arbitrary page cap."""
     config = _make_config(tmp_path)

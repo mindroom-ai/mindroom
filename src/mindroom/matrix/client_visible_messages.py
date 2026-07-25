@@ -9,6 +9,7 @@ import nio
 
 from mindroom.constants import STREAM_STATUS_KEY
 from mindroom.entity_resolution import current_internal_sender_ids
+from mindroom.matrix import replacements
 from mindroom.matrix.event_info import (
     EventInfo,
     event_source_is_state_event,
@@ -18,7 +19,6 @@ from mindroom.matrix.event_info import (
 )
 from mindroom.matrix.media import valid_room_message_replacement
 from mindroom.matrix.message_content import extract_and_resolve_message, extract_edit_body, resolve_event_source_content
-from mindroom.matrix.replacements import ordered_replacements, replacement_content
 from mindroom.matrix.visible_body import bundled_visible_body_preview, visible_body_from_event_source
 
 if TYPE_CHECKING:
@@ -109,7 +109,7 @@ class ResolvedVisibleMessage:
         self.latest_event_id = latest_event_id
         self.latest_event_timestamp = latest_event_timestamp
         if content is not None:
-            self.content = replacement_content(self.content, content)
+            self.content = replacements.replacement_content(self.content, content)
         self.refresh_stream_status()
 
     @property
@@ -255,7 +255,7 @@ async def bundled_replacement_body(
 ) -> str | None:
     """Return one canonical bundled replacement body using runtime-derived sender trust."""
     trusted_sender_ids = _resolved_trusted_sender_ids(config, runtime_paths, trusted_sender_ids)
-    for candidate in ordered_replacements(
+    for candidate in replacements.ordered_replacements(
         event_source,
         room_id=room_id,
         validator=valid_room_message_replacement,
@@ -397,7 +397,7 @@ async def apply_latest_edits_to_messages(
             "type": "m.room.message",
             "content": existing_message.content,
         }
-        for edit_source in ordered_replacements(
+        for edit_source in replacements.ordered_replacements(
             original_source,
             edit_candidates,
             room_id=room_id,
@@ -454,6 +454,8 @@ async def resolve_latest_visible_messages(
         ):
             continue
 
+        bundled_candidates = edit_candidates_by_original_event_id.setdefault(event.event_id, [])
+        bundled_candidates.extend(replacements.bundled_replacement_candidates(event.source))
         if event.event_id in messages_by_event_id:
             continue
 
