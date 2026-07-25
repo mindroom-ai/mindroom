@@ -643,16 +643,16 @@ async def append_existing_thread_event(
 
     An opaque ``m.room.encrypted`` payload never replaces stored clear content for the same event ID.
     """
-    event_id = event_id_for_cache(normalized_event)
-    if not await filter_cacheable_events(
+    cacheable_events = await filter_cacheable_events(
         db,
         namespace,
         room_id,
-        [(event_id, normalized_event)],
-    ):
+        [(event_id_for_cache(normalized_event), normalized_event)],
+    )
+    if not cacheable_events:
         return False
 
-    serialized_event = serialize_cached_event(event_id, normalized_event)
+    serialized_event = serialize_cached_event(*cacheable_events[0])
     row = await fetchone(
         db,
         """

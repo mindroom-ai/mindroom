@@ -2587,6 +2587,66 @@ async def test_cached_point_and_snapshot_reads_apply_bundled_replacement(
 
 
 @pytest.mark.asyncio
+async def test_thread_append_sanitizes_tombstoned_bundled_replacement(
+    event_cache: ConversationEventCache,
+) -> None:
+    """Incremental append must persist the filtered original, not its tombstoned bundle."""
+    room_id = "!room:localhost"
+    thread_id = "$thread:localhost"
+    original_event_id = "$late_reply"
+    edit_event_id = "$late_edit"
+    await _replace_thread(
+        event_cache,
+        room_id,
+        thread_id,
+        [_clear_payload(thread_id, body="root")],
+    )
+    original_event = _clear_payload(
+        original_event_id,
+        body="Original",
+        thread_root_id=thread_id,
+        origin_server_ts=2000,
+    )
+    original_event["unsigned"] = {
+        "m.relations": {
+            "m.replace": {
+                "event_id": edit_event_id,
+                "sender": original_event["sender"],
+                "origin_server_ts": 3000,
+                "type": "m.room.message",
+                "content": {
+                    "body": "* Forged",
+                    "msgtype": "m.text",
+                    "m.new_content": {"body": "Forged", "msgtype": "m.text"},
+                    "m.relates_to": {
+                        "rel_type": "m.replace",
+                        "event_id": original_event_id,
+                    },
+                },
+            },
+        },
+    }
+
+    assert not await event_cache.redact_event(room_id, edit_event_id)
+    assert await event_cache.append_event(room_id, thread_id, original_event)
+
+    cached_original = await event_cache.get_event(room_id, original_event_id)
+    cached_thread = await event_cache.get_thread_events(room_id, thread_id)
+    assert cached_original is not None
+    assert cached_original["unsigned"]["m.relations"].get("m.replace") is None
+    assert cached_thread is not None
+    assert next(event for event in cached_thread if event["event_id"] == original_event_id) == cached_original
+    assert (
+        await event_cache.get_latest_edit(
+            room_id,
+            cached_original,
+            validator=valid_room_message_replacement,
+        )
+        is None
+    )
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "invalid_scope",
     [{"state_key": ""}, {"room_id": "!other:localhost"}],
