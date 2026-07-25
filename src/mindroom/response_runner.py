@@ -493,6 +493,7 @@ class ResponseRunner:
         init=False,
     )
     _inbox_response_tasks: set[asyncio.Task[None]] = field(default_factory=set, init=False)
+    _admission_shutdown_requested: asyncio.Event = field(default_factory=asyncio.Event, init=False, repr=False)
 
     def track_inbox_response(self, response: Coroutine[Any, Any, None], *, name: str) -> asyncio.Task[None]:
         """Own one detached inbox response until it completes or a drain settles it."""
@@ -507,8 +508,8 @@ class ResponseRunner:
             return
         error = task.exception()
         if isinstance(error, ResponseAdmissionRefusedError):
-            # Already reported as a warning at the refusal site, with the room
-            # and thread context this callback does not have.
+            # The Matrix callback awaiting this pre-lock task surfaces the
+            # refusal into sync-checkpoint failure accounting.
             return
         if error is not None:
             self.deps.logger.error(
@@ -575,6 +576,32 @@ class ResponseRunner:
     def _admission_gate(self) -> ResponseAdmissionGate:
         """Return the orchestrator-owned gate deciding whether responses may start."""
         return self.deps.runtime.response_admission_gate
+
+    def resume_pending_admissions(self) -> None:
+        """Let a fresh sync-loop generation wait for config apply completion."""
+        self._admission_shutdown_requested.clear()
+
+    def refuse_pending_admissions(self) -> None:
+        """Wake pre-admission responses whose owning runtime is shutting down."""
+        self._admission_shutdown_requested.set()
+
+    async def _wait_for_admission_or_shutdown(self) -> bool:
+        """Return whether admission reopened before this runtime started shutdown."""
+        if self._admission_shutdown_requested.is_set():
+            return False
+        admission_opened = asyncio.create_task(self._admission_gate.wait_until_open())
+        shutdown_requested = asyncio.create_task(self._admission_shutdown_requested.wait())
+        try:
+            await asyncio.wait(
+                (admission_opened, shutdown_requested),
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            return not self._admission_shutdown_requested.is_set()
+        finally:
+            for task in (admission_opened, shutdown_requested):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(admission_opened, shutdown_requested, return_exceptions=True)
 
     def _show_tool_calls(self, agent_name: str | None = None) -> bool:
         """Return tool-call visibility for the current or target agent."""
@@ -797,19 +824,22 @@ class ResponseRunner:
         locked_operation: Callable[[MessageTarget, _EarlyPlaceholderState], Awaitable[str | None]],
     ) -> str | None:
         """Admit one response before lifecycle locking or visible placeholder work."""
-        if not self._admission_gate.admit():
-            # A config apply owns the runtime; give up before any lifecycle lock
-            # or visible placeholder work. Nothing re-dispatches the turn, so log
-            # the loss here. Deliberately no Matrix send: this path runs inside
-            # the drain that stopping a bot performs, and an untimed room_send
-            # would stall that drain until it cancelled live responses. Callers
-            # that already published a placeholder settle it themselves.
-            self.deps.logger.warning(
-                "response_refused_during_config_apply",
-                response_kind=response_kind,
-                **request.response_envelope.target.log_context,
-            )
-            raise ResponseAdmissionRefusedError
+        admission_deferred = False
+        while not self._admission_gate.admit():
+            if not admission_deferred:
+                admission_deferred = True
+                self.deps.logger.info(
+                    "response_deferred_during_config_apply",
+                    response_kind=response_kind,
+                    **request.response_envelope.target.log_context,
+                )
+            if not await self._wait_for_admission_or_shutdown():
+                self.deps.logger.warning(
+                    "response_refused_after_runtime_replacement",
+                    response_kind=response_kind,
+                    **request.response_envelope.target.log_context,
+                )
+                raise ResponseAdmissionRefusedError
         self._in_flight_response_count += 1
         try:
             resolved_target = request.response_envelope.target

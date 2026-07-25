@@ -99,6 +99,7 @@ class _RecordingResponseRunner:
     """
 
     response_event_id: str | None = "$response:localhost"
+    pre_lock_error: Exception | None = None
     deferred_sync_restart_error: asyncio.CancelledError | None = None
     requests: list[ResponseRequest] = field(default_factory=list)
     team_requests: list[ResponseRequest] = field(default_factory=list)
@@ -131,6 +132,8 @@ class _RecordingResponseRunner:
 
     async def generate_response(self, request: ResponseRequest) -> str | None:
         self.requests.append(request)
+        if self.pre_lock_error is not None:
+            raise self.pre_lock_error
         if request.on_lifecycle_lock_acquired is not None:
             request.on_lifecycle_lock_acquired()
         if request.prepare_source_turn is not None and request.prepare_source_turn():
@@ -152,6 +155,8 @@ class _RecordingResponseRunner:
         team_mode: str,  # noqa: ARG002
     ) -> str | None:
         self.team_requests.append(request)
+        if self.pre_lock_error is not None:
+            raise self.pre_lock_error
         if request.on_lifecycle_lock_acquired is not None:
             request.on_lifecycle_lock_acquired()
         if request.prepare_source_turn is not None and request.prepare_source_turn():
@@ -1034,6 +1039,25 @@ async def test_deferred_sync_restart_records_handled_outcome_before_rethrow(conf
 
 
 @pytest.mark.asyncio
+async def test_pre_lock_replacement_refusal_poisons_coalescing_drain(config: Config, tmp_path: Path) -> None:
+    """A refused source callback must invalidate checkpoint certification."""
+    harness = _build_harness(config, tmp_path)
+    harness.runner.pre_lock_error = ResponseAdmissionRefusedError()
+    room = _room_with_members(config, "general")
+    event = _text_event("please survive replacement")
+
+    await harness.controller.handle_text_event(room, event)
+    drain_result = await harness.gate.drain_all()
+    await asyncio.gather(*harness.runner.inbox_tasks, return_exceptions=True)
+
+    assert drain_result.completed is False
+    assert drain_result.dispatch_failure_count == 1
+    record = harness.turn_store.get_turn_record(event.event_id)
+    assert record is not None
+    assert record.completed is False
+
+
+@pytest.mark.asyncio
 async def test_command_turn_records_terminal_outcome_through_turn_store(config: Config, tmp_path: Path) -> None:
     """A ``!command`` turn executes on the router and records a terminal TurnStore outcome.
 
@@ -1215,24 +1239,13 @@ async def test_interactive_selection_persistence_failure_prevents_ack_and_genera
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("edit_succeeds", "expected_send_count"), [(True, 1), (False, 2)])
-async def test_interactive_selection_refused_by_config_apply_settles_ack_placeholder(
+async def test_interactive_selection_replacement_refusal_uses_checkpoint_replay(
     config: Config,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    edit_succeeds: bool,
-    expected_send_count: int,
 ) -> None:
-    """A refused selection must terminalize its ack instead of leaving it 'Processing...'.
-
-    The ack is already visible and the refusal path itself does no Matrix I/O,
-    so without this the user watches a placeholder that never resolves. The edit
-    is parametrized because this runs while an apply is stopping entities, which
-    is exactly when an edit is most likely to fail; the fallback send is what
-    keeps the placeholder from being stranded anyway.
-    """
+    """A replaced runtime must bubble refusal so its Matrix event is replayed."""
     harness = _build_harness(config, tmp_path)
-    harness.gateway.edit_succeeds = edit_succeeds
     room = nio.MatrixRoom(_ROOM_ID, _entity_user_id(config, "general"))
     selection = interactive.InteractiveSelection(
         question_event_id="$question:localhost",
@@ -1250,29 +1263,19 @@ async def test_interactive_selection_refused_by_config_apply_settles_ack_placeho
 
     monkeypatch.setattr(harness.runner, "generate_response", refuse)
 
-    # The refusal must not escape: it is routine, not a dispatch failure.
-    await harness.controller.handle_interactive_selection(
-        room,
-        selection=selection,
-        user_id=_SENDER,
-        source_event_id=selection_event_id,
-    )
+    with pytest.raises(ResponseAdmissionRefusedError):
+        await harness.controller.handle_interactive_selection(
+            room,
+            selection=selection,
+            user_id=_SENDER,
+            source_event_id=selection_event_id,
+        )
 
-    # The ack was sent, then edited in place to a terminal note.
-    assert len(harness.gateway.sent) == expected_send_count
-    assert len(harness.gateway.edited) == 1
-    edit_request = harness.gateway.edited[0]
-    assert edit_request.event_id == "$sent-1:localhost"
-    assert "configuration reload" in edit_request.new_text.lower()
-    assert edit_request.extra_content == {constants.STREAM_STATUS_KEY: constants.STREAM_STATUS_COMPLETED}
-    if not edit_succeeds:
-        # The edit failed, so the note must still reach the room as a new message
-        # rather than leaving the placeholder on "Processing...".
-        fallback_request = harness.gateway.sent[1]
-        assert fallback_request.response_text == edit_request.new_text
-        assert fallback_request.extra_content == edit_request.extra_content
+    # Only the pre-existing acknowledgement was sent. Refusal performs no
+    # untimed Matrix settlement inside replacement shutdown.
+    assert len(harness.gateway.sent) == 1
+    assert harness.gateway.edited == []
 
-    # The turn stays uncompleted so restart replay can still pick it up.
     record = harness.turn_store.get_turn_record(selection_event_id)
     assert record is not None
     assert record.response_event_id is None

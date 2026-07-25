@@ -1041,6 +1041,7 @@ class AgentBot:
         own startup timeout for the pre-first-response window.
         """
         self._sync_shutting_down = False
+        self._response_runner.resume_pending_admissions()
         self._calls_reconcile_pending = self._call_manager is not None
         mark_matrix_sync_loop_started(self.agent_name)
 
@@ -1695,6 +1696,7 @@ class AgentBot:
     ) -> None:
         """Cancel work that must not outlive the Matrix sync loop."""
         self._sync_shutting_down = True
+        self._response_runner.refuse_pending_admissions()
         await self._cancel_startup_thread_prewarm()
         if self.agent_name == ROUTER_AGENT_NAME:
             await self._cancel_deferred_overdue_task_drain()

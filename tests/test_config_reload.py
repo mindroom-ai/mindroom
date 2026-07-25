@@ -2900,11 +2900,72 @@ async def test_in_flight_response_count_stays_per_entity_across_bots(
 
 
 @pytest.mark.asyncio
-async def test_tracked_inbox_response_cancelled_during_reload_never_sends_placeholder(
+async def test_closed_admission_defers_response_until_gate_reopens(
     tmp_path: Path,
     mock_agent_users: dict[str, AgentMatrixUser],
 ) -> None:
-    """A restart racing admission should cancel before lifecycle or placeholder work."""
+    """A response arriving during config apply should run after the gate reopens."""
+    config = _runtime_bound_config(
+        Config(
+            agents={"agent1": AgentConfig(display_name="Agent 1")},
+            router=RouterConfig(model="default"),
+        ),
+        tmp_path,
+    )
+    bot = AgentBot(
+        agent_user=mock_agent_users["agent1"],
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+    )
+    setup_test_bot(bot, AsyncMock())
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    admission_gate = ResponseAdmissionGate()
+    bot.admission_gate = admission_gate
+    response_started = asyncio.Event()
+
+    async def run_response(_target: MessageTarget, _early_placeholder: object) -> str:
+        response_started.set()
+        return "$response"
+
+    assert admission_gate.close_if_idle()
+    task = asyncio.create_task(
+        runner._run_locked_response_lifecycle(
+            ResponseRequest(
+                thread_history=(),
+                prompt="Hello",
+                response_envelope=request_envelope(
+                    room_id="!room:localhost",
+                    reply_to_event_id="$reply",
+                    agent_name=bot.agent_name,
+                ),
+            ),
+            response_kind="ai",
+            locked_operation=run_response,
+        ),
+    )
+    try:
+        await asyncio.sleep(0)
+        assert not task.done()
+        assert not response_started.is_set()
+        assert bot.in_flight_response_count == 0
+
+        admission_gate.reopen()
+
+        assert await asyncio.wait_for(task, timeout=1) == "$response"
+        assert response_started.is_set()
+        assert bot.in_flight_response_count == 0
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_replaced_runtime_refuses_deferred_response_without_matrix_io(
+    tmp_path: Path,
+    mock_agent_users: dict[str, AgentMatrixUser],
+) -> None:
+    """A replaced runtime should fail its waiter so checkpoint replay owns recovery."""
     config = _runtime_bound_config(
         Config(
             agents={"agent1": AgentConfig(display_name="Agent 1")},
@@ -2945,27 +3006,28 @@ async def test_tracked_inbox_response_cancelled_during_reload_never_sends_placeh
         name="test_reload_admission_race",
     )
     try:
-        # The refused response settles itself, so the drain the apply performs
-        # completes instead of burning its timeout and cancelling live work.
-        assert (
-            await bot._response_runner.drain_inbox_responses(
-                cancel_after_seconds=0.05,
-                shutdown_intent=SYNC_RESTART_SHUTDOWN,
-            )
-            is True
-        )
+        await asyncio.sleep(0)
+        assert not task.done()
+        assert bot.in_flight_response_count == 0
+        send_response.assert_not_awaited()
+
+        # Replacement shutdown wakes pre-admission waiters without cancelling
+        # them, so the callback failure poisons the old sync checkpoint.
+        await bot.prepare_for_sync_shutdown(shutdown_intent=SYNC_RESTART_SHUTDOWN)
 
         # A refusal is an admission failure, not a cancellation: handlers that
         # treat CancelledError as teardown must not mistake it for one.
+        assert task.done()
         assert not task.cancelled()
         assert isinstance(task.exception(), ResponseAdmissionRefusedError)
         assert bot.in_flight_response_count == 0
-        # No Matrix I/O on the refusal path: this runs inside the drain that
-        # stopping a bot performs, so an untimed send would stall that drain.
         send_response.assert_not_awaited()
-        # The dropped turn is still not silent; nothing re-dispatches it.
         assert any(
-            call.args and call.args[0] == "response_refused_during_config_apply"
+            call.args and call.args[0] == "response_deferred_during_config_apply"
+            for call in refusal_logger.info.call_args_list
+        )
+        assert any(
+            call.args and call.args[0] == "response_refused_after_runtime_replacement"
             for call in refusal_logger.warning.call_args_list
         )
     finally:

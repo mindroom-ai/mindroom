@@ -83,21 +83,20 @@ Config changes are detected via polling (`watch_paths()` checks watched source-f
    Direct agent-run entry points that bypass the response lifecycle (`mindroom.api.openai_compat` and cascaded voice in `mindroom.matrix_rtc.call_tools`) are not admitted through it, so a reload can still land underneath one of those runs.
    The gate stays closed, but is not held, across config loading and plan application.
    Holding it would stall the apply against itself: applying the plan stops bots, and stopping a bot drains its detached responses
-3. While the gate is closed, a response that tries to start is refused immediately rather than blocking, by raising `ResponseAdmissionRefusedError`.
-   This is deliberately not an `asyncio.CancelledError`, because handlers that treat cancellation as teardown would otherwise abort sibling work or swallow the refusal as shutdown noise.
-   The gate is global and covers the whole apply window regardless of how narrow the plan turns out to be, so a refused response does not necessarily belong to an entity that is being restarted.
-   A refusal logs `response_refused_during_config_apply`.
-   The refusal path itself performs no Matrix I/O, because it runs inside the drain that stopping a bot performs and an untimed send would stall that drain
-4. Refusal handling depends on how far the turn had progressed.
-   An inbound message stays uncompleted in the turn ledger, so restart replay can still pick it up.
-   A caller that already published a visible placeholder (interactive selection) settles that placeholder itself, falling back to a new message when the edit fails, so the user is never left watching a "Processing..." message that never resolves.
-   A queued sync-restart retry is put back on the queue rather than consuming its one attempt, since nothing ran
+3. While the gate is closed, a response waits before taking a lifecycle lock, incrementing the in-flight count, or publishing a placeholder.
+   The gate is global and covers the whole apply window regardless of how narrow the plan turns out to be.
+   When the apply finishes, responses owned by unchanged or replacement runtimes compete for admission normally.
+4. A runtime being replaced wakes its pre-admission waiters with `ResponseAdmissionRefusedError`.
+   This is deliberately not an `asyncio.CancelledError`, because the Matrix callback must fail and invalidate the old sync checkpoint so the replacement runtime replays the source event.
+   The refusal path performs no Matrix I/O, so replacement shutdown cannot stall on an untimed send.
+   A queued sync-restart retry is put back on the queue rather than consuming its one attempt.
+   Auto-resume messages received by replacement bots during the apply wait for the gate to reopen instead of being dropped
 5. If responses never drain, the reload stops deferring after ten minutes and closes the gate over the still-running responses, so a config change cannot be starved forever on a busy install
 6. `ConfigReloadLifecycle.update_config()` loads the new config and `_identify_entities_to_restart()` computes the diff using `model_dump(exclude_none=True)`
 7. The orchestrator applies the resulting plan: affected entities are stopped, recreated, and restarted
 8. Removed entities run `cleanup()` (leave rooms, stop bot)
 9. New/restarted bots go through room setup
-10. The gate reopens once the apply finishes, whether it succeeded or failed
+10. The gate reopens once the apply finishes, whether it succeeded or failed, and deferred responses may then start
 
 Skills are watched separately via `_watch_skills_task()` with cache invalidation.
 

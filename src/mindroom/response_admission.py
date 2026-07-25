@@ -13,29 +13,26 @@ bypass the response lifecycle (the OpenAI-compatible API in
 ``mindroom.matrix_rtc.call_tools``) are not admitted through it, so a reload can
 still land underneath one of those runs.
 
-Every method is deliberately synchronous. No critical section here contains an
-``await``, so the single-threaded event loop cannot interleave one method
-against another and a lock would add nothing. Staying synchronous also matters
-for correctness: ``release`` runs in a ``finally`` on the cancellation path,
-where an ``await`` could itself be interrupted and permanently leak a slot,
-wedging config reload.
+Every state transition is deliberately synchronous. No critical section here
+contains an ``await``, so the single-threaded event loop cannot interleave one
+transition against another and a lock would add nothing. ``wait_until_open``
+only observes the event published by those transitions. Keeping ``release``
+synchronous matters on cancellation, where an ``await`` could itself be
+interrupted and permanently leak a slot, wedging config reload.
 """
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 
 
 class ResponseAdmissionRefusedError(Exception):
-    """Raised when a config apply owns the runtime and a response cannot start.
+    """Raised when a response waiting through config apply loses its runtime.
 
-    Deliberately not an ``asyncio.CancelledError``. A refusal happens before any
-    lifecycle work, so it is an admission failure, not a cancellation, and the
-    two must stay distinguishable: cancellation handlers treat their exception as
-    teardown, aborting sibling work (``sync_restart_retry.flush``) or swallowing
-    it as expected shutdown noise (``bot._create_task_wrapper``). Callers that
-    already published a placeholder must be able to catch this specifically and
-    settle that placeholder.
+    Deliberately not an ``asyncio.CancelledError``. The response never entered
+    its lifecycle, so replacement-runtime replay must see a failed callback
+    instead of expected shutdown noise.
     """
 
     def __init__(self) -> None:
@@ -48,6 +45,11 @@ class ResponseAdmissionGate:
 
     _in_flight_response_count: int = field(default=0, init=False)
     _closed: bool = field(default=False, init=False)
+    _open_event: asyncio.Event = field(default_factory=asyncio.Event, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        """Publish the initially open state to response waiters."""
+        self._open_event.set()
 
     @property
     def in_flight_response_count(self) -> int:
@@ -76,12 +78,19 @@ class ResponseAdmissionGate:
         if self._in_flight_response_count > 0:
             return False
         self._closed = True
+        self._open_event.clear()
         return True
 
     def close(self) -> None:
         """Close admission regardless of in-flight responses, for a forced apply."""
         self._closed = True
+        self._open_event.clear()
 
     def reopen(self) -> None:
         """Reopen admission after a config apply finishes."""
         self._closed = False
+        self._open_event.set()
+
+    async def wait_until_open(self) -> None:
+        """Wait until config application reopens response admission."""
+        await self._open_event.wait()
