@@ -26,8 +26,19 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from agno.knowledge.embedder.base import Embedder
 
+from mindroom.embedding_errors import (
+    EMBEDDER_EMPTY_VECTOR_DETAIL,
+    EmbedderRequestError,
+    describe_embedder_error,
+    embedder_failure_is_transient,
+    is_embedder_auth_failure_detail,
+)
+from mindroom.logging_config import get_logger
+
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
+
+logger = get_logger(__name__)
 
 #: Provider request limits. Both bounds matter: item count keeps a request from
 #: exceeding per-request input limits, and payload size keeps a batch of large
@@ -82,6 +93,8 @@ class BatchPrefetchEmbedder(Embedder):
     inner: Embedder = field(default_factory=Embedder)
     _cache: dict[str, list[float]] = field(default_factory=dict, init=False, repr=False)
     _provider_request_count: int = field(default=0, init=False, repr=False)
+    _batching_disabled: bool = field(default=False, init=False, repr=False)
+    _observed_dimensions: int | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Mirror the wrapped embedder's dimensions so vector writes stay consistent."""
@@ -94,8 +107,8 @@ class BatchPrefetchEmbedder(Embedder):
         return self._provider_request_count
 
     def supports_batching(self) -> bool:
-        """Return whether the wrapped embedder can embed a batch in one request."""
-        return isinstance(self.inner, _SupportsBatchEmbedding)
+        """Return whether the wrapped embedder can still embed a batch in one request."""
+        return not self._batching_disabled and isinstance(self.inner, _SupportsBatchEmbedding)
 
     def clear_cache(self) -> None:
         """Drop prefetched vectors once their batch has been written."""
@@ -105,27 +118,98 @@ class BatchPrefetchEmbedder(Embedder):
         """Return the distinct texts that still need embedding, in first-seen order."""
         return list(dict.fromkeys(text for text in texts if text not in self._cache))
 
-    def embed_batch_into_cache(self, texts: Sequence[str]) -> int:
-        """Embed one planned batch in a single provider request and cache it.
+    def _validated(self, embedding: list[float]) -> list[float]:
+        """Reject a vector that is empty or inconsistent with the ones before it.
 
-        Raises whatever the wrapped embedder raises so the caller can classify
-        the failure, retry a transient one, and fall back to per-text requests
-        without re-embedding anything already cached.
+        Width is checked against the first vector this adapter actually saw,
+        not against ``Embedder.dimensions``: that field is a declared default
+        (agno ships 1536) which real providers routinely contradict, so
+        trusting it would reject correct vectors. Consistency still catches the
+        case that matters here, a provider changing width mid-run.
+        """
+        if not embedding:
+            raise EmbedderRequestError(EMBEDDER_EMPTY_VECTOR_DETAIL)
+        if self._observed_dimensions is None:
+            self._observed_dimensions = len(embedding)
+        elif len(embedding) != self._observed_dimensions:
+            detail = f"embedder returned a {len(embedding)}-dimension vector, expected {self._observed_dimensions}"
+            raise EmbedderRequestError(detail)
+        return embedding
+
+    def _embed_each_into_cache(self, pending: Sequence[str]) -> int:
+        """Embed one text per request, preserving input order.
+
+        Successes are cached as they land, so a failure part-way through never
+        costs the items already embedded.
+
+        Prefetching is an optimization, so a fault affecting one text is left
+        uncached and the file that owns it fails through the normal per-file
+        path, where it is retried and recorded as a failed file. Only a
+        credential rejection is re-raised: that is provably global, and
+        grinding one doomed request per remaining chunk would bury the cause.
+        """
+        cached = 0
+        for text in pending:
+            self._provider_request_count += 1
+            try:
+                self._cache[text] = self._validated(self.inner.get_embedding(text))
+            except Exception as exc:
+                if is_embedder_auth_failure_detail(describe_embedder_error(exc)):
+                    raise
+                logger.debug("Leaving one chunk unembedded for the per-file path", exc_info=True)
+                continue
+            cached += 1
+        return cached
+
+    def embed_batch_into_cache(self, texts: Sequence[str]) -> int:
+        """Embed one planned batch, falling back to per-item when batching is unusable.
+
+        Batch support is a capability claim that only a real multi-input
+        request can test: some OpenAI-compatible backends accept an array and
+        answer with a single vector, or reject the array outright. Treating
+        that as a fatal error stalls every refresh on its first batch, so a
+        non-transient batch failure retires batching for the rest of this run
+        and the same texts are embedded one at a time instead.
+
+        The fallback hides nothing: authentication, authorization, invalid
+        model, and dimension failures surface again from the per-item requests
+        with their existing semantics. Transient failures are re-raised
+        untouched so the caller's retry and backoff still apply.
         """
         pending = [text for text in dict.fromkeys(texts) if text not in self._cache]
         if not pending:
             return 0
+        if not self.supports_batching() or len(pending) == 1:
+            # A single-input request proves nothing about batch support, so it
+            # is never allowed to retire batching.
+            return self._embed_each_into_cache(pending)
+
+        inner = self.inner
+        if not isinstance(inner, _SupportsBatchEmbedding):  # pragma: no cover - guarded by supports_batching
+            return self._embed_each_into_cache(pending)
+
         self._provider_request_count += 1
-        if isinstance(self.inner, _SupportsBatchEmbedding):
-            embeddings = self.inner.get_embeddings_batch(list(pending))
-        else:
-            embeddings = [self.inner.get_embedding(text) for text in pending]
+        try:
+            embeddings = inner.get_embeddings_batch(list(pending))
+        except Exception as exc:
+            if embedder_failure_is_transient(exc):
+                raise
+            self._disable_batching(f"multi-input request failed: {describe_embedder_error(exc)}")
+            return self._embed_each_into_cache(pending)
+
         if len(embeddings) != len(pending):
-            msg = f"embedder returned {len(embeddings)} embeddings for {len(pending)} inputs"
-            raise ValueError(msg)
+            self._disable_batching(
+                f"multi-input request returned {len(embeddings)} vectors for {len(pending)} inputs",
+            )
+            return self._embed_each_into_cache(pending)
+
         for text, embedding in zip(pending, embeddings, strict=True):
-            self._cache[text] = embedding
+            self._cache[text] = self._validated(embedding)
         return len(pending)
+
+    def _disable_batching(self, reason: str) -> None:
+        self._batching_disabled = True
+        logger.warning("Knowledge embedder does not support batching; using one request per chunk", reason=reason)
 
     def get_embedding(self, text: str) -> list[float]:
         """Return a prefetched embedding, or delegate to the wrapped embedder."""
@@ -133,7 +217,9 @@ class BatchPrefetchEmbedder(Embedder):
         if cached is not None:
             return cached
         self._provider_request_count += 1
-        return self.inner.get_embedding(text)
+        # Validated here too: this is the path Agno's writer actually uses, so
+        # skipping it would let an unusable vector reach the collection.
+        return self._validated(self.inner.get_embedding(text))
 
     def get_embedding_and_usage(self, text: str) -> tuple[list[float], dict[str, Any] | None]:
         """Return a prefetched embedding without usage, or delegate for a miss.
@@ -146,7 +232,8 @@ class BatchPrefetchEmbedder(Embedder):
         if cached is not None:
             return cached, None
         self._provider_request_count += 1
-        return self.inner.get_embedding_and_usage(text)
+        embedding, usage = self.inner.get_embedding_and_usage(text)
+        return self._validated(embedding), usage
 
     async def async_get_embedding(self, text: str) -> list[float]:
         """Async variant of ``get_embedding``."""
@@ -154,7 +241,7 @@ class BatchPrefetchEmbedder(Embedder):
         if cached is not None:
             return cached
         self._provider_request_count += 1
-        return await self.inner.async_get_embedding(text)
+        return self._validated(await self.inner.async_get_embedding(text))
 
     async def async_get_embedding_and_usage(self, text: str) -> tuple[list[float], dict[str, Any] | None]:
         """Async variant of ``get_embedding_and_usage``."""
@@ -162,4 +249,5 @@ class BatchPrefetchEmbedder(Embedder):
         if cached is not None:
             return cached, None
         self._provider_request_count += 1
-        return await self.inner.async_get_embedding_and_usage(text)
+        embedding, usage = await self.inner.async_get_embedding_and_usage(text)
+        return self._validated(embedding), usage

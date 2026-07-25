@@ -3508,7 +3508,10 @@ visibility = [
 
 [[modules]]
 path = "mindroom.knowledge.embedding_batch"
-depends_on = []
+depends_on = [
+    "mindroom.embedding_errors",
+    "mindroom.logging_config",
+]
 visibility = ["mindroom.knowledge.manager"]
 
 [[modules]]

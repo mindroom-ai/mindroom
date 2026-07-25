@@ -31,6 +31,7 @@ from mindroom.embedding_errors import (
     embedder_failure_is_transient,
     embedder_retry_after_seconds,
 )
+from mindroom.knowledge import resolve_agent_knowledge_access
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.candidate_checkpoint import (
     CandidateCheckpoint,
@@ -205,6 +206,13 @@ class _RecordingEmbedder(Embedder):
         self.failures: dict[str, list[BaseException]] = {}
         self.fail_everything: BaseException | None = None
         self.supports_batch = True
+        #: Return one vector fewer than requested for any multi-input call,
+        #: mimicking an OpenAI-compatible backend that accepts array input but
+        #: does not really implement it.
+        self.short_batch = False
+        #: Raise this on any multi-input call (the classified error the real
+        #: MindRoomOpenAIEmbedder raises for a short response).
+        self.batch_error: BaseException | None = None
 
     @property
     def request_count(self) -> int:
@@ -226,9 +234,15 @@ class _RecordingEmbedder(Embedder):
             msg = "batch embedding is disabled for this test"
             raise AssertionError(msg)
         self.batch_requests.append(tuple(texts))
+        if len(texts) > 1 and self.batch_error is not None:
+            raise self.batch_error
         self._maybe_fail(texts)
+        embeddings = [[float(len(text)), 1.0] for text in texts]
+        if len(texts) > 1 and self.short_batch:
+            self.embedded_texts.extend(texts[:-1])
+            return embeddings[:-1]
         self.embedded_texts.extend(texts)
-        return [[float(len(text)), 1.0] for text in texts]
+        return embeddings
 
     def get_embedding(self, text: str) -> list[float]:
         return self.get_embedding_and_usage(text)[0]
@@ -1669,3 +1683,227 @@ async def test_candidate_converges_across_repeated_interruptions_and_source_chan
         [f"doc{index:04d}.md" for index in range(9) if index != 1] + ["extra.md"],
     )
     assert load_candidate_checkpoint(_storage_path(config, runtime_paths)) is None
+
+
+@pytest.mark.asyncio
+async def test_short_batch_response_falls_back_to_per_item_and_publishes(
+    tmp_path: Path,
+    embedder: _RecordingEmbedder,
+) -> None:
+    """A backend that accepts array input but returns fewer vectors must not stall the build.
+
+    Some OpenAI-compatible servers accept a multi-input embeddings request and
+    answer with a single vector. Treating that as a permanent failure kills the
+    candidate on its first batch, so the base can never index anything.
+    """
+    docs_path = tmp_path / "docs"
+    _write_corpus(docs_path, 5)
+    config = _config(tmp_path, docs_path)
+    runtime_paths = runtime_paths_for(config)
+    embedder.short_batch = True
+
+    assert await _manager(config).reindex_all() == 5
+
+    state = _published_state(config, runtime_paths)
+    assert state is not None
+    assert state.status == "complete"
+    assert state.indexed_count == 5
+    for index in range(5):
+        assert embedder.embedded_count(f"content {index}") >= 1
+
+
+@pytest.mark.asyncio
+async def test_batch_capability_failure_disables_batching_for_the_rest_of_the_run(
+    tmp_path: Path,
+    embedder: _RecordingEmbedder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One failed capability probe must not be repeated for every later batch."""
+    monkeypatch.setattr(knowledge_manager_module, "_INDEX_FILES_PER_BATCH", 4)
+    docs_path = tmp_path / "docs"
+    _write_corpus(docs_path, 16)
+    config = _config(tmp_path, docs_path)
+    embedder.short_batch = True
+
+    assert await _manager(config).reindex_all() == 16
+
+    multi_input_requests = [batch for batch in embedder.batch_requests if len(batch) > 1]
+    assert len(multi_input_requests) == 1, (
+        f"batch support was probed {len(multi_input_requests)} times: {multi_input_requests}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_rejected_array_input_falls_back_without_losing_the_build(
+    tmp_path: Path,
+    embedder: _RecordingEmbedder,
+) -> None:
+    """A backend that rejects array input outright still indexes, one chunk at a time."""
+    docs_path = tmp_path / "docs"
+    _write_corpus(docs_path, 4)
+    config = _config(tmp_path, docs_path)
+    runtime_paths = runtime_paths_for(config)
+    embedder.batch_error = EmbedderRequestError("embedder request failed (HTTP 400)")
+
+    assert await _manager(config).reindex_all() == 4
+
+    state = _published_state(config, runtime_paths)
+    assert state is not None
+    assert state.status == "complete"
+    assert state.indexed_count == 4
+
+
+def test_per_item_fallback_preserves_order_and_validates_dimensions() -> None:
+    """Fallback keeps input order and refuses vectors of inconsistent width."""
+    inner = _RecordingEmbedder()
+    inner.short_batch = True
+    adapter = BatchPrefetchEmbedder(inner=inner)
+
+    assert adapter.embed_batch_into_cache(["alpha", "bb", "c"]) == 3
+    assert adapter.supports_batching() is False, "a failed probe retires batching for the run"
+    # Order preserved: each text maps to its own vector, keyed by content.
+    assert adapter.get_embedding("alpha") == [5.0, 1.0]
+    assert adapter.get_embedding("bb") == [2.0, 1.0]
+    assert adapter.get_embedding("c") == [1.0, 1.0]
+
+    widening = _RecordingEmbedder()
+    widening.supports_batch = False
+    adapter = BatchPrefetchEmbedder(inner=widening)
+    assert adapter.embed_batch_into_cache(["one"]) == 1
+    original_get = widening.get_embedding
+    widening.get_embedding = lambda text: [*original_get(text), 9.0]  # type: ignore[method-assign]
+    # Validation guards the path Agno's writer uses, so a widened vector cannot
+    # reach the collection even though prefetch treats its own faults as best effort.
+    with pytest.raises(EmbedderRequestError, match="3-dimension vector, expected 2"):
+        adapter.get_embedding("two")
+
+
+def test_empty_vector_is_rejected_by_the_batch_adapter() -> None:
+    """An empty vector is never cached, whatever path produced it."""
+    inner = _RecordingEmbedder()
+    inner.supports_batch = False
+    inner.get_embedding = lambda _text: []  # type: ignore[method-assign]
+    adapter = BatchPrefetchEmbedder(inner=inner)
+
+    assert adapter.embed_batch_into_cache(["anything"]) == 0, "prefetch leaves it to the per-file path"
+    with pytest.raises(EmbedderRequestError, match="empty vector"):
+        adapter.get_embedding("anything")
+
+
+@pytest.mark.asyncio
+async def test_permanent_per_item_failure_after_fallback_is_recorded_per_file(
+    tmp_path: Path,
+    embedder: _RecordingEmbedder,
+) -> None:
+    """A permanent fault affecting one chunk fails that file only, keeping the rest."""
+    docs_path = tmp_path / "docs"
+    _write_corpus(docs_path, 4)
+    config = _config(tmp_path, docs_path)
+    runtime_paths = runtime_paths_for(config)
+    embedder.short_batch = True
+    embedder.failures["content 2"] = [EmbedderRequestError("embedder request failed (HTTP 422)") for _ in range(10)]
+
+    manager = _manager(config)
+    await manager.reindex_all()
+
+    assert manager._last_refresh_error is not None
+    assert "Indexed 3 of 4" in manager._last_refresh_error
+    assert "embedder request failed (HTTP 422)" in manager._last_refresh_error
+    assert _published_state(config, runtime_paths) is None, "an incomplete snapshot must not publish"
+    checkpoint = load_candidate_checkpoint(_storage_path(config, runtime_paths))
+    assert checkpoint is not None
+    assert set(checkpoint.failed) == {"doc0002.md"}
+    assert set(checkpoint.completed) == {"doc0000.md", "doc0001.md", "doc0003.md"}
+
+
+@pytest.mark.asyncio
+async def test_credential_rejection_during_fallback_still_fails_fast(
+    tmp_path: Path,
+    embedder: _RecordingEmbedder,
+) -> None:
+    """A global credential failure aborts instead of issuing one doomed request per chunk."""
+    docs_path = tmp_path / "docs"
+    _write_corpus(docs_path, 40)
+    config = _config(tmp_path, docs_path)
+    runtime_paths = runtime_paths_for(config)
+    embedder.short_batch = True
+    embedder.fail_everything = EmbedderRequestError("embedder authentication failed (HTTP 401)")
+
+    manager = _manager(config)
+    await manager.reindex_all()
+
+    assert manager._last_refresh_error is not None
+    assert "embedder authentication failed (HTTP 401)" in manager._last_refresh_error
+    assert _published_state(config, runtime_paths) is None
+    assert embedder.request_count <= 4, f"kept probing a rejected credential: {embedder.request_count}"
+    assert load_candidate_checkpoint(_storage_path(config, runtime_paths)) is not None
+
+
+@pytest.mark.asyncio
+async def test_restart_during_batch_fallback_resumes_the_same_candidate(
+    tmp_path: Path,
+    embedder: _RecordingEmbedder,
+) -> None:
+    """Fallback mode does not change resume semantics."""
+    docs_path = tmp_path / "docs"
+    _write_corpus(docs_path, 6)
+    config = _config(tmp_path, docs_path)
+    runtime_paths = runtime_paths_for(config)
+    embedder.short_batch = True
+    original_index = KnowledgeManager._index_file_locked
+
+    async def _fail_one(self: KnowledgeManager, resolved_path: Path, **kwargs: object) -> bool:
+        if resolved_path.name == "doc0005.md":
+            return False
+        return await original_index(self, resolved_path, **kwargs)
+
+    KnowledgeManager._index_file_locked = _fail_one  # type: ignore[method-assign]
+    try:
+        await _manager(config).reindex_all()
+    finally:
+        KnowledgeManager._index_file_locked = original_index  # type: ignore[method-assign]
+
+    checkpoint = load_candidate_checkpoint(_storage_path(config, runtime_paths))
+    assert checkpoint is not None
+    candidate_collection = checkpoint.collection
+    assert len(checkpoint.completed) == 5
+    embedder.embedded_texts.clear()
+
+    assert await _manager(config).reindex_all() == 1
+
+    for index in range(5):
+        assert embedder.embedded_count(f"content {index}") == 0, "checkpointed files were re-embedded"
+    state = _published_state(config, runtime_paths)
+    assert state is not None
+    assert state.collection == candidate_collection
+    assert state.indexed_count == 6
+
+
+@pytest.mark.asyncio
+async def test_config_mismatched_index_stays_unavailable_until_the_candidate_publishes(
+    tmp_path: Path,
+    embedder: _RecordingEmbedder,
+) -> None:
+    """Search must not run against vectors built under incompatible settings."""
+    docs_path = tmp_path / "docs"
+    _write_corpus(docs_path, 3)
+    config = _config(tmp_path, docs_path)
+    runtime_paths = runtime_paths_for(config)
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+
+    changed_config = config.model_copy(deep=True)
+    changed_config.memory.embedder.config.model = "text-embedding-3-large"
+
+    lookup = get_published_index("docs", config=changed_config, runtime_paths=runtime_paths)
+    assert lookup.availability is KnowledgeAvailability.CONFIG_MISMATCH
+    assert lookup.index is None, "incompatible vectors must not be queryable"
+    resolution = resolve_agent_knowledge_access("helper", changed_config, runtime_paths)
+    assert resolution.knowledge is None
+
+    embedder.short_batch = True
+    result = await refresh_knowledge_binding("docs", config=changed_config, runtime_paths=runtime_paths)
+
+    assert result.index_published is True
+    reopened = get_published_index("docs", config=changed_config, runtime_paths=runtime_paths)
+    assert reopened.availability is KnowledgeAvailability.READY
+    assert reopened.index is not None
