@@ -30,7 +30,13 @@ from mindroom.matrix.sync_certification import SyncCheckpoint, SyncTrustState
 from mindroom.matrix.sync_tokens import clear_sync_token, load_sync_checkpoint, save_sync_token
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.response_admission import ResponseAdmissionGate
-from mindroom.runtime_shutdown import GENERIC_SHUTDOWN, ORDERLY_SHUTDOWN, SYNC_RESTART_SHUTDOWN, RuntimeShutdownIntent
+from mindroom.runtime_shutdown import (
+    ENTITY_REMOVED_SHUTDOWN,
+    GENERIC_SHUTDOWN,
+    ORDERLY_SHUTDOWN,
+    SYNC_RESTART_SHUTDOWN,
+    RuntimeShutdownIntent,
+)
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -991,6 +997,7 @@ async def test_prepare_for_sync_shutdown_flushes_latest_sync_token(tmp_path: Pat
     ("shutdown_intent", "reason_category"),
     [
         (GENERIC_SHUTDOWN, "agent_shutdown"),
+        (ENTITY_REMOVED_SHUTDOWN, "agent_shutdown"),
         (SYNC_RESTART_SHUTDOWN, "config_reload"),
         (ORDERLY_SHUTDOWN, "process_shutdown"),
     ],
@@ -1003,7 +1010,6 @@ async def test_response_runtime_shutdown_log_is_structured_and_identifier_free(
 ) -> None:
     """Full shutdown logs action and response count without Matrix identifiers."""
     bot = _agent_bot(tmp_path)
-    bot._coalescing_gate.drain_all = AsyncMock(return_value=CoalescingDrainResult(completed=True))
 
     with capture_logs() as logs:
         await bot.prepare_for_sync_shutdown(shutdown_intent=shutdown_intent)
