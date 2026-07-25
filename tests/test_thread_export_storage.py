@@ -185,7 +185,9 @@ def test_unrecognized_root_is_not_marked(tmp_path: Path) -> None:
     with pytest.raises(RuntimeError, match="unowned thread export root") as error:
         prepare_export_root(output_dir)
 
-    assert repr(_ROOT_MARKER_TEXT) in str(error.value)
+    message = str(error.value)
+    assert _ROOT_MARKER_TEXT.strip() in message
+    assert "\\n" not in message, "the adoption instruction must be copy-pasteable, not a Python repr"
     assert keep.read_text(encoding="utf-8") == "private"
     assert not (output_dir / _ROOT_MARKER_FILENAME).exists()
 

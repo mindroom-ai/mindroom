@@ -268,8 +268,8 @@ def _unowned_export_root(path: Path) -> _UnsafeThreadExportPathError:
     """Return a failure for a root without MindRoom ownership proof."""
     return _UnsafeThreadExportPathError(
         f"Refusing unowned thread export root: {path}; "
-        f"the root must be empty, already contain an exported room directory, or contain "
-        f"{_ROOT_MARKER_FILENAME} with exact content {_ROOT_MARKER_TEXT!r}.",
+        f"the root must be empty, already contain an exported room directory, or contain a "
+        f"{_ROOT_MARKER_FILENAME} file whose only line is {_ROOT_MARKER_TEXT.strip()}",
     )
 
 
