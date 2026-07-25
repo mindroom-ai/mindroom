@@ -6,8 +6,9 @@
 - Pull request: https://github.com/mindroom-ai/mindroom/pull/1641.
 - Base: `origin/main` at `66dd4f4a68bcfd1a5e43b2cac20a1b464f306ab1`.
 - Rejected frozen head: `abb8d4292672c91c4cb551772d214cdca54378e0`.
-- Current local, remote, and GitHub PR head: `577d64559eba2ab2e5ce2a973e0a12f3af47c946`.
-- Current production code head: `c0552cf5a3e7ad6a535f721623e7ee2cf2b7026a`.
+- Current local source-reset head: `6a69cfd6d7ae95c91f24f4845c1b681bdb674946`.
+- Current remote and GitHub PR head: `577d64559eba2ab2e5ce2a973e0a12f3af47c946`.
+- Published production code head: `c0552cf5a3e7ad6a535f721623e7ee2cf2b7026a`.
 - Never merge this pull request.
 - Never amend or force-push.
 
@@ -35,8 +36,8 @@
 - The exact local SQLite replay for all affected contracts passes `14` tests with no fanout.
 - Focused Ruff lint and formatting pass on all changed files.
 - PostgreSQL poison and failed-test replay remain queued behind PR #1646.
-- Current candidate production source diff is `+916/-390`, net `+526` against the exact merge base.
-- The narrow certification correction is complete, and no more blocker patches may accumulate before simplification.
+- Current local production source diff is `+662/-464`, net `+198` against the exact merge base.
+- The source-minimal reset and narrow certification correction are locally committed.
 - Re-run exact failed files, owning cache suites, full pytest, Tach, and all-file pre-commit under resource ownership.
 - Push small follow-up commits after verifying Git author.
 - Refresh the PR body and all campaign evidence for the new exact head.
@@ -60,7 +61,7 @@
 
 ## Active source-minimal reset
 
-- The published branch remains `577d64559eba2ab2e5ce2a973e0a12f3af47c946`, and the current worktree contains the uncommitted source-minimal reset.
+- The published branch remains `577d64559eba2ab2e5ce2a973e0a12f3af47c946`, and the source-minimal reset is locally committed through `6a69cfd6d7ae95c91f24f4845c1b681bdb674946`.
 - `src/mindroom/matrix/replacements.py` is the 76-line replacement-domain owner for bundled flattening, identity, scope, relation validity, canonical ordering, and content projection.
 - `event_info.py` is restored to relation facts plus the small room and state helpers.
 - Cache edit lookup now receives the full original event and a surface validator, while one cache-row decoder validates durable payload identity.
@@ -73,4 +74,4 @@
 - The exact non-PostgreSQL prior-CI files pass `15`, `13`, `18`, and `4` tests.
 - Full `tests/test_event_cache.py` and focused thread, approval, and cache-contract regressions pass.
 - That focused cache run unexpectedly exercised the available PostgreSQL parametrization while PR #1646 owned the heavy slot, so no further PostgreSQL, full-suite, hook, or live work may start until explicit release.
-- The next safe step is to update external evidence, commit locally after author verification, and wait for resource ownership before the required exact PostgreSQL replay and push.
+- The next safe step is to wait for resource ownership before the required exact PostgreSQL replay and push.
