@@ -98,6 +98,8 @@ def embedder_failure_is_transient(exc: BaseException) -> bool:
     if not _is_embedder_provider_error(exc):
         return False
 
+    # Deferred like the probe above: slim entry points must not pay the openai
+    # SDK import, and reaching here means a provider call already loaded it.
     from openai import APIConnectionError, APIStatusError  # noqa: PLC0415
 
     if isinstance(exc, APIConnectionError):
@@ -112,6 +114,7 @@ def embedder_retry_after_seconds(exc: BaseException) -> float | None:
     if not _is_embedder_provider_error(exc):
         return None
 
+    # Deferred for the same reason: keep the openai SDK out of import time.
     from openai import APIStatusError  # noqa: PLC0415
 
     if not isinstance(exc, APIStatusError):

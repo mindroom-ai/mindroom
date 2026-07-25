@@ -38,7 +38,6 @@ from mindroom.knowledge.candidate_checkpoint import (
     append_candidate_journal,
     candidate_is_resumable,
     delete_candidate_checkpoint,
-    journal_entry_count,
     load_candidate_checkpoint,
     save_candidate_checkpoint,
 )
@@ -193,6 +192,12 @@ class _CandidateRun:
     #: Completed entries whose vectors this process has already confirmed, so
     #: repeated reconciliation rounds do not re-query Chroma for every file.
     verified: set[str] = field(default_factory=set)
+    #: Size of the corpus this candidate is currently targeting, refreshed by
+    #: each reconciliation so progress reporting shows real pending work.
+    total_files: int = 0
+    #: Journal appends since the last compaction, tracked in memory so deciding
+    #: when to compact never re-reads and re-parses the whole journal.
+    journal_appends: int = 0
     resumed: bool = False
     published: bool = False
 
@@ -1516,8 +1521,18 @@ class KnowledgeManager:
             async with semaphore:
                 return await _index_one(file_path)
 
-        results = await asyncio.gather(*(_index_one_bounded(file_path) for file_path in batch))
-        return sum(int(indexed) for indexed in results)
+        # return_exceptions=True so a failing or cancelled child cannot leave its
+        # siblings running: they would keep appending journal entries and mutating
+        # candidate bookkeeping while the caller's `finally` compacts the
+        # checkpoint, silently dropping the work those files had finished.
+        results = await asyncio.gather(
+            *(_index_one_bounded(file_path) for file_path in batch),
+            return_exceptions=True,
+        )
+        first_error = next((result for result in results if isinstance(result, BaseException)), None)
+        if first_error is not None:
+            raise first_error
+        return sum(1 for result in results if result is True)
 
     def _candidate_paths_with_vectors(
         self,
@@ -1731,6 +1746,7 @@ class KnowledgeManager:
             for relative_path, (_signature, file_path) in sorted(signatures.items())
             if relative_path not in run.completed_paths or relative_path in run.failed
         )
+        run.total_files = len(present)
         return _CandidateReconciliation(expected=frozenset(present), pending=pending)
 
     async def _persist_candidate_batch(self, run: _CandidateRun, batch: Sequence[Path]) -> None:
@@ -1752,20 +1768,21 @@ class KnowledgeManager:
                 )
                 run.failed[relative_path] = failure
                 failed.append((relative_path, failure))
+        if not completed and not failed:
+            return
         await asyncio.to_thread(
             append_candidate_journal,
             self._base_storage_path,
             completed=tuple(completed),
             failed=tuple(failed),
         )
+        run.journal_appends += len(completed) + len(failed)
 
     async def _compact_candidate_checkpoint(self, run: _CandidateRun, *, force: bool = False) -> None:
         """Fold journal appends back into the candidate snapshot."""
         if run.published:
             return
-        if not force and await asyncio.to_thread(journal_entry_count, self._base_storage_path) < (
-            _CANDIDATE_JOURNAL_COMPACT_ENTRIES
-        ):
+        if not force and run.journal_appends < _CANDIDATE_JOURNAL_COMPACT_ENTRIES:
             return
         run.checkpoint = await asyncio.to_thread(
             save_candidate_checkpoint,
@@ -1778,9 +1795,13 @@ class KnowledgeManager:
                 # The target revision advances only once the reconciled state
                 # it describes is about to be durable.
                 target_revision=self._git_last_successful_commit,
-                total_files=max(run.checkpoint.total_files, len(run.completed_paths)),
+                # The corpus this candidate targets, not a high-water mark of
+                # completed files: status subtracts completed from this to
+                # report how much work is still outstanding.
+                total_files=run.total_files,
             ),
         )
+        run.journal_appends = 0
 
     async def reindex_all(self) -> int:
         """Advance the durable candidate index and publish it when it matches the source."""

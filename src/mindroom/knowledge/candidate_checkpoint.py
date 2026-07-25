@@ -324,11 +324,6 @@ def append_candidate_journal(
         handle.write("".join(f"{line}\n" for line in lines))
 
 
-def journal_entry_count(base_storage_path: Path) -> int:
-    """Return how many journal updates are pending compaction."""
-    return len(_journal_entries(_candidate_journal_path(base_storage_path)))
-
-
 def delete_candidate_checkpoint(base_storage_path: Path) -> None:
     """Remove candidate state once the candidate is published or discarded."""
     _candidate_checkpoint_path(base_storage_path).unlink(missing_ok=True)

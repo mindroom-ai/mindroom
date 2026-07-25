@@ -13271,7 +13271,8 @@ File-mode refreshes may write lightweight source metadata, but local file-only b
 
 While a semantic build is in progress, that directory also holds `candidate_index.json` and `candidate_index.jsonl`, the durable record of which files the in-progress candidate has already indexed.
 Those files are removed once the candidate is published.
-At most one candidate collection per knowledge base is retained; superseded candidates are deleted, and collections whose ownership cannot be proven from the base identity are preserved and reported rather than removed.
+At most one owned candidate collection per knowledge base is retained, and superseded owned candidates are deleted.
+Collections whose ownership cannot be proven from the base identity are preserved and reported rather than removed, so unrelated collections in that directory may remain.
 
 The storage path defaults to `mindroom_data/` next to your `config.yaml`, or can be set with `MINDROOM_STORAGE_PATH`.
 

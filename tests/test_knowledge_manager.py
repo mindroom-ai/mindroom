@@ -63,23 +63,12 @@ from mindroom.knowledge.utils import KnowledgeAvailabilityDetail
 from mindroom.knowledge.watch import KnowledgeSourceWatcher
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
+from tests.knowledge_test_support import metadata_matches
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Coroutine, Iterator
 
     from mindroom.constants import RuntimePaths
-
-
-def _metadata_matches(metadata: dict[str, object], key: str, condition: object) -> bool:
-    """Mirror the subset of ChromaDB ``where`` matching the indexer relies on."""
-    if isinstance(condition, dict):
-        if "$in" in condition:
-            return metadata.get(key) in condition["$in"]
-        if "$eq" in condition:
-            return metadata.get(key) == condition["$eq"]
-        msg = f"unsupported where condition: {condition!r}"
-        raise AssertionError(msg)
-    return metadata.get(key) == condition
 
 
 class _Collection:
@@ -99,7 +88,7 @@ class _Collection:
             selected_all = list(_VectorDb.collections.get(self._name, []))
         if where:
             key, condition = next(iter(where.items()))
-            selected_all = [item for item in selected_all if _metadata_matches(item["metadata"], key, condition)]
+            selected_all = [item for item in selected_all if metadata_matches(item["metadata"], key, condition)]
         selected = selected_all[offset:] if limit is None else selected_all[offset : offset + limit]
         ids = [str(index) for index in range(offset, offset + len(selected))]
         return {"ids": ids, "metadatas": [dict(item["metadata"]) for item in selected]}

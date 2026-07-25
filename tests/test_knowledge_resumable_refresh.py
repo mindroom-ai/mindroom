@@ -57,6 +57,7 @@ from mindroom.knowledge.registry import (
 )
 from mindroom.knowledge.status import get_knowledge_index_status
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
+from tests.knowledge_test_support import metadata_matches
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -84,17 +85,6 @@ class _Record:
     metadata: dict[str, Any]
 
 
-def _metadata_matches(metadata: dict[str, Any], key: str, condition: object) -> bool:
-    if isinstance(condition, dict):
-        if "$in" in condition:
-            return metadata.get(key) in condition["$in"]
-        if "$eq" in condition:
-            return metadata.get(key) == condition["$eq"]
-        msg = f"unsupported where condition: {condition!r}"
-        raise AssertionError(msg)
-    return metadata.get(key) == condition
-
-
 class _FakeCollection:
     def __init__(self, name: str) -> None:
         self._name = name
@@ -111,7 +101,7 @@ class _FakeCollection:
         records = list(_FakeVectorDb.store.get(self._name, []))
         if where:
             key, condition = next(iter(where.items()))
-            records = [record for record in records if _metadata_matches(record.metadata, key, condition)]
+            records = [record for record in records if metadata_matches(record.metadata, key, condition)]
         selected = records[offset:] if limit is None else records[offset : offset + limit]
         return {
             "ids": [str(index) for index in range(len(selected))],
@@ -1262,11 +1252,13 @@ def test_candidate_checkpoint_replays_journal_and_tolerates_a_torn_tail(tmp_path
     assert "torn.md" not in checkpoint.completed
 
     # Compaction folds the journal into the snapshot and removes it.
-    save_candidate_checkpoint(storage_path, checkpoint)
+    compacted = save_candidate_checkpoint(storage_path, checkpoint)
     assert not _candidate_journal_path(storage_path).exists()
-    assert load_candidate_checkpoint(storage_path) == checkpoint or (
-        load_candidate_checkpoint(storage_path).completed == checkpoint.completed
-    )
+    reloaded = load_candidate_checkpoint(storage_path)
+    assert reloaded is not None
+    assert reloaded == compacted
+    assert reloaded.completed == checkpoint.completed
+    assert reloaded.failed == checkpoint.failed
 
 
 def test_unknown_checkpoint_schema_version_is_ignored(tmp_path: Path) -> None:
@@ -1367,3 +1359,120 @@ async def test_scale_refresh_issues_batched_requests_for_a_large_corpus(
 
     assert embedder.single_requests == []
     assert embedder.request_count == pytest.approx(file_count / 64, abs=2)
+
+
+@pytest.mark.asyncio
+async def test_candidate_progress_reports_real_outstanding_work(
+    tmp_path: Path,
+) -> None:
+    """Candidate ``total_files`` is the target corpus, not a completed high-water mark.
+
+    Persisting ``max(previous_total, completed)`` made ``pending_count`` always
+    zero, so an operator watching a stalled build saw "nothing left to do".
+    """
+    docs_path = tmp_path / "docs"
+    _write_corpus(docs_path, 5)
+    config = _config(tmp_path, docs_path)
+    runtime_paths = runtime_paths_for(config)
+    original_index = KnowledgeManager._index_file_locked
+
+    async def _fail_two(self: KnowledgeManager, resolved_path: Path, **kwargs: object) -> bool:
+        if resolved_path.name in {"doc0003.md", "doc0004.md"}:
+            return False
+        return await original_index(self, resolved_path, **kwargs)
+
+    KnowledgeManager._index_file_locked = _fail_two  # type: ignore[method-assign]
+    try:
+        await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    finally:
+        KnowledgeManager._index_file_locked = original_index  # type: ignore[method-assign]
+
+    checkpoint = load_candidate_checkpoint(_storage_path(config, runtime_paths))
+    assert checkpoint is not None
+    assert checkpoint.total_files == 5
+    status = get_knowledge_index_status("docs", config=config, runtime_paths=runtime_paths)
+    assert status.candidate is not None
+    assert status.candidate.total_files == 5
+    assert status.candidate.completed_count == 3
+    assert status.candidate.failed_count == 2
+
+
+@pytest.mark.asyncio
+async def test_batch_failure_never_leaves_stragglers_writing_after_compaction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One failing file must not strand its siblings past the batch that owns them.
+
+    ``asyncio.gather`` propagates the first exception while leaving the other
+    coroutines running, so a straggler could append journal entries after the
+    refresh's ``finally`` had already compacted and unlinked the journal --
+    silently losing files that had genuinely finished.
+    """
+    monkeypatch.setenv("MINDROOM_KNOWLEDGE_FILE_INDEX_CONCURRENCY", "4")
+    docs_path = tmp_path / "docs"
+    _write_corpus(docs_path, 4)
+    config = _config(tmp_path, docs_path)
+    runtime_paths = runtime_paths_for(config)
+
+    slow_started = asyncio.Event()
+    slow_finished = asyncio.Event()
+    original_index = KnowledgeManager._index_file_locked
+
+    async def _fail_fast_and_stall_others(
+        self: KnowledgeManager,
+        resolved_path: Path,
+        **kwargs: object,
+    ) -> bool:
+        if resolved_path.name == "doc0000.md":
+            await slow_started.wait()
+            msg = "explodes while siblings are still running"
+            raise RuntimeError(msg)
+        slow_started.set()
+        await asyncio.sleep(0)
+        indexed = await original_index(self, resolved_path, **kwargs)
+        slow_finished.set()
+        return indexed
+
+    KnowledgeManager._index_file_locked = _fail_fast_and_stall_others  # type: ignore[method-assign]
+    try:
+        with pytest.raises(RuntimeError, match="explodes while siblings"):
+            await _manager(config).reindex_all()
+    finally:
+        KnowledgeManager._index_file_locked = original_index  # type: ignore[method-assign]
+
+    assert slow_finished.is_set(), "siblings must have settled before the batch returned"
+    checkpoint = load_candidate_checkpoint(_storage_path(config, runtime_paths))
+    assert checkpoint is not None
+    stored = sorted(record.metadata["source_path"] for record in _FakeVectorDb.store[checkpoint.collection])
+    # Every file whose vectors landed is recorded; nothing was dropped by a
+    # compaction racing an in-flight append.
+    assert set(checkpoint.completed) == set(stored)
+    assert set(checkpoint.completed) == {"doc0001.md", "doc0002.md", "doc0003.md"}
+
+
+@pytest.mark.asyncio
+async def test_compaction_decision_does_not_reread_the_journal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Deciding whether to compact must not cost a full journal parse per batch."""
+    monkeypatch.setattr(knowledge_manager_module, "_INDEX_FILES_PER_BATCH", 4)
+    reads = 0
+    original_read = Path.read_text
+
+    def _counting_read_text(self: Path, *args: object, **kwargs: object) -> str:
+        nonlocal reads
+        if self.name.endswith(".jsonl"):
+            reads += 1
+        return original_read(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "read_text", _counting_read_text)
+    docs_path = tmp_path / "docs"
+    _write_corpus(docs_path, 40)
+    config = _config(tmp_path, docs_path)
+
+    assert await _manager(config).reindex_all() == 40
+
+    # Ten batches, none of which may parse the journal just to decide.
+    assert reads == 0, f"journal was re-read {reads} times while deciding whether to compact"

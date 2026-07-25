@@ -61,15 +61,16 @@ async def run_with_embedding_retry(
     on_retry: Callable[[], None] | None = None,
 ) -> _T:
     """Run ``operation``, retrying only transient embedding failures."""
-    last_error: BaseException | None = None
-    for attempt in range(1, max(policy.max_attempts, 1) + 1):
+    max_attempts = max(policy.max_attempts, 1)
+    attempt = 0
+    while True:
+        attempt += 1
         try:
             return await operation()
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            last_error = exc
-            if attempt >= policy.max_attempts or not embedder_failure_is_transient(exc):
+            if attempt >= max_attempts or not embedder_failure_is_transient(exc):
                 raise
             delay_seconds = policy.backoff_seconds(
                 attempt,
@@ -85,6 +86,3 @@ async def run_with_embedding_retry(
                 detail=describe_embedder_error(exc),
             )
             await sleep(delay_seconds)
-    # Unreachable: the loop either returns or raises, but keeps type checkers
-    # honest about the non-returning tail.
-    raise last_error if last_error is not None else RuntimeError("embedding retry loop exited without a result")
