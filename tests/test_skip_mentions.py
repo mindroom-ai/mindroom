@@ -23,6 +23,7 @@ from mindroom.constants import (
 )
 from mindroom.conversation_resolver import _should_skip_mentions
 from mindroom.delivery_gateway import (
+    CancelledVisibleNoteRequest,
     DeliveryGateway,
     DeliveryGatewayDeps,
     EditTextRequest,
@@ -529,6 +530,39 @@ async def test_delivery_gateway_reads_generation_live_per_delivery(tmp_path: Pat
 
     stamped = [send_call.args[2][STREAM_GENERATION_KEY] for send_call in send_result.await_args_list]
     assert stamped == ["gen-1", "gen-2"]
+
+
+@pytest.mark.asyncio
+async def test_sync_restart_cancellation_edit_keeps_runtime_generation(tmp_path: Path) -> None:
+    """The retry queue must retain ownership of its same-generation interruption note."""
+    gateway, _, _ = _gateway_with_mocks(tmp_path)
+    gateway.deps.runtime.runtime_generation = "gen-1"
+    target = MessageTarget.resolve("!test:server", "$thread", "$root")
+    gateway.deps.resolver.deps.conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(
+        return_value="$latest",
+    )
+
+    with patch(
+        "mindroom.matrix.client_delivery.send_message_result",
+        new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit")),
+    ) as send_result:
+        await gateway.deliver_cancelled_visible_note(
+            CancelledVisibleNoteRequest(
+                target=target,
+                event_id="$response",
+                existing_event_is_placeholder=False,
+                cancel_source="sync_restart",
+                identity=ResponseIdentity(
+                    response_kind="ai",
+                    response_envelope=_delivery_envelope(),
+                    correlation_id="corr-sync-restart",
+                ),
+            ),
+        )
+
+    content = send_result.await_args.args[2]
+    assert content[STREAM_GENERATION_KEY] == "gen-1"
+    assert content["m.new_content"][STREAM_GENERATION_KEY] == "gen-1"
 
 
 @pytest.mark.asyncio

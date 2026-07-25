@@ -786,7 +786,9 @@ class DeliveryGateway:
     ) -> FinalDeliveryOutcome:
         """Edit the in-flight visible response into a terminal cancellation note."""
         cancelled_text, stream_status = build_cancelled_response_update("", cancel_source=request.cancel_source)
-        extra_content = {constants.STREAM_STATUS_KEY: stream_status}
+        extra_content: dict[str, Any] = {constants.STREAM_STATUS_KEY: stream_status}
+        if request.cancel_source == "sync_restart":
+            extra_content[constants.STREAM_GENERATION_KEY] = self.deps.runtime.runtime_generation
         failure_reason = cancel_failure_reason(request.cancel_source)
         edited = await self.edit_text(
             EditTextRequest(
