@@ -327,7 +327,7 @@ async def _blocked_before_plan(
             thread_id=prepared.replay_guard.thread_id,
             may_be_superseded_by_newer_requester_turn=may_be_superseded,
         )
-        if not skips_turn:
+        if may_be_superseded and not skips_turn:
             controller.deps.logger.warning(
                 "Thread replay guard degraded; proceeding without negative newer-message proof",
                 event_id=prepared.event.event_id,

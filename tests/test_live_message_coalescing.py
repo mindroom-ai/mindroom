@@ -4201,7 +4201,8 @@ async def test_backlog_replay_skips_older_message_when_newer_exists(tmp_path: Pa
 
 
 @pytest.mark.asyncio
-async def test_backlog_replay_keeps_mixed_requester_coalesced_turn(tmp_path: Path) -> None:
+@pytest.mark.parametrize("degraded", [False, True])
+async def test_backlog_replay_keeps_mixed_requester_coalesced_turn(tmp_path: Path, *, degraded: bool) -> None:
     """A newer primary-requester message must not settle another requester's source."""
     bot = _make_bot(tmp_path)
     room = _make_room()
@@ -4222,7 +4223,19 @@ async def test_backlog_replay_keeps_mixed_requester_coalesced_turn(tmp_path: Pat
         thread_id=None,
         latest_event_id="$newer-bob",
     )
-    _set_context_histories(dispatch, [newer_bob_message])
+    if degraded:
+        degraded_history = ThreadHistoryResult(
+            [newer_bob_message],
+            is_full_history=False,
+            diagnostics={
+                THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_DEGRADED,
+                THREAD_HISTORY_DEGRADED_DIAGNOSTIC: True,
+            },
+        )
+        dispatch.context.thread_history = degraded_history
+        dispatch.context.replay_guard_history = degraded_history
+    else:
+        _set_context_histories(dispatch, [newer_bob_message])
     handled_turn = TurnRecord.create(
         ["$alice", "$bob"],
         source_event_metadata={
@@ -4239,6 +4252,7 @@ async def test_backlog_replay_keeps_mixed_requester_coalesced_turn(tmp_path: Pat
             new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
         ),
         patch.object(bot._turn_policy, "plan_turn", new=action_mock),
+        patch.object(bot._turn_controller.deps.logger, "warning") as warning_mock,
     ):
         await bot._turn_controller._dispatch_text_message(
             room,
@@ -4248,6 +4262,8 @@ async def test_backlog_replay_keeps_mixed_requester_coalesced_turn(tmp_path: Pat
         )
 
     action_mock.assert_awaited_once()
+    warning_mock.assert_not_called()
+    bot.event_cache.get_recent_room_events.assert_not_awaited()
     assert not bot._turn_store.is_handled("$alice")
     assert not bot._turn_store.is_handled("$bob")
 
