@@ -1291,6 +1291,7 @@ depends_on = [
     "mindroom.orchestration.external_trigger_runtime",
     "mindroom.orchestration.runtime",
     "mindroom.orchestration.todo_poke_runtime",
+    "mindroom.response_admission",
     "mindroom.runtime_support",
     "mindroom.scheduling_executor",
     "mindroom.tool_system.plugins",
@@ -1317,6 +1318,7 @@ depends_on = [
     "mindroom.memory",
     "mindroom.orchestration.runtime",
     "mindroom.post_response_effects",
+    "mindroom.response_admission",
     "mindroom.response_attempt",
     "mindroom.response_lifecycle",
     "mindroom.response_terminal",
@@ -1328,6 +1330,16 @@ depends_on = [
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.worker_routing",
     "mindroom.user_turn_time",
+]
+
+[[modules]]
+path = "mindroom.response_admission"
+depends_on = []
+visibility = [
+    "mindroom.bot",
+    "mindroom.orchestration.config_lifecycle",
+    "mindroom.orchestrator",
+    "mindroom.response_runner",
 ]
 
 [[modules]]

@@ -8,7 +8,7 @@ import sys
 import tempfile
 from contextlib import suppress
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -35,6 +35,7 @@ from mindroom.orchestration.plugin_watch import (
 )
 from mindroom.orchestration.runtime import log_startup_phase_finished, log_startup_phase_started
 from mindroom.orchestrator import _MultiAgentOrchestrator, _watch_skills_task
+from mindroom.response_admission import ResponseAdmissionGate
 from mindroom.response_runner import ResponseRequest
 from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN
 from mindroom.startup_errors import PermanentStartupError
@@ -1579,6 +1580,13 @@ async def test_queued_config_reload_waits_for_in_flight_response_without_event_i
             thinking_message="Thinking...",
         )
 
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+    orchestrator.running = True
+    orchestrator.agent_bots["agent1"] = bot
+    # The orchestrator owns one shared gate that every managed bot admits through.
+    runner.admission_gate = orchestrator.config_reload.response_admission_gate
+    orchestrator.config_reload.update_config = AsyncMock(return_value=True)
+
     response_task = asyncio.create_task(
         runner._run_locked_response_lifecycle(
             request,
@@ -1586,11 +1594,6 @@ async def test_queued_config_reload_waits_for_in_flight_response_without_event_i
             locked_operation=run_response,
         ),
     )
-
-    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
-    orchestrator.running = True
-    orchestrator.agent_bots["agent1"] = bot
-    orchestrator.config_reload.update_config = AsyncMock(return_value=True)
 
     try:
         await asyncio.wait_for(response_started.wait(), timeout=1)
@@ -2845,20 +2848,12 @@ async def test_tracked_inbox_response_cancelled_during_reload_never_sends_placeh
     send_response = AsyncMock(return_value="$thinking")
     install_send_response_mock(bot, send_response)
     runner = unwrap_extracted_collaborator(bot._response_runner)
-    admission_attempted = asyncio.Event()
+    admission_gate = ResponseAdmissionGate()
+    runner.admission_gate = admission_gate
 
-    class _SignallingAdmissionLock(asyncio.Lock):
-        async def acquire(self) -> Literal[True]:
-            admission_attempted.set()
-            return await super().acquire()
-
-    admission_lock = _SignallingAdmissionLock()
-    runner.response_admission_lock = admission_lock
-
-    await admission_lock.acquire()
-    admission_attempted.clear()
-    assert runner.response_admission_lock is admission_lock
-    assert admission_lock.locked()
+    # Stand where a config apply stands: admission closed, plan in progress.
+    assert await admission_gate.close_if_idle()
+    assert runner.admission_gate is admission_gate
     task = bot._response_runner.track_inbox_response(
         bot._response_runner.generate_response(
             ResponseRequest(
@@ -2874,26 +2869,20 @@ async def test_tracked_inbox_response_cancelled_during_reload_never_sends_placeh
         name="test_reload_admission_race",
     )
     try:
-        await asyncio.wait_for(admission_attempted.wait(), timeout=1)
-        assert bot.in_flight_response_count == 0
-        assert not task.done()
-        send_response.assert_not_awaited()
-
+        # The refused response settles itself, so the drain the apply performs
+        # completes instead of burning its timeout and cancelling live work.
         assert (
             await bot._response_runner.drain_inbox_responses(
                 cancel_after_seconds=0.05,
                 shutdown_intent=SYNC_RESTART_SHUTDOWN,
             )
-            is False
+            is True
         )
-        await asyncio.gather(task, return_exceptions=True)
 
         assert task.cancelled()
         assert bot.in_flight_response_count == 0
         send_response.assert_not_awaited()
     finally:
-        if admission_lock.locked():
-            admission_lock.release()
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
 
@@ -2965,9 +2954,10 @@ async def test_shutdown_during_active_drain_cancels_reload(
     orchestrator.running = True
 
     mock_bot = MagicMock(spec=AgentBot)
-    mock_bot.in_flight_response_count = 1  # Never drains
     mock_bot.stop = AsyncMock()
     orchestrator.agent_bots["agent1"] = mock_bot
+    # An admitted response that never finishes, so the drain never goes idle.
+    assert await orchestrator.config_reload.response_admission_gate.admit()
     orchestrator.config_reload.update_config = AsyncMock(return_value=True)
     orchestrator.config_reload.request_reload()
     task = orchestrator.config_reload._reload_task

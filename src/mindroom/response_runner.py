@@ -84,6 +84,7 @@ from .delivery_gateway import (
     StreamingDeliveryRequest,
 )
 from .media_inputs import MediaInputs
+from .response_admission import ResponseAdmissionGate
 from .response_lifecycle import (
     QueuedHumanNoticeReservation,
     ResponseLifecycle,
@@ -120,6 +121,7 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 type _MatrixEventId = str
+_CONFIG_APPLY_CANCEL_MESSAGE = "Configuration reload is restarting this entity"
 _ToolContextResult = TypeVar("_ToolContextResult")
 _ToolStreamChunk = TypeVar("_ToolStreamChunk")
 _StateMutationResult = TypeVar("_StateMutationResult")
@@ -482,12 +484,11 @@ class ResponseRunner:
     """Run one response lifecycle while keeping bot seams patchable."""
 
     deps: ResponseRunnerDeps
-    _response_admission_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
+    _admission_gate: ResponseAdmissionGate = field(default_factory=ResponseAdmissionGate, init=False, repr=False)
     _lifecycle_coordinator: ResponseLifecycleCoordinator = field(
         default_factory=ResponseLifecycleCoordinator,
         init=False,
     )
-    _in_flight_response_count: int = field(default=0, init=False)
     _inbox_response_tasks: set[asyncio.Task[None]] = field(default_factory=set, init=False)
 
     def track_inbox_response(self, response: Coroutine[Any, Any, None], *, name: str) -> asyncio.Task[None]:
@@ -561,22 +562,17 @@ class ResponseRunner:
     @property
     def in_flight_response_count(self) -> int:
         """Return the number of active response lifecycles."""
-        return self._in_flight_response_count
-
-    @in_flight_response_count.setter
-    def in_flight_response_count(self, value: int) -> None:
-        """Update the number of active response lifecycles."""
-        self._in_flight_response_count = value
+        return self._admission_gate.in_flight_response_count
 
     @property
-    def response_admission_lock(self) -> asyncio.Lock:
-        """Return the gate protecting response admission during config apply."""
-        return self._response_admission_lock
+    def admission_gate(self) -> ResponseAdmissionGate:
+        """Return the gate deciding whether responses may start right now."""
+        return self._admission_gate
 
-    @response_admission_lock.setter
-    def response_admission_lock(self, value: asyncio.Lock) -> None:
+    @admission_gate.setter
+    def admission_gate(self, value: ResponseAdmissionGate) -> None:
         """Bind the orchestrator-owned response-admission gate."""
-        self._response_admission_lock = value
+        self._admission_gate = value
 
     def _show_tool_calls(self, agent_name: str | None = None) -> bool:
         """Return tool-call visibility for the current or target agent."""
@@ -799,8 +795,10 @@ class ResponseRunner:
         locked_operation: Callable[[MessageTarget, _EarlyPlaceholderState], Awaitable[str | None]],
     ) -> str | None:
         """Admit one response before lifecycle locking or visible placeholder work."""
-        async with self.response_admission_lock:
-            self.in_flight_response_count += 1
+        if not await self._admission_gate.admit():
+            # A config apply owns the runtime and is about to stop this entity;
+            # give up before any lifecycle lock or visible placeholder work.
+            raise asyncio.CancelledError(_CONFIG_APPLY_CANCEL_MESSAGE)
         try:
             resolved_target = request.response_envelope.target
             early_placeholder = _EarlyPlaceholderState()
@@ -840,7 +838,7 @@ class ResponseRunner:
                     placeholder_event_id=early_placeholder.placeholder_event_id,
                 ) from cause
         finally:
-            self.in_flight_response_count -= 1
+            self._admission_gate.release()
 
     async def _finalize_early_placeholder_cancellation(
         self,

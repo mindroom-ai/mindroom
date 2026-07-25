@@ -128,6 +128,7 @@ if TYPE_CHECKING:
     from mindroom.matrix.cache import AgentMessageSnapshot, ConversationEventCache, EventCacheWriteCoordinator
     from mindroom.matrix.identity import MatrixID
     from mindroom.matrix.media import MatrixMediaEvent
+    from mindroom.response_admission import ResponseAdmissionGate
     from mindroom.runtime_protocols import OrchestratorRuntime
     from mindroom.runtime_support import StartupThreadPrewarmRegistry
     from mindroom.tool_system.events import ToolTraceEntry
@@ -609,12 +610,14 @@ class AgentBot:
         if self.agent_user.user_id == matrix_id_before_login.full_id:
             return
 
-        response_admission_lock = self.response_admission_lock
+        admission_gate = self.admission_gate
         self.agent_user.__dict__.pop("matrix_id", None)
         self.__dict__.pop("matrix_id", None)
         self.event_cache = self.event_cache.for_principal(self.matrix_id.full_id)
         self._init_runtime_components()
-        self.response_admission_lock = response_admission_lock
+        # The gate is orchestrator-owned and shared across bots; rebuilding runtime
+        # components must not swap in a fresh per-bot gate.
+        self.admission_gate = admission_gate
 
     @property
     def client(self) -> nio.AsyncClient | None:
@@ -732,20 +735,15 @@ class AgentBot:
         """Return the number of active response lifecycles."""
         return self._response_runner.in_flight_response_count
 
-    @in_flight_response_count.setter
-    def in_flight_response_count(self, value: int) -> None:
-        """Update the number of active response lifecycles."""
-        self._response_runner.in_flight_response_count = value
-
     @property
-    def response_admission_lock(self) -> asyncio.Lock:
-        """Return the gate protecting response admission during config apply."""
-        return self._response_runner.response_admission_lock
+    def admission_gate(self) -> ResponseAdmissionGate:
+        """Return the gate deciding whether responses may start right now."""
+        return self._response_runner.admission_gate
 
-    @response_admission_lock.setter
-    def response_admission_lock(self, value: asyncio.Lock) -> None:
+    @admission_gate.setter
+    def admission_gate(self, value: ResponseAdmissionGate) -> None:
         """Bind the orchestrator-owned response-admission gate."""
-        self._response_runner.response_admission_lock = value
+        self._response_runner.admission_gate = value
 
     @property
     def pending_sync_restart_retry_room_ids(self) -> frozenset[str]:
