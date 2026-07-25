@@ -1396,11 +1396,63 @@ async def test_redacting_settled_coalesced_source_does_not_mark_optional(tmp_pat
         runner._resolve_target = lambda _logical_ref: asyncio.sleep(0, result="$first")  # type: ignore[method-assign]
         runner._client_for_operation = lambda _operation: RedactionClient()  # type: ignore[method-assign]
         runner._room_for_thread = lambda _thread: "!room:example"  # type: ignore[method-assign]
+        pump_calls: list[int] = []
+
+        async def pump(*, timeout_ms: int) -> None:
+            pump_calls.append(timeout_ms)
+
+        oracle.pump = pump  # type: ignore[method-assign]
 
         operation = LiveOperation(3, LiveOperationKind.REDACTION, 0, "op:1")
         await runner._apply(operation)
 
+        assert pump_calls == [0]
         assert "$first" not in oracle.optional_sources
+    finally:
+        await matrix_client.close()
+
+
+@pytest.mark.asyncio
+async def test_source_redaction_pumps_visible_reply_before_optional_classification() -> None:
+    """A server-visible reply cannot be hidden by the oracle's stale sync view."""
+    matrix_client = LiveMatrixClient("http://matrix.invalid", "!room:example")
+    oracle = ExactReplyOracle(matrix_client, "@agent:example", coalescing_threads=True)
+    try:
+        oracle.expect("op:1", "$source", thread=0, client=0)
+        oracle._ingest_event({"event_id": "$source", "sender": "@user:example", "type": "m.room.message"})
+
+        async def pump(*, timeout_ms: int) -> None:
+            assert timeout_ms == 0
+            oracle._ingest_event(_agent_reply_event("$source", "$reply", "LIVE-FUZZ call=1 END call=1"))
+
+        oracle.pump = pump  # type: ignore[method-assign]
+
+        class RedactionClient:
+            user_id = "@user:example"
+
+            @staticmethod
+            async def redact(
+                _target_event_id: str,
+                _txn_id: str,
+                *,
+                room_id: str,
+            ) -> str:
+                assert room_id == "!room:example"
+                return "$redaction"
+
+        runner = object.__new__(LiveFuzzRunner)
+        runner.oracle = oracle
+        runner.redacted_targets = {}
+        runner.sent_records = []
+        runner._edit_event_source = {}
+        runner._resolve_target = lambda _logical_ref: asyncio.sleep(0, result="$source")  # type: ignore[method-assign]
+        runner._client_for_operation = lambda _operation: RedactionClient()  # type: ignore[method-assign]
+        runner._room_for_thread = lambda _thread: "!room:example"  # type: ignore[method-assign]
+
+        await runner._apply(LiveOperation(3, LiveOperationKind.REDACTION, 0, "op:1"))
+
+        assert oracle.response_ids["$source"] == {"$reply"}
+        assert "$source" not in oracle.optional_sources
     finally:
         await matrix_client.close()
 
@@ -2903,6 +2955,146 @@ def test_abandoned_process_group_requires_exact_command_marker(
     )
 
     assert signals == [(4242, signal.SIGKILL)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("profile", ["fuzz", "chaos", "saturation"])
+async def test_every_live_profile_runs_the_shared_final_audit(profile: str) -> None:
+    """No workload may report PASS before the independent final-state audit."""
+    calls: list[str] = []
+
+    class FakeClient:
+        async def register(self) -> None:
+            calls.append("register")
+
+        async def join_room(self) -> None:
+            calls.append("join")
+
+        async def sync_incremental(self, *, timeout_ms: int, allow_limited: bool) -> None:
+            assert (timeout_ms, allow_limited) == (0, True)
+            calls.append("client-sync")
+
+    class FakeOracle:
+        async def initialize(self) -> None:
+            calls.append("oracle-init")
+
+    async def send_roots(_threads: Collection[int]) -> None:
+        calls.append("roots")
+
+    async def run_profile(*_args: object) -> dict[str, object]:
+        calls.append(profile)
+        return {"status": "PASS"}
+
+    async def audit_final_state() -> dict[str, int]:
+        calls.append("audit")
+        return {"audited_events": 7}
+
+    runner = object.__new__(LiveFuzzRunner)
+    runner.clients = (FakeClient(),)
+    runner.oracle = FakeOracle()
+    runner.scenario = LiveFuzzScenario(thread_count=1, batches=(), profile=profile)
+    runner._send_roots = send_roots  # type: ignore[method-assign]
+    runner._run_batches = run_profile  # type: ignore[method-assign]
+    runner._run_chaos = run_profile  # type: ignore[method-assign]
+    runner._run_saturation = run_profile  # type: ignore[method-assign]
+    runner._audit_final_state = audit_final_state  # type: ignore[method-assign]
+
+    result = await runner.run()
+
+    assert calls[-2:] == [profile, "audit"]
+    assert result == {"status": "PASS", "audited_events": 7}
+
+
+@pytest.mark.asyncio
+async def test_saturation_turn_registers_exact_sent_source_for_final_audit() -> None:
+    """Saturation audit inputs come from the real Matrix send result."""
+    expected: list[tuple[str, str, int, int]] = []
+
+    class FakeOracle:
+        def begin_expectation_registration(self) -> None:
+            expected.append(("begin", "", -1, -1))
+
+        def expect(
+            self,
+            logical_ref: str,
+            event_id: str,
+            *,
+            thread: int,
+            client: int,
+            sent_at: float,
+        ) -> None:
+            assert sent_at > 0
+            expected.append((logical_ref, event_id, thread, client))
+
+        def finish_expectation_registration(self, *, validate: bool) -> None:
+            assert validate is True
+            expected.append(("finish", "", -1, -1))
+
+    class FakeClient:
+        user_id = "@sender:example"
+
+        @staticmethod
+        async def send_event(
+            event_type: str,
+            _txn_id: str,
+            content: dict[str, Any],
+            *,
+            room_id: str,
+        ) -> str:
+            assert event_type == "m.room.message"
+            assert content["body"].startswith("Live saturation op:9")
+            assert room_id == "!room:example"
+            return "$source-from-server"
+
+    async def completed_response(
+        _client: FakeClient,
+        *,
+        root_event_id: str,
+        source_event_id: str,
+    ) -> str:
+        assert root_event_id == "$root"
+        assert source_event_id == "$source-from-server"
+        return "$response-from-server"
+
+    runner = object.__new__(LiveFuzzRunner)
+    runner.stack = SimpleNamespace(
+        agent_id="@agent:example",
+        room_id="!room:example",
+        room_ids={"lobby": "!room:example"},
+        room_keys=("lobby",),
+    )
+    runner.scenario = LiveFuzzScenario(thread_count=4, batches=(), profile="saturation")
+    runner.oracle = FakeOracle()
+    runner.sent_records = []
+    runner._wait_for_completed_response = completed_response  # type: ignore[method-assign]
+    expected_sources: set[str] = set()
+
+    result = await runner._saturation_turn(
+        FakeClient(),  # type: ignore[arg-type]
+        label="op:9",
+        thread=3,
+        client_index=2,
+        thread_root="$root",
+        reply_to="$prior",
+        expected_sources=expected_sources,
+    )
+
+    assert result == ("$root", "$response-from-server")
+    assert expected_sources == {"$source-from-server"}
+    assert expected == [
+        ("begin", "", -1, -1),
+        ("op:9", "$source-from-server", 3, 2),
+        ("finish", "", -1, -1),
+    ]
+    assert runner.sent_records == [
+        _SentRecord(
+            "$source-from-server",
+            "!room:example",
+            "m.room.message",
+            sender="@sender:example",
+            content=runner.sent_records[0].content,
+        ),
+    ]
 
 
 def test_failure_bundle_interleaves_lifecycle_boundaries(tmp_path: Path) -> None:

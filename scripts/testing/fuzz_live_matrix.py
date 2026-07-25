@@ -3256,15 +3256,17 @@ class LiveFuzzRunner:
             await asyncio.gather(
                 *(client.sync_incremental(timeout_ms=0, allow_limited=True) for client in self.clients),
             )
-            return await self._run_saturation()
-
-        await self.oracle.initialize()
-        await self._send_roots(range(self.scenario.thread_count))
-        if self.scenario.profile == "chaos":
-            return await self._run_chaos()
-        return await self._run_batches(
-            self.scenario.batches,
-        )
+            await self.oracle.initialize()
+            result = await self._run_saturation()
+        else:
+            await self.oracle.initialize()
+            await self._send_roots(range(self.scenario.thread_count))
+            result = (
+                await self._run_chaos()
+                if self.scenario.profile == "chaos"
+                else await self._run_batches(self.scenario.batches)
+            )
+        return {**result, **await self._audit_final_state()}
 
     async def _run_saturation(self) -> dict[str, object]:
         """Run hot and parallel turns without cross-thread barriers."""
@@ -3274,6 +3276,8 @@ class LiveFuzzRunner:
         hot_root, hot_response = await self._saturation_turn(
             self.clients[0],
             label="hot-root",
+            thread=0,
+            client_index=0,
             thread_root=None,
             reply_to=None,
             expected_sources=expected_sources,
@@ -3283,6 +3287,8 @@ class LiveFuzzRunner:
             _, hot_response = await self._saturation_turn(
                 self.clients[0],
                 label=operation.event_ref,
+                thread=0,
+                client_index=0,
                 thread_root=hot_root,
                 reply_to=hot_response,
                 expected_sources=expected_sources,
@@ -3297,6 +3303,8 @@ class LiveFuzzRunner:
             root, response = await self._saturation_turn(
                 client,
                 label=f"root:{thread}",
+                thread=thread,
+                client_index=thread - 1,
                 thread_root=None,
                 reply_to=None,
                 expected_sources=expected_sources,
@@ -3306,6 +3314,8 @@ class LiveFuzzRunner:
                 _, response = await self._saturation_turn(
                     client,
                     label=operation.event_ref,
+                    thread=thread,
+                    client_index=thread - 1,
                     thread_root=root,
                     reply_to=response,
                     expected_sources=expected_sources,
@@ -3343,6 +3353,10 @@ class LiveFuzzRunner:
             )
             raise AssertionError(msg)
 
+        await self.oracle.wait_until_exact(
+            deadline_seconds=self.reply_timeout,
+            settle_seconds=self.settle_seconds,
+        )
         return {
             "batches": self.executed_batches,
             "canonical_agent_replies": len(expected_sources),
@@ -3357,6 +3371,8 @@ class LiveFuzzRunner:
         client: LiveMatrixClient,
         *,
         label: str,
+        thread: int,
+        client_index: int,
         thread_root: str | None,
         reply_to: str | None,
         expected_sources: set[str],
@@ -3376,7 +3392,30 @@ class LiveFuzzRunner:
             ),
         )
         txn_id = f"live-saturation-{label}-{secrets.token_hex(4)}"
-        source_event_id = await client.send_event("m.room.message", txn_id, content)
+        room_id = self._room_for_thread(thread)
+        self.oracle.begin_expectation_registration()
+        registered = False
+        try:
+            source_event_id = await client.send_event("m.room.message", txn_id, content, room_id=room_id)
+            self.sent_records.append(
+                _SentRecord(
+                    source_event_id,
+                    room_id,
+                    "m.room.message",
+                    sender=client.user_id,
+                    content=content,
+                ),
+            )
+            self.oracle.expect(
+                label,
+                source_event_id,
+                thread=thread,
+                client=client_index,
+                sent_at=time.monotonic(),
+            )
+            registered = True
+        finally:
+            self.oracle.finish_expectation_registration(validate=registered)
         expected_sources.add(source_event_id)
         root_event_id = thread_root or source_event_id
         response_event_id = await self._wait_for_completed_response(
@@ -3396,6 +3435,9 @@ class LiveFuzzRunner:
         """Wait until one source has exactly one fully streamed response."""
         deadline = time.monotonic() + self.reply_timeout
         while time.monotonic() < deadline:
+            # Keep the independent oracle cursor current during saturation
+            # instead of risking one limited final sync after the entire burst.
+            await self.oracle.pump(timeout_ms=0)
             response_ids = self._canonical_response_ids(
                 client.seen_events.values(),
                 root_event_id=root_event_id,
@@ -3621,20 +3663,6 @@ class LiveFuzzRunner:
 
         await self._checkpoint(len(self.scenario.batches))
         await self._wait_for_restart_recovery_window()
-        auditor = FinalStateAuditor(
-            self.client,
-            self.oracle,
-            agent_id=self.stack.agent_id,
-            expected_body_for=_ModelHandler.response_text_for,
-            ledger_path=self.stack.storage_path / "tracking" / f"{AGENT_NAME}_responded.json",
-            source_current_markers=self.source_current_markers,
-            source_revision_markers=self.source_revision_markers,
-        )
-        audit = await auditor.audit(
-            room_ids=tuple(self.stack.room_ids.values()),
-            sent_records=self.sent_records,
-            redacted_targets=self.redacted_targets,
-        )
         return {
             "batches": self.executed_batches,
             "canonical_agent_replies": len(self.oracle.expected_sources),
@@ -3648,9 +3676,29 @@ class LiveFuzzRunner:
             "roots": self.scenario.thread_count,
             "status": "PASS",
             "tuwunel_restarts": self.tuwunel_restart_count,
-            **audit,
             **_latency_summary(self.oracle.reply_latencies.values()),
         }
+
+    async def _audit_final_state(self) -> dict[str, int]:
+        """Audit every profile through an independent canonical Matrix view."""
+        auditor = FinalStateAuditor(
+            self.client,
+            self.oracle,
+            agent_id=self.stack.agent_id,
+            expected_body_for=_ModelHandler.response_text_for,
+            ledger_path=(
+                None
+                if self.scenario.profile == "saturation"
+                else self.stack.storage_path / "tracking" / f"{AGENT_NAME}_responded.json"
+            ),
+            source_current_markers=self.source_current_markers,
+            source_revision_markers=self.source_revision_markers,
+        )
+        return await auditor.audit(
+            room_ids=tuple(self.stack.room_ids.values()),
+            sent_records=self.sent_records,
+            redacted_targets=self.redacted_targets,
+        )
 
     async def _apply_lifecycle(self, kind: LiveOperationKind, batch_index: int) -> None:
         """Run one singleton lifecycle disruption."""
@@ -3930,6 +3978,7 @@ class LiveFuzzRunner:
                 # revision Matrix itself rolled back.
                 self._pop_source_revision(reverted_source, target_event_id)
             else:
+                await self.oracle.pump(timeout_ms=0)
                 self.oracle.refresh_ledger_attributions(min_interval=0.0)
             if reverted_source is None and target_event_id not in self.oracle.settled_sources():
                 # A source redacted before its reply settles legitimately races
