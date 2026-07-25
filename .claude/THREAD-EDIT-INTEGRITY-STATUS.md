@@ -6,9 +6,9 @@
 - Pull request: https://github.com/mindroom-ai/mindroom/pull/1641.
 - Base: `origin/main` at `66dd4f4a68bcfd1a5e43b2cac20a1b464f306ab1`.
 - Rejected frozen head: `abb8d4292672c91c4cb551772d214cdca54378e0`.
-- Current production source-reset head: `6a69cfd6d7ae95c91f24f4845c1b681bdb674946`.
-- Current pushed branch and GitHub PR head before this status-only update: `b4def76b1dc00bbde8ec543dcb87714ace7362ef`.
-- Published production code head: `6a69cfd6d7ae95c91f24f4845c1b681bdb674946`.
+- Current production source-reset head: `6a69cfd6daa88880b047c0675148612cb5ac4003`.
+- Current pushed branch and GitHub PR head before this status-only correction: `70ff58e3b97ca40f4065daeed4a1093d3ba51928`.
+- Published production code head: `6a69cfd6daa88880b047c0675148612cb5ac4003`.
 - Never merge this pull request.
 - Never amend or force-push.
 
@@ -62,7 +62,7 @@
 
 ## Active source-minimal reset
 
-- The source-minimal reset is published through `b4def76b1dc00bbde8ec543dcb87714ace7362ef`, with production source ending at `6a69cfd6d7ae95c91f24f4845c1b681bdb674946`.
+- The source-minimal reset is published through `70ff58e3b97ca40f4065daeed4a1093d3ba51928`, with production source ending at `6a69cfd6daa88880b047c0675148612cb5ac4003`.
 - `src/mindroom/matrix/replacements.py` is the 76-line replacement-domain owner for bundled flattening, identity, scope, relation validity, canonical ordering, and content projection.
 - `event_info.py` is restored to relation facts plus the small room and state helpers.
 - Cache edit lookup now receives the full original event and a surface validator, while one cache-row decoder validates durable payload identity.
