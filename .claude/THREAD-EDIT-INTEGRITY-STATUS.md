@@ -74,4 +74,5 @@
 - The exact non-PostgreSQL prior-CI files pass `15`, `13`, `18`, and `4` tests.
 - Full `tests/test_event_cache.py` and focused thread, approval, and cache-contract regressions pass.
 - That focused cache run unexpectedly exercised the available PostgreSQL parametrization while PR #1646 owned the heavy slot, so no further PostgreSQL, full-suite, hook, or live work may start until explicit release.
+- The required `/tmp/pr1641-live-tuwunel.md` gate file is currently absent after reboot, and no live command may be reconstructed or guessed.
 - The next safe step is to wait for resource ownership before the required exact PostgreSQL replay and push.
