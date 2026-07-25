@@ -258,6 +258,48 @@ async def test_late_candidates_share_one_bounded_follow_up_scan() -> None:
 
 
 @pytest.mark.asyncio
+async def test_partial_joiner_is_logged_as_joining_not_starting() -> None:
+    """Scheduling a follow-up while joining a running scan must not be logged as a new scan."""
+    coordinator = StartupRoomHistoryCoordinator()
+    scanner = _RecordingScanner(blocking=True)
+
+    prewarm = asyncio.create_task(
+        coordinator.acquire(
+            principal_id=PRINCIPAL_ID,
+            room_id=ROOM_ID,
+            thread_root_ids=["$shared:localhost"],
+            scan=scanner,
+        ),
+    )
+    await asyncio.wait_for(scanner.started.wait(), timeout=1.0)
+    with patch("mindroom.matrix.startup_room_history.logger") as mock_logger:
+        # This caller overlaps the running scan and also brings one root that arrived too late.
+        partial = asyncio.create_task(
+            coordinator.acquire(
+                principal_id=PRINCIPAL_ID,
+                room_id=ROOM_ID,
+                thread_root_ids=["$shared:localhost", "$late:localhost"],
+                scan=scanner,
+            ),
+        )
+        await asyncio.sleep(0)
+        scanner.release.set()
+        await prewarm
+        partial_result = await partial
+        logged_events = [call.args[0] for call in mock_logger.info.call_args_list]
+
+    assert partial_result.flights_created == 0
+    assert "startup_room_history_started" not in logged_events
+    assert "startup_room_history_joined" in logged_events
+    assert "startup_room_history_follow_up_scheduled" in logged_events
+    assert partial_result.outcomes == {
+        "$shared:localhost": StartupRootOutcome.STORED,
+        "$late:localhost": StartupRootOutcome.STORED,
+    }
+    assert scanner.scan_count == 2
+
+
+@pytest.mark.asyncio
 async def test_failed_room_releases_ownership_and_other_rooms_continue() -> None:
     """A failed scan must stay retryable while unrelated rooms keep making progress."""
     coordinator = StartupRoomHistoryCoordinator()
@@ -704,7 +746,7 @@ async def test_fifty_interrupted_threads_pay_one_room_scan(tmp_path: Path) -> No
             new=AsyncMock(side_effect=delivered_matrix_side_effect("$auto-resume")),
         ) as send_resume:
             resumed_count = await auto_resume_interrupted_threads(
-                MagicMock(),
+                client,
                 interrupted,
                 config=config,
                 runtime_paths=runtime_paths_for(config),

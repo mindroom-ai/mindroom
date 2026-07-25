@@ -257,7 +257,11 @@ class StartupRoomHistoryCoordinator:
         scan: _StartupRoomScanner,
         task_owner: object | None,
     ) -> tuple[_RoomHistoryFlight, bool]:
-        """Return the flight this caller should wait on, creating at most one new flight."""
+        """Return the flight this caller waits on and whether that exact flight is new to it.
+
+        The boolean describes the returned flight only. Scheduling a follow-up while returning the
+        running flight is a join, not a start; that follow-up has its own scheduled event.
+        """
         running = state.flight
         if running is None:
             flight = self._new_flight(key, set(pending), scan=scan, task_owner=task_owner, is_follow_up=False)
@@ -271,26 +275,28 @@ class StartupRoomHistoryCoordinator:
             return running, False
 
         late_roots = pending - running.roots
-        created = False
-        if late_roots:
-            follow_up = state.follow_up
-            if follow_up is None:
-                follow_up = self._new_flight(key, set(late_roots), scan=scan, task_owner=task_owner, is_follow_up=True)
-                state.follow_up = follow_up
-                created = True
-                logger.info(
-                    "startup_room_history_follow_up_scheduled",
-                    startup_generation=key[0],
-                    room_id=key[2],
-                    principal_id=key[1],
-                    root_count=len(late_roots),
-                    running_scan_index=running.scan_index,
-                )
-            else:
-                follow_up.roots |= late_roots
-            if not pending & running.roots:
-                return follow_up, created
-        return running, created
+        if not late_roots:
+            return running, False
+
+        follow_up = state.follow_up
+        follow_up_created = follow_up is None
+        if follow_up is None:
+            follow_up = self._new_flight(key, set(late_roots), scan=scan, task_owner=task_owner, is_follow_up=True)
+            state.follow_up = follow_up
+            logger.info(
+                "startup_room_history_follow_up_scheduled",
+                startup_generation=key[0],
+                room_id=key[2],
+                principal_id=key[1],
+                root_count=len(late_roots),
+                running_scan_index=running.scan_index,
+            )
+        else:
+            follow_up.roots |= late_roots
+        if pending & running.roots:
+            # Make progress on the running scan first; the follow-up is awaited on the next attempt.
+            return running, False
+        return follow_up, follow_up_created
 
     def _new_flight(
         self,
