@@ -184,6 +184,26 @@ class TestRecordingCommittedOutcomes:
         assert (pending[0].extra_content or {})[STREAM_STATUS_KEY] == STREAM_STATUS_COMPLETED
 
     @pytest.mark.asyncio
+    async def test_recorded_intent_forces_a_terminal_stream_status(self, tmp_path: Path) -> None:
+        """A carried in-progress status never survives into the repaired terminal edit."""
+        target = MessageTarget.resolve(ROOM_ID, None, SOURCE_EVENT_ID)
+        gateway, store = _gateway(tmp_path=tmp_path, client=make_matrix_client_mock(), target=target)
+
+        await gateway.finalize_streamed_response(
+            FinalizeStreamedResponseRequest(
+                target=target,
+                stream_transport_outcome=_stream_outcome(),
+                initial_delivery_kind="sent",
+                identity=_identity(target),
+                tool_trace=None,
+                extra_content={STREAM_STATUS_KEY: "streaming"},
+            ),
+        )
+
+        pending = store.unsettled_items()[0]
+        assert (pending.extra_content or {})[STREAM_STATUS_KEY] == STREAM_STATUS_COMPLETED
+
+    @pytest.mark.asyncio
     async def test_model_error_without_delivery_failure_is_not_persisted(self, tmp_path: Path) -> None:
         """Only Matrix transport failures become durable retries."""
         target = MessageTarget.resolve(ROOM_ID, None, SOURCE_EVENT_ID)

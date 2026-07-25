@@ -529,8 +529,10 @@ class DeliveryGateway:
         store = self.deps.terminal_delivery_store
         if store is None or not body.strip():
             return None
+        # The repaired edit must publish the terminal status even when the
+        # carried content still describes an in-progress stream.
         durable_extra_content = dict(extra_content or {})
-        durable_extra_content.setdefault(constants.STREAM_STATUS_KEY, _terminal_stream_status(outcome_kind))
+        durable_extra_content[constants.STREAM_STATUS_KEY] = _terminal_stream_status(outcome_kind)
         intent = TerminalDeliveryIntent(
             agent_name=self.deps.agent_name,
             target=target,
