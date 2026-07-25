@@ -210,7 +210,7 @@ class TurnRecord:
     def requester_id_for_source(self, source_event_id: str) -> str | None:
         """Return the exact requester for one source in this turn."""
         if self.source_event_metadata is None:
-            return self.requester_id
+            return self.requester_id if not self.is_coalesced else None
         return metadata.sender if (metadata := self.source_event_metadata.get(source_event_id)) is not None else None
 
     @property

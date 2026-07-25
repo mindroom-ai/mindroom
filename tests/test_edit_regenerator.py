@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock
 import nio
 import pytest
 
-from mindroom.coalescing_batch import coalesced_prompt
+from mindroom.coalescing_batch import tagged_coalesced_prompt
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
@@ -91,6 +91,8 @@ def _turn_record(
     requester_id: str = USER_ID,
 ) -> TurnRecord:
     anchor = anchor_event_id or source_event_ids[-1]
+    if source_event_metadata is None and len(source_event_ids) > 1:
+        source_event_metadata = {event_id: SourceEventMetadata(sender=requester_id) for event_id in source_event_ids}
     return TurnRecord(
         anchor_event_id=anchor,
         source_event_ids=source_event_ids,
@@ -200,6 +202,19 @@ async def _handle_edit(harness: _Harness, event: nio.RoomMessageText, event_info
 def _assert_no_regeneration(harness: _Harness) -> None:
     harness.generate_response.assert_not_awaited()
     harness.turn_store.record_turn.assert_not_called()
+
+
+def _tagged_prompt(record: TurnRecord, prompts: dict[str, str]) -> str:
+    """Render a production-shaped coalesced prompt for one durable test record."""
+    assert record.source_event_metadata is not None
+    prompt = tagged_coalesced_prompt(
+        record.replay_source_event_ids,
+        prompts,
+        dict(record.source_event_metadata),
+        timestamp_formatter=lambda _timestamp_ms: None,
+    )
+    assert prompt is not None
+    return prompt
 
 
 @pytest.mark.asyncio
@@ -334,7 +349,10 @@ async def test_coalesced_edit_rebuilds_combined_prompt(tmp_path: Path) -> None:
 
     await _handle_edit(harness, event, event_info)
 
-    expected_prompt = coalesced_prompt(["edited first message", "second message"])
+    expected_prompt = _tagged_prompt(
+        record,
+        {first_event_id: "edited first message", second_event_id: "second message"},
+    )
     assert harness.generate_response.await_args.args[0].prompt == expected_prompt
 
     metadata_call = harness.turn_store.build_run_metadata.call_args
@@ -370,7 +388,7 @@ async def test_coalesced_sibling_edit_excludes_redacted_source_prompt(tmp_path: 
     await _handle_edit(harness, event, event_info)
 
     request = harness.generate_response.await_args.args[0]
-    assert request.prompt == coalesced_prompt(["edited second message"])
+    assert request.prompt == _tagged_prompt(record, {second_event_id: "edited second message"})
     assert "REDACTED_SECRET" not in request.prompt
     assert request.prepare_source_turn is not None
     assert request.prepare_source_turn() is False
