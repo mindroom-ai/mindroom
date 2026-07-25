@@ -992,6 +992,7 @@ async def test_startup_thread_prewarm_bulk_refreshes_once_under_room_barrier(tmp
         bot.event_cache,
         thread_root_ids=tuple(thread_ids),
         caller_label="startup_thread_prewarm",
+        max_scan_pages=20,
     )
     assert competing_write_started.is_set()
     bot._conversation_cache.logger.info.assert_any_call(
@@ -1038,6 +1039,44 @@ async def test_startup_thread_prewarm_rechecks_shutdown_before_bulk_scan(tmp_pat
 
     assert completed is False
     mock_bulk_refresh.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_startup_thread_prewarm_cache_probe_failure_is_fail_open(tmp_path: Path) -> None:
+    """A cache-state read failure should release the room without aborting the startup loop."""
+    bot = _agent_bot(tmp_path)
+    bot._conversation_cache.logger = MagicMock()
+    thread_ids = ["$thread:localhost"]
+
+    with (
+        patch.object(
+            bot._conversation_cache,
+            "_startup_thread_prewarm_ids",
+            new=AsyncMock(return_value=thread_ids),
+        ),
+        patch(
+            "mindroom.matrix.conversation_cache.untrusted_cached_thread_ids",
+            new=AsyncMock(side_effect=RuntimeError("database unavailable")),
+        ),
+        patch.object(
+            bot._conversation_cache,
+            "_bulk_refresh_startup_threads",
+            new=AsyncMock(),
+        ) as mock_bulk_refresh,
+    ):
+        completed = await bot._conversation_cache.prewarm_recent_room_threads(
+            "!room:localhost",
+            is_shutting_down=lambda: False,
+        )
+
+    assert completed is False
+    mock_bulk_refresh.assert_not_awaited()
+    bot._conversation_cache.logger.warning.assert_called_once_with(
+        "startup_thread_prewarm_cache_probe_failed",
+        room_id="!room:localhost",
+        thread_count=1,
+        error="database unavailable",
+    )
 
 
 @pytest.mark.asyncio
@@ -1163,6 +1202,7 @@ async def test_startup_thread_prewarm_bulk_refresh_waits_for_background_warm(tmp
         bot.event_cache,
         thread_root_ids=["$thread-root"],
         caller_label="startup_thread_prewarm",
+        max_scan_pages=20,
     )
 
 
