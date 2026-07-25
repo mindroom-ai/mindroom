@@ -115,7 +115,7 @@ async def test_bulk_refresh_scans_room_once_and_stores_each_thread() -> None:
 
     assert client.room_messages.await_count == 2
     assert stats.requested_threads == 2
-    assert stats.stored_threads == 2
+    assert stats.usable_threads == 2
     assert stats.missing_root_ids == frozenset()
     assert stats.room_scan_pages == 2
 
@@ -162,7 +162,7 @@ async def test_bulk_refresh_reports_missing_roots_without_storing_partial_thread
         caller_label="test",
     )
 
-    assert stats.stored_threads == 1
+    assert stats.usable_threads == 1
     assert stats.missing_root_ids == frozenset({"$ghost:localhost"})
     event_cache.replace_thread_if_not_newer.assert_awaited_once()
     assert event_cache.replace_thread_if_not_newer.await_args.args[1] == "$a:localhost"
@@ -203,7 +203,7 @@ async def test_bulk_refresh_page_budget_stores_found_threads_and_reports_remaini
     )
 
     client.room_messages.assert_awaited_once()
-    assert stats.stored_threads == 1
+    assert stats.usable_threads == 1
     assert stats.missing_root_ids == frozenset({"$b:localhost"})
     assert stats.room_scan_pages == 1
     assert stats.scan_truncated is True

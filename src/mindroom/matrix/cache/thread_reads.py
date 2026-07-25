@@ -211,18 +211,36 @@ class ThreadReadPolicy:
         queue_wait_started: float,
     ) -> ThreadHistoryResult:
         coordinator_queue_wait_ms = elapsed_ms_since(queue_wait_started, clock=time.perf_counter)
+        return await fetcher(
+            room_id,
+            thread_id,
+            caller_label=caller_label,
+            coordinator_queue_wait_ms=coordinator_queue_wait_ms,
+        )
+
+    async def _load_untimed_thread_read(
+        self,
+        room_id: str,
+        thread_id: str,
+        *,
+        fetcher: _ThreadHistoryFetcher,
+        caller_label: str,
+        queue_wait_started: float,
+    ) -> ThreadHistoryResult:
+        """Load one read that may wait, absorbing repair backoff instead of leaking it to callers."""
         while True:
             try:
-                return await fetcher(
+                return await self._load_thread_read(
                     room_id,
                     thread_id,
+                    fetcher=fetcher,
                     caller_label=caller_label,
-                    coordinator_queue_wait_ms=coordinator_queue_wait_ms,
+                    queue_wait_started=queue_wait_started,
                 )
             except ThreadRepairBackoffError as exc:
-                # Non-dispatch reads have no timeout, so they wait the throttle out rather than leak
-                # this internal signal to turn execution. Each pass sleeps before retrying, so a
-                # repair that keeps failing surfaces its own error instead of spinning.
+                # Reads without a dispatch timeout wait the throttle out rather than leak this
+                # internal signal into turn execution. Each pass sleeps before retrying, so a repair
+                # that keeps failing surfaces its own error instead of spinning.
                 await asyncio.sleep(exc.retry_after_seconds)
 
     async def _load_dispatch_thread_read(
@@ -322,7 +340,7 @@ class ThreadReadPolicy:
                 dispatch_timeout_seconds=dispatch_timeout_seconds,
             )
         await self._wait_for_pending_thread_cache_updates(room_id, thread_id)
-        return await self._load_thread_read(
+        return await self._load_untimed_thread_read(
             room_id,
             thread_id,
             fetcher=fetcher,

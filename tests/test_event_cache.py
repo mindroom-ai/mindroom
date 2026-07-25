@@ -43,7 +43,7 @@ from mindroom.matrix.client_thread_history import (
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.matrix.conversation_cache import MatrixConversationCache, _cached_room_get_event
 from mindroom.matrix.event_info import EventInfo
-from mindroom.matrix.thread_diagnostics import THREAD_HISTORY_DEGRADED_DIAGNOSTIC
+from mindroom.matrix.thread_diagnostics import THREAD_HISTORY_DEGRADED_DIAGNOSTIC, is_thread_history_degraded
 from mindroom.timing import DispatchPipelineTiming
 from tests.conftest import (
     agent_response_should_respond,
@@ -808,6 +808,36 @@ async def test_strict_thread_history_waits_out_repair_backoff(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
+async def test_dispatch_thread_read_degrades_immediately_on_repair_backoff(tmp_path: Path) -> None:
+    """Dispatch reads must surface repair backoff at once instead of spending their whole budget."""
+    event_cache = SqliteEventCache(tmp_path / "event_cache.db")
+    await event_cache.initialize()
+    conversation_cache = _conversation_cache_for_thread_reads(tmp_path, event_cache, client=MagicMock())
+    coordinator = MagicMock()
+    coordinator.wait_for_thread_idle = AsyncMock(return_value=None)
+    coordinator.run_thread_repair = AsyncMock(side_effect=ThreadRepairBackoffError(30.0))
+    conversation_cache.runtime.event_cache_write_coordinator = coordinator
+
+    try:
+        result = await asyncio.wait_for(
+            conversation_cache.get_dispatch_thread_history(
+                "!room:localhost",
+                "$thread:localhost",
+                caller_label="dispatch_context",
+            ),
+            timeout=1.0,
+        )
+    finally:
+        await event_cache.close()
+
+    assert list(result) == []
+    assert is_thread_history_degraded(result)
+    assert result.diagnostics["thread_read_error"] == "cache_repair_backoff"
+    assert result.diagnostics["cache_repair_backoff_seconds"] == 30.0
+    coordinator.run_thread_repair.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_strict_thread_history_retries_after_joining_unusable_snapshot(tmp_path: Path) -> None:
     """A strict reader must not accept one joined snapshot-shaped repair result as full history."""
     event_cache = SqliteEventCache(tmp_path / "event_cache.db")
@@ -1007,7 +1037,7 @@ async def test_conversation_cache_startup_prewarm_bulk_refresh_preserves_metadat
     conversation_cache = _conversation_cache_for_thread_reads(tmp_path, event_cache, client=client)
     stats = BulkThreadRefreshStats(
         requested_threads=1,
-        stored_threads=1,
+        usable_threads=1,
         missing_root_ids=frozenset(),
         room_scan_pages=1,
         scanned_event_count=2,

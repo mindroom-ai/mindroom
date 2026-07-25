@@ -1047,8 +1047,8 @@ class MatrixConversationCache(ConversationCacheProtocol):
             )
             return False
 
-        threads_warmed = already_warm + stats.stored_threads
-        threads_failed = len(untrusted_thread_ids) - stats.stored_threads
+        threads_warmed = already_warm + stats.usable_threads
+        threads_failed = len(untrusted_thread_ids) - stats.usable_threads
         self._log_startup_thread_prewarm_complete(
             room_id,
             started_at=started_at,

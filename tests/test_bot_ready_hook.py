@@ -119,12 +119,12 @@ def _thread_root_event(
 def _bulk_refresh_stats(
     requested_threads: int,
     *,
-    stored_threads: int | None = None,
+    usable_threads: int | None = None,
 ) -> BulkThreadRefreshStats:
     """Return compact startup-prewarm bulk stats for tests."""
     return BulkThreadRefreshStats(
         requested_threads=requested_threads,
-        stored_threads=requested_threads if stored_threads is None else stored_threads,
+        usable_threads=requested_threads if usable_threads is None else usable_threads,
         missing_root_ids=frozenset(),
         room_scan_pages=1,
         scanned_event_count=requested_threads,

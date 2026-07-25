@@ -1081,7 +1081,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             allow_prewarm_fetch_finish.set()
             await _close_bound_runtime_support(bot, support)
 
-        assert prewarm_stats.stored_threads == 1
+        assert prewarm_stats.usable_threads == 1
         assert [message.body for message in history] == ["Old root", "Old reply"]
         assert history.diagnostics[THREAD_HISTORY_SOURCE_DIAGNOSTIC] == THREAD_HISTORY_SOURCE_CACHE
         assert THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC not in history.diagnostics

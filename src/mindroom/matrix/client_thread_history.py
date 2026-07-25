@@ -1415,7 +1415,7 @@ async def refresh_thread_history_from_source(
                 coordinator_queue_wait_ms=coordinator_queue_wait_ms,
             )
             return result
-        if attempt.usable or not attempt.retryable or repair_attempts == _MAX_THREAD_REPAIR_ATTEMPTS:
+        if not attempt.retryable or repair_attempts == _MAX_THREAD_REPAIR_ATTEMPTS:
             break
         logger.warning(
             "Retrying thread cache repair after guarded replacement conflict",
@@ -1427,7 +1427,7 @@ async def refresh_thread_history_from_source(
 
     assert fetch_result is not None
     assert attempt is not None
-    if attempt.retryable and not attempt.usable:
+    if attempt.retryable:
         logger.warning(
             "Thread cache repair did not install a usable snapshot",
             room_id=room_id,
@@ -1876,7 +1876,7 @@ class BulkThreadRefreshStats:
     """Summary for one bulk thread-cache refresh pass over a room."""
 
     requested_threads: int
-    stored_threads: int
+    usable_threads: int
     missing_root_ids: frozenset[str]
     room_scan_pages: int
     scanned_event_count: int
@@ -2066,7 +2066,7 @@ async def bulk_refresh_room_thread_histories(
         thread_root_ids=thread_root_ids,
         max_scan_pages=max_scan_pages,
     )
-    stored_threads = 0
+    usable_threads = 0
     opaque_stale_threads = 0
     if scan_result.unresolved_opaque_event_ids:
         logger.warning(
@@ -2095,10 +2095,10 @@ async def bulk_refresh_room_thread_histories(
                 fetch_started_at=fetch_started_at,
             )
             if store_outcome.usable:
-                stored_threads += 1
+                usable_threads += 1
     stats = BulkThreadRefreshStats(
         requested_threads=len(set(thread_root_ids)),
-        stored_threads=stored_threads,
+        usable_threads=usable_threads,
         missing_root_ids=scan_result.missing_root_ids,
         room_scan_pages=scan_result.page_count,
         scanned_event_count=scan_result.scanned_event_count,
@@ -2109,7 +2109,7 @@ async def bulk_refresh_room_thread_histories(
         room_id=room_id,
         caller_label=caller_label,
         requested_threads=stats.requested_threads,
-        stored_threads=stats.stored_threads,
+        usable_threads=stats.usable_threads,
         opaque_stale_threads=opaque_stale_threads,
         missing_roots=len(stats.missing_root_ids),
         room_scan_pages=stats.room_scan_pages,

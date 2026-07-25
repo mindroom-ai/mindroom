@@ -354,7 +354,10 @@ class TestThreadHistory:
                     ),
                 ),
             ) as mock_fallback,
-            patch("mindroom.matrix.client_thread_history._store_thread_history_cache", new=AsyncMock()) as mock_store,
+            patch(
+                "mindroom.matrix.client_thread_history._store_thread_history_cache",
+                new=AsyncMock(return_value=ThreadCacheReplaceOutcome.STORED),
+            ) as mock_store,
         ):
             history = await fetch_thread_history(
                 client,
@@ -758,7 +761,10 @@ class TestThreadHistory:
                     ),
                 ),
             ),
-            patch("mindroom.matrix.client_thread_history._store_thread_history_cache", new=AsyncMock()) as mock_store,
+            patch(
+                "mindroom.matrix.client_thread_history._store_thread_history_cache",
+                new=AsyncMock(return_value=ThreadCacheReplaceOutcome.STORED),
+            ) as mock_store,
         ):
             history = await fetch_thread_history(
                 client,
@@ -804,7 +810,10 @@ class TestThreadHistory:
                     ),
                 ),
             ),
-            patch("mindroom.matrix.client_thread_history._store_thread_history_cache", new=AsyncMock()) as mock_store,
+            patch(
+                "mindroom.matrix.client_thread_history._store_thread_history_cache",
+                new=AsyncMock(return_value=ThreadCacheReplaceOutcome.STORED),
+            ) as mock_store,
         ):
             await fetch_thread_history(
                 client,
@@ -3508,7 +3517,10 @@ class TestThreadHistoryCache:
                     ),
                 ),
             ),
-            patch("mindroom.matrix.client_thread_history._store_thread_history_cache", new=AsyncMock()),
+            patch(
+                "mindroom.matrix.client_thread_history._store_thread_history_cache",
+                new=AsyncMock(return_value=ThreadCacheReplaceOutcome.STORED),
+            ),
         ):
             history = await matrix_client_module.fetch_thread_history(
                 AsyncMock(),
@@ -4068,7 +4080,7 @@ class TestThreadHistoryCache:
         finally:
             await cache.close()
 
-        assert stats.stored_threads == 1
+        assert stats.usable_threads == 1
         assert stats.missing_root_ids == frozenset()
         assert clean_rows is not None
         assert {source["event_id"] for source in clean_rows} == {"$thread_root", "$clear_child"}
@@ -4120,7 +4132,7 @@ class TestThreadHistoryCache:
         finally:
             await cache.close()
 
-        assert stats.stored_threads == 0
+        assert stats.usable_threads == 0
         for thread_id in ("$thread_root", "$other_root"):
             state = states[thread_id]
             assert state is not None
