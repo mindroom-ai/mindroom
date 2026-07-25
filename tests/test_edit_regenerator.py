@@ -1200,7 +1200,8 @@ async def test_sync_restart_retries_waiting_coalesced_sibling(tmp_path: Path) ->
     assert harness.regenerator._mailboxes == {}
     await asyncio.wait_for(harness.restart_retry.flush(), timeout=2)
 
-    assert attempts == 3
+    assert attempts == 2
+    assert hook_calls == 2
     recorded = harness.turn_store.record_turn.call_args.args[0]
     assert recorded.source_event_prompts == {
         first_event_id: "first edited",

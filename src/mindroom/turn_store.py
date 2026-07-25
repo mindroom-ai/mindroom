@@ -669,9 +669,7 @@ def _has_redaction_cleanup_context(turn_record: TurnRecord) -> bool:
 def _backfill_missing_turn_facts(authority: TurnRecord, recovery: TurnRecord) -> TurnRecord:
     """Fill absent optional facts without overriding authoritative ledger values.
 
-    Source identity, anchor, completion, and timestamp always come from
-    ``authority``. Every optional fact uses ``recovery`` only when the
-    authoritative value is absent.
+    Identity and completion come from ``authority``; recovery only fills missing optional facts.
     """
     return replace(
         authority,
@@ -718,6 +716,7 @@ def _reconcile_ledger_and_recovery(
         or recovery_record.response_event_id is None
         or not same_turn_identity(ledger_record, recovery_record)
     ):
+        recovery_record = replace(recovery_record, source_event_revisions=None)
         backfilled_record = _backfill_missing_turn_facts(ledger_record, recovery_record)
         return (
             replace(

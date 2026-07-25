@@ -297,8 +297,8 @@ class EditRegenerator:
         else:
             prompt, structured = driving_edit.body, False
         record = replace(record, source_event_prompts=prompt_map, source_event_revisions=revisions)
-        assert record.conversation_target is not None
         target = record.conversation_target
+        assert target is not None
         requester_id = driving_edit.envelope.requester_id
         metadata = self.deps.turn_store.build_run_metadata(
             record,
@@ -309,11 +309,13 @@ class EditRegenerator:
             ),
         )
 
+        async def retry_mailbox() -> None:
+            await self._drain(room, record, mailbox)
+
         def retry_after_sync_restart() -> None:
             applied.clear()
             self.deps.turn_store.remove_stale_runs_for_edit(turn_record=record, requester_user_id=requester_id)
-            for pending_edit in mailbox.pending.values():
-                self.deps.restart_retry.register(pending_edit.revision[1], pending_edit.retry, room_id=room.room_id)
+            self.deps.restart_retry.register(driving_edit.revision[1], retry_mailbox, room_id=room.room_id)
 
         return (
             ResponseRequest(

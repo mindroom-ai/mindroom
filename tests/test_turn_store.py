@@ -1261,6 +1261,37 @@ def test_newer_interrupted_run_keeps_delivered_ledger_outcome(tmp_path: Path) ->
     assert loaded.timestamp == 10
 
 
+def test_interrupted_recovery_does_not_mix_prompt_and_revision(tmp_path: Path) -> None:
+    """An unfinished run cannot pair its edit revision with the delivered ledger prompt."""
+    store = _store(tmp_path)
+    store._ledger.record_handled_turn(
+        TurnRecord.create(
+            ["$event"],
+            response_event_id="$response",
+            source_event_prompts={"$event": "base prompt"},
+            timestamp=10,
+        ),
+    )
+    recovery_record = TurnRecord.create(
+        ["$event"],
+        completed=False,
+        source_event_prompts={"$event": "edited prompt"},
+        source_event_revisions={"$event": (20, "$edit")},
+        timestamp=20,
+    )
+
+    loaded = _load_with_recovery(
+        store,
+        original_event_id="$event",
+        recovery_record=recovery_record,
+    )
+
+    assert loaded is not None
+    assert loaded.source_event_prompts == {"$event": "base prompt"}
+    assert loaded.source_event_revisions is None
+    assert loaded.response_event_id == "$response"
+
+
 def test_terminal_write_refreshes_ledger_precedence_timestamp(tmp_path: Path) -> None:
     """A successful terminal write should become newer than its recovered input."""
     store = _store(tmp_path)
