@@ -467,15 +467,19 @@ async def replace_thread_locked_if_not_newer(
     conflict = guarded_thread_replacement_conflict(
         cache_state_row,
         fetch_started_at=fetch_started_at,
-        has_snapshot_rows=bool(
-            await _thread_event_ids_for_thread(
+        has_snapshot_rows=False,
+    )
+    if conflict is not None and conflict.outcome is ThreadCacheReplaceOutcome.RETRYABLE_CONFLICT:
+        conflict = guarded_thread_replacement_conflict(
+            cache_state_row,
+            fetch_started_at=fetch_started_at,
+            has_snapshot_rows=await _thread_has_snapshot_rows_for_thread(
                 db,
                 principal_id=principal_id,
                 room_id=room_id,
                 thread_id=thread_id,
             ),
-        ),
-    )
+        )
     if conflict is not None:
         return conflict
     await _replace_thread_locked(
@@ -809,6 +813,28 @@ async def _thread_event_ids_for_thread(
     rows = await cursor.fetchall()
     await cursor.close()
     return [str(row[0]) for row in rows]
+
+
+async def _thread_has_snapshot_rows_for_thread(
+    db: aiosqlite.Connection,
+    *,
+    principal_id: str,
+    room_id: str,
+    thread_id: str,
+) -> bool:
+    """Return whether one thread has at least one cached snapshot row."""
+    cursor = await db.execute(
+        """
+        SELECT 1
+        FROM thread_events
+        WHERE principal_id = ? AND room_id = ? AND thread_id = ?
+        LIMIT 1
+        """,
+        (principal_id, room_id, thread_id),
+    )
+    row = await cursor.fetchone()
+    await cursor.close()
+    return row is not None
 
 
 async def _thread_event_ids_for_room(
