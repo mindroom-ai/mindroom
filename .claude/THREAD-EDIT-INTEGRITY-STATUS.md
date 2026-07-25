@@ -33,10 +33,22 @@
 
 ## Current GitHub conflict
 
-- Current pushed head is `3fd554dc2758b37674232b635e9f34c9dc9c2d6b`.
-- GitHub reports `CONFLICTING` because `origin/main` advanced to `5f062224a1f490a91a72c555bf2fa0ca59c096b3` while the PR base snapshot remains `66dd4f4a68bcfd1a5e43b2cac20a1b464f306ab1`.
-- Both sides changed `postgres_event_cache.py`, `client_thread_history.py`, `conversation_cache.py`, `tach.toml`, and cache tests.
-- Correct the verified blockers first, then merge exact current `origin/main` with explicit conflict review.
+- Merge commit `8a384affc9fb577d732cb4987b5aed12f0885680` incorporates exact `origin/main` head `5f062224a1f490a91a72c555bf2fa0ca59c096b3`.
+- The only content conflict was `_bulk_scan_thread_event_sources`.
+- The resolution preserves main's `max_scan_pages` validation and the branch's canonical `ThreadEditCandidatesByOriginalEventId`.
+- All three bulk-backfill tests and Tach pass on the merge.
+- The merge commit is pushed.
+
+## Active blocker corrections
+
+- Commit `791cf005c` rejects explicit wrong-room edits before extraction and passes authoritative `room.room_id` from `EditRegenerator`.
+- All `93` edit-regenerator and message-content tests pass.
+- The active cache correction transactionally removes a redacted edit from the original event's bundled replacement metadata in both backends.
+- Cache admission also treats bundled edit IDs as tombstone candidates, so a later original carrying a redacted bundle cannot resurrect it.
+- Backend-neutral regressions cover latest-edit, point, snapshot, thread-row, approval, and redact-before-store surfaces.
+- All `22` backend-neutral semantics tests, both corrected SQLite projections, and five adjacent SQLite redaction tests pass.
+- PostgreSQL execution remains closed behind the shared heavy owner.
+- Projected production source is `+833/-634`, net `+199` against current `origin/main`.
 
 ## Required gates after the final correction
 

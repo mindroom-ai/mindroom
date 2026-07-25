@@ -407,17 +407,24 @@ async def redact_event_locked(
         room_id,
         event_ids=removed_event_ids,
     )
-    await _record_redacted_events(
+    await _record_redacted_events(db, namespace, room_id, event_ids=removed_event_ids)
+    scrubbed_rows = await rowcount(
         db,
-        namespace,
-        room_id,
-        event_ids=removed_event_ids,
+        """UPDATE mindroom_event_cache_events
+        SET event_json = (event_json::jsonb #- '{unsigned,m.relations,m.replace}')::text
+        WHERE namespace = %s AND room_id = %s AND %s = ANY(ARRAY[
+            event_json::jsonb #>> '{unsigned,m.relations,m.replace,event_id}',
+            event_json::jsonb #>> '{unsigned,m.relations,m.replace,latest_event,event_id}',
+            event_json::jsonb #>> '{unsigned,m.relations,m.replace,event,event_id}'
+        ])""",
+        (namespace, room_id, event_id),
     )
     return cache_rows_were_deleted(
         deleted_thread_rows,
         deleted_event_rows,
         deleted_edit_rows,
         deleted_thread_index_rows,
+        scrubbed_rows,
     )
 
 

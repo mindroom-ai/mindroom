@@ -37,6 +37,7 @@ from mindroom.matrix.client_thread_history import BulkThreadRefreshStats, fetch_
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.matrix.conversation_cache import MatrixConversationCache, _cached_room_get_event
 from mindroom.matrix.event_info import EventInfo
+from mindroom.matrix.media import valid_room_message_replacement
 from mindroom.matrix.thread_diagnostics import THREAD_HISTORY_DEGRADED_DIAGNOSTIC
 from mindroom.timing import DispatchPipelineTiming
 from tests.conftest import (
@@ -2492,23 +2493,24 @@ async def test_cached_point_and_snapshot_reads_apply_bundled_replacement(
             source_content={"body": "Original", "msgtype": "m.text"},
         ),
     )
-    original_event["unsigned"] = {
-        "m.relations": {
-            "m.replace": {
-                "event_id": "$bundled_edit",
-                "sender": "@alice:localhost",
-                "origin_server_ts": 3000,
-                "type": "m.room.message",
-                "content": {
-                    "body": "* Bundled",
-                    "msgtype": "m.text",
-                    "m.new_content": {"body": "Bundled", "msgtype": "m.text"},
-                    "m.relates_to": {"rel_type": "m.replace", "event_id": "$reply"},
-                },
-            },
+    bundled_edit = {
+        "event_id": "$bundled_edit",
+        "sender": "@alice:localhost",
+        "origin_server_ts": 3000,
+        "type": "m.room.message",
+        "content": {
+            "body": "* Bundled",
+            "msgtype": "m.text",
+            "m.new_content": {"body": "Bundled", "msgtype": "m.text"},
+            "m.relates_to": {"rel_type": "m.replace", "event_id": "$reply"},
         },
     }
-    await event_cache.store_event("$reply", "!room:localhost", original_event)
+    original_event["unsigned"] = {
+        "m.relations": {
+            "m.replace": bundled_edit,
+        },
+    }
+    await _replace_thread(event_cache, "!room:localhost", "$thread", [original_event])
 
     response, _ = await _cached_room_get_event(
         AsyncMock(),
@@ -2529,6 +2531,44 @@ async def test_cached_point_and_snapshot_reads_apply_bundled_replacement(
     assert snapshot is not None
     assert snapshot.content == {"body": "Bundled", "msgtype": "m.text"}
     assert snapshot.origin_server_ts == 2000
+
+    await event_cache.store_event("$bundled_edit", "!room:localhost", bundled_edit)
+    assert await event_cache.redact_event("!room:localhost", "$bundled_edit")
+    cached_original = await event_cache.get_event("!room:localhost", "$reply")
+    cached_thread = await event_cache.get_thread_events("!room:localhost", "$thread")
+    assert cached_original is not None
+    assert cached_thread == [cached_original]
+    assert cached_original["unsigned"]["m.relations"].get("m.replace") is None
+    assert (
+        await event_cache.get_latest_edit(
+            "!room:localhost",
+            cached_original,
+            validator=valid_room_message_replacement,
+        )
+        is None
+    )
+
+    response, _ = await _cached_room_get_event(AsyncMock(), event_cache, "!room:localhost", "$reply")
+    snapshot = await event_cache.get_latest_agent_message_snapshot(
+        "!room:localhost",
+        None,
+        "@alice:localhost",
+        runtime_started_at=None,
+    )
+
+    assert isinstance(response, nio.RoomGetEventResponse)
+    assert response.event.body == "Original"
+    assert snapshot is not None
+    assert snapshot.content == {"body": "Original", "msgtype": "m.text"}
+
+    late_original = json.loads(json.dumps(original_event))
+    late_original["event_id"] = "$late_reply"
+    late_edit = late_original["unsigned"]["m.relations"]["m.replace"]
+    late_edit["event_id"] = "$late_bundled_edit"
+    late_edit["content"]["m.relates_to"]["event_id"] = "$late_reply"
+    assert not await event_cache.redact_event("!room:localhost", "$late_bundled_edit")
+    await event_cache.store_event("$late_reply", "!room:localhost", late_original)
+    assert await event_cache.get_event("!room:localhost", "$late_reply") is None
 
 
 @pytest.mark.asyncio
@@ -2938,6 +2978,7 @@ async def test_edit_cache_row_indexes_io_mindroom_tool_approval_edits(
             "m.relates_to": {"rel_type": "m.replace", "event_id": "$approval"},
         },
     }
+    approval_card["unsigned"] = {"m.relations": {"m.replace": approval_edit}}
 
     try:
         await cache.store_events_batch(
@@ -2953,12 +2994,25 @@ async def test_edit_cache_row_indexes_io_mindroom_tool_approval_edits(
             sender="@bot:localhost",
             event_type="io.mindroom.tool_approval",
         )
+        assert await cache.redact_event("!room:localhost", "$approval_edit")
+        cached_card = await cache.get_event("!room:localhost", "$approval")
+        latest_after_redaction = await get_latest_edit(
+            cache,
+            "!room:localhost",
+            "$approval",
+            sender="@bot:localhost",
+            event_type="io.mindroom.tool_approval",
+        )
     finally:
         await cache.close()
 
     assert latest_edit is not None
     assert latest_edit["event_id"] == "$approval_edit"
     assert latest_edit["content"]["m.new_content"]["status"] == "approved"
+    assert cached_card is not None
+    assert cached_card["content"]["status"] == "pending"
+    assert cached_card["unsigned"]["m.relations"].get("m.replace") is None
+    assert latest_after_redaction is None
 
 
 @pytest.mark.asyncio

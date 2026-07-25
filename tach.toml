@@ -1782,6 +1782,7 @@ depends_on = []
 path = "mindroom.matrix.cache.event_cache_events"
 depends_on = [
     "mindroom.matrix.event_info",
+    "mindroom.matrix.replacements",
     "mindroom.matrix.sidecar_content",
 ]
 visibility = [
@@ -2375,6 +2376,7 @@ path = "mindroom.matrix.replacements"
 depends_on = ["mindroom.matrix.event_info"]
 visibility = [
     "mindroom.matrix.cache.agent_message_snapshot_semantics",
+    "mindroom.matrix.cache.event_cache_events",
     "mindroom.matrix.cache.postgres_event_cache_events",
     "mindroom.matrix.cache.sqlite_event_cache_events",
     "mindroom.matrix.client_thread_history",

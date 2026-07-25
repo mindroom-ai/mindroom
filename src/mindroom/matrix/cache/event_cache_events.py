@@ -12,6 +12,7 @@ from mindroom.matrix.event_info import (
     event_source_matches_room,
     event_type_supports_thread_relations,
 )
+from mindroom.matrix.replacements import bundled_replacement_candidates
 from mindroom.matrix.sidecar_content import sidecar_mxc_url
 
 if TYPE_CHECKING:
@@ -157,7 +158,14 @@ def validated_mxc_text_rows(rows: Iterable[Any], *, room_id: str) -> dict[tuple[
 
 def event_redaction_candidate_ids(event_id: str, event: dict[str, Any]) -> frozenset[str]:
     """Return IDs whose tombstones would prevent caching one event."""
-    candidate_ids = {event_id}
+    candidate_ids = {
+        event_id,
+        *(
+            candidate["event_id"]
+            for candidate in bundled_replacement_candidates(event)
+            if isinstance(candidate.get("event_id"), str)
+        ),
+    }
     event_info = EventInfo.from_event(event)
     if event_info.is_edit and isinstance(event_info.original_event_id, str):
         candidate_ids.add(event_info.original_event_id)

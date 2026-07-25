@@ -425,11 +425,23 @@ async def redact_event_locked(
         event_ids=removed_event_ids,
     )
     await _record_redacted_events(db, principal_id, room_id, event_ids=removed_event_ids)
+    scrubbed_cursor = await db.execute(
+        """UPDATE events SET event_json = json_remove(event_json, '$.unsigned."m.relations"."m.replace"')
+        WHERE principal_id = ? AND room_id = ? AND ? IN (
+            json_extract(event_json, '$.unsigned."m.relations"."m.replace".event_id'),
+            json_extract(event_json, '$.unsigned."m.relations"."m.replace".latest_event.event_id'),
+            json_extract(event_json, '$.unsigned."m.relations"."m.replace".event.event_id')
+        )""",
+        (principal_id, room_id, event_id),
+    )
+    scrubbed_rows = 0 if scrubbed_cursor.rowcount is None else scrubbed_cursor.rowcount
+    await scrubbed_cursor.close()
     return cache_rows_were_deleted(
         deleted_thread_rows,
         deleted_event_rows,
         deleted_edit_rows,
         deleted_thread_index_rows,
+        scrubbed_rows,
     )
 
 
