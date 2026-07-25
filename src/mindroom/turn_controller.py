@@ -400,25 +400,25 @@ class TurnController:
         is_edit: bool,
     ) -> tuple[bool, _TurnClaimLease | None]:
         """Claim a raw command source before conversation resolution can suspend."""
+        command = None if is_edit else self._command_control_input_for_event(event)
+        if command is None:
+            return False, None
+        command_turn = TurnRecord.create([event.event_id], completed=False)
+        claim = _TurnClaimLease(command_turn) if self.deps.turn_store.try_claim_turn(command_turn) else None
+        return True, claim
+
+    def _command_control_input_for_event(self, event: TextDispatchEvent) -> Command | None:
+        """Classify one raw or hydrated event through the trusted command boundary."""
         content = event.source.get("content") if isinstance(event.source, dict) else None
         source_kind = (
             self.deps.ingress.event_source_kind(event, content)
             if isinstance(content, dict) and self.deps.ingress.sender_is_trusted_for_ingress_metadata(event.sender)
             else None
         )
-        command = (
-            None
-            if is_edit
-            else self.deps.ingress.command_control_input(
-                event,
-                source_kind=source_kind or MESSAGE_SOURCE_KIND,
-            )
+        return self.deps.ingress.command_control_input(
+            event,
+            source_kind=source_kind or MESSAGE_SOURCE_KIND,
         )
-        if command is None:
-            return False, None
-        command_turn = TurnRecord.create([event.event_id], completed=False)
-        claim = _TurnClaimLease(command_turn) if self.deps.turn_store.try_claim_turn(command_turn) else None
-        return True, claim
 
     def _mark_source_events_responded(self, handled_turn: TurnRecord) -> None:
         """Mark one or more source events as handled by the same terminal outcome."""
@@ -876,39 +876,55 @@ class TurnController:
             prechecked_event.requester_user_id,
         )
 
-    async def _notify_command_target_not_ready(
+    async def _handle_unresolvable_command_target(
         self,
         room: nio.MatrixRoom,
         event: nio.RoomMessageText,
         *,
-        is_command: bool,
+        dispatch_timing: DispatchPipelineTiming | None,
+        command_claim: _TurnClaimLease | None,
     ) -> bool:
-        """Fail one command visibly when its conversation cannot be resolved yet."""
-        if not is_command:
-            return False
-        self.deps.logger.warning(
-            "command_target_not_ready",
-            event_id=event.event_id,
-            room_id=room.room_id,
-            sender=event.sender,
+        """Hydrate and terminalize one canonical command whose target is unresolved."""
+        prepared_event = await self._resolve_text_event_with_ingress_timing(
+            event,
+            dispatch_timing=dispatch_timing,
         )
-        if self.deps.agent_name == ROUTER_AGENT_NAME:
-            target = self.deps.resolver.build_message_target(
+        if self._command_control_input_for_event(prepared_event) is None:
+            return False
+
+        acquired_claim: _TurnClaimLease | None = None
+        if command_claim is None:
+            command_turn = TurnRecord.create([event.event_id], completed=False)
+            if not self.deps.turn_store.try_claim_turn(command_turn):
+                return True
+            acquired_claim = _TurnClaimLease(command_turn)
+        try:
+            self.deps.logger.warning(
+                "command_target_not_ready",
+                event_id=event.event_id,
                 room_id=room.room_id,
-                thread_id=None,
-                reply_to_event_id=event.event_id,
-                event_source=event.source,
+                sender=event.sender,
             )
-            await self.deps.delivery_gateway.send_text(
-                SendTextRequest(
-                    target=target,
-                    response_text=(
-                        "I could not run that command yet: the conversation it targets "
-                        "is still being resolved. Please resend it in a moment."
+            if self.deps.agent_name == ROUTER_AGENT_NAME:
+                target = self.deps.resolver.build_message_target(
+                    room_id=room.room_id,
+                    thread_id=None,
+                    reply_to_event_id=event.event_id,
+                    event_source=event.source,
+                )
+                await self.deps.delivery_gateway.send_text(
+                    SendTextRequest(
+                        target=target,
+                        response_text=(
+                            "I could not run that command yet: the conversation it targets "
+                            "is still being resolved. Please resend it in a moment."
+                        ),
                     ),
-                ),
-            )
-        self._mark_source_events_responded(TurnRecord.create([event.event_id]))
+                )
+            self._mark_source_events_responded(TurnRecord.create([event.event_id]))
+        finally:
+            if acquired_claim is not None:
+                acquired_claim.release(self.deps.turn_store)
         return True
 
     async def _dispatch_command_control_input(
@@ -2112,8 +2128,8 @@ class TurnController:
         if prechecked_event is None:
             return
 
-        is_command, command_claim = self._claim_command_before_resolution(event, is_edit=event_info.is_edit)
-        if is_command and command_claim is None:
+        raw_is_command, command_claim = self._claim_command_before_resolution(event, is_edit=event_info.is_edit)
+        if raw_is_command and command_claim is None:
             return
 
         dispatch_timing = create_dispatch_pipeline_timing(
@@ -2142,7 +2158,6 @@ class TurnController:
                 event_info=event_info,
                 dispatch_timing=dispatch_timing,
                 reservation_owner=reservation_owner,
-                is_command=is_command,
                 command_claim=command_claim,
             )
         except IngressAdmissionClosedError:
@@ -2165,7 +2180,6 @@ class TurnController:
         event_info: EventInfo,
         dispatch_timing: DispatchPipelineTiming | None,
         reservation_owner: _PromptIngressReservationOwner,
-        is_command: bool,
         command_claim: _TurnClaimLease | None,
     ) -> None:
         """Resolve, normalize, and admit one live (non-edit) text event."""
@@ -2173,7 +2187,12 @@ class TurnController:
         try:
             ingress_thread_id = await self.deps.resolver.coalescing_thread_id(room, event)
         except ThreadMembershipLookupError:
-            if await self._notify_command_target_not_ready(room, event, is_command=is_command):
+            if await self._handle_unresolvable_command_target(
+                room,
+                event,
+                dispatch_timing=dispatch_timing,
+                command_claim=command_claim,
+            ):
                 return
             raise
         if await self._should_skip_router_before_shared_ingress_work(

@@ -732,6 +732,99 @@ async def test_hydrated_sidecar_noncommand_releases_raw_command_claim_before_gat
 
 
 @pytest.mark.asyncio
+async def test_unresolvable_raw_command_with_hydrated_noncommand_is_not_terminal(tmp_path: Path) -> None:
+    """Target failure classifies a v2 sidecar from its hydrated ordinary body."""
+    bot = _make_bot(tmp_path, agent_name="router")
+    room = _make_room()
+    event = _text_event(
+        event_id="$sidecar-ordinary",
+        body="!help",
+        server_timestamp=1000,
+        thread_id="$pending_root",
+    )
+    content = event.source["content"]
+    assert isinstance(content, dict)
+    content.update(
+        {
+            "io.mindroom.long_text": {
+                "version": 2,
+                "encoding": "matrix_event_content_json",
+            },
+            "url": "mxc://localhost/sidecar-ordinary",
+        },
+    )
+    bot.client.download = AsyncMock(
+        return_value=MagicMock(
+            spec=nio.DownloadResponse,
+            body=json.dumps({"msgtype": "m.text", "body": "ordinary hydrated conversation"}).encode(),
+        ),
+    )
+    send_text = AsyncMock(return_value="$notice")
+
+    with (
+        patch.object(
+            bot._conversation_resolver,
+            "coalescing_thread_id",
+            new=AsyncMock(side_effect=ThreadMembershipLookupError("unproven root")),
+        ),
+        patch.object(bot._delivery_gateway, "send_text", new=send_text),
+        pytest.raises(ThreadMembershipLookupError, match="unproven root"),
+    ):
+        await bot._turn_controller.handle_text_event(room, event)
+
+    bot.client.download.assert_awaited_once_with(mxc="mxc://localhost/sidecar-ordinary")
+    send_text.assert_not_awaited()
+    assert not bot._turn_store.is_handled(event.event_id)
+    assert not bot._turn_store.is_claimed_in_flight(event.event_id)
+
+
+@pytest.mark.asyncio
+async def test_unresolvable_raw_noncommand_with_hydrated_command_is_terminal(tmp_path: Path) -> None:
+    """Target failure recognizes a command that exists only in a v2 sidecar."""
+    bot = _make_bot(tmp_path, agent_name="router")
+    room = _make_room()
+    event = _text_event(
+        event_id="$sidecar-command",
+        body="ordinary preview",
+        server_timestamp=1000,
+        thread_id="$pending_root",
+    )
+    content = event.source["content"]
+    assert isinstance(content, dict)
+    content.update(
+        {
+            "io.mindroom.long_text": {
+                "version": 2,
+                "encoding": "matrix_event_content_json",
+            },
+            "url": "mxc://localhost/sidecar-command",
+        },
+    )
+    bot.client.download = AsyncMock(
+        return_value=MagicMock(
+            spec=nio.DownloadResponse,
+            body=json.dumps({"msgtype": "m.text", "body": "!help"}).encode(),
+        ),
+    )
+    send_text = AsyncMock(return_value="$notice")
+
+    with (
+        patch.object(
+            bot._conversation_resolver,
+            "coalescing_thread_id",
+            new=AsyncMock(side_effect=ThreadMembershipLookupError("unproven root")),
+        ),
+        patch.object(bot._delivery_gateway, "send_text", new=send_text),
+    ):
+        await bot._turn_controller.handle_text_event(room, event)
+
+    bot.client.download.assert_awaited_once_with(mxc="mxc://localhost/sidecar-command")
+    send_text.assert_awaited_once()
+    assert bot._turn_store.is_handled(event.event_id)
+    assert not bot._turn_store.is_claimed_in_flight(event.event_id)
+
+
+@pytest.mark.asyncio
 async def test_non_router_agent_marks_unresolvable_command_handled_without_notice(tmp_path: Path) -> None:
     """Non-router agents drop unresolvable commands quietly but never guess a target."""
     bot = _make_bot(tmp_path)
