@@ -15,6 +15,7 @@ from mindroom.coalescing import (
 
 if TYPE_CHECKING:
     from mindroom.coalescing_batch import CoalescingKey
+    from mindroom.handled_turns import TurnRecord
 
 
 @dataclass
@@ -25,6 +26,7 @@ class PromptIngressReservationOwner:
     slot: LaneSlot
     admitted: bool = False
     ready_task: asyncio.Task[ReadyPendingEvent | None] | None = None
+    pending_turn_claim: TurnRecord | None = None
 
     @staticmethod
     def _close_late_ready_task_result(task: asyncio.Task[ReadyPendingEvent | None]) -> None:

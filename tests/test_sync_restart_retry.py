@@ -25,7 +25,7 @@ from mindroom.sync_restart_retry import (
     SyncRestartRetryQueue,
     interrupted_source_needs_retry,
 )
-from tests.conftest import request_envelope, unwrap_extracted_collaborator
+from tests.conftest import delivered_matrix_event, request_envelope, unwrap_extracted_collaborator
 from tests.response_runner_helpers import _bot, _plain_request, _target
 
 if TYPE_CHECKING:
@@ -149,11 +149,95 @@ async def test_locked_retry_guard_precedes_payload_and_fails_closed(
         else:
             assert await task is None
 
-    assert events == (["lock", "history", "history", "prepare"] if history_case == "current" else ["lock", "history"])
+    assert events == (["history", "lock", "history", "prepare"] if history_case == "current" else ["history"])
     if history_case == "current":
         bot.client.room_send.assert_awaited_once()
     else:
         bot.client.room_send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("interrupted", [False, True])
+async def test_team_resolution_fallback_obeys_locked_retry_guard(tmp_path: Path, *, interrupted: bool) -> None:
+    """Only a still-interrupted team edit retry may deliver its availability reason."""
+    bot = _bot(tmp_path)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    target = _target(reply_to_event_id="$source")
+    execution_identity = runner.deps.tool_runtime.build_execution_identity(target=target, user_id="@user:localhost")
+    history_scope = runner.deps.state_writer.team_history_scope(
+        [bot.matrix_id],
+        requester_user_id=execution_identity.requester_id,
+    )
+    storage = MagicMock()
+    storage.get_session.return_value = TeamSession(
+        session_id=target.session_id,
+        team_id=history_scope.scope_id,
+        runs=[_stored_run(history_scope, "run", interrupted=interrupted)],
+    )
+    request = replace(
+        _plain_request(target, source_event_id="$source"),
+        existing_event_id="$existing",
+        sync_restart_retry_source_event_id="$source",
+    )
+
+    edit_message = AsyncMock(return_value=delivered_matrix_event("$edit"))
+    with (
+        patch.object(runner.deps.state_writer, "create_storage", return_value=storage),
+        patch("mindroom.delivery_gateway.edit_message_result", new=edit_message),
+    ):
+        response = await runner.generate_team_response_helper(
+            request,
+            team_agents=[bot.matrix_id],
+            team_mode="coordinate",
+            resolution_reason="No team available",
+        )
+
+    assert response == ("$existing" if interrupted else None)
+    assert edit_message.await_count == int(interrupted)
+
+
+@pytest.mark.asyncio
+async def test_team_resolution_fallback_sync_restart_registers_retry(tmp_path: Path) -> None:
+    """Cancellation while editing a fallback reason must retain the edit for retry."""
+    bot = _bot(tmp_path)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    target = _target(reply_to_event_id="$source")
+    execution_identity = runner.deps.tool_runtime.build_execution_identity(target=target, user_id="@user:localhost")
+    history_scope = runner.deps.state_writer.team_history_scope(
+        [bot.matrix_id],
+        requester_user_id=execution_identity.requester_id,
+    )
+    storage = MagicMock()
+    storage.get_session.return_value = TeamSession(
+        session_id=target.session_id,
+        team_id=history_scope.scope_id,
+        runs=[_stored_run(history_scope, "run", interrupted=True)],
+    )
+    retries: list[str] = []
+    request = replace(
+        _plain_request(target, source_event_id="$source"),
+        existing_event_id="$existing",
+        sync_restart_retry_source_event_id="$source",
+        on_sync_restart_cancelled=lambda: retries.append("retry"),
+    )
+    edit_message = AsyncMock(
+        side_effect=[asyncio.CancelledError("sync_restart"), delivered_matrix_event("$cancelled")],
+    )
+
+    with (
+        patch.object(runner.deps.state_writer, "create_storage", return_value=storage),
+        patch("mindroom.delivery_gateway.edit_message_result", new=edit_message),
+    ):
+        response = await runner.generate_team_response_helper(
+            request,
+            team_agents=[bot.matrix_id],
+            team_mode="coordinate",
+            resolution_reason="No team available",
+        )
+
+    assert response == "$existing"
+    assert retries == ["retry"]
+    assert edit_message.await_count == 1
 
 
 def _request(on_sync_restart_cancelled: Callable[[], None] | None = None) -> ResponseRequest:
@@ -244,6 +328,34 @@ async def test_queue_runs_each_retry_exactly_once() -> None:
     assert queue.register("$event", retry, room_id="!room:localhost") is False
     await queue.flush()
     assert runs == ["ran"]
+
+
+@pytest.mark.asyncio
+async def test_concurrent_flushes_share_one_serial_retry_pass() -> None:
+    """Overlapping healthy sync callbacks must not run the same retry twice."""
+    queue = SyncRestartRetryQueue()
+    started = asyncio.Event()
+    release = asyncio.Event()
+    runs = 0
+
+    async def retry() -> None:
+        nonlocal runs
+        runs += 1
+        started.set()
+        await release.wait()
+
+    assert queue.register("$event", retry, room_id="!room:localhost") is True
+    first = asyncio.create_task(queue.flush())
+    await started.wait()
+    second = asyncio.create_task(queue.flush())
+    await asyncio.sleep(0)
+    assert not second.done()
+
+    release.set()
+    await asyncio.gather(first, second)
+
+    assert runs == 1
+    assert not queue.has_pending
 
 
 @pytest.mark.asyncio

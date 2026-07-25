@@ -7,13 +7,14 @@ import json
 import threading
 import time
 from contextlib import contextmanager
-from dataclasses import replace
+from dataclasses import FrozenInstanceError, replace
 from typing import TYPE_CHECKING
 from unittest.mock import patch
 
 import pytest
 
 import mindroom.handled_turns as handled_turns_module
+from mindroom import constants
 from mindroom.file_locks import advisory_file_lock
 from mindroom.handled_turns import (
     HandledTurnLedger,
@@ -68,6 +69,9 @@ def _write_responses_file(
             else None,
             source_event_prompts=raw_record.get("source_event_prompts")
             if isinstance(raw_record.get("source_event_prompts"), dict)
+            else None,
+            source_event_revisions=raw_record.get("source_event_revisions")
+            if isinstance(raw_record.get("source_event_revisions"), dict)
             else None,
             source_event_metadata=raw_record.get("source_event_metadata")
             if isinstance(raw_record.get("source_event_metadata"), dict)
@@ -384,21 +388,117 @@ def test_source_event_metadata_persists_across_reload(temp_dir: Path) -> None:
     tracker1.record_handled_turn(
         TurnRecord.create(
             ["$first", "$second"],
+            discovery_event_ids=["$human-first"],
             response_event_id="$response",
             source_event_prompts={"$first": "first", "$second": "second"},
             source_event_metadata={
-                "$first": SourceEventMetadata(sender="@alice:localhost", timestamp_ms=1_774_019_700_000),
+                "$first": SourceEventMetadata(
+                    sender="@alice:localhost",
+                    timestamp_ms=1_774_019_700_000,
+                    discovery_event_id="$human-first",
+                ),
                 "$second": SourceEventMetadata(sender="@bob:localhost", timestamp_ms=None),
             },
         ),
     )
 
-    turn_record = _reload_ledger("test_source_metadata_reload", temp_dir).get_turn_record("$second")
+    tracker2 = _reload_ledger("test_source_metadata_reload", temp_dir)
+    turn_record = tracker2.get_turn_record("$second")
 
     assert turn_record is not None
     assert turn_record.source_event_metadata == {
-        "$first": SourceEventMetadata(sender="@alice:localhost", timestamp_ms=1_774_019_700_000.0),
+        "$first": SourceEventMetadata(
+            sender="@alice:localhost",
+            timestamp_ms=1_774_019_700_000.0,
+            discovery_event_id="$human-first",
+        ),
         "$second": SourceEventMetadata(sender="@bob:localhost", timestamp_ms=None),
+    }
+    redacted = replace(turn_record, redacted_source_event_ids=("$human-first",))
+    assert redacted.replay_source_event_ids == ("$second",)
+    assert redacted.source_event_prompts == {"$second": "second"}
+    tracker2.record_handled_turn(redacted)
+
+    reloaded = _reload_ledger("test_source_metadata_reload", temp_dir).get_turn_record("$human-first")
+    assert reloaded is not None
+    assert reloaded.redacted_source_event_ids == ("$human-first",)
+    assert reloaded.source_event_prompts == {"$second": "second"}
+
+
+def test_turn_record_cannot_mutate_after_ledger_publication() -> None:
+    """Turn records are immutable snapshots once shared with ledger readers and writers."""
+    record = TurnRecord.create(["$source"], response_event_id="$response")
+
+    with pytest.raises(FrozenInstanceError):
+        record.response_event_id = "$replacement"  # type: ignore[misc]
+
+
+def test_source_event_revisions_persist_across_restart_and_run_recovery(temp_dir: Path) -> None:
+    """Per-source edit order should survive both durable turn projections."""
+    revisions = {
+        "$first": (1_000_010, "$edit-first"),
+        "$second": (1_000_020, "$edit-second"),
+    }
+    record = TurnRecord.create(
+        ["$first", "$second"],
+        response_event_id="$response",
+        source_event_prompts={"$first": "edited first", "$second": "edited second"},
+        source_event_revisions=revisions,
+        requester_id="@user:example.com",
+    )
+    tracker = HandledTurnLedger("test_source_revisions_reload", base_path=temp_dir)
+    tracker.record_handled_turn(record)
+
+    reloaded = _reload_ledger("test_source_revisions_reload", temp_dir).get_turn_record("$second")
+
+    assert reloaded is not None
+    assert reloaded.source_event_revisions == revisions
+
+    run_metadata = TurnRecordCodec.to_run_metadata(record)
+    run_metadata[constants.MATRIX_EVENT_ID_METADATA_KEY] = "$second"
+    run_metadata[constants.MATRIX_RESPONSE_EVENT_ID_METADATA_KEY] = "$response"
+    recovered = TurnRecordCodec.from_run_metadata(run_metadata)
+
+    assert recovered is not None
+    assert recovered.source_event_revisions == revisions
+    assert recovered.requester_id == "@user:example.com"
+
+
+def test_suppressed_source_event_revisions_persist_across_restart(temp_dir: Path) -> None:
+    """Hook suppression must survive Matrix replay through the durable ledger."""
+    suppressed_revisions = {"$source": (1_000_010, "$edit")}
+    tracker = HandledTurnLedger("test_suppressed_source_revisions_reload", base_path=temp_dir)
+    tracker.record_handled_turn(
+        TurnRecord.create(
+            ["$source"],
+            response_event_id="$response",
+            source_event_revisions=suppressed_revisions,
+            suppressed_source_event_revisions=suppressed_revisions,
+        ),
+    )
+
+    reloaded = _reload_ledger("test_suppressed_source_revisions_reload", temp_dir).get_turn_record("$source")
+
+    assert reloaded is not None
+    assert reloaded.suppressed_source_event_revisions == suppressed_revisions
+
+
+def test_source_event_revisions_keep_only_valid_live_sources() -> None:
+    """Revision identity should stay bounded to replayable sources in one turn."""
+    record = TurnRecord.create(
+        ["$first", "$second"],
+        discovery_event_ids=["$malformed"],
+        redacted_source_event_ids=["$second"],
+        source_event_revisions={
+            "$first": (1_000_010, "$edit-first"),
+            "$second": (1_000_020, "$edit-second"),
+            "$extra": (1_000_030, "$edit-extra"),
+            "$malformed": ["bad-timestamp", "$edit-malformed"],
+        },
+    )
+
+    assert record.source_event_revisions == {
+        "$first": (1_000_010, "$edit-first"),
     }
 
 

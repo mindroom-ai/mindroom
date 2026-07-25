@@ -72,6 +72,12 @@ Command handling now records terminal outcomes through `TurnStore` as well.
 `TurnRecord` is the single immutable schema for turn identity, outcome, and regeneration facts.
 One codec projects that schema into the versioned handled-turn ledger and recoverable Agno run metadata.
 Interactive-selection discovery aliases remain separate from canonical source identity, so recovery can index every triggering event without making one message look coalesced.
+Coalesced router relays persist each human discovery alias on its physical source metadata so later edits and redactions update the owned prompt.
+Per-source Matrix revision tuples keep durable edit facts newest-wins across retries and restarts.
+`EditRegenerator` groups edits by room, response anchor, and requester in a bounded per-response mailbox.
+One draining owner folds each source's newest Matrix revision into a complete response request and loops when newer edits arrive.
+Physical source IDs are exclusive turn claims, while discovery aliases are advisory settlement keys observed by `wait_for_turn_settled`.
+A sync-restart cancellation leaves its mailbox snapshot for `SyncRestartRetryQueue` to drain before later edits supersede it.
 The two physical stores remain intentionally redundant so run metadata can repair a ledger write lost during a crash.
 `TurnStore` applies deterministic field precedence: a present ledger record owns canonical source identity and anchor, while a newer delivered run can repair mutable response and regeneration facts after a crash.
 Recovery never replaces a ledger record that changed while run metadata was loading.
