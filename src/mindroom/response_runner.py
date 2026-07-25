@@ -76,7 +76,6 @@ from mindroom.user_turn_time import prefix_user_turn_time
 from .delivery_gateway import (
     CancelledVisibleNoteRequest,
     DeliveryGateway,
-    EditTextRequest,
     FinalDeliveryRequest,
     FinalizeStreamedResponseRequest,
     MatrixCompactionLifecycle,
@@ -1576,15 +1575,40 @@ class ResponseRunner:
         team_request = replace(team_request, request=request)
         reason = team_request.resolution_reason
         if reason is not None:
-            event_id = request.existing_event_id
-            if event_id is None:
-                return await self.deps.delivery_gateway.send_text(
-                    SendTextRequest(target=resolved_target, response_text=reason),
+            response_identity = self._response_identity(request, response_kind="team")
+            lifecycle = self._build_lifecycle(identity=response_identity, request=request)
+            progress = _DeliveryProgress(tracked_event_id=request.existing_event_id)
+
+            async def deliver_resolution_reason(message_id: str | None) -> None:
+                progress.settle(
+                    await self.deps.delivery_gateway.deliver_final(
+                        FinalDeliveryRequest(
+                            target=resolved_target,
+                            existing_event_id=message_id,
+                            existing_event_is_placeholder=request.existing_event_is_placeholder,
+                            response_text=reason,
+                            identity=response_identity,
+                            tool_trace=None,
+                            extra_content=None,
+                        ),
+                    ),
                 )
-            edited = await self.deps.delivery_gateway.edit_text(
-                EditTextRequest(target=resolved_target, event_id=event_id, new_text=reason),
+
+            return await self._run_and_settle_locked_response(
+                request,
+                target=resolved_target,
+                lifecycle=lifecycle,
+                progress=progress,
+                response_function=deliver_resolution_reason,
+                thinking_message=None,
+                user_id=request.user_id,
+                run_id=str(uuid4()),
+                build_post_response_outcome=lambda _final_outcome: ResponseOutcome(),
+                post_response_deps=lambda: self.deps.post_response_effects.build_deps(
+                    room_id=request.room_id,
+                    interactive_agent_name=self.deps.agent_name,
+                ),
             )
-            return event_id if edited else None
         requester_user_id = request.user_id or ""
         _memory_prompt, _memory_thread_history, prepared_prompt, model_thread_history = (
             prepare_memory_and_model_context(

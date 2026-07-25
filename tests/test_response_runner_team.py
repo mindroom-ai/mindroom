@@ -467,7 +467,7 @@ class TestAgentBot(AgentBotTestBase):
         assert delivery_resolution is None
         call = generate_team_response.await_args
         assert call.kwargs == {
-            "team_agents": [],
+            "team_agents": [team_member],
             "team_mode": "coordinate",
             "resolution_reason": "No team available",
         }

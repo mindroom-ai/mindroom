@@ -2220,7 +2220,7 @@ class TeamBot(AgentBot):
             assert team_resolution.reason is not None
             return await self._response_runner.generate_team_response_helper(
                 request,
-                team_agents=[],
+                team_agents=self.current_configured_team_agents(),
                 team_mode=configured_mode.value,
                 resolution_reason=team_resolution.reason,
             )
