@@ -73,6 +73,7 @@ _STARTUP_MAINTENANCE_PHASES = frozenset(
 )
 _STARTUP_PHASE_PATTERN = re.compile(r"\bphase=(startup_maintenance\.[^\s\]]+)")
 _STARTUP_STATUS_PATTERN = re.compile(r"\bstatus=([a-z_]+)")
+_ANSI_ESCAPE_PATTERN = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
 
 def _required_int(value: Mapping[str, object], key: str) -> int:
@@ -1685,6 +1686,7 @@ class ManagedTuwunelStack:
         with self.log_path.open("rb") as log:
             log.seek(self._mindroom_start_log_offset)
             generation_log = log.read().decode("utf-8", errors="replace")
+        generation_log = _ANSI_ESCAPE_PATTERN.sub("", generation_log)
         statuses: dict[str, str] = {}
         for line in generation_log.splitlines():
             if "startup_phase_finished" not in line:

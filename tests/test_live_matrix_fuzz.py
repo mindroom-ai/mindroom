@@ -324,6 +324,32 @@ def test_startup_maintenance_wait_rejects_failed_current_phase(tmp_path: Path) -
         stack.wait_for_startup_maintenance(timeout_seconds=0.1)
 
 
+def test_startup_maintenance_wait_parses_colored_structlog_fields(tmp_path: Path) -> None:
+    """ANSI styling around structlog keys and values cannot hide completion."""
+
+    class FakeProcess:
+        @staticmethod
+        def poll() -> None:
+            return None
+
+    log_path = tmp_path / "mindroom.log"
+    log_path.write_text(
+        "".join(
+            "\x1b[32mstartup_phase_finished\x1b[0m "
+            f"\x1b[36mphase\x1b[0m=\x1b[35m{phase}\x1b[0m "
+            "\x1b[36mstatus\x1b[0m=\x1b[35mcompleted\x1b[0m\n"
+            for phase in sorted(live_fuzz._STARTUP_MAINTENANCE_PHASES)
+        ),
+        encoding="utf-8",
+    )
+    stack = object.__new__(ManagedTuwunelStack)
+    stack.log_path = log_path
+    stack._mindroom_start_log_offset = 0
+    stack._mindroom_process = FakeProcess()
+
+    stack.wait_for_startup_maintenance(timeout_seconds=0.1)
+
+
 def test_startup_maintenance_wait_has_bounded_timeout(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
