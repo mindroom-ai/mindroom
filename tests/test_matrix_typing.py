@@ -179,6 +179,9 @@ async def test_shared_typing_lease_uses_longest_requested_timeout() -> None:
 
     release_turns.set()
     await asyncio.gather(short_task, long_task)
+
+    # The final stop reports the lease's own timeout, not the _set_typing default.
+    assert client.room_typing.await_args_list[-1].args == (room_id, False, 60_000)
     assert not typing_module._ACTIVE_TYPING
 
 

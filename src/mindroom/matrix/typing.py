@@ -156,10 +156,9 @@ async def _release_typing_state(
         await refresh_task
     client, room_id = key
     try:
-        try:
-            await _set_typing(client, room_id, False)
-        except Exception:
-            logger.warning("Failed to stop typing indicator", room_id=room_id, exc_info=True)
+        await _set_typing(client, room_id, False, state.timeout_seconds)
+    except Exception:
+        logger.warning("Failed to stop typing indicator", room_id=room_id, exc_info=True)
     finally:
         if _ACTIVE_TYPING.get(key) is state:
             del _ACTIVE_TYPING[key]
