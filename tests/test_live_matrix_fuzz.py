@@ -1351,6 +1351,51 @@ async def test_all_reply_body_oracles_use_same_total_replacement_order() -> None
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "replacement_fields",
+    [
+        {},
+        {"m.new_content": "not-an-object"},
+        {"m.new_content": {"body": 123}},
+    ],
+)
+async def test_all_reply_body_oracles_ignore_invalid_replacement_new_content(
+    replacement_fields: dict[str, object],
+) -> None:
+    """An invalid edit cannot fall back to its forged outer fallback body."""
+    client = LiveMatrixClient("http://matrix.invalid", "!room:example")
+    oracle = ExactReplyOracle(client, "@agent:example")
+    auditor = FinalStateAuditor(
+        client,
+        oracle,
+        agent_id="@agent:example",
+        expected_body_for=_short_body_for,
+    )
+    original = _agent_reply_event("$source", "$reply", "original")
+    invalid_edit = {
+        "event_id": "$edit",
+        "sender": "@agent:example",
+        "type": "m.room.message",
+        "origin_server_ts": 999,
+        "content": {
+            "body": "forged outer fallback",
+            "m.relates_to": {"rel_type": "m.replace", "event_id": "$reply"},
+            **replacement_fields,
+        },
+    }
+    try:
+        oracle._ingest_event(original)
+        oracle._ingest_event(invalid_edit)
+        assert oracle.latest_reply_bodies["$reply"][1] == "original"
+
+        events = {"$reply": original, "$edit": invalid_edit}
+        assert auditor._latest_agent_body(events, "$reply") == "original"
+        assert LiveFuzzRunner._latest_event_body(events.values(), "$reply") == "original"
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
 async def test_exact_reply_oracle_ignores_empty_defaultdict_entries() -> None:
     """Stale empty reply sets from bookkeeping reads must not count as replies."""
     client = LiveMatrixClient("http://matrix.invalid", "!room:example")
@@ -2516,8 +2561,43 @@ async def test_model_source_audit_uses_harness_redaction_truth(tmp_path: Path) -
             events,
             redacted_source_event_ids={"$a"},
         )
+
+        unrelated = _source_marker("op:unrelated", ORIGINAL_REVISION)
+        auditor.observed_markers_for = lambda _call_id: frozenset({orig, unrelated})
+        with pytest.raises(AssertionError, match="unexpected source markers"):
+            auditor._assert_model_saw_current_sources(
+                events,
+                redacted_source_event_ids={"$a"},
+            )
     finally:
         await auditor.client.close()
+
+
+def test_ledger_redaction_audit_requires_harness_expected_tombstone() -> None:
+    """Harness-observed source redaction must exist in the durable source row."""
+    live = TurnRecord(
+        source_event_ids=("$source",),
+        response_event_id="$reply",
+        completed=True,
+    )
+    assert FinalStateAuditor._ledger_redaction_problems(
+        {"$source": live},
+        {"$source"},
+    ) == ["harness-redacted source $source has no durable tombstone"]
+
+    tombstoned = TurnRecord(
+        source_event_ids=("$source",),
+        redacted_source_event_ids=("$source",),
+        response_event_id="$reply",
+        completed=True,
+    )
+    assert (
+        FinalStateAuditor._ledger_redaction_problems(
+            {"$source": tombstoned},
+            {"$source"},
+        )
+        == []
+    )
 
 
 @pytest.mark.asyncio
@@ -3434,6 +3514,7 @@ def test_live_stack_manifest_is_atomic_and_recoverable(tmp_path: Path) -> None:
         artifact_directory=artifact,
     )
     try:
+        stack._created = True
         stack._write_manifest(
             state="ready",
             matrix_port=18008,
@@ -3449,6 +3530,7 @@ def test_live_stack_manifest_is_atomic_and_recoverable(tmp_path: Path) -> None:
         assert payload["matrix_port"] == 18008
         assert payload["api_port"] == 18765
         assert payload["mindroom_pid"] == 1234
+        assert payload["instance_cleanup_required"] is True
         assert not stack.manifest_path.with_suffix(".tmp").exists()
     finally:
         stack.temp_dir.cleanup()
@@ -3489,6 +3571,7 @@ def test_create_failure_retains_exact_cleanup_obligation(
 
     payload = json.loads(stack.manifest_path.read_text(encoding="utf-8"))
     assert payload["state"] == ("cleanup_failed" if remove_fails else "closed")
+    assert payload["instance_cleanup_required"] is remove_fails
     assert stack._created is remove_fails
     assert commands == [
         ("just", "local-instances-create", stack.instance_name, "tuwunel"),
@@ -3515,6 +3598,7 @@ def test_abandoned_manifest_recovery_is_registry_aware_and_kills_exact_group(
                 "instance_name": "fuzz-old",
                 "project_root": str(old_root),
                 "state": "cleanup_failed",
+                "instance_cleanup_required": False,
                 "mindroom_pid": 4242,
                 "mindroom_command_marker": "/persistent/attestation.json",
             },
@@ -3632,6 +3716,152 @@ def test_abandoned_manifest_recovery_survives_deleted_worktree_once(
             ),
         ]
         assert json.loads(manifest_path.read_text(encoding="utf-8"))["state"] == "recovered"
+    finally:
+        stack.temp_dir.cleanup()
+
+
+def test_abandoned_failed_close_tears_down_exact_project_when_registry_empty(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed close remains cleanup debt even after registry loss."""
+    state_root = tmp_path / "state"
+    old_root = tmp_path / "old-worktree"
+    registry_path = old_root / "local" / "instances" / "deploy" / "instances.json"
+    registry_path.parent.mkdir(parents=True)
+    registry_path.write_text(json.dumps({"instances": {}}), encoding="utf-8")
+    manifest_path = state_root / "runs" / "fuzz-old.json"
+    manifest_path.parent.mkdir(parents=True)
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "docker_compose_project": "fuzz-old",
+                "instance_name": "fuzz-old",
+                "instance_cleanup_required": True,
+                "project_root": str(old_root),
+                "state": "cleanup_failed",
+            },
+        ),
+        encoding="utf-8",
+    )
+    stack = ManagedTuwunelStack(state_root=state_root)
+    commands: list[tuple[tuple[str, ...], dict[str, object]]] = []
+    try:
+        monkeypatch.setattr(
+            live_fuzz,
+            "_run_command",
+            lambda *command, **kwargs: commands.append((command, kwargs)),
+        )
+
+        stack._recover_abandoned_runs()
+
+        assert commands == [
+            (
+                ("docker", "compose", "-p", "fuzz-old", "down", "-v"),
+                {"cwd": old_root / "local" / "instances" / "deploy"},
+            ),
+        ]
+        recovered = json.loads(manifest_path.read_text(encoding="utf-8"))
+        assert recovered["state"] == "recovered"
+        assert recovered["instance_cleanup_required"] is False
+    finally:
+        stack.temp_dir.cleanup()
+
+
+def test_abandoned_cleanup_failure_keeps_manifest_recoverable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed exact teardown cannot falsely mark its manifest recovered."""
+    state_root = tmp_path / "state"
+    old_root = tmp_path / "old-worktree"
+    registry_path = old_root / "local" / "instances" / "deploy" / "instances.json"
+    registry_path.parent.mkdir(parents=True)
+    registry_path.write_text(json.dumps({"instances": {}}), encoding="utf-8")
+    manifest_path = state_root / "runs" / "fuzz-old.json"
+    manifest_path.parent.mkdir(parents=True)
+    manifest = {
+        "docker_compose_project": "fuzz-old",
+        "instance_name": "fuzz-old",
+        "instance_cleanup_required": True,
+        "project_root": str(old_root),
+        "state": "cleanup_failed",
+    }
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    stack = ManagedTuwunelStack(state_root=state_root)
+    try:
+
+        def fail_teardown(*_command: str, **_kwargs: object) -> str:
+            msg = "compose down failed"
+            raise RuntimeError(msg)
+
+        monkeypatch.setattr(live_fuzz, "_run_command", fail_teardown)
+
+        with pytest.raises(RuntimeError, match="compose down failed"):
+            stack._recover_abandoned_runs()
+
+        assert json.loads(manifest_path.read_text(encoding="utf-8")) == manifest
+    finally:
+        stack.temp_dir.cleanup()
+
+
+@pytest.mark.parametrize(
+    "registry_text",
+    [
+        '{"instances":',
+        json.dumps({"instances": []}),
+    ],
+)
+def test_abandoned_recovery_uses_each_manifest_when_registry_is_corrupt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    registry_text: str,
+) -> None:
+    """A corrupt shared registry falls back to each exact manifest project."""
+    state_root = tmp_path / "state"
+    old_root = tmp_path / "old-worktree"
+    registry_path = old_root / "local" / "instances" / "deploy" / "instances.json"
+    registry_path.parent.mkdir(parents=True)
+    registry_path.write_text(registry_text, encoding="utf-8")
+    manifest_paths: list[Path] = []
+    for instance_name in ("fuzz-old-a", "fuzz-old-b"):
+        manifest_path = state_root / "runs" / f"{instance_name}.json"
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        manifest_path.write_text(
+            json.dumps(
+                {
+                    "docker_compose_project": instance_name,
+                    "instance_name": instance_name,
+                    "instance_cleanup_required": True,
+                    "project_root": str(old_root),
+                    "state": "cleanup_failed",
+                },
+            ),
+            encoding="utf-8",
+        )
+        manifest_paths.append(manifest_path)
+    stack = ManagedTuwunelStack(state_root=state_root)
+    commands: list[tuple[tuple[str, ...], dict[str, object]]] = []
+    try:
+        monkeypatch.setattr(
+            live_fuzz,
+            "_run_command",
+            lambda *command, **kwargs: commands.append((command, kwargs)),
+        )
+
+        stack._recover_abandoned_runs()
+
+        assert commands == [
+            (
+                ("docker", "compose", "-p", instance_name, "down", "-v"),
+                {"cwd": old_root / "local" / "instances" / "deploy"},
+            )
+            for instance_name in ("fuzz-old-a", "fuzz-old-b")
+        ]
+        for manifest_path in manifest_paths:
+            recovered = json.loads(manifest_path.read_text(encoding="utf-8"))
+            assert recovered["state"] == "recovered"
+            assert recovered["instance_cleanup_required"] is False
     finally:
         stack.temp_dir.cleanup()
 
@@ -4900,6 +5130,80 @@ def test_main_cleanup_failure_retains_pre_teardown_evidence(
     assert "release host lease: failed" in cleanup_errors
     assert not (artifact_root / "receipts").exists()
     assert events == ["start", "diagnostics", "stop", "diagnostics", "tuwunel_log", "remove"]
+
+
+def test_main_missing_runtime_provenance_captures_bundle_before_teardown(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Missing child attestation becomes a captured failure before destruction."""
+    artifact_root = tmp_path / "artifacts"
+    disposable = tmp_path / "disposable"
+    storage_path = disposable / "mindroom_data"
+    ledger_path = storage_path / "tracking" / "general_responded.json"
+    log_path = disposable / "mindroom.log"
+    ledger_path.parent.mkdir(parents=True)
+    _write_ledger(ledger_path, {})
+    log_path.write_text("runtime without attestation\n", encoding="utf-8")
+    args = SimpleNamespace(
+        artifact_root=artifact_root,
+        failure_log=None,
+        pending_grace=0.0,
+        reply_timeout=1.0,
+        save_trace=None,
+        seed=1,
+        settle_seconds=0.0,
+        trace=None,
+    )
+    events: list[str] = []
+
+    class MissingProvenanceStack:
+        runtime_provenance = None
+
+        def __init__(self, **_kwargs: object) -> None:
+            self.log_path = log_path
+            self.storage_path = storage_path
+
+        def start(self) -> None:
+            events.append("start")
+
+        def log_tail(self) -> str:
+            return "runtime without attestation"
+
+        def stop_mindroom(self) -> None:
+            events.append("stop")
+
+        def diagnostic_counts(self) -> dict[str, int]:
+            events.append("diagnostics")
+            return {}
+
+        def tuwunel_log(self) -> str:
+            events.append("tuwunel")
+            return "tuwunel evidence\n"
+
+        def close(self) -> None:
+            events.append("close")
+            shutil.rmtree(disposable)
+
+    async def pass_run(*_args: object, **_kwargs: object) -> dict[str, object]:
+        return {"status": "PASS"}
+
+    monkeypatch.setattr(live_fuzz, "_parse_args", lambda: args)
+    monkeypatch.setattr(live_fuzz, "_scenario_from_args", lambda _args: _bundle_scenario())
+    monkeypatch.setattr(live_fuzz, "_run_provenance", dict)
+    monkeypatch.setattr(live_fuzz, "ManagedTuwunelStack", MissingProvenanceStack)
+    monkeypatch.setattr(live_fuzz, "_run_live", pass_run)
+
+    with pytest.raises(RuntimeError, match="omitted child runtime provenance"):
+        live_fuzz.main()
+
+    directory = next(path for path in artifact_root.iterdir() if path.is_dir())
+    assert not disposable.exists()
+    assert "runtime without attestation" in (directory / "mindroom.log").read_text(encoding="utf-8")
+    assert "omitted child runtime provenance" in (directory / "exception.txt").read_text(encoding="utf-8")
+    assert f"Live Matrix fuzz failure bundle: {directory}" in capsys.readouterr().err
+    assert events == ["start", "diagnostics", "stop", "diagnostics", "tuwunel", "close"]
 
 
 def test_failure_bundle_appends_every_cleanup_error(tmp_path: Path) -> None:

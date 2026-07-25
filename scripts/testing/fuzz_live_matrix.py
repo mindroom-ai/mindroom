@@ -1379,6 +1379,7 @@ class ManagedTuwunelStack:
                 "docker_compose_project": self.instance_name,
                 "harness_pid": os.getpid(),
                 "instance_name": self.instance_name,
+                "instance_cleanup_required": self._created,
                 "mindroom_command_marker": str(self.attestation_path),
                 "project_root": str(PROJECT_ROOT),
                 "state": state,
@@ -1414,34 +1415,57 @@ class ManagedTuwunelStack:
                 raise RuntimeError(msg)
             old_root = Path(project_root)
             self._terminate_recorded_mindroom(payload)
-            if old_root.exists():
-                registry_path = old_root / "local" / "instances" / "deploy" / "instances.json"
-                registry = json.loads(registry_path.read_text(encoding="utf-8")) if registry_path.exists() else {}
-                instances = registry.get("instances", {}) if isinstance(registry, dict) else {}
-            else:
-                instances = None
-            if isinstance(instances, dict) and instance_name in instances:
-                _run_command(
-                    "just",
-                    "local-instances-remove",
-                    instance_name,
-                    cwd=old_root,
-                )
-            elif instances is None or payload.get("state") == "creating":
-                compose_root = old_root if old_root.exists() else PROJECT_ROOT
-                _run_command(
-                    "docker",
-                    "compose",
-                    "-p",
-                    docker_compose_project,
-                    "down",
-                    "-v",
-                    cwd=compose_root / "local" / "instances" / "deploy",
-                )
+            cleanup_required = payload.get("instance_cleanup_required")
+            if not isinstance(cleanup_required, bool):
+                cleanup_required = True
+            if cleanup_required:
+                instances = self._registry_instances(old_root)
+                if instances is not None and instance_name in instances:
+                    _run_command(
+                        "just",
+                        "local-instances-remove",
+                        instance_name,
+                        cwd=old_root,
+                    )
+                else:
+                    self._teardown_compose_project(
+                        old_root,
+                        docker_compose_project,
+                    )
+            payload["instance_cleanup_required"] = False
             payload["state"] = "recovered"
             temporary = manifest_path.with_suffix(".tmp")
             temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
             temporary.replace(manifest_path)
+
+    @staticmethod
+    def _registry_instances(project_root: Path) -> Mapping[str, object] | None:
+        """Read one worktree's registry, returning unknown when it is unusable."""
+        registry_path = project_root / "local" / "instances" / "deploy" / "instances.json"
+        if not project_root.exists() or not registry_path.exists():
+            return None
+        try:
+            registry = json.loads(registry_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        if not isinstance(registry, dict):
+            return None
+        instances = registry.get("instances")
+        return cast("dict[str, object]", instances) if isinstance(instances, dict) else None
+
+    @staticmethod
+    def _teardown_compose_project(project_root: Path, docker_compose_project: str) -> None:
+        """Tear down only the exact project named by one durable manifest."""
+        compose_root = project_root if project_root.exists() else PROJECT_ROOT
+        _run_command(
+            "docker",
+            "compose",
+            "-p",
+            docker_compose_project,
+            "down",
+            "-v",
+            cwd=compose_root / "local" / "instances" / "deploy",
+        )
 
     @staticmethod
     def _terminate_recorded_mindroom(payload: Mapping[str, object]) -> None:
@@ -1486,7 +1510,10 @@ class ManagedTuwunelStack:
         """Create every live dependency and wait for the managed room."""
         self._acquire_host_lease()
         self._recover_abandoned_runs()
-        self._write_manifest(state="creating")
+        self._write_manifest(
+            state="creating",
+            instance_cleanup_required=True,
+        )
         # Instance creation can fail after registering or starting resources.
         # From this point onward cleanup owns the exact instance name, even
         # when the create command itself never returns successfully.
@@ -2611,10 +2638,8 @@ class ExactReplyOracle:
         # An edit only counts when it targets a canonical reply we already track.
         if is_edit and reply_event_id not in self.latest_reply_bodies:
             return False
-        new_content = content.get("m.new_content")
-        body_source = new_content if isinstance(new_content, dict) else content
-        body = body_source.get("body")
-        if not isinstance(body, str):
+        body = _canonical_message_body(content, is_edit=is_edit)
+        if body is None:
             return False
         timestamp = self.event_summaries.get(event_id, {}).get("origin_server_ts")
         order = _replacement_order(event_id, timestamp, is_edit=is_edit)
@@ -2734,6 +2759,15 @@ def _replacement_order(event_id: str, timestamp: object, *, is_edit: bool) -> tu
     return (int(is_edit), timestamp if isinstance(timestamp, int) else 0, event_id)
 
 
+def _canonical_message_body(content: Mapping[str, Any], *, is_edit: bool) -> str | None:
+    """Parse one original or replacement body without outer-body edit fallback."""
+    body_source = content.get("m.new_content") if is_edit else content
+    if not isinstance(body_source, dict):
+        return None
+    body = body_source.get("body")
+    return body if isinstance(body, str) else None
+
+
 def _auto_resume_relay_target(
     event: Mapping[str, Any],
     *,
@@ -2824,10 +2858,14 @@ class FinalStateAuditor:
         self._assert_sync_view_parity(events, sent_records, replies)
         ledger_metrics: dict[str, int] = {}
         if self.ledger_path is not None:
-            ledger_metrics = self._assert_ledger_attribution(replies, redacted_source_event_ids=set(redacted))
+            redacted_sources = set(redacted) & set(self.oracle.expected_sources)
+            ledger_metrics = self._assert_ledger_attribution(
+                replies,
+                redacted_source_event_ids=redacted_sources,
+            )
             self._assert_model_saw_current_sources(
                 events,
-                redacted_source_event_ids=set(redacted),
+                redacted_source_event_ids=redacted_sources,
             )
         return {
             "audited_events": len(events),
@@ -3169,13 +3207,19 @@ class FinalStateAuditor:
         records: Mapping[str, TurnRecord],
         harness_redacted: set[str],
     ) -> list[str]:
-        """Reject production tombstones not proven by harness-authored redactions."""
+        """Require exact durable tombstones for harness-authored source redactions."""
         problems: list[str] = []
         for event_id, record in records.items():
             forged = set(record.redacted_source_event_ids) - harness_redacted
             if forged:
                 problems.append(
                     f"turn record {event_id} claims unobserved source redactions: {sorted(forged)}",
+                )
+        for source_event_id in sorted(harness_redacted):
+            record = records.get(source_event_id)
+            if record is None or source_event_id not in record.redacted_source_event_ids:
+                problems.append(
+                    f"harness-redacted source {source_event_id} has no durable tombstone",
                 )
         return problems
 
@@ -3263,22 +3307,32 @@ class FinalStateAuditor:
         for source_event_id, record in records.items():
             if record.response_event_id is None:
                 continue
-            required = {
+            covered_sources = set(record.source_event_ids) & set(expected_sources)
+            live_sources = covered_sources - harness_redacted
+            required_live = {
                 self.source_current_markers[covered]
-                for covered in set(record.source_event_ids) - harness_redacted
-                if covered in expected_sources and covered in self.source_current_markers
+                for covered in live_sources
+                if covered in self.source_current_markers
             }
-            if not required:
-                continue
+            redacted_markers = {
+                marker
+                for covered in covered_sources & harness_redacted
+                for marker in (
+                    _source_marker(expected_sources[covered], ORIGINAL_REVISION),
+                    *self.source_revision_markers.get(covered, {}).values(),
+                )
+            }
             body = self._latest_agent_body(events, record.response_event_id)
             call_id = _body_call_id(body)
             observed = self.observed_markers_for(call_id) if call_id is not None else frozenset()
-            missing = required - observed
-            if missing:
+            missing = required_live - observed
+            unexpected = observed - required_live - redacted_markers
+            if missing or unexpected:
                 problems.append(
                     f"turn for {expected_sources.get(source_event_id, source_event_id)} "
                     f"({source_event_id}) generated without current source markers "
-                    f"{sorted(missing)}; model saw {sorted(observed)}",
+                    f"{sorted(missing)} or with unexpected source markers "
+                    f"{sorted(unexpected)}; model saw {sorted(observed)}",
                 )
         if problems:
             msg = f"model source-revision audit failed: {problems}"
@@ -3422,10 +3476,8 @@ class FinalStateAuditor:
             )
             if not is_original and not is_edit:
                 continue
-            new_content = content.get("m.new_content")
-            body_source = new_content if isinstance(new_content, dict) else content
-            body = body_source.get("body")
-            if isinstance(body, str):
+            body = _canonical_message_body(content, is_edit=is_edit)
+            if body is not None:
                 timestamp = event.get("origin_server_ts")
                 candidates.append((_replacement_order(event_id, timestamp, is_edit=is_edit), body))
         return max(candidates, default=((0, 0, ""), ""))[1]
@@ -3785,10 +3837,8 @@ class LiveFuzzRunner:
             )
             if not is_original and not is_edit:
                 continue
-            new_content = content.get("m.new_content")
-            body_source = new_content if isinstance(new_content, dict) else content
-            body = body_source.get("body")
-            if isinstance(body, str):
+            body = _canonical_message_body(content, is_edit=is_edit)
+            if body is not None:
                 timestamp = event.get("origin_server_ts")
                 candidates.append((_replacement_order(event_id, timestamp, is_edit=is_edit), body))
         return max(candidates, default=((0, 0, ""), ""))[1]
@@ -5022,6 +5072,15 @@ def _capture_failed_run(
             _record_secondary_failure(bundle, cleanup_error, label="Live Matrix fuzz cleanup error")
 
 
+def _require_runtime_provenance(stack: ManagedTuwunelStack) -> Mapping[str, object]:
+    """Return child-attested provenance or fail before destructive cleanup."""
+    provenance = stack.runtime_provenance
+    if provenance is None:
+        msg = "passing live run omitted child runtime provenance"
+        raise RuntimeError(msg)
+    return provenance
+
+
 def main() -> None:
     """Run one trace against a fresh disposable real-server stack."""
     if len(sys.argv) >= 4 and sys.argv[1] == "__mindroom_runtime_child__":
@@ -5066,6 +5125,7 @@ def main() -> None:
         result["seed"] = args.seed if args.trace is None else "trace"
         result["wall_seconds"] = round(time.monotonic() - started_at, 1)
         result.update(stack.diagnostic_counts())
+        provenance = _require_runtime_provenance(stack)
     except BaseException as exc:
         _capture_failed_run(args, bundle, stack, runner_holder.get("runner"), exc)
         raise
@@ -5081,10 +5141,6 @@ def main() -> None:
         _record_secondary_failure(bundle, cleanup_error, label="Live Matrix fuzz cleanup error")
         print(f"Live Matrix fuzz cleanup failure bundle: {bundle.directory}", file=sys.stderr)
         raise
-    provenance = stack.runtime_provenance
-    if provenance is None:
-        msg = "passing live run omitted child runtime provenance"
-        raise RuntimeError(msg)
     receipt = bundle.retain_pass_receipt(result, provenance)
     result["pass_receipt"] = str(receipt)
     print(json.dumps(result, sort_keys=True))
