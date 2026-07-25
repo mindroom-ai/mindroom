@@ -1061,6 +1061,7 @@ class PostgresEventCache:
         callback: Callable[[psycopg.AsyncConnection], Awaitable[_T]],
         allow_departed: bool = False,
         expected_membership_epoch: int | None = None,
+        membership_epoch_mismatch_result: _T | None = None,
     ) -> _T:
         """Run one cache operation, flushing pending stale markers first even for reads."""
         if not self._can_expose_operation_result(room_id, allow_departed=allow_departed):
@@ -1076,6 +1077,7 @@ class PostgresEventCache:
                     callback=callback,
                     allow_departed=allow_departed,
                     expected_membership_epoch=expected_membership_epoch,
+                    membership_epoch_mismatch_result=membership_epoch_mismatch_result,
                 )
             except EventCacheBackendUnavailableError:
                 transient_attempt += 1
@@ -1109,6 +1111,7 @@ class PostgresEventCache:
         callback: Callable[[psycopg.AsyncConnection], Awaitable[_T]],
         allow_departed: bool,
         expected_membership_epoch: int | None,
+        membership_epoch_mismatch_result: _T | None,
     ) -> tuple[_T, _FlushedPendingWrites]:
         """Run one transaction attempt under the principal namespace lock."""
         async with self._runtime.acquire_db_operation(
@@ -1122,6 +1125,7 @@ class PostgresEventCache:
                     callback=callback,
                     allow_departed=allow_departed,
                     expected_membership_epoch=expected_membership_epoch,
+                    membership_epoch_mismatch_result=membership_epoch_mismatch_result,
                 )
             except BaseException:
                 await _rollback_postgres_connection_best_effort(
@@ -1144,6 +1148,7 @@ class PostgresEventCache:
         callback: Callable[[psycopg.AsyncConnection], Awaitable[_T]],
         allow_departed: bool,
         expected_membership_epoch: int | None,
+        membership_epoch_mismatch_result: _T | None,
     ) -> tuple[_T, _FlushedPendingWrites]:
         """Commit one callback unless the transaction first removed its security scope."""
         if self._runtime.is_disabled or (not allow_departed and self._runtime.is_room_departed(room_id)):
@@ -1158,10 +1163,12 @@ class PostgresEventCache:
                 namespace=self._runtime.namespace,
                 room_id=room_id,
             )
-            if membership_state != "joined" or (
-                expected_membership_epoch is not None and membership_epoch != expected_membership_epoch
-            ):
+            if membership_state != "joined":
                 result = disabled_result
+            elif expected_membership_epoch is not None and membership_epoch != expected_membership_epoch:
+                result = (
+                    disabled_result if membership_epoch_mismatch_result is None else membership_epoch_mismatch_result
+                )
             else:
                 result = await callback(db)
         else:
@@ -1542,6 +1549,7 @@ class PostgresEventCache:
                 validated_at=replacement_timestamp,
             ),
             expected_membership_epoch=expected_membership_epoch,
+            membership_epoch_mismatch_result=ThreadCacheReplaceOutcome.RETRYABLE_CONFLICT,
         )
 
     async def invalidate_thread(self, room_id: str, thread_id: str) -> None:

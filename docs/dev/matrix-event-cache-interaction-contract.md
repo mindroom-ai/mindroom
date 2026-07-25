@@ -112,7 +112,7 @@ The guarded replacement classifies its result as `stored`, `existing_usable`, `r
 A refill performs at most two reconstruction attempts and only retries `retryable_conflict` and `invalidated`; `existing_usable` serves the winning snapshot instead.
 A refill that completes without installing a snapshot still returns its homeserver history, so reads stay fail-open.
 
-Only a repair that raises enters a bounded one-second backoff for its key.
+A repair that raises or completes without leaving a usable snapshot enters a bounded one-second backoff for its key; a usable outcome clears it.
 Reads without a dispatch timeout wait that backoff out; dispatch-safe reads return a degraded result with `thread_read_error` `cache_repair_backoff` and let their caller fall back to a strict read.
 
 Startup thread prewarm scans outside the live write coordinator so its bulk room scan cannot starve dispatch repairs.

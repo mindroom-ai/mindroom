@@ -776,6 +776,7 @@ class SqliteEventCache:
         writer: Callable[[aiosqlite.Connection], Awaitable[_T]],
         allow_departed: bool = False,
         expected_membership_epoch: int | None = None,
+        membership_epoch_mismatch_result: _T | None = None,
     ) -> _T:
         if not self._can_expose_write_result(room_id, allow_departed=allow_departed):
             return disabled_result
@@ -819,10 +820,14 @@ class SqliteEventCache:
                         principal_id=self.principal_id,
                         room_id=room_id,
                     )
-                    if membership_state != "joined" or (
-                        expected_membership_epoch is not None and membership_epoch != expected_membership_epoch
-                    ):
+                    if membership_state != "joined":
                         result = disabled_result
+                    elif expected_membership_epoch is not None and membership_epoch != expected_membership_epoch:
+                        result = (
+                            disabled_result
+                            if membership_epoch_mismatch_result is None
+                            else membership_epoch_mismatch_result
+                        )
                     else:
                         result = await writer(db)
                 await db.commit()
@@ -1147,6 +1152,7 @@ class SqliteEventCache:
                 validated_at=replacement_timestamp,
             ),
             expected_membership_epoch=expected_membership_epoch,
+            membership_epoch_mismatch_result=ThreadCacheReplaceOutcome.RETRYABLE_CONFLICT,
         )
 
     async def invalidate_thread(self, room_id: str, thread_id: str) -> None:
