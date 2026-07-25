@@ -173,6 +173,17 @@ def test_discovery_alias_allows_original_but_excludes_second_relay(tmp_path: Pat
     store.release_pending_turn_claim(original)
 
 
+def test_completed_turn_can_reclaim_its_handled_alias_for_edit(tmp_path: Path) -> None:
+    """A completed relay turn must remain claimable for its own edit drain."""
+    store = _store(tmp_path)
+    completed = TurnRecord.create(["$relay"], discovery_event_ids=["$human"])
+    store.record_turn(completed)
+
+    assert store.try_claim_turn(completed) is True
+
+    store.release_pending_turn_claim(completed)
+
+
 @pytest.mark.asyncio
 async def test_turn_settlement_waits_for_pending_claim_release(tmp_path: Path) -> None:
     """A waiter should remain blocked until response ownership reaches its existing release seam."""
