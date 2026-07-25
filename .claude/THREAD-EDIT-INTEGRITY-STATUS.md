@@ -42,7 +42,7 @@
 - Push small follow-up commits after verifying Git author.
 - Refresh the PR body and all campaign evidence for the new exact head.
 - Remove this file only when a new exact head is frozen.
-- Run fresh exact-head native Codex and Claude `opus` xhigh reviews after every code commit sequence.
+- Run fresh exact-head native Codex and Claude with explicit `--model=claude-opus-5 --effort=high` after every code commit sequence.
 - Run real-Tuwunel only after both fresh reviews approve the same unchanged head.
 
 ## Design and source-minimality reset
