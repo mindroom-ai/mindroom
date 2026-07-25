@@ -367,10 +367,10 @@ async def test_last_child_deletion_removes_unproven_thread_root_mapping_immediat
 
 
 @pytest.mark.asyncio
-async def test_runtime_deletion_removes_dependent_root_proof(
+async def test_runtime_deletion_keeps_orphan_edit_from_creating_root_proof(
     event_cache: ConversationEventCache,
 ) -> None:
-    """Runtime cleanup removes a root mapping whose dependent edit supplied its only proof."""
+    """An orphan edit creates no root proof, and deleting its target still removes the edit."""
     room_id = "!room:localhost"
     thread_id = "$unfetched-root:localhost"
     original_id = "$uncached-original:localhost"
@@ -379,7 +379,8 @@ async def test_runtime_deletion_removes_dependent_root_proof(
     assert isinstance(new_content, dict)
     new_content["m.relates_to"] = {"rel_type": "m.thread", "event_id": thread_id}
     await event_cache.store_event(str(edit["event_id"]), room_id, edit)
-    assert await event_cache.get_thread_id_for_event(room_id, thread_id) == thread_id
+    assert await event_cache.get_thread_id_for_event(room_id, thread_id) is None
 
     assert await event_cache.redact_event(room_id, original_id) is True
+    assert await event_cache.get_event(room_id, str(edit["event_id"])) is None
     assert await event_cache.get_thread_id_for_event(room_id, thread_id) is None

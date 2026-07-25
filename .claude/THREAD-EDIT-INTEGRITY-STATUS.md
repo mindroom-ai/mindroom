@@ -151,3 +151,13 @@ Updated 2026-07-25 after the exact-`0bbfb0dad` review corrections.
 - PR #1666 exact `a7e81a81627da89a7c993b96dc2ea71ac81fe184` owns the heavy slot.
 - Do not run PostgreSQL fanout, full pytest, all-file hooks, Docker, or real-Tuwunel until #1666 merges and #1641 synchronizes its startup auto-resume fix.
 - Never merge.
+
+## GitHub test-contract correction
+
+- GitHub pytest on exact `432fa70913bf92f97cc7c4c4a407fc35b081a111` ran `11898` tests and failed only two backend instances of `test_runtime_deletion_removes_dependent_root_proof`.
+- The shared fixture asserted that an orphan edit's `m.new_content` relation must create a root mapping, which is the exact unsafe behavior removed by production commit `2295502b1`.
+- The production fix is correct; no fallback was added.
+- The test now asserts that no root mapping is created while retaining proof that redacting the missing original removes the dependent edit.
+- All `10` SQLite contract cases, Ruff, format, `ty`, Tach, module privacy, focused pre-commit, and diff checks pass.
+- The PostgreSQL instance will rerun in GitHub CI and later in the serialized exact-head backend gate.
+- Commit and push this test-only correction, then restart exact-head review and CI.
