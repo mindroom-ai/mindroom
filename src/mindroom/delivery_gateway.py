@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from html import escape as html_escape
 from typing import TYPE_CHECKING, Any, Literal
 
+from nio.exceptions import SendRetryError
+
 from mindroom import constants, interactive
 from mindroom.constants import SKIP_MENTIONS_KEY
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
@@ -505,12 +507,15 @@ class DeliveryGateway:
             )
         if request.skip_mentions:
             content[SKIP_MENTIONS_KEY] = True
-        delivered = await send_message_result(
-            client,
-            resolved_target.room_id,
-            content,
-            retry_sync_recovery=request.retry_sync_recovery,
-        )
+        try:
+            delivered = await send_message_result(
+                client,
+                resolved_target.room_id,
+                content,
+                retry_sync_recovery=request.retry_sync_recovery,
+            )
+        except SendRetryError:
+            delivered = None
         if delivered is not None:
             self.deps.resolver.deps.conversation_cache.notify_outbound_message(
                 resolved_target.room_id,
@@ -561,14 +566,17 @@ class DeliveryGateway:
                 latest_thread_event_id=latest_thread_event_id,
             )
 
-        delivered = await edit_message_result(
-            client,
-            target.room_id,
-            request.event_id,
-            content,
-            request.new_text,
-            retry_sync_recovery=request.retry_sync_recovery,
-        )
+        try:
+            delivered = await edit_message_result(
+                client,
+                target.room_id,
+                request.event_id,
+                content,
+                request.new_text,
+                retry_sync_recovery=request.retry_sync_recovery,
+            )
+        except SendRetryError:
+            delivered = None
         if delivered is not None:
             self.deps.resolver.deps.conversation_cache.notify_outbound_message(
                 target.room_id,

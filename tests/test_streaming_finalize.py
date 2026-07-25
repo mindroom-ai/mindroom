@@ -112,6 +112,43 @@ def _envelope() -> MessageEnvelope:
     )
 
 
+def _delivery_gateway(tmp_path: Path) -> DeliveryGateway:
+    config = _config(tmp_path)
+    response_hooks = SimpleNamespace(
+        apply_before_response=AsyncMock(
+            return_value=SimpleNamespace(
+                response_text="final answer",
+                response_kind="ai",
+                tool_trace=None,
+                extra_content=None,
+                envelope=_envelope(),
+                suppress=False,
+            ),
+        ),
+        apply_final_response_transform=AsyncMock(),
+        emit_after_response=AsyncMock(),
+        emit_cancelled_response=AsyncMock(),
+    )
+    return DeliveryGateway(
+        DeliveryGatewayDeps(
+            runtime=SimpleNamespace(client=_client(), orchestrator=None, config=config, runtime_started_at=0.0),
+            runtime_paths=runtime_paths_for(config),
+            agent_name="code",
+            logger=Mock(),
+            redact_message_event=AsyncMock(return_value=True),
+            resolver=SimpleNamespace(
+                deps=SimpleNamespace(
+                    conversation_cache=SimpleNamespace(
+                        get_latest_thread_event_id_if_needed=AsyncMock(return_value=None),
+                        notify_outbound_message=Mock(),
+                    ),
+                ),
+            ),
+            response_hooks=response_hooks,
+        ),
+    )
+
+
 @pytest.mark.asyncio
 async def test_transport_retry_terminal_send_with_no_event_id_retries_until_send_lands(tmp_path: Path) -> None:
     """Terminal sends should retry even when finalize is sending the first visible event."""
@@ -475,33 +512,7 @@ async def test_transport_empty_adopted_placeholder_finishes_as_error_note(tmp_pa
 @pytest.mark.asyncio
 async def test_final_delivery_failure_replaces_placeholder_with_failure_update(tmp_path: Path) -> None:
     """A failed final placeholder edit should get one clear terminal failure update when possible."""
-    config = _config(tmp_path)
-    response_hooks = SimpleNamespace(
-        apply_before_response=AsyncMock(
-            return_value=SimpleNamespace(
-                response_text="final answer",
-                response_kind="ai",
-                tool_trace=None,
-                extra_content=None,
-                envelope=_envelope(),
-                suppress=False,
-            ),
-        ),
-        apply_final_response_transform=AsyncMock(),
-        emit_after_response=AsyncMock(),
-        emit_cancelled_response=AsyncMock(),
-    )
-    gateway = DeliveryGateway(
-        DeliveryGatewayDeps(
-            runtime=SimpleNamespace(client=_client(), orchestrator=None, config=config, runtime_started_at=0.0),
-            runtime_paths=runtime_paths_for(config),
-            agent_name="code",
-            logger=Mock(),
-            redact_message_event=AsyncMock(return_value=True),
-            resolver=Mock(),
-            response_hooks=response_hooks,
-        ),
-    )
+    gateway = _delivery_gateway(tmp_path)
     edit_outcomes = [False, True]
     object.__setattr__(
         gateway,
@@ -534,6 +545,70 @@ async def test_final_delivery_failure_replaces_placeholder_with_failure_update(t
     failure_update_request = gateway.edit_text.await_args_list[-1].args[0]
     assert failure_update_request.new_text == "Response delivery failed. Please retry."
     assert failure_update_request.extra_content[STREAM_STATUS_KEY] == STREAM_STATUS_ERROR
+
+
+@pytest.mark.asyncio
+async def test_persistent_sync_recovery_barrier_settles_placeholder_as_delivery_failure(tmp_path: Path) -> None:
+    """An exhausted final-edit retry should still run placeholder failure settlement."""
+    gateway = _delivery_gateway(tmp_path)
+    barrier_error = nio.SendRetryError("Room timeline recovery is still pending.")
+    with patch(
+        "mindroom.delivery_gateway.edit_message_result",
+        new=AsyncMock(side_effect=[barrier_error, None]),
+    ) as edit:
+        outcome = await gateway.deliver_final(
+            FinalDeliveryRequest(
+                target=MessageTarget.resolve("!room:localhost", None, "$reply"),
+                existing_event_id="$placeholder",
+                existing_event_is_placeholder=True,
+                response_text="final answer",
+                identity=ResponseIdentity(
+                    response_kind="ai",
+                    response_envelope=_envelope(),
+                    correlation_id="corr-persistent-sync-recovery-barrier",
+                ),
+                tool_trace=None,
+                extra_content=None,
+            ),
+        )
+
+    assert edit.await_count == 2
+    assert edit.await_args_list[0].kwargs["retry_sync_recovery"] is True
+    assert edit.await_args_list[1].kwargs["retry_sync_recovery"] is False
+    assert outcome.terminal_status == "error"
+    assert outcome.final_visible_event_id == "$placeholder"
+    assert outcome.failure_reason == "delivery_failed"
+
+
+@pytest.mark.asyncio
+async def test_persistent_sync_recovery_barrier_returns_new_send_delivery_failure(tmp_path: Path) -> None:
+    """An exhausted final-send retry should retain the gateway failure contract."""
+    gateway = _delivery_gateway(tmp_path)
+    barrier_error = nio.SendRetryError("Room timeline recovery is still pending.")
+    with patch(
+        "mindroom.delivery_gateway.send_message_result",
+        new=AsyncMock(side_effect=barrier_error),
+    ) as send:
+        outcome = await gateway.deliver_final(
+            FinalDeliveryRequest(
+                target=MessageTarget.resolve("!room:localhost", None, "$reply"),
+                existing_event_id=None,
+                response_text="final answer",
+                identity=ResponseIdentity(
+                    response_kind="ai",
+                    response_envelope=_envelope(),
+                    correlation_id="corr-persistent-sync-recovery-send-barrier",
+                ),
+                tool_trace=None,
+                extra_content=None,
+            ),
+        )
+
+    send.assert_awaited_once()
+    assert send.await_args.kwargs["retry_sync_recovery"] is True
+    assert outcome.terminal_status == "error"
+    assert outcome.final_visible_event_id is None
+    assert outcome.failure_reason == "delivery_failed"
 
 
 @pytest.mark.asyncio
