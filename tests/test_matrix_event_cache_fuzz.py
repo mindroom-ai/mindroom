@@ -6,7 +6,7 @@ import asyncio
 import tempfile
 import uuid
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from hypothesis import HealthCheck, example, given, settings
@@ -27,6 +27,8 @@ from scripts.testing.fuzz_matrix_event_cache import (
     edit_source,
     message_id,
     model_based_scenario,
+    plain_reply_source,
+    reference_source,
     reply_id,
     room_id,
     run_scenario,
@@ -344,14 +346,24 @@ async def test_concurrent_batch_uses_independent_cache_connections(tmp_path: Pat
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("operation_kind", "source_builder"),
+    [
+        (OperationKind.THREADED_MESSAGE, threaded_message_source),
+        (OperationKind.PLAIN_REPLY, plain_reply_source),
+        (OperationKind.REFERENCE, reference_source),
+    ],
+)
 async def test_concurrent_batch_rejects_point_only_thread_writes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    operation_kind: OperationKind,
+    source_builder: Callable[[FuzzOperation], dict[str, Any]],
 ) -> None:
-    """Concurrent success requires thread indexes, not merely surviving point rows."""
+    """Concurrent explicit and inferred writes require thread indexes, not only point rows."""
 
     async def store_point_only(runner: CacheFuzzRunner, operation: FuzzOperation) -> None:
-        source = threaded_message_source(operation)
+        source = source_builder(operation)
         runner._remember_source(source)
         await runner.cache.store_event(
             source["event_id"],
@@ -363,15 +375,15 @@ async def test_concurrent_batch_rejects_point_only_thread_writes(
     scenario = FuzzScenario(
         batches=(
             (
-                FuzzOperation(OperationKind.THREADED_MESSAGE, 0, 0, 1, 0, 0),
-                FuzzOperation(OperationKind.THREADED_MESSAGE, 0, 1, 1, 0, 0),
+                FuzzOperation(operation_kind, 0, 0, 1, 0, 1),
+                FuzzOperation(operation_kind, 0, 1, 1, 0, 1),
             ),
         ),
         room_count=1,
         thread_count=2,
     )
 
-    with pytest.raises(AssertionError, match="concurrent thread member disappeared"):
+    with pytest.raises(AssertionError, match=r"concurrent (event mapping|thread member) disappeared"):
         await run_scenario(
             lambda: SqliteEventCache(tmp_path / "point-only-concurrent.db"),
             scenario,

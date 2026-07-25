@@ -26,10 +26,7 @@ if TYPE_CHECKING:
     from mindroom.matrix.message_content import SidecarHydrationBatch
 
 _VISIBLE_ROOM_MESSAGE_EVENT_TYPES = (nio.RoomMessageText, nio.RoomMessageNotice)
-type LatestThreadEdits = dict[
-    tuple[str, str],
-    tuple[nio.RoomMessageText | nio.RoomMessageNotice, str | None],
-]
+type LatestThreadEdits = dict[tuple[str, str], nio.RoomMessageText | nio.RoomMessageNotice]
 
 
 @dataclass(slots=True)
@@ -381,13 +378,12 @@ def record_latest_thread_edit(
 
     original_event_id = event_info.original_event_id
     edit_key = (original_event_id, event.sender)
-    current_latest_edit_data = latest_edits_by_original_event_id.get(edit_key)
-    current_latest_edit = current_latest_edit_data[0] if current_latest_edit_data else None
+    current_latest_edit = latest_edits_by_original_event_id.get(edit_key)
     if current_latest_edit is None or (event.server_timestamp, event.event_id) > (
         current_latest_edit.server_timestamp,
         current_latest_edit.event_id,
     ):
-        latest_edits_by_original_event_id[edit_key] = (event, event_info.thread_id_from_edit)
+        latest_edits_by_original_event_id[edit_key] = event
     return True
 
 
@@ -403,7 +399,7 @@ async def apply_latest_edits_to_messages(
     trusted_sender_ids: Collection[str] = (),
 ) -> None:
     """Apply the newest valid same-sender edit to each existing message."""
-    for (original_event_id, edit_sender), (edit_event, _edit_thread_id) in latest_edits_by_original_event_id.items():
+    for (original_event_id, edit_sender), edit_event in latest_edits_by_original_event_id.items():
         existing_message = messages_by_event_id.get(original_event_id)
         if existing_message is None or edit_sender != existing_message.sender:
             continue

@@ -1243,12 +1243,6 @@ def _git_state_for_file(
     return revision, dirty
 
 
-def _git_revision_for_file(path: Path) -> str | None:
-    """Return HEAD only when the loaded file is tracked and clean."""
-    revision, dirty = _git_state_for_file(path)
-    return revision if not dirty else None
-
-
 def _source_hash(path: Path) -> str:
     """Hash one loaded source file for wheel and checkout provenance."""
     return hashlib.sha256(path.read_bytes()).hexdigest()

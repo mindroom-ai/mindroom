@@ -1634,7 +1634,7 @@ async def _group_scanned_sources_by_thread(
     )
 
     edits_by_root: dict[str, list[dict[str, Any]]] = {}
-    for (original_event_id, _edit_sender), (edit_event, _edit_thread_id) in latest_edits_by_original_event_id.items():
+    for (original_event_id, _edit_sender), edit_event in latest_edits_by_original_event_id.items():
         if original_event_id not in scanned_message_sources:
             continue
         original_root_id = resolved_thread_ids.get(original_event_id)

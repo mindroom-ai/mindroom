@@ -1213,9 +1213,6 @@ class CacheFuzzRunner:
         self.reaction_ids: set[tuple[str, str]] = set()
         self.clear_event_ids: set[tuple[str, str]] = set()
         self.cache_generation: str | None = None
-        self.reopen_count = 0
-        self.rejoin_count = 0
-        self.max_batch_latency_ms = 0.0
 
     async def seed(self) -> None:
         """Create authoritative roots so later operations can race realistically."""
@@ -1252,6 +1249,7 @@ class CacheFuzzRunner:
         await self.assert_invariants()
         await self._assert_reference_model()
         for batch in self.scenario.batches:
+            inferred_thread_ids = await self._concurrent_inferred_thread_ids(batch)
             if self.reference_model is not None:
                 for operation in batch:
                     self.reference_model.apply_operation(
@@ -1270,17 +1268,40 @@ class CacheFuzzRunner:
                     msg = f"cache fuzz batch timed out after {self.max_batch_seconds:.3f}s"
                     raise AssertionError(msg) from exc
             batch_seconds = time.perf_counter() - started
-            self.max_batch_latency_ms = max(self.max_batch_latency_ms, batch_seconds * 1000)
             if self.max_batch_seconds is not None:
                 assert batch_seconds <= self.max_batch_seconds, (
                     f"cache fuzz batch exceeded latency bound: {batch_seconds:.3f}s > {self.max_batch_seconds:.3f}s"
                 )
-            await self._assert_concurrent_batch_postconditions(batch)
+            await self._assert_concurrent_batch_postconditions(batch, inferred_thread_ids=inferred_thread_ids)
             await self.assert_invariants()
             await self._assert_reference_model()
         return await self.observe()
 
-    async def _assert_concurrent_batch_postconditions(self, batch: tuple[FuzzOperation, ...]) -> None:
+    async def _concurrent_inferred_thread_ids(
+        self,
+        batch: tuple[FuzzOperation, ...],
+    ) -> dict[FuzzOperation, str]:
+        """Resolve lookup-dependent thread membership before concurrent writes begin."""
+        if len(batch) == 1:
+            return {}
+        inferred_thread_ids: dict[FuzzOperation, str] = {}
+        for operation in batch:
+            if operation.kind not in {OperationKind.PLAIN_REPLY, OperationKind.REFERENCE}:
+                continue
+            thread_root = await self.cache.get_thread_id_for_event(
+                room_id(operation.room),
+                _related_target_id(operation),
+            )
+            if thread_root is not None:
+                inferred_thread_ids[operation] = thread_root
+        return inferred_thread_ids
+
+    async def _assert_concurrent_batch_postconditions(
+        self,
+        batch: tuple[FuzzOperation, ...],
+        *,
+        inferred_thread_ids: dict[FuzzOperation, str],
+    ) -> None:
         """Require independent concurrent writes to remain observable."""
         if len(batch) == 1:
             return
@@ -1325,18 +1346,26 @@ class CacheFuzzRunner:
             assert await self.cache.get_event(current_room_id, event_id) is not None, (
                 f"independent concurrent event write disappeared: {current_room_id} {event_id}"
             )
-            expected_thread_id = self._explicit_source_thread_id(source)
+            explicit_thread_id = self._explicit_source_thread_id(source)
+            expected_thread_id = explicit_thread_id or inferred_thread_ids.get(operation)
             if expected_thread_id is None or operation.kind is OperationKind.REACTION:
                 continue
-            assert await self.cache.get_thread_id_for_event(current_room_id, event_id) == expected_thread_id, (
-                f"independent concurrent event mapping disappeared: {current_room_id} {event_id}"
-            )
+            actual_thread_id = await self.cache.get_thread_id_for_event(current_room_id, event_id)
+            if explicit_thread_id is not None:
+                assert actual_thread_id == expected_thread_id, (
+                    f"independent concurrent event mapping disappeared: {current_room_id} {event_id}"
+                )
             state = await self.cache.get_thread_cache_state(current_room_id, expected_thread_id)
             events = await self.cache.get_thread_events(current_room_id, expected_thread_id)
-            if state is not None and events is not None and thread_cache_rejection_reason(state) is None:
-                assert event_id in {cast("str", event["event_id"]) for event in events}, (
-                    f"independent concurrent thread member disappeared: {current_room_id} {event_id}"
-                )
+            # Lookup contention may safely reject the inferred mutation by making the snapshot stale.
+            if state is None or events is None or thread_cache_rejection_reason(state) is not None:
+                continue
+            assert actual_thread_id == expected_thread_id, (
+                f"independent concurrent event mapping disappeared: {current_room_id} {event_id}"
+            )
+            assert event_id in {cast("str", event["event_id"]) for event in events}, (
+                f"independent concurrent thread member disappeared: {current_room_id} {event_id}"
+            )
 
     @staticmethod
     def _explicit_source_thread_id(source: dict[str, Any]) -> str | None:
@@ -1529,7 +1558,6 @@ class CacheFuzzRunner:
         self.cache = self.root_cache.for_principal(FUZZ_PRINCIPAL)
         self.other_cache = self.root_cache.for_principal(OTHER_PRINCIPAL)
         self.policy = _build_sync_policy(self.cache)
-        self.reopen_count += 1
 
     async def _apply_room_rejoin(self, operation: FuzzOperation) -> None:
         """Cross a durable departure epoch, purge, rejoin, and incrementally refill."""
@@ -1565,7 +1593,6 @@ class CacheFuzzRunner:
             validated_at=time.time(),
         )
         assert not stale_write_accepted
-        self.rejoin_count += 1
 
     async def _assert_tombstone_invariants(self) -> None:
         for current_room_id, event_id in sorted(self.redacted_ids):
