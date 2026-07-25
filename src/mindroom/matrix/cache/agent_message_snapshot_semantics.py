@@ -55,15 +55,19 @@ def _event_matches_snapshot_scope(
     sender: str,
 ) -> bool:
     """Return whether one indexed event is a visible message candidate for a snapshot scope."""
-    if (
-        event.get("type") != "m.room.message"
-        or event.get("sender") != sender
-        or event_source_is_state_event(event)
-        or not isinstance(parse_room_message_event_source(event), nio.RoomMessage)
-    ):
+    if event.get("sender") != sender or not _event_is_snapshot_graph_member(event):
         return False
     relation_type = EventInfo.from_event(event).relation_type
     return relation_type != "m.replace" and not (thread_id is None and relation_type == "m.thread")
+
+
+def _event_is_snapshot_graph_member(event: dict[str, Any]) -> bool:
+    """Return whether one cached event may contribute timeline thread relations."""
+    return (
+        event.get("type") == "m.room.message"
+        and not event_source_is_state_event(event)
+        and isinstance(parse_room_message_event_source(event), nio.RoomMessage)
+    )
 
 
 async def _resolved_snapshot_thread_event_ids(
@@ -76,7 +80,7 @@ async def _resolved_snapshot_thread_event_ids(
     event_infos = {
         event_id: EventInfo.from_event(event)
         for event in events
-        if isinstance(event_id := event.get("event_id"), str) and event_id
+        if _event_is_snapshot_graph_member(event) and isinstance(event_id := event.get("event_id"), str) and event_id
     }
     resolved = await resolve_thread_ids_for_event_infos(
         room_id,
