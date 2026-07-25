@@ -1,24 +1,34 @@
 # Thread edit integrity status
 
 Current PR: #1641.
-Current frozen head before resumed work: `243ec1250a5a0fa6cce9fa7e2a2bd9704addbd11`.
-Current production head: `09bfb180cf6b9400b9afd09f1a40761726d74fc9`.
-Current production diff: `+756/-557`, net `+199`; hard ceiling is net `+200`.
+Current pushed implementation head: `add5eb73d8e58e86a9d6d14c1362fecb9080c2e5`.
+Current production head: `add5eb73d8e58e86a9d6d14c1362fecb9080c2e5`.
+Current production diff: `+782/-606`, net `+176`; hard ceiling is net `+200`.
 
-Fresh exact-head native Codex `gpt-5.6-sol` xhigh review is `CHANGES REQUIRED`.
-The confirmed blocker is post-hydration validation of v2 edit sidecars.
-A raw-valid replacement can hydrate to malformed canonical `m.new_content`, become visible, and suppress an older valid replacement.
-The same gap affects direct/full history, bundled preview, and cached point projection.
+Exact-`243ec1250` native Codex `gpt-5.6-sol` xhigh review was `CHANGES REQUIRED`.
+Commit `add5eb73d` fixes its confirmed v2 sidecar hydration blocker.
+Hydrated replacements now require nio-valid message layers and the same replacement relation as their raw preview.
+Direct/full history and bundled previews fall back to an older valid candidate.
+Cached point projection rejects each hydrated-invalid candidate and asks the backend for the next canonical candidate.
+The dead bundled-preview content parser was removed so every visible edit body uses the shared extraction seam.
 
-Planned narrow correction:
+Validation on the current implementation:
 
-- Revalidate hydrated replacement content at the shared edit-extraction seam.
-- When an original is available, revalidate the hydrated relation and identity against that original.
-- Make cached point projection skip a hydrated-invalid newest candidate and request the next valid cached candidate.
-- Add deterministic direct/full-history, bundled-preview, and SQLite/PostgreSQL cached fallback regressions.
-- Keep production source at or below net `+200`.
+- `69` message-content tests pass.
+- `27` edit-history tests pass.
+- `28` SQLite edit-cache tests pass.
+- The stale edit-sidecar cleanup regression passes.
+- The three earlier SQLite snapshot regressions, two malformed-media regressions, and seeded SQLite cache fuzz pass.
+- Ruff, formatting, `ty`, Tach dependencies/interfaces, commit hooks, and diff checks pass.
+- PostgreSQL variants for malformed and retargeted hydrated sidecars are collected but not yet run.
+
+Claude Opus is advisory-only and never required approval.
+No PR #1641 Opus process or queue remains active.
+An advisory Claude claim blocks only after deterministic reproduction or independent confirmation.
+Fresh exact-head native Codex, GitHub CI, PostgreSQL, full pytest, all-file hooks, and real-Tuwunel remain required.
 
 No PostgreSQL, full pytest, Docker, all-file, or live validation may start without explicit resource-gate ownership.
-The current heavy owner is none, but the user explicitly prohibited heavy tests for this phase.
-Existing exact-head reviews and gates are stale as soon as this work is committed.
+The current heavy owner is none, and PR #1641 has not claimed it.
+All reviews, CI, heavy tests, and live evidence before `add5eb73d` are stale.
+Remove this living handoff only in the final freeze commit before exact-head review and validation.
 Do not merge, amend, force-push, or use temporary worktrees/evidence.
