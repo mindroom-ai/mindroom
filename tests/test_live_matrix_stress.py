@@ -424,6 +424,19 @@ def test_duplicate_cache_repair_scan_fails_gate() -> None:
         metrics.assert_healthy()
 
 
+def test_whole_run_health_can_exclude_intentional_cross_phase_repairs() -> None:
+    metrics = StressLogMetrics()
+    event = {
+        "event": "matrix_cache_thread_history_refreshed",
+        "mode": "full_scan",
+        "thread_id": "thread-001",
+    }
+    metrics.ingest(event)
+    metrics.ingest(event)
+
+    metrics.assert_healthy(check_duplicate_repairs=False)
+
+
 def test_artifact_sanitizer_redacts_secrets_urls_paths_and_matrix_ids() -> None:
     sanitizer = ArtifactSanitizer()
     raw = {

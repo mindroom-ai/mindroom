@@ -5100,7 +5100,7 @@ class LiveMatrixStressRunner:
         complete_log_metrics = aggregate_log_metrics(
             self.stack.log_path.read_text(encoding="utf-8", errors="replace"),
         )
-        complete_log_metrics.assert_healthy()
+        complete_log_metrics.assert_healthy(check_duplicate_repairs=False)
         self._assert_reservation_telemetry(complete_log_metrics)
         source_to_final = [latency for audit in audits for latency in audit.source_to_final_ms]
         first_sent = min(turn.sent_at for turns in turns_by_wave for turn in turns)
@@ -5451,6 +5451,8 @@ class LiveMatrixStressRunner:
         if len(metrics) != self.config.waves:
             msg = f"stress cache metrics cover {len(metrics)}/{self.config.waves} waves"
             raise AssertionError(msg)
+        for wave_metrics in metrics:
+            wave_metrics.assert_healthy()
         cold = metrics[0]
         if cold.full_scans < self.config.threads:
             msg = f"cold wave produced {cold.full_scans}/{self.config.threads} full scans"

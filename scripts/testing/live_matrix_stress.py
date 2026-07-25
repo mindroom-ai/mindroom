@@ -634,7 +634,7 @@ class StressLogMetrics:
             },
         }
 
-    def assert_healthy(self) -> None:
+    def assert_healthy(self, *, check_duplicate_repairs: bool = True) -> None:
         """Fail on correctness signals that invalidate a normal stress run."""
         failures: list[str] = []
         if self.known_thread_room_barrier_count:
@@ -653,9 +653,10 @@ class StressLogMetrics:
             (self.cache_store_failures, "cache/store failures"),
         )
         failures.extend(f"{count} {label}" for count, label in health_counts if count)
-        duplicate_repairs = {thread: count for thread, count in self.repair_fetches_by_thread.items() if count > 1}
-        if duplicate_repairs:
-            failures.append(f"duplicate repair scans: {duplicate_repairs}")
+        if check_duplicate_repairs:
+            duplicate_repairs = {thread: count for thread, count in self.repair_fetches_by_thread.items() if count > 1}
+            if duplicate_repairs:
+                failures.append(f"duplicate repair scans: {duplicate_repairs}")
         if failures:
             raise AssertionError("; ".join(failures))
 
