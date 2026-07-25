@@ -498,18 +498,6 @@ def _remove_postgres_container(docker: str, container_name: str) -> None:
     raise RuntimeError(msg)
 
 
-def pytest_configure(config: pytest.Config) -> None:  # noqa: ARG001
-    """Keep CLI output uncolored so console assertions never depend on the developer's terminal.
-
-    Rich caches ``FORCE_COLOR`` when a module-level ``Console`` is constructed, so this must run
-    before any test module imports the CLI. An agent or CI shell exporting it would otherwise make
-    passing assertions fail on ANSI escapes that never appear in a clean environment.
-    """
-    os.environ.pop("FORCE_COLOR", None)
-    os.environ.pop("CLICOLOR_FORCE", None)
-    os.environ["TERM"] = "dumb"
-
-
 def pytest_configure_node(node: "WorkerController") -> None:
     """Remember the shared Postgres container name in the xdist controller."""
     node.config.stash[_POSTGRES_CONTAINER_NAME_STASH_KEY] = _postgres_container_name(
