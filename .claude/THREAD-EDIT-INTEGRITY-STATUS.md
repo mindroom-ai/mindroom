@@ -1,39 +1,29 @@
 # Thread edit integrity gate status
 
-Updated 2026-07-25 15:01 PDT.
+Updated 2026-07-25 after the exact-`0bbfb0dad` review corrections.
 
 ## Exact target
 
 - PR: `mindroom-ai/mindroom#1641`
-- Head: `0bbfb0dad7be5567051e7021630d73bdd83f570f`
+- Latest production commit: `d6068fd1f1b251c5dfe5e08ec8919f9426722c4e`
+- The branch head also contains this tracked living handoff; resolve its exact SHA from local, origin, and GitHub after recovery.
 - Base and merge base: `ce8b1a6aea3485ebf3f3b4382c888801175880c2`
-- Local, remote, and GitHub heads agree.
+- Local, remote, and GitHub heads must agree before any gate is counted.
 - The tracked worktree is clean.
 - Three pre-existing untracked `.claude/TASK-*.md` notes are user-owned and must remain untouched.
 
 ## Active gates
 
-- Fresh native Codex rejected exact `c828022eaba9a68e0b4b41e5b27f8241b685db0f` with two independently reproduced thread-membership blockers.
-- An indirect edited parent's resolved visible state lost separately resolved membership, so its raw edit row could become the cleanup tail ahead of an equal-time child.
-- A raw replacement row could invent thread membership through `m.new_content` and authorize an indirect cached snapshot member.
-- Commit `0bbfb0dad7be5567051e7021630d73bdd83f570f` selects one visible state per original while merging membership evidence separately, excludes raw edit rows from visible tails, and excludes replacements from snapshot membership graphs.
-- Exact regressions pass `5/5` across cleanup, SQLite, and PostgreSQL, including same- and foreign-sender relation mutation.
-- Both owning files pass `144/144`.
+- Fresh native Codex rejected exact `0bbfb0dad7be5567051e7021630d73bdd83f570f` with two independently reproduced correctness blockers.
+- Orphan replacements could establish thread membership through `m.new_content`, and plaintext media replacements accepted non-MXC URLs.
+- Commits `2295502b163c1169da40f5c5bb9166bf9e72134d` and `d6068fd1f1b251c5dfe5e08ec8919f9426722c4e` fix the owning seams.
+- Direct regressions and owning lightweight suites pass.
 - Ruff, format, `ty`, Tach, module privacy, Vulture, focused pre-commit, and diff checks pass.
 - Normal commit hooks passed with the required `/Users/bas.nijholt/.local/bin/uv`; no hook was skipped.
-- Local, remote, and GitHub heads agree at exact `0bbfb0dad7be5567051e7021630d73bdd83f570f`.
-- All exact-`c828022e` review, CI, local, all-file, and live evidence is historical.
-- Exact-head focused resolution, approval, and media validation passes `374/374`.
-- Exact-head SQLite/PostgreSQL backend validation passes `369` tests with `96` expected skips, including the seeded trace and 45-thread fanout.
-- The first full run failed only the known Rich terminal-width assertion because the long xdist path wrapped `plugin exploded`; the exact unchanged test passes with fixed terminal width.
-- The fixed-width full rerun passes `11844` tests with `54` skipped.
-- Tach and every all-file pre-commit hook pass in a clean persistent detached exact-head worktree.
+- All exact-`0bbfb0dad` review, CI, local, all-file, and live evidence is historical after production changes.
 - Fresh exact-head native Codex review and GitHub CI are active.
-- The user explicitly authorized isolated heavy validation despite unrelated active jobs.
-- PR #1641 claims isolated validation at exact head `0bbfb0dad7be5567051e7021630d73bdd83f570f`.
-- Do not interrupt unrelated processes.
-- Use distinct container names, Compose projects, and allocated ports.
-- Run real-Tuwunel after Codex and the remaining GitHub smoke/Greptile checks settle successfully.
+- PR #1666 owns the heavy slot.
+- Do not run PostgreSQL fanout, full pytest, all-file hooks, Docker, or real-Tuwunel until #1666 merges and #1641 synchronizes its startup auto-resume fix.
 
 ## Live gate
 
@@ -47,7 +37,7 @@ Updated 2026-07-25 15:01 PDT.
 
 ## Completion rule
 
-- Every gate must cover exact head `0bbfb0dad7be5567051e7021630d73bdd83f570f`.
+- Every final gate must cover the exact current branch head after #1666 merges and this branch synchronizes it.
 - Any head movement invalidates all current evidence.
 - Remove this living handoff before declaring the PR merge-ready.
 - Never merge.
@@ -151,13 +141,13 @@ Updated 2026-07-25 15:01 PDT.
 - Commit `2295502b163c1169da40f5c5bb9166bf9e72134d` makes local history replacements inherit membership only from a resolved original, prevents replacement content from proving a root, and prevents point-cache thread rows from raw replacement content.
 - Commit `d6068fd1f1b251c5dfe5e08ec8919f9426722c4e` requires valid MXC URLs for plaintext and encrypted media replacement layers.
 - Both commits are authored by `Bas Nijholt <bas@nijho.lt>`, passed normal commit hooks, and are pushed.
-- Local, remote, and GitHub heads agree at exact `d6068fd1f1b251c5dfe5e08ec8919f9426722c4e`.
+- Production commit `d6068fd1f1b251c5dfe5e08ec8919f9426722c4e` is pushed; the tracked living-handoff commit follows it.
 - Direct orphan certification, point-index, four-media-type URI, and SQLite malformed-newest fallback regressions pass.
 - Owning thread-history, membership, media, reuse, cleanup, cache-mutation, sync, and read-guard selections pass.
 - Ruff, format, `ty`, Tach, Vulture, module privacy, focused pre-commit, commit hooks, and diff checks pass.
 - The correction changes production by `+16/-11`, net `+5`; PR-wide production is `+1544/-1070`, net `+474`.
 - Exact-`0bbfb0dad` review, CI, full, all-file, and live evidence is historical after the code commits.
-- Fresh exact-`d6068fd1f` native Codex review and GitHub CI are active.
+- Fresh exact-branch-head native Codex review and GitHub CI are active.
 - PR #1666 exact `a7e81a81627da89a7c993b96dc2ea71ac81fe184` owns the heavy slot.
 - Do not run PostgreSQL fanout, full pytest, all-file hooks, Docker, or real-Tuwunel until #1666 merges and #1641 synchronizes its startup auto-resume fix.
 - Never merge.
