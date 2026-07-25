@@ -33,7 +33,11 @@ from mindroom.matrix.cache.event_batching import group_lookup_events_by_room
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from mindroom.matrix.cache.thread_history_result import thread_history_result
 from mindroom.matrix.cache.thread_reads import ThreadReadMode
-from mindroom.matrix.cache.thread_repair import ThreadRepairBackoffError, ThreadRepairRunResult
+from mindroom.matrix.cache.thread_repair import (
+    ThreadRepairBackoffError,
+    ThreadRepairRegistry,
+    ThreadRepairRunResult,
+)
 from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
 from mindroom.matrix.client_thread_history import (
     BulkThreadRefreshStats,
@@ -678,6 +682,83 @@ async def test_dispatch_context_waits_for_strict_thread_history_after_degraded_s
         sender_id="@requester:localhost",
         available_responders_in_room=[route_ids["primary"], route_ids["secondary"]],
     )
+
+
+@pytest.mark.asyncio
+async def test_dispatch_retries_strictly_after_failed_cache_repair_backoff(tmp_path: Path) -> None:
+    """A proven thread should move from failed dispatch repair to fresh strict history."""
+    event_cache = SqliteEventCache(tmp_path / "event_cache.db", principal_id="@mindroom_code:localhost")
+    await event_cache.initialize()
+    conversation_cache = _conversation_cache_for_thread_reads(tmp_path, event_cache, client=MagicMock())
+    coordinator = EventCacheWriteCoordinator(logger=MagicMock())
+    coordinator._thread_repairs = ThreadRepairRegistry(failure_backoff_seconds=0.05)
+    conversation_cache.runtime.event_cache_write_coordinator = coordinator
+    config = conversation_cache.runtime.config
+    runtime_paths = conversation_cache.runtime.runtime_paths
+    matrix_id = entity_ids(config, runtime_paths)["code"]
+    resolver = ConversationResolver(
+        ConversationResolverDeps(
+            runtime=conversation_cache.runtime,
+            logger=MagicMock(),
+            runtime_paths=runtime_paths,
+            agent_name="code",
+            matrix_id=matrix_id,
+            conversation_cache=conversation_cache,
+        ),
+    )
+    failed_history = thread_history_result(
+        [],
+        is_full_history=True,
+        diagnostics={
+            THREAD_HISTORY_DEGRADED_DIAGNOSTIC: True,
+            "cache_store_outcome": ThreadCacheReplaceOutcome.HARD_FAILURE.value,
+            "cache_repair_usable": False,
+        },
+    )
+    strict_history = thread_history_result(
+        [
+            ResolvedVisibleMessage.synthetic(
+                sender="@user:localhost",
+                body="Recovered context",
+                event_id="$reply:localhost",
+                thread_id="$thread:localhost",
+            ),
+        ],
+        is_full_history=True,
+        diagnostics={"cache_repair_usable": True},
+    )
+    room = nio.MatrixRoom("!room:localhost", matrix_id.full_id)
+    event = nio.RoomMessageText.from_dict(
+        {
+            "content": {
+                "body": "Continue",
+                "msgtype": "m.text",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread:localhost"},
+            },
+            "event_id": "$incoming:localhost",
+            "sender": "@user:localhost",
+            "origin_server_ts": 1234567890,
+            "room_id": room.room_id,
+            "type": "m.room.message",
+        },
+    )
+
+    try:
+        with patch(
+            "mindroom.matrix.conversation_cache.fetch_dispatch_thread_history",
+            AsyncMock(side_effect=[failed_history, strict_history]),
+        ) as fetch_dispatch_thread_history:
+            result = await resolver.extract_dispatch_context(room, event)
+    finally:
+        await coordinator.close()
+        await event_cache.close()
+
+    assert result.context.is_thread is True
+    assert result.context.thread_id == "$thread:localhost"
+    assert result.context.thread_history is strict_history
+    assert result.thread_context is not None
+    assert result.thread_context.replay_guard_degraded is False
+    assert fetch_dispatch_thread_history.await_count == 2
 
 
 @pytest.mark.asyncio

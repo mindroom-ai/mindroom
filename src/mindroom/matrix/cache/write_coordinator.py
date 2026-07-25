@@ -653,6 +653,7 @@ class EventCacheWriteCoordinator:
         repair_coro_factory: Callable[[], Awaitable[T]],
         *,
         coordination_scope: str,
+        result_is_usable: Callable[[T], bool],
     ) -> ThreadRepairRunResult[T]:
         """Join or start one principal-scoped repair under the same-thread barrier."""
         key = self._thread_repair_key(
@@ -675,6 +676,7 @@ class EventCacheWriteCoordinator:
                 ),
             ),
             repair=repair_coro_factory,
+            result_is_usable=result_is_usable,
         )
 
     def retain_thread_repair_delta(

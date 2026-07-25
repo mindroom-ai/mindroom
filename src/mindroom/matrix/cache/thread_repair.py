@@ -94,8 +94,9 @@ class ThreadRepairRegistry:
         *,
         schedule: Callable[[Callable[[], Awaitable[T]]], asyncio.Task[T]],
         repair: Callable[[], Awaitable[T]],
+        result_is_usable: Callable[[T], bool],
     ) -> ThreadRepairRunResult[T]:
-        """Join or start one shielded repair, throttling only a repair that raised."""
+        """Join or start one shielded repair and update backoff from its outcome."""
         active = self._active_task(key)
         if active is not None:
             value = cast("T", await asyncio.shield(active))
@@ -111,11 +112,12 @@ class ThreadRepairRegistry:
             except asyncio.CancelledError:
                 raise
             except BaseException:
-                # A repair that completes without installing a snapshot still returns usable
-                # history to its caller, so only a raising repair is worth throttling.
                 self._record_failure(key)
                 raise
-            self._retry_after.pop(key, None)
+            if result_is_usable(value):
+                self._retry_after.pop(key, None)
+            else:
+                self._record_failure(key)
             return value
 
         task = schedule(run_repair)

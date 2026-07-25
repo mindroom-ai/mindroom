@@ -856,6 +856,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
                 thread_id,
                 repair,
                 coordination_scope=principal_id,
+                result_is_usable=self._thread_repair_result_is_usable,
             )
             result = repair_run.value
             # A joined lightweight snapshot flight cannot answer a full-history read, so run our own.
