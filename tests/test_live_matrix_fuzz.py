@@ -2566,6 +2566,55 @@ def test_child_provenance_uses_loaded_overlay(
     assert provenance["nio_expected_revision"] == "nio-head"
 
 
+@pytest.mark.parametrize(
+    "dirty_input",
+    [
+        "justfile",
+        "local/instances/deploy/docker-compose.tuwunel.yml",
+    ],
+)
+def test_child_provenance_rejects_dirty_stack_inputs(
+    dirty_input: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exact-head runs reject dirty executable local-stack inputs."""
+    project_root = tmp_path / "mindroom"
+    mindroom_path = project_root / "src" / "mindroom" / "__init__.py"
+    nio_path = tmp_path / "nio" / "__init__.py"
+    dirty_path = project_root / dirty_input
+    attestation = tmp_path / "runtime-attestation.json"
+    attestation.write_text(
+        json.dumps(
+            {
+                "mindroom_module_path": str(mindroom_path),
+                "nio_module_path": str(nio_path),
+            },
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(live_fuzz, "PROJECT_ROOT", project_root)
+    monkeypatch.setattr(
+        "scripts.testing.fuzz_live_matrix._git_root_for_path",
+        lambda _path: project_root,
+    )
+    monkeypatch.setattr(
+        "scripts.testing.fuzz_live_matrix._git_revision",
+        lambda _path: "mindroom-head",
+    )
+
+    def git_state(path: Path, *, scopes: Collection[Path] = ()) -> tuple[str, bool]:
+        if path != mindroom_path:
+            return "nio-head", False
+        dirty = any(dirty_path == scope or dirty_path.is_relative_to(scope) for scope in scopes)
+        return "mindroom-head", dirty
+
+    monkeypatch.setattr("scripts.testing.fuzz_live_matrix._git_state_for_file", git_state)
+
+    with pytest.raises(RuntimeError, match="clean loaded MindRoom checkout"):
+        _validated_child_provenance(attestation, overlay=None)
+
+
 def test_child_provenance_rejects_nested_mindroom_checkout(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2749,7 +2798,16 @@ def test_pass_receipt_survives_bundle_discard(tmp_path: Path) -> None:
     """A successful exact-head run keeps compact provenance after bulky cleanup."""
     root = tmp_path / "artifacts"
     bundle = FailureBundle.create(root, "run-pass", scenario=_bundle_scenario(), provenance={"parent": True})
-    provenance = {"mindroom_revision": "abc", "nio_revision": "def"}
+    provenance = {
+        "matrix_homeserver": "http://127.0.0.1:18008",
+        "matrix_server_implementation": "tuwunel",
+        "matrix_server_name": "m-fuzz.localhost",
+        "mindroom_revision": "abc",
+        "nio_revision": "def",
+        "tuwunel_container": "fuzz-tuwunel",
+        "tuwunel_image_id": "sha256:1234",
+        "tuwunel_image_reference": "ghcr.io/mindroom-ai/tuwunel:latest",
+    }
 
     receipt = bundle.retain_pass_receipt({"status": "PASS"}, provenance)
     bundle.discard()
@@ -2760,6 +2818,52 @@ def test_pass_receipt_survives_bundle_discard(tmp_path: Path) -> None:
     assert payload["result"]["status"] == "PASS"
     assert payload["provenance"] == provenance
     assert len(payload["scenario_sha256"]) == 64
+
+
+def test_runtime_provenance_identifies_tuwunel_server(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Child attestation retains exact homeserver container and image identity."""
+    sink: list[dict[str, object]] = []
+    stack = ManagedTuwunelStack(
+        state_root=tmp_path / "state",
+        provenance_sink=lambda provenance: sink.append(dict(provenance)),
+    )
+    try:
+        stack.attestation_path.write_text("{}", encoding="utf-8")
+        stack.homeserver = "http://127.0.0.1:18008"
+        stack.server_name = "m-fuzz.localhost"
+        monkeypatch.setattr(
+            "scripts.testing.fuzz_live_matrix._validated_child_provenance",
+            lambda *_args, **_kwargs: {"mindroom_revision": "abc"},
+        )
+        monkeypatch.setattr(
+            "scripts.testing.fuzz_live_matrix._run_command",
+            lambda *_args, **_kwargs: json.dumps(
+                [
+                    {
+                        "Config": {"Image": "ghcr.io/mindroom-ai/tuwunel:latest"},
+                        "Image": "sha256:1234",
+                    },
+                ],
+            ),
+        )
+
+        stack._wait_for_runtime_attestation()
+
+        assert stack.runtime_provenance == {
+            "matrix_homeserver": "http://127.0.0.1:18008",
+            "matrix_server_implementation": "tuwunel",
+            "matrix_server_name": "m-fuzz.localhost",
+            "mindroom_revision": "abc",
+            "tuwunel_container": f"{stack.instance_name}-tuwunel",
+            "tuwunel_image_id": "sha256:1234",
+            "tuwunel_image_reference": "ghcr.io/mindroom-ai/tuwunel:latest",
+        }
+        assert sink == [stack.runtime_provenance]
+    finally:
+        stack.temp_dir.cleanup()
 
 
 def test_stack_close_attempts_every_stage_after_failures(
@@ -2874,6 +2978,7 @@ def test_live_stack_manifest_is_atomic_and_recoverable(tmp_path: Path) -> None:
         payload = json.loads(stack.manifest_path.read_text(encoding="utf-8"))
 
         assert payload["instance_name"] == stack.instance_name
+        assert payload["docker_compose_project"] == stack.instance_name
         assert payload["artifact_directory"] == str(artifact)
         assert payload["state"] == "ready"
         assert payload["matrix_port"] == 18008
@@ -2899,6 +3004,7 @@ def test_abandoned_manifest_recovery_is_registry_aware_and_kills_exact_group(
     manifest_path.write_text(
         json.dumps(
             {
+                "docker_compose_project": "fuzz-old",
                 "instance_name": "fuzz-old",
                 "project_root": str(old_root),
                 "state": "cleanup_failed",
@@ -2924,6 +3030,55 @@ def test_abandoned_manifest_recovery_is_registry_aware_and_kills_exact_group(
         stack._recover_abandoned_runs()
 
         assert events == ["process"]
+        assert json.loads(manifest_path.read_text(encoding="utf-8"))["state"] == "recovered"
+    finally:
+        stack.temp_dir.cleanup()
+
+
+def test_abandoned_manifest_recovery_survives_deleted_worktree_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A deleted worktree cannot wedge every later fuzz run on stale cleanup."""
+    state_root = tmp_path / "state"
+    manifest_path = state_root / "runs" / "fuzz-old.json"
+    manifest_path.parent.mkdir(parents=True)
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "docker_compose_project": "fuzz-old",
+                "instance_name": "fuzz-old",
+                "project_root": str(tmp_path / "deleted-worktree"),
+                "state": "cleanup_failed",
+                "mindroom_pid": 4242,
+                "mindroom_command_marker": "/persistent/attestation.json",
+            },
+        ),
+        encoding="utf-8",
+    )
+    stack = ManagedTuwunelStack(state_root=state_root)
+    events: list[object] = []
+    try:
+        monkeypatch.setattr(
+            stack,
+            "_terminate_recorded_mindroom",
+            lambda _payload: events.append("process"),
+        )
+        monkeypatch.setattr(
+            "scripts.testing.fuzz_live_matrix._run_command",
+            lambda *command, **kwargs: events.append((command, kwargs)),
+        )
+
+        stack._recover_abandoned_runs()
+        stack._recover_abandoned_runs()
+
+        assert events == [
+            "process",
+            (
+                ("docker", "compose", "-p", "fuzz-old", "down", "-v"),
+                {"cwd": live_fuzz.PROJECT_ROOT / "local" / "instances" / "deploy"},
+            ),
+        ]
         assert json.loads(manifest_path.read_text(encoding="utf-8"))["state"] == "recovered"
     finally:
         stack.temp_dir.cleanup()

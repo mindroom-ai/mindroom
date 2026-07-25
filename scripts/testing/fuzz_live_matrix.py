@@ -1324,6 +1324,7 @@ class ManagedTuwunelStack:
         payload.update(
             {
                 "artifact_directory": str(self.artifact_directory) if self.artifact_directory is not None else None,
+                "docker_compose_project": self.instance_name,
                 "harness_pid": os.getpid(),
                 "instance_name": self.instance_name,
                 "mindroom_command_marker": str(self.attestation_path),
@@ -1348,28 +1349,41 @@ class ManagedTuwunelStack:
             if not isinstance(payload, dict) or payload.get("state") in {"closed", "recovered"}:
                 continue
             instance_name = payload.get("instance_name")
+            docker_compose_project = payload.get("docker_compose_project")
             project_root = payload.get("project_root")
             if (
                 not isinstance(instance_name, str)
                 or not instance_name.startswith("fuzz")
+                or not isinstance(docker_compose_project, str)
+                or docker_compose_project != instance_name
                 or not isinstance(project_root, str)
             ):
                 msg = f"invalid abandoned live-fuzz manifest: {manifest_path}"
                 raise RuntimeError(msg)
             old_root = Path(project_root)
-            if not old_root.exists():
-                msg = f"abandoned live-fuzz worktree is unavailable: {old_root}"
-                raise RuntimeError(msg)
             self._terminate_recorded_mindroom(payload)
-            registry_path = old_root / "local" / "instances" / "deploy" / "instances.json"
-            registry = json.loads(registry_path.read_text(encoding="utf-8")) if registry_path.exists() else {}
-            instances = registry.get("instances", {}) if isinstance(registry, dict) else {}
+            if old_root.exists():
+                registry_path = old_root / "local" / "instances" / "deploy" / "instances.json"
+                registry = json.loads(registry_path.read_text(encoding="utf-8")) if registry_path.exists() else {}
+                instances = registry.get("instances", {}) if isinstance(registry, dict) else {}
+            else:
+                instances = None
             if isinstance(instances, dict) and instance_name in instances:
                 _run_command(
                     "just",
                     "local-instances-remove",
                     instance_name,
                     cwd=old_root,
+                )
+            elif instances is None:
+                _run_command(
+                    "docker",
+                    "compose",
+                    "-p",
+                    docker_compose_project,
+                    "down",
+                    "-v",
+                    cwd=PROJECT_ROOT / "local" / "instances" / "deploy",
                 )
             payload["state"] = "recovered"
             temporary = manifest_path.with_suffix(".tmp")
@@ -1706,10 +1720,13 @@ class ManagedTuwunelStack:
         deadline = time.monotonic() + 20
         while time.monotonic() < deadline:
             if self.attestation_path.exists():
-                self.runtime_provenance = _validated_child_provenance(
-                    self.attestation_path,
-                    overlay=os.environ.get("MINDROOM_LIVE_FUZZ_UV_WITH"),
-                )
+                self.runtime_provenance = {
+                    **_validated_child_provenance(
+                        self.attestation_path,
+                        overlay=os.environ.get("MINDROOM_LIVE_FUZZ_UV_WITH"),
+                    ),
+                    **self._tuwunel_provenance(),
+                }
                 if self._provenance_sink is not None:
                     self._provenance_sink(self.runtime_provenance)
                 return
@@ -1719,6 +1736,36 @@ class ManagedTuwunelStack:
             time.sleep(0.05)
         msg = "MindRoom child did not attest loaded runtime paths"
         raise TimeoutError(msg)
+
+    def _tuwunel_provenance(self) -> dict[str, str]:
+        """Return exact live homeserver and immutable container-image identity."""
+        container_name = f"{self.instance_name}-tuwunel"
+        raw = json.loads(
+            _run_command(
+                "docker",
+                "container",
+                "inspect",
+                container_name,
+            ),
+        )
+        if not isinstance(raw, list) or len(raw) != 1 or not isinstance(raw[0], dict):
+            msg = f"invalid Docker inspection for {container_name}"
+            raise RuntimeError(msg)
+        container = raw[0]
+        config = container.get("Config")
+        image_id = container.get("Image")
+        image_reference = config.get("Image") if isinstance(config, dict) else None
+        if not isinstance(image_id, str) or not isinstance(image_reference, str):
+            msg = f"Docker inspection omitted Tuwunel image identity for {container_name}"
+            raise TypeError(msg)
+        return {
+            "matrix_homeserver": self.homeserver,
+            "matrix_server_implementation": "tuwunel",
+            "matrix_server_name": self.server_name,
+            "tuwunel_container": container_name,
+            "tuwunel_image_id": image_id,
+            "tuwunel_image_reference": image_reference,
+        }
 
     def _stop_mindroom(self, *, kill: bool = False) -> None:
         process = self._mindroom_process
@@ -4368,6 +4415,8 @@ def _validated_child_provenance(
         scopes=(
             PROJECT_ROOT / "src" / "mindroom",
             Path(__file__),
+            PROJECT_ROOT / "justfile",
+            PROJECT_ROOT / "local" / "instances" / "deploy",
             PROJECT_ROOT / "pyproject.toml",
             PROJECT_ROOT / "uv.lock",
         ),
