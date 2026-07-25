@@ -119,19 +119,18 @@ class EditRegenerator:
             event,
             caller_label="edit_regeneration_context",
         )
-        loaded_turn = self.deps.turn_store.load_turn(
+        turn_record = self.deps.turn_store.load_turn(
             room=room,
             thread_id=context.thread_id or event_info.thread_id or event_info.thread_id_from_edit,
             original_event_id=original_event_id,
             requester_user_id=requester_user_id,
         )
-        if loaded_turn is None:
+        if turn_record is None or turn_record.requester_id != requester_user_id:
             self._logger().debug(
-                "No handled turn record found for edited message",
+                "No requester-owned handled turn record found for edited message",
                 original_event_id=original_event_id,
             )
             return
-        turn_record = loaded_turn
         if (
             turn_record.conversation_target is None
             or turn_record.history_scope is None

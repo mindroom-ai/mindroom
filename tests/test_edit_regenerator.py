@@ -88,6 +88,7 @@ def _turn_record(
     source_event_metadata: dict[str, SourceEventMetadata] | None = None,
     response_owner: str | None = AGENT_NAME,
     thread_id: str | None = THREAD_ID,
+    requester_id: str = USER_ID,
 ) -> TurnRecord:
     anchor = anchor_event_id or source_event_ids[-1]
     return TurnRecord(
@@ -98,6 +99,7 @@ def _turn_record(
         source_event_prompts=source_event_prompts,
         source_event_metadata=source_event_metadata,
         response_owner=response_owner,
+        requester_id=requester_id,
         history_scope=HistoryScope(kind="agent", scope_id=AGENT_NAME),
         conversation_target=MessageTarget.resolve(ROOM_ID, thread_id, anchor),
     )
@@ -237,6 +239,18 @@ async def test_simple_edit_regenerates_and_records_new_response(tmp_path: Path) 
     assert recorded.response_owner == AGENT_NAME
     assert recorded.history_scope == record.history_scope
     assert recorded.conversation_target == record.conversation_target
+
+
+@pytest.mark.asyncio
+async def test_edit_from_another_requester_does_not_regenerate(tmp_path: Path) -> None:
+    """One authorized requester cannot regenerate another requester's handled turn."""
+    harness = _harness(tmp_path, turn_record=_turn_record())
+    mallory = "@mallory:example.org"
+    event, event_info = _edit_event(sender=mallory)
+
+    await harness.regenerator.handle_message_edit(harness.room, event, event_info, mallory)
+
+    _assert_no_regeneration(harness)
 
 
 @pytest.mark.asyncio
@@ -474,7 +488,7 @@ async def test_edit_without_turn_record_returns_early(tmp_path: Path) -> None:
     _assert_no_regeneration(harness)
     harness.resolver.build_message_envelope.assert_not_called()
     harness.logger.debug.assert_any_call(
-        "No handled turn record found for edited message",
+        "No requester-owned handled turn record found for edited message",
         original_event_id=ORIGINAL_EVENT_ID,
     )
 
