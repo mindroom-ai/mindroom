@@ -55,6 +55,15 @@ if TYPE_CHECKING:
 runner = CliRunner()
 
 
+def test_cli_console_renders_without_ansi_escapes(capsys: pytest.CaptureFixture[str]) -> None:
+    """The root conftest must keep the import-time CLI console colourless in any shell."""
+    config_cli.console.print("[bold red]MindRoom Doctor[/bold red]")
+
+    captured = capsys.readouterr().out
+    assert "\x1b" not in captured
+    assert "MindRoom Doctor" in captured
+
+
 @pytest.fixture(autouse=True)
 def _clear_runtime_path_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("MINDROOM_CONFIG_PATH", raising=False)
