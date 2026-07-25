@@ -400,25 +400,12 @@ class TurnController:
         is_edit: bool,
     ) -> tuple[bool, _TurnClaimLease | None]:
         """Claim a raw command source before conversation resolution can suspend."""
-        command = None if is_edit else self._command_control_input_for_event(event)
+        command = None if is_edit else self.deps.ingress.command_control_input_for_event(event)
         if command is None:
             return False, None
         command_turn = TurnRecord.create([event.event_id], completed=False)
         claim = _TurnClaimLease(command_turn) if self.deps.turn_store.try_claim_turn(command_turn) else None
         return True, claim
-
-    def _command_control_input_for_event(self, event: TextDispatchEvent) -> Command | None:
-        """Classify one raw or hydrated event through the trusted command boundary."""
-        content = event.source.get("content") if isinstance(event.source, dict) else None
-        source_kind = (
-            self.deps.ingress.event_source_kind(event, content)
-            if isinstance(content, dict) and self.deps.ingress.sender_is_trusted_for_ingress_metadata(event.sender)
-            else None
-        )
-        return self.deps.ingress.command_control_input(
-            event,
-            source_kind=source_kind or MESSAGE_SOURCE_KIND,
-        )
 
     def _mark_source_events_responded(self, handled_turn: TurnRecord) -> None:
         """Mark one or more source events as handled by the same terminal outcome."""
@@ -889,7 +876,7 @@ class TurnController:
             event,
             dispatch_timing=dispatch_timing,
         )
-        if self._command_control_input_for_event(prepared_event) is None:
+        if self.deps.ingress.command_control_input_for_event(prepared_event) is None:
             return False
 
         acquired_claim: _TurnClaimLease | None = None

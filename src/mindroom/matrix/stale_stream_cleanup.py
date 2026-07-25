@@ -1750,7 +1750,10 @@ def _is_current_generation_stream(state: _MessageState, *, actor: StaleStreamCle
     """Return whether the scanned stamp proves this runtime owns the stream.
 
     The generation stamp read from the same content snapshot is the clock-free
-    source of truth under the single-runtime-per-Matrix-principal invariant.
+    proof of current-run ownership.
+    MindRoom does not enforce its unsupported assumption that one runtime owns each
+    Matrix principal, so a concurrent runtime can see a foreign generation and
+    terminate the first runtime's live streams.
     Even when the live response finalizes between scan and this check, the
     stamped snapshot still names the current generation, so a current-run
     stream is never repaired from history regardless of homeserver clock skew.
