@@ -7,40 +7,40 @@
 - Base: `origin/main` at `66dd4f4a68bcfd1a5e43b2cac20a1b464f306ab1`.
 - Rejected frozen head: `abb8d4292672c91c4cb551772d214cdca54378e0`.
 - Current production source-reset head: `6a69cfd6daa88880b047c0675148612cb5ac4003`.
-- Current pushed branch and GitHub PR head before this status-only correction: `70ff58e3b97ca40f4065daeed4a1093d3ba51928`.
-- Published production code head: `6a69cfd6daa88880b047c0675148612cb5ac4003`.
+- Rejected review head: `fae7ddad0b5242396565b2069a439875718d12d5`.
+- Current pushed branch and production code head: `83442e9914ced7cf02f8915d75c0f63131b92b4d`.
 - Never merge this pull request.
 - Never amend or force-push.
 
 ## Current gate state
 
-- Exact-head GitHub pytest failed `12` tests on `b39029c76e06656d53aced0f921503212cd2bfad`; that candidate is invalid.
-- All independent approvals are stale and non-gating after the review-fix commits.
+- Fresh native Codex xhigh and Claude Opus 5 high both returned `CHANGES REQUIRED` on exact `fae7ddad0b5242396565b2069a439875718d12d5`.
+- Follow-up commits `8fbc4b033` and `83442e991` fix the verified blockers and invalidate every review and CI result from `fae7ddad0`.
+- GitHub CI on the new pushed head is pending.
 - Real-Tuwunel has not run.
-- The heavy slot is currently unclaimed, but PR #1646, mindroom-nio PR #20, PR #1639, and PR #1640 remain ahead in the serialized queue.
+- PR #1646 owns the heavy resource slot, and PR #1641 must not run full pytest, PostgreSQL fanout, Docker, all-file hooks, or live validation.
 - Every approval, CI result, and live gate before the next pushed head is invalid.
 
 ## Verified blockers
 
-- Thread-cache certification incorrectly required raw non-message interaction events to parse as visible room messages, forcing a homeserver refill instead of preserving them as raw-only members.
-- Public cache writes now normalize their tuple-key event ID into the payload, so two old tests no longer created poisoned rows and instead asserted stale fallback behavior.
-- The grouping helper test expected a payload event ID to override its authoritative tuple key, contrary to the corrected storage contract.
-- A state root is rejected as a missing visible root, while an explicit wrong-room row is rejected earlier by the backend authoritative-index boundary and therefore has no later resolver diagnostic.
-- Raw backend regressions must prove thread room-scope and point, recent, snapshot, and edit identity poison all fail closed without relying on public-write normalization.
+- Cached latest-edit lookup could accept an invalid explicit row when the original carried any valid bundled replacement.
+- PostgreSQL latest-edit fallback used an unbounded client-side cursor, and recent-event `LIMIT` could let numeric JSON poison hide later valid rows.
+- Wrong-room and state events could create sidecar ownership, and `/threads` could expose wrong-room or state roots.
+- Tach omitted the replacement owner and retained stale interface names.
+- Event-cache security and storage docs omitted the shared replacement-validity contract.
+- Bounded stale-stream cleanup lacked an explicit edit-only missing-original regression.
 
 ## Required next steps
 
-- Thread certification now requires a visible non-state root and valid relation-capable message members while preserving other interaction families as raw-only cache members.
-- Public-write tests now exercise malformed message content only; raw SQL corruption owns event-ID mismatch coverage.
-- Raw backend coverage now poisons a thread root's explicit room plus point, recent, snapshot, and latest-edit payload identities.
-- The exact local SQLite replay for all affected contracts passes `14` tests with no fanout.
-- Focused Ruff lint and formatting pass on all changed files.
-- PostgreSQL poison and failed-test replay remain queued behind the current serialized resource order.
-- Current local production source diff is `+662/-464`, net `+198` against the exact merge base.
-- The source-minimal reset and narrow certification correction are locally committed.
-- Re-run exact failed files, owning cache suites, full pytest, Tach, and all-file pre-commit under resource ownership.
-- The net `+198` correction is pushed normally through `b4def76b1dc00bbde8ec543dcb87714ace7362ef` without amend or force-push.
-- Refresh the PR body and all campaign evidence for the new exact head.
+- Cache lookup now validates the explicit row itself, combines it with bundled candidates only after validation, and preserves malformed-newest fallback.
+- PostgreSQL latest-edit and recent-event fallback use server-side cursors, while canonical equal-timestamp ordering remains explicit `COLLATE "C"`.
+- Sidecar ownership and `/threads` roots reject state events and explicit room conflicts.
+- Bounded stale-stream cleanup proves edit-only history does not synthesize a visible original.
+- Focused replacement, approval, thread-page, stale-cleanup, Ruff, formatting, commit-hook, and Tach checks pass.
+- One focused selector unintentionally expanded to PostgreSQL parametrizations while the resource slot was unavailable; all `37` cases passed, and no further PostgreSQL work may run before ownership.
+- Current pushed production source diff is `+693/-503`, net `+190` against the exact merge base.
+- Commit and push Tach, docs, and this handoff, then refresh the PR body and campaign evidence for the exact new head.
+- Re-run the owning cache suites, full pytest, all-file pre-commit, and real-Tuwunel only under resource ownership.
 - Remove this file only when a new exact head is frozen.
 - Run fresh exact-head native Codex and Claude with explicit `--model=claude-opus-5 --effort=high` after every code commit sequence.
 - Start the fresh Claude review only when an Opus slot is free.
@@ -62,7 +62,7 @@
 
 ## Active source-minimal reset
 
-- The source-minimal reset is published through `70ff58e3b97ca40f4065daeed4a1093d3ba51928`, with production source ending at `6a69cfd6daa88880b047c0675148612cb5ac4003`.
+- The source-minimal reset and review corrections are published through `83442e9914ced7cf02f8915d75c0f63131b92b4d`.
 - `src/mindroom/matrix/replacements.py` is the 76-line replacement-domain owner for bundled flattening, identity, scope, relation validity, canonical ordering, and content projection.
 - `event_info.py` is restored to relation facts plus the small room and state helpers.
 - Cache edit lookup now receives the full original event and a surface validator, while one cache-row decoder validates durable payload identity.
@@ -70,7 +70,7 @@
 - Full history, bundled preview, point lookup, snapshots, approval lookup, sidecar hydration, and cleanup consume the shared candidate seam.
 - The custom encrypted-media and Base64 validator, compatibility re-exports, duplicate selectors, duplicate projections, and schema-v4 migration are removed.
 - PostgreSQL schema v3 intentionally retains `idx_mindroom_event_cache_event_edits_room_original_ts` as the single narrowing index because explicit query-level `COLLATE "C"` owns equal-timestamp correctness.
-- Production source is currently net `+198` against merge base `66dd4f4a68bcfd1a5e43b2cac20a1b464f306ab1`, satisfying the hard `<= +200` gate.
+- Production source is currently `+693/-503`, net `+190` against merge base `66dd4f4a68bcfd1a5e43b2cac20a1b464f306ab1`, satisfying the hard `<= +200` gate.
 - Ruff formatting, Ruff lint, `ty`, and diff checks pass for every dirty Python file.
 - The exact non-PostgreSQL prior-CI files pass `15`, `13`, `18`, and `4` tests.
 - Full `tests/test_event_cache.py` and focused thread, approval, and cache-contract regressions pass.

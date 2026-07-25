@@ -10,7 +10,7 @@ The point cache is intentionally broader than visible conversation history.
 
 Every admitted joined-room timeline event with an event ID can be retained for point lookup, relation resolution, recent-event lookup, and redaction bookkeeping.
 
-Visible thread history projects supported `m.room.message` events, collapses edits into their originals, and omits non-message events and still-opaque encrypted payloads.
+Visible thread history projects supported `m.room.message` events, applies only valid same-sender and same-type replacements to existing originals, and omits standalone edits, non-message events, and still-opaque encrypted payloads.
 
 Durable conversation history is distinct from ephemeral sync state.
 
@@ -25,11 +25,11 @@ The following treatment is covered against both SQLite and PostgreSQL backends b
 | Text, notice, emote, and location messages | Retained | Visible when they belong to the thread | Thread and reply relations map to the root and invalidate only that thread |
 | Valid file, image, audio, voice, and video messages | Retained | Visible when they belong to the thread | Thread and reply relations map to the root and invalidate only that thread |
 | Explicit thread children and relation-less replies | Retained | Visible | Event-to-thread mappings are retained and the known thread is invalidated |
-| Root, child, and reply edits | Retained | Applied to the original rather than shown separately | Edit and event-to-thread indexes are retained and the known thread is invalidated |
+| Root, child, and reply edits | Retained | Valid replacements apply to an existing original rather than appearing separately, while missing-original edits remain hidden | Edit and event-to-thread indexes are retained and the known thread is invalidated |
 | Message references | Retained | Visible | Message references resolve through the relation target and affect its known thread |
 | Reactions | Retained until redacted | Not visible | Reactions do not alter thread snapshots |
 | Sticker, poll start, poll response, poll end, beacon info, and beacon | Retained | Not visible | These families remain room-level and do not invalidate thread snapshots |
-| Generic state and timeline events | Retained | Not visible | These families remain room-level |
+| Generic state and timeline events | Retained | Not visible | These families remain room-level and cannot own sidecar plaintext |
 | Member, name, topic, avatar, power, join-rule, history-visibility, guest-access, alias, encryption, and pin state | Retained when delivered in the joined timeline | Not visible | These families remain room-level |
 | Call invite, candidates, answer, select-answer, reject, negotiate, and hangup | Retained | Not visible | These families remain room-level |
 | RTC membership, focus, and notification events | Retained | Not visible | These families remain room-level |
@@ -48,6 +48,11 @@ Explicit snapshot writes apply the same event-family filter, and relation walks 
 Page-local, cached, and homeserver-scan root proof accepts only plaintext or encrypted message children.
 
 Point-event payload quality is monotonic per event ID: clear normalized content may replace a retained opaque `m.room.encrypted` payload, but a later opaque payload never replaces already-clear content.
+
+Point, recent, snapshot, and latest-edit reads reject payloads whose event ID, timestamp, or explicit room evidence disagrees with the authoritative index.
+
+Latest-edit reads validate the original and every candidate through the owning message or approval surface, then choose across bundled and cached candidates by canonical timestamp and event-ID ordering.
+
 The upsert refuses the downgrade atomically inside the database conflict clause, so opposite arrival orders, duplicate IDs in one batch, and separate cache clients on one backing store all converge on the clear payload.
 The same rule guards a thread snapshot row when an incremental append rewrites an event the snapshot already holds.
 Payload-derived edit and relation index rows are written only for payloads the point store actually accepted.

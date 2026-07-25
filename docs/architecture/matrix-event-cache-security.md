@@ -14,11 +14,21 @@ The default constructor principal exists for standalone cache consumers and test
 
 An event lookup is keyed by principal, room, and event ID.
 
+Every decoded cache row must match its authoritative event-ID, timestamp, and room indexes before the payload can be returned or used for replacement projection.
+
+A replacement is eligible only when the original and replacement are non-state events in the same room, use the same sender and event type, carry exact `m.replace` relation identity, and pass the owning surface validator.
+
+An original that is itself a replacement cannot become a visible message, and a malformed newest replacement falls back to the next valid candidate.
+
+Valid bundled and explicit cached replacements share canonical latest-first ordering by `origin_server_ts` and then lexicographically greatest event ID.
+
 A decrypted sidecar row is keyed by principal, room, and MXC URL, and reads additionally require a surviving reference from the requested event ID.
 
 Reference rows are derived from version 2 `io.mindroom.long_text` metadata in top-level content and `m.new_content`.
 
 Both unencrypted `url` and encrypted `file.url` MXC representations are tracked.
+
+State events and events with an explicit conflicting room ID cannot create sidecar ownership references.
 
 Plaintext persistence succeeds only while the owning event and its reference are visible and not tombstoned.
 
