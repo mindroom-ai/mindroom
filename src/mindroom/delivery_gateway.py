@@ -507,6 +507,7 @@ class DeliveryGateway:
             )
         if request.skip_mentions:
             content[SKIP_MENTIONS_KEY] = True
+        failure_reason = "send_message_result returned None"
         try:
             delivered = await send_message_result(
                 client,
@@ -516,6 +517,7 @@ class DeliveryGateway:
             )
         except SendRetryError:
             delivered = None
+            failure_reason = "matrix timeline recovery still blocked the send"
         if delivered is not None:
             self.deps.resolver.deps.conversation_cache.notify_outbound_message(
                 resolved_target.room_id,
@@ -524,7 +526,11 @@ class DeliveryGateway:
             )
             self.deps.logger.info("Sent response", event_id=delivered.event_id, **resolved_target.log_context)
             return delivered.event_id
-        self.deps.logger.error("Failed to send response to room", **resolved_target.log_context)
+        self.deps.logger.error(
+            "Failed to send response to room",
+            error=failure_reason,
+            **resolved_target.log_context,
+        )
         return None
 
     async def edit_text(self, request: EditTextRequest) -> bool:
@@ -566,6 +572,7 @@ class DeliveryGateway:
                 latest_thread_event_id=latest_thread_event_id,
             )
 
+        failure_reason = "edit_message_result returned None"
         try:
             delivered = await edit_message_result(
                 client,
@@ -577,6 +584,7 @@ class DeliveryGateway:
             )
         except SendRetryError:
             delivered = None
+            failure_reason = "matrix timeline recovery still blocked the edit"
         if delivered is not None:
             self.deps.resolver.deps.conversation_cache.notify_outbound_message(
                 target.room_id,
@@ -588,7 +596,7 @@ class DeliveryGateway:
         self.deps.logger.error(
             "Failed to edit message",
             event_id=request.event_id,
-            error="edit_message_result returned None",
+            error=failure_reason,
             **target.log_context,
         )
         return False
