@@ -617,6 +617,7 @@ def test_stress_sync_fence_waits_for_exact_principal_event(mocker: MockerFixture
     )
 
     command = run.call_args.args[0]
+    assert command[:4] == ("docker", "exec", "--interactive", "synthetic-postgres")
     assert any(field.startswith("namespace=synthetic:principal:") for field in command)
     assert "room_id=!room:localhost" in command
     assert "event_id=$event" in command

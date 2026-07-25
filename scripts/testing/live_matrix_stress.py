@@ -1218,6 +1218,7 @@ class ManagedStressPostgres:
                 (
                     "docker",
                     "exec",
+                    "--interactive",
                     self.name,
                     "psql",
                     "-U",
