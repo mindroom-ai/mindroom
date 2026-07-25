@@ -185,6 +185,13 @@ def test_stop_mindroom_kills_group_after_leader_already_exited(
 
 def test_startup_maintenance_wait_uses_only_current_process_generation(tmp_path: Path) -> None:
     """A stale completion marker from the prior process cannot release restart audit."""
+    phases = {
+        "startup_maintenance.rooms_and_memberships",
+        "startup_maintenance.runtime_support",
+        "startup_maintenance.stale_stream_recovery.initial",
+        "startup_maintenance.stale_stream_recovery.joined_room_delta",
+    }
+    assert phases == live_fuzz._STARTUP_MAINTENANCE_PHASES
 
     class FakeProcess:
         @staticmethod
@@ -198,7 +205,7 @@ def test_startup_maintenance_wait_uses_only_current_process_generation(tmp_path:
     )
     current_generation_offset = log_path.stat().st_size
     with log_path.open("a", encoding="utf-8") as log:
-        for phase in sorted(live_fuzz._STARTUP_MAINTENANCE_PHASES):
+        for phase in sorted(phases):
             log.write(f"startup_phase_finished phase={phase} status=completed\n")
 
     stack = object.__new__(ManagedTuwunelStack)
@@ -229,6 +236,38 @@ def test_startup_maintenance_wait_rejects_failed_current_phase(tmp_path: Path) -
 
     with pytest.raises(AssertionError, match="did not complete cleanly"):
         stack.wait_for_startup_maintenance(timeout_seconds=0.1)
+
+
+def test_startup_maintenance_wait_has_bounded_timeout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Missing generation markers fail at the caller's deadline."""
+
+    class FakeProcess:
+        @staticmethod
+        def poll() -> None:
+            return None
+
+    clock = 0.0
+
+    def monotonic() -> float:
+        nonlocal clock
+        now = clock
+        clock += 1.0
+        return now
+
+    log_path = tmp_path / "mindroom.log"
+    log_path.write_text("", encoding="utf-8")
+    stack = object.__new__(ManagedTuwunelStack)
+    stack.log_path = log_path
+    stack._mindroom_start_log_offset = 0
+    stack._mindroom_process = FakeProcess()
+    monkeypatch.setattr(live_fuzz.time, "monotonic", monotonic)
+    monkeypatch.setattr(live_fuzz.time, "sleep", lambda _seconds: None)
+
+    with pytest.raises(TimeoutError, match="startup maintenance phases"):
+        stack.wait_for_startup_maintenance(timeout_seconds=2.0)
 
 
 def test_live_scenario_is_deterministic_and_json_replayable() -> None:
@@ -2120,6 +2159,39 @@ async def test_matrix_quiet_window_restarts_after_late_duplicate(
     monkeypatch.setattr(live_fuzz.time, "monotonic", monotonic)
     try:
         await client.wait_until_quiet(deadline_seconds=10.0, quiet_seconds=1.0)
+    finally:
+        monkeypatch.setattr(live_fuzz.time, "monotonic", original_monotonic)
+        await client.close()
+
+    assert calls == 4
+
+
+@pytest.mark.asyncio
+async def test_matrix_quiet_window_has_bounded_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A noisy or short-polling server cannot keep the saturation audit alive forever."""
+    client = LiveMatrixClient("http://matrix.invalid", "!room:example")
+    clock = 0.0
+    calls = 0
+    original_monotonic = live_fuzz.time.monotonic
+
+    def monotonic() -> float:
+        return clock
+
+    async def sync_incremental(*, timeout_ms: int, allow_limited: bool) -> int:
+        nonlocal calls, clock
+        assert 0 < timeout_ms <= 250
+        assert allow_limited is False
+        calls += 1
+        clock += 0.6
+        return 0
+
+    client.sync_incremental = sync_incremental  # type: ignore[method-assign]
+    monkeypatch.setattr(live_fuzz.time, "monotonic", monotonic)
+    try:
+        with pytest.raises(TimeoutError, match="did not stay quiet"):
+            await client.wait_until_quiet(deadline_seconds=2.0, quiet_seconds=5.0)
     finally:
         monkeypatch.setattr(live_fuzz.time, "monotonic", original_monotonic)
         await client.close()
