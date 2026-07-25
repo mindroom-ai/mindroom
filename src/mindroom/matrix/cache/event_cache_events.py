@@ -250,6 +250,15 @@ def _without_tombstoned_bundled_replacements(
     return sanitized
 
 
+def scrub_bundled_replacement_json(event_json: str, event_id: str) -> str:
+    """Remove one bundled replacement identity while preserving surviving candidates."""
+    sanitized = _without_tombstoned_bundled_replacements(
+        json.loads(event_json),
+        frozenset((event_id,)),
+    )
+    return json.dumps(sanitized, separators=(",", ":"))
+
+
 def filter_redacted_events(
     events: list[_CachedEventValue],
     *,

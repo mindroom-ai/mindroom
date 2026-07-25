@@ -18,6 +18,7 @@ from .event_cache_events import (
     event_thread_rows,
     filter_redacted_events,
     redaction_removal_event_ids,
+    scrub_bundled_replacement_json,
     serialize_cacheable_events,
     validated_mxc_text_rows,
 )
@@ -435,17 +436,30 @@ async def redact_event_locked(
         event_ids=removed_event_ids,
     )
     await _record_redacted_events(db, namespace, room_id, event_ids=removed_event_ids)
-    scrubbed_rows = await rowcount(
+    bundled_rows = await fetchall(
         db,
-        """UPDATE mindroom_event_cache_events
-        SET event_json = (event_json::jsonb #- '{unsigned,m.relations,m.replace}')::text
+        """SELECT event_id, event_json FROM mindroom_event_cache_events
         WHERE namespace = %s AND room_id = %s AND %s = ANY(ARRAY[
             event_json::jsonb #>> '{unsigned,m.relations,m.replace,event_id}',
             event_json::jsonb #>> '{unsigned,m.relations,m.replace,latest_event,event_id}',
             event_json::jsonb #>> '{unsigned,m.relations,m.replace,event,event_id}'
-        ])""",
+        ])
+        FOR UPDATE""",
         (namespace, room_id, event_id),
     )
+    scrubbed_rows = 0
+    for cached_event_id, event_json in bundled_rows:
+        scrubbed_rows += await rowcount(
+            db,
+            """UPDATE mindroom_event_cache_events SET event_json = %s
+            WHERE namespace = %s AND room_id = %s AND event_id = %s""",
+            (
+                scrub_bundled_replacement_json(event_json, event_id),
+                namespace,
+                room_id,
+                cached_event_id,
+            ),
+        )
     return cache_rows_were_deleted(
         deleted_thread_rows,
         deleted_event_rows,

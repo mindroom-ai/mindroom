@@ -18,6 +18,7 @@ from .event_cache_events import (
     event_thread_rows,
     filter_redacted_events,
     redaction_removal_event_ids,
+    scrub_bundled_replacement_json,
     serialize_cacheable_events,
     validated_mxc_text_rows,
 )
@@ -458,7 +459,7 @@ async def redact_event_locked(
     )
     await _record_redacted_events(db, principal_id, room_id, event_ids=removed_event_ids)
     scrubbed_cursor = await db.execute(
-        """UPDATE events SET event_json = json_remove(event_json, '$.unsigned."m.relations"."m.replace"')
+        """SELECT event_id, event_json FROM events
         WHERE principal_id = ? AND room_id = ? AND ? IN (
             json_extract(event_json, '$.unsigned."m.relations"."m.replace".event_id'),
             json_extract(event_json, '$.unsigned."m.relations"."m.replace".latest_event.event_id'),
@@ -466,8 +467,22 @@ async def redact_event_locked(
         )""",
         (principal_id, room_id, event_id),
     )
-    scrubbed_rows = 0 if scrubbed_cursor.rowcount is None else scrubbed_cursor.rowcount
+    bundled_rows = list(await scrubbed_cursor.fetchall())
     await scrubbed_cursor.close()
+    await db.executemany(
+        """UPDATE events SET event_json = ?
+        WHERE principal_id = ? AND room_id = ? AND event_id = ?""",
+        [
+            (
+                scrub_bundled_replacement_json(event_json, event_id),
+                principal_id,
+                room_id,
+                cached_event_id,
+            )
+            for cached_event_id, event_json in bundled_rows
+        ],
+    )
+    scrubbed_rows = len(bundled_rows)
     return cache_rows_were_deleted(
         deleted_thread_rows,
         deleted_event_rows,

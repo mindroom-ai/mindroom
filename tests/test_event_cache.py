@@ -2587,6 +2587,60 @@ async def test_cached_point_and_snapshot_reads_apply_bundled_replacement(
 
 
 @pytest.mark.asyncio
+async def test_redacting_bundled_replacement_preserves_older_candidate(
+    event_cache: ConversationEventCache,
+) -> None:
+    """Redacting one bundled edit must expose the next Matrix-valid candidate."""
+    original_event = _cache_source(
+        _make_text_event(
+            event_id="$reply",
+            sender="@alice:localhost",
+            body="Original",
+            server_timestamp=2000,
+            source_content={"body": "Original", "msgtype": "m.text"},
+        ),
+    )
+
+    def bundled_edit(event_id: str, body: str, timestamp: int) -> dict[str, object]:
+        return {
+            "event_id": event_id,
+            "sender": "@alice:localhost",
+            "origin_server_ts": timestamp,
+            "type": "m.room.message",
+            "content": {
+                "body": f"* {body}",
+                "msgtype": "m.text",
+                "m.new_content": {"body": body, "msgtype": "m.text"},
+                "m.relates_to": {"rel_type": "m.replace", "event_id": "$reply"},
+            },
+        }
+
+    older_edit = bundled_edit("$older_edit", "Older", 3000)
+    newest_edit = bundled_edit("$newest_edit", "Newest", 4000)
+    newest_edit["event"] = older_edit
+    original_event["unsigned"] = {"m.relations": {"m.replace": newest_edit}}
+    await _replace_thread(event_cache, "!room:localhost", "$thread", [original_event])
+    await event_cache.store_event("$newest_edit", "!room:localhost", newest_edit)
+
+    assert await event_cache.redact_event("!room:localhost", "$newest_edit")
+    cached_original = await event_cache.get_event("!room:localhost", "$reply")
+    assert cached_original is not None
+    bundled = cached_original["unsigned"]["m.relations"]["m.replace"]
+    assert bundled["event"]["event_id"] == "$older_edit"
+    latest = await event_cache.get_latest_edit(
+        "!room:localhost",
+        cached_original,
+        validator=valid_room_message_replacement,
+    )
+    assert latest is not None
+    assert latest["event_id"] == "$older_edit"
+
+    response, _ = await _cached_room_get_event(AsyncMock(), event_cache, "!room:localhost", "$reply")
+    assert isinstance(response, nio.RoomGetEventResponse)
+    assert response.event.body == "Older"
+
+
+@pytest.mark.asyncio
 async def test_thread_append_sanitizes_tombstoned_bundled_replacement(
     event_cache: ConversationEventCache,
 ) -> None:
