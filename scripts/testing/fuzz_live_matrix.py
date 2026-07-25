@@ -2063,12 +2063,22 @@ class ManagedTuwunelStack:
         return port
 
     def _write_config(self, model_port: int) -> None:
+        model_extra_kwargs: dict[str, object] = {
+            "base_url": f"http://127.0.0.1:{model_port}/v1",
+        }
+        if self.stress_config is not None:
+            model_extra_kwargs.update(
+                {
+                    "timeout": (self.stress_config.barrier_timeout_seconds + self.stress_config.stream_seconds + 30),
+                    "max_retries": 0,
+                },
+            )
         config = {
             "models": {
                 "default": {
                     "provider": "openai",
                     "id": MODEL_ID,
-                    "extra_kwargs": {"base_url": f"http://127.0.0.1:{model_port}/v1"},
+                    "extra_kwargs": model_extra_kwargs,
                 },
             },
             "agents": {

@@ -25,6 +25,7 @@ if TYPE_CHECKING:
 
 import psutil
 import pytest
+import yaml
 
 import scripts.testing.fuzz_live_matrix as live_fuzz
 from scripts.testing.fuzz_live_matrix import (
@@ -4397,6 +4398,34 @@ def test_live_stack_wires_serialization_fault_into_model_controller(tmp_path: Pa
     try:
         assert stack.stress_controller is not None
         assert stack.stress_controller._serialization_lock is not None
+    finally:
+        stack.temp_dir.cleanup()
+
+
+def test_stress_stack_bounds_model_timeout_beyond_barrier_and_disables_retries(
+    tmp_path: Path,
+) -> None:
+    """Long barrier waits must not trigger duplicate OpenAI requests."""
+    config = live_fuzz.StressConfig(
+        threads=2,
+        stream_seconds=45,
+        edit_interval=0.5,
+        waves=1,
+        history_turns=0,
+        barrier_timeout_seconds=90,
+    )
+    stack = ManagedTuwunelStack(
+        state_root=tmp_path / "state",
+        stress_config=config,
+    )
+    try:
+        stack._write_config(12345)
+        payload = yaml.safe_load(stack.config_path.read_text(encoding="utf-8"))
+        assert payload["models"]["default"]["extra_kwargs"] == {
+            "base_url": "http://127.0.0.1:12345/v1",
+            "max_retries": 0,
+            "timeout": 165,
+        }
     finally:
         stack.temp_dir.cleanup()
 
