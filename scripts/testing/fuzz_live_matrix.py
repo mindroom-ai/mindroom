@@ -1490,6 +1490,14 @@ class NioOverlay:
     revision: str
 
 
+@dataclass(frozen=True, slots=True)
+class MindroomRuntime:
+    """Clean exact MindRoom checkout loaded by the managed child."""
+
+    path: Path
+    revision: str
+
+
 class ManagedTuwunelStack:
     """Disposable Tuwunel plus the current worktree's MindRoom runtime."""
 
@@ -1502,7 +1510,9 @@ class ManagedTuwunelStack:
         artifact_directory: Path | None = None,
         state_root: Path = DEFAULT_LIVE_FUZZ_STATE_ROOT,
         nio_overlay: NioOverlay | None = None,
+        mindroom_root: Path | None = None,
         mindroom_revision: str | None = None,
+        runner_revision: str | None = None,
         stress_config: StressConfig | None = None,
     ) -> None:
         token = secrets.token_hex(4)
@@ -1536,11 +1546,20 @@ class ManagedTuwunelStack:
         self._env: dict[str, str] = {}
         self._provenance_sink = provenance_sink
         self.nio_overlay = nio_overlay
+        self._mindroom_root = mindroom_root.resolve() if mindroom_root is not None else None
         self._mindroom_revision = mindroom_revision
+        self._runner_revision = runner_revision
         self._host_lease: TextIOWrapper | None = None
         self._mindroom_start_log_offset = 0
         self.stress_config = stress_config
-        self.stress_controller = StressModelController(stress_config) if stress_config is not None else None
+        self.stress_controller = (
+            StressModelController(
+                stress_config,
+                serialize_streams=stress_config.fault_mode == "serialize-streams",
+            )
+            if stress_config is not None
+            else None
+        )
         self.stress_postgres = (
             ManagedStressPostgres(f"{self.instance_name}-postgres") if stress_config is not None else None
         )
@@ -1548,8 +1567,12 @@ class ManagedTuwunelStack:
     def _frozen_mindroom_revision(self) -> str:
         """Freeze and return the one MindRoom revision allowed for this run."""
         if self._mindroom_revision is None:
-            self._mindroom_revision = _required_mindroom_revision()
+            self._mindroom_revision = _required_mindroom_revision(self._selected_mindroom_root())
         return self._mindroom_revision
+
+    def _selected_mindroom_root(self) -> Path:
+        """Return the explicit runtime root or the current patched runner root."""
+        return self._mindroom_root or PROJECT_ROOT.resolve()
 
     def _required_nio_overlay(self) -> NioOverlay:
         """Return the preflighted overlay or reject live stack creation."""
@@ -2071,12 +2094,15 @@ class ManagedTuwunelStack:
     def _start_mindroom(self) -> None:
         assert self._log_handle is not None
         overlay = self._required_nio_overlay()
+        mindroom_root = self._selected_mindroom_root()
         self.attestation_path.unlink(missing_ok=True)
         self._mindroom_start_log_offset = self.log_path.stat().st_size if self.log_path.exists() else 0
         self._mindroom_process = subprocess.Popen(
             [
                 "uv",
                 "run",
+                "--project",
+                str(mindroom_root),
                 "--with-editable",
                 str(overlay.path),
                 "python",
@@ -2089,7 +2115,7 @@ class ManagedTuwunelStack:
                 "--log-level",
                 "DEBUG" if self.stress_config is not None else "INFO",
             ],
-            cwd=PROJECT_ROOT,
+            cwd=mindroom_root,
             env=self._env,
             stdout=self._log_handle,
             stderr=subprocess.STDOUT,
@@ -2141,6 +2167,8 @@ class ManagedTuwunelStack:
                         self.attestation_path,
                         overlay=overlay,
                         expected_mindroom_revision=expected_mindroom_revision,
+                        expected_mindroom_root=self._selected_mindroom_root(),
+                        expected_runner_revision=self._runner_revision,
                     ),
                     **self._tuwunel_provenance(),
                     "runtime_generation": len(self._runtime_generations) + 1,
@@ -2171,6 +2199,8 @@ class ManagedTuwunelStack:
             provenance,
             overlay=self._required_nio_overlay(),
             expected_mindroom_revision=self._frozen_mindroom_revision(),
+            expected_mindroom_root=self._selected_mindroom_root(),
+            expected_runner_revision=self._runner_revision,
         )
         final_source_validation = {
             key: validated[key]
@@ -2181,7 +2211,11 @@ class ManagedTuwunelStack:
                 "nio_dirty",
                 "nio_expected_revision",
                 "nio_revision",
+                "runner_dirty",
+                "runner_expected_revision",
+                "runner_revision",
             )
+            if key in validated
         }
         self.runtime_provenance = {
             **provenance,
@@ -5614,6 +5648,11 @@ def _parse_args() -> argparse.Namespace:
         required=True,
         help="clean exact mindroom-nio Git checkout loaded by the live MindRoom child",
     )
+    parser.add_argument(
+        "--mindroom-runtime",
+        type=Path,
+        help="clean exact MindRoom checkout loaded by the child; defaults to this harness checkout",
+    )
     parser.add_argument("--profile", choices=("fuzz", "saturation", "chaos", "stress"), default="fuzz")
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--steps", type=_positive_int, default=200)
@@ -5626,6 +5665,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--baseline", type=Path)
     parser.add_argument("--write-baseline", type=Path)
     parser.add_argument("--enforce-performance", action="store_true")
+    parser.add_argument(
+        "--fault-mode",
+        choices=("none", "serialize-streams"),
+        default="none",
+        help="deliberately inject a named workload fault; never used for performance baselines",
+    )
     parser.add_argument("--overlapping-followups", action="store_true")
     parser.add_argument("--max-batch-size", type=_positive_int, default=16)
     parser.add_argument("--restart-interval", type=_non_negative_int, default=100)
@@ -5835,11 +5880,69 @@ def _git_revision(path: Path) -> str | None:
     return result.stdout.strip() if result.returncode == 0 else None
 
 
-def _required_mindroom_revision() -> str:
-    """Return the exact runner revision or fail before live setup."""
-    revision = _git_revision(PROJECT_ROOT)
+def _required_mindroom_revision(root: Path = PROJECT_ROOT) -> str:
+    """Return one exact MindRoom revision or fail before live setup."""
+    revision = _git_revision(root)
     if revision is None:
-        msg = "could not freeze the live runner MindRoom revision"
+        msg = f"could not freeze the live MindRoom revision for {root}"
+        raise RuntimeError(msg)
+    return revision
+
+
+def _prepare_mindroom_runtime(path: Path | None) -> MindroomRuntime:
+    """Fail closed unless the selected child runtime is an exact clean checkout."""
+    root = (path or PROJECT_ROOT).expanduser().resolve()
+    module_path = root / "src" / "mindroom" / "__init__.py"
+    if not module_path.is_file():
+        msg = f"MindRoom runtime does not contain src/mindroom/__init__.py: {root}"
+        raise RuntimeError(msg)
+    _require_git_root(module_path, root, "MindRoom")
+    revision, dirty = _git_state_for_file(
+        module_path,
+        scopes=(
+            root / "src" / "mindroom",
+            root / "pyproject.toml",
+            root / "uv.lock",
+        ),
+    )
+    if revision is None:
+        msg = f"could not verify exact MindRoom runtime revision: {root}"
+        raise RuntimeError(msg)
+    if dirty:
+        msg = f"live fuzz requires a clean exact MindRoom runtime: {root}"
+        raise RuntimeError(msg)
+    return MindroomRuntime(path=root, revision=revision)
+
+
+def _selected_mindroom_runtime(path: Path | None) -> MindroomRuntime:
+    """Return the runner checkout by default or preflight an explicit runtime."""
+    if path is None:
+        return MindroomRuntime(
+            path=PROJECT_ROOT.resolve(),
+            revision=_required_mindroom_revision(),
+        )
+    return _prepare_mindroom_runtime(path)
+
+
+def _required_runner_revision() -> str:
+    """Return the clean exact harness revision or fail before disposable setup."""
+    script_path = Path(__file__).resolve()
+    revision, dirty = _git_state_for_file(
+        script_path,
+        scopes=(
+            script_path,
+            script_path.with_name("live_matrix_stress.py"),
+            PROJECT_ROOT / "justfile",
+            PROJECT_ROOT / "local" / "instances" / "deploy",
+            PROJECT_ROOT / "pyproject.toml",
+            PROJECT_ROOT / "uv.lock",
+        ),
+    )
+    if revision is None:
+        msg = "could not freeze the live harness revision"
+        raise RuntimeError(msg)
+    if dirty:
+        msg = "live fuzz requires a clean exact harness checkout"
         raise RuntimeError(msg)
     return revision
 
@@ -5899,6 +6002,8 @@ def _validated_child_provenance(
     *,
     overlay: NioOverlay,
     expected_mindroom_revision: str,
+    expected_mindroom_root: Path | None = None,
+    expected_runner_revision: str | None = None,
 ) -> dict[str, object]:
     """Validate actual child imports against the runner and requested overlay."""
     raw = json.loads(attestation_path.read_text(encoding="utf-8"))
@@ -5909,7 +6014,38 @@ def _validated_child_provenance(
         raw,
         overlay=overlay,
         expected_mindroom_revision=expected_mindroom_revision,
+        expected_mindroom_root=expected_mindroom_root,
+        expected_runner_revision=expected_runner_revision,
     )
+
+
+def _validated_runner_provenance(expected_revision: str | None) -> dict[str, object]:
+    """Validate the clean harness checkout separately from the selected runtime."""
+    if expected_revision is None:
+        return {}
+    script_path = Path(__file__).resolve()
+    revision, dirty = _git_state_for_file(
+        script_path,
+        scopes=(
+            script_path,
+            script_path.with_name("live_matrix_stress.py"),
+            PROJECT_ROOT / "justfile",
+            PROJECT_ROOT / "local" / "instances" / "deploy",
+            PROJECT_ROOT / "pyproject.toml",
+            PROJECT_ROOT / "uv.lock",
+        ),
+    )
+    if revision != expected_revision:
+        msg = f"live harness revision changed after preflight: expected {expected_revision}, loaded {revision}"
+        raise RuntimeError(msg)
+    if dirty:
+        msg = "live fuzz requires a clean exact harness checkout"
+        raise RuntimeError(msg)
+    return {
+        "runner_revision": revision,
+        "runner_expected_revision": expected_revision,
+        "runner_dirty": dirty,
+    }
 
 
 def _validated_import_provenance(
@@ -5917,6 +6053,8 @@ def _validated_import_provenance(
     *,
     overlay: NioOverlay,
     expected_mindroom_revision: str,
+    expected_mindroom_root: Path | None = None,
+    expected_runner_revision: str | None = None,
 ) -> dict[str, object]:
     """Validate imported module paths against frozen exact clean checkouts."""
     mindroom_value = raw.get("mindroom_module_path")
@@ -5926,22 +6064,33 @@ def _validated_import_provenance(
         raise TypeError(msg)
     mindroom_path = Path(mindroom_value).resolve()
     nio_path = Path(nio_value).resolve()
+    uses_runner_runtime = expected_mindroom_root is None
+    mindroom_root = (expected_mindroom_root or PROJECT_ROOT).resolve()
     _require_path_within(
         mindroom_path,
-        PROJECT_ROOT,
-        "loaded MindRoom path is outside the live runner checkout",
+        mindroom_root,
+        (
+            "loaded MindRoom path is outside the live runner checkout"
+            if uses_runner_runtime
+            else "loaded MindRoom path is outside the selected runtime checkout"
+        ),
     )
-    _require_git_root(mindroom_path, PROJECT_ROOT, "MindRoom")
-    mindroom_revision, mindroom_dirty = _git_state_for_file(
-        mindroom_path,
-        scopes=(
-            PROJECT_ROOT / "src" / "mindroom",
+    _require_git_root(mindroom_path, mindroom_root, "MindRoom")
+    mindroom_scopes: tuple[Path, ...] = (
+        mindroom_root / "src" / "mindroom",
+        mindroom_root / "pyproject.toml",
+        mindroom_root / "uv.lock",
+    )
+    if mindroom_root == PROJECT_ROOT.resolve():
+        mindroom_scopes = (
+            *mindroom_scopes,
             Path(__file__),
             PROJECT_ROOT / "justfile",
             PROJECT_ROOT / "local" / "instances" / "deploy",
-            PROJECT_ROOT / "pyproject.toml",
-            PROJECT_ROOT / "uv.lock",
-        ),
+        )
+    mindroom_revision, mindroom_dirty = _git_state_for_file(
+        mindroom_path,
+        scopes=mindroom_scopes,
     )
     if mindroom_revision is None:
         msg = "could not verify the loaded MindRoom revision"
@@ -5951,7 +6100,7 @@ def _validated_import_provenance(
         raise RuntimeError(msg)
     if mindroom_revision != expected_mindroom_revision:
         msg = (
-            "loaded MindRoom revision does not match the live runner: "
+            "loaded MindRoom revision does not match the selected runtime: "
             f"expected {expected_mindroom_revision}, loaded {mindroom_revision}"
         )
         raise RuntimeError(msg)
@@ -5977,8 +6126,10 @@ def _validated_import_provenance(
     if nio_dirty:
         msg = "live fuzz requires a clean loaded mindroom-nio overlay"
         raise RuntimeError(msg)
+    runner_provenance = _validated_runner_provenance(expected_runner_revision)
     return {
         **raw,
+        **runner_provenance,
         "mindroom_revision": mindroom_revision,
         "mindroom_expected_revision": expected_mindroom_revision,
         "mindroom_dirty": mindroom_dirty,
@@ -5988,7 +6139,12 @@ def _validated_import_provenance(
     }
 
 
-def _run_provenance(mindroom_revision: str | None = None) -> dict[str, object]:
+def _run_provenance(
+    mindroom_revision: str | None = None,
+    *,
+    mindroom_root: Path = PROJECT_ROOT,
+    runner_revision: str | None = None,
+) -> dict[str, object]:
     """Capture parent identity until child-attested provenance replaces it.
 
     Only inert build/version identity is recorded; no credentials, tokens, or
@@ -6000,7 +6156,9 @@ def _run_provenance(mindroom_revision: str | None = None) -> dict[str, object]:
         "mindroom_module_path": str(Path(mindroom.__file__ or "").resolve()),
         "nio_module_path": str(Path(nio.__file__ or "").resolve()),
     }
-    provenance["mindroom_head"] = mindroom_revision or _required_mindroom_revision()
+    provenance["mindroom_head"] = mindroom_revision or _required_mindroom_revision(mindroom_root)
+    if runner_revision is not None:
+        provenance["runner_head"] = runner_revision
     try:
         provenance["nio_version"] = version("mindroom-nio")
     except PackageNotFoundError:
@@ -6317,6 +6475,32 @@ def _require_exact_nio_provenance(
         raise RuntimeError(msg)
 
 
+def _require_exact_runtime_generation(
+    generation: object,
+    *,
+    index: int,
+    frozen_revision: str,
+) -> None:
+    """Reject one mixed, dirty, or stale runtime generation."""
+    if not isinstance(generation, dict):
+        msg = f"passing live run has invalid runtime generation {index}"
+        raise TypeError(msg)
+    generation = cast("dict[str, object]", generation)
+    if (
+        generation.get("mindroom_revision") != frozen_revision
+        or generation.get("mindroom_expected_revision") != frozen_revision
+        or generation.get("mindroom_dirty") is not False
+    ):
+        msg = f"passing live run generation {index} did not use exact clean MindRoom {frozen_revision}"
+        raise RuntimeError(msg)
+    runner_expected = generation.get("runner_expected_revision")
+    if runner_expected is not None and (
+        generation.get("runner_revision") != runner_expected or generation.get("runner_dirty") is not False
+    ):
+        msg = f"passing live run generation {index} did not use its exact clean harness"
+        raise RuntimeError(msg)
+
+
 def _require_exact_mindroom_provenance(
     provenance: Mapping[str, object],
     *,
@@ -6335,17 +6519,11 @@ def _require_exact_mindroom_provenance(
         msg = "passing live run omitted per-generation runtime attestations"
         raise RuntimeError(msg)
     for index, generation in enumerate(generations, start=1):
-        if not isinstance(generation, dict):
-            msg = f"passing live run has invalid runtime generation {index}"
-            raise TypeError(msg)
-        generation = cast("dict[str, object]", generation)
-        if (
-            generation.get("mindroom_revision") != frozen_revision
-            or generation.get("mindroom_expected_revision") != frozen_revision
-            or generation.get("mindroom_dirty") is not False
-        ):
-            msg = f"passing live run generation {index} did not use exact clean MindRoom {frozen_revision}"
-            raise RuntimeError(msg)
+        _require_exact_runtime_generation(
+            generation,
+            index=index,
+            frozen_revision=frozen_revision,
+        )
     if not require_final:
         return
     final_validation = provenance.get("final_source_validation")
@@ -6360,6 +6538,9 @@ def _require_exact_mindroom_provenance(
         "nio_dirty",
         "nio_expected_revision",
         "nio_revision",
+        "runner_dirty",
+        "runner_expected_revision",
+        "runner_revision",
     )
     if (
         final_validation.get("mindroom_revision") != frozen_revision
@@ -6402,6 +6583,7 @@ def _stress_config_from_args(args: argparse.Namespace) -> StressConfig:
         cache_backend=args.cache_backend,
         seed=args.seed,
         overlapping_followups=args.overlapping_followups,
+        fault_mode=args.fault_mode,
     )
     config.validate()
     return config
@@ -6440,6 +6622,7 @@ def _compare_stress_baseline(
     *,
     config: StressConfig,
     result: Mapping[str, object],
+    enforce: bool,
 ) -> Mapping[str, object]:
     _require_persistent_stress_path(path)
     baseline = StressBaseline.from_json(path.read_text(encoding="utf-8"))
@@ -6450,7 +6633,10 @@ def _compare_stress_baseline(
             f"stress baseline workload mismatch: profile={baseline.profile!r}, config_sha256={baseline.config_sha256!r}"
         )
         raise ValueError(msg)
-    return baseline.compare(_baseline_sample_from_result(result))
+    return baseline.compare(
+        _baseline_sample_from_result(result),
+        enforce=enforce,
+    )
 
 
 def _append_stress_baseline_sample(
@@ -6576,18 +6762,47 @@ def _capture_stress_bundle(
         )
 
 
-def _run_stress_main(args: argparse.Namespace) -> None:
-    """Run one complete stress campaign unit and retain success evidence."""
-    config = _stress_config_from_args(args)
+def _validate_stress_cli(args: argparse.Namespace, config: StressConfig) -> None:
+    """Reject contradictory stress flags before starting disposable services."""
     if args.enforce_performance and args.baseline is None:
         msg = "--enforce-performance requires --baseline"
         raise ValueError(msg)
+    if config.fault_mode != "none" and (args.baseline is not None or args.write_baseline is not None):
+        msg = "fault-injected stress runs cannot read or write performance baselines"
+        raise ValueError(msg)
+
+
+def _close_failed_stress_run(
+    stack: ManagedTuwunelStack,
+    bundle: StressArtifactBundle,
+    failure: BaseException,
+) -> None:
+    """Attempt cleanup and record whether disposable resources were removed."""
+    resources_removed = True
+    try:
+        stack.close()
+    except BaseException as cleanup_error:
+        resources_removed = False
+        failure.add_note(f"stress cleanup failure: {cleanup_error}")
+    with suppress(BaseException):
+        bundle.write_json(
+            "cleanup-manifest.json",
+            {"status": "FAILED", "resources_removed": resources_removed},
+        )
+
+
+def _run_stress_main(args: argparse.Namespace) -> None:
+    """Run one complete stress campaign unit and retain success evidence."""
+    config = _stress_config_from_args(args)
+    _validate_stress_cli(args, config)
     artifact_root = args.artifact_root or DEFAULT_STRESS_ARTIFACT_ROOT
     _require_persistent_stress_path(artifact_root)
     if args.save_trace is not None:
         _require_persistent_stress_path(args.save_trace)
         _atomic_text_write(args.save_trace, config.to_json() + "\n")
-    mindroom_revision = _required_mindroom_revision()
+    mindroom_runtime = _selected_mindroom_runtime(args.mindroom_runtime)
+    mindroom_revision = mindroom_runtime.revision
+    runner_revision = _required_runner_revision() if args.mindroom_runtime is not None else None
     run_id = f"{time.strftime('%Y%m%dT%H%M%S')}-{secrets.token_hex(4)}"
     bundle = StressArtifactBundle.create(artifact_root, run_id)
     journal: list[Mapping[str, object]] = []
@@ -6600,7 +6815,9 @@ def _run_stress_main(args: argparse.Namespace) -> None:
         ),
         artifact_directory=bundle.directory,
         nio_overlay=args.nio_overlay,
+        mindroom_root=mindroom_runtime.path,
         mindroom_revision=mindroom_revision,
+        runner_revision=runner_revision,
         stress_config=config,
     )
     result: dict[str, object] | None = None
@@ -6622,6 +6839,7 @@ def _run_stress_main(args: argparse.Namespace) -> None:
                 args.baseline,
                 config=config,
                 result=result,
+                enforce=args.enforce_performance,
             )
         if args.write_baseline is not None:
             result["baseline_write"] = _append_stress_baseline_sample(
@@ -6642,15 +6860,7 @@ def _run_stress_main(args: argparse.Namespace) -> None:
                 failure=exc,
                 baseline_comparison=baseline_comparison,
             )
-        try:
-            stack.close()
-        except BaseException as cleanup_error:
-            exc.add_note(f"stress cleanup failure: {cleanup_error}")
-        with suppress(BaseException):
-            bundle.write_json(
-                "cleanup-manifest.json",
-                {"status": "FAILED", "resources_removed": True},
-            )
+        _close_failed_stress_run(stack, bundle, exc)
         print(f"Live Matrix stress failure bundle: {bundle.directory}", file=sys.stderr)
         raise
 
@@ -6667,7 +6877,15 @@ def _run_stress_main(args: argparse.Namespace) -> None:
             baseline_comparison=baseline_comparison,
         )
 
-    stack.close(before_destructive_cleanup=snapshot_evidence)
+    try:
+        stack.close(before_destructive_cleanup=snapshot_evidence)
+    except BaseException:
+        with suppress(BaseException):
+            bundle.write_json(
+                "cleanup-manifest.json",
+                {"status": "FAILED", "resources_removed": False},
+            )
+        raise
     bundle.write_json(
         "cleanup-manifest.json",
         {"status": "PASS", "resources_removed": True},
@@ -6676,15 +6894,8 @@ def _run_stress_main(args: argparse.Namespace) -> None:
     print(json.dumps(result, sort_keys=True))
 
 
-def main() -> None:
-    """Run one trace against a fresh disposable real-server stack."""
-    if len(sys.argv) >= 4 and sys.argv[1] == "__mindroom_runtime_child__":
-        _run_mindroom_runtime_child(Path(sys.argv[2]), sys.argv[3:])
-        return
-    args = _parse_args()
-    if args.profile == "stress":
-        _run_stress_main(args)
-        return
+def _run_nonstress_main(args: argparse.Namespace) -> None:
+    """Run one fuzz, saturation, or chaos trace."""
     args.artifact_root = args.artifact_root or DEFAULT_ARTIFACT_ROOT
     nio_overlay: NioOverlay = args.nio_overlay
     scenario = _scenario_from_args(args)
@@ -6694,13 +6905,19 @@ def main() -> None:
     if reply_timeout is None:
         reply_timeout = _PROFILE_REPLY_TIMEOUTS[scenario.profile]
 
-    mindroom_revision = _required_mindroom_revision()
+    mindroom_runtime = _selected_mindroom_runtime(args.mindroom_runtime)
+    mindroom_revision = mindroom_runtime.revision
+    runner_revision = _required_runner_revision() if args.mindroom_runtime is not None else None
     run_id = f"{time.strftime('%Y%m%dT%H%M%S')}-{secrets.token_hex(4)}"
     bundle = FailureBundle.create(
         args.artifact_root,
         run_id,
         scenario=scenario,
-        provenance=_run_provenance(mindroom_revision),
+        provenance=_run_provenance(
+            mindroom_revision,
+            mindroom_root=mindroom_runtime.path,
+            runner_revision=runner_revision,
+        ),
     )
     stack = ManagedTuwunelStack(
         stream_profile=_PROFILE_STREAMS[scenario.profile],
@@ -6708,7 +6925,9 @@ def main() -> None:
         provenance_sink=bundle.update_provenance,
         artifact_directory=bundle.directory,
         nio_overlay=nio_overlay,
+        mindroom_root=mindroom_runtime.path,
         mindroom_revision=mindroom_revision,
+        runner_revision=runner_revision,
     )
     runner_holder: dict[str, LiveFuzzRunner] = {}
     try:
@@ -6758,6 +6977,18 @@ def main() -> None:
     # A passing run has no failure to preserve. Delete its bundle only after
     # teardown also succeeds, so a cleanup failure retains recovery evidence.
     bundle.discard()
+
+
+def main() -> None:
+    """Run one trace against a fresh disposable real-server stack."""
+    if len(sys.argv) >= 4 and sys.argv[1] == "__mindroom_runtime_child__":
+        _run_mindroom_runtime_child(Path(sys.argv[2]), sys.argv[3:])
+        return
+    args = _parse_args()
+    if args.profile == "stress":
+        _run_stress_main(args)
+        return
+    _run_nonstress_main(args)
 
 
 def _persist_failure_bundle(

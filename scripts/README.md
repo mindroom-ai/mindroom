@@ -52,6 +52,8 @@ uv run python scripts/testing/fuzz_live_matrix.py --nio-overlay ../mindroom-nio 
 uv run python scripts/testing/fuzz_live_matrix.py --nio-overlay ../mindroom-nio --profile chaos --seed 42 --steps 200 --clients 4 --rooms 2
 uv run python scripts/testing/fuzz_live_matrix.py --nio-overlay ../mindroom-nio --profile stress
 uv run python scripts/testing/fuzz_live_matrix.py --nio-overlay ../mindroom-nio --profile stress --threads 10 --stream-seconds 10 --waves 1
+uv run python scripts/testing/fuzz_live_matrix.py --nio-overlay ../mindroom-nio --mindroom-runtime ../mindroom-main --profile stress --write-baseline artifacts/live-matrix-stress/main-baseline.json
+uv run python scripts/testing/fuzz_live_matrix.py --nio-overlay ../mindroom-nio --profile stress --fault-mode serialize-streams
 ```
 
 The live harness requires `--nio-overlay` to name a clean exact Git checkout of mindroom-nio.
@@ -68,6 +70,8 @@ It clears only namespace data after deterministic history preparation so the fir
 Every stress run retains sanitized success or failure evidence under `artifacts/live-matrix-stress/`.
 Use `--write-baseline scripts/testing/baselines/live-matrix-stress-50x45x2.json` for three identical clean main runs before enabling `--baseline` and `--enforce-performance`.
 The first two baseline runs retain a sample collection, and the third run writes the versioned median-of-three baseline only when dispersion is within the configured 25 percent allowance.
+Use `--mindroom-runtime` to drive a separate clean exact MindRoom checkout with the current harness, which lets three exact-main runs establish a same-machine baseline before the candidate run.
+Use `--fault-mode serialize-streams` without baseline flags to prove the synchronized concurrency gate rejects deliberately serialized model streams.
 
 ### Generate and sync managed avatars
 Run MindRoom at least once before syncing so the router account exists in Matrix state.

@@ -82,6 +82,7 @@ def test_stress_profile_defaults_and_trace_round_trip() -> None:
     assert config.pulses_per_stream == 90
     assert config.waves == 2
     assert config.cache_backend == "postgres"
+    assert config.fault_mode == "none"
     assert config.expected_model_pulses == 9000
     assert StressConfig.from_json(config.to_json()) == config
 
@@ -93,6 +94,7 @@ def test_stress_profile_defaults_and_trace_round_trip() -> None:
         ({"cache_backend": "sqlite"}, "requires PostgreSQL"),
         ({"stream_seconds": 1.1, "edit_interval": 0.5}, "exactly divisible"),
         ({"history_turns": -1}, "history_turns must be non-negative"),
+        ({"fault_mode": "unknown"}, "unsupported stress fault mode"),
     ],
 )
 def test_stress_config_rejects_invalid_shapes(changes: dict[str, object], message: str) -> None:
@@ -216,6 +218,12 @@ def test_serialized_stream_fault_fails_concurrency_gate() -> None:
         controller.assert_complete()
 
 
+def test_serialized_stream_fault_round_trips_in_replay_config() -> None:
+    config = StressConfig(fault_mode="serialize-streams")
+
+    assert StressConfig.from_json(config.to_json()).fault_mode == "serialize-streams"
+
+
 def test_cancelled_stream_is_recorded_and_fails_gate() -> None:
     clock = _FakeClock()
     config = StressConfig(threads=1, waves=1, stream_seconds=2, edit_interval=0.5)
@@ -256,11 +264,22 @@ def test_baseline_round_trip_and_candidate_comparison() -> None:
     assert comparison["baseline_medians"]["source_to_final_p95_ms"] == 1000
 
 
-def test_baseline_regression_gate_cannot_be_disabled() -> None:
+def test_baseline_regression_gate_fails_when_enforced() -> None:
     baseline = _stable_baseline()
 
     with pytest.raises(AssertionError, match="stress performance regression"):
         baseline.compare(_sample(1.4))
+
+
+def test_baseline_regression_can_be_observed_without_enforcement() -> None:
+    comparison = _stable_baseline().compare(_sample(1.4), enforce=False)
+
+    assert comparison["passed"] is False
+    assert comparison["regressed_metrics"] == [
+        "source_to_final_p95_ms",
+        "source_to_final_p99_ms",
+        "throughput_responses_per_second",
+    ]
 
 
 def test_baseline_rejects_different_machine_class() -> None:

@@ -70,6 +70,7 @@ class StressConfig:
     cache_backend: Literal["postgres"] = "postgres"
     seed: int = 1
     overlapping_followups: bool = False
+    fault_mode: Literal["none", "serialize-streams"] = "none"
     barrier_timeout_seconds: float = 90.0
     settlement_timeout_seconds: float = 180.0
     resource_sample_interval_seconds: float = 0.5
@@ -85,6 +86,9 @@ class StressConfig:
             raise ValueError(msg)
         if self.cache_backend != "postgres":
             msg = "stress profile requires PostgreSQL and never falls back to SQLite"
+            raise ValueError(msg)
+        if self.fault_mode not in {"none", "serialize-streams"}:
+            msg = f"unsupported stress fault mode: {self.fault_mode}"
             raise ValueError(msg)
         _positive(self.barrier_timeout_seconds, "barrier_timeout_seconds")
         _positive(self.settlement_timeout_seconds, "settlement_timeout_seconds")
@@ -758,8 +762,9 @@ class StressBaseline:
         candidate: BaselineSample,
         *,
         machine_class: str | None = None,
+        enforce: bool = True,
     ) -> dict[str, object]:
-        """Return comparison details and fail when candidate exceeds allowance."""
+        """Return comparison details and optionally enforce the allowance."""
         candidate_machine_class = machine_class or current_machine_class()
         if candidate_machine_class != self.machine_class:
             msg = (
@@ -789,7 +794,7 @@ class StressBaseline:
             "passed": not failures,
             "regressed_metrics": failures,
         }
-        if failures:
+        if failures and enforce:
             msg = f"stress performance regression: {', '.join(failures)}"
             raise AssertionError(msg)
         return result

@@ -133,6 +133,13 @@ jobs:
           repository: mindroom-ai/mindroom-nio
           path: mindroom-nio
 
+      - name: Checkout exact current main baseline
+        uses: actions/checkout@v5
+        with:
+          path: baseline-mindroom
+          ref: main
+          lfs: true
+
       - name: Install uv
         uses: astral-sh/setup-uv@v6
 
@@ -145,12 +152,36 @@ jobs:
       - name: Install dependencies
         run: uv sync --all-extras
 
-      - name: Run full synchronized stress gate
+      - name: Run exact main baseline sample 1
+        run: >-
+          uv run python scripts/testing/fuzz_live_matrix.py
+          --nio-overlay mindroom-nio
+          --mindroom-runtime baseline-mindroom
+          --profile stress
+          --write-baseline artifacts/live-matrix-stress/main-baseline.json
+
+      - name: Run exact main baseline sample 2
+        run: >-
+          uv run python scripts/testing/fuzz_live_matrix.py
+          --nio-overlay mindroom-nio
+          --mindroom-runtime baseline-mindroom
+          --profile stress
+          --write-baseline artifacts/live-matrix-stress/main-baseline.json
+
+      - name: Run exact main baseline sample 3
+        run: >-
+          uv run python scripts/testing/fuzz_live_matrix.py
+          --nio-overlay mindroom-nio
+          --mindroom-runtime baseline-mindroom
+          --profile stress
+          --write-baseline artifacts/live-matrix-stress/main-baseline.json
+
+      - name: Run candidate synchronized stress gate
         run: >-
           uv run python scripts/testing/fuzz_live_matrix.py
           --nio-overlay mindroom-nio
           --profile stress
-          --baseline scripts/testing/baselines/live-matrix-stress-50x45x2.json
+          --baseline artifacts/live-matrix-stress/main-baseline.json
           --enforce-performance
 
       - name: Upload stress evidence
