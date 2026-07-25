@@ -56,6 +56,12 @@ def _clean_store_runtime() -> None:
     _reset_terminal_delivery_store_runtime()
 
 
+@pytest.fixture(autouse=True)
+def _fast_sync_recovery_window(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Exhaust the immediate recovery-retry budget quickly; durability is what is under test."""
+    monkeypatch.setattr("mindroom.matrix.client_delivery._SYNC_RECOVERY_RETRY_TIMEOUT_SECONDS", 0.05)
+
+
 def _config(tmp_path: Path) -> tuple[Config, RuntimePaths]:
     runtime_paths = test_runtime_paths(tmp_path)
     config = bind_runtime_paths(
