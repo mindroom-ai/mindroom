@@ -52,12 +52,12 @@ jobs:
 
     steps:
       - name: Checkout MindRoom
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           lfs: true
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v6
+        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
 
       - name: Set up Python
         run: uv python install 3.13
@@ -81,24 +81,25 @@ jobs:
 
     steps:
       - name: Checkout MindRoom
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           lfs: true
 
       - name: Checkout mindroom-nio
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           repository: mindroom-ai/mindroom-nio
           path: mindroom-nio
+          ref: 837dbc77d9a60183c08570835139d24c280c22d7
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v6
+        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
 
       - name: Set up Python
         run: uv python install 3.13
 
       - name: Install just
-        uses: extractions/setup-just@v3
+        uses: extractions/setup-just@f8a3cce218d9f83db3a2ecd90e41ac3de6cdfd9b # v3
 
       - name: Install dependencies
         run: uv sync --all-extras
@@ -116,7 +117,7 @@ jobs:
 
       - name: Upload stress evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: live-matrix-stress-smoke-${{ github.run_id }}
           path: artifacts/live-matrix-stress/
@@ -133,31 +134,32 @@ jobs:
 
     steps:
       - name: Checkout MindRoom
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           lfs: true
 
       - name: Checkout mindroom-nio
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           repository: mindroom-ai/mindroom-nio
           path: mindroom-nio
+          ref: 837dbc77d9a60183c08570835139d24c280c22d7
 
       - name: Checkout exact current main baseline
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           path: baseline-mindroom
           ref: main
           lfs: true
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v6
+        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
 
       - name: Set up Python
         run: uv python install 3.13
 
       - name: Install just
-        uses: extractions/setup-just@v3
+        uses: extractions/setup-just@f8a3cce218d9f83db3a2ecd90e41ac3de6cdfd9b # v3
 
       - name: Install dependencies
         run: uv sync --all-extras
@@ -196,7 +198,7 @@ jobs:
 
       - name: Upload stress evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: live-matrix-stress-full-${{ github.run_id }}
           path: artifacts/live-matrix-stress/
@@ -210,24 +212,25 @@ jobs:
 
     steps:
       - name: Checkout MindRoom
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           lfs: true
 
       - name: Checkout mindroom-nio
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           repository: mindroom-ai/mindroom-nio
           path: mindroom-nio
+          ref: 837dbc77d9a60183c08570835139d24c280c22d7
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v6
+        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
 
       - name: Set up Python
         run: uv python install 3.13
 
       - name: Install just
-        uses: extractions/setup-just@v3
+        uses: extractions/setup-just@f8a3cce218d9f83db3a2ecd90e41ac3de6cdfd9b # v3
 
       - name: Install dependencies
         run: uv sync --all-extras
@@ -245,7 +248,7 @@ jobs:
 
       - name: Upload soak evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: live-matrix-stress-soak-${{ github.run_id }}
           path: artifacts/live-matrix-stress/

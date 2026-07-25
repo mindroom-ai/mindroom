@@ -31,15 +31,21 @@ _MINIMUM_RESPONSE_CHARS = 64
 
 
 @dataclass
+class _AsyncCoordinationState:
+    condition: asyncio.Condition = field(default_factory=asyncio.Condition)
+    async_barrier_members: dict[str, set[str]] = field(default_factory=dict)
+    async_released_groups: set[str] = field(default_factory=set)
+    stream_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+
+
+@dataclass
 class _CoordinationState:
     sync_condition: threading.Condition = field(default_factory=threading.Condition)
     sync_barrier_members: dict[str, set[str]] = field(default_factory=dict)
     sync_released_groups: set[str] = field(default_factory=set)
     sync_stream_lock: threading.Lock = field(default_factory=threading.Lock)
-    async_condition: asyncio.Condition | None = None
-    async_barrier_members: dict[str, set[str]] = field(default_factory=dict)
-    async_released_groups: set[str] = field(default_factory=set)
-    async_stream_lock: asyncio.Lock | None = None
+    async_states: dict[asyncio.AbstractEventLoop, _AsyncCoordinationState] = field(default_factory=dict)
+    async_states_lock: threading.Lock = field(default_factory=threading.Lock)
     telemetry_lock: threading.Lock = field(default_factory=threading.Lock)
 
 
@@ -444,26 +450,31 @@ class SyntheticModel(Model):
     async def _reach_async_barrier(self, plan: SyntheticPlan, phase: str, group: str | None) -> None:
         if phase != "initial" or group is None or self.barrier_size == 0:
             return
-        condition = self._get_async_condition()
+        state = self._get_async_state()
         async with asyncio.timeout(self.barrier_timeout_seconds):
-            async with condition:
-                members = self._state.async_barrier_members.setdefault(group, set())
+            async with state.condition:
+                members = state.async_barrier_members.setdefault(group, set())
                 members.add(plan.request_id)
                 self._record("barrier_reached", plan, phase, group)
                 if len(members) >= self.barrier_size:
-                    self._state.async_released_groups.add(group)
-                    condition.notify_all()
-                await condition.wait_for(lambda: group in self._state.async_released_groups)
+                    state.async_released_groups.add(group)
+                    state.condition.notify_all()
+                await state.condition.wait_for(lambda: group in state.async_released_groups)
 
-    def _get_async_condition(self) -> asyncio.Condition:
-        if self._state.async_condition is None:
-            self._state.async_condition = asyncio.Condition()
-        return self._state.async_condition
+    def _get_async_state(self) -> _AsyncCoordinationState:
+        loop = asyncio.get_running_loop()
+        with self._state.async_states_lock:
+            closed_loops = [known_loop for known_loop in self._state.async_states if known_loop.is_closed()]
+            for closed_loop in closed_loops:
+                del self._state.async_states[closed_loop]
+            state = self._state.async_states.get(loop)
+            if state is None:
+                state = _AsyncCoordinationState()
+                self._state.async_states[loop] = state
+            return state
 
     def _get_async_stream_lock(self) -> asyncio.Lock:
-        if self._state.async_stream_lock is None:
-            self._state.async_stream_lock = asyncio.Lock()
-        return self._state.async_stream_lock
+        return self._get_async_state().stream_lock
 
     def _record(self, kind: str, plan: SyntheticPlan, phase: str, group: str | None) -> None:
         if self.telemetry_path is None:

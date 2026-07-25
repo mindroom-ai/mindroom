@@ -182,6 +182,28 @@ async def test_async_barrier_releases_one_group_together(tmp_path: Path) -> None
     assert all("request-" not in line for line in telemetry_path.read_text(encoding="utf-8").splitlines())
 
 
+def test_shared_async_coordination_isolated_between_event_loop_lifetimes(tmp_path: Path) -> None:
+    settings: dict[str, object] = {
+        "coordination_key": str(tmp_path),
+        "barrier_size": 2,
+        "barrier_group_pattern": r"wave=(\d+)",
+        "barrier_timeout_seconds": 1,
+        "serialize_streams": True,
+    }
+    models = (_model(**settings), _model(**settings))
+
+    async def run(wave: int) -> None:
+        async def consume(model: SyntheticModel, request: int) -> None:
+            messages = [Message(role="user", content=f"request-{request} wave={wave}")]
+            async for _response in model.ainvoke_stream(messages, tools=[]):
+                pass
+
+        await asyncio.gather(*(consume(model, request) for request, model in enumerate(models)))
+
+    asyncio.run(run(0))
+    asyncio.run(run(1))
+
+
 @pytest.mark.parametrize(
     ("changes", "message"),
     [
