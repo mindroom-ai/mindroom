@@ -5,9 +5,9 @@ from __future__ import annotations
 import asyncio
 import mimetypes
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
 
 import nio
@@ -46,6 +46,98 @@ class DeliveredMatrixEvent:
     content_sent: dict[str, Any]
 
 
+MatrixDeliveryFailureKind = Literal[
+    "sync_recovery",
+    "rate_limited",
+    "network",
+    "server",
+    "forbidden",
+    "not_in_room",
+    "target_missing",
+    "too_large",
+    "bad_request",
+    "local_precondition",
+    "unknown",
+]
+
+# Matrix error codes whose failure is a property of the request or the room, not
+# of the current transport window. Retrying these forever cannot make progress.
+_PERMANENT_MATRIX_ERROR_KINDS: dict[str, MatrixDeliveryFailureKind] = {
+    "M_FORBIDDEN": "forbidden",
+    "M_UNKNOWN_TOKEN": "forbidden",
+    "M_MISSING_TOKEN": "forbidden",
+    "M_USER_DEACTIVATED": "forbidden",
+    "M_BAD_STATE": "not_in_room",
+    "M_NOT_FOUND": "target_missing",
+    "M_TOO_LARGE": "too_large",
+    "M_BAD_JSON": "bad_request",
+    "M_NOT_JSON": "bad_request",
+    "M_INVALID_PARAM": "bad_request",
+    "M_UNRECOGNIZED": "bad_request",
+    "M_UNSUPPORTED_ROOM_VERSION": "bad_request",
+}
+_TRANSIENT_MATRIX_ERROR_KINDS: dict[str, MatrixDeliveryFailureKind] = {
+    "M_LIMIT_EXCEEDED": "rate_limited",
+    "M_UNKNOWN": "server",
+}
+
+
+@dataclass(frozen=True, slots=True)
+class MatrixDeliveryFailure:
+    """Classified, log-safe reason one Matrix send or edit did not land."""
+
+    kind: MatrixDeliveryFailureKind
+    detail: str
+    retry_after_seconds: float | None = None
+    error: Exception | None = field(default=None, compare=False, repr=False)
+
+    @property
+    def retryable(self) -> bool:
+        """Return whether a later attempt with the same payload could still succeed."""
+        return self.kind in {"sync_recovery", "rate_limited", "network", "server", "unknown"}
+
+
+@dataclass(frozen=True, slots=True)
+class MatrixSendOutcome:
+    """Exactly one of a delivered Matrix event or a classified delivery failure."""
+
+    delivered: DeliveredMatrixEvent | None = None
+    failure: MatrixDeliveryFailure | None = None
+
+
+def classify_matrix_send_error(response: nio.RoomSendError) -> MatrixDeliveryFailure:
+    """Classify one Matrix send error response without copying server payloads."""
+    error_code = response.status_code if isinstance(response.status_code, str) and response.status_code else "M_UNKNOWN"
+    retry_after_ms = getattr(response, "retry_after_ms", None)
+    retry_after_seconds = (
+        retry_after_ms / 1000
+        if isinstance(retry_after_ms, int | float) and not isinstance(retry_after_ms, bool)
+        else None
+    )
+    permanent_kind = _PERMANENT_MATRIX_ERROR_KINDS.get(error_code)
+    if permanent_kind is not None:
+        return MatrixDeliveryFailure(kind=permanent_kind, detail=error_code)
+    transient_kind = _TRANSIENT_MATRIX_ERROR_KINDS.get(error_code, "server")
+    return MatrixDeliveryFailure(
+        kind=transient_kind,
+        detail=error_code,
+        retry_after_seconds=retry_after_seconds,
+    )
+
+
+def classify_matrix_delivery_exception(error: Exception) -> MatrixDeliveryFailure:
+    """Classify one local Matrix delivery exception by type, never by payload."""
+    if isinstance(error, nio.SendRetryError):
+        return MatrixDeliveryFailure(kind="sync_recovery", detail="SendRetryError", error=error)
+    if isinstance(error, OlmTrustError):
+        return MatrixDeliveryFailure(kind="local_precondition", detail="OlmTrustError", error=error)
+    if isinstance(error, nio.LocalProtocolError):
+        return MatrixDeliveryFailure(kind="local_precondition", detail="LocalProtocolError", error=error)
+    if isinstance(error, (TimeoutError, ConnectionError, OSError)):
+        return MatrixDeliveryFailure(kind="network", detail=error.__class__.__name__, error=error)
+    return MatrixDeliveryFailure(kind="unknown", detail=error.__class__.__name__, error=error)
+
+
 def _sanitized_delivery_error_message(error: Exception) -> str:
     """Return a log-safe Matrix delivery failure message."""
     if isinstance(error, OlmTrustError):
@@ -71,6 +163,9 @@ def _log_matrix_delivery_exception(
     )
 
 
+_PreparedSendResult = tuple[object | None, MatrixDeliveryFailure | None]
+
+
 async def _retry_prepared_room_message_after_sync_recovery(
     send_once: Callable[[], Awaitable[object | None]],
     *,
@@ -78,16 +173,17 @@ async def _retry_prepared_room_message_after_sync_recovery(
     room_id: str,
     operation: str,
     cache_bypass: bool,
-) -> object | None:
+) -> _PreparedSendResult:
     """Retry one frozen payload within a bounded sync-recovery window."""
     loop = asyncio.get_running_loop()
     deadline = loop.time() + _SYNC_RECOVERY_RETRY_TIMEOUT_SECONDS
     delay = _SYNC_RECOVERY_RETRY_INITIAL_DELAY_SECONDS
     first_retry = True
+    exhausted = classify_matrix_delivery_exception(original_error)
     while True:
         remaining = deadline - loop.time()
         if remaining <= 0:
-            raise original_error
+            return None, exhausted
         retry_delay = min(delay, remaining)
         log = logger.warning if first_retry else logger.debug
         log(
@@ -99,13 +195,13 @@ async def _retry_prepared_room_message_after_sync_recovery(
         await asyncio.sleep(retry_delay)
         remaining = deadline - loop.time()
         if remaining <= 0:
-            raise original_error
+            return None, exhausted
         try:
-            return await asyncio.wait_for(send_once(), remaining)
+            return await asyncio.wait_for(send_once(), remaining), None
         except asyncio.CancelledError:
             raise
         except TimeoutError:
-            raise original_error from None
+            return None, exhausted
         except nio.SendRetryError:
             first_retry = False
             delay = min(delay * 2, _SYNC_RECOVERY_RETRY_MAX_DELAY_SECONDS)
@@ -116,7 +212,7 @@ async def _retry_prepared_room_message_after_sync_recovery(
                 operation=operation,
                 cache_bypass=cache_bypass,
             )
-            return None
+            return None, classify_matrix_delivery_exception(error)
 
 
 async def _send_prepared_room_message(
@@ -128,8 +224,10 @@ async def _send_prepared_room_message(
     cache_bypass: bool,
     operation: str,
     retry_sync_recovery: bool,
-) -> object | None:
+    transaction_id: str | None = None,
+) -> _PreparedSendResult:
     """Send one prepared Matrix room message and normalize local delivery exceptions."""
+    missing_access_token = MatrixDeliveryFailure(kind="local_precondition", detail="missing_access_token")
 
     async def send_once() -> object | None:
         if cache_bypass:
@@ -147,7 +245,7 @@ async def _send_prepared_room_message(
                 room_id,
                 message_type,
                 content_sent,
-                uuid4(),
+                transaction_id or uuid4(),
             )
             return await client._send(
                 nio.RoomSendResponse,
@@ -162,11 +260,12 @@ async def _send_prepared_room_message(
             room_id=room_id,
             message_type=message_type,
             content=content_sent,
+            tx_id=transaction_id,
             ignore_unverified_devices=True,
         )
 
     try:
-        return await send_once()
+        response = await send_once()
     except asyncio.CancelledError:
         raise
     except Exception as error:
@@ -184,7 +283,12 @@ async def _send_prepared_room_message(
             operation=operation,
             cache_bypass=cache_bypass,
         )
-        return None
+        # Only an exhausted recovery retry re-raises to callers, so a swallowed
+        # exception must not carry the original error forward.
+        return None, replace(classify_matrix_delivery_exception(error), error=None)
+    if response is None:
+        return None, missing_access_token
+    return response, None
 
 
 def cached_room(client: nio.AsyncClient, room_id: str) -> nio.MatrixRoom | None:
@@ -250,10 +354,48 @@ async def send_message_result(
     *,
     operation: str = "send_message",
     retry_sync_recovery: bool = False,
+    transaction_id: str | None = None,
 ) -> DeliveredMatrixEvent | None:
     """Send a message to a Matrix room and return the exact delivered payload."""
+    outcome = await send_message_outcome(
+        client,
+        room_id,
+        content,
+        operation=operation,
+        retry_sync_recovery=retry_sync_recovery,
+        transaction_id=transaction_id,
+    )
+    _reraise_sync_recovery_failure(outcome.failure)
+    return outcome.delivered
+
+
+def _reraise_sync_recovery_failure(failure: MatrixDeliveryFailure | None) -> None:
+    """Preserve the historical contract that only exhausted recovery retries raise.
+
+    A ``SendRetryError`` seen without the bounded recovery retry enabled stays
+    normalized to a ``None`` result, exactly as before classification existed.
+    """
+    if failure is None or failure.kind != "sync_recovery":
+        return
+    error = failure.error
+    if isinstance(error, BaseException):
+        raise error
+
+
+async def send_message_outcome(
+    client: nio.AsyncClient,
+    room_id: str,
+    content: dict[str, Any],
+    *,
+    operation: str = "send_message",
+    retry_sync_recovery: bool = False,
+    transaction_id: str | None = None,
+) -> MatrixSendOutcome:
+    """Send a message to a Matrix room and return its delivered payload or classified failure."""
     if not _can_send_to_encrypted_room(client, room_id, operation=operation):
-        return None
+        return MatrixSendOutcome(
+            failure=MatrixDeliveryFailure(kind="local_precondition", detail="e2ee_support_missing"),
+        )
 
     rooms = client.rooms
     room = rooms.get(room_id) if isinstance(rooms, Mapping) else None
@@ -267,7 +409,9 @@ async def send_message_result(
                 operation=operation,
                 hint="Wait for initial sync to populate nio's room cache before sending to encrypted rooms.",
             )
-            return None
+            return MatrixSendOutcome(
+                failure=MatrixDeliveryFailure(kind="local_precondition", detail="room_cache_not_synced"),
+            )
         if not (
             isinstance(encryption_state, nio.RoomGetStateEventError) and encryption_state.status_code == "M_NOT_FOUND"
         ):
@@ -277,7 +421,9 @@ async def send_message_result(
                 operation=operation,
                 hint="Unable to determine whether the room is encrypted while nio's room cache is empty.",
             )
-            return None
+            return MatrixSendOutcome(
+                failure=MatrixDeliveryFailure(kind="local_precondition", detail="room_encryption_state_unknown"),
+            )
 
     message_type = "m.room.message"
     emit_timing_event(
@@ -300,7 +446,7 @@ async def send_message_result(
         message_type=message_type,
         cache_bypass=cache_bypass,
     )
-    response = await _send_prepared_room_message(
+    response, prepared_failure = await _send_prepared_room_message(
         client,
         room_id,
         content_sent,
@@ -308,8 +454,10 @@ async def send_message_result(
         cache_bypass=cache_bypass,
         operation=operation,
         retry_sync_recovery=retry_sync_recovery,
+        transaction_id=transaction_id,
     )
     if response is None:
+        failure = prepared_failure or MatrixDeliveryFailure(kind="unknown", detail="delivery_exception")
         emit_timing_event(
             "Matrix send timing",
             phase="send_finish",
@@ -319,7 +467,7 @@ async def send_message_result(
             outcome="error",
             error="delivery_exception",
         )
-        return None
+        return MatrixSendOutcome(failure=failure)
     if isinstance(response, nio.RoomSendResponse):
         emit_timing_event(
             "Matrix send timing",
@@ -336,7 +484,9 @@ async def send_message_result(
             event_id=str(response.event_id),
             cache_bypass=cache_bypass,
         )
-        return DeliveredMatrixEvent(event_id=str(response.event_id), content_sent=content_sent)
+        return MatrixSendOutcome(
+            delivered=DeliveredMatrixEvent(event_id=str(response.event_id), content_sent=content_sent),
+        )
     emit_timing_event(
         "Matrix send timing",
         phase="send_finish",
@@ -352,7 +502,12 @@ async def send_message_result(
         error=str(response),
         cache_bypass=cache_bypass,
     )
-    return None
+    failure = (
+        classify_matrix_send_error(response)
+        if isinstance(response, nio.RoomSendError)
+        else MatrixDeliveryFailure(kind="unknown", detail=type(response).__name__)
+    )
+    return MatrixSendOutcome(failure=failure)
 
 
 def _guess_mimetype(file_path: Path) -> str:
@@ -710,8 +865,35 @@ async def edit_message_result(
     *,
     extra_content: dict[str, Any] | None = None,
     retry_sync_recovery: bool = False,
+    transaction_id: str | None = None,
 ) -> DeliveredMatrixEvent | None:
     """Edit an existing Matrix message and return the exact delivered payload."""
+    outcome = await edit_message_outcome(
+        client,
+        room_id,
+        event_id,
+        new_content,
+        new_text,
+        extra_content=extra_content,
+        retry_sync_recovery=retry_sync_recovery,
+        transaction_id=transaction_id,
+    )
+    _reraise_sync_recovery_failure(outcome.failure)
+    return outcome.delivered
+
+
+async def edit_message_outcome(
+    client: nio.AsyncClient,
+    room_id: str,
+    event_id: str,
+    new_content: dict[str, Any],
+    new_text: str,
+    *,
+    extra_content: dict[str, Any] | None = None,
+    retry_sync_recovery: bool = False,
+    transaction_id: str | None = None,
+) -> MatrixSendOutcome:
+    """Edit an existing Matrix message and return its delivered payload or classified failure."""
     edit_content = build_edit_event_content(
         event_id=event_id,
         new_content=new_content,
@@ -719,24 +901,32 @@ async def edit_message_result(
         extra_content=extra_content,
     )
 
-    return await send_message_result(
+    return await send_message_outcome(
         client,
         room_id,
         edit_content,
         operation="edit_message",
         retry_sync_recovery=retry_sync_recovery,
+        transaction_id=transaction_id,
     )
 
 
 __all__ = [
     "DeliveredMatrixEvent",
+    "MatrixDeliveryFailure",
+    "MatrixDeliveryFailureKind",
+    "MatrixSendOutcome",
     "build_edit_event_content",
     "build_threaded_edit_content",
     "cached_room",
     "can_send_to_encrypted_room",
+    "classify_matrix_delivery_exception",
+    "classify_matrix_send_error",
+    "edit_message_outcome",
     "edit_message_result",
     "send_audio_message",
     "send_file_message",
+    "send_message_outcome",
     "send_message_result",
     "send_runtime_encrypted_media_message",
 ]

@@ -63,7 +63,7 @@ from mindroom.streaming import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Iterable, Sequence
+    from collections.abc import AsyncIterator, Callable, Iterable, Sequence
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -106,12 +106,18 @@ class _InterruptedThread:
     timestamp_ms: int = field(default=0, compare=False)
 
 
+def _no_pending_terminal_deliveries(_room_id: str) -> frozenset[str]:
+    """Return no durably owned event IDs for actors without a durable delivery store."""
+    return frozenset()
+
+
 @dataclass(frozen=True)
 class StaleStreamCleanupActor:
     """One bot account that may repair its own stale messages."""
 
     client: nio.AsyncClient
     conversation_cache: ConversationCacheProtocol | None
+    pending_terminal_delivery_event_ids: Callable[[str], frozenset[str]] = _no_pending_terminal_deliveries
 
 
 @dataclass(frozen=True)
@@ -582,6 +588,16 @@ async def _process_stale_room_candidate(
         now_ms=current_time_ms,
         scan_policy=scan_policy,
     ):
+        return False, None
+    if target_event_id in actor.pending_terminal_delivery_event_ids(room_id):
+        # A durable terminal delivery already owns this message. Writing an
+        # interruption note over it would clobber a committed final response and
+        # auto-resuming would duplicate a turn that has already been answered.
+        logger.info(
+            "Skipping stale stream cleanup for durably owned terminal delivery",
+            room_id=room_id,
+            event_id=target_event_id,
+        )
         return False, None
     if scan_policy.terminal_interrupted_only and not _has_resumable_interrupted_note(state):
         return False, None

@@ -115,6 +115,8 @@ from .scheduling import (
 )
 from .startup_errors import PermanentStartupError
 from .sync_restart_retry import InterruptedTurnRooms
+from .terminal_delivery import TerminalDeliveryStore
+from .terminal_delivery_worker import TerminalDeliveryWorker, TerminalDeliveryWorkerDeps
 from .turn_controller import TurnController, TurnControllerDeps
 from .turn_policy import IngressHookRunner, TurnPolicy, TurnPolicyDeps
 from .turn_store import TurnStore, TurnStoreDeps
@@ -296,6 +298,8 @@ class AgentBot:
     _conversation_state_writer: ConversationStateWriter
     _conversation_cache: MatrixConversationCache
     _delivery_gateway: DeliveryGateway
+    _terminal_delivery_store: TerminalDeliveryStore
+    _terminal_delivery_worker: TerminalDeliveryWorker
     _response_runner: ResponseRunner
     _redacted_turn_cleanup: RedactedTurnCleanup
     _turn_store: TurnStore
@@ -458,6 +462,10 @@ class AgentBot:
                 runtime_paths=self.runtime_paths,
             ),
         )
+        self._terminal_delivery_store = TerminalDeliveryStore(
+            agent_name=self.agent_name,
+            base_path=self.storage_path / "tracking",
+        )
         self._delivery_gateway = DeliveryGateway(
             DeliveryGatewayDeps(
                 runtime=self._runtime_view,
@@ -469,6 +477,15 @@ class AgentBot:
                 response_hooks=ResponseHookService(
                     hook_context=self._hook_context_support,
                 ),
+                terminal_delivery_store=self._terminal_delivery_store,
+            ),
+        )
+        self._terminal_delivery_worker = TerminalDeliveryWorker(
+            TerminalDeliveryWorkerDeps(
+                store=self._terminal_delivery_store,
+                attempt=self._delivery_gateway.attempt_pending_terminal_delivery,
+                is_ready=self._terminal_delivery_ready,
+                logger=self.logger,
             ),
         )
         self._tool_runtime_support = ToolRuntimeSupport(
@@ -563,6 +580,7 @@ class AgentBot:
             RedactedTurnCleanupDeps(
                 conversation_cache=self._conversation_cache,
                 turn_store=self._turn_store,
+                terminal_delivery_store=self._terminal_delivery_store,
             ),
         )
         self._turn_controller = TurnController(
@@ -587,6 +605,30 @@ class AgentBot:
                 interrupted_turn_rooms=self._interrupted_turn_rooms,
             ),
         )
+
+    async def _start_durable_terminal_delivery(self) -> None:
+        """Load durable terminal-delivery state and start its retry worker.
+
+        The worker is safe to start before the first sync: ``_terminal_delivery_ready``
+        keeps it idle until this bot is running with a live, synced Matrix client.
+        """
+        recovered = await asyncio.to_thread(self._terminal_delivery_store.warm)
+        if recovered:
+            self.logger.warning("terminal_delivery_startup_recovery", recovered_count=len(recovered))
+        self._terminal_delivery_worker.start()
+
+    def _terminal_delivery_ready(self) -> bool:
+        """Return whether durable terminal delivery may talk to Matrix right now."""
+        return (
+            self.running
+            and not self._sync_shutting_down
+            and self._first_sync_done
+            and self._runtime_view.client is not None
+        )
+
+    def pending_terminal_delivery_event_ids(self, room_id: str | None = None) -> frozenset[str]:
+        """Return visible event IDs a durable terminal delivery still owns for this bot."""
+        return self._terminal_delivery_store.pending_target_event_ids(room_id)
 
     async def _wait_until_coalesced_dispatch_allowed(self, key: CoalescingKey) -> None:
         """Hold active follow-up dispatch until the response lock for its target is idle."""
@@ -1172,6 +1214,11 @@ class AgentBot:
         if first_sync_response or has_deferred_overdue_tasks():
             self._maybe_start_deferred_overdue_task_drain()
 
+        # Limited-sync timeline recovery closes its gaps while a sync response is
+        # applied, so every applied sync is the practical recovery-ready signal for
+        # durable terminal delivery. Missing one only delays the periodic scan.
+        self._terminal_delivery_worker.wake(reason="sync_response_applied")
+
     async def _on_sync_response(self, _response: nio.SyncResponse | nio.SlidingSyncResponse) -> None:
         """Track successful sync responses for health checks and watchdogs."""
         first_sync_response = not self._first_sync_done
@@ -1441,6 +1488,7 @@ class AgentBot:
             await self._set_avatar_if_available()
             # Keep durable tracking-state loading off the event loop at startup.
             await asyncio.to_thread(self._turn_store.warm)
+            await self._start_durable_terminal_delivery()
             await asyncio.to_thread(interactive.init_persistence, self.runtime_paths.storage_root)
             client = self.client
             assert client is not None
@@ -1699,6 +1747,7 @@ class AgentBot:
             )
         self._sync_shutting_down = True
         self._response_runner.refuse_pending_admissions()
+        await self._terminal_delivery_worker.stop()
         await self._cancel_startup_thread_prewarm()
         if self.agent_name == ROUTER_AGENT_NAME:
             await self._cancel_deferred_overdue_task_drain()

@@ -948,7 +948,26 @@ depends_on = [
     "mindroom.matrix.client_delivery",
     "mindroom.runtime_protocols",
     "mindroom.streaming",
+    "mindroom.terminal_delivery",
 ]
+
+[[modules]]
+path = "mindroom.terminal_delivery"
+depends_on = [
+    "mindroom.durable_write",
+    "mindroom.file_locks",
+    "mindroom.logging_config",
+    "mindroom.message_target",
+    "mindroom.tool_system.events",
+]
+
+[[modules]]
+path = "mindroom.terminal_delivery_worker"
+depends_on = [
+    "mindroom.logging_config",
+    "mindroom.terminal_delivery",
+]
+visibility = ["mindroom.bot"]
 
 [[modules]]
 path = "mindroom.edit_regenerator"
@@ -2751,6 +2770,8 @@ depends_on = [
     "mindroom.tool_system.worker_routing",
     "mindroom.turn_controller",
     "mindroom.turn_policy",
+    "mindroom.terminal_delivery",
+    "mindroom.terminal_delivery_worker",
     "mindroom.turn_store",
 ]
 
@@ -3988,13 +4009,17 @@ from = ["mindroom.matrix.to_device"]
 [[interfaces]]
 expose = [
     "DeliveredMatrixEvent",
+    "MatrixDeliveryFailure",
+    "MatrixSendOutcome",
     "build_edit_event_content",
     "build_threaded_edit_content",
     "can_send_to_encrypted_room",
     "cached_room",
+    "edit_message_outcome",
     "edit_message_result",
     "send_audio_message",
     "send_file_message",
+    "send_message_outcome",
     "send_message_result",
     "send_runtime_encrypted_media_message",
 ]
