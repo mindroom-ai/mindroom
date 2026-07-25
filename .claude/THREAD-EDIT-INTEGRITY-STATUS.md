@@ -6,9 +6,9 @@
 - Pull request: https://github.com/mindroom-ai/mindroom/pull/1641.
 - Base: `origin/main` at `66dd4f4a68bcfd1a5e43b2cac20a1b464f306ab1`.
 - Rejected frozen head: `abb8d4292672c91c4cb551772d214cdca54378e0`.
-- Current local source-reset head: `6a69cfd6d7ae95c91f24f4845c1b681bdb674946`.
-- Current remote and GitHub PR head: `577d64559eba2ab2e5ce2a973e0a12f3af47c946`.
-- Published production code head: `c0552cf5a3e7ad6a535f721623e7ee2cf2b7026a`.
+- Current production source-reset head: `6a69cfd6d7ae95c91f24f4845c1b681bdb674946`.
+- Current pushed branch and GitHub PR head before this status-only update: `b4def76b1dc00bbde8ec543dcb87714ace7362ef`.
+- Published production code head: `6a69cfd6d7ae95c91f24f4845c1b681bdb674946`.
 - Never merge this pull request.
 - Never amend or force-push.
 
@@ -17,7 +17,7 @@
 - Exact-head GitHub pytest failed `12` tests on `b39029c76e06656d53aced0f921503212cd2bfad`; that candidate is invalid.
 - All independent approvals are stale and non-gating after the review-fix commits.
 - Real-Tuwunel has not run.
-- The heavy slot is currently owned by PR #1646's exact real-Tuwunel gate.
+- The heavy slot is currently unclaimed, but PR #1646, mindroom-nio PR #20, PR #1639, and PR #1640 remain ahead in the serialized queue.
 - Every approval, CI result, and live gate before the next pushed head is invalid.
 
 ## Verified blockers
@@ -35,14 +35,15 @@
 - Raw backend coverage now poisons a thread root's explicit room plus point, recent, snapshot, and latest-edit payload identities.
 - The exact local SQLite replay for all affected contracts passes `14` tests with no fanout.
 - Focused Ruff lint and formatting pass on all changed files.
-- PostgreSQL poison and failed-test replay remain queued behind PR #1646.
+- PostgreSQL poison and failed-test replay remain queued behind the current serialized resource order.
 - Current local production source diff is `+662/-464`, net `+198` against the exact merge base.
 - The source-minimal reset and narrow certification correction are locally committed.
 - Re-run exact failed files, owning cache suites, full pytest, Tach, and all-file pre-commit under resource ownership.
-- Push small follow-up commits after verifying Git author.
+- The net `+198` correction is pushed normally through `b4def76b1dc00bbde8ec543dcb87714ace7362ef` without amend or force-push.
 - Refresh the PR body and all campaign evidence for the new exact head.
 - Remove this file only when a new exact head is frozen.
 - Run fresh exact-head native Codex and Claude with explicit `--model=claude-opus-5 --effort=high` after every code commit sequence.
+- Start the fresh Claude review only when an Opus slot is free.
 - Run real-Tuwunel only after both fresh reviews approve the same unchanged head.
 
 ## Design and source-minimality reset
@@ -61,7 +62,7 @@
 
 ## Active source-minimal reset
 
-- The published branch remains `577d64559eba2ab2e5ce2a973e0a12f3af47c946`, and the source-minimal reset is locally committed through `6a69cfd6d7ae95c91f24f4845c1b681bdb674946`.
+- The source-minimal reset is published through `b4def76b1dc00bbde8ec543dcb87714ace7362ef`, with production source ending at `6a69cfd6d7ae95c91f24f4845c1b681bdb674946`.
 - `src/mindroom/matrix/replacements.py` is the 76-line replacement-domain owner for bundled flattening, identity, scope, relation validity, canonical ordering, and content projection.
 - `event_info.py` is restored to relation facts plus the small room and state helpers.
 - Cache edit lookup now receives the full original event and a surface validator, while one cache-row decoder validates durable payload identity.
@@ -74,5 +75,6 @@
 - The exact non-PostgreSQL prior-CI files pass `15`, `13`, `18`, and `4` tests.
 - Full `tests/test_event_cache.py` and focused thread, approval, and cache-contract regressions pass.
 - That focused cache run unexpectedly exercised the available PostgreSQL parametrization while PR #1646 owned the heavy slot, so no further PostgreSQL, full-suite, hook, or live work may start until explicit release.
-- The required `/tmp/pr1641-live-tuwunel.md` gate file is currently absent after reboot, and no live command may be reconstructed or guessed.
-- The next safe step is to wait for resource ownership before the required exact PostgreSQL replay and push.
+- No durable live instructions, worktrees, handoffs, or evidence may use a temporary directory.
+- The next safe steps are to push this status-only update, refresh PR evidence, inspect current AI feedback, and start fresh exact-head reviews only when an Opus slot is free.
+- PostgreSQL, full pytest, all-file hooks, Docker, and real-Tuwunel remain prohibited until explicit resource ownership.
