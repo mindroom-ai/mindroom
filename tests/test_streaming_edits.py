@@ -180,6 +180,7 @@ class TestStreamingEdits:
         edit_event1.source = {
             "content": {
                 "body": "* @mindroom_calculator:localhost: What's 2+2? Can you show the work?",
+                "msgtype": "m.text",
                 "m.mentions": {"user_ids": ["@mindroom_calculator:localhost"]},
                 "m.relates_to": {
                     "rel_type": "m.replace",
@@ -187,9 +188,15 @@ class TestStreamingEdits:
                 },
                 "m.new_content": {
                     "body": "@mindroom_calculator:localhost: What's 2+2? Can you show the work?",
+                    "msgtype": "m.text",
                     "m.mentions": {"user_ids": ["@mindroom_calculator:localhost"]},
                 },
             },
+            "event_id": "$edit1",
+            "origin_server_ts": 1_000_001,
+            "room_id": "!test:localhost",
+            "sender": "@user:localhost",
+            "type": "m.room.message",
         }
 
         # Process edit - bot SHOULD regenerate its response.
@@ -207,6 +214,7 @@ class TestStreamingEdits:
         edit_event2.source = {
             "content": {
                 "body": "* @mindroom_calculator:localhost: What's 2+2? Can you show the work step by step?",
+                "msgtype": "m.text",
                 "m.mentions": {"user_ids": ["@mindroom_calculator:localhost"]},
                 "m.relates_to": {
                     "rel_type": "m.replace",
@@ -214,9 +222,15 @@ class TestStreamingEdits:
                 },
                 "m.new_content": {
                     "body": "@mindroom_calculator:localhost: What's 2+2? Can you show the work step by step?",
+                    "msgtype": "m.text",
                     "m.mentions": {"user_ids": ["@mindroom_calculator:localhost"]},
                 },
             },
+            "event_id": "$edit2",
+            "origin_server_ts": 1_000_002,
+            "room_id": "!test:localhost",
+            "sender": "@user:localhost",
+            "type": "m.room.message",
         }
 
         # Reset mocks again

@@ -381,22 +381,6 @@ async def test_bot_regenerates_response_on_edit(tmp_path: Path) -> None:
             "room_id": "!test:example.com",
         },
     )
-    edit_event.source = {
-        "content": {
-            "body": "* @test_agent what is 3+3?",
-            "msgtype": "m.text",
-            "m.new_content": {
-                "body": "@test_agent what is 3+3?",
-                "msgtype": "m.text",
-            },
-            "m.relates_to": {
-                "event_id": "$original:example.com",
-                "rel_type": "m.replace",
-            },
-        },
-        "event_id": "$edit:example.com",
-        "sender": "@user:example.com",
-    }
 
     # Mock the methods needed for regeneration
     mock_streaming = AsyncMock(return_value=False)
@@ -699,23 +683,6 @@ async def test_handle_message_edit_reuses_persisted_target_and_thread_scope(
             "room_id": room.room_id,
         },
     )
-    edit_event.source = {
-        "content": {
-            "body": "* updated question",
-            "msgtype": "m.text",
-            "m.new_content": {
-                "body": "updated question",
-                "msgtype": "m.text",
-            },
-            "m.relates_to": {
-                "event_id": "$original:example.com",
-                "rel_type": "m.replace",
-            },
-        },
-        "event_id": "$edit:example.com",
-        "sender": "@user:example.com",
-    }
-
     mock_generate_response = AsyncMock(side_effect=_generate_response_with_locked_callback("$response:example.com"))
     replace_edit_regenerator_deps(bot, generate_response=mock_generate_response)
     with (
@@ -944,23 +911,6 @@ async def test_team_bot_regenerates_edits_against_team_history_storage(tmp_path:
             "room_id": "!test:example.com",
         },
     )
-    edit_event.source = {
-        "content": {
-            "body": "* @test_team redo that",
-            "msgtype": "m.text",
-            "m.new_content": {
-                "body": "@test_team redo that",
-                "msgtype": "m.text",
-            },
-            "m.relates_to": {
-                "event_id": "$original:example.com",
-                "rel_type": "m.replace",
-            },
-        },
-        "event_id": "$edit:example.com",
-        "sender": "@user:example.com",
-    }
-
     storage = MagicMock()
     scheduled_tasks: list[asyncio.Task[None]] = []
 
@@ -1415,23 +1365,6 @@ async def test_handle_message_edit_rebuilds_coalesced_prompt_for_non_primary_edi
             "room_id": "!test:example.com",
         },
     )
-    edit_event.source = {
-        "content": {
-            "body": "* updated first",
-            "msgtype": "m.text",
-            "m.new_content": {
-                "body": "updated first",
-                "msgtype": "m.text",
-            },
-            "m.relates_to": {
-                "event_id": "$first:example.com",
-                "rel_type": "m.replace",
-            },
-        },
-        "event_id": "$edit:example.com",
-        "sender": "@user:example.com",
-    }
-
     mock_generate_response = AsyncMock(side_effect=_generate_response_with_locked_callback("$response:example.com"))
     replace_edit_regenerator_deps(bot, generate_response=mock_generate_response)
     with (
@@ -1564,23 +1497,6 @@ async def test_handle_message_edit_reuses_existing_response_without_placeholder_
             "room_id": "!test:example.com",
         },
     )
-    edit_event.source = {
-        "content": {
-            "body": "* @test_agent what is 3+3?",
-            "msgtype": "m.text",
-            "m.new_content": {
-                "body": "@test_agent what is 3+3?",
-                "msgtype": "m.text",
-            },
-            "m.relates_to": {
-                "event_id": "$original:example.com",
-                "rel_type": "m.replace",
-            },
-        },
-        "event_id": "$edit:example.com",
-        "sender": "@user:example.com",
-    }
-
     mock_generate_response = AsyncMock(side_effect=_generate_response_with_locked_callback("$response:example.com"))
     replace_edit_regenerator_deps(bot, generate_response=mock_generate_response)
     with (
@@ -1680,23 +1596,6 @@ async def test_handle_message_edit_does_not_remark_response_when_regeneration_is
             "room_id": "!test:example.com",
         },
     )
-    edit_event.source = {
-        "content": {
-            "body": "* @test_agent what is 3+3?",
-            "msgtype": "m.text",
-            "m.new_content": {
-                "body": "@test_agent what is 3+3?",
-                "msgtype": "m.text",
-            },
-            "m.relates_to": {
-                "event_id": "$original:example.com",
-                "rel_type": "m.replace",
-            },
-        },
-        "event_id": "$edit:example.com",
-        "sender": "@user:example.com",
-    }
-
     mock_generate_response = AsyncMock(side_effect=_generate_response_with_locked_callback(None))
     replace_edit_regenerator_deps(bot, generate_response=mock_generate_response)
     with (
@@ -1791,22 +1690,6 @@ async def test_handle_message_edit_does_not_mark_regeneration_success_when_exist
             "room_id": "!test:example.com",
         },
     )
-    edit_event.source = {
-        "content": {
-            "body": "* @test_agent what is 3+3?",
-            "msgtype": "m.text",
-            "m.new_content": {
-                "body": "@test_agent what is 3+3?",
-                "msgtype": "m.text",
-            },
-            "m.relates_to": {
-                "event_id": "$original:example.com",
-                "rel_type": "m.replace",
-            },
-        },
-        "event_id": "$edit:example.com",
-        "sender": "@user:example.com",
-    }
 
     async def fail_visible_update(request: ResponseRequest) -> str | None:
         if request.on_lifecycle_lock_acquired is not None:
@@ -1906,23 +1789,6 @@ async def test_handle_message_edit_rebuilds_coalesced_prompt_from_persisted_run_
             "room_id": "!test:example.com",
         },
     )
-    edit_event.source = {
-        "content": {
-            "body": "* updated first",
-            "msgtype": "m.text",
-            "m.new_content": {
-                "body": "updated first",
-                "msgtype": "m.text",
-            },
-            "m.relates_to": {
-                "event_id": "$first:example.com",
-                "rel_type": "m.replace",
-            },
-        },
-        "event_id": "$edit:example.com",
-        "sender": "@user:example.com",
-    }
-
     session_id = create_session_id("!test:example.com", None)
     storage = MagicMock()
     storage.get_session.return_value = AgentSession(
@@ -2237,23 +2103,6 @@ async def test_handle_message_edit_recovers_missing_ledger_row_from_interrupted_
             "room_id": "!test:example.com",
         },
     )
-    edit_event.source = {
-        "content": {
-            "body": "* updated original question",
-            "msgtype": "m.text",
-            "m.new_content": {
-                "body": "updated original question",
-                "msgtype": "m.text",
-            },
-            "m.relates_to": {
-                "event_id": "$original:example.com",
-                "rel_type": "m.replace",
-            },
-        },
-        "event_id": "$edit:example.com",
-        "sender": "@user:example.com",
-    }
-
     mock_generate_response = AsyncMock(return_value=_delivery_resolution(None))
     replace_edit_regenerator_deps(bot, generate_response=mock_generate_response)
     with (
@@ -2378,23 +2227,6 @@ async def test_handle_message_edit_uses_persisted_interrupted_response_event_id_
             "room_id": "!test:example.com",
         },
     )
-    edit_event.source = {
-        "content": {
-            "body": "* updated first",
-            "msgtype": "m.text",
-            "m.new_content": {
-                "body": "updated first",
-                "msgtype": "m.text",
-            },
-            "m.relates_to": {
-                "event_id": "$first:example.com",
-                "rel_type": "m.replace",
-            },
-        },
-        "event_id": "$edit:example.com",
-        "sender": "@user:example.com",
-    }
-
     mock_generate_response = AsyncMock(return_value=_delivery_resolution(None))
     replace_edit_regenerator_deps(bot, generate_response=mock_generate_response)
     with (
@@ -2535,23 +2367,6 @@ async def test_team_handle_message_edit_uses_persisted_interrupted_response_even
             "room_id": "!test:example.com",
         },
     )
-    edit_event.source = {
-        "content": {
-            "body": "* @test_team updated original question",
-            "msgtype": "m.text",
-            "m.new_content": {
-                "body": "@test_team updated original question",
-                "msgtype": "m.text",
-            },
-            "m.relates_to": {
-                "event_id": "$original:example.com",
-                "rel_type": "m.replace",
-            },
-        },
-        "event_id": "$edit:example.com",
-        "sender": "@user:example.com",
-    }
-
     mock_generate_response = AsyncMock(return_value=_delivery_resolution(None))
     replace_edit_regenerator_deps(bot, generate_response=mock_generate_response)
     with (
@@ -3096,23 +2911,6 @@ async def test_handle_message_edit_recovers_missing_ledger_row_from_persisted_ru
             "room_id": "!test:example.com",
         },
     )
-    edit_event.source = {
-        "content": {
-            "body": "* updated first",
-            "msgtype": "m.text",
-            "m.new_content": {
-                "body": "updated first",
-                "msgtype": "m.text",
-            },
-            "m.relates_to": {
-                "event_id": "$first:example.com",
-                "rel_type": "m.replace",
-            },
-        },
-        "event_id": "$edit:example.com",
-        "sender": "@user:example.com",
-    }
-
     session_id = create_session_id("!test:example.com", None)
     storage = _FakeAgentStorage(session=None)
     conversation_target = MessageTarget.resolve("!test:example.com", None, "$primary:example.com")
@@ -3294,23 +3092,6 @@ async def test_handle_message_edit_recovers_threaded_turn_using_resolved_context
             "room_id": "!test:example.com",
         },
     )
-    edit_event.source = {
-        "content": {
-            "body": "* updated threaded question",
-            "msgtype": "m.text",
-            "m.new_content": {
-                "body": "updated threaded question",
-                "msgtype": "m.text",
-            },
-            "m.relates_to": {
-                "event_id": "$first:example.com",
-                "rel_type": "m.replace",
-            },
-        },
-        "event_id": "$edit:example.com",
-        "sender": "@user:example.com",
-    }
-
     threaded_session_id = create_session_id("!test:example.com", "$thread_root:example.com")
     threaded_storage = _FakeAgentStorage(
         AgentSession(
@@ -3454,23 +3235,6 @@ async def test_handle_message_edit_recovers_missing_single_turn_without_rerunnin
             "room_id": "!test:example.com",
         },
     )
-    edit_event.source = {
-        "content": {
-            "body": "* updated question",
-            "msgtype": "m.text",
-            "m.new_content": {
-                "body": "updated question",
-                "msgtype": "m.text",
-            },
-            "m.relates_to": {
-                "event_id": "$original:example.com",
-                "rel_type": "m.replace",
-            },
-        },
-        "event_id": "$edit:example.com",
-        "sender": "@user:example.com",
-    }
-
     session_id = create_session_id("!test:example.com", None)
     storage = MagicMock()
     storage.get_session.return_value = AgentSession(
@@ -3684,23 +3448,6 @@ async def test_handle_message_edit_recovers_newer_run_response_event_id_after_re
             "room_id": "!test:example.com",
         },
     )
-    edit_event.source = {
-        "content": {
-            "body": "* updated original",
-            "msgtype": "m.text",
-            "m.new_content": {
-                "body": "updated original",
-                "msgtype": "m.text",
-            },
-            "m.relates_to": {
-                "event_id": "$original:example.com",
-                "rel_type": "m.replace",
-            },
-        },
-        "event_id": "$edit:example.com",
-        "sender": "@user:example.com",
-    }
-
     mock_generate_response = AsyncMock(return_value=_delivery_resolution(None))
     replace_edit_regenerator_deps(restarted_bot, generate_response=mock_generate_response)
     with (
