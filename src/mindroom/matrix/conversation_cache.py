@@ -265,14 +265,18 @@ async def _apply_cached_latest_edit(
     if event_source.get("type") != "m.room.message" or event_source_is_state_event(event_source):
         return event_source
 
-    rejected_event_ids: set[object] = set()
-    while latest_replacement := await event_cache.get_latest_edit(
-        room_id,
-        event_source,
-        validator=lambda candidate: (
-            valid_room_message_replacement(candidate) and candidate.get("event_id") not in rejected_event_ids
-        ),
-    ):
+    # A replacement can pass identity and envelope validation and still fail to resolve, for
+    # example when its sidecar cannot be hydrated. Each such candidate is excluded and the cache
+    # is asked for the next-newest one, so a broken newest edit never hides an older valid edit.
+    rejected_event_ids: set[str] = set()
+    while (
+        latest_replacement := await event_cache.get_latest_edit(
+            room_id,
+            event_source,
+            validator=valid_room_message_replacement,
+            excluded_event_ids=rejected_event_ids,
+        )
+    ) is not None:
         edited_body, edited_content = await extract_edit_body(
             latest_replacement,
             client,
@@ -282,19 +286,30 @@ async def _apply_cached_latest_edit(
             trusted_sender_ids=trusted_sender_ids,
             replacement_validator=valid_room_message_replacement,
         )
-        if edited_body is not None and edited_content is not None:
-            break
-        rejected_event_ids.add(latest_replacement["event_id"])
-    else:
-        return event_source
+        if edited_body is None or edited_content is None:
+            rejected_event_ids.add(latest_replacement["event_id"])
+            continue
+        return _event_source_with_replaced_content(
+            event_source,
+            edited_body=edited_body,
+            edited_content=edited_content,
+        )
+    return event_source
 
+
+def _event_source_with_replaced_content(
+    event_source: dict[str, Any],
+    *,
+    edited_body: str,
+    edited_content: dict[str, Any],
+) -> dict[str, Any]:
+    """Return one event source carrying its replacement's visible content."""
     original_content = event_source.get("content", {})
     projected_content = replacement_content(
         original_content if isinstance(original_content, dict) else {},
         edited_content,
     )
     projected_content.setdefault("body", edited_body)
-
     updated_event_source = {key: value for key, value in event_source.items() if isinstance(key, str)}
     updated_event_source["content"] = projected_content
     return updated_event_source

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from mindroom.matrix.replacements import ReplacementValidator, ordered_replacements
+from mindroom.matrix.replacements import ReplacementValidator, is_valid_replacement, ordered_replacements
 
 from .event_cache_events import (
     CachedEventRow,
@@ -102,7 +102,11 @@ async def load_event(
         """,
         (namespace, room_id, event_id),
     )
-    decoded = None if row is None else decode_cached_event(row[0], event_id, row[1], room_id=room_id)
+    decoded = (
+        None
+        if row is None
+        else decode_cached_event(event_json=row[0], event_id=event_id, origin_server_ts=row[1], room_id=room_id)
+    )
     return None if decoded is None else decoded.event
 
 
@@ -118,6 +122,9 @@ async def load_recent_room_events(
     """Return recent cached room events of one type, newest first."""
     if limit <= 0:
         return []
+    # The limit is applied while streaming a server-side cursor rather than in SQL so a payload
+    # that disagrees with its index cannot consume a limit slot and hide a later valid event.
+    # `decode_cached_event` stays the only place that states the payload-versus-index rule.
     cursor = db.cursor(name="mindroom_recent_room_events")
     await cursor.execute(
         """
@@ -126,13 +133,7 @@ async def load_recent_room_events(
         WHERE namespace = %s
             AND room_id = %s
             AND origin_server_ts >= %s
-            AND event_json::jsonb ->> 'event_id' = event_id
-            AND event_json::jsonb -> 'origin_server_ts' = to_jsonb(origin_server_ts)
             AND event_json::jsonb ->> 'type' = %s
-            AND (
-                NOT (event_json::jsonb ? 'room_id')
-                OR event_json::jsonb ->> 'room_id' = room_id
-            )
         ORDER BY origin_server_ts DESC, write_seq DESC
         """,
         (namespace, room_id, since_ts_ms, event_type),
@@ -140,7 +141,13 @@ async def load_recent_room_events(
     events: list[dict[str, Any]] = []
     try:
         while len(events) < limit and (row := await cursor.fetchone()) is not None:
-            if decoded := decode_cached_event(row[0], row[1], row[2], room_id=room_id):
+            decoded = decode_cached_event(
+                event_json=row[0],
+                event_id=row[1],
+                origin_server_ts=row[2],
+                room_id=room_id,
+            )
+            if decoded is not None:
                 events.append(decoded.event)
         return events
     finally:
@@ -154,17 +161,30 @@ async def load_latest_edit(
     room_id: str,
     original: dict[str, Any],
     validator: ReplacementValidator,
+    excluded_event_ids: Collection[str] = (),
 ) -> dict[str, Any] | None:
-    """Return the latest cached edit event for one original event."""
+    """Return the Matrix-latest replacement across the cached edit index and bundled metadata."""
     row = await load_latest_edit_row(
         db,
         namespace=namespace,
         room_id=room_id,
         original=original,
         validator=validator,
+        excluded_event_ids=excluded_event_ids,
     )
     candidates = () if row is None else (row.event,)
-    return next(iter(ordered_replacements(original, candidates, room_id=room_id, validator=validator)), None)
+    return next(
+        iter(
+            ordered_replacements(
+                original,
+                candidates,
+                room_id=room_id,
+                validator=validator,
+                excluded_event_ids=excluded_event_ids,
+            ),
+        ),
+        None,
+    )
 
 
 async def load_latest_edit_row(
@@ -174,6 +194,7 @@ async def load_latest_edit_row(
     room_id: str,
     original: dict[str, Any],
     validator: ReplacementValidator,
+    excluded_event_ids: Collection[str] = (),
 ) -> CachedEventRow | None:
     """Return the latest cached edit event plus its lookup-row write time."""
     original_event_id = original.get("event_id")
@@ -199,12 +220,19 @@ async def load_latest_edit_row(
     )
     try:
         while (row := await cursor.fetchone()) is not None:
-            decoded = decode_cached_event(row[0], row[2], row[3], room_id=room_id, cached_at=row[1])
-            if decoded is not None and decoded.event in ordered_replacements(
+            decoded = decode_cached_event(
+                event_json=row[0],
+                cached_at=row[1],
+                event_id=row[2],
+                origin_server_ts=row[3],
+                room_id=room_id,
+            )
+            if decoded is not None and is_valid_replacement(
                 original,
-                (decoded.event,),
+                decoded.event,
                 room_id=room_id,
                 validator=validator,
+                excluded_event_ids=excluded_event_ids,
             ):
                 return decoded
         return None
@@ -303,9 +331,9 @@ async def persist_mxc_text(
         (namespace, room_id, event_id, mxc_url),
     )
     if owns_plaintext is None or not cached_event_owns_mxc(
-        owns_plaintext[0],
-        event_id,
-        owns_plaintext[1],
+        event_json=owns_plaintext[0],
+        event_id=event_id,
+        origin_server_ts=owns_plaintext[1],
         room_id=room_id,
         mxc_url=mxc_url,
     ):

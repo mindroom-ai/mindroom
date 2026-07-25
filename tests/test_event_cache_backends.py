@@ -2809,3 +2809,43 @@ def test_event_cache_runtime_identity_uses_shared_postgres_redaction() -> None:
     )
 
     assert identity.redacted_location == "postgresql://db.internal/mindroom?user=cache&password=***"
+
+
+@pytest.mark.asyncio
+async def test_sqlite_tombstone_lookup_chunks_beyond_host_parameter_limit(tmp_path: Path) -> None:
+    """A whole-thread tombstone lookup must not exceed SQLite's host-parameter budget.
+
+    Thread resolution asks for one candidate per raw row, and long agent threads hold one
+    ``m.replace`` row per streaming edit, so the candidate set outgrows what SQLite accepts in a
+    single ``IN (...)`` statement. Without chunking this raises ``too many SQL variables`` and the
+    whole thread read fails.
+    """
+    room_id = "!room:localhost"
+    cache = SqliteEventCache(tmp_path / "event_cache.db")
+    await cache.initialize()
+    try:
+        redacted_event_id = "$redacted-late"
+        await cache.store_events_batch(
+            [
+                (
+                    redacted_event_id,
+                    room_id,
+                    {
+                        "event_id": redacted_event_id,
+                        "room_id": room_id,
+                        "sender": "@agent:localhost",
+                        "type": "m.room.message",
+                        "origin_server_ts": 1000,
+                        "content": {"body": "doomed", "msgtype": "m.text"},
+                    },
+                ),
+            ],
+        )
+        assert await cache.redact_event(room_id, redacted_event_id)
+
+        # Sorting places the tombstoned ID in a late chunk, so a lookup that silently dropped
+        # trailing chunks would report it as surviving.
+        candidate_event_ids = {f"$event-{index:06d}" for index in range(40_000)} | {redacted_event_id}
+        assert await cache.redacted_event_ids(room_id, candidate_event_ids) == frozenset({redacted_event_id})
+    finally:
+        await cache.close()

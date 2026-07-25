@@ -133,8 +133,9 @@ class ConversationEventCache(Protocol):
         original: dict[str, Any],
         *,
         validator: ReplacementValidator,
+        excluded_event_ids: Collection[str] = (),
     ) -> dict[str, Any] | None:
-        """Return the latest cached edit event for one original event."""
+        """Return the Matrix-latest replacement of one original, skipping excluded candidates."""
 
     async def get_latest_agent_message_snapshot(
         self,

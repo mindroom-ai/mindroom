@@ -12,7 +12,7 @@ from mindroom.matrix.cache.event_cache_events import decode_cached_event
 from mindroom.matrix.cache.event_normalization import normalize_event_source_for_cache
 from mindroom.matrix.cache.thread_cache_state import thread_cache_state_row, thread_revision_row
 from mindroom.matrix.media import valid_room_message_replacement
-from mindroom.matrix.replacements import ordered_replacements
+from mindroom.matrix.replacements import is_valid_replacement, ordered_replacements
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -84,9 +84,9 @@ def test_decode_cached_event_rejects_index_timestamp_mismatch() -> None:
 
     assert (
         decode_cached_event(
-            json.dumps(event),
-            "$edit",
-            3000,
+            event_json=json.dumps(event),
+            event_id="$edit",
+            origin_server_ts=3000,
             room_id="!room:localhost",
         )
         is None
@@ -236,4 +236,84 @@ def test_ordered_replacements_rejects_malformed_explicit_room_ids(
             validator=valid_room_message_replacement,
         )
         == []
+    )
+
+
+def _replaceable_original(**extra: object) -> dict[str, object]:
+    """Return one plain original message that a same-sender replacement may target."""
+    return {
+        "event_id": "$original",
+        "sender": "@alice:localhost",
+        "origin_server_ts": 1000,
+        "type": "m.room.message",
+        "content": {"body": "Original", "msgtype": "m.text"},
+        **extra,
+    }
+
+
+def _replacement(event_id: str, timestamp: int, **extra: object) -> dict[str, object]:
+    """Return one well-formed replacement of ``$original``."""
+    return {
+        "event_id": event_id,
+        "sender": "@alice:localhost",
+        "origin_server_ts": timestamp,
+        "type": "m.room.message",
+        "content": {
+            "body": f"* {event_id}",
+            "msgtype": "m.text",
+            "m.new_content": {"body": event_id, "msgtype": "m.text"},
+            "m.relates_to": {"rel_type": "m.replace", "event_id": "$original"},
+        },
+        **extra,
+    }
+
+
+def test_is_valid_replacement_ignores_a_valid_bundled_sibling() -> None:
+    """Validating one candidate must not pass because a different candidate is valid.
+
+    Cache backends ask this per joined row while scanning the edit index. Answering from the
+    original's bundled aggregation instead of the row under test would admit a forged row
+    whenever the original happened to carry any valid bundled replacement.
+    """
+    original = _replaceable_original(
+        unsigned={"m.relations": {"m.replace": _replacement("$bundled", 3000)}},
+    )
+    forged = _replacement("$forged", 4000) | {"sender": "@mallory:localhost"}
+
+    assert is_valid_replacement(
+        original,
+        _replacement("$cached", 2000),
+        room_id=None,
+        validator=valid_room_message_replacement,
+    )
+    assert not is_valid_replacement(
+        original,
+        forged,
+        room_id=None,
+        validator=valid_room_message_replacement,
+    )
+    # The bundled sibling is still selected by the ordering seam that is allowed to see it.
+    assert (
+        ordered_replacements(
+            original,
+            [forged],
+            room_id=None,
+            validator=valid_room_message_replacement,
+        )[0]["event_id"]
+        == "$bundled"
+    )
+
+
+def test_is_valid_replacement_honors_excluded_event_ids() -> None:
+    """An excluded candidate is not a usable replacement even when it is otherwise valid."""
+    original = _replaceable_original()
+    candidate = _replacement("$edit", 2000)
+
+    assert is_valid_replacement(original, candidate, room_id=None, validator=valid_room_message_replacement)
+    assert not is_valid_replacement(
+        original,
+        candidate,
+        room_id=None,
+        validator=valid_room_message_replacement,
+        excluded_event_ids={"$edit"},
     )

@@ -245,6 +245,11 @@ class ThreadMutationResolver:
             event_info = EventInfo.from_event(event_source)
             supports_relations = event_type_supports_thread_relations(event_info.event_type)
             if supports_relations and not event_source_supports_thread_relations(event_source, room_id):
+                # A state or wrong-room event claiming a message type must never contribute
+                # relations, but its ID still has to occupy the page so later resolution cannot
+                # fall through to an authoritative fetch and trust it. The relation-free
+                # placeholder carries no event type, which `conversation_relation_thread_membership_access`
+                # rejects as an unusable relation ancestor, so any walk reaching it stays indeterminate.
                 page_event_infos[event_id] = EventInfo.from_event(None)
                 continue
             page_event_infos[event_id] = event_info

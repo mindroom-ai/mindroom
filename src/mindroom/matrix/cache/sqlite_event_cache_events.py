@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from mindroom.matrix.replacements import ReplacementValidator, ordered_replacements
+from mindroom.matrix.replacements import ReplacementValidator, is_valid_replacement, ordered_replacements
 
 from .event_cache_events import (
     CachedEventRow,
@@ -13,7 +13,6 @@ from .event_cache_events import (
     cache_rows_were_deleted,
     cached_event_owns_mxc,
     decode_cached_event,
-    decode_cached_events,
     event_edit_rows,
     event_mxc_urls,
     event_thread_rows,
@@ -27,6 +26,10 @@ if TYPE_CHECKING:
     from collections.abc import Collection
 
     import aiosqlite
+
+# SQLite refuses a statement with more than SQLITE_MAX_VARIABLE_NUMBER host parameters (999 before
+# SQLite 3.32, 32766 after). Stay well under the older bound so the chunk size holds on any host.
+_MAX_SQLITE_QUERY_IDS = 900
 
 _MXC_TEXT_REFERENCE_BATCH_SIZE = 400
 _ROOM_CONTENT_TABLES = (
@@ -103,7 +106,11 @@ async def load_event(
     )
     row = await cursor.fetchone()
     await cursor.close()
-    decoded = None if row is None else decode_cached_event(row[0], event_id, row[1], room_id=room_id)
+    decoded = (
+        None
+        if row is None
+        else decode_cached_event(event_json=row[0], event_id=event_id, origin_server_ts=row[1], room_id=room_id)
+    )
     return None if decoded is None else decoded.event
 
 
@@ -119,6 +126,9 @@ async def load_recent_room_events(
     """Return recent events from one principal-owned room."""
     if limit <= 0:
         return []
+    # The limit is applied while streaming rather than in SQL so a payload that disagrees with its
+    # index cannot consume a limit slot and hide a later valid event. `decode_cached_event` stays
+    # the only place that states the payload-versus-index rule.
     cursor = await db.execute(
         """
         SELECT event_json, event_id, origin_server_ts
@@ -126,23 +136,25 @@ async def load_recent_room_events(
         WHERE principal_id = ?
             AND room_id = ?
             AND origin_server_ts >= ?
-            AND json_type(event_json, '$.event_id') = 'text'
-            AND json_extract(event_json, '$.event_id') = event_id
-            AND json_type(event_json, '$.origin_server_ts') = 'integer'
-            AND json_extract(event_json, '$.origin_server_ts') = origin_server_ts
             AND json_extract(event_json, '$.type') = ?
-            AND (
-                json_type(event_json, '$.room_id') IS NULL
-                OR json_extract(event_json, '$.room_id') = room_id
-            )
         ORDER BY origin_server_ts DESC, write_seq DESC
-        LIMIT ?
         """,
-        (principal_id, room_id, since_ts_ms, event_type, limit),
+        (principal_id, room_id, since_ts_ms, event_type),
     )
-    rows = await cursor.fetchall()
-    await cursor.close()
-    return decode_cached_events(rows, room_id=room_id)
+    events: list[dict[str, Any]] = []
+    try:
+        while len(events) < limit and (row := await cursor.fetchone()) is not None:
+            decoded = decode_cached_event(
+                event_json=row[0],
+                event_id=row[1],
+                origin_server_ts=row[2],
+                room_id=room_id,
+            )
+            if decoded is not None:
+                events.append(decoded.event)
+        return events
+    finally:
+        await cursor.close()
 
 
 async def load_latest_edit(
@@ -152,17 +164,30 @@ async def load_latest_edit(
     room_id: str,
     original: dict[str, Any],
     validator: ReplacementValidator,
+    excluded_event_ids: Collection[str] = (),
 ) -> dict[str, Any] | None:
-    """Return the latest principal- and room-scoped edit."""
+    """Return the Matrix-latest replacement across the cached edit index and bundled metadata."""
     row = await load_latest_edit_row(
         db,
         principal_id=principal_id,
         room_id=room_id,
         original=original,
         validator=validator,
+        excluded_event_ids=excluded_event_ids,
     )
     candidates = () if row is None else (row.event,)
-    return next(iter(ordered_replacements(original, candidates, room_id=room_id, validator=validator)), None)
+    return next(
+        iter(
+            ordered_replacements(
+                original,
+                candidates,
+                room_id=room_id,
+                validator=validator,
+                excluded_event_ids=excluded_event_ids,
+            ),
+        ),
+        None,
+    )
 
 
 async def load_latest_edit_row(
@@ -172,6 +197,7 @@ async def load_latest_edit_row(
     room_id: str,
     original: dict[str, Any],
     validator: ReplacementValidator,
+    excluded_event_ids: Collection[str] = (),
 ) -> CachedEventRow | None:
     """Return the latest edit and its write time within one ownership scope."""
     original_event_id = original.get("event_id")
@@ -196,12 +222,19 @@ async def load_latest_edit_row(
     )
     try:
         while (row := await cursor.fetchone()) is not None:
-            decoded = decode_cached_event(row[0], row[2], row[3], room_id=room_id, cached_at=row[1])
-            if decoded is not None and decoded.event in ordered_replacements(
+            decoded = decode_cached_event(
+                event_json=row[0],
+                cached_at=row[1],
+                event_id=row[2],
+                origin_server_ts=row[3],
+                room_id=room_id,
+            )
+            if decoded is not None and is_valid_replacement(
                 original,
-                (decoded.event,),
+                decoded.event,
                 room_id=room_id,
                 validator=validator,
+                excluded_event_ids=excluded_event_ids,
             ):
                 return decoded
         return None
@@ -299,9 +332,9 @@ async def _event_owns_mxc_text(
     owns_plaintext = await cursor.fetchone()
     await cursor.close()
     return owns_plaintext is not None and cached_event_owns_mxc(
-        owns_plaintext[0],
-        event_id,
-        owns_plaintext[1],
+        event_json=owns_plaintext[0],
+        event_id=event_id,
+        origin_server_ts=owns_plaintext[1],
         room_id=room_id,
         mxc_url=mxc_url,
     )
@@ -922,21 +955,29 @@ async def redacted_event_ids(
     *,
     event_ids: frozenset[str],
 ) -> frozenset[str]:
-    """Return the subset of candidate event IDs that are durably tombstoned."""
-    if not event_ids:
-        return frozenset()
-    placeholders = ",".join("?" for _ in event_ids)
-    cursor = await db.execute(
-        f"""
-        SELECT event_id
-        FROM redacted_events
-        WHERE principal_id = ? AND room_id = ? AND event_id IN ({placeholders})
-        """,  # noqa: S608
-        (principal_id, room_id, *sorted(event_ids)),
-    )
-    rows = await cursor.fetchall()
-    await cursor.close()
-    return frozenset(str(row[0]) for row in rows)
+    """Return the subset of candidate event IDs that are durably tombstoned.
+
+    Callers resolving a whole thread pass one candidate per raw row, and long agent threads hold
+    one ``m.replace`` row per streaming edit, so the candidate set routinely outgrows one
+    statement's host-parameter budget and the lookup is issued in bounded chunks.
+    """
+    sorted_event_ids = sorted(event_ids)
+    tombstoned: set[str] = set()
+    for start in range(0, len(sorted_event_ids), _MAX_SQLITE_QUERY_IDS):
+        chunk = sorted_event_ids[start : start + _MAX_SQLITE_QUERY_IDS]
+        placeholders = ",".join("?" for _ in chunk)
+        cursor = await db.execute(
+            f"""
+            SELECT event_id
+            FROM redacted_events
+            WHERE principal_id = ? AND room_id = ? AND event_id IN ({placeholders})
+            """,  # noqa: S608
+            (principal_id, room_id, *chunk),
+        )
+        rows = await cursor.fetchall()
+        await cursor.close()
+        tombstoned.update(str(row[0]) for row in rows)
+    return frozenset(tombstoned)
 
 
 async def _mxc_urls_for_events(

@@ -118,11 +118,11 @@ async def _next_decoded_snapshot_row(
     """Return the next cache row whose payload matches its authoritative indexes."""
     while (row := await next_row()) is not None:
         decoded = decode_cached_event(
-            row[0],
-            row[2],
-            row[3],
-            room_id=room_id,
+            event_json=row[0],
             cached_at=row[1],
+            event_id=row[2],
+            origin_server_ts=row[3],
+            room_id=room_id,
         )
         if decoded is not None:
             return decoded
@@ -166,7 +166,14 @@ async def _load_thread_agent_message_snapshot(
     sender: str,
     runtime_started_at: float | None,
 ) -> AgentMessageSnapshot | None:
-    """Resolve one complete indexed thread graph before selecting its latest message."""
+    """Resolve one complete indexed thread graph before selecting its latest message.
+
+    Unlike the room scope this cannot stop at the first scope match. Membership can be indirect
+    (a reply to a reply to a threaded event), and the ancestors that prove it are older, so they
+    arrive after the candidate in this newest-first scan. Returning early would answer with a
+    lower row whenever the newest row is an indirect member, so the whole indexed thread is
+    resolved first and the newest proven member wins.
+    """
     decoded_rows: list[CachedEventRow] = []
     while (decoded := await _next_decoded_snapshot_row(next_row=next_row, room_id=room_id)) is not None:
         decoded_rows.append(decoded)

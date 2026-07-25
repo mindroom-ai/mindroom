@@ -24,6 +24,12 @@ SQLite uses `BINARY` event-ID ordering, and PostgreSQL uses bytewise `COLLATE "C
 
 PostgreSQL latest-edit and recent-event fallback scans use server-side cursors so malformed index-compatible JSON values cannot exhaust a client-side result set or hide later valid rows.
 
+Recent-event reads on both backends apply their limit while streaming instead of in SQL, so a payload that disagrees with its index cannot consume a limit slot and hide a later valid event.
+
+`decode_cached_event` is the only statement of the payload-versus-index rule; backend SQL narrows by scope and type but never restates that rule.
+
+Room-scoped tombstone lookups chunk their candidate IDs, because resolving one thread can present more candidates than SQLite accepts host parameters in a single statement.
+
 PostgreSQL schema version 3 retains `idx_mindroom_event_cache_event_edits_room_original_ts` as its single latest-edit narrowing index because explicit query-level `COLLATE "C"` owns the equal-timestamp tie-break.
 
 ## Startup maintenance

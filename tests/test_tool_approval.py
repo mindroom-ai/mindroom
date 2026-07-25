@@ -56,7 +56,7 @@ from tests.event_cache_test_support import get_latest_edit
 from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
-    from collections.abc import Generator
+    from collections.abc import Collection, Generator
     from pathlib import Path
 
 
@@ -73,12 +73,14 @@ class FakeEventCache:
         original: dict[str, Any],
         *,
         validator: ReplacementValidator,
+        excluded_event_ids: Collection[str] = (),
     ) -> dict[str, Any] | None:
         edits = ordered_replacements(
             original,
             (event for (event_room_id, _), event in self.events.items() if event_room_id == room_id),
             room_id=room_id,
             validator=validator,
+            excluded_event_ids=excluded_event_ids,
         )
         return edits[0] if edits else None
 

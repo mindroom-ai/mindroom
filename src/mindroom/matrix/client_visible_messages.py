@@ -452,10 +452,12 @@ async def resolve_latest_visible_messages(
         ):
             continue
 
-        bundled_candidates = edit_candidates_by_original_event_id.setdefault(event.event_id, [])
-        bundled_candidates.extend(replacements.bundled_replacement_candidates(event.source))
         if event.event_id in messages_by_event_id:
             continue
+
+        bundled_candidates = replacements.bundled_replacement_candidates(event.source)
+        if bundled_candidates:
+            edit_candidates_by_original_event_id.setdefault(event.event_id, []).extend(bundled_candidates)
 
         message_data = await extract_and_resolve_message(
             event,

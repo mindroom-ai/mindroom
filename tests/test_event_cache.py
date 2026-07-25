@@ -3256,6 +3256,71 @@ async def test_latest_edit_equal_timestamp_uses_greatest_event_id(
 
 
 @pytest.mark.asyncio
+async def test_latest_edit_excludes_candidates_the_caller_already_rejected(
+    event_cache: ConversationEventCache,
+) -> None:
+    """Excluding an unresolvable newest replacement must surface the next-newest valid one.
+
+    A replacement can pass identity and envelope validation and still fail to resolve, for
+    example when its sidecar cannot be hydrated. Callers exclude it and ask again, so a broken
+    newest edit must never hide an older valid edit.
+    """
+    room_id = "!room:localhost"
+    original_event_id = "$original"
+
+    def edit(event_id: str, body: str, timestamp: int) -> nio.RoomMessageText:
+        return _make_text_event(
+            event_id=event_id,
+            sender="@alice:localhost",
+            body=f"* {body}",
+            server_timestamp=timestamp,
+            source_content={
+                "body": f"* {body}",
+                "m.new_content": {"body": body, "msgtype": "m.text"},
+                "m.relates_to": {"rel_type": "m.replace", "event_id": original_event_id},
+            },
+        )
+
+    older_edit = edit("$older-edit", "Older", 2000)
+    newest_edit = edit("$newest-edit", "Newest", 3000)
+    await event_cache.store_event(older_edit.event_id, room_id, _cache_source(older_edit))
+    await event_cache.store_event(newest_edit.event_id, room_id, _cache_source(newest_edit))
+
+    unfiltered = await get_latest_edit(
+        event_cache,
+        room_id,
+        original_event_id,
+        sender="@alice:localhost",
+        event_type="m.room.message",
+    )
+    assert unfiltered is not None
+    assert unfiltered["event_id"] == "$newest-edit"
+
+    fallback = await get_latest_edit(
+        event_cache,
+        room_id,
+        original_event_id,
+        sender="@alice:localhost",
+        event_type="m.room.message",
+        excluded_event_ids={"$newest-edit"},
+    )
+    assert fallback is not None
+    assert fallback["event_id"] == "$older-edit"
+
+    assert (
+        await get_latest_edit(
+            event_cache,
+            room_id,
+            original_event_id,
+            sender="@alice:localhost",
+            event_type="m.room.message",
+            excluded_event_ids={"$newest-edit", "$older-edit"},
+        )
+        is None
+    )
+
+
+@pytest.mark.asyncio
 async def test_latest_edit_requires_sender_scope_when_newer_edit_is_untrusted(
     event_cache: ConversationEventCache,
 ) -> None:

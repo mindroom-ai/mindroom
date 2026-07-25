@@ -75,6 +75,9 @@ Interactive-selection discovery aliases remain separate from canonical source id
 Coalesced router relays persist each human discovery alias on its physical source metadata so later edits and redactions update the owned prompt.
 Per-source Matrix revision tuples keep durable edit facts newest-wins across retries and restarts.
 `EditRegenerator` groups edits by room, response anchor, and requester in a bounded per-response mailbox.
+An edit only regenerates when the editor is the persisted requester of that exact source event, so one member of a coalesced turn cannot replay another member's prompt.
+A coalesced turn whose ledger record holds no per-source metadata fails closed and regenerates nothing.
+An edit whose explicit event room disagrees with the authoritative Matrix room is rejected before regeneration, and inline replacement content is validated as a real Matrix replacement before it can become a prompt.
 One draining owner folds each source's newest Matrix revision into a complete response request and loops when newer edits arrive.
 Physical source IDs are exclusive turn claims, while discovery aliases are advisory settlement keys observed by `wait_for_turn_settled`.
 A sync-restart cancellation leaves its revision uncommitted and records the room in `InterruptedTurnRooms`, so the replacement runtime's recovery re-drives the turn instead of losing it.
