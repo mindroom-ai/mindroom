@@ -312,7 +312,8 @@ class EditRegenerator:
         def retry_after_sync_restart() -> None:
             applied.clear()
             self.deps.turn_store.remove_stale_runs_for_edit(turn_record=record, requester_user_id=requester_id)
-            self.deps.restart_retry.register(driving_edit.revision[1], driving_edit.retry, room_id=room.room_id)
+            for pending_edit in mailbox.pending.values():
+                self.deps.restart_retry.register(pending_edit.revision[1], pending_edit.retry, room_id=room.room_id)
 
         return (
             ResponseRequest(

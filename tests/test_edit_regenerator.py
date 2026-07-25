@@ -34,6 +34,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
+    from mindroom.hooks import MessageEnvelope
 
 AGENT_NAME = "assistant"
 ROOM_ID = "!room:example.org"
@@ -1125,6 +1126,92 @@ async def test_sync_restart_cancellation_retries_without_committing_interrupted_
         ),
         requester_user_id=USER_ID,
     )
+
+
+@pytest.mark.asyncio
+async def test_sync_restart_retries_waiting_coalesced_sibling(tmp_path: Path) -> None:
+    """Restart cancellation must requeue every source waiting in the mailbox."""
+    first_event_id = "$m1:example.org"
+    second_event_id = "$m2:example.org"
+    harness = _harness(
+        tmp_path,
+        turn_record=_turn_record(
+            source_event_ids=(first_event_id, second_event_id),
+            source_event_prompts={
+                first_event_id: "first base",
+                second_event_id: "second base",
+            },
+        ),
+    )
+    generation_started = asyncio.Event()
+    cancel_generation = asyncio.Event()
+    sibling_hook_finished = asyncio.Event()
+    attempts = 0
+    hook_calls = 0
+
+    async def hook(*, envelope: MessageEnvelope, **_kwargs: object) -> bool:
+        nonlocal hook_calls
+        assert envelope.requester_id == USER_ID
+        hook_calls += 1
+        if hook_calls == 2:
+            sibling_hook_finished.set()
+        return False
+
+    async def interrupt_then_succeed(request: ResponseRequest) -> str:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            generation_started.set()
+            await cancel_generation.wait()
+            assert request.on_sync_restart_cancelled is not None
+            assert request.on_deferred_outcome_handled is not None
+            request.on_sync_restart_cancelled()
+            request.on_deferred_outcome_handled("$interrupted:example.org")
+            raise asyncio.CancelledError
+        return NEW_RESPONSE_EVENT_ID
+
+    harness.ingress_hook_runner.emit_message_received_hooks.side_effect = hook
+    harness.generate_response.side_effect = interrupt_then_succeed
+    first, first_info = _edit_event(
+        original_event_id=first_event_id,
+        new_body="first edited",
+        event_id="$edit-first:example.org",
+        server_timestamp=1_000_010,
+    )
+    second, second_info = _edit_event(
+        original_event_id=second_event_id,
+        new_body="second edited",
+        event_id="$edit-second:example.org",
+        server_timestamp=1_000_020,
+    )
+
+    first_task = asyncio.create_task(_handle_edit(harness, first, first_info))
+    await asyncio.wait_for(generation_started.wait(), timeout=1)
+    second_task = asyncio.create_task(_handle_edit(harness, second, second_info))
+    await asyncio.wait_for(sibling_hook_finished.wait(), timeout=1)
+    second_task.cancel()
+    cancel_generation.set()
+    with pytest.raises(asyncio.CancelledError):
+        await second_task
+    with pytest.raises(asyncio.CancelledError):
+        await first_task
+
+    assert harness.restart_retry.has_pending is True
+    assert harness.regenerator._mailboxes == {}
+    await asyncio.wait_for(harness.restart_retry.flush(), timeout=2)
+
+    assert attempts == 3
+    recorded = harness.turn_store.record_turn.call_args.args[0]
+    assert recorded.source_event_prompts == {
+        first_event_id: "first edited",
+        second_event_id: "second edited",
+    }
+    assert recorded.source_event_revisions == {
+        first_event_id: (1_000_010, "$edit-first:example.org"),
+        second_event_id: (1_000_020, "$edit-second:example.org"),
+    }
+    assert harness.restart_retry.has_pending is False
+    assert harness.regenerator._mailboxes == {}
 
 
 @pytest.mark.asyncio
