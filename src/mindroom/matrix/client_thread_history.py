@@ -1861,7 +1861,12 @@ async def get_room_threads_page(
     if not isinstance(response, RoomThreadsResponse):
         raise _room_threads_page_error_from_response(response)
 
-    return response.thread_roots, response.next_batch
+    thread_roots = [
+        event
+        for event in response.thread_roots
+        if not event_source_is_state_event(event.source) and event_source_matches_room(event.source, room_id)
+    ]
+    return thread_roots, response.next_batch
 
 
 def _append_unique_thread_root_ids(

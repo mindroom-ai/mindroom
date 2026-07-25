@@ -1666,6 +1666,33 @@ async def test_cleanup_uses_scanned_history_when_edited_bot_message_lacks_visibl
 
 
 @pytest.mark.asyncio
+async def test_cleanup_does_not_synthesize_missing_original_from_edit_only_history(tmp_path: Path) -> None:
+    """A bounded scan containing only an edit must not create a visible cleanup target."""
+    config = _make_config(tmp_path)
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.room_messages.return_value = _room_messages_response(
+        _make_message_event(
+            event_id="$latest-edit",
+            body="* Needs cleanup",
+            timestamp_ms=NOW_MS - STALE_AGE_MS,
+            relates_to={"rel_type": "m.replace", "event_id": "$outside-scan-original"},
+            new_content={"body": "Needs cleanup", "msgtype": "m.text", STREAM_STATUS_KEY: "streaming"},
+        ),
+    )
+    client.room_get_event_relations = MagicMock(return_value=_aiter())
+
+    with patch(
+        "mindroom.matrix.stale_stream_cleanup.edit_message_result",
+        new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit")),
+    ) as mock_edit:
+        cleaned, interrupted = await _run_cleanup(client, config, joined_rooms=[ROOM_ID])
+
+    assert cleaned == 0
+    assert interrupted == []
+    mock_edit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_cleanup_follows_agent_reply_chain_outside_scanned_history(tmp_path: Path) -> None:
     """Cleanup should fetch the exact reply chain until it reaches the original human requester."""
     config = _make_config(tmp_path)

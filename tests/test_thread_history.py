@@ -3027,7 +3027,31 @@ async def test_get_room_threads_page_uses_single_threads_request() -> None:
             "content": {"msgtype": "m.text", "body": "Thread root"},
         },
     )
-    response = RoomThreadsResponse("!room:localhost", [thread_root], next_page)
+    wrong_room_root = nio.RoomMessageText.from_dict(
+        {
+            "type": "m.room.message",
+            "event_id": "$wrong_room",
+            "room_id": "!other:localhost",
+            "sender": "@alice:localhost",
+            "origin_server_ts": 1235,
+            "content": {"msgtype": "m.text", "body": "Wrong room"},
+        },
+    )
+    state_root = nio.RoomMessageText.from_dict(
+        {
+            "type": "m.room.message",
+            "event_id": "$state",
+            "state_key": "",
+            "sender": "@alice:localhost",
+            "origin_server_ts": 1236,
+            "content": {"msgtype": "m.text", "body": "State"},
+        },
+    )
+    response = RoomThreadsResponse(
+        "!room:localhost",
+        [wrong_room_root, state_root, thread_root],
+        next_page,
+    )
     client._send = AsyncMock(return_value=response)
 
     with patch(
