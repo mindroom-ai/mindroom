@@ -1531,3 +1531,69 @@ async def test_incomplete_published_metadata_still_preserves_its_collection(
     await _manager(config)._open_candidate_run()
 
     assert published_collection in _FakeVectorDb.store
+
+
+@pytest.mark.asyncio
+async def test_candidate_cleanup_does_not_report_the_bases_own_default_collection(
+    tmp_path: Path,
+) -> None:
+    """Skipping the default collection is not an ownership failure.
+
+    Candidate-only cleanup deliberately leaves the default collection alone.
+    Reporting it as unprovably owned on every refresh tells operators their own
+    base's collection is unrecognized.
+    """
+    docs_path = tmp_path / "docs"
+    _write_corpus(docs_path, 2)
+    config = _config(tmp_path, docs_path)
+    manager = _manager(config)
+    default_collection = manager._default_collection_name()
+    _FakeVectorDb.store[default_collection] = []
+    _FakeVectorDb.store["some_unrelated_collection"] = []
+
+    with capture_logs() as logs:
+        await manager._open_candidate_run()
+
+    reported = [
+        entry for entry in logs if entry["event"] == "Preserved knowledge collections with unprovable ownership"
+    ]
+    assert len(reported) == 1
+    assert reported[0]["collections"] == ["some_unrelated_collection"]
+    assert default_collection in _FakeVectorDb.store
+
+
+@pytest.mark.asyncio
+async def test_candidate_pending_count_is_visible_while_the_build_runs(
+    tmp_path: Path,
+) -> None:
+    """Mid-build readers must see real outstanding work, not completed == total.
+
+    The corpus size is only folded into the snapshot at compaction time, and
+    status previously reported ``max(total_files, completed_count)``. Together
+    those made ``pending_count`` read zero for the whole build.
+    """
+    docs_path = tmp_path / "docs"
+    _write_corpus(docs_path, 6)
+    config = _config(tmp_path, docs_path)
+    runtime_paths = runtime_paths_for(config)
+    observed: list[tuple[int, int]] = []
+    original_index = KnowledgeManager._index_file_locked
+
+    async def _observe_status(self: KnowledgeManager, resolved_path: Path, **kwargs: object) -> bool:
+        indexed = await original_index(self, resolved_path, **kwargs)
+        status = get_knowledge_index_status("docs", config=config, runtime_paths=runtime_paths)
+        if status.candidate is not None:
+            observed.append((status.candidate.total_files, status.candidate.completed_count))
+        return indexed
+
+    KnowledgeManager._index_file_locked = _observe_status  # type: ignore[method-assign]
+    try:
+        assert await _manager(config).reindex_all() == 6
+    finally:
+        KnowledgeManager._index_file_locked = original_index  # type: ignore[method-assign]
+
+    assert observed, "status was never sampled during the build"
+    assert all(total == 6 for total, _completed in observed), observed
+    assert any(completed < total for total, completed in observed), (
+        f"pending work was never visible mid-build: {observed}"
+    )

@@ -1074,7 +1074,8 @@ class KnowledgeManager:
             if not is_candidate and (candidates_only or collection_name != default_collection):
                 # Reclaiming abandoned candidates must never race a legacy
                 # published collection whose metadata predates this layout.
-                unowned.append(collection_name)
+                if collection_name != default_collection:
+                    unowned.append(collection_name)
                 continue
             try:
                 self._build_vector_db(collection_name).delete()
@@ -1886,6 +1887,11 @@ class KnowledgeManager:
             plan = await self._reconcile_candidate(run, files)
             progress.total = len(plan.expected)
             progress.completed = len(run.completed_paths)
+            if run.checkpoint.total_files != run.total_files:
+                # Publish the corpus size as soon as it is known, so a reader
+                # watching a long build sees real outstanding work instead of
+                # waiting for the next journal compaction.
+                await self._compact_candidate_checkpoint(run, force=True)
 
             if plan.pending:
 

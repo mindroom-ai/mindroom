@@ -79,7 +79,7 @@ def _candidate_status_for_key(key: registry.PublishedIndexKey) -> KnowledgeCandi
         status=checkpoint.status,
         completed_count=checkpoint.completed_count,
         failed_count=len(checkpoint.failed),
-        total_files=max(checkpoint.total_files, checkpoint.completed_count),
+        total_files=checkpoint.total_files,
         target_revision=checkpoint.target_revision,
         created_at=checkpoint.created_at or None,
         updated_at=checkpoint.updated_at or None,
