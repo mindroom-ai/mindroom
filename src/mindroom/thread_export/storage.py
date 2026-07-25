@@ -187,6 +187,12 @@ def _room_contains_only_export_files(room_fd: int) -> bool:
     )
 
 
+def _contains_thread_export_file(room_fd: int) -> bool:
+    """Return whether one pinned directory holds a committed Matrix thread export."""
+    names = os.listdir(room_fd)
+    return any(_is_thread_export_filename(name) and _regular_file_at(room_fd, name) for name in names)
+
+
 def _open_canonical_room_directory(root_fd: int, output_dir: Path, name: str) -> int | None:
     """Open one canonically named, non-symlinked room directory below a pinned root."""
     if not _is_encoded_room_segment(name):
@@ -217,27 +223,30 @@ def _recognizable_room_directory(root_fd: int, output_dir: Path, name: str) -> b
         os.close(room_fd)
 
 
-def _room_shaped_directory(root_fd: int, output_dir: Path, name: str) -> bool:
-    """Return whether one root entry holds any exporter-owned file under a canonical room name."""
+def _room_directory_with_thread_exports(root_fd: int, output_dir: Path, name: str) -> bool:
+    """Return whether one root entry is a canonically named room holding a thread export."""
     room_fd = _open_canonical_room_directory(root_fd, output_dir, name)
     if room_fd is None:
         return False
     try:
-        names = os.listdir(room_fd)  # noqa: PTH208 - room_fd pins the directory
-        return any(_is_room_export_file(room_fd, entry) for entry in names)
+        return _contains_thread_export_file(room_fd)
     finally:
         os.close(room_fd)
 
 
 def _root_has_export_evidence(root_fd: int, output_dir: Path) -> bool:
-    """Return whether an empty root, or one holding an exported room, proves exporter ownership.
+    """Return whether an empty root, or one holding a thread export, proves exporter ownership.
 
-    Unrelated entries beside an exported room do not veto ownership: a stray ``.DS_Store``,
+    Evidence is a percent-encoded room directory containing a ``$``-prefixed Matrix thread
+    export, which no unrelated directory produces by accident. A generic ``index.json`` is
+    deliberately not evidence: a build or data directory can hold one, and adopting on that
+    alone would expose it to reconciliation.
+    Unrelated entries beside real evidence do not veto ownership, because a stray ``.DS_Store``,
     ``.git`` directory, or operator note must not strand a real corpus, and every destructive
     path is independently scoped to exporter-owned entries.
     """
     names = os.listdir(root_fd)
-    return not names or any(_room_shaped_directory(root_fd, output_dir, name) for name in names)
+    return not names or any(_room_directory_with_thread_exports(root_fd, output_dir, name) for name in names)
 
 
 def _has_valid_export_root_marker(root_fd: int) -> bool:
@@ -594,10 +603,7 @@ def room_has_thread_exports(output_dir: Path, room: ThreadExportRoom) -> bool:
     if room_fd is None:
         return False
     try:
-        return any(
-            _is_thread_export_filename(filename) and _regular_file_at(room_fd, filename)
-            for filename in os.listdir(room_fd)  # noqa: PTH208 - room_fd pins the directory
-        )
+        return _contains_thread_export_file(room_fd)
     finally:
         os.close(room_fd)
 

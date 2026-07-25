@@ -569,7 +569,8 @@ A warning is logged when that guard preserves existing target state because the 
 A complete room enumeration that returns zero threads preserves existing YAML exports for that room and logs a warning because an anomalous empty response cannot be distinguished from deletion of the final thread.
 After either warning, verify the source state and remove the preserved export manually only when the deletion is confirmed; workspace git history remains the recovery path for mistaken cleanup.
 Enabled targets whose resolved output directories are equal or nested are all skipped before Matrix work.
-MindRoom claims an output root by writing a `.mindroom-thread-exports` ownership marker, and it claims automatically when the root is empty or already holds at least one exported room directory.
+MindRoom claims an output root by writing a `.mindroom-thread-exports` ownership marker, and it claims automatically when the root is empty or already holds a room directory containing an exported thread file.
+A directory that merely contains an `index.json` is not treated as evidence, so pointing `--output` at an unrelated project or build directory is refused rather than adopted.
 Unrelated entries beside those room directories, such as `.DS_Store`, a `.git` directory, or your own notes, neither block the claim nor ever get deleted.
 A root MindRoom cannot recognize is skipped for the entire pass, so it is neither exported to nor cleaned up, and the skip is reported as a target failure.
 Adopt such a root by creating `.mindroom-thread-exports` inside it containing exactly `{"format":"mindroom-thread-exports","version":1}` followed by a newline.

@@ -79,6 +79,7 @@ def test_exporter_replaces_an_invalid_marker_on_a_recognizable_legacy_root(tmp_p
     room_dir = output_dir / "lobby"
     room_dir.mkdir(parents=True)
     (room_dir / "index.json").write_text("{}\n", encoding="utf-8")
+    (room_dir / _thread_filename("$thread:localhost")).write_text("version: 1\n", encoding="utf-8")
     (output_dir / _ROOT_MARKER_FILENAME).write_text("invalid\n", encoding="utf-8")
 
     prepare_export_root(output_dir)
@@ -92,6 +93,7 @@ def test_exporter_ignores_its_atomic_write_residue_when_claiming_a_legacy_root(t
     room_dir = output_dir / "lobby"
     room_dir.mkdir(parents=True)
     (room_dir / "index.json").write_text("{}\n", encoding="utf-8")
+    (room_dir / _thread_filename("$thread:localhost")).write_text("version: 1\n", encoding="utf-8")
     room_temp = room_dir / f".index.json.{'a' * 32}.tmp"
     root_temp = output_dir / f".{_ROOT_MARKER_FILENAME}.{'b' * 32}.tmp"
     room_temp.write_text('{"version":', encoding="utf-8")
@@ -133,6 +135,7 @@ def test_exporter_claims_a_legacy_root_beside_a_foreign_directory(tmp_path: Path
     room_dir = output_dir / "lobby"
     room_dir.mkdir(parents=True)
     (room_dir / "index.json").write_text("{}\n", encoding="utf-8")
+    (room_dir / _thread_filename("$thread:localhost")).write_text("version: 1\n", encoding="utf-8")
     keep = output_dir / ".git" / "HEAD"
     keep.parent.mkdir()
     keep.write_text("ref: refs/heads/main\n", encoding="utf-8")
@@ -153,6 +156,23 @@ def test_exporter_claims_a_room_left_without_an_index_by_an_interrupted_pass(tmp
     prepare_export_root(output_dir)
 
     assert (output_dir / _ROOT_MARKER_FILENAME).read_text(encoding="utf-8") == _ROOT_MARKER_TEXT
+
+
+def test_a_stray_index_json_does_not_make_a_project_directory_adoptable(tmp_path: Path) -> None:
+    """A build directory holding index.json must not authorize adopting its parent."""
+    project = tmp_path / "my-project"
+    build_dir = project / "dist"
+    build_dir.mkdir(parents=True)
+    (build_dir / "index.json").write_text('{"build":1}\n', encoding="utf-8")
+    source = project / "README.md"
+    source.write_text("my project", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="unowned thread export root"):
+        prepare_export_root(project)
+
+    assert not (project / _ROOT_MARKER_FILENAME).exists()
+    assert (build_dir / "index.json").read_text(encoding="utf-8") == '{"build":1}\n'
+    assert source.read_text(encoding="utf-8") == "my project"
 
 
 def test_unrecognized_root_is_not_marked(tmp_path: Path) -> None:
