@@ -181,7 +181,7 @@ def _event_edit_row(room_id: str, event: dict[str, Any]) -> _EventEditRow | None
     """Return an edit-index row when one cached event is an editable replacement."""
     if event.get("type") not in _EDITABLE_EVENT_TYPES:
         return None
-    if event.get("type") == "m.room.message" and not has_valid_message_replacement(event):
+    if not is_valid_cached_edit(event):
         return None
     event_info = EventInfo.from_event(event)
     if not event_info.is_edit or not isinstance(event_info.original_event_id, str):
@@ -192,6 +192,11 @@ def _event_edit_row(room_id: str, event: dict[str, Any]) -> _EventEditRow | None
         original_event_id=event_info.original_event_id,
         origin_server_ts=_event_timestamp_for_cache(event),
     )
+
+
+def is_valid_cached_edit(event: dict[str, Any]) -> bool:
+    """Return whether an indexed cache edit carries usable replacement content."""
+    return event.get("type") != "m.room.message" or has_valid_message_replacement(event)
 
 
 def event_edit_rows(room_id: str, events: list[SerializedCachedEvent]) -> list[_EventEditRow]:

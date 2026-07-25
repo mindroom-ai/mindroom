@@ -15,6 +15,7 @@ from .event_cache_events import (
     event_redaction_candidate_ids,
     event_thread_rows,
     filter_redacted_events,
+    is_valid_cached_edit,
     redaction_removal_event_ids,
     serialize_cacheable_events,
 )
@@ -192,15 +193,17 @@ async def _load_latest_edit_row(
           AND event_edits.original_event_id = ?
           {sender_predicate}
         ORDER BY event_edits.origin_server_ts DESC, event_edits.edit_event_id DESC
-        LIMIT 1
         """,  # noqa: S608
         parameters,
     )
-    row = await cursor.fetchone()
-    await cursor.close()
-    if row is None:
+    try:
+        while (row := await cursor.fetchone()) is not None:
+            event = json.loads(row[0])
+            if is_valid_cached_edit(event):
+                return CachedEventRow(event=event, cached_at=None if row[1] is None else float(row[1]))
         return None
-    return CachedEventRow(event=json.loads(row[0]), cached_at=None if row[1] is None else float(row[1]))
+    finally:
+        await cursor.close()
 
 
 async def load_mxc_text(
