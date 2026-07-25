@@ -39,6 +39,7 @@ class SupportsVisibleThreadMessage(Protocol):
 
     event_id: str
     visible_event_id: str
+    visible_timestamp: int
     thread_id: str | None
     timestamp: int
     latest_event_id: str
@@ -280,11 +281,11 @@ def _visible_thread_message_is_better_candidate(
     """Return whether one visible message copy should replace the current event winner."""
     return (
         candidate.thread_id is not None,
-        candidate.timestamp,
+        candidate.visible_timestamp,
         candidate.latest_event_id,
     ) > (
         current.thread_id is not None,
-        current.timestamp,
+        current.visible_timestamp,
         current.latest_event_id,
     )
 
@@ -342,7 +343,7 @@ def latest_visible_thread_event_id_by_thread(
             ordered_messages,
             thread_id=thread_key,
             event_id_getter=lambda message: message.visible_event_id,
-            timestamp_getter=lambda message: message.timestamp,
+            timestamp_getter=lambda message: message.visible_timestamp,
             input_order_by_event_id={message.visible_event_id: index for index, message in enumerate(thread_messages)},
             related_event_id_by_event_id=_related_event_id_by_visible_event_id(thread_messages),
         )

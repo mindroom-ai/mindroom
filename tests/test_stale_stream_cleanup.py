@@ -384,6 +384,52 @@ def test_latest_visible_thread_event_id_by_thread_prefers_same_timestamp_descend
     }
 
 
+def test_latest_visible_thread_event_id_by_thread_uses_edit_timestamp() -> None:
+    """A recent visible edit should sort after a later-created unedited reply."""
+    root = ResolvedVisibleMessage.synthetic(
+        sender=USER_ID,
+        body="root",
+        event_id="$thread-root",
+        timestamp=NOW_MS - 4_000,
+        content={"body": "root", "msgtype": "m.text"},
+        thread_id="$thread-root",
+    )
+    edited_reply = ResolvedVisibleMessage.synthetic(
+        sender=USER_ID,
+        body="old",
+        event_id="$old-reply",
+        timestamp=NOW_MS - 3_000,
+        content={
+            "body": "old",
+            "msgtype": "m.text",
+            "m.relates_to": _thread_reply_relation("$thread-root", "$thread-root"),
+        },
+        thread_id="$thread-root",
+    )
+    edited_reply.apply_edit(
+        body="recent edit",
+        latest_event_id="$recent-edit",
+        latest_event_timestamp=NOW_MS - 500,
+        content={"body": "recent edit", "msgtype": "m.text"},
+    )
+    later_reply = ResolvedVisibleMessage.synthetic(
+        sender=USER_ID,
+        body="later reply",
+        event_id="$later-reply",
+        timestamp=NOW_MS - 1_000,
+        content={
+            "body": "later reply",
+            "msgtype": "m.text",
+            "m.relates_to": _thread_reply_relation("$thread-root", "$thread-root"),
+        },
+        thread_id="$thread-root",
+    )
+
+    assert latest_visible_thread_event_id_by_thread([root, edited_reply, later_reply]) == {
+        "$thread-root": "$recent-edit",
+    }
+
+
 @pytest.mark.asyncio
 async def test_relations_api_filters_reactions_and_unions_history_ids(tmp_path: Path) -> None:
     """Cleanup should redact valid relation hits plus any history-scanned stop reactions."""
