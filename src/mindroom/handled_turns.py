@@ -45,6 +45,7 @@ class SourceEventMetadata:
 
     sender: str
     timestamp_ms: float | None = None
+    discovery_event_id: str | None = None
 
     def __post_init__(self) -> None:
         """Normalize the timestamp once for every physical representation."""
@@ -55,6 +56,8 @@ class SourceEventMetadata:
         record: dict[str, object] = {"sender": self.sender}
         if self.timestamp_ms is not None:
             record["timestamp_ms"] = self.timestamp_ms
+        if self.discovery_event_id is not None:
+            record["discovery_event_id"] = self.discovery_event_id
         return record
 
     @classmethod
@@ -66,15 +69,16 @@ class SourceEventMetadata:
         sender = metadata.get("sender")
         if not isinstance(sender, str) or not sender:
             return None
-        return cls(sender=sender, timestamp_ms=normalize_timestamp_ms(metadata.get("timestamp_ms")))
+        timestamp_ms = normalize_timestamp_ms(metadata.get("timestamp_ms"))
+        return cls(sender, timestamp_ms, _normalize_string(metadata.get("discovery_event_id")))
 
 
 SourceEventRevision = tuple[int, str]
 
 
-@dataclass(frozen=True)
+@dataclass
 class TurnRecord:
-    """Canonical immutable identity, outcome, and regeneration facts for one turn."""
+    """Canonical identity, outcome, and regeneration facts for one turn."""
 
     source_event_ids: tuple[str, ...]
     discovery_event_ids: tuple[str, ...] = ()
@@ -122,54 +126,36 @@ class TurnRecord:
         normalized_timestamp = (
             float(timestamp) if isinstance(timestamp, int | float) and not isinstance(timestamp, bool) else 0.0
         )
-        object.__setattr__(self, "source_event_ids", source_event_ids)
-        object.__setattr__(self, "discovery_event_ids", discovery_event_ids)
-        object.__setattr__(self, "redacted_source_event_ids", redacted_source_event_ids)
-        object.__setattr__(self, "pending_redaction_cleanup_event_ids", pending_redaction_cleanup_event_ids)
-        object.__setattr__(self, "anchor_event_id", anchor_event_id)
-        object.__setattr__(self, "response_event_id", _normalize_string(self.response_event_id))
-        object.__setattr__(self, "visible_echo_event_id", _normalize_string(self.visible_echo_event_id))
-        object.__setattr__(
-            self,
-            "source_event_prompts",
-            _immutable_prompt_map(
-                source_event_ids,
-                self.source_event_prompts,
-                excluded_event_ids=redacted_source_event_id_set,
-            ),
+        self.source_event_ids = source_event_ids
+        self.discovery_event_ids = discovery_event_ids
+        self.redacted_source_event_ids = redacted_source_event_ids
+        self.pending_redaction_cleanup_event_ids = pending_redaction_cleanup_event_ids
+        self.anchor_event_id = anchor_event_id
+        self.response_event_id = _normalize_string(self.response_event_id)
+        self.visible_echo_event_id = _normalize_string(self.visible_echo_event_id)
+        self.source_event_prompts = _immutable_prompt_map(
+            source_event_ids,
+            self.source_event_prompts,
+            excluded_event_ids=redacted_source_event_id_set,
         )
-        object.__setattr__(
-            self,
-            "source_event_revisions",
-            _immutable_source_event_revisions(
-                (*source_event_ids, *discovery_event_ids),
-                self.source_event_revisions,
-                excluded_event_ids=redacted_source_event_id_set,
-            ),
+        self.source_event_revisions = _immutable_source_event_revisions(
+            (*source_event_ids, *discovery_event_ids),
+            self.source_event_revisions,
+            excluded_event_ids=redacted_source_event_id_set,
         )
-        object.__setattr__(
-            self,
-            "source_event_metadata",
-            _immutable_source_event_metadata(
-                source_event_ids,
-                self.source_event_metadata,
-                excluded_event_ids=redacted_source_event_id_set,
-            ),
+        self.source_event_metadata = _immutable_source_event_metadata(
+            source_event_ids,
+            self.source_event_metadata,
+            excluded_event_ids=redacted_source_event_id_set,
         )
-        object.__setattr__(self, "response_owner", _normalize_string(self.response_owner))
-        object.__setattr__(self, "requester_id", _normalize_string(self.requester_id))
-        object.__setattr__(self, "correlation_id", _normalize_string(self.correlation_id))
-        object.__setattr__(
-            self,
-            "history_scope",
-            self.history_scope if isinstance(self.history_scope, HistoryScope) else None,
+        self.response_owner = _normalize_string(self.response_owner)
+        self.requester_id = _normalize_string(self.requester_id)
+        self.correlation_id = _normalize_string(self.correlation_id)
+        self.history_scope = self.history_scope if isinstance(self.history_scope, HistoryScope) else None
+        self.conversation_target = (
+            self.conversation_target if isinstance(self.conversation_target, MessageTarget) else None
         )
-        object.__setattr__(
-            self,
-            "conversation_target",
-            self.conversation_target if isinstance(self.conversation_target, MessageTarget) else None,
-        )
-        object.__setattr__(self, "timestamp", normalized_timestamp)
+        self.timestamp = normalized_timestamp
 
     @classmethod
     def create(
@@ -224,10 +210,21 @@ class TurnRecord:
         """Return canonical source IDs followed by non-source discovery aliases."""
         return (*self.source_event_ids, *self.discovery_event_ids)
 
+    def prompt_source_event_id(self, event_id: str) -> str:
+        """Return the physical prompt owner for a source or discovery alias."""
+        return next(
+            (
+                source_id
+                for source_id, metadata in (self.source_event_metadata or {}).items()
+                if metadata.discovery_event_id == event_id
+            ),
+            event_id,
+        )
+
     @property
     def replay_source_event_ids(self) -> tuple[str, ...]:
         """Return source IDs whose content remains eligible for replay or regeneration."""
-        redacted_event_ids = set(self.redacted_source_event_ids)
+        redacted_event_ids = {self.prompt_source_event_id(event_id) for event_id in self.redacted_source_event_ids}
         return tuple(event_id for event_id in self.source_event_ids if event_id not in redacted_event_ids)
 
 

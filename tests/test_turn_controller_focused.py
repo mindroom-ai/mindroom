@@ -552,8 +552,13 @@ async def test_coalesced_router_relays_index_every_human_source_for_edit_lookup(
                 source_kind=TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
                 requester_user_id=_SENDER,
                 trust_internal_payload_metadata=True,
+                discovery_event_id=human_event_id,
             )
-            for event in relay_events
+            for event, human_event_id in zip(
+                relay_events,
+                ("$human-one:localhost", "$human-two:localhost"),
+                strict=True,
+            )
         ],
     )
 
@@ -566,6 +571,9 @@ async def test_coalesced_router_relays_index_every_human_source_for_edit_lookup(
     assert first_lookup == second_lookup
     assert first_lookup.source_event_ids == ("$relay-one:localhost", "$relay-two:localhost")
     assert first_lookup.discovery_event_ids == ("$human-one:localhost", "$human-two:localhost")
+    assert first_lookup.source_event_metadata is not None
+    assert first_lookup.source_event_metadata["$relay-one:localhost"].discovery_event_id == "$human-one:localhost"
+    assert first_lookup.source_event_metadata["$relay-two:localhost"].discovery_event_id == "$human-two:localhost"
 
 
 @pytest.mark.asyncio

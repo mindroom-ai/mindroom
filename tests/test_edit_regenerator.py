@@ -87,6 +87,7 @@ def _message_context(*, thread_id: str | None = THREAD_ID) -> MessageContext:
 def _turn_record(
     *,
     source_event_ids: tuple[str, ...] = (ORIGINAL_EVENT_ID,),
+    discovery_event_ids: tuple[str, ...] = (),
     redacted_source_event_ids: tuple[str, ...] = (),
     anchor_event_id: str | None = None,
     response_event_id: str | None = RESPONSE_EVENT_ID,
@@ -99,6 +100,7 @@ def _turn_record(
     return TurnRecord(
         anchor_event_id=anchor,
         source_event_ids=source_event_ids,
+        discovery_event_ids=discovery_event_ids,
         redacted_source_event_ids=redacted_source_event_ids,
         response_event_id=response_event_id,
         source_event_prompts=source_event_prompts,
@@ -980,6 +982,39 @@ async def test_coalesced_edit_preserves_tagged_source_metadata(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
+async def test_coalesced_routed_alias_edit_updates_owned_relay_prompt(tmp_path: Path) -> None:
+    """A human edit routed through a relay must replace that relay's prompt."""
+    first_relay = "$relay-one:example.org"
+    second_relay = "$relay-two:example.org"
+    first_human = "$human-one:example.org"
+    second_human = "$human-two:example.org"
+    record = _turn_record(
+        source_event_ids=(first_relay, second_relay),
+        discovery_event_ids=(first_human, second_human),
+        source_event_prompts={first_relay: "first base", second_relay: "second base"},
+        source_event_metadata={
+            first_relay: SourceEventMetadata(sender=USER_ID, discovery_event_id=first_human),
+            second_relay: SourceEventMetadata(sender=USER_ID, discovery_event_id=second_human),
+        },
+    )
+    harness = _harness(tmp_path, turn_record=record)
+    event, event_info = _edit_event(
+        original_event_id=first_human,
+        new_body="first edited",
+        event_id="$edit-first:example.org",
+    )
+
+    await _handle_edit(harness, event, event_info)
+
+    request = harness.generate_response.await_args.args[0]
+    assert "first edited" in request.prompt
+    assert "first base" not in request.prompt
+    recorded = harness.turn_store.record_turn.call_args.args[0]
+    assert recorded.source_event_prompts == {first_relay: "first edited", second_relay: "second base"}
+    assert recorded.source_event_revisions == {first_human: (event.server_timestamp, event.event_id)}
+
+
+@pytest.mark.asyncio
 async def test_coalesced_edit_without_persisted_prompts_is_skipped(tmp_path: Path) -> None:
     """A coalesced turn without a persisted prompt map cannot be rebuilt and is skipped."""
     record = _turn_record(
@@ -1126,6 +1161,41 @@ async def test_sync_restart_cancellation_retries_without_committing_interrupted_
         ),
         requester_user_id=USER_ID,
     )
+
+
+@pytest.mark.asyncio
+async def test_swallowed_sync_restart_keeps_mailbox_snapshot_for_retry(tmp_path: Path) -> None:
+    """A runner-returned interruption marker must not consume the queued edit."""
+    harness = _harness(tmp_path, turn_record=_turn_record())
+    attempts = 0
+
+    async def interrupt_then_succeed(request: ResponseRequest) -> str:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            assert request.on_sync_restart_cancelled is not None
+            request.on_sync_restart_cancelled()
+            return "$interrupted:example.org"
+        return NEW_RESPONSE_EVENT_ID
+
+    harness.generate_response.side_effect = interrupt_then_succeed
+    event, event_info = _edit_event(new_body="latest after restart")
+
+    await _handle_edit(harness, event, event_info)
+
+    assert attempts == 1
+    assert harness.restart_retry.has_pending is True
+    harness.turn_store.record_turn.assert_not_called()
+    assert harness.regenerator._mailboxes == {}
+
+    await harness.restart_retry.flush()
+
+    assert attempts == 2
+    recorded = harness.turn_store.record_turn.call_args.args[0]
+    assert recorded.response_event_id == NEW_RESPONSE_EVENT_ID
+    assert recorded.source_event_revisions == {
+        ORIGINAL_EVENT_ID: (event.server_timestamp, event.event_id),
+    }
 
 
 @pytest.mark.asyncio

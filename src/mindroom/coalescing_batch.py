@@ -72,6 +72,7 @@ class PendingEvent:
     message_received_depth: int = 0
     trust_internal_payload_metadata: bool = False
     requester_user_id: str | None = None
+    discovery_event_id: str | None = None
     enqueue_time: float = field(default_factory=time.time)
     dispatch_metadata: tuple[PendingDispatchMetadata, ...] = ()
 
@@ -340,6 +341,7 @@ def _batch_source_event_metadata(ordered_pending_events: list[PendingEvent]) -> 
         pending_event.event.event_id: SourceEventMetadata(
             sender=pending_event.requester_user_id or pending_event.event.sender,
             timestamp_ms=normalize_timestamp_ms(pending_event.event.server_timestamp),
+            discovery_event_id=pending_event.discovery_event_id,
         )
         for pending_event in ordered_pending_events
     }

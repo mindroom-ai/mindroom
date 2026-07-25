@@ -265,7 +265,9 @@ class EditRegenerator:
             if not edit.suppressed:
                 active[source_event_id] = edit
         prompt_map = dict(record.source_event_prompts or {})
-        prompt_map.update({source_event_id: edit.body for source_event_id, edit in eligible.items()})
+        prompt_map.update(
+            {record.prompt_source_event_id(source_event_id): edit.body for source_event_id, edit in eligible.items()},
+        )
         if not active:
             if revisions != dict(record.source_event_revisions or {}):
                 record = replace(record, source_event_prompts=prompt_map, source_event_revisions=revisions)
@@ -373,6 +375,8 @@ class EditRegenerator:
                 continue
             regenerated_event_id = await self.deps.generate_response(request)
             if regenerated_event_id is not None:
+                if not applied:
+                    return
                 self.deps.turn_store.record_turn(
                     replace(record, response_event_id=regenerated_event_id),
                 )

@@ -387,10 +387,15 @@ def test_source_event_metadata_persists_across_reload(temp_dir: Path) -> None:
     tracker1.record_handled_turn(
         TurnRecord.create(
             ["$first", "$second"],
+            discovery_event_ids=["$human-first"],
             response_event_id="$response",
             source_event_prompts={"$first": "first", "$second": "second"},
             source_event_metadata={
-                "$first": SourceEventMetadata(sender="@alice:localhost", timestamp_ms=1_774_019_700_000),
+                "$first": SourceEventMetadata(
+                    sender="@alice:localhost",
+                    timestamp_ms=1_774_019_700_000,
+                    discovery_event_id="$human-first",
+                ),
                 "$second": SourceEventMetadata(sender="@bob:localhost", timestamp_ms=None),
             },
         ),
@@ -400,9 +405,14 @@ def test_source_event_metadata_persists_across_reload(temp_dir: Path) -> None:
 
     assert turn_record is not None
     assert turn_record.source_event_metadata == {
-        "$first": SourceEventMetadata(sender="@alice:localhost", timestamp_ms=1_774_019_700_000.0),
+        "$first": SourceEventMetadata(
+            sender="@alice:localhost",
+            timestamp_ms=1_774_019_700_000.0,
+            discovery_event_id="$human-first",
+        ),
         "$second": SourceEventMetadata(sender="@bob:localhost", timestamp_ms=None),
     }
+    assert replace(turn_record, redacted_source_event_ids=("$human-first",)).replay_source_event_ids == ("$second",)
 
 
 def test_source_event_revisions_persist_across_restart_and_run_recovery(temp_dir: Path) -> None:

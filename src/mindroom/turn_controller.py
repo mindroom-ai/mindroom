@@ -955,6 +955,7 @@ class TurnController:
             hook_source=hook_source,
             message_received_depth=message_received_depth,
             trust_internal_payload_metadata=resolved_trust_internal_payload_metadata,
+            discovery_event_id=self.deps.ingress.router_relay_original_event_id(event),
             dispatch_metadata=dispatch_metadata,
         )
         await reservation_owner.admit(
@@ -1906,15 +1907,13 @@ class TurnController:
             dispatch_timing.mark("gate_exit")
         async with self.deps.resolver.turn_thread_cache_scope():
             dispatch_start = time.monotonic()
-            relay_alias = self.deps.ingress.router_relay_original_event_id
-            routed_aliases = tuple(filter(None, (relay_alias(item.event) for item in batch.pending_events)))
+            source_metadata = dict(handoff.source_event_metadata)
+            routed_aliases = tuple(filter(None, (item.discovery_event_id for item in source_metadata.values())))
             handled_turn = TurnRecord.create(
                 handoff.source_event_ids,
                 discovery_event_ids=routed_aliases,
                 source_event_prompts=dict(handoff.source_event_prompts),
-                source_event_metadata=dict(handoff.source_event_metadata)
-                if len(handoff.source_event_ids) > 1
-                else None,
+                source_event_metadata=source_metadata if len(handoff.source_event_ids) > 1 else None,
             )
             close_pending_event_metadata_once(list(batch.pending_events))
             await self._dispatch_handoff(
