@@ -1060,8 +1060,7 @@ def _merge_retained_thread_event_sources(
         event_id = _event_id_from_source(event_source)
         if event_id is None or event_id in merged_by_event_id:
             continue
-        normalized_event_source = dict(event_source)
-        merged_by_event_id[event_id] = normalized_event_source
+        merged_by_event_id[event_id] = dict(event_source)
         changed = True
     return (
         sort_thread_event_sources_root_first(
