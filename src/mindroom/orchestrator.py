@@ -612,6 +612,8 @@ class _MultiAgentOrchestrator:
             # the stop() cancellation pass.
             return
         await self._cancel_bot_start_task(entity_name)
+        if not self.running:
+            return
         self._bot_start_tasks[entity_name] = create_logged_task(
             self._run_bot_start_retry(entity_name),
             name=f"retry_start_{entity_name}",

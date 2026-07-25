@@ -2122,6 +2122,59 @@ class TestMultiAgentOrchestrator:
         bot.try_start.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_bot_start_retry_scheduling_stops_when_shutdown_begins_during_cancellation(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Shutdown during retry cancellation must prevent a replacement retry."""
+        orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
+        orchestrator.running = True
+        existing_started = asyncio.Event()
+        cancellation_started = asyncio.Event()
+        finish_cancellation = asyncio.Event()
+        replacement_started = asyncio.Event()
+        keep_replacement_running = asyncio.Event()
+
+        async def existing_retry() -> None:
+            existing_started.set()
+            try:
+                await asyncio.Future()
+            finally:
+                cancellation_started.set()
+                await finish_cancellation.wait()
+
+        async def replacement_retry(_entity_name: str) -> None:
+            replacement_started.set()
+            await keep_replacement_running.wait()
+
+        existing_task = asyncio.create_task(existing_retry())
+        await existing_started.wait()
+        orchestrator._bot_start_tasks["general"] = existing_task
+
+        with patch.object(orchestrator, "_run_bot_start_retry", new=replacement_retry):
+            schedule_task = asyncio.create_task(orchestrator._schedule_bot_start_retry("general"))
+            try:
+                await cancellation_started.wait()
+                orchestrator.running = False
+                finish_cancellation.set()
+                await schedule_task
+
+                assert replacement_started.is_set() is False
+                assert orchestrator._bot_start_tasks == {}
+            finally:
+                finish_cancellation.set()
+                keep_replacement_running.set()
+                pending_tasks = (
+                    existing_task,
+                    schedule_task,
+                    *orchestrator._bot_start_tasks.values(),
+                )
+                for task in pending_tasks:
+                    task.cancel()
+                await asyncio.gather(*pending_tasks, return_exceptions=True)
+                orchestrator._bot_start_tasks.clear()
+
+    @pytest.mark.asyncio
     async def test_shutdown_cancels_retry_producers_before_remaining_teardown(self, tmp_path: Path) -> None:
         """Shutdown must close reload and retry races before any other awaited cleanup."""
         orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
