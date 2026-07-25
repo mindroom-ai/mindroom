@@ -188,11 +188,14 @@ class EditRegenerator:
             context=context,
             envelope=envelope,
             revision=revision,
-            suppressed=revision != committed
-            and await self.deps.ingress_hook_runner.emit_message_received_hooks(
-                envelope=envelope,
-                correlation_id=event.event_id,
-                policy=hook_ingress_policy(envelope),
+            suppressed=revision == (turn_record.suppressed_source_event_revisions or {}).get(original_event_id)
+            or (
+                revision != committed
+                and await self.deps.ingress_hook_runner.emit_message_received_hooks(
+                    envelope=envelope,
+                    correlation_id=event.event_id,
+                    policy=hook_ingress_policy(envelope),
+                )
             ),
         )
         assert turn_record.anchor_event_id is not None
@@ -232,6 +235,7 @@ class EditRegenerator:
         ):
             return None, None, {}
         revisions = dict(record.source_event_revisions or {})
+        suppressed_revisions = dict(record.suppressed_source_event_revisions or {})
         applied: dict[str, SourceEventRevision] = {}
         active: dict[str, _Edit] = {}
         prompt_map = dict(record.source_event_prompts or {})
@@ -246,12 +250,22 @@ class EditRegenerator:
             revisions[source_event_id] = edit.revision
             applied[source_event_id] = edit.revision
             prompt_map[record.prompt_source_event_id(source_event_id)] = edit.body
-            if not edit.suppressed:
+            if edit.suppressed:
+                suppressed_revisions[source_event_id] = edit.revision
+            else:
+                suppressed_revisions.pop(source_event_id, None)
                 active[source_event_id] = edit
                 retrying &= edit.revision == committed
         if not active:
-            if revisions != dict(record.source_event_revisions or {}):
-                record = replace(record, source_event_prompts=prompt_map, source_event_revisions=revisions)
+            if revisions != dict(record.source_event_revisions or {}) or suppressed_revisions != dict(
+                record.suppressed_source_event_revisions or {},
+            ):
+                record = replace(
+                    record,
+                    source_event_prompts=prompt_map,
+                    source_event_revisions=revisions,
+                    suppressed_source_event_revisions=suppressed_revisions,
+                )
                 self.deps.turn_store.record_turn(record)
             return None, None, applied
 
@@ -274,7 +288,12 @@ class EditRegenerator:
                     prompt, structured = tagged_prompt, True
         else:
             prompt, structured = driving_edit.body, False
-        record = replace(record, source_event_prompts=prompt_map, source_event_revisions=revisions)
+        record = replace(
+            record,
+            source_event_prompts=prompt_map,
+            source_event_revisions=revisions,
+            suppressed_source_event_revisions=suppressed_revisions,
+        )
         target = record.conversation_target
         assert target is not None
         requester_id = driving_edit.envelope.requester_id

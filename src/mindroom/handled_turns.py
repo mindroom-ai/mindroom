@@ -101,6 +101,7 @@ class TurnRecord:
     visible_echo_event_id: str | None = None
     source_event_prompts: Mapping[str, str] | None = None
     source_event_revisions: Mapping[str, SourceEventRevision] | None = None
+    suppressed_source_event_revisions: Mapping[str, SourceEventRevision] | None = None
     source_event_metadata: Mapping[str, SourceEventMetadata] | None = None
     response_owner: str | None = None
     requester_id: str | None = None
@@ -154,6 +155,11 @@ class TurnRecord:
             self.source_event_revisions,
             excluded_event_ids=redacted_source_event_id_set,
         )
+        suppressed_source_event_revisions = _immutable_source_event_revisions(
+            (*source_event_ids, *discovery_event_ids),
+            self.suppressed_source_event_revisions,
+            excluded_event_ids=redacted_source_event_id_set,
+        )
         history_scope = self.history_scope if isinstance(self.history_scope, HistoryScope) else None
         conversation_target = self.conversation_target if isinstance(self.conversation_target, MessageTarget) else None
         object.__setattr__(self, "source_event_ids", source_event_ids)
@@ -165,6 +171,7 @@ class TurnRecord:
         object.__setattr__(self, "visible_echo_event_id", _normalize_string(self.visible_echo_event_id))
         object.__setattr__(self, "source_event_prompts", source_event_prompts)
         object.__setattr__(self, "source_event_revisions", source_event_revisions)
+        object.__setattr__(self, "suppressed_source_event_revisions", suppressed_source_event_revisions)
         object.__setattr__(self, "source_event_metadata", source_event_metadata)
         object.__setattr__(self, "response_owner", _normalize_string(self.response_owner))
         object.__setattr__(self, "requester_id", _normalize_string(self.requester_id))
@@ -187,6 +194,7 @@ class TurnRecord:
         visible_echo_event_id: str | None = None,
         source_event_prompts: Mapping[str, str] | None = None,
         source_event_revisions: Mapping[str, object] | None = None,
+        suppressed_source_event_revisions: Mapping[str, object] | None = None,
         source_event_metadata: Mapping[str, object] | None = None,
         response_owner: str | None = None,
         requester_id: str | None = None,
@@ -207,6 +215,10 @@ class TurnRecord:
             visible_echo_event_id=visible_echo_event_id,
             source_event_prompts=source_event_prompts,
             source_event_revisions=typing.cast("Mapping[str, SourceEventRevision] | None", source_event_revisions),
+            suppressed_source_event_revisions=typing.cast(
+                "Mapping[str, SourceEventRevision] | None",
+                suppressed_source_event_revisions,
+            ),
             source_event_metadata=typing.cast("Mapping[str, SourceEventMetadata] | None", source_event_metadata),
             response_owner=response_owner,
             requester_id=requester_id,
@@ -267,6 +279,10 @@ class TurnRecordCodec:
             payload["source_event_revisions"] = {
                 event_id: list(revision) for event_id, revision in record.source_event_revisions.items()
             }
+        if record.suppressed_source_event_revisions is not None:
+            payload["suppressed_source_event_revisions"] = {
+                event_id: list(revision) for event_id, revision in record.suppressed_source_event_revisions.items()
+            }
         if record.source_event_metadata is not None:
             payload["source_event_metadata"] = {
                 event_id: metadata.to_record() for event_id, metadata in record.source_event_metadata.items()
@@ -326,6 +342,9 @@ class TurnRecordCodec:
             visible_echo_event_id=_normalize_string(record.get("visible_echo_event_id")),
             source_event_prompts=_mapping_or_none(record.get("source_event_prompts")),
             source_event_revisions=_mapping_or_none(record.get("source_event_revisions")),
+            suppressed_source_event_revisions=_mapping_or_none(
+                record.get("suppressed_source_event_revisions"),
+            ),
             source_event_metadata=_mapping_or_none(record.get("source_event_metadata")),
             response_owner=_normalize_string(record.get("response_owner")),
             requester_id=_normalize_string(record.get("requester_id")),

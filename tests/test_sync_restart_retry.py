@@ -331,6 +331,34 @@ async def test_queue_runs_each_retry_exactly_once() -> None:
 
 
 @pytest.mark.asyncio
+async def test_concurrent_flushes_share_one_serial_retry_pass() -> None:
+    """Overlapping healthy sync callbacks must not run the same retry twice."""
+    queue = SyncRestartRetryQueue()
+    started = asyncio.Event()
+    release = asyncio.Event()
+    runs = 0
+
+    async def retry() -> None:
+        nonlocal runs
+        runs += 1
+        started.set()
+        await release.wait()
+
+    assert queue.register("$event", retry, room_id="!room:localhost") is True
+    first = asyncio.create_task(queue.flush())
+    await started.wait()
+    second = asyncio.create_task(queue.flush())
+    await asyncio.sleep(0)
+    assert not second.done()
+
+    release.set()
+    await asyncio.gather(first, second)
+
+    assert runs == 1
+    assert not queue.has_pending
+
+
+@pytest.mark.asyncio
 async def test_queue_isolates_individual_retry_failures() -> None:
     """One failing retry must not block the others."""
     queue = SyncRestartRetryQueue()

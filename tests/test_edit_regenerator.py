@@ -1089,6 +1089,27 @@ async def test_hook_suppression_records_turn_without_regeneration(tmp_path: Path
     assert recorded.source_event_revisions == {
         ORIGINAL_EVENT_ID: (event.server_timestamp, event.event_id),
     }
+    assert recorded.suppressed_source_event_revisions == {
+        ORIGINAL_EVENT_ID: (event.server_timestamp, event.event_id),
+    }
+
+
+@pytest.mark.asyncio
+async def test_hook_suppressed_edit_replay_stays_suppressed(tmp_path: Path) -> None:
+    """Matrix replay must not turn a durably suppressed edit into a retry."""
+    harness = _harness(tmp_path, turn_record=_turn_record())
+    harness.ingress_hook_runner.emit_message_received_hooks.return_value = True
+    event, event_info = _edit_event()
+
+    await _handle_edit(harness, event, event_info)
+    await _handle_edit(harness, event, event_info)
+
+    harness.ingress_hook_runner.emit_message_received_hooks.assert_awaited_once()
+    harness.generate_response.assert_not_awaited()
+    recorded = harness.turn_store.record_turn.call_args.args[0]
+    assert recorded.suppressed_source_event_revisions == {
+        ORIGINAL_EVENT_ID: (event.server_timestamp, event.event_id),
+    }
 
 
 @pytest.mark.asyncio

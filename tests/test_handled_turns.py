@@ -464,6 +464,25 @@ def test_source_event_revisions_persist_across_restart_and_run_recovery(temp_dir
     assert recovered.requester_id == "@user:example.com"
 
 
+def test_suppressed_source_event_revisions_persist_across_restart(temp_dir: Path) -> None:
+    """Hook suppression must survive Matrix replay through the durable ledger."""
+    suppressed_revisions = {"$source": (1_000_010, "$edit")}
+    tracker = HandledTurnLedger("test_suppressed_source_revisions_reload", base_path=temp_dir)
+    tracker.record_handled_turn(
+        TurnRecord.create(
+            ["$source"],
+            response_event_id="$response",
+            source_event_revisions=suppressed_revisions,
+            suppressed_source_event_revisions=suppressed_revisions,
+        ),
+    )
+
+    reloaded = _reload_ledger("test_suppressed_source_revisions_reload", temp_dir).get_turn_record("$source")
+
+    assert reloaded is not None
+    assert reloaded.suppressed_source_event_revisions == suppressed_revisions
+
+
 def test_source_event_revisions_keep_only_valid_live_sources() -> None:
     """Revision identity should stay bounded to replayable sources in one turn."""
     record = TurnRecord.create(
