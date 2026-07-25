@@ -878,6 +878,7 @@ async def test_conversation_cache_startup_prewarm_bulk_refresh_preserves_metadat
             event_cache,
             thread_root_ids=["$thread:localhost"],
             caller_label="startup_thread_prewarm",
+            max_scan_pages=20,
         )
     finally:
         await event_cache.close()

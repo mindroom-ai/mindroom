@@ -90,6 +90,7 @@ __all__ = [
 
 
 _STARTUP_PREWARM_THREAD_LIMIT = 32
+_STARTUP_PREWARM_MAX_SCAN_PAGES = 20
 
 
 async def resolve_thread_root_event_id_for_client(
@@ -706,6 +707,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
                 self.runtime.event_cache,
                 thread_root_ids=thread_ids,
                 caller_label="startup_thread_prewarm",
+                max_scan_pages=_STARTUP_PREWARM_MAX_SCAN_PAGES,
             )
 
         coordinator = self.runtime.event_cache_write_coordinator
@@ -798,14 +800,25 @@ class MatrixConversationCache(ConversationCacheProtocol):
         thread_ids = await self._startup_thread_prewarm_ids(room_id)
         if thread_ids is None or is_shutting_down() or not self.runtime.event_cache.durable_writes_available:
             return False
-        untrusted_thread_ids = await untrusted_cached_thread_ids(
-            self.runtime.event_cache,
-            room_id,
-            thread_ids,
-        )
-        already_warm = len(thread_ids) - len(untrusted_thread_ids)
-        if is_shutting_down() or not self.runtime.event_cache.durable_writes_available:
+        try:
+            untrusted_thread_ids = await untrusted_cached_thread_ids(
+                self.runtime.event_cache,
+                room_id,
+                thread_ids,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self.logger.warning(
+                "startup_thread_prewarm_cache_probe_failed",
+                room_id=room_id,
+                thread_count=len(thread_ids),
+                error=str(exc),
+            )
+            untrusted_thread_ids = None
+        if untrusted_thread_ids is None or is_shutting_down() or not self.runtime.event_cache.durable_writes_available:
             return False
+        already_warm = len(thread_ids) - len(untrusted_thread_ids)
         if not untrusted_thread_ids:
             self._log_startup_thread_prewarm_complete(
                 room_id,
