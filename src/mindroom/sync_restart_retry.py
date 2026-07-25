@@ -1,14 +1,14 @@
 """One-shot re-dispatch of responses cancelled by sync-restart recovery.
 
-When the Matrix sync watchdog restarts a stalled sync loop, in-flight
-responses are cancelled and their placeholder becomes a terminal
+When the orchestrator replaces a bot during a sync-restart shutdown,
+in-flight responses are cancelled and their placeholder becomes a terminal
 "[Response interrupted by service restart]" note. The turn controller
-registers a retry here, and the bot flushes the queue once its sync loop
-reports a healthy sync response again. Each source event is retried at
-most once; a retry that is itself interrupted is not requeued. A retry
-refused by a config apply is the exception: nothing ran, so it stays
-pending for the next flush. Pending room ids also let the orchestrator
-hand retries to a replacement bot.
+registers a retry here, and the replacement bot flushes the queue once its
+sync loop reports a healthy response. Each source event is retried at most
+once; a retry that is itself interrupted is not requeued. A retry refused by
+a config apply is the exception: nothing ran, so it stays pending for the next
+flush. Pending room ids also let the orchestrator hand retries to a replacement
+bot.
 """
 
 from __future__ import annotations
