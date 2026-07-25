@@ -63,11 +63,12 @@ from mindroom.streaming import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Iterable, Sequence
+    from collections.abc import AsyncIterator, Iterable, Mapping, Sequence
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.matrix.conversation_cache import ConversationCacheProtocol, ThreadReadResult
+    from mindroom.matrix.startup_room_history import StartupRootOutcome
 
 logger = get_logger(__name__)
 
@@ -323,22 +324,19 @@ async def _auto_resume_interrupted_threads(
         return 0
 
     candidate_threads = _ordered_auto_resume_candidates(interrupted)
+    root_outcomes = await _certify_auto_resume_thread_histories(
+        candidate_threads,
+        conversation_cache=conversation_cache,
+    )
     resumed_count = 0
     delay_due = delay_before_first
     for interrupted_thread in candidate_threads:
-        if interrupted_thread.original_sender_id is None:
-            logger.warning(
-                "Skipping auto-resume because requester identity could not be resolved",
-                room_id=interrupted_thread.room_id,
-                thread_id=interrupted_thread.thread_id,
-                target_event_id=interrupted_thread.target_event_id,
-            )
-            continue
-        if not await _interrupted_target_remains_latest_human_work(
+        if not await _auto_resume_candidate_is_resumable(
             interrupted_thread,
             config=config,
             runtime_paths=runtime_paths,
             conversation_cache=conversation_cache,
+            root_outcomes=root_outcomes,
         ):
             continue
         try:
@@ -391,6 +389,95 @@ async def _auto_resume_interrupted_threads(
             )
 
     return resumed_count
+
+
+async def _auto_resume_candidate_is_resumable(
+    interrupted_thread: _InterruptedThread,
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    conversation_cache: ConversationCacheProtocol | None,
+    root_outcomes: Mapping[tuple[str, str], StartupRootOutcome],
+) -> bool:
+    """Return whether one candidate passes every fail-closed guard before a resume is sent."""
+    if interrupted_thread.original_sender_id is None:
+        logger.warning(
+            "Skipping auto-resume because requester identity could not be resolved",
+            room_id=interrupted_thread.room_id,
+            thread_id=interrupted_thread.thread_id,
+            target_event_id=interrupted_thread.target_event_id,
+        )
+        return False
+    if not _auto_resume_history_is_certifiable(interrupted_thread, root_outcomes):
+        return False
+    return await _interrupted_target_remains_latest_human_work(
+        interrupted_thread,
+        config=config,
+        runtime_paths=runtime_paths,
+        conversation_cache=conversation_cache,
+    )
+
+
+async def _certify_auto_resume_thread_histories(
+    candidate_threads: Sequence[_InterruptedThread],
+    *,
+    conversation_cache: ConversationCacheProtocol | None,
+) -> dict[tuple[str, str], StartupRootOutcome]:
+    """Certify every candidate thread root with one shared room-history operation per room.
+
+    Without this, each freshness check reconstructs its own thread, so a room holding many
+    interrupted threads pays one homeserver room walk per candidate.
+    """
+    if conversation_cache is None:
+        return {}
+    root_ids_by_room: dict[str, set[str]] = {}
+    for candidate in candidate_threads:
+        if candidate.thread_id:
+            root_ids_by_room.setdefault(candidate.room_id, set()).add(candidate.thread_id)
+
+    certified: dict[tuple[str, str], StartupRootOutcome] = {}
+    for room_id, thread_root_ids in root_ids_by_room.items():
+        try:
+            outcomes = await conversation_cache.ensure_startup_thread_history(room_id, sorted(thread_root_ids))
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            # Fail open to the per-thread freshness read, which stays fail-closed on its own.
+            logger.warning(
+                "Shared auto-resume thread history certification failed",
+                room_id=room_id,
+                candidate_root_count=len(thread_root_ids),
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+            continue
+        for thread_root_id, outcome in outcomes.items():
+            certified[(room_id, thread_root_id)] = outcome
+    return certified
+
+
+def _auto_resume_history_is_certifiable(
+    interrupted_thread: _InterruptedThread,
+    root_outcomes: Mapping[tuple[str, str], StartupRootOutcome],
+) -> bool:
+    """Return whether shared startup work left this thread's history safe to certify.
+
+    A root the shared scan could not certify must not fall back to its own full room walk: it is
+    skipped instead, because an unproven history can never justify resuming a turn.
+    """
+    if interrupted_thread.thread_id is None:
+        return True
+    outcome = root_outcomes.get((interrupted_thread.room_id, interrupted_thread.thread_id))
+    if outcome is None or outcome.certified:
+        return True
+    logger.info(
+        "Skipping auto-resume because shared startup history could not certify the thread",
+        room_id=interrupted_thread.room_id,
+        thread_id=interrupted_thread.thread_id,
+        target_event_id=interrupted_thread.target_event_id,
+        history_outcome=outcome.value,
+    )
+    return False
 
 
 async def _interrupted_target_remains_latest_human_work(

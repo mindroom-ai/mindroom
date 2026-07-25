@@ -304,6 +304,8 @@ def _auto_resume_conversation_cache(interrupted: list[InterruptedThread]) -> Asy
             ],
         ),
     )
+    # No shared startup certification: these cases exercise the per-thread freshness read.
+    conversation_cache.ensure_startup_thread_history = AsyncMock(return_value={})
     conversation_cache.notify_outbound_message = Mock()
     return conversation_cache
 
@@ -2032,6 +2034,7 @@ async def test_recent_mid_tool_shutdown_marker_resumes_only_without_newer_human_
         )
     conversation_cache = AsyncMock()
     conversation_cache.get_strict_thread_history.return_value = _authoritative_history(*history_messages)
+    conversation_cache.ensure_startup_thread_history = AsyncMock(return_value={})
     conversation_cache.notify_outbound_message = Mock()
 
     with patch(

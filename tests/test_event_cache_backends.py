@@ -33,9 +33,9 @@ from mindroom.matrix.cache.thread_cache_state import (
     THREAD_HISTORY_TRUST_VERSION,
 )
 from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
+from mindroom.matrix.startup_room_history import StartupRoomHistoryCoordinator
 from mindroom.runtime_support import (
     OwnedRuntimeSupport,
-    StartupThreadPrewarmRegistry,
     _build_event_cache,
     _event_cache_runtime_identity,
     _EventCacheRuntimeIdentity,
@@ -2098,7 +2098,7 @@ async def test_event_cache_startup_backend_unavailable_retries_without_disabling
     support = OwnedRuntimeSupport(
         event_cache=cast("ConversationEventCache", cache),
         event_cache_write_coordinator=EventCacheWriteCoordinator(logger=logger),
-        startup_thread_prewarm_registry=StartupThreadPrewarmRegistry(),
+        startup_room_history=StartupRoomHistoryCoordinator(),
         event_cache_identity=_event_cache_runtime_identity(cache_config, runtime_paths),
     )
 

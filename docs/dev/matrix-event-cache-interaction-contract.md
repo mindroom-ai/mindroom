@@ -115,6 +115,28 @@ Dispatch reads reject stale fallback and propagate the refill failure.
 
 Every completed read emits `matrix_cache_thread_history_refreshed` with `mode`, `cache_read_ms`, `homeserver_fetch_ms`, page and event counts, `cache_reject_reason`, `thread_read_source`, degradation state, and error state.
 
+## Startup room-history acquisition
+
+Startup recovery has two consumers of the same room history, and both go through one shared operation owned by `mindroom.matrix.startup_room_history`.
+
+Ordering within one startup generation is: first sync establishes room state, startup recovery discovers interrupted candidates, one shared per-room operation certifies the relevant thread roots, auto-resume freshness consumes that result, and generic prewarm joins the same work or observes its recorded outcomes.
+
+The shared operation is keyed by startup generation, cache principal, and room ID, so principals never share each other's cache namespace and a later startup wave re-certifies the same rooms.
+
+Callers contribute the thread roots they need; roots contributed before the scan starts join its scope, and roots arriving after that scope freezes are collected into exactly one follow-up batch rather than starting one scan each.
+
+Each root receives exactly one terminal outcome: `stored`, `already_trusted`, `missing`, `truncated`, `invalidated`, or `failed`.
+
+Only `stored` and `already_trusted` certify a root; auto-resume skips any candidate whose root the shared operation could not certify, because unproven history can never justify resuming a turn.
+
+A room whose scan fails or is cancelled records no outcomes and releases ownership, so a later attempt retries and no room stays permanently claimed but unfinished.
+
+An empty result means shared certification was unavailable rather than that certification failed, and callers then keep their own per-thread behavior.
+
+Startup pagination never runs under the room write barrier: unrelated same-room writes stay live for the length of the walk, and `replace_thread_if_not_newer` is what rejects a snapshot whose membership epoch or thread cache state moved after the fetch began.
+
+Each shared operation emits `startup_room_history_started`, `startup_room_history_joined`, `startup_room_history_follow_up_scheduled`, and `startup_room_history_completed` with the startup generation, candidate root count, per-outcome root counts, page and event counts, truncation, peak waiter count, queue wait, fetch time, and terminal status.
+
 ## Disposable live audit
 
 `tests/manual/matrix_event_cache_live_audit.py` creates a new private room owned by the test agent and never accepts access tokens as command-line arguments.

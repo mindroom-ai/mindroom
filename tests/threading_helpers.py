@@ -38,7 +38,7 @@ from mindroom.matrix.thread_diagnostics import (
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.runtime_support import (
     OwnedRuntimeSupport,
-    StartupThreadPrewarmRegistry,
+    StartupRoomHistoryCoordinator,
     close_owned_runtime_support,
     sync_owned_runtime_support,
 )
@@ -514,7 +514,7 @@ async def _bind_owned_runtime_support(
     )
     bot.event_cache = support.event_cache
     bot.event_cache_write_coordinator = support.event_cache_write_coordinator
-    bot.startup_thread_prewarm_registry = support.startup_thread_prewarm_registry
+    bot.startup_room_history = support.startup_room_history
     bot._runtime_view.mark_runtime_started()
     return support
 
@@ -582,7 +582,7 @@ class ThreadingBehaviorTestBase:
         bot.client = _make_client_mock(user_id="@mindroom_general:localhost")
         bot.event_cache = _runtime_event_cache()
         bot.event_cache_write_coordinator = _install_runtime_write_coordinator(bot)
-        bot.startup_thread_prewarm_registry = StartupThreadPrewarmRegistry()
+        bot.startup_room_history = StartupRoomHistoryCoordinator()
 
         # Initialize components that depend on client
 

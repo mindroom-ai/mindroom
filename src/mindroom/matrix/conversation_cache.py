@@ -50,6 +50,7 @@ from mindroom.matrix.media import (
 )
 from mindroom.matrix.membership_fence import UNCERTIFIED_MEMBERSHIP_EPOCH
 from mindroom.matrix.message_content import extract_edit_body
+from mindroom.matrix.startup_room_history import StartupRoomScanResult, StartupRootOutcome
 from mindroom.matrix.thread_bookkeeping import ThreadMutationResolver
 from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
 from mindroom.matrix.thread_membership import resolve_event_thread_membership
@@ -62,7 +63,7 @@ from mindroom.matrix.thread_room_scan import (
 from mindroom.timing import elapsed_ms_since
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable, Collection
+    from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Mapping
     from contextlib import AbstractAsyncContextManager
 
     import structlog
@@ -91,6 +92,21 @@ __all__ = [
 
 _STARTUP_PREWARM_THREAD_LIMIT = 32
 _STARTUP_PREWARM_MAX_SCAN_PAGES = 20
+
+
+def _scanned_root_outcome(
+    root_id: str,
+    *,
+    stats: BulkThreadRefreshStats,
+    still_untrusted: bool,
+) -> StartupRootOutcome:
+    """Classify one requested root after a bounded startup room scan."""
+    if not still_untrusted:
+        return StartupRootOutcome.STORED
+    if root_id not in stats.missing_root_ids:
+        # The root was scanned but its reconstruction never became a trusted snapshot.
+        return StartupRootOutcome.INVALIDATED
+    return StartupRootOutcome.TRUNCATED if stats.scan_truncated else StartupRootOutcome.MISSING
 
 
 async def resolve_thread_root_event_id_for_client(
@@ -193,6 +209,16 @@ class ConversationCacheProtocol(Protocol):
 
     async def get_thread_id_for_event(self, room_id: str, event_id: str) -> str | None:
         """Resolve the cached thread root for one event when known."""
+
+    async def ensure_startup_thread_history(
+        self,
+        room_id: str,
+        thread_root_ids: Collection[str],
+    ) -> Mapping[str, StartupRootOutcome]:
+        """Certify startup thread roots for one room through one shared room-history operation.
+
+        An empty mapping means shared certification was unavailable, not that certification failed.
+        """
 
     async def purge_rooms(self, room_ids: Collection[str]) -> None:
         """Fence and purge one authoritative batch of departed rooms."""
@@ -704,45 +730,94 @@ class MatrixConversationCache(ConversationCacheProtocol):
         room_id: str,
         thread_ids: Collection[str],
     ) -> BulkThreadRefreshStats:
-        """Refresh one room's startup threads in one scan under the room write barrier."""
+        """Refresh one room's startup threads in one scan without holding the room write barrier.
 
-        async def refresh_room_threads() -> BulkThreadRefreshStats:
-            return await bulk_refresh_room_thread_histories(
-                self._require_client(),
-                room_id,
-                self.runtime.event_cache,
-                thread_root_ids=thread_ids,
-                caller_label="startup_thread_prewarm",
-                max_scan_pages=_STARTUP_PREWARM_MAX_SCAN_PAGES,
-            )
-
-        coordinator = self.runtime.event_cache_write_coordinator
-        if coordinator is None:
-            return await refresh_room_threads()
-        return cast(
-            "BulkThreadRefreshStats",
-            await coordinator.queue_room_update(
-                room_id,
-                refresh_room_threads,
-                name="matrix_cache_bulk_startup_thread_prewarm",
-                log_exceptions=False,
-                coordination_scope=self.runtime.event_cache.principal_id,
-            ),
+        Startup pagination must never occupy the room barrier: it would block every unrelated
+        same-room write and read for the length of a homeserver walk. ``replace_thread_if_not_newer``
+        already compares the captured membership epoch and rejects any snapshot whose thread cache
+        state moved after the fetch began, so the guarded write is what keeps a background scan from
+        overwriting newer state.
+        """
+        return await bulk_refresh_room_thread_histories(
+            self._require_client(),
+            room_id,
+            self.runtime.event_cache,
+            thread_root_ids=thread_ids,
+            caller_label="startup_thread_prewarm",
+            max_scan_pages=_STARTUP_PREWARM_MAX_SCAN_PAGES,
         )
+
+    async def _scan_startup_room_history(
+        self,
+        room_id: str,
+        thread_root_ids: frozenset[str],
+    ) -> StartupRoomScanResult:
+        """Run at most one bounded room walk and report per-root certification outcomes."""
+        requested_root_ids = tuple(sorted(thread_root_ids))
+        untrusted_root_ids = await untrusted_cached_thread_ids(
+            self.runtime.event_cache,
+            room_id,
+            requested_root_ids,
+        )
+        outcomes: dict[str, StartupRootOutcome] = dict.fromkeys(
+            requested_root_ids,
+            StartupRootOutcome.ALREADY_TRUSTED,
+        )
+        if not untrusted_root_ids:
+            return StartupRoomScanResult(outcomes=outcomes)
+
+        stats = await self._bulk_refresh_startup_threads(room_id, untrusted_root_ids)
+        still_untrusted_root_ids = set(
+            await untrusted_cached_thread_ids(self.runtime.event_cache, room_id, untrusted_root_ids),
+        )
+        for root_id in untrusted_root_ids:
+            outcomes[root_id] = _scanned_root_outcome(
+                root_id,
+                stats=stats,
+                still_untrusted=root_id in still_untrusted_root_ids,
+            )
+        return StartupRoomScanResult(
+            outcomes=outcomes,
+            pages=stats.room_scan_pages,
+            scanned_events=stats.scanned_event_count,
+            truncated=stats.scan_truncated,
+        )
+
+    async def ensure_startup_thread_history(
+        self,
+        room_id: str,
+        thread_root_ids: Collection[str],
+    ) -> Mapping[str, StartupRootOutcome]:
+        """Certify startup thread roots for one room through one shared room-history operation.
+
+        Returns an empty mapping when shared certification is unavailable, so callers keep their
+        previous per-thread behavior instead of treating an unusable coordinator as a failed proof.
+        """
+        coordinator = self.runtime.startup_room_history
+        if coordinator is None or not self.runtime.event_cache.durable_writes_available:
+            return {}
+        result = await coordinator.acquire(
+            principal_id=self.runtime.event_cache.principal_id,
+            room_id=room_id,
+            thread_root_ids=thread_root_ids,
+            scan=self._scan_startup_room_history,
+            task_owner=self.runtime,
+        )
+        return result.outcomes
 
     def _log_startup_thread_prewarm_complete(
         self,
         room_id: str,
         *,
         started_at: float,
-        threads_warmed: int,
-        threads_failed: int,
+        outcomes: Mapping[str, StartupRootOutcome],
     ) -> None:
+        certified_root_ids = [root_id for root_id, outcome in outcomes.items() if outcome.certified]
         self.logger.info(
             "startup_thread_prewarm_complete",
             room_id=room_id,
-            threads_warmed=threads_warmed,
-            threads_failed=threads_failed,
+            threads_warmed=len(certified_root_ids),
+            threads_failed=len(outcomes) - len(certified_root_ids),
             elapsed_ms=elapsed_ms_since(started_at, clock=time.perf_counter),
         )
 
@@ -793,74 +868,21 @@ class MatrixConversationCache(ConversationCacheProtocol):
         room_id: str,
         *,
         is_shutting_down: Callable[[], bool],
-    ) -> bool:
-        """Warm one room's recent thread roots and report whether the room-level pass finished."""
+    ) -> None:
+        """Warm one room's recent thread roots through the shared startup room-history operation."""
         if not self.runtime.event_cache.durable_writes_available:
             self.logger.warning(
                 "startup_thread_prewarm_skipped",
                 room_id=room_id,
                 reason="event_cache_writes_unavailable",
             )
-            return False
+            return
         started_at = time.perf_counter()
         thread_ids = await self._startup_thread_prewarm_ids(room_id)
-        if thread_ids is None or is_shutting_down() or not self.runtime.event_cache.durable_writes_available:
-            return False
-        try:
-            untrusted_thread_ids = await untrusted_cached_thread_ids(
-                self.runtime.event_cache,
-                room_id,
-                thread_ids,
-            )
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            self.logger.warning(
-                "startup_thread_prewarm_cache_probe_failed",
-                room_id=room_id,
-                thread_count=len(thread_ids),
-                error=str(exc),
-                error_type=type(exc).__name__,
-                exc_info=True,
-            )
-            untrusted_thread_ids = None
-        if untrusted_thread_ids is None or is_shutting_down() or not self.runtime.event_cache.durable_writes_available:
-            return False
-        already_warm = len(thread_ids) - len(untrusted_thread_ids)
-        if not untrusted_thread_ids:
-            self._log_startup_thread_prewarm_complete(
-                room_id,
-                started_at=started_at,
-                threads_warmed=already_warm,
-                threads_failed=0,
-            )
-            return True
-
-        try:
-            stats = await self._bulk_refresh_startup_threads(
-                room_id,
-                untrusted_thread_ids,
-            )
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            self.logger.warning(
-                "startup_thread_prewarm_bulk_failed",
-                room_id=room_id,
-                thread_count=len(untrusted_thread_ids),
-                error=str(exc),
-            )
-            return False
-
-        threads_warmed = already_warm + stats.stored_threads
-        threads_failed = len(untrusted_thread_ids) - stats.stored_threads
-        self._log_startup_thread_prewarm_complete(
-            room_id,
-            started_at=started_at,
-            threads_warmed=threads_warmed,
-            threads_failed=threads_failed,
-        )
-        return not is_shutting_down() and self.runtime.event_cache.durable_writes_available
+        if not thread_ids or is_shutting_down():
+            return
+        outcomes = await self.ensure_startup_thread_history(room_id, thread_ids)
+        self._log_startup_thread_prewarm_complete(room_id, started_at=started_at, outcomes=outcomes)
 
     async def get_thread_history(
         self,

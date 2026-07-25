@@ -1948,11 +1948,24 @@ depends_on = [
     "mindroom.matrix.membership_fence",
     "mindroom.matrix.media",
     "mindroom.matrix.message_content",
+    "mindroom.matrix.startup_room_history",
     "mindroom.matrix.thread_bookkeeping",
     "mindroom.matrix.thread_membership",
     "mindroom.matrix.thread_resolution_reuse",
     "mindroom.matrix.thread_room_scan",
     "mindroom.matrix.visible_body",
+]
+
+[[modules]]
+path = "mindroom.matrix.startup_room_history"
+depends_on = []
+visibility = [
+    "mindroom.bot",
+    "mindroom.bot_runtime_view",
+    "mindroom.matrix.conversation_cache",
+    "mindroom.matrix.stale_stream_cleanup",
+    "mindroom.orchestrator",
+    "mindroom.runtime_support",
 ]
 
 [[modules]]
@@ -1999,6 +2012,7 @@ depends_on = [
     "mindroom.matrix.cache.postgres_redaction",
     "mindroom.matrix.cache.sqlite_event_cache",
     "mindroom.matrix.cache.write_coordinator",
+    "mindroom.matrix.startup_room_history",
     "mindroom.tool_system.dependencies",
 ]
 

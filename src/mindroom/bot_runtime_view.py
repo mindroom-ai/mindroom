@@ -14,8 +14,8 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.matrix.cache import ConversationEventCache, EventCacheWriteCoordinator
+    from mindroom.matrix.startup_room_history import StartupRoomHistoryCoordinator
     from mindroom.runtime_protocols import OrchestratorRuntime
-    from mindroom.runtime_support import StartupThreadPrewarmRegistry
 
 
 class BotRuntimeView(Protocol):
@@ -43,7 +43,7 @@ class BotRuntimeView(Protocol):
     def event_cache_write_coordinator(self) -> EventCacheWriteCoordinator: ...  # noqa: D102
 
     @property
-    def startup_thread_prewarm_registry(self) -> StartupThreadPrewarmRegistry: ...  # noqa: D102
+    def startup_room_history(self) -> StartupRoomHistoryCoordinator | None: ...  # noqa: D102
 
     @property
     def response_admission_gate(self) -> ResponseAdmissionGate: ...  # noqa: D102
@@ -68,7 +68,7 @@ class BotRuntimeState:
     orchestrator: OrchestratorRuntime | None
     event_cache: ConversationEventCache | None
     event_cache_write_coordinator: EventCacheWriteCoordinator | None
-    startup_thread_prewarm_registry: StartupThreadPrewarmRegistry | None = None
+    startup_room_history: StartupRoomHistoryCoordinator | None = None
     # Orchestrator-owned and shared across bots. Lives here, not on ResponseRunner,
     # so it survives the runtime rebuild after a login identity change.
     response_admission_gate: ResponseAdmissionGate = field(default_factory=ResponseAdmissionGate)

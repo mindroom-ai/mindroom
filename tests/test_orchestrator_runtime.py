@@ -35,6 +35,7 @@ from mindroom.hooks import (
     HookRegistry,
 )
 from mindroom.matrix.client import PermanentMatrixStartupError
+from mindroom.matrix.startup_room_history import StartupRoomHistoryCoordinator
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY, AgentMatrixUser
 from mindroom.orchestration.config_updates import ConfigUpdatePlan
@@ -61,7 +62,6 @@ from mindroom.runtime_state import (
     set_api_server_address,
     set_runtime_ready,
 )
-from mindroom.runtime_support import StartupThreadPrewarmRegistry
 from mindroom.startup_errors import PermanentStartupError
 from mindroom.tool_approval import _shutdown_approval_store
 from mindroom.tool_system.metadata import TOOL_METADATA
@@ -1368,7 +1368,7 @@ class TestMultiAgentOrchestrator:
         synced_support = SimpleNamespace(
             event_cache=shared_event_cache,
             event_cache_write_coordinator=make_event_cache_write_coordinator_mock(),
-            startup_thread_prewarm_registry=StartupThreadPrewarmRegistry(),
+            startup_room_history=StartupRoomHistoryCoordinator(),
         )
 
         with patch(
@@ -2487,7 +2487,7 @@ class TestMultiAgentOrchestrator:
         support = SimpleNamespace(
             event_cache=new_cache,
             event_cache_write_coordinator=MagicMock(),
-            startup_thread_prewarm_registry=StartupThreadPrewarmRegistry(),
+            startup_room_history=StartupRoomHistoryCoordinator(),
         )
         store = initialize_approval_store(runtime_paths, event_cache=old_cache)
 

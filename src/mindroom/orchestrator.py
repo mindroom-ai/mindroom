@@ -380,7 +380,7 @@ class _MultiAgentOrchestrator:
         bot.admission_gate = self._response_admission_gate
         bot.event_cache = self._runtime_support.event_cache.for_principal(bot.matrix_id.full_id)
         bot.event_cache_write_coordinator = self._runtime_support.event_cache_write_coordinator
-        bot.startup_thread_prewarm_registry = self._runtime_support.startup_thread_prewarm_registry
+        bot.startup_room_history = self._runtime_support.startup_room_history
 
     def _approval_event_cache(self) -> ConversationEventCache:
         """Return the router principal's isolated cache before or after bot construction."""
@@ -1205,6 +1205,9 @@ class _MultiAgentOrchestrator:
         # Create sync tasks for each bot with automatic restart on failure.
         set_runtime_starting("Starting Matrix sync loops")
         startup_cutoff_ms = int(time.time() * 1000)
+        # One startup wave owns one room-history generation, so a later restart re-certifies rooms
+        # instead of reusing outcomes recorded before this sync established room state.
+        self._runtime_support.startup_room_history.advance_generation()
         phase_started = log_startup_phase_started("start_matrix_sync_loops")
         for entity_name, bot in self.agent_bots.items():
             if bot.running:

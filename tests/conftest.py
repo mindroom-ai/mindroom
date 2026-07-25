@@ -75,6 +75,7 @@ from mindroom.matrix.client import DeliveredMatrixEvent, ResolvedVisibleMessage
 from mindroom.matrix.client_delivery import build_edit_event_content
 from mindroom.matrix.conversation_cache import ConversationCacheProtocol
 from mindroom.matrix.identity import MatrixID
+from mindroom.matrix.startup_room_history import StartupRoomHistoryCoordinator
 from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
 from mindroom.media_fallback import reset_model_media_capability_cache
 from mindroom.message_target import MessageTarget
@@ -84,7 +85,6 @@ from mindroom.response_payload_preparation import (
     ResponsePayloadPreparer,
 )
 from mindroom.response_runner import PostLockRequestPreparationError, ResponseRequest, ResponseRunner
-from mindroom.runtime_support import StartupThreadPrewarmRegistry
 from mindroom.thread_utils import decide_agent_response
 from mindroom.turn_controller import TurnController, _DispatchPreparation, _ReplayGuardContext
 from mindroom.turn_origin import TurnOrigin, classify_turn_origin
@@ -853,8 +853,8 @@ def install_runtime_cache_support(bot: RuntimeBot) -> RuntimeBot:
         bot.event_cache = make_event_cache_mock()
     if bot._runtime_view.event_cache_write_coordinator is None:
         bot.event_cache_write_coordinator = make_event_cache_write_coordinator_mock(owner=bot._runtime_view)
-    if bot._runtime_view.startup_thread_prewarm_registry is None:
-        bot.startup_thread_prewarm_registry = StartupThreadPrewarmRegistry()
+    if bot._runtime_view.startup_room_history is None:
+        bot.startup_room_history = StartupRoomHistoryCoordinator()
     sync_bot_runtime_state(bot)
     return bot
 

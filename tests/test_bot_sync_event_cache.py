@@ -23,7 +23,7 @@ from mindroom.matrix.sync_tokens import load_sync_checkpoint
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN
 from mindroom.runtime_support import (
-    StartupThreadPrewarmRegistry,
+    StartupRoomHistoryCoordinator,
 )
 from tests.conftest import (
     TEST_PASSWORD,
@@ -95,7 +95,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
 
         assert bot.event_cache is support.event_cache
         assert bot.event_cache_write_coordinator is support.event_cache_write_coordinator
-        assert bot.startup_thread_prewarm_registry is support.startup_thread_prewarm_registry
+        assert bot.startup_room_history is support.startup_room_history
         assert cached_event is not None
         assert cached_event["event_id"] == "$post-stop-event"
         start_client.close.assert_awaited_once()
@@ -105,7 +105,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         """Agent startup should fail fast when no injected runtime-support bundle is present."""
         bot.event_cache = None
         bot.event_cache_write_coordinator = None
-        bot.startup_thread_prewarm_registry = None
+        bot.startup_room_history = None
 
         with (
             patch.object(bot, "ensure_user_account", AsyncMock()) as ensure_user_account,
@@ -143,14 +143,14 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             logger=MagicMock(),
             background_task_owner=object(),
         )
-        shared_registry = StartupThreadPrewarmRegistry()
+        shared_registry = StartupRoomHistoryCoordinator()
         await shared_cache.initialize()
         bot.event_cache = shared_cache
         bot.event_cache_write_coordinator = shared_coordinator
-        bot.startup_thread_prewarm_registry = shared_registry
+        bot.startup_room_history = shared_registry
         other_bot.event_cache = shared_cache
         other_bot.event_cache_write_coordinator = shared_coordinator
-        other_bot.startup_thread_prewarm_registry = shared_registry
+        other_bot.startup_room_history = shared_registry
         bot.client = _make_client_mock(user_id="@mindroom_general:localhost")
         bot.client.close = AsyncMock()
 
@@ -185,7 +185,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
 
     def test_partial_runtime_support_injection_fails_fast(self, bot: AgentBot) -> None:
         """Startup validation should require the full injected runtime-support bundle."""
-        bot.startup_thread_prewarm_registry = None
+        bot.startup_room_history = None
 
         with pytest.raises(
             PermanentMatrixStartupError,
@@ -197,7 +197,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
     async def test_try_start_partial_runtime_support_injection_fails_before_login(self, bot: AgentBot) -> None:
         """Partial runtime-support injection should stop startup before any login side effects."""
         bot.client = None
-        bot.startup_thread_prewarm_registry = None
+        bot.startup_room_history = None
 
         with (
             patch.object(bot, "ensure_user_account", AsyncMock()) as ensure_user_account,
