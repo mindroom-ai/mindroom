@@ -33,6 +33,7 @@ from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.hooks import EnrichmentItem
 from mindroom.matrix.client_visible_messages import replace_visible_message
 from mindroom.matrix.presence import should_use_streaming
+from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
 from mindroom.matrix.typing import typing_indicator
 from mindroom.memory import (
     mark_auto_flush_dirty_session,
@@ -1042,6 +1043,16 @@ class ResponseRunner:
                 room_id=request.room_id,
                 thread_id=request.thread_id,
                 error=str(exc),
+            )
+            return request
+        if not refreshed_history.is_full_history or is_thread_history_degraded(refreshed_history):
+            message = "Post-lock thread history refresh returned incomplete history"
+            if request.requires_model_history_refresh:
+                raise RuntimeError(message)
+            self.deps.logger.warning(
+                message,
+                room_id=request.room_id,
+                thread_id=request.thread_id,
             )
             return request
         if exclude_event_id is not None:

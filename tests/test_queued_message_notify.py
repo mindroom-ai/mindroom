@@ -1291,6 +1291,39 @@ async def test_refresh_model_history_after_lock_refreshes_empty_thread_history(t
 
 
 @pytest.mark.asyncio
+async def test_refresh_model_history_after_lock_rejects_incomplete_required_history(tmp_path: Path) -> None:
+    """A required post-lock refresh must fail instead of installing degraded or partial model context."""
+    bot = _bot(tmp_path)
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    resolver = unwrap_extracted_collaborator(coordinator.deps.resolver)
+    incomplete_history = ThreadHistoryResult([], is_full_history=False)
+
+    with (
+        patch.object(
+            resolver,
+            "fetch_thread_history",
+            new=AsyncMock(return_value=incomplete_history),
+        ),
+        pytest.raises(RuntimeError, match="incomplete history"),
+    ):
+        await coordinator._refresh_model_history_after_lock(
+            ResponseRequest(
+                thread_history=[],
+                prompt="hello",
+                user_id="@user:localhost",
+                response_envelope=request_envelope(
+                    room_id="!room:localhost",
+                    reply_to_event_id="$event",
+                    thread_id="$thread",
+                    prompt="hello",
+                    user_id="@user:localhost",
+                ),
+                requires_model_history_refresh=True,
+            ),
+        )
+
+
+@pytest.mark.asyncio
 async def test_refresh_model_history_after_lock_does_not_reprove_room_target(
     tmp_path: Path,
 ) -> None:

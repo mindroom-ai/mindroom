@@ -1804,6 +1804,7 @@ depends_on = [
     "mindroom.constants",
     "mindroom.matrix.cache.thread_cache_helpers",
     "mindroom.matrix.cache.thread_history_result",
+    "mindroom.matrix.cache.thread_repair",
     "mindroom.matrix.thread_diagnostics",
 ]
 
@@ -1811,6 +1812,7 @@ depends_on = [
 path = "mindroom.matrix.cache.thread_repair"
 depends_on = []
 visibility = [
+    "mindroom.matrix.cache.thread_reads",
     "mindroom.matrix.cache.write_coordinator",
     "mindroom.matrix.conversation_cache",
 ]
@@ -3847,6 +3849,7 @@ exclusive = true
 [[interfaces]]
 expose = [
     "ConversationEventCache",
+    "ThreadCacheReplaceOutcome",
     "ThreadHistoryResult",
     "normalize_nio_event_for_cache",
     "thread_history_result",

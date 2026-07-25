@@ -43,7 +43,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast
 
 import nio
@@ -130,11 +130,27 @@ _MAX_THREAD_REPAIR_ATTEMPTS = 2
 type _ThreadHistoryDiagnosticValue = str | int | float | bool | None
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class RetainedThreadEventSourceProvider:
     """Late-bound retained deltas captured after the homeserver scan completes."""
 
     get_event_sources: Callable[[], Collection[dict[str, Any]]]
+    _provided_event_ids: set[str] = field(default_factory=set, init=False)
+
+    def current_event_sources(self) -> tuple[dict[str, Any], ...]:
+        """Return current retained deltas and remember which IDs entered this snapshot."""
+        event_sources = tuple(dict(event_source) for event_source in self.get_event_sources())
+        self._provided_event_ids.update(
+            event_id
+            for event_source in event_sources
+            if isinstance((event_id := event_source.get("event_id")), str) and event_id
+        )
+        return event_sources
+
+    @property
+    def provided_event_ids(self) -> frozenset[str]:
+        """Return IDs supplied to snapshot reconstruction."""
+        return frozenset(self._provided_event_ids)
 
 
 type _RetainedThreadEventSources = Collection[dict[str, Any]] | RetainedThreadEventSourceProvider
@@ -1074,7 +1090,7 @@ async def _resolve_merged_thread_fetch_result(
 ) -> _ThreadHistoryFetchResult:
     """Replay retained deltas onto a fetched snapshot before installation and delivery."""
     current_retained_event_sources = (
-        retained_event_sources.get_event_sources()
+        retained_event_sources.current_event_sources()
         if isinstance(retained_event_sources, RetainedThreadEventSourceProvider)
         else retained_event_sources
     )
