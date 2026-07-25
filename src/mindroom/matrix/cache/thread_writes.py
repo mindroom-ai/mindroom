@@ -9,10 +9,11 @@ These three policies are the only writers of durable thread-cache state:
    policy can additionally run in fail-closed mode (``raise_on_cache_write_failure``) so sync-token
    certification only certifies responses whose writes durably landed.
 
-3. Barrier routing: mutations whose thread is known pre-queue run on the per-thread barrier; mutations
-   that need cache lookups to resolve their thread (plain edits and replies, outbound redactions) stay
-   on the room barrier, because earlier queued writes can create the lookup rows they depend on
-   (ISSUE-189 tracks finer routing).
+3. Barrier routing: mutations whose thread is known pre-queue run on the per-thread barrier.
+   Locally streamed responses reserve their certified thread identity before relation-free edits begin,
+   so those edits avoid cache lookups and retain the per-thread barrier.
+   Mutations whose identity remains unknown stay on the room barrier because earlier queued writes can
+   create the lookup rows they depend on.
 
 4. UNKNOWN-impact mutations invalidate the whole room's cached threads eagerly, outside the per-thread
    queue: concurrent per-thread writers cannot uphold the ``room_invalidated_at >= validated_at``
@@ -41,7 +42,14 @@ from typing import TYPE_CHECKING, Any
 
 import nio
 
-from mindroom.constants import STREAM_STATUS_KEY, STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING
+from mindroom.constants import (
+    STREAM_STATUS_CANCELLED,
+    STREAM_STATUS_COMPLETED,
+    STREAM_STATUS_ERROR,
+    STREAM_STATUS_KEY,
+    STREAM_STATUS_PENDING,
+    STREAM_STATUS_STREAMING,
+)
 from mindroom.matrix.event_info import EventInfo, is_thread_affecting_relation
 from mindroom.matrix.sync_certification import SyncCacheWriteResult
 from mindroom.matrix.thread_bookkeeping import (
@@ -58,6 +66,7 @@ from .event_normalization import (
     normalize_event_source_for_cache,
     normalize_nio_event_for_cache,
 )
+from .outbound_thread_reservations import OutboundThreadReservations
 
 if TYPE_CHECKING:
     from mindroom.matrix.cache.thread_write_cache_ops import ThreadMutationCacheOps
@@ -70,6 +79,13 @@ __all__ = [
 
 
 _NONTERMINAL_STREAM_STATUSES = frozenset({STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING})
+_TERMINAL_STREAM_STATUSES = frozenset(
+    {
+        STREAM_STATUS_CANCELLED,
+        STREAM_STATUS_COMPLETED,
+        STREAM_STATUS_ERROR,
+    },
+)
 _LIMITED_SYNC_TIMELINE_REASON = "limited_sync_timeline"
 _SYNC_TIMELINE_WRITE_FAILED_REASON = "sync_timeline_write_failed"
 
@@ -122,7 +138,6 @@ def _collect_sync_event_cache_update(
 def _outbound_streaming_edit_coalesce_context(
     *,
     event_info: EventInfo,
-    event_id: str,
     event_source: dict[str, object],
 ) -> tuple[tuple[str, str], dict[str, object]] | None:
     if not event_info.is_edit or not isinstance(event_info.original_event_id, str):
@@ -138,10 +153,25 @@ def _outbound_streaming_edit_coalesce_context(
     return (
         ("outbound_streaming_edit", event_info.original_event_id),
         {
-            "original_event_id": event_info.original_event_id,
-            "latest_event_id": event_id,
+            "stream_status": typing.cast("dict[str, object]", new_content).get(STREAM_STATUS_KEY),
         },
     )
+
+
+def _outbound_stream_status(
+    event_source: dict[str, object],
+    *,
+    event_info: EventInfo,
+) -> object:
+    content = event_source.get("content")
+    if not isinstance(content, dict):
+        return None
+    status_content = typing.cast("dict[str, object]", content)
+    if event_info.is_edit:
+        new_content = status_content.get("m.new_content")
+        if isinstance(new_content, dict):
+            status_content = typing.cast("dict[str, object]", new_content)
+    return status_content.get(STREAM_STATUS_KEY)
 
 
 def _mutation_reason(
@@ -285,18 +315,17 @@ class ThreadOutboundWritePolicy:
         resolver: ThreadMutationResolver,
         cache_ops: ThreadMutationCacheOps,
         require_client: typing.Callable[[], nio.AsyncClient],
+        reservations: OutboundThreadReservations | None = None,
     ) -> None:
         self._resolver = resolver
         self._cache_ops = cache_ops
         self._require_client = require_client
+        self._reservations = reservations or OutboundThreadReservations()
 
     def _emit_outbound_schedule_timing(
         self,
         *,
         barrier_kind: str,
-        room_id: str,
-        thread_id: str | None,
-        event_id: str,
         event_type: str | None,
         event_info: EventInfo,
         has_coalesce_key: bool,
@@ -305,9 +334,6 @@ class ThreadOutboundWritePolicy:
             "Event cache outbound schedule timing",
             operation="matrix_cache_notify_outbound_event",
             barrier_kind=barrier_kind,
-            room_id=room_id,
-            thread_id=thread_id,
-            event_id=event_id,
             event_type=event_type,
             is_edit=event_info.is_edit,
             is_reaction=event_info.is_reaction,
@@ -320,12 +346,18 @@ class ThreadOutboundWritePolicy:
         event_id: str,
         event_source: dict[str, Any],
         event_info: EventInfo,
+        *,
+        known_thread_id: str | None = None,
     ) -> None:
-        impact = await self._resolver.resolve_thread_impact_for_mutation(
-            room_id,
-            event_info=event_info,
-            event_id=event_id,
-            context="outbound",
+        impact = (
+            MutationThreadImpact.threaded(known_thread_id)
+            if known_thread_id is not None
+            else await self._resolver.resolve_thread_impact_for_mutation(
+                room_id,
+                event_info=event_info,
+                event_id=event_id,
+                context="outbound",
+            )
         )
         if impact.state is not MutationThreadImpactState.THREADED:
             await self._cache_ops.store_events_batch(
@@ -343,6 +375,68 @@ class ThreadOutboundWritePolicy:
             context="outbound",
             room_level_skip_message="Skipping outbound thread cache bookkeeping for non-threaded event mutation",
             invalidate_on_append_failure=False,
+        )
+
+    def _resolve_prequeue_thread_route(
+        self,
+        *,
+        room_id: str,
+        event_id: str,
+        event_info: EventInfo,
+        stream_status: object,
+    ) -> tuple[str | None, str | None, str | None]:
+        """Resolve explicit or reserved thread scope before entering a write queue."""
+        explicit_thread_id = event_info.thread_id or event_info.thread_id_from_edit
+        raw_reservation_event_id = event_info.original_event_id if event_info.is_edit else event_id
+        reservation_event_id = raw_reservation_event_id if isinstance(raw_reservation_event_id, str) else None
+        needs_reservation_scope = reservation_event_id is not None and (
+            stream_status in _NONTERMINAL_STREAM_STATUSES
+            or stream_status in _TERMINAL_STREAM_STATUSES
+            or (explicit_thread_id is None and event_info.is_edit)
+        )
+        principal_id = self._cache_ops.cache_principal_id() if needs_reservation_scope else None
+        if (
+            explicit_thread_id is not None
+            and reservation_event_id is not None
+            and stream_status in _NONTERMINAL_STREAM_STATUSES
+        ):
+            assert principal_id is not None
+            self._reservations.reserve(
+                principal_id,
+                room_id,
+                reservation_event_id,
+                explicit_thread_id,
+            )
+        reserved_thread_id = None
+        if (
+            explicit_thread_id is None
+            and event_info.is_edit
+            and isinstance(event_info.original_event_id, str)
+            and principal_id is not None
+        ):
+            reserved_thread_id = self._reservations.resolve(
+                principal_id,
+                room_id,
+                event_info.original_event_id,
+                transitioned_event_id=event_id,
+            )
+        return explicit_thread_id or reserved_thread_id, principal_id, reservation_event_id
+
+    def _release_terminal_thread_reservation(
+        self,
+        *,
+        principal_id: str | None,
+        room_id: str,
+        reservation_event_id: str | None,
+        stream_status: object,
+    ) -> None:
+        """Release a terminal claim after its queued update captured thread scope."""
+        if principal_id is None or reservation_event_id is None or stream_status not in _TERMINAL_STREAM_STATUSES:
+            return
+        self._reservations.release(
+            principal_id,
+            room_id,
+            reservation_event_id,
         )
 
     def notify_outbound_event(
@@ -363,9 +457,12 @@ class ThreadOutboundWritePolicy:
             event_id = typing.cast("str", event_id_value)
 
             event_info = EventInfo.from_event(normalized_event_source)
+            stream_status = _outbound_stream_status(
+                normalized_event_source,
+                event_info=event_info,
+            )
             coalesce_context = _outbound_streaming_edit_coalesce_context(
                 event_info=event_info,
-                event_id=event_id,
                 event_source=normalized_event_source,
             )
             coalesce_key, coalesce_log_context = coalesce_context if coalesce_context is not None else (None, None)
@@ -375,9 +472,6 @@ class ThreadOutboundWritePolicy:
             if event_info.is_reaction:
                 self._emit_outbound_schedule_timing(
                     barrier_kind="room",
-                    room_id=room_id,
-                    thread_id=None,
-                    event_id=event_id,
                     event_type=event_type,
                     event_info=event_info,
                     has_coalesce_key=coalesce_key is not None,
@@ -418,41 +512,50 @@ class ThreadOutboundWritePolicy:
                     emit_timing=emit_timing,
                 )
                 return
-            thread_id = event_info.thread_id or event_info.thread_id_from_edit
+            thread_id, principal_id, reservation_event_id = self._resolve_prequeue_thread_route(
+                room_id=room_id,
+                event_id=event_id,
+                event_info=event_info,
+                stream_status=stream_status,
+            )
             if thread_id is not None:
                 self._emit_outbound_schedule_timing(
                     barrier_kind="thread",
-                    room_id=room_id,
-                    thread_id=thread_id,
-                    event_id=event_id,
                     event_type=event_type,
                     event_info=event_info,
                     has_coalesce_key=coalesce_key is not None,
                 )
-                self._schedule_fail_open_thread_update(
-                    room_id,
-                    thread_id,
-                    lambda: self._apply_outbound_event_notification(
+                try:
+                    self._schedule_fail_open_thread_update(
                         room_id,
-                        event_id,
-                        normalized_event_source,
-                        event_info,
-                    ),
-                    name="matrix_cache_notify_outbound_event",
-                    cancelled_message="Ignoring cancelled outbound cache bookkeeping after successful send",
-                    failure_message="Ignoring outbound cache bookkeeping failure after successful send",
-                    log_context={"event_id": event_id},
-                    emit_timing=emit_timing,
-                    coalesce_key=coalesce_key,
-                    coalesce_log_context=coalesce_log_context,
-                )
+                        thread_id,
+                        lambda: self._apply_outbound_event_notification(
+                            room_id,
+                            event_id,
+                            normalized_event_source,
+                            event_info,
+                            known_thread_id=thread_id,
+                        ),
+                        name="matrix_cache_notify_outbound_event",
+                        cancelled_message="Ignoring cancelled outbound cache bookkeeping after successful send",
+                        failure_message="Ignoring outbound cache bookkeeping failure after successful send",
+                        log_context={"event_id": event_id},
+                        emit_timing=emit_timing,
+                        coalesce_key=coalesce_key,
+                        coalesce_log_context=coalesce_log_context,
+                    )
+                finally:
+                    self._release_terminal_thread_reservation(
+                        principal_id=principal_id,
+                        room_id=room_id,
+                        reservation_event_id=reservation_event_id,
+                        stream_status=stream_status,
+                    )
                 return
-            # Lookup-dependent outbound mutations stay on the room barrier because earlier outbound writes can create the lookup rows needed to resolve thread impact. Safe parallelization would require reservation-based routing (see ISSUE-189).
+            # Truly lookup-dependent outbound mutations stay on the room barrier because earlier
+            # outbound writes can create the rows needed to resolve thread impact.
             self._emit_outbound_schedule_timing(
                 barrier_kind="room",
-                room_id=room_id,
-                thread_id=None,
-                event_id=event_id,
                 event_type=event_type,
                 event_info=event_info,
                 has_coalesce_key=coalesce_key is not None,
@@ -510,6 +613,27 @@ class ThreadOutboundWritePolicy:
                 "event_id": event_id,
                 "content": dict(content),
             },
+        )
+
+    def reserve_thread_response(self, room_id: str, event_id: str, thread_id: str) -> None:
+        """Retain one known response thread before later edits drop relation metadata."""
+        if not self._cache_ops.cache_runtime_available():
+            return
+        self._reservations.reserve(
+            self._cache_ops.cache_principal_id(),
+            room_id,
+            event_id,
+            thread_id,
+        )
+
+    def release_thread_response(self, room_id: str, event_id: str) -> None:
+        """Release one terminal response reservation and all retained event aliases."""
+        if self._cache_ops.runtime.event_cache is None:
+            return
+        self._reservations.release(
+            self._cache_ops.cache_principal_id(),
+            room_id,
+            event_id,
         )
 
     def _normalize_outbound_event_source(

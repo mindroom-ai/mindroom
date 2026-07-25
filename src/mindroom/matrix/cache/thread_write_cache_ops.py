@@ -65,6 +65,11 @@ class ThreadMutationCacheOps:
             return {"cache_backend": "none"}
         return self.runtime.event_cache.runtime_diagnostics()
 
+    def cache_principal_id(self) -> str:
+        """Return principal namespace owning outbound write reservations."""
+        assert self.runtime.event_cache is not None
+        return self.runtime.event_cache.principal_id
+
     def pending_durable_write_room_ids(self) -> tuple[str, ...]:
         """Return rooms with runtime-only writes that must persist before sync certification."""
         if self.runtime.event_cache is None:

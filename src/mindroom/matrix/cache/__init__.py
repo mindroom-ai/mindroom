@@ -14,6 +14,7 @@ Developer note:
 - `sqlite_agent_message_snapshot.py` owns SQLite reads for latest cached agent message snapshots.
 - `postgres_event_cache_events.py`, `postgres_event_cache_threads.py`, and `postgres_agent_message_snapshot.py` own the equivalent PostgreSQL row helpers.
 - `sqlite_cache_maintenance.py` and `postgres_cache_maintenance.py` own transactional migration, invariant repair, and startup diagnostics.
+- `outbound_thread_reservations.py` owns bounded principal-, room-, and event-scoped thread claims for local response edits.
 - `thread_writes.py` owns live, outbound, and sync mutation flows; `thread_bookkeeping.py` resolves thread impact and `thread_write_cache_ops.py` applies queued cache mutations.
 
 Package boundary:

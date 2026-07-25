@@ -229,6 +229,12 @@ class ConversationCacheProtocol(Protocol):
         This is advisory post-redaction bookkeeping and must fail open.
         """
 
+    def reserve_outbound_thread(self, room_id: str, event_id: str, thread_id: str) -> None:
+        """Reserve one known outbound response thread for later relation-free edits."""
+
+    def release_outbound_thread(self, room_id: str, event_id: str) -> None:
+        """Release one outbound response thread reservation after terminal delivery."""
+
     async def append_live_event(
         self,
         room_id: str,
@@ -997,6 +1003,14 @@ class MatrixConversationCache(ConversationCacheProtocol):
         self._evict_turn_thread_reads_for_room(room_id)
         self._evict_turn_event_lookups_for_room(room_id)
         self._outbound.notify_outbound_redaction(room_id, redacted_event_id)
+
+    def reserve_outbound_thread(self, room_id: str, event_id: str, thread_id: str) -> None:
+        """Reserve one known outbound response thread for later relation-free edits."""
+        self._outbound.reserve_thread_response(room_id, event_id, thread_id)
+
+    def release_outbound_thread(self, room_id: str, event_id: str) -> None:
+        """Release one outbound response thread reservation after terminal delivery."""
+        self._outbound.release_thread_response(room_id, event_id)
 
     def _evict_turn_thread_reads_for_room(self, room_id: str) -> None:
         """Discard thread reads changed by a successful outbound mutation."""
