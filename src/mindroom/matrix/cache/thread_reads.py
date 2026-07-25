@@ -113,12 +113,14 @@ class ThreadReadPolicy:
         fetch_thread_history_from_client: _ThreadHistoryFetcher,
         fetch_dispatch_thread_history_from_client: _ThreadHistoryFetcher,
         fetch_dispatch_thread_snapshot_from_client: _ThreadHistoryFetcher,
+        refresh_thread_history_from_source: _ThreadHistoryFetcher,
     ) -> None:
         self._logger_getter = logger_getter
         self.runtime = runtime
         self.fetch_thread_history_from_client = fetch_thread_history_from_client
         self.fetch_dispatch_thread_history_from_client = fetch_dispatch_thread_history_from_client
         self.fetch_dispatch_thread_snapshot_from_client = fetch_dispatch_thread_snapshot_from_client
+        self.refresh_thread_history_from_source = refresh_thread_history_from_source
 
     @property
     def logger(self) -> structlog.stdlib.BoundLogger:
@@ -372,6 +374,26 @@ class ThreadReadPolicy:
             fetcher=fetcher,
             name=self._operation_name_for_mode(mode),
             full_history=mode.full_history,
+            caller_label=caller_label,
+            queue_wait_started=queue_wait_started,
+        )
+
+    async def refresh_thread_from_source(
+        self,
+        room_id: str,
+        thread_id: str,
+        *,
+        caller_label: str,
+    ) -> ThreadHistoryResult:
+        """Refresh one full thread directly from Matrix through the same-thread write barrier."""
+        queue_wait_started = time.perf_counter()
+        await self._wait_for_pending_thread_cache_updates(room_id, thread_id)
+        return await self._run_thread_read(
+            room_id,
+            thread_id,
+            fetcher=self.refresh_thread_history_from_source,
+            name="matrix_cache_refresh_strict_thread_from_source",
+            full_history=True,
             caller_label=caller_label,
             queue_wait_started=queue_wait_started,
         )

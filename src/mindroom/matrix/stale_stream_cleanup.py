@@ -106,6 +106,10 @@ class _InterruptedThread:
     timestamp_ms: int = field(default=0, compare=False)
 
 
+class _InterruptedTargetAbsentError(ValueError):
+    """Raised when strict thread history does not contain the interrupted response."""
+
+
 @dataclass(frozen=True)
 class StaleStreamCleanupActor:
     """One bot account that may repair its own stale messages."""
@@ -410,10 +414,21 @@ async def _interrupted_target_remains_latest_human_work(
             interrupted_thread.thread_id,
             caller_label="startup_auto_resume_freshness",
         )
-        later_messages = _authoritative_history_after_target(
-            history,
-            target_event_id=interrupted_thread.target_event_id,
-        )
+        try:
+            later_messages = _authoritative_history_after_target(
+                history,
+                target_event_id=interrupted_thread.target_event_id,
+            )
+        except _InterruptedTargetAbsentError:
+            history = await conversation_cache.refresh_strict_thread_history_from_source(
+                interrupted_thread.room_id,
+                interrupted_thread.thread_id,
+                caller_label="startup_auto_resume_target_refresh",
+            )
+            later_messages = _authoritative_history_after_target(
+                history,
+                target_event_id=interrupted_thread.target_event_id,
+            )
         remains_latest = _later_thread_activity_is_internal(
             later_messages,
             config=config,
@@ -454,7 +469,7 @@ def _authoritative_history_after_target(
     )
     if target_index is None:
         msg = f"Interrupted target absent from thread history: {target_event_id}"
-        raise ValueError(msg)
+        raise _InterruptedTargetAbsentError(msg)
     return history[target_index + 1 :]
 
 

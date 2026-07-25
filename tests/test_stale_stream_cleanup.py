@@ -295,14 +295,19 @@ def _authoritative_history(*messages: ResolvedVisibleMessage) -> ThreadHistoryRe
 
 def _auto_resume_conversation_cache(interrupted: list[InterruptedThread]) -> AsyncMock:
     conversation_cache = AsyncMock()
-    conversation_cache.get_strict_thread_history = AsyncMock(
-        side_effect=lambda room_id, thread_id, **_: _authoritative_history(
+
+    def history_for_thread(room_id: str, thread_id: str, **_: object) -> ThreadHistoryResult:
+        return _authoritative_history(
             *[
                 _history_message(item.target_event_id, timestamp=item.timestamp_ms)
                 for item in interrupted
                 if (item.room_id, item.thread_id) == (room_id, thread_id)
             ],
-        ),
+        )
+
+    conversation_cache.get_strict_thread_history = AsyncMock(side_effect=history_for_thread)
+    conversation_cache.refresh_strict_thread_history_from_source = AsyncMock(
+        side_effect=history_for_thread,
     )
     conversation_cache.notify_outbound_message = Mock()
     return conversation_cache
@@ -939,6 +944,10 @@ async def test_auto_resume_fails_closed_without_authoritative_target_history(
         conversation_cache.get_strict_thread_history.return_value = _authoritative_history(
             _history_message("$other"),
         )
+        conversation_cache.refresh_strict_thread_history_from_source.side_effect = None
+        conversation_cache.refresh_strict_thread_history_from_source.return_value = _authoritative_history(
+            _history_message("$other"),
+        )
     elif conversation_cache is not None and history_case == "untrusted_sender":
         state = MatrixState.load(runtime_paths_for(config))
         state.accounts.pop(managed_account_key("other"))
@@ -960,6 +969,57 @@ async def test_auto_resume_fails_closed_without_authoritative_target_history(
 
     assert resumed_count == 0
     mock_send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_auto_resume_refreshes_matrix_when_startup_cache_omits_target(tmp_path: Path) -> None:
+    """Startup recovery should refresh Matrix once when sync has not appended the target to cache yet."""
+    config = _make_config(tmp_path)
+    client = AsyncMock(spec=nio.AsyncClient)
+    interrupted = [
+        InterruptedThread(
+            ROOM_ID,
+            "$thread",
+            "$target",
+            "partial",
+            "test_agent",
+            original_sender_id=USER_ID,
+        ),
+    ]
+    conversation_cache = _auto_resume_conversation_cache(interrupted)
+    conversation_cache.get_strict_thread_history.side_effect = None
+    conversation_cache.get_strict_thread_history.return_value = _authoritative_history(
+        _history_message("$older"),
+    )
+    conversation_cache.refresh_strict_thread_history_from_source.side_effect = None
+    conversation_cache.refresh_strict_thread_history_from_source.return_value = _authoritative_history(
+        _history_message("$target"),
+    )
+
+    with patch(
+        "mindroom.matrix.stale_stream_cleanup.send_message_result",
+        new=AsyncMock(side_effect=delivered_matrix_side_effect("$resume")),
+    ) as mock_send:
+        resumed_count = await auto_resume_interrupted_threads(
+            client,
+            interrupted,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            conversation_cache=conversation_cache,
+        )
+
+    assert resumed_count == 1
+    conversation_cache.get_strict_thread_history.assert_awaited_once_with(
+        ROOM_ID,
+        "$thread",
+        caller_label="startup_auto_resume_freshness",
+    )
+    conversation_cache.refresh_strict_thread_history_from_source.assert_awaited_once_with(
+        ROOM_ID,
+        "$thread",
+        caller_label="startup_auto_resume_target_refresh",
+    )
+    mock_send.assert_awaited_once()
 
 
 @pytest.mark.asyncio
