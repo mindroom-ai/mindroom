@@ -289,30 +289,16 @@ async def _apply_cached_latest_edit(
         if edited_body is None or edited_content is None:
             rejected_event_ids.add(latest_replacement["event_id"])
             continue
-        return _event_source_with_replaced_content(
-            event_source,
-            edited_body=edited_body,
-            edited_content=edited_content,
+        original_content = event_source.get("content", {})
+        projected_content = replacement_content(
+            original_content if isinstance(original_content, dict) else {},
+            edited_content,
         )
+        projected_content.setdefault("body", edited_body)
+        updated_event_source = {key: value for key, value in event_source.items() if isinstance(key, str)}
+        updated_event_source["content"] = projected_content
+        return updated_event_source
     return event_source
-
-
-def _event_source_with_replaced_content(
-    event_source: dict[str, Any],
-    *,
-    edited_body: str,
-    edited_content: dict[str, Any],
-) -> dict[str, Any]:
-    """Return one event source carrying its replacement's visible content."""
-    original_content = event_source.get("content", {})
-    projected_content = replacement_content(
-        original_content if isinstance(original_content, dict) else {},
-        edited_content,
-    )
-    projected_content.setdefault("body", edited_body)
-    updated_event_source = {key: value for key, value in event_source.items() if isinstance(key, str)}
-    updated_event_source["content"] = projected_content
-    return updated_event_source
 
 
 async def _cached_room_get_event_response(
