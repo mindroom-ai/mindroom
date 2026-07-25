@@ -3869,6 +3869,18 @@ def test_start_mindroom_uses_editable_overlay_and_persists_each_pid(
         stack.temp_dir.cleanup()
 
 
+def test_live_stack_accepts_explicit_isolated_api_port(tmp_path: Path) -> None:
+    """Live campaigns may avoid another campaign's conventional API port."""
+    stack = ManagedTuwunelStack(
+        state_root=tmp_path / "state",
+        api_port=18765,
+    )
+    try:
+        assert stack._requested_api_port == 18765
+    finally:
+        stack.temp_dir.cleanup()
+
+
 @pytest.mark.asyncio
 async def test_run_live_closes_every_client_without_masking_primary_failure(
     monkeypatch: pytest.MonkeyPatch,
@@ -6090,6 +6102,7 @@ def test_main_preserves_base_exception_evidence_and_closes_stack(
 ) -> None:
     """An interrupted campaign preserves evidence and tears down its stack."""
     args = SimpleNamespace(
+        api_port=None,
         artifact_root=tmp_path / "artifacts",
         profile="fuzz",
         failure_log=None,
@@ -6149,6 +6162,7 @@ def test_main_bad_failure_log_preserves_primary_and_closes_stack(
     mindroom_log = tmp_path / "mindroom.log"
     mindroom_log.write_text("mindroom output\n", encoding="utf-8")
     args = SimpleNamespace(
+        api_port=None,
         artifact_root=tmp_path / "artifacts",
         profile="fuzz",
         failure_log=failure_log,
@@ -6197,6 +6211,7 @@ def test_main_bundle_capture_failure_preserves_primary_and_closes_stack(
 ) -> None:
     """Any evidence-capture failure still preserves the run error and teardown."""
     args = SimpleNamespace(
+        api_port=None,
         artifact_root=tmp_path / "artifacts",
         profile="fuzz",
         failure_log=None,
@@ -6250,6 +6265,7 @@ def test_main_stop_interrupt_preserves_primary_and_closes_stack(
 ) -> None:
     """An interrupted evidence stage cannot mask the run error or skip close."""
     args = SimpleNamespace(
+        api_port=None,
         artifact_root=tmp_path / "artifacts",
         profile="fuzz",
         failure_log=None,
@@ -6319,6 +6335,7 @@ def test_main_rechecks_sources_at_teardown_and_receipt_boundaries(
 ) -> None:
     """PASS revalidates after runtime work and again after teardown."""
     args = SimpleNamespace(
+        api_port=None,
         artifact_root=tmp_path / "artifacts",
         profile="fuzz",
         failure_log=None,
@@ -6410,6 +6427,7 @@ def test_main_cleanup_failure_retains_pre_teardown_evidence(
     """A passing workload snapshots disposable evidence before failed cleanup."""
     artifact_root = tmp_path / "artifacts"
     args = SimpleNamespace(
+        api_port=None,
         artifact_root=artifact_root,
         profile="fuzz",
         failure_log=None,
@@ -6543,6 +6561,7 @@ def test_main_missing_runtime_provenance_captures_bundle_before_teardown(
     _write_ledger(ledger_path, {})
     log_path.write_text("runtime without attestation\n", encoding="utf-8")
     args = SimpleNamespace(
+        api_port=None,
         artifact_root=artifact_root,
         profile="fuzz",
         failure_log=None,

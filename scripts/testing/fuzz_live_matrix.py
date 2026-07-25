@@ -1517,6 +1517,7 @@ class ManagedTuwunelStack:
         mindroom_revision: str | None = None,
         runner_revision: str | None = None,
         stress_config: StressConfig | None = None,
+        api_port: int | None = None,
     ) -> None:
         token = secrets.token_hex(4)
         self._stream_profile = stream_profile or StreamProfile()
@@ -1553,6 +1554,7 @@ class ManagedTuwunelStack:
         self._mindroom_root = mindroom_root.resolve() if mindroom_root is not None else None
         self._mindroom_revision = mindroom_revision
         self._runner_revision = runner_revision
+        self._requested_api_port = api_port
         self._host_lease: TextIOWrapper | None = None
         self._mindroom_start_log_offset = 0
         self.stress_config = stress_config
@@ -1756,7 +1758,8 @@ class ManagedTuwunelStack:
         registry = json.loads(INSTANCE_REGISTRY.read_text(encoding="utf-8"))
         instance = registry["instances"][self.instance_name]
         matrix_port = int(instance["matrix_port"])
-        self.api_port = int(instance["mindroom_port"])
+        allocated_api_port = int(instance["mindroom_port"])
+        self.api_port = self._requested_api_port if self._requested_api_port is not None else allocated_api_port
         domain = str(instance["domain"])
         self.homeserver = f"http://127.0.0.1:{matrix_port}"
         self.server_name = f"m-{domain}"
@@ -5716,6 +5719,11 @@ def _parse_args() -> argparse.Namespace:
         type=Path,
         help="clean exact MindRoom checkout loaded by the child; defaults to this harness checkout",
     )
+    parser.add_argument(
+        "--api-port",
+        type=_positive_int,
+        help="explicit isolated MindRoom API port; defaults to local instance allocation",
+    )
     parser.add_argument("--profile", choices=("fuzz", "saturation", "chaos", "stress"), default="fuzz")
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--steps", type=_positive_int, default=200)
@@ -6886,6 +6894,7 @@ def _run_stress_main(args: argparse.Namespace) -> None:
         mindroom_revision=mindroom_revision,
         runner_revision=runner_revision,
         stress_config=config,
+        api_port=args.api_port,
     )
     result: dict[str, object] | None = None
     baseline_comparison: Mapping[str, object] | None = None
@@ -6995,6 +7004,7 @@ def _run_nonstress_main(args: argparse.Namespace) -> None:
         mindroom_root=mindroom_runtime.path,
         mindroom_revision=mindroom_revision,
         runner_revision=runner_revision,
+        api_port=args.api_port,
     )
     runner_holder: dict[str, LiveFuzzRunner] = {}
     try:

@@ -51,6 +51,7 @@ uv run python scripts/testing/fuzz_live_matrix.py --nio-overlay ../mindroom-nio 
 uv run python scripts/testing/fuzz_live_matrix.py --nio-overlay ../mindroom-nio --profile saturation
 uv run python scripts/testing/fuzz_live_matrix.py --nio-overlay ../mindroom-nio --profile chaos --seed 42 --steps 200 --clients 4 --rooms 2
 uv run python scripts/testing/fuzz_live_matrix.py --nio-overlay ../mindroom-nio --profile stress
+uv run python scripts/testing/fuzz_live_matrix.py --nio-overlay ../mindroom-nio --profile stress --api-port 18765
 uv run python scripts/testing/fuzz_live_matrix.py --nio-overlay ../mindroom-nio --profile stress --threads 10 --stream-seconds 10 --waves 1
 uv run python scripts/testing/fuzz_live_matrix.py --nio-overlay ../mindroom-nio --mindroom-runtime ../mindroom-main --profile stress --write-baseline artifacts/live-matrix-stress/main-baseline.json
 uv run python scripts/testing/fuzz_live_matrix.py --nio-overlay ../mindroom-nio --profile stress --fault-mode serialize-streams
