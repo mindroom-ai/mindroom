@@ -199,6 +199,37 @@ async def test_export_threads_once_continues_after_one_account_login_failure(tmp
 
 
 @pytest.mark.asyncio
+async def test_export_threads_once_room_filter_selects_invited_room(tmp_path: Path) -> None:
+    """A room-id filter matching only an invited room should export just that room."""
+    config = thread_export_config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    write_thread_export_matrix_state(tmp_path, account_keys=("agent_general",))
+    write_invited_rooms(runtime_paths, "general", ["!user-room:localhost"])
+    client = Mock()
+    client.close = AsyncMock()
+
+    with (
+        patch("mindroom.thread_export.service.login_agent_user", new=AsyncMock(return_value=client)),
+        patch("mindroom.thread_export.service.build_owned_runtime_support", return_value=mock_runtime_support()),
+        patch("mindroom.thread_export.service.close_owned_runtime_support", new=AsyncMock()),
+        patch(
+            "mindroom.thread_export.service.export_threads_for_targets_for_client",
+            new=AsyncMock(side_effect=successful_group_result),
+        ) as export_group,
+    ):
+        stats = await export_threads_once(
+            config=config,
+            runtime_paths=runtime_paths,
+            room_filter="!user-room:localhost",
+        )
+
+    export_group.assert_awaited_once()
+    assert [room.room_id for room in export_group.await_args.kwargs["rooms"]] == ["!user-room:localhost"]
+    assert stats.rooms_exported == 1
+    assert stats.failures == 0
+
+
+@pytest.mark.asyncio
 async def test_failed_export_groups_do_not_create_runtime_support(tmp_path: Path) -> None:
     """An account-assignment failure should not create an unused cache."""
     config = thread_export_config(tmp_path)
@@ -260,16 +291,16 @@ async def test_full_pass_retains_scoped_exports_when_account_group_cannot_run(tm
 
 @pytest.mark.asyncio
 async def test_aliased_target_output_directories_are_all_skipped(tmp_path: Path) -> None:
-    """The production symlink-alias topology must preserve the shared corpus."""
+    """A symlinked agent workspace must preserve the corpus both aliases resolve to."""
     config = thread_export_config(tmp_path)
     runtime_paths = runtime_paths_for(config)
     agents_dir = tmp_path / "agents"
-    real_agent_dir = agents_dir / "openclaw"
+    real_agent_dir = agents_dir / "agent_primary"
     output_dir = real_agent_dir / "workspace" / "thread_exports"
     existing_export = output_dir / "lobby" / "old.yaml"
     existing_export.parent.mkdir(parents=True)
     existing_export.write_text("secret", encoding="utf-8")
-    aliased_agent_dir = agents_dir / "mind_flash"
+    aliased_agent_dir = agents_dir / "agent_alias"
     aliased_agent_dir.symlink_to(real_agent_dir, target_is_directory=True)
     targets = (
         ThreadExportTarget(aliased_agent_dir / "workspace" / "thread_exports"),
@@ -322,8 +353,8 @@ async def test_nested_target_output_directories_are_all_skipped(
 
 
 @pytest.mark.asyncio
-async def test_unresolvable_target_output_directory_fails_closed(tmp_path: Path) -> None:
-    """A symlink loop should become one target-scoped failure."""
+async def test_symlink_loop_target_output_directory_fails_closed(tmp_path: Path) -> None:
+    """A symlink loop should fail when the root is prepared, not silently resolve."""
     config = thread_export_config(tmp_path)
     runtime_paths = runtime_paths_for(config)
     first_link = tmp_path / "first"
@@ -341,7 +372,7 @@ async def test_unresolvable_target_output_directory_fails_closed(tmp_path: Path)
     assert stats[0].output_dir == output_dir
     assert stats[0].failures == 1
     assert stats[0].failed_items[0].room_key is None
-    assert "output directory validation failed" in stats[0].failed_items[0].error
+    assert "output directory preparation failed" in stats[0].failed_items[0].error
 
 
 @pytest.mark.asyncio
@@ -434,12 +465,12 @@ async def test_aliased_targets_are_skipped_while_unique_target_completes(
     config = thread_export_config(tmp_path)
     runtime_paths = runtime_paths_for(config)
     write_thread_export_matrix_state(tmp_path, account_keys=(INTERNAL_USER_ACCOUNT_KEY,))
-    real_agent_dir = tmp_path / "agents" / "openclaw"
+    real_agent_dir = tmp_path / "agents" / "agent_primary"
     shared_output_dir = real_agent_dir / "workspace" / "thread_exports"
     shared_export = shared_output_dir / "lobby" / "old.yaml"
     shared_export.parent.mkdir(parents=True)
     shared_export.write_text("secret", encoding="utf-8")
-    aliased_agent_dir = tmp_path / "agents" / "mind_flash"
+    aliased_agent_dir = tmp_path / "agents" / "agent_alias"
     aliased_agent_dir.symlink_to(real_agent_dir, target_is_directory=True)
     healthy_output_dir = tmp_path / "healthy"
     mark_thread_export_root(healthy_output_dir)

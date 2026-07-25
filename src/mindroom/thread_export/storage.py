@@ -187,23 +187,28 @@ def _room_contains_only_export_files(room_fd: int) -> bool:
     )
 
 
-def _recognizable_room_directory(root_fd: int, output_dir: Path, name: str) -> bool:
-    """Return whether one root entry has the exporter-owned room shape."""
+def _open_canonical_room_directory(root_fd: int, output_dir: Path, name: str) -> int | None:
+    """Open one canonically named, non-symlinked room directory below a pinned root."""
     if not _is_encoded_room_segment(name):
-        return False
+        return None
     try:
         mode = os.stat(name, dir_fd=root_fd, follow_symlinks=False).st_mode
     except FileNotFoundError:
-        return False
+        return None
     if not stat.S_ISDIR(mode):
-        return False
-    room_fd = _open_directory_at(
+        return None
+    return _open_directory_at(
         root_fd,
         name,
         path=output_dir / name,
         label="room directory",
         create=False,
     )
+
+
+def _recognizable_room_directory(root_fd: int, output_dir: Path, name: str) -> bool:
+    """Return whether one root entry holds an index and nothing the exporter does not own."""
+    room_fd = _open_canonical_room_directory(root_fd, output_dir, name)
     if room_fd is None:
         return False
     try:
@@ -212,19 +217,27 @@ def _recognizable_room_directory(root_fd: int, output_dir: Path, name: str) -> b
         os.close(room_fd)
 
 
-def _root_contains_only_export_structure(root_fd: int, output_dir: Path) -> bool:
-    """Return whether a markerless root is empty or contains recognizable exports."""
+def _room_shaped_directory(root_fd: int, output_dir: Path, name: str) -> bool:
+    """Return whether one root entry holds any exporter-owned file under a canonical room name."""
+    room_fd = _open_canonical_room_directory(root_fd, output_dir, name)
+    if room_fd is None:
+        return False
+    try:
+        names = os.listdir(room_fd)  # noqa: PTH208 - room_fd pins the directory
+        return any(_is_room_export_file(room_fd, entry) for entry in names)
+    finally:
+        os.close(room_fd)
+
+
+def _root_has_export_evidence(root_fd: int, output_dir: Path) -> bool:
+    """Return whether an empty root, or one holding an exported room, proves exporter ownership.
+
+    Unrelated entries beside an exported room do not veto ownership: a stray ``.DS_Store``,
+    ``.git`` directory, or operator note must not strand a real corpus, and every destructive
+    path is independently scoped to exporter-owned entries.
+    """
     names = os.listdir(root_fd)
-    if not names:
-        return True
-    for name in names:
-        if name == _ROOT_MARKER_FILENAME:
-            continue
-        if _atomic_temp_destination(name) == _ROOT_MARKER_FILENAME and _regular_file_at(root_fd, name):
-            continue
-        if not _recognizable_room_directory(root_fd, output_dir, name):
-            return False
-    return True
+    return not names or any(_room_shaped_directory(root_fd, output_dir, name) for name in names)
 
 
 def _has_valid_export_root_marker(root_fd: int) -> bool:
@@ -246,16 +259,16 @@ def _unowned_export_root(path: Path) -> _UnsafeThreadExportPathError:
     """Return a failure for a root without MindRoom ownership proof."""
     return _UnsafeThreadExportPathError(
         f"Refusing unowned thread export root: {path}; "
-        f"the root must contain {_ROOT_MARKER_FILENAME} with exact content {_ROOT_MARKER_TEXT!r} "
-        "or only recognizable MindRoom thread exports.",
+        f"the root must be empty, already contain an exported room directory, or contain "
+        f"{_ROOT_MARKER_FILENAME} with exact content {_ROOT_MARKER_TEXT!r}.",
     )
 
 
 def _claim_export_root(root_fd: int, output_dir: Path) -> None:
-    """Install the marker on an empty or recognizable exporter-owned root."""
+    """Install the marker on an empty root or one that already holds an exported room."""
     if _has_valid_export_root_marker(root_fd):
         return
-    if _root_contains_only_export_structure(root_fd, output_dir):
+    if _root_has_export_evidence(root_fd, output_dir):
         _atomic_write_at(root_fd, _ROOT_MARKER_FILENAME, _ROOT_MARKER_TEXT)
         return
     logger.warning(
@@ -605,7 +618,7 @@ def _remove_room_export_entries(
     room_name: str,
     *,
     room_key: str | None,
-) -> tuple[bool, bool]:
+) -> bool:
     """Remove exporter-owned room entries, preserving and reporting everything else."""
     room_fd = _open_directory_at(
         root_fd,
@@ -615,18 +628,16 @@ def _remove_room_export_entries(
         create=False,
     )
     if room_fd is None:
-        return False, False
+        return False
     try:
         filenames = os.listdir(room_fd)  # noqa: PTH208 - room_fd pins the directory
         removed_files = False
-        had_unrecognized_entries = False
         for filename in filenames:
             if _is_room_export_file(room_fd, filename):
                 os.unlink(filename, dir_fd=room_fd)
                 removed_files = True
             else:
                 _log_unrecognized_entry(output_dir, filename, room_key=room_key)
-                had_unrecognized_entries = True
         if removed_files:
             _fsync_directory_fd(room_fd)
         removed_directory = False
@@ -634,20 +645,17 @@ def _remove_room_export_entries(
             with suppress(OSError):
                 os.rmdir(room_name, dir_fd=root_fd)
                 removed_directory = True
-        return removed_files or removed_directory, had_unrecognized_entries
+        return removed_files or removed_directory
     finally:
         os.close(room_fd)
 
 
-def _unrecognized_room(output_dir: Path, room_name: str) -> _UnsafeThreadExportPathError:
-    """Return the exact-room failure that distinguishes a present foreign directory."""
-    return _UnsafeThreadExportPathError(
-        f"Refusing removal of unrecognized thread export room: {output_dir / room_name}",
-    )
-
-
 def remove_room_export(output_dir: Path, room: ThreadExportRoom) -> None:
-    """Retract one room export, raising when a present room has no recognizable data."""
+    """Retract one room export, preserving and reporting entries the exporter does not own.
+
+    Retraction is idempotent: once every exporter-owned entry is gone, later passes over the
+    same room are quiet no-ops rather than a failure the operator can never clear.
+    """
     root_fd = _open_owned_export_root(output_dir, create=False)
     if root_fd is None:
         return
@@ -666,20 +674,11 @@ def remove_room_export(output_dir: Path, room: ThreadExportRoom) -> None:
             shutil.rmtree(room_name, dir_fd=root_fd)
             _fsync_directory_fd(root_fd)
             return
-        if stat.S_ISDIR(mode):
-            removed, had_unrecognized_entries = _remove_room_export_entries(
-                root_fd,
-                output_dir,
-                room_name,
-                room_key=room.key,
-            )
-            if removed:
-                _fsync_directory_fd(root_fd)
-                return
-            if had_unrecognized_entries:
-                raise _unrecognized_room(output_dir, room_name)
-        _log_unrecognized_entry(output_dir, room_name, room_key=room.key)
-        raise _unrecognized_room(output_dir, room_name)
+        if not stat.S_ISDIR(mode):
+            _log_unrecognized_entry(output_dir, room_name, room_key=room.key)
+            return
+        if _remove_room_export_entries(root_fd, output_dir, room_name, room_key=room.key):
+            _fsync_directory_fd(root_fd)
     finally:
         os.close(root_fd)
 
@@ -733,14 +732,7 @@ def _remove_reconciliation_room(root_fd: int, output_dir: Path, room_name: str) 
     except FileNotFoundError:
         return False
     if stat.S_ISDIR(mode):
-        removed, had_unrecognized_entries = _remove_room_export_entries(
-            root_fd,
-            output_dir,
-            room_name,
-            room_key=None,
-        )
-        if removed or had_unrecognized_entries:
-            return removed
+        return _remove_room_export_entries(root_fd, output_dir, room_name, room_key=None)
     _log_unrecognized_entry(output_dir, room_name)
     return False
 

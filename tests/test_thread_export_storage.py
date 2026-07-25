@@ -104,6 +104,57 @@ def test_exporter_ignores_its_atomic_write_residue_when_claiming_a_legacy_root(t
     assert (output_dir / _ROOT_MARKER_FILENAME).read_text(encoding="utf-8") == _ROOT_MARKER_TEXT
 
 
+@pytest.mark.parametrize(
+    "foreign_entry",
+    [
+        pytest.param(".DS_Store", id="finder-metadata"),
+        pytest.param("README.md", id="operator-note"),
+    ],
+)
+def test_exporter_claims_a_legacy_root_beside_a_foreign_file(tmp_path: Path, foreign_entry: str) -> None:
+    """A stray file next to a real corpus must not strand the whole target."""
+    output_dir = tmp_path / "thread_exports"
+    room_dir = output_dir / "lobby"
+    room_dir.mkdir(parents=True)
+    (room_dir / "index.json").write_text("{}\n", encoding="utf-8")
+    (room_dir / _thread_filename("$thread:localhost")).write_text("version: 1\n", encoding="utf-8")
+    foreign = output_dir / foreign_entry
+    foreign.write_text("unrelated", encoding="utf-8")
+
+    prepare_export_root(output_dir)
+
+    assert (output_dir / _ROOT_MARKER_FILENAME).read_text(encoding="utf-8") == _ROOT_MARKER_TEXT
+    assert foreign.read_text(encoding="utf-8") == "unrelated"
+
+
+def test_exporter_claims_a_legacy_root_beside_a_foreign_directory(tmp_path: Path) -> None:
+    """A version-control directory beside a real corpus must not strand the target."""
+    output_dir = tmp_path / "thread_exports"
+    room_dir = output_dir / "lobby"
+    room_dir.mkdir(parents=True)
+    (room_dir / "index.json").write_text("{}\n", encoding="utf-8")
+    keep = output_dir / ".git" / "HEAD"
+    keep.parent.mkdir()
+    keep.write_text("ref: refs/heads/main\n", encoding="utf-8")
+
+    prepare_export_root(output_dir)
+
+    assert (output_dir / _ROOT_MARKER_FILENAME).read_text(encoding="utf-8") == _ROOT_MARKER_TEXT
+    assert keep.read_text(encoding="utf-8") == "ref: refs/heads/main\n"
+
+
+def test_exporter_claims_a_room_left_without_an_index_by_an_interrupted_pass(tmp_path: Path) -> None:
+    """Thread YAML written before an interrupted index write still proves ownership."""
+    output_dir = tmp_path / "thread_exports"
+    room_dir = output_dir / "lobby"
+    room_dir.mkdir(parents=True)
+    (room_dir / _thread_filename("$thread:localhost")).write_text("version: 1\n", encoding="utf-8")
+
+    prepare_export_root(output_dir)
+
+    assert (output_dir / _ROOT_MARKER_FILENAME).read_text(encoding="utf-8") == _ROOT_MARKER_TEXT
+
+
 def test_unrecognized_root_is_not_marked(tmp_path: Path) -> None:
     """An ordinary directory should fail closed instead of gaining export ownership."""
     output_dir = tmp_path / "documents"
@@ -192,10 +243,10 @@ def test_stale_pruning_deletes_only_thread_id_shaped_yaml(
     assert warning.call_args.args == ("Leaving unrecognized thread export entry untouched",)
 
 
-def test_room_removal_reports_a_present_unrecognized_directory(
+def test_room_removal_preserves_a_present_unrecognized_directory(
     tmp_path: Path,
 ) -> None:
-    """A present room with no exporter-owned files should fail instead of looking absent."""
+    """A room holding only foreign files should be preserved and reported, not fail forever."""
     output_dir = tmp_path / "thread_exports"
     room_dir = output_dir / "lobby"
     room_dir.mkdir(parents=True)
@@ -203,15 +254,31 @@ def test_room_removal_reports_a_present_unrecognized_directory(
     keep = room_dir / "keep.txt"
     keep.write_text("private", encoding="utf-8")
 
-    with (
-        patch("mindroom.thread_export.storage.logger.warning") as warning,
-        pytest.raises(RuntimeError, match="unrecognized thread export room"),
-    ):
-        remove_room_export(output_dir, _room())
+    with patch("mindroom.thread_export.storage.logger.warning") as warning:
+        for _ in range(2):
+            remove_room_export(output_dir, _room())
 
     assert keep.read_text(encoding="utf-8") == "private"
-    warning.assert_called_once()
-    assert warning.call_args.args == ("Leaving unrecognized thread export entry untouched",)
+    assert warning.call_count == 2
+    assert all(call.args == ("Leaving unrecognized thread export entry untouched",) for call in warning.call_args_list)
+
+
+def test_room_retraction_is_idempotent_beside_a_foreign_file(tmp_path: Path) -> None:
+    """Repeat retraction of a partially cleaned room must stay a quiet no-op."""
+    output_dir = tmp_path / "thread_exports"
+    room_dir = output_dir / "lobby"
+    room_dir.mkdir(parents=True)
+    _mark_export_root(output_dir)
+    (room_dir / "index.json").write_text("{}\n", encoding="utf-8")
+    (room_dir / _thread_filename("$thread:localhost")).write_text("version: 1\n", encoding="utf-8")
+    keep = room_dir / "notes.txt"
+    keep.write_text("operator note", encoding="utf-8")
+
+    for _ in range(3):
+        remove_room_export(output_dir, _room())
+
+    assert sorted(entry.name for entry in room_dir.iterdir()) == ["notes.txt"]
+    assert keep.read_text(encoding="utf-8") == "operator note"
 
 
 def test_recognizable_room_removal_still_retracts_data(tmp_path: Path) -> None:

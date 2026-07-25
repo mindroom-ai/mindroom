@@ -569,8 +569,12 @@ A warning is logged when that guard preserves existing target state because the 
 A complete room enumeration that returns zero threads preserves existing YAML exports for that room and logs a warning because an anomalous empty response cannot be distinguished from deletion of the final thread.
 After either warning, verify the source state and remove the preserved export manually only when the deletion is confirmed; workspace git history remains the recovery path for mistaken cleanup.
 Enabled targets whose resolved output directories are equal or nested are all skipped before Matrix work.
-MindRoom automatically adds a `.mindroom-thread-exports` ownership marker to empty roots and recognizable existing export trees.
-Destructive cleanup requires that marker and removes only recognizable room directories and thread YAML files, leaving unrelated entries untouched.
+MindRoom claims an output root by writing a `.mindroom-thread-exports` ownership marker, and it claims automatically when the root is empty or already holds at least one exported room directory.
+Unrelated entries beside those room directories, such as `.DS_Store`, a `.git` directory, or your own notes, neither block the claim nor ever get deleted.
+A root MindRoom cannot recognize is skipped for the entire pass, so it is neither exported to nor cleaned up, and the skip is reported as a target failure.
+Adopt such a root by creating `.mindroom-thread-exports` inside it containing exactly `{"format":"mindroom-thread-exports","version":1}` followed by a newline.
+Cleanup then removes only recognizable room directories and thread YAML files, leaving unrelated entries untouched and logged.
+Retracting a room whose directory still holds unrelated entries removes only the exported files and leaves the directory in place, and repeating the pass stays a quiet no-op.
 Output paths with a terminal `.`, `..`, or empty leaf are rejected, as are symlinked final output and room directories.
 With `--prefer-cache` thread bodies are served from the durable event cache and only fetched from the homeserver on miss or invalidation; use it alongside a running MindRoom that keeps the cache fresh.
 

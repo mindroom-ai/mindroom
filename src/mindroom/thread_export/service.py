@@ -129,7 +129,7 @@ def _validated_targets(
         try:
             output_dir = canonicalize_output_dir(authored_output_dir)
             resolved_output_dir = output_dir.resolve()
-        except Exception as exc:
+        except (OSError, RuntimeError) as exc:
             accumulator.failed_items.append(failure_for_target(f"output directory validation failed: {exc}"))
             logger.warning(
                 "Skipping thread export target whose output directory could not be validated",
@@ -167,10 +167,10 @@ def _validated_targets(
             continue
         try:
             prepare_export_root(accumulator.target.output_dir)
-        except Exception as exc:
-            accumulator.failed_items.append(failure_for_target(f"output directory validation failed: {exc}"))
+        except (OSError, RuntimeError) as exc:
+            accumulator.failed_items.append(failure_for_target(f"output directory preparation failed: {exc}"))
             logger.warning(
-                "Skipping thread export target with unsafe output directory",
+                "Skipping thread export target with unusable output directory",
                 output_dir=str(accumulator.target.output_dir),
                 error=str(exc),
             )
