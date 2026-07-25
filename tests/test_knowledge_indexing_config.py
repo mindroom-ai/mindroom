@@ -34,10 +34,11 @@ def _settings(base_id: str = "docs") -> IndexingSettings:
         git_skip_hidden="",
         git_include_patterns="",
         git_exclude_patterns="",
-        include_patterns="",
-        exclude_patterns="",
+        include_patterns="()",
+        exclude_patterns="()",
         include_extensions="",
         exclude_extensions="()",
+        extra_extensions="()",
     )
 
 
@@ -84,17 +85,34 @@ def test_indexing_settings_from_metadata_rejects_invalid_payloads() -> None:
     assert IndexingSettings.from_metadata({**metadata, "mode": "unknown"}) is None
 
 
-def test_indexing_settings_from_metadata_defaults_optional_filter_keys() -> None:
-    """Older payloads without include/exclude patterns or skip_hidden still parse."""
+def test_indexing_settings_from_metadata_normalizes_legacy_empty_filter_keys() -> None:
+    """Older semantic payloads normalize absent or empty filter tuples at the parse boundary."""
     metadata = _settings().to_metadata()
     del metadata["include_patterns"]
-    del metadata["exclude_patterns"]
+    metadata["exclude_patterns"] = ""
+    del metadata["extra_extensions"]
     del metadata["skip_hidden"]
     parsed = IndexingSettings.from_metadata(metadata)
     assert parsed is not None
-    assert parsed.include_patterns == ""
-    assert parsed.exclude_patterns == ""
+    assert parsed.include_patterns == "()"
+    assert parsed.exclude_patterns == "()"
+    assert parsed.extra_extensions == "()"
     assert parsed.skip_hidden == ""
+
+
+def test_files_mode_legacy_empty_patterns_normalize_without_semantic_extensions() -> None:
+    """File-mode patterns remain tuple keys while semantic-only extensions stay empty."""
+    metadata = replace(_settings(), mode="files", extra_extensions="").to_metadata()
+    metadata["include_patterns"] = ""
+    del metadata["exclude_patterns"]
+    metadata["extra_extensions"] = ""
+
+    parsed = IndexingSettings.from_metadata(metadata)
+
+    assert parsed is not None
+    assert parsed.include_patterns == "()"
+    assert parsed.exclude_patterns == "()"
+    assert parsed.extra_extensions == ""
 
 
 def test_skip_hidden_changes_corpus_key_but_not_query_key() -> None:

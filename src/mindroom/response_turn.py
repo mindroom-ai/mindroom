@@ -345,7 +345,7 @@ class BlockingTurnAdapter:
     close_runtime_dbs: Callable[[ScopeSessionContext | None], None]
     discard_empty_run: Callable[[ScopeSessionContext | None, EmptyRunDiscard], None]
     on_scope_opened: Callable[[ScopeSessionContext | None], None] | None = None
-    finalize_attempt: Callable[[ScopeSessionContext | None], None] | None = None
+    finalize_attempt: Callable[[ScopeSessionContext | None], Awaitable[None]] | None = None
     unexpected_error_text: Callable[[Exception], str] | None = None
     persist_standalone_replay: Callable[[ScopeSessionContext | None, StandaloneReplaySnapshot], None] | None = None
 
@@ -365,7 +365,7 @@ class StreamingTurnAdapter[ChunkT]:
     discard_empty_run: Callable[[ScopeSessionContext | None, EmptyRunDiscard], None]
     make_text_chunk: Callable[[str], ChunkT]
     on_scope_opened: Callable[[ScopeSessionContext | None], None] | None = None
-    finalize_attempt: Callable[[ScopeSessionContext | None], None] | None = None
+    finalize_attempt: Callable[[ScopeSessionContext | None], Awaitable[None]] | None = None
     unexpected_error_text: Callable[[Exception], str] | None = None
     persist_standalone_replay: Callable[[ScopeSessionContext | None, StandaloneReplaySnapshot], None] | None = None
 
@@ -588,7 +588,7 @@ async def run_blocking_response_turn(
                     )
                 finally:
                     if adapter.finalize_attempt is not None:
-                        adapter.finalize_attempt(run.scope_context)
+                        await adapter.finalize_attempt(run.scope_context)
                 if isinstance(settled, str):
                     return settled
                 continuation = settled
@@ -874,7 +874,7 @@ async def stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
                         )
                 finally:
                     if adapter.finalize_attempt is not None:
-                        adapter.finalize_attempt(run.scope_context)
+                        await adapter.finalize_attempt(run.scope_context)
                 if not keep_going:
                     return
             _raise_continuation_budget_exhausted()

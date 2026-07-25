@@ -1189,6 +1189,9 @@ class _DeliveryRequest:
     capture_completion: asyncio.Future[None] | None = None
 
 
+_STREAM_DELIVERY_PENDING_OPTIONAL_REQUEST_LIMIT = 32
+
+
 def _raise_progress_delivery_error(error: Exception) -> NoReturn:
     """Raise a stored worker-progress delivery error from a helper."""
     raise error
@@ -1207,23 +1210,39 @@ def _queue_delivery_request(
     wait_for_capture: bool = False,
 ) -> asyncio.Future[None] | None:
     """Queue one non-terminal delivery request for the single delivery owner."""
-    capture_completion = asyncio.get_running_loop().create_future() if wait_for_capture else None
-    delivery_queue.put_nowait(
-        _DeliveryRequest(
+    required_delivery = (
+        wait_for_capture or force_refresh or boundary_refresh or phase_boundary_flush or allow_empty_progress
+    )
+    queue_size = delivery_queue.qsize()
+    if not required_delivery and queue_size >= _STREAM_DELIVERY_PENDING_OPTIONAL_REQUEST_LIMIT:
+        emit_timing_event(
+            "Dispatch tool delivery timing",
+            phase="dropped_superseded",
+            queue_size=queue_size,
             progress_hint=progress_hint,
             force_refresh=force_refresh,
             boundary_refresh=boundary_refresh,
             phase_boundary_flush=phase_boundary_flush,
             allow_empty_progress=allow_empty_progress,
-            prior_delta_at=prior_delta_at,
-            boundary_refresh_prior_delta_at=(
-                (prior_delta_at if boundary_refresh_prior_delta_at is None else boundary_refresh_prior_delta_at)
-                if boundary_refresh
-                else None
-            ),
-            capture_completion=capture_completion,
+            wait_for_capture=False,
+        )
+        return None
+    capture_completion = asyncio.get_running_loop().create_future() if wait_for_capture else None
+    request = _DeliveryRequest(
+        progress_hint=progress_hint,
+        force_refresh=force_refresh,
+        boundary_refresh=boundary_refresh,
+        phase_boundary_flush=phase_boundary_flush,
+        allow_empty_progress=allow_empty_progress,
+        prior_delta_at=prior_delta_at,
+        boundary_refresh_prior_delta_at=(
+            (prior_delta_at if boundary_refresh_prior_delta_at is None else boundary_refresh_prior_delta_at)
+            if boundary_refresh
+            else None
         ),
+        capture_completion=capture_completion,
     )
+    delivery_queue.put_nowait(request)
     emit_timing_event(
         "Dispatch tool delivery timing",
         phase="queued",

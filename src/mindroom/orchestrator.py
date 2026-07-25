@@ -63,6 +63,7 @@ from mindroom.mcp.manager import MCPServerManager
 from mindroom.mcp.registry import mcp_tool_name
 from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.memory import MemoryAutoFlushWorker, auto_flush_enabled
+from mindroom.response_admission import ResponseAdmissionGate
 from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
 from mindroom.runtime_state import (
     clear_api_server_address,
@@ -244,6 +245,7 @@ class _MultiAgentOrchestrator:
     config_reload: ConfigReloadLifecycle = field(init=False)
     _mcp_manager: MCPServerManager | None = field(default=None, init=False)
     _config_update_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
+    _response_admission_gate: ResponseAdmissionGate = field(default_factory=ResponseAdmissionGate, init=False)
     _pending_replacement_recovery_room_ids: dict[str, set[str]] = field(default_factory=dict, init=False)
     _runtime_support: OwnedRuntimeSupport = field(init=False)
     _event_cache_write_task_owner: object = field(default_factory=object, init=False)
@@ -283,9 +285,9 @@ class _MultiAgentOrchestrator:
             is_running=lambda: self.running,
             current_config=lambda: self.config,
             agent_bots=lambda: self.agent_bots,
-            in_flight_response_count=self.in_flight_response_count,
             load_initial_config=self._load_initial_config,
             apply_update_plan=self._apply_config_update_plan,
+            response_admission_gate=self._response_admission_gate,
             config_update_lock=self._config_update_lock,
         )
         self._approval_transport = ApprovalMatrixTransport(
@@ -375,6 +377,7 @@ class _MultiAgentOrchestrator:
 
     def _bind_runtime_support_services(self, bot: AgentBot | TeamBot) -> None:
         """Bind the current runtime support services to one managed bot."""
+        bot.admission_gate = self._response_admission_gate
         bot.event_cache = self._runtime_support.event_cache.for_principal(bot.matrix_id.full_id)
         bot.event_cache_write_coordinator = self._runtime_support.event_cache_write_coordinator
         bot.startup_thread_prewarm_registry = self._runtime_support.startup_thread_prewarm_registry
@@ -597,10 +600,6 @@ class _MultiAgentOrchestrator:
             name=f"retry_start_{entity_name}",
             failure_message="Background bot start task failed",
         )
-
-    def in_flight_response_count(self) -> int:
-        """Return the number of active response tasks across all managed bots."""
-        return sum(bot.in_flight_response_count for bot in self.agent_bots.values())
 
     async def _sync_runtime_support_services(
         self,

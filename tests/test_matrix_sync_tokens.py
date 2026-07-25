@@ -28,6 +28,7 @@ from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from mindroom.matrix.sync_certification import SyncCheckpoint, SyncTrustState
 from mindroom.matrix.sync_tokens import clear_sync_token, load_sync_checkpoint, save_sync_token
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.response_admission import ResponseAdmissionGate
 from mindroom.runtime_shutdown import GENERIC_SHUTDOWN, SYNC_RESTART_SHUTDOWN
 from tests.conftest import (
     TEST_PASSWORD,
@@ -296,6 +297,8 @@ async def test_login_identity_change_rebinds_principal_cache_view(tmp_path: Path
     await old_cache.store_event(event_id, room_id, event)
     bot = _agent_bot(tmp_path)
     bot.event_cache = old_cache
+    admission_gate = ResponseAdmissionGate()
+    bot.admission_gate = admission_gate
     matrix_id_before_login = bot.matrix_id
 
     try:
@@ -303,6 +306,7 @@ async def test_login_identity_change_rebinds_principal_cache_view(tmp_path: Path
         bot._rebuild_runtime_components_after_login_if_identity_changed(matrix_id_before_login)
 
         assert bot.event_cache.principal_id == new_principal_id
+        assert bot.admission_gate is admission_gate
         assert await bot.event_cache.get_event(room_id, event_id) is None
         assert await old_cache.get_event(room_id, event_id) == event
     finally:

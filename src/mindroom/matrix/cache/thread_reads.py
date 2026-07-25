@@ -5,8 +5,8 @@ Read-side invariants:
 1. Every thread read through this policy first waits for the room and same-thread write queue to drain
    (``wait_for_thread_idle``), so a read never observes cache state older than mutations already queued
    when the read began.
-   Startup prewarm deliberately bypasses this policy and relies on the write-time replacement guard
-   instead.
+   Startup prewarm bypasses this policy but runs its one bulk room scan through the room write barrier
+   before relying on the backend replacement guard.
 
 2. Dispatch-safe modes (``DISPATCH_SNAPSHOT``, ``DISPATCH_FULL``) bound the whole wait-plus-fetch by one
    shared timeout and return an explicitly degraded empty result
@@ -155,6 +155,7 @@ class ThreadReadPolicy:
             room_id,
             thread_id,
             ignore_cancelled_room_fences=True,
+            coordination_scope=self.runtime.event_cache.principal_id,
         )
 
     def _full_history_result(
@@ -320,6 +321,7 @@ class ThreadReadPolicy:
                 ),
                 name=name,
                 ignore_cancelled_room_fences=True,
+                coordination_scope=self.runtime.event_cache.principal_id,
             ),
         )
 

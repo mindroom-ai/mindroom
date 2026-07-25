@@ -250,10 +250,11 @@ def _test_indexing_settings(base_id: str = "docs") -> IndexingSettings:
         git_skip_hidden="",
         git_include_patterns="",
         git_exclude_patterns="",
-        include_patterns="",
-        exclude_patterns="",
+        include_patterns="()",
+        exclude_patterns="()",
         include_extensions="",
         exclude_extensions="()",
+        extra_extensions="()",
     )
 
 
@@ -2553,9 +2554,58 @@ def test_indexing_settings_key_uses_named_settings(tmp_path: Path) -> None:
     assert not knowledge_registry.published_index_settings_compatible(key.indexing_settings, changed_repo_identity)
 
 
+def test_legacy_empty_optional_filter_metadata_remains_compatible() -> None:
+    """Legacy empty semantic filter keys normalize once when metadata is parsed."""
+    current = _test_indexing_settings()
+    legacy_metadata = current.to_metadata()
+    legacy_metadata["include_patterns"] = ""
+    del legacy_metadata["exclude_patterns"]
+    legacy_metadata["extra_extensions"] = ""
+    legacy = IndexingSettings.from_metadata(legacy_metadata)
+
+    assert legacy is not None
+    assert legacy == current
+    assert knowledge_registry.published_index_settings_compatible(legacy, current)
+    assert not knowledge_registry.published_index_settings_compatible(
+        legacy,
+        replace(current, extra_extensions="('.pdf',)"),
+    )
+
+
 def test_knowledge_file_indexing_parallelism_default_is_conservative() -> None:
     """One refresh subprocess should not fan out into dozens of concurrent file embeds by default."""
-    assert knowledge_manager_module._MAX_CONCURRENT_KNOWLEDGE_FILE_INDEXES == 4
+    assert knowledge_manager_module._max_concurrent_knowledge_file_indexes() == 4
+
+
+def test_knowledge_file_indexing_parallelism_reads_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Large corpora can raise file-level indexing concurrency explicitly."""
+    monkeypatch.setenv("MINDROOM_KNOWLEDGE_FILE_INDEX_CONCURRENCY", "16")
+
+    assert knowledge_manager_module._max_concurrent_knowledge_file_indexes() == 16
+
+
+def test_knowledge_file_indexing_parallelism_is_validated_at_manager_startup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bad operator override should fail when the manager is built, before refresh work starts."""
+    monkeypatch.setenv("MINDROOM_KNOWLEDGE_FILE_INDEX_CONCURRENCY", "bad")
+    config = _config(tmp_path, bases={"docs": tmp_path / "docs"}, agent_bases=["docs"])
+
+    with pytest.raises(ValueError, match="MINDROOM_KNOWLEDGE_FILE_INDEX_CONCURRENCY"):
+        KnowledgeManager("docs", config=config, runtime_paths=runtime_paths_for(config))
+
+
+@pytest.mark.parametrize("raw_value", ["bad", "0", "129"])
+def test_knowledge_file_indexing_parallelism_rejects_invalid_env(
+    raw_value: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Invalid file-level indexing concurrency should fail loudly."""
+    monkeypatch.setenv("MINDROOM_KNOWLEDGE_FILE_INDEX_CONCURRENCY", raw_value)
+
+    with pytest.raises(ValueError, match="MINDROOM_KNOWLEDGE_FILE_INDEX_CONCURRENCY"):
+        knowledge_manager_module._max_concurrent_knowledge_file_indexes()
 
 
 def test_indexing_settings_filter_keys_are_order_insensitive(tmp_path: Path) -> None:

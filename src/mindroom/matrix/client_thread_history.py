@@ -1073,11 +1073,18 @@ async def refresh_thread_history_from_source(
             expected_membership_epoch=fetch_membership_epoch,
             fetch_started_at=fetch_started_at,
         )
+        cache_store_outcome = (
+            "stored"
+            if cache_store_written
+            else "writes_unavailable"
+            if not event_cache.durable_writes_available
+            else "not_replaced"
+        )
         logger.info(
             "Thread history cache store completed",
             room_id=room_id,
             thread_id=thread_id,
-            cache_store_outcome="stored" if cache_store_written else "not_replaced",
+            cache_store_outcome=cache_store_outcome,
             cache_store_written=cache_store_written,
             event_count=len(fetch_result.event_sources),
             homeserver_scan_pages=fetch_result.room_scan_pages,
@@ -1580,6 +1587,7 @@ class _BulkThreadScanResult:
     unresolved_opaque_event_ids: frozenset[str]
     page_count: int
     scanned_event_count: int
+    scan_truncated: bool
 
 
 @dataclass(frozen=True)
@@ -1591,6 +1599,7 @@ class BulkThreadRefreshStats:
     missing_root_ids: frozenset[str]
     room_scan_pages: int
     scanned_event_count: int
+    scan_truncated: bool = False
 
 
 async def _unresolved_opaque_relation_event_ids(
@@ -1683,16 +1692,24 @@ async def _bulk_scan_thread_event_sources(
     room_id: str,
     *,
     thread_root_ids: Collection[str],
+    max_scan_pages: int | None = None,
 ) -> _BulkThreadScanResult:
     """Walk room history backward once and recover every requested thread's event sources."""
+    if max_scan_pages is not None and max_scan_pages < 1:
+        msg = "max_scan_pages must be at least 1"
+        raise ValueError(msg)
     edit_candidates_by_original_event_id: ThreadEditCandidatesByOriginalEventId = {}
     scanned_message_sources: dict[str, dict[str, Any]] = {}
     remaining_root_ids = set(thread_root_ids)
     from_token: str | None = None
     page_count = 0
     scanned_event_count = 0
+    scan_truncated = False
 
     while remaining_root_ids:
+        if max_scan_pages is not None and page_count >= max_scan_pages:
+            scan_truncated = True
+            break
         response = await client.room_messages(
             room_id,
             start=from_token,
@@ -1735,6 +1752,7 @@ async def _bulk_scan_thread_event_sources(
         unresolved_opaque_event_ids=unresolved_opaque_event_ids,
         page_count=page_count,
         scanned_event_count=scanned_event_count,
+        scan_truncated=scan_truncated,
     )
 
 
@@ -1745,6 +1763,7 @@ async def bulk_refresh_room_thread_histories(
     *,
     thread_root_ids: Collection[str],
     caller_label: str = "unknown",
+    max_scan_pages: int | None = None,
 ) -> BulkThreadRefreshStats:
     """Warm the durable thread cache for many threads with one backward room scan.
 
@@ -1753,13 +1772,19 @@ async def bulk_refresh_room_thread_histories(
     O(history) walk, buckets every scanned event with the same canonical resolution rules as the
     per-thread path, and stores each requested thread through the same guarded
     ``replace_thread_if_not_newer`` path. Threads whose root never appeared in the scan are
-    reported in ``missing_root_ids`` and never stored. Threads whose reconstruction contains
-    still-opaque encrypted evidence are marked stale instead of stored, and a scan holding opaque
-    relations with unresolved impact marks every requested thread stale.
+    reported in ``missing_root_ids`` and never stored. A caller-provided page budget stops the scan
+    with remaining roots reported as missing and ``scan_truncated`` set. Threads whose reconstruction
+    contains still-opaque encrypted evidence are marked stale instead of stored, and a scan holding
+    opaque relations with unresolved impact marks every requested thread stale.
     """
     fetch_started_at = time.time()
     fetch_membership_epoch = await _capture_membership_epoch(event_cache, room_id)
-    scan_result = await _bulk_scan_thread_event_sources(client, room_id, thread_root_ids=thread_root_ids)
+    scan_result = await _bulk_scan_thread_event_sources(
+        client,
+        room_id,
+        thread_root_ids=thread_root_ids,
+        max_scan_pages=max_scan_pages,
+    )
     stored_threads = 0
     opaque_stale_threads = 0
     if scan_result.unresolved_opaque_event_ids:
@@ -1799,6 +1824,7 @@ async def bulk_refresh_room_thread_histories(
         missing_root_ids=scan_result.missing_root_ids,
         room_scan_pages=scan_result.page_count,
         scanned_event_count=scan_result.scanned_event_count,
+        scan_truncated=scan_result.scan_truncated,
     )
     logger.info(
         "Bulk thread cache refresh completed",
@@ -1810,6 +1836,7 @@ async def bulk_refresh_room_thread_histories(
         missing_roots=len(stats.missing_root_ids),
         room_scan_pages=stats.room_scan_pages,
         scanned_event_count=stats.scanned_event_count,
+        scan_truncated=stats.scan_truncated,
     )
     return stats
 

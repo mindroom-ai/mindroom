@@ -18,7 +18,7 @@ import time
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 import nio
 from nio.responses import RoomGetEventError
@@ -35,10 +35,13 @@ from mindroom.matrix.cache.thread_reads import ThreadReadMode, ThreadReadPolicy
 from mindroom.matrix.cache.thread_write_cache_ops import ThreadMutationCacheOps
 from mindroom.matrix.cache.thread_writes import ThreadLiveWritePolicy, ThreadOutboundWritePolicy, ThreadSyncWritePolicy
 from mindroom.matrix.client_thread_history import (
+    BulkThreadRefreshStats,
+    bulk_refresh_room_thread_histories,
     fetch_dispatch_thread_history,
     fetch_dispatch_thread_snapshot,
     fetch_thread_history,
     get_room_threads_page,
+    untrusted_cached_thread_ids,
 )
 from mindroom.matrix.event_info import (
     EventInfo,
@@ -94,8 +97,7 @@ __all__ = [
 
 
 _STARTUP_PREWARM_THREAD_LIMIT = 32
-_STARTUP_PREWARM_THREAD_CONCURRENCY = 8
-type _StartupThreadPrewarmOutcome = Literal["warmed", "failed", "aborted"]
+_STARTUP_PREWARM_MAX_SCAN_PAGES = 20
 
 
 async def resolve_thread_root_event_id_for_client(
@@ -541,7 +543,10 @@ class MatrixConversationCache(ConversationCacheProtocol):
 
         coordinator = self.runtime.event_cache_write_coordinator
         if coordinator is not None:
-            await coordinator.wait_for_prior_room_updates(room_id)
+            await coordinator.wait_for_prior_room_updates(
+                room_id,
+                coordination_scope=self.runtime.event_cache.principal_id,
+            )
 
         membership_epoch = await self._capture_membership_epoch(room_id)
         response, fetched_event_source = await _cached_room_get_event(
@@ -602,6 +607,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
                     room_id,
                     persist_lookup_event,
                     name="matrix_cache_store_room_get_event",
+                    coordination_scope=self.runtime.event_cache.principal_id,
                 )
             else:
                 await persist_lookup_event()
@@ -702,19 +708,51 @@ class MatrixConversationCache(ConversationCacheProtocol):
             resolution_reuse=self._thread_resolution_reuse,
         )
 
-    async def _refresh_dispatch_thread_snapshot_for_startup_prewarm(
+    async def _bulk_refresh_startup_threads(
         self,
         room_id: str,
-        thread_id: str,
-    ) -> ThreadHistoryResult:
-        """Refresh one strict thread snapshot for advisory startup prewarm without the live read barrier."""
-        return await self._fetch_thread_from_client(
-            fetch_dispatch_thread_snapshot,
-            room_id,
-            thread_id,
-            caller_label="startup_thread_prewarm",
-            # Startup prewarm bypasses the read coordinator; 0.0 means no coordinator queue was used.
-            coordinator_queue_wait_ms=0.0,
+        thread_ids: Collection[str],
+    ) -> BulkThreadRefreshStats:
+        """Refresh one room's startup threads in one scan under the room write barrier."""
+
+        async def refresh_room_threads() -> BulkThreadRefreshStats:
+            return await bulk_refresh_room_thread_histories(
+                self._require_client(),
+                room_id,
+                self.runtime.event_cache,
+                thread_root_ids=thread_ids,
+                caller_label="startup_thread_prewarm",
+                max_scan_pages=_STARTUP_PREWARM_MAX_SCAN_PAGES,
+            )
+
+        coordinator = self.runtime.event_cache_write_coordinator
+        if coordinator is None:
+            return await refresh_room_threads()
+        return cast(
+            "BulkThreadRefreshStats",
+            await coordinator.queue_room_update(
+                room_id,
+                refresh_room_threads,
+                name="matrix_cache_bulk_startup_thread_prewarm",
+                log_exceptions=False,
+                coordination_scope=self.runtime.event_cache.principal_id,
+            ),
+        )
+
+    def _log_startup_thread_prewarm_complete(
+        self,
+        room_id: str,
+        *,
+        started_at: float,
+        threads_warmed: int,
+        threads_failed: int,
+    ) -> None:
+        self.logger.info(
+            "startup_thread_prewarm_complete",
+            room_id=room_id,
+            threads_warmed=threads_warmed,
+            threads_failed=threads_failed,
+            elapsed_ms=elapsed_ms_since(started_at, clock=time.perf_counter),
         )
 
     async def _startup_thread_prewarm_ids(
@@ -766,85 +804,72 @@ class MatrixConversationCache(ConversationCacheProtocol):
         is_shutting_down: Callable[[], bool],
     ) -> bool:
         """Warm one room's recent thread roots and report whether the room-level pass finished."""
-        started_at = time.perf_counter()
-        threads_warmed = 0
-        threads_failed = 0
-        thread_ids = await self._startup_thread_prewarm_ids(room_id)
-        if thread_ids is None:
-            return False
-
-        completed = True
-        pending_thread_ids = list(thread_ids)
-
-        async def worker() -> None:
-            nonlocal completed, threads_failed, threads_warmed
-            while pending_thread_ids:
-                if is_shutting_down():
-                    completed = False
-                    return
-                outcome = await self._prewarm_one_startup_thread(
-                    room_id,
-                    pending_thread_ids.pop(0),
-                    is_shutting_down=is_shutting_down,
-                )
-                if outcome == "aborted":
-                    completed = False
-                    return
-                if outcome == "failed":
-                    threads_failed += 1
-                else:
-                    threads_warmed += 1
-
-        worker_count = min(_STARTUP_PREWARM_THREAD_CONCURRENCY, len(pending_thread_ids))
-        await asyncio.gather(*(worker() for _ in range(worker_count)))
-
-        self.logger.info(
-            "startup_thread_prewarm_complete",
-            room_id=room_id,
-            threads_warmed=threads_warmed,
-            threads_failed=threads_failed,
-            elapsed_ms=elapsed_ms_since(started_at, clock=time.perf_counter),
-        )
-        return completed
-
-    async def _prewarm_one_startup_thread(
-        self,
-        room_id: str,
-        thread_id: str,
-        *,
-        is_shutting_down: Callable[[], bool],
-    ) -> _StartupThreadPrewarmOutcome:
-        """Refresh one startup thread snapshot and return its room-level prewarm outcome."""
-        if is_shutting_down():
-            return "aborted"
-        if not thread_id:
+        if not self.runtime.event_cache.durable_writes_available:
             self.logger.warning(
-                "startup_thread_prewarm_thread_failed",
+                "startup_thread_prewarm_skipped",
                 room_id=room_id,
-                thread_id=thread_id,
-                error="missing_thread_root_event_id",
+                reason="event_cache_writes_unavailable",
             )
-            await asyncio.sleep(0)
-            return "failed"
-
+            return False
+        started_at = time.perf_counter()
+        thread_ids = await self._startup_thread_prewarm_ids(room_id)
+        if thread_ids is None or is_shutting_down() or not self.runtime.event_cache.durable_writes_available:
+            return False
         try:
-            await self._refresh_dispatch_thread_snapshot_for_startup_prewarm(
+            untrusted_thread_ids = await untrusted_cached_thread_ids(
+                self.runtime.event_cache,
                 room_id,
-                thread_id,
+                thread_ids,
             )
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             self.logger.warning(
-                "startup_thread_prewarm_thread_failed",
+                "startup_thread_prewarm_cache_probe_failed",
                 room_id=room_id,
-                thread_id=thread_id,
+                thread_count=len(thread_ids),
+                error=str(exc),
+                error_type=type(exc).__name__,
+                exc_info=True,
+            )
+            untrusted_thread_ids = None
+        if untrusted_thread_ids is None or is_shutting_down() or not self.runtime.event_cache.durable_writes_available:
+            return False
+        already_warm = len(thread_ids) - len(untrusted_thread_ids)
+        if not untrusted_thread_ids:
+            self._log_startup_thread_prewarm_complete(
+                room_id,
+                started_at=started_at,
+                threads_warmed=already_warm,
+                threads_failed=0,
+            )
+            return True
+
+        try:
+            stats = await self._bulk_refresh_startup_threads(
+                room_id,
+                untrusted_thread_ids,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self.logger.warning(
+                "startup_thread_prewarm_bulk_failed",
+                room_id=room_id,
+                thread_count=len(untrusted_thread_ids),
                 error=str(exc),
             )
-            return "failed"
+            return False
 
-        await asyncio.sleep(0)
-        return "warmed"
+        threads_warmed = already_warm + stats.stored_threads
+        threads_failed = len(untrusted_thread_ids) - stats.stored_threads
+        self._log_startup_thread_prewarm_complete(
+            room_id,
+            started_at=started_at,
+            threads_warmed=threads_warmed,
+            threads_failed=threads_failed,
+        )
+        return not is_shutting_down() and self.runtime.event_cache.durable_writes_available
 
     async def get_thread_history(
         self,

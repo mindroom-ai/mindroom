@@ -341,6 +341,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             "!test:localhost",
             slow_prior_room_update,
             name="matrix_cache_prior_update",
+            coordination_scope=event_cache.principal_id,
         )
         await asyncio.wait_for(prior_write_started.wait(), timeout=1.0)
 
@@ -411,6 +412,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             thread_b_id,
             blocking_sibling_thread_update,
             name="matrix_cache_blocking_sibling_thread_update",
+            coordination_scope=event_cache.principal_id,
         )
         redaction_event = MagicMock(spec=nio.RedactionEvent)
         redaction_event.event_id = "$redaction:localhost"
@@ -481,6 +483,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             thread_a_id,
             blocking_same_thread_update,
             name="matrix_cache_blocking_same_thread_update",
+            coordination_scope=event_cache.principal_id,
         )
         redaction_event = MagicMock(spec=nio.RedactionEvent)
         redaction_event.event_id = "$redaction:localhost"
@@ -574,6 +577,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             thread_b_id,
             blocking_sibling_thread_update,
             name="matrix_cache_blocking_other_thread_update",
+            coordination_scope=event_cache.principal_id,
         )
         try:
             await asyncio.wait_for(sibling_update_started.wait(), timeout=1.0)
@@ -823,22 +827,22 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         try:
             bot.client.room_messages = AsyncMock(side_effect=room_messages)
             prewarm_task = asyncio.create_task(
-                bot._conversation_cache._refresh_dispatch_thread_snapshot_for_startup_prewarm(
+                bot._conversation_cache._bulk_refresh_startup_threads(
                     room_id,
-                    thread_id,
+                    [thread_id],
                 ),
             )
             await asyncio.wait_for(prewarm_fetch_started.wait(), timeout=1.0)
 
             allow_prewarm_fetch_finish.set()
-            prewarm_history = await asyncio.wait_for(prewarm_task, timeout=1.0)
+            prewarm_stats = await asyncio.wait_for(prewarm_task, timeout=1.0)
 
             history = await bot._conversation_cache.get_dispatch_thread_history(room_id, thread_id)
         finally:
             allow_prewarm_fetch_finish.set()
             await _close_bound_runtime_support(bot, support)
 
-        assert [message.body for message in prewarm_history] == ["Old root", "Old reply"]
+        assert prewarm_stats.stored_threads == 1
         assert [message.body for message in history] == ["Old root", "Old reply"]
         assert history.diagnostics[THREAD_HISTORY_SOURCE_DIAGNOSTIC] == THREAD_HISTORY_SOURCE_CACHE
         assert THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC not in history.diagnostics
@@ -1111,6 +1115,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             "$thread:localhost",
             lambda: queued_update(),
             name="matrix_cache_follow_up_update",
+            coordination_scope=access.runtime.event_cache.principal_id,
         )
         await asyncio.sleep(0)
         assert queued_update_started.is_set() is False

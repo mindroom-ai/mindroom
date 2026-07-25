@@ -21,7 +21,13 @@ from agno.knowledge.reader.text_reader import TextReader
 from agno.vectordb.chroma import ChromaDb
 
 from mindroom.chunking import SafeFixedSizeChunking
-from mindroom.constants import RuntimePaths, resolve_config_relative_path
+from mindroom.constants import (
+    DEFAULT_MAX_CONCURRENT_KNOWLEDGE_FILE_INDEXES,
+    KNOWLEDGE_FILE_INDEX_CONCURRENCY_ENV,
+    MAX_ALLOWED_CONCURRENT_KNOWLEDGE_FILE_INDEXES,
+    RuntimePaths,
+    resolve_config_relative_path,
+)
 from mindroom.credentials import get_runtime_shared_credentials_manager
 from mindroom.embedding_errors import classified_embedder_error
 from mindroom.embedding_factory import create_configured_embedder
@@ -68,7 +74,6 @@ _SOURCE_PATH_KEY = "source_path"
 _SOURCE_MTIME_NS_KEY = "source_mtime_ns"
 _SOURCE_SIZE_KEY = "source_size"
 _SOURCE_DIGEST_KEY = "source_digest"
-_MAX_CONCURRENT_KNOWLEDGE_FILE_INDEXES = 4
 _POST_INDEX_VECTOR_VISIBILITY_RETRY_DELAYS_SECONDS = (0.0, 0.01, 0.05)
 _INDEXING_STATUS_RESETTING = "resetting"
 _INDEXING_STATUS_INDEXING = "indexing"
@@ -79,6 +84,25 @@ _INDEXING_STATUSES = {
     _INDEXING_STATUS_COMPLETE,
 }
 _FileSignature = tuple[int, int, str]
+
+
+def _max_concurrent_knowledge_file_indexes() -> int:
+    """Return bounded file-level indexing concurrency."""
+    raw_value = os.getenv(KNOWLEDGE_FILE_INDEX_CONCURRENCY_ENV)
+    if raw_value is None:
+        return DEFAULT_MAX_CONCURRENT_KNOWLEDGE_FILE_INDEXES
+    try:
+        value = int(raw_value)
+    except ValueError as exc:
+        msg = f"{KNOWLEDGE_FILE_INDEX_CONCURRENCY_ENV} must be an integer, got {raw_value!r}"
+        raise ValueError(msg) from exc
+    if not 1 <= value <= MAX_ALLOWED_CONCURRENT_KNOWLEDGE_FILE_INDEXES:
+        msg = (
+            f"{KNOWLEDGE_FILE_INDEX_CONCURRENCY_ENV} must be between 1 and "
+            f"{MAX_ALLOWED_CONCURRENT_KNOWLEDGE_FILE_INDEXES}, got {value}"
+        )
+        raise ValueError(msg)
+    return value
 
 
 @runtime_checkable
@@ -344,9 +368,11 @@ class KnowledgeManager:
     _git_lfs_repository_ready: bool = field(default=False, init=False)
     _git_tracked_relative_paths: set[str] | None = field(default=None, init=False, repr=False)
     _persisted_collection_missing_on_init: bool = field(default=False, init=False, repr=False)
+    _max_concurrent_file_indexes: int = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Initialize filesystem paths and the underlying vector database."""
+        self._max_concurrent_file_indexes = _max_concurrent_knowledge_file_indexes()
         base_config = self.config.get_knowledge_base_config(self.base_id)
         if self.storage_path is None:
             self.storage_path = self.runtime_paths.storage_root
@@ -1141,7 +1167,7 @@ class KnowledgeManager:
                     vanished_files.add(relative_path)
                 return False
 
-        concurrency = min(_MAX_CONCURRENT_KNOWLEDGE_FILE_INDEXES, len(files))
+        concurrency = min(self._max_concurrent_file_indexes, len(files))
         if concurrency <= 1:
             indexed_count = 0
             for file_path in files:
