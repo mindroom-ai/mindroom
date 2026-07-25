@@ -2855,7 +2855,7 @@ async def test_tracked_inbox_response_cancelled_during_reload_never_sends_placeh
     runner.deps = replace(runner.deps, logger=refusal_logger)
 
     # Stand where a config apply stands: admission closed, plan in progress.
-    assert await admission_gate.close_if_idle()
+    assert admission_gate.close_if_idle()
     assert runner.admission_gate is admission_gate
     task = bot._response_runner.track_inbox_response(
         bot._response_runner.generate_response(
@@ -2967,7 +2967,7 @@ async def test_shutdown_during_active_drain_cancels_reload(
     mock_bot.stop = AsyncMock()
     orchestrator.agent_bots["agent1"] = mock_bot
     # An admitted response that never finishes, so the drain never goes idle.
-    assert await orchestrator.config_reload.response_admission_gate.admit()
+    assert orchestrator.config_reload.response_admission_gate.admit()
     orchestrator.config_reload.update_config = AsyncMock(return_value=True)
     orchestrator.config_reload.request_reload()
     task = orchestrator.config_reload._reload_task

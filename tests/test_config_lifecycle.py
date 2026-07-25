@@ -155,7 +155,7 @@ async def test_reload_drains_active_responses_before_applying(
     monkeypatch.setattr("mindroom.orchestration.config_lifecycle._CONFIG_RELOAD_DEBOUNCE_SECONDS", 0.01)
     monkeypatch.setattr("mindroom.orchestration.config_lifecycle._CONFIG_RELOAD_IDLE_POLL_SECONDS", 0.01)
     gate = ResponseAdmissionGate()
-    assert await gate.admit()
+    assert gate.admit()
     lifecycle = _make_lifecycle(tmp_path, response_admission_gate=gate)
     lifecycle.update_config = AsyncMock(return_value=True)
 
@@ -244,7 +244,7 @@ async def test_new_request_during_drain_keeps_waiting_for_idle(
     monkeypatch.setattr("mindroom.orchestration.config_lifecycle._CONFIG_RELOAD_DEBOUNCE_SECONDS", 0.01)
     monkeypatch.setattr("mindroom.orchestration.config_lifecycle._CONFIG_RELOAD_IDLE_POLL_SECONDS", 0.005)
     gate = ResponseAdmissionGate()
-    assert await gate.admit()
+    assert gate.admit()
     lifecycle = _make_lifecycle(tmp_path, response_admission_gate=gate)
 
     lifecycle.update_config = AsyncMock(return_value=True)
@@ -372,7 +372,7 @@ async def test_cancel_clears_queued_reload(
     monkeypatch.setattr("mindroom.orchestration.config_lifecycle._CONFIG_RELOAD_DEBOUNCE_SECONDS", 0.01)
     monkeypatch.setattr("mindroom.orchestration.config_lifecycle._CONFIG_RELOAD_IDLE_POLL_SECONDS", 0.01)
     busy_gate = ResponseAdmissionGate()
-    assert await busy_gate.admit()
+    assert busy_gate.admit()
     lifecycle = _make_lifecycle(tmp_path, response_admission_gate=busy_gate)
     lifecycle.update_config = AsyncMock(return_value=True)
 
@@ -429,7 +429,7 @@ async def test_response_start_during_config_load_waits_until_apply_finishes(
     try:
         # Admission is already closed while the apply is in progress, and asking
         # never blocks on the applier, so the response is refused immediately.
-        assert await gate.admit() is False
+        assert gate.admit() is False
 
         release_load.set()
         await asyncio.wait_for(reload_task, timeout=1)
@@ -437,7 +437,7 @@ async def test_response_start_during_config_load_waits_until_apply_finishes(
         lifecycle.apply_update_plan.assert_awaited_once()
         assert observed_apply_counts == [0]
         # The gate reopens once the apply completes.
-        assert await gate.admit() is True
+        assert gate.admit() is True
         gate.release()
     finally:
         release_load.set()
@@ -461,7 +461,7 @@ async def test_apply_does_not_block_response_drain_started_by_the_apply(
     monkeypatch.setattr("mindroom.orchestration.config_lifecycle.load_config", lambda *_a, **_k: Config())
 
     async def response_lifecycle() -> str:
-        if not await gate.admit():
+        if not gate.admit():
             return "refused"
         gate.release()
         return "admitted"
@@ -496,7 +496,7 @@ async def test_drain_applies_reload_after_force_timeout(
     monkeypatch.setattr("mindroom.orchestration.config_lifecycle._CONFIG_RELOAD_DRAIN_FORCE_AFTER_SECONDS", 0.05)
     gate = ResponseAdmissionGate()
     # A response that never finishes, so the gate is never idle.
-    assert await gate.admit()
+    assert gate.admit()
     lifecycle = _make_lifecycle(tmp_path, response_admission_gate=gate)
     lifecycle.update_config = AsyncMock(return_value=True)
 

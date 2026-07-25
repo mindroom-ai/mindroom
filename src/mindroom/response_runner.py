@@ -795,7 +795,7 @@ class ResponseRunner:
         locked_operation: Callable[[MessageTarget, _EarlyPlaceholderState], Awaitable[str | None]],
     ) -> str | None:
         """Admit one response before lifecycle locking or visible placeholder work."""
-        if not await self._admission_gate.admit():
+        if not self._admission_gate.admit():
             # A config apply owns the runtime; give up before any lifecycle lock
             # or visible placeholder work. Nothing re-dispatches the turn, so log
             # the loss here. Deliberately no Matrix send: this path runs inside

@@ -234,7 +234,7 @@ class ConfigReloadLifecycle:
         try:
             await self._apply_queued_config_reload()
         finally:
-            await self.response_admission_gate.reopen()
+            self.response_admission_gate.reopen()
 
     async def _apply_queued_config_reload(self) -> None:
         """Apply one queued config reload attempt and log the result."""
@@ -281,7 +281,7 @@ class ConfigReloadLifecycle:
 
                 # Closing the gate is atomic with the final idle sample, so a response
                 # cannot slip in between.
-                if await self.response_admission_gate.close_if_idle():
+                if self.response_admission_gate.close_if_idle():
                     if drain_state.waiting_for_idle:
                         logger.info("Active responses finished; applying queued configuration reload")
                         drain_state.reset()
@@ -299,7 +299,7 @@ class ConfigReloadLifecycle:
                 # The drain timed out. Close admission over the still-running
                 # responses so the apply is not racing fresh ones, then apply.
                 drain_state.reset()
-                await self.response_admission_gate.close()
+                self.response_admission_gate.close()
                 await self._apply_with_closed_admission()
         finally:
             if self._reload_task is current_task:
