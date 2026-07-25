@@ -1,0 +1,212 @@
+name: Live Matrix Stress
+
+on:
+  pull_request:
+    branches:
+      - main
+      - test/fuzz-live-chaos-expansion
+    paths:
+      - ".github/workflows/live-matrix-stress.yml"
+      - "local/instances/deploy/**"
+      - "scripts/testing/fuzz_live_matrix.py"
+      - "scripts/testing/live_matrix_stress.py"
+      - "src/mindroom/matrix/**"
+      - "src/mindroom/streaming.py"
+      - "tests/test_live_matrix_fuzz.py"
+      - "tests/test_live_matrix_stress.py"
+      - "uv.lock"
+  push:
+    tags:
+      - "v*"
+  schedule:
+    - cron: "17 7 * * *"
+  workflow_dispatch:
+    inputs:
+      tier:
+        description: Stress tier to execute
+        required: true
+        type: choice
+        default: full
+        options:
+          - smoke
+          - full
+          - soak
+
+permissions:
+  contents: read
+  packages: read
+
+concurrency:
+  group: live-matrix-stress-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  unit:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout MindRoom
+        uses: actions/checkout@v5
+        with:
+          lfs: true
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Set up Python
+        run: uv python install 3.13
+
+      - name: Install dependencies
+        run: uv sync --all-extras
+
+      - name: Run deterministic stress tests
+        run: uv run pytest -n auto -x --lf tests/test_live_matrix_stress.py tests/test_live_matrix_fuzz.py -k "stress or barrier or baseline"
+
+  smoke:
+    if: github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.tier == 'smoke')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout MindRoom
+        uses: actions/checkout@v5
+        with:
+          lfs: true
+
+      - name: Checkout mindroom-nio
+        uses: actions/checkout@v5
+        with:
+          repository: mindroom-ai/mindroom-nio
+          path: mindroom-nio
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Set up Python
+        run: uv python install 3.13
+
+      - name: Install just
+        uses: extractions/setup-just@v3
+
+      - name: Install dependencies
+        run: uv sync --all-extras
+
+      - name: Run real Tuwunel and PostgreSQL smoke stress
+        run: >-
+          uv run python scripts/testing/fuzz_live_matrix.py
+          --nio-overlay mindroom-nio
+          --profile stress
+          --threads 10
+          --stream-seconds 10
+          --edit-interval 0.5
+          --waves 1
+          --history-turns 5
+
+      - name: Upload stress evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-matrix-stress-smoke-${{ github.run_id }}
+          path: artifacts/live-matrix-stress/
+          if-no-files-found: error
+          retention-days: 14
+
+  full:
+    if: >-
+      github.event_name == 'schedule' ||
+      github.event_name == 'push' ||
+      (github.event_name == 'workflow_dispatch' && inputs.tier == 'full')
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout MindRoom
+        uses: actions/checkout@v5
+        with:
+          lfs: true
+
+      - name: Checkout mindroom-nio
+        uses: actions/checkout@v5
+        with:
+          repository: mindroom-ai/mindroom-nio
+          path: mindroom-nio
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Set up Python
+        run: uv python install 3.13
+
+      - name: Install just
+        uses: extractions/setup-just@v3
+
+      - name: Install dependencies
+        run: uv sync --all-extras
+
+      - name: Run full synchronized stress gate
+        run: >-
+          uv run python scripts/testing/fuzz_live_matrix.py
+          --nio-overlay mindroom-nio
+          --profile stress
+          --baseline scripts/testing/baselines/live-matrix-stress-50x45x2.json
+          --enforce-performance
+
+      - name: Upload stress evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-matrix-stress-full-${{ github.run_id }}
+          path: artifacts/live-matrix-stress/
+          if-no-files-found: error
+          retention-days: 30
+
+  soak:
+    if: github.event_name == 'workflow_dispatch' && inputs.tier == 'soak'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout MindRoom
+        uses: actions/checkout@v5
+        with:
+          lfs: true
+
+      - name: Checkout mindroom-nio
+        uses: actions/checkout@v5
+        with:
+          repository: mindroom-ai/mindroom-nio
+          path: mindroom-nio
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Set up Python
+        run: uv python install 3.13
+
+      - name: Install just
+        uses: extractions/setup-just@v3
+
+      - name: Install dependencies
+        run: uv sync --all-extras
+
+      - name: Run optional overlapping follow-up soak
+        run: >-
+          uv run python scripts/testing/fuzz_live_matrix.py
+          --nio-overlay mindroom-nio
+          --profile stress
+          --threads 75
+          --stream-seconds 600
+          --edit-interval 0.5
+          --waves 1
+          --overlapping-followups
+
+      - name: Upload soak evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-matrix-stress-soak-${{ github.run_id }}
+          path: artifacts/live-matrix-stress/
+          if-no-files-found: error
+          retention-days: 30

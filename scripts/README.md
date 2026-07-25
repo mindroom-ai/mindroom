@@ -50,6 +50,8 @@ uv run python scripts/testing/fuzz_matrix_event_cache.py --seed 42 --steps 500
 uv run python scripts/testing/fuzz_live_matrix.py --nio-overlay ../mindroom-nio --seed 42 --steps 200 --threads 45
 uv run python scripts/testing/fuzz_live_matrix.py --nio-overlay ../mindroom-nio --profile saturation
 uv run python scripts/testing/fuzz_live_matrix.py --nio-overlay ../mindroom-nio --profile chaos --seed 42 --steps 200 --clients 4 --rooms 2
+uv run python scripts/testing/fuzz_live_matrix.py --nio-overlay ../mindroom-nio --profile stress
+uv run python scripts/testing/fuzz_live_matrix.py --nio-overlay ../mindroom-nio --profile stress --threads 10 --stream-seconds 10 --waves 1
 ```
 
 The live harness requires `--nio-overlay` to name a clean exact Git checkout of mindroom-nio.
@@ -60,6 +62,12 @@ The saturation profile uses a 180-second per-reply deadline because its slow 12-
 The chaos profile runs sustained multi-sender multi-room load that only settles at generated checkpoints, mixing hot-thread floods, in-flight edits and redactions, MindRoom warm/kill/cold restarts, Tuwunel restarts, and full outage windows with recovery gaps.
 Every failure persists the exact logical workload as `scenario.json` in the failure bundle and prints its path for replay with `--trace`.
 Replay preserves operation batches and inputs, but external scheduling and runtime output can differ.
+
+The stress profile uses one room, one agent, 50 independent threads, a synchronized fake-model barrier, 45-second streams, 0.5-second pulses, two waves, and a disposable PostgreSQL event cache by default.
+It clears only namespace data after deterministic history preparation so the first wave proves cold scans and the second wave proves warm reuse without replacing cache-certification metadata.
+Every stress run retains sanitized success or failure evidence under `artifacts/live-matrix-stress/`.
+Use `--write-baseline scripts/testing/baselines/live-matrix-stress-50x45x2.json` for three identical clean main runs before enabling `--baseline` and `--enforce-performance`.
+The first two baseline runs retain a sample collection, and the third run writes the versioned median-of-three baseline only when dispersion is within the configured 25 percent allowance.
 
 ### Generate and sync managed avatars
 Run MindRoom at least once before syncing so the router account exists in Matrix state.

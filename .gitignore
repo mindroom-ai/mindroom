@@ -242,6 +242,8 @@ terraform.tfstate
 
 # Local artifacts
 backups/
+artifacts/live-matrix-stress/
+artifacts/live-matrix-stress-tests/
 saas-platform/.env.backup
 wgcf-account.toml
 wgcf-profile.conf

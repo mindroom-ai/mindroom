@@ -31,9 +31,10 @@ import sys
 import tempfile
 import threading
 import time
-from collections import defaultdict
+from collections import Counter, defaultdict
 from contextlib import suppress
 from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
 from enum import StrEnum
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -44,16 +45,62 @@ from urllib.parse import quote
 
 import httpx
 import nio
+import psutil
 import yaml
 
 import mindroom
-from mindroom.constants import SOURCE_KIND_KEY
+from mindroom.constants import SOURCE_KIND_KEY, STREAM_STATUS_COMPLETED, STREAM_STATUS_KEY
 from mindroom.dispatch_source import AUTO_RESUME_MESSAGE, TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 from mindroom.handled_turns import TurnRecord, TurnRecordCodec
 from mindroom.streaming import INTERRUPTED_RESPONSE_NOTE, RESTART_INTERRUPTED_RESPONSE_NOTE
 
+if __package__:
+    from scripts.testing.live_matrix_stress import (
+        DEFAULT_STRESS_ARTIFACT_ROOT,
+        BaselineSample,
+        ManagedStressPostgres,
+        ResourceSample,
+        StressArtifactBundle,
+        StressBaseline,
+        StressConfig,
+        StressLogMetrics,
+        StressModelController,
+        StressRequest,
+        aggregate_log_metrics,
+        assert_matrix_edit_shape,
+        current_machine_class,
+        latency_summary,
+        parse_stress_request,
+        parse_structured_log,
+        percentile,
+        resource_summary,
+        write_replay_command,
+    )
+else:
+    from live_matrix_stress import (
+        DEFAULT_STRESS_ARTIFACT_ROOT,
+        BaselineSample,
+        ManagedStressPostgres,
+        ResourceSample,
+        StressArtifactBundle,
+        StressBaseline,
+        StressConfig,
+        StressLogMetrics,
+        StressModelController,
+        StressRequest,
+        aggregate_log_metrics,
+        assert_matrix_edit_shape,
+        current_machine_class,
+        latency_summary,
+        parse_stress_request,
+        parse_structured_log,
+        percentile,
+        resource_summary,
+        write_replay_command,
+    )
+
 if TYPE_CHECKING:
-    from collections.abc import Callable, Collection, Mapping
+    from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
     from io import TextIOWrapper
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -1043,6 +1090,7 @@ class _ModelHandler(BaseHTTPRequestHandler):
     slow_stream_segments = 120
     slow_stream_delay = 0.02
     first_token_delay = 0.0
+    stress_controller: ClassVar[StressModelController | None] = None
 
     # Class-level observation map guarded by a lock because the stub runs under a
     # ThreadingHTTPServer: concurrent MindRoom requests each land in their own
@@ -1146,6 +1194,32 @@ class _ModelHandler(BaseHTTPRequestHandler):
             return frozenset()
         return frozenset()
 
+    @staticmethod
+    def _final_user_text(payload: Mapping[str, object]) -> str:
+        """Return text from the final user message for stress-marker routing."""
+        messages = payload.get("messages")
+        if not isinstance(messages, list):
+            return ""
+        for raw_message in reversed(messages):
+            if not isinstance(raw_message, dict):
+                continue
+            message = cast("dict[str, object]", raw_message)
+            if message.get("role") != "user":
+                continue
+            content = message.get("content")
+            if isinstance(content, str):
+                return content
+            if isinstance(content, list):
+                return " ".join(
+                    text
+                    for part in content
+                    if isinstance(part, dict)
+                    for text in (cast("dict[str, object]", part).get("text"),)
+                    if isinstance(text, str)
+                )
+            return ""
+        return ""
+
     def do_POST(self) -> None:
         if self.path.rstrip("/") != "/v1/chat/completions":
             self.send_error(HTTPStatus.NOT_FOUND)
@@ -1154,6 +1228,16 @@ class _ModelHandler(BaseHTTPRequestHandler):
         payload = json.loads(self.rfile.read(content_length))
         call_id = next(self.call_ids)
         self._record_observation(call_id, self._final_user_markers(payload))
+        stress_request = parse_stress_request(self._final_user_text(payload))
+        if stress_request is not None:
+            if payload.get("stream") is not True or self.stress_controller is None:
+                self.send_error(HTTPStatus.BAD_REQUEST, "stress requests require the armed streaming controller")
+                return
+            try:
+                self._send_stress_stream(call_id, stress_request)
+            except OSError:
+                self.close_connection = True
+            return
         content = self._response_text(call_id)
         if self._is_slow_call(call_id) and self.first_token_delay > 0:
             time.sleep(self.first_token_delay)
@@ -1230,6 +1314,50 @@ class _ModelHandler(BaseHTTPRequestHandler):
                 },
             )
             time.sleep(chunk_delay)
+        self._write_sse(
+            {
+                **base,
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+            },
+        )
+        self.wfile.write(b"data: [DONE]\n\n")
+        self.wfile.flush()
+        self.close_connection = True
+
+    def _send_stress_stream(self, call_id: int, request: StressRequest) -> None:
+        """Emit exact controller-owned stress pulses through OpenAI SSE."""
+        controller = self.stress_controller
+        assert controller is not None
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        base = {
+            "id": f"live-stress-response-{call_id}",
+            "object": "chat.completion.chunk",
+            "created": int(time.time()),
+            "model": MODEL_ID,
+        }
+        self._write_sse(
+            {
+                **base,
+                "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}],
+            },
+        )
+        for chunk in controller.stream(request):
+            self._write_sse(
+                {
+                    **base,
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {"content": chunk},
+                            "finish_reason": None,
+                        },
+                    ],
+                },
+            )
         self._write_sse(
             {
                 **base,
@@ -1375,6 +1503,7 @@ class ManagedTuwunelStack:
         state_root: Path = DEFAULT_LIVE_FUZZ_STATE_ROOT,
         nio_overlay: NioOverlay | None = None,
         mindroom_revision: str | None = None,
+        stress_config: StressConfig | None = None,
     ) -> None:
         token = secrets.token_hex(4)
         self._stream_profile = stream_profile or StreamProfile()
@@ -1410,6 +1539,11 @@ class ManagedTuwunelStack:
         self._mindroom_revision = mindroom_revision
         self._host_lease: TextIOWrapper | None = None
         self._mindroom_start_log_offset = 0
+        self.stress_config = stress_config
+        self.stress_controller = StressModelController(stress_config) if stress_config is not None else None
+        self.stress_postgres = (
+            ManagedStressPostgres(f"{self.instance_name}-postgres") if stress_config is not None else None
+        )
 
     def _frozen_mindroom_revision(self) -> str:
         """Freeze and return the one MindRoom revision allowed for this run."""
@@ -1604,6 +1738,8 @@ class ManagedTuwunelStack:
 
         _run_command("just", "local-instances-start-matrix", self.instance_name)
         self._wait_for_url(f"{self.homeserver}/_matrix/client/versions", timeout=30)
+        if self.stress_postgres is not None:
+            self.stress_postgres.start()
         model_port = self._start_model_server()
         self._write_config(model_port)
         self._env = {
@@ -1618,8 +1754,19 @@ class ManagedTuwunelStack:
             "OPENAI_API_KEY": "sk-live-fuzz",
             "UV_PYTHON": "3.13",
         }
+        if self.stress_postgres is not None:
+            self._env.update(
+                {
+                    "MINDROOM_EVENT_CACHE_DATABASE_URL": self.stress_postgres.database_url,
+                    "MINDROOM_LOG_FORMAT": "json",
+                    "MINDROOM_LOG_LEVEL": "DEBUG",
+                    "MINDROOM_TIMING": "1",
+                },
+            )
         self._log_handle = self.log_path.open("a", encoding="utf-8")
         self._start_mindroom()
+        if self.stress_config is not None:
+            self.assert_stress_dependencies_healthy()
         self._write_manifest(
             state="ready",
             matrix_port=matrix_port,
@@ -1716,6 +1863,7 @@ class ManagedTuwunelStack:
             _attempt_cleanup(errors, "stop model server", server.shutdown)
             _attempt_cleanup(errors, "close model server", server.server_close)
             self._model_server = None
+            _ModelHandler.stress_controller = None
         if self._model_thread is not None:
             thread = self._model_thread
             if _attempt_cleanup(
@@ -1726,6 +1874,8 @@ class ManagedTuwunelStack:
                 self._model_thread = None
         if before_destructive_cleanup is not None:
             _attempt_cleanup(errors, "snapshot runtime evidence", before_destructive_cleanup)
+        if self.stress_postgres is not None:
+            _attempt_cleanup(errors, "remove stress PostgreSQL", self.stress_postgres.close)
         if self._created and _attempt_cleanup(
             errors,
             "remove Tuwunel instance",
@@ -1766,6 +1916,70 @@ class ManagedTuwunelStack:
             "sync_restart_retries": log.count("sync_restart_retry_started"),
         }
 
+    @property
+    def mindroom_pid(self) -> int | None:
+        """Return the active MindRoom process ID for bounded resource sampling."""
+        process = self._mindroom_process
+        return process.pid if process is not None and process.poll() is None else None
+
+    def assert_stress_dependencies_healthy(self) -> None:
+        """Fail unless stress uses live Tuwunel, PostgreSQL, and the configured backend."""
+        if self.stress_config is None or self.stress_postgres is None:
+            msg = "stress dependency preflight requires a stress-configured stack"
+            raise RuntimeError(msg)
+        self.assert_mindroom_running()
+        if not self.stress_postgres.is_healthy():
+            msg = "stress PostgreSQL failed readiness after MindRoom startup"
+            raise RuntimeError(msg)
+        result = subprocess.run(
+            ("docker", "inspect", "--format", "{{.State.Running}}", f"{self.instance_name}-tuwunel"),
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.stdout.strip() != "true":
+            msg = "stress Tuwunel container is not running"
+            raise RuntimeError(msg)
+        events, _ = parse_structured_log(self.log_path.read_text(encoding="utf-8", errors="replace"))
+        initialized = any(
+            event.get("event") == "Matrix event cache startup maintenance complete"
+            and event.get("backend") == "postgres"
+            and event.get("namespace") == self.namespace
+            for event in events
+        )
+        if not initialized:
+            msg = "stress runtime did not attest PostgreSQL event-cache initialization"
+            raise RuntimeError(msg)
+        log_text = self.log_path.read_text(encoding="utf-8", errors="replace").lower()
+        if "continuing without advisory cache" in log_text or "disabling advisory matrix event cache" in log_text:
+            msg = "stress runtime reported cache disablement instead of PostgreSQL"
+            raise RuntimeError(msg)
+
+    def clear_stress_cache(self) -> None:
+        """Create a real cold-cache boundary without replacing certification metadata."""
+        if self.stress_postgres is None:
+            msg = "cannot clear stress cache on a non-stress stack"
+            raise RuntimeError(msg)
+        self.stress_postgres.clear_cache_namespace(self.namespace)
+
+    def stress_postgres_diagnostics(self) -> Mapping[str, object]:
+        """Return exact synthetic PostgreSQL diagnostics for artifact capture."""
+        if self.stress_postgres is None:
+            return {"started": False}
+        return self.stress_postgres.diagnostics()
+
+    def tuwunel_is_healthy(self) -> bool:
+        """Return whether the exact managed Tuwunel container is running."""
+        result = subprocess.run(
+            ("docker", "inspect", "--format", "{{.State.Running}}", f"{self.instance_name}-tuwunel"),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        return result.returncode == 0 and result.stdout.strip() == "true"
+
     def tuwunel_log(self, *, tail: int = 4000) -> str:
         """Return the homeserver container log for durable failure evidence.
 
@@ -1796,6 +2010,7 @@ class ManagedTuwunelStack:
         _ModelHandler.slow_stream_segments = profile.slow_stream_segments
         _ModelHandler.slow_stream_delay = profile.slow_stream_delay
         _ModelHandler.first_token_delay = profile.first_token_delay
+        _ModelHandler.stress_controller = self.stress_controller
         self._model_server = ThreadingHTTPServer(("127.0.0.1", 0), _ModelHandler)
         port = self._model_server.server_address[1]
         self._model_thread = threading.Thread(
@@ -1823,11 +2038,15 @@ class ManagedTuwunelStack:
                     "tools": [],
                     "rooms": list(self.room_keys),
                     "learning": False,
+                    "startup_thread_prewarm": self.stress_config is None,
                 },
             },
             "defaults": {"tools": [], "enable_streaming": True, "markdown": False},
             "memory": {"backend": "file"},
-            "router": {"model": "default"},
+            "router": {
+                "model": "default",
+                "startup_thread_prewarm": self.stress_config is None,
+            },
             "mindroom_user": {"username": "livefuzzowner", "display_name": "Live Fuzz Owner"},
             "matrix_room_access": {
                 "mode": "multi_user",
@@ -1842,6 +2061,11 @@ class ManagedTuwunelStack:
                 "agent_reply_permissions": {},
             },
         }
+        if self.stress_config is not None:
+            config["cache"] = {
+                "backend": self.stress_config.cache_backend,
+                "namespace": self.namespace,
+            }
         self.config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
 
     def _start_mindroom(self) -> None:
@@ -1863,7 +2087,7 @@ class ManagedTuwunelStack:
                 "--api-port",
                 str(self.api_port),
                 "--log-level",
-                "INFO",
+                "DEBUG" if self.stress_config is not None else "INFO",
             ],
             cwd=PROJECT_ROOT,
             env=self._env,
@@ -2423,6 +2647,7 @@ class ExactReplyOracle:
         coalescing_threads: bool = False,
         ledger_path: Path | None = None,
         expected_body_for: Callable[[int], str] = _ModelHandler.response_text_for,
+        terminal_body_predicate: Callable[[str], bool] | None = None,
     ) -> None:
         self.client = client
         self.agent_id = agent_id
@@ -2430,6 +2655,7 @@ class ExactReplyOracle:
         self.coalescing_threads = coalescing_threads
         self.ledger_path = ledger_path
         self.expected_body_for = expected_body_for
+        self.terminal_body_predicate = terminal_body_predicate
         self._ledger_records: dict[str, TurnRecord] = {}
         self._ledger_read_at = 0.0
         self.internal_source_ids: set[str] = set()
@@ -2793,6 +3019,8 @@ class ExactReplyOracle:
         not terminal, so they must keep settlement open.
         """
         if body.endswith((INTERRUPTED_RESPONSE_NOTE, RESTART_INTERRUPTED_RESPONSE_NOTE)):
+            return True
+        if self.terminal_body_predicate is not None and self.terminal_body_predicate(body):
             return True
         call_id = _body_call_id(body)
         return call_id is not None and body == self.expected_body_for(call_id)
@@ -4727,10 +4955,653 @@ def _positive_int(value: str) -> int:
     return parsed
 
 
+@dataclass(frozen=True, slots=True)
+class _StressTurn:
+    """One logical stress source and its real transport timing."""
+
+    label: str
+    wave: int
+    thread: int
+    event_id: str
+    thread_root: str
+    sent_at: float
+
+
+@dataclass(frozen=True, slots=True)
+class _StressWaveAudit:
+    """Canonical Matrix evidence and timing metrics for one wave."""
+
+    wave: int
+    thread_metrics: tuple[dict[str, object], ...]
+    edits_by_stream: Mapping[str, tuple[float, ...]]
+    source_to_placeholder_ms: tuple[float, ...]
+    source_to_first_content_ms: tuple[float, ...]
+    source_to_final_ms: tuple[float, ...]
+    matrix_edit_count: int
+    streaming_status_counts: Mapping[str, int]
+
+    def summary(self) -> dict[str, object]:
+        """Return JSON-safe per-wave transport metrics."""
+        return {
+            "wave": self.wave,
+            "source_to_placeholder_ms": latency_summary(self.source_to_placeholder_ms),
+            "source_to_first_content_ms": latency_summary(self.source_to_first_content_ms),
+            "source_to_final_ms": latency_summary(self.source_to_final_ms),
+            "matrix_edit_count": self.matrix_edit_count,
+            "streaming_status_counts": dict(self.streaming_status_counts),
+        }
+
+
+class LiveMatrixStressRunner:
+    """Run synchronized cold and warm waves through the existing live harness."""
+
+    def __init__(
+        self,
+        stack: ManagedTuwunelStack,
+        client: LiveMatrixClient,
+        config: StressConfig,
+        *,
+        journal: Callable[[Mapping[str, object]], None] | None = None,
+    ) -> None:
+        controller = stack.stress_controller
+        if controller is None:
+            msg = "live stress runner requires an armed stress model controller"
+            raise RuntimeError(msg)
+        self.stack = stack
+        self.client = client
+        self.config = config
+        self.controller = controller
+        self.journal = journal
+        self._expected_stress_bodies: set[str] = set()
+        self.oracle = ExactReplyOracle(
+            client,
+            stack.agent_id,
+            coalescing_threads=config.overlapping_followups,
+            ledger_path=stack.storage_path / "tracking" / f"{AGENT_NAME}_responded.json",
+            terminal_body_predicate=self._terminal_body_complete,
+        )
+        self._journal_sequence = 0
+        self._sent_content: dict[str, Mapping[str, Any]] = {}
+        self._wave_log_ranges: list[tuple[int, int]] = []
+
+    def _terminal_body_complete(self, body: str) -> bool:
+        if body in self._expected_stress_bodies:
+            return True
+        call_id = _body_call_id(body)
+        return call_id is not None and body == _ModelHandler.response_text_for(call_id)
+
+    async def run(self) -> dict[str, object]:
+        """Prepare history, execute both waves, and enforce exact final state."""
+        await self.client.register()
+        await self.client.join_room()
+        await self.client.sync_incremental(timeout_ms=0, allow_limited=True)
+        await self.oracle.initialize()
+        roots, reply_targets = await self._prepare_history()
+        await self.client.wait_until_quiet(
+            deadline_seconds=self.config.settlement_timeout_seconds,
+            quiet_seconds=0.75,
+        )
+        await asyncio.sleep(1)
+        self.stack.clear_stress_cache()
+
+        turns_by_wave: list[tuple[_StressTurn, ...]] = []
+        for wave in range(self.config.waves):
+            start_offset = self.stack.log_path.stat().st_size
+            turns = await self._run_wave(wave, roots, reply_targets)
+            end_offset = self.stack.log_path.stat().st_size
+            self._wave_log_ranges.append((start_offset, end_offset))
+            turns_by_wave.append(turns)
+            reply_targets = {turn.thread: self._one_response_event(turn.event_id) for turn in turns}
+
+        self.controller.assert_complete()
+        self.stack.assert_stress_dependencies_healthy()
+        events = await self._paginate_canonical_events()
+        audits = tuple(self._audit_wave(events, wave, turns) for wave, turns in enumerate(turns_by_wave))
+        all_edits = {label: edits for audit in audits for label, edits in audit.edits_by_stream.items()}
+        assert_matrix_edit_shape(self.config, all_edits)
+        wave_logs = self._wave_log_texts()
+        wave_cache_metrics = tuple(aggregate_log_metrics(text) for text in wave_logs)
+        self._assert_cache_wave_shape(wave_cache_metrics)
+        complete_log_metrics = aggregate_log_metrics(
+            self.stack.log_path.read_text(encoding="utf-8", errors="replace"),
+        )
+        complete_log_metrics.assert_healthy()
+        self._assert_reservation_telemetry(complete_log_metrics)
+        source_to_final = [latency for audit in audits for latency in audit.source_to_final_ms]
+        first_sent = min(turn.sent_at for turns in turns_by_wave for turn in turns)
+        wall_seconds = max(0.001, time.monotonic() - first_sent)
+        performance_sample = BaselineSample(
+            source_to_final_p95_ms=percentile(source_to_final, 95),
+            source_to_final_p99_ms=percentile(source_to_final, 99),
+            throughput_responses_per_second=len(source_to_final) / wall_seconds,
+        )
+        return {
+            "status": "PASS",
+            "roots": len(roots),
+            "hot_history_turns": self.config.history_turns,
+            "waves": [audit.summary() for audit in audits],
+            "per_thread": [metric for audit in audits for metric in audit.thread_metrics],
+            "model": self.controller.snapshot(),
+            "matrix_edit_count": sum(audit.matrix_edit_count for audit in audits),
+            "cache_by_wave": [metrics.summary() for metrics in wave_cache_metrics],
+            "runtime_log_metrics": complete_log_metrics.summary(),
+            "performance_sample": asdict(performance_sample),
+            "oracle": _sanitized_oracle_snapshot(self.oracle),
+        }
+
+    async def _prepare_history(self) -> tuple[dict[int, str], dict[int, str]]:
+        """Create 50 roots plus one fast long history before the cold boundary."""
+        root_results = await self._send_many(
+            (
+                (
+                    f"root:{thread}",
+                    thread,
+                    None,
+                    None,
+                    f"Synthetic stress root {thread:03d}",
+                )
+                for thread in range(self.config.threads)
+            ),
+        )
+        await self.oracle.wait_until_exact(
+            deadline_seconds=self.config.settlement_timeout_seconds,
+            settle_seconds=0.75,
+        )
+        roots = {thread: event_id for _, thread, event_id in root_results}
+        reply_targets = {thread: self._one_response_event(event_id) for _, thread, event_id in root_results}
+        for history_turn in range(self.config.history_turns):
+            label = f"hot-history:{history_turn:03d}"
+            results = await self._send_many(
+                (
+                    (
+                        label,
+                        0,
+                        roots[0],
+                        reply_targets[0],
+                        f"Synthetic hot history turn {history_turn:03d}",
+                    ),
+                ),
+            )
+            source_event_id = results[0][2]
+            await self.oracle.wait_until_exact(
+                deadline_seconds=self.config.settlement_timeout_seconds,
+                settle_seconds=0.1,
+            )
+            reply_targets[0] = self._one_response_event(source_event_id)
+        return roots, reply_targets
+
+    async def _run_wave(
+        self,
+        wave: int,
+        roots: Mapping[int, str],
+        reply_targets: Mapping[int, str],
+    ) -> tuple[_StressTurn, ...]:
+        """Send one synchronized source per thread and wait for terminal edits."""
+        requests = tuple(
+            StressRequest(wave=wave, thread=thread, seed=self.config.seed) for thread in range(self.config.threads)
+        )
+        self._expected_stress_bodies.update(self.controller.expected_body(request) for request in requests)
+        sent_results = await self._send_many(
+            (
+                (
+                    f"wave:{wave}:thread:{thread}",
+                    thread,
+                    roots[thread],
+                    reply_targets[thread],
+                    f"Synthetic stress wave {wave} thread {thread:03d} {self.config.marker(wave, thread)}",
+                )
+                for thread in range(self.config.threads)
+            ),
+        )
+        turns = tuple(
+            _StressTurn(
+                label=label,
+                wave=wave,
+                thread=thread,
+                event_id=event_id,
+                thread_root=roots[thread],
+                sent_at=self.oracle.sent_at[event_id],
+            )
+            for label, thread, event_id in sent_results
+        )
+        if self.config.overlapping_followups:
+            await self._send_overlapping_followups(wave, roots, turns)
+        await self.oracle.wait_until_exact(
+            deadline_seconds=self.config.settlement_timeout_seconds,
+            settle_seconds=0.75,
+        )
+        self.stack.assert_stress_dependencies_healthy()
+        return turns
+
+    async def _send_overlapping_followups(
+        self,
+        wave: int,
+        roots: Mapping[int, str],
+        turns: Sequence[_StressTurn],
+    ) -> None:
+        """Send deterministic queued follow-ups after every wave stream starts."""
+        deadline = time.monotonic() + self.config.barrier_timeout_seconds
+        while self.controller.reached_count(wave) < self.config.threads:
+            if time.monotonic() >= deadline:
+                reached = self.controller.reached_count(wave)
+                msg = f"overlap phase barrier reached {reached}/{self.config.threads}"
+                raise TimeoutError(msg)
+            await asyncio.sleep(0.05)
+        await asyncio.sleep(min(self.config.stream_seconds / 2, self.config.edit_interval * 2))
+        await self._send_many(
+            (
+                (
+                    f"overlap:{wave}:thread:{turn.thread}",
+                    turn.thread,
+                    roots[turn.thread],
+                    turn.event_id,
+                    f"Synthetic overlapping follow-up wave {wave} thread {turn.thread:03d}",
+                )
+                for turn in turns
+            ),
+        )
+
+    async def _send_many(
+        self,
+        specifications: Iterable[tuple[str, int, str | None, str | None, str]],
+    ) -> list[tuple[str, int, str]]:
+        """Send and register a concurrent deterministic source group."""
+        specs = tuple(specifications)
+        for _ in specs:
+            self.oracle.begin_expectation_registration()
+
+        async def send_one(
+            label: str,
+            thread: int,
+            thread_root: str | None,
+            reply_to: str | None,
+            body: str,
+        ) -> tuple[str, int, str]:
+            registered = False
+            relation = None
+            if thread_root is not None and reply_to is not None:
+                relation = {
+                    "rel_type": "m.thread",
+                    "event_id": thread_root,
+                    "is_falling_back": True,
+                    "m.in_reply_to": {"event_id": reply_to},
+                }
+            content = {
+                "msgtype": "m.text",
+                "body": f"{body} {self.stack.agent_id}",
+                "m.mentions": {"user_ids": [self.stack.agent_id]},
+            }
+            if relation is not None:
+                content["m.relates_to"] = relation
+            sent_at = time.monotonic()
+            try:
+                event_id = await self.client.send_event(
+                    "m.room.message",
+                    f"live-stress-{label.replace(':', '-')}",
+                    content,
+                )
+                self.oracle.expect(
+                    label,
+                    event_id,
+                    thread=thread,
+                    client=0,
+                    sent_at=sent_at,
+                )
+                self._sent_content[event_id] = content
+                self._record_journal(
+                    {
+                        "kind": "stress_source",
+                        "label": label,
+                        "wave": _wave_from_label(label),
+                        "thread": thread,
+                        "event_id": event_id,
+                    },
+                )
+                registered = True
+                return label, thread, event_id
+            finally:
+                self.oracle.finish_expectation_registration(validate=registered)
+
+        return list(
+            await asyncio.gather(
+                *(send_one(*specification) for specification in specs),
+            ),
+        )
+
+    def _record_journal(self, payload: Mapping[str, object]) -> None:
+        if self.journal is None:
+            return
+        self._journal_sequence += 1
+        self.journal({"sequence": self._journal_sequence, **payload})
+
+    def _one_response_event(self, source_event_id: str) -> str:
+        response_ids = self.oracle.response_ids.get(source_event_id, set())
+        if len(response_ids) != 1:
+            msg = (
+                f"stress source {self.oracle.expected_sources.get(source_event_id, source_event_id)} "
+                f"has {len(response_ids)} canonical responses"
+            )
+            raise AssertionError(msg)
+        return next(iter(response_ids))
+
+    async def _paginate_canonical_events(self) -> dict[str, dict[str, Any]]:
+        events: dict[str, dict[str, Any]] = {}
+        for event in await self.client.paginate_room(self.stack.room_id):
+            event_id = event.get("event_id")
+            if isinstance(event_id, str) and event_id not in events:
+                events[event_id] = event
+        return events
+
+    def _audit_wave(
+        self,
+        events: Mapping[str, Mapping[str, Any]],
+        wave: int,
+        turns: Sequence[_StressTurn],
+    ) -> _StressWaveAudit:
+        thread_metrics: list[dict[str, object]] = []
+        edits_by_stream: dict[str, tuple[float, ...]] = {}
+        placeholder_latencies: list[float] = []
+        content_latencies: list[float] = []
+        final_latencies: list[float] = []
+        status_counts: Counter[str] = Counter()
+        matrix_edit_count = 0
+        for turn in turns:
+            metric, edit_timestamps, statuses = self._audit_turn(events, turn)
+            thread_metrics.append(metric)
+            edits_by_stream[f"wave-{wave:02d}/thread-{turn.thread:03d}"] = edit_timestamps
+            placeholder_latencies.append(cast("float", metric["source_to_placeholder_ms"]))
+            content_latencies.append(cast("float", metric["source_to_first_content_ms"]))
+            final_latencies.append(cast("float", metric["source_to_final_ms"]))
+            matrix_edit_count += len(edit_timestamps)
+            status_counts.update(statuses)
+        return _StressWaveAudit(
+            wave=wave,
+            thread_metrics=tuple(thread_metrics),
+            edits_by_stream=edits_by_stream,
+            source_to_placeholder_ms=tuple(placeholder_latencies),
+            source_to_first_content_ms=tuple(content_latencies),
+            source_to_final_ms=tuple(final_latencies),
+            matrix_edit_count=matrix_edit_count,
+            streaming_status_counts=dict(status_counts),
+        )
+
+    def _audit_turn(
+        self,
+        events: Mapping[str, Mapping[str, Any]],
+        turn: _StressTurn,
+    ) -> tuple[dict[str, object], tuple[float, ...], Counter[str]]:
+        response_event_id = self._one_response_event(turn.event_id)
+        response = events.get(response_event_id)
+        source = events.get(turn.event_id)
+        if response is None or source is None:
+            msg = f"stress final audit missing source or response for {turn.label}"
+            raise AssertionError(msg)
+        replacements = [event for event in events.values() if _replacement_target(event) == response_event_id]
+        ordered_replacements = sorted(
+            replacements,
+            key=lambda event: _replacement_order(
+                cast("str", event.get("event_id", "")),
+                event.get("origin_server_ts"),
+                is_edit=True,
+            ),
+        )
+        ordered_events = [response, *ordered_replacements]
+        bodies = [
+            _canonical_message_body(
+                cast("Mapping[str, Any]", event.get("content", {})),
+                is_edit=index > 0,
+            )
+            for index, event in enumerate(ordered_events)
+        ]
+        request = StressRequest(wave=turn.wave, thread=turn.thread, seed=self.config.seed)
+        expected_body = self.controller.expected_body(request)
+        if not bodies or bodies[-1] != expected_body:
+            msg = f"stress final content mismatch for {turn.label}"
+            raise AssertionError(msg)
+        pulse_numbers = [_last_stress_pulse(body) for body in bodies if body is not None and "SYNTHETIC wave=" in body]
+        if pulse_numbers != sorted(pulse_numbers):
+            msg = f"same-thread edit ordering violation for {turn.label}: {pulse_numbers}"
+            raise AssertionError(msg)
+        statuses = Counter(
+            status
+            for index, event in enumerate(ordered_events)
+            for status in (_stream_status(event, is_edit=index > 0),)
+            if status is not None
+        )
+        if statuses[STREAM_STATUS_COMPLETED] != 1:
+            msg = f"stress response {turn.label} has terminal status count {statuses[STREAM_STATUS_COMPLETED]}"
+            raise AssertionError(msg)
+        source_ts = _required_event_timestamp(source, turn.label)
+        response_ts = _required_event_timestamp(response, turn.label)
+        content_events = [
+            event
+            for event, body in zip(ordered_events, bodies, strict=True)
+            if body is not None and "SYNTHETIC wave=" in body
+        ]
+        if not content_events:
+            msg = f"stress response {turn.label} never exposed streamed content"
+            raise AssertionError(msg)
+        first_content_ts = _required_event_timestamp(content_events[0], turn.label)
+        final_ts = _required_event_timestamp(ordered_events[-1], turn.label)
+        edit_timestamps = tuple(_required_event_timestamp(event, turn.label) / 1000 for event in ordered_replacements)
+        metric = {
+            "label": f"wave-{turn.wave:02d}/thread-{turn.thread:03d}",
+            "source_to_placeholder_ms": float(response_ts - source_ts),
+            "source_to_first_content_ms": float(first_content_ts - source_ts),
+            "source_to_final_ms": float(final_ts - source_ts),
+            "matrix_stream_duration_ms": float(final_ts - first_content_ts),
+            "matrix_edit_count": len(ordered_replacements),
+            "matrix_edit_gap_ms": latency_summary(
+                [
+                    float(right - left)
+                    for left, right in itertools.pairwise(
+                        [_required_event_timestamp(event, turn.label) for event in ordered_events],
+                    )
+                ],
+            ),
+            "final_completion_marker": (
+                f"COMPLETE[wave={turn.wave};thread={turn.thread:03d};pulses={self.config.pulses_per_stream}]"
+            ),
+        }
+        return metric, edit_timestamps, statuses
+
+    def _wave_log_texts(self) -> tuple[str, ...]:
+        payload = self.stack.log_path.read_bytes()
+        return tuple(payload[start:end].decode("utf-8", errors="replace") for start, end in self._wave_log_ranges)
+
+    def _assert_cache_wave_shape(
+        self,
+        metrics: Sequence[StressLogMetrics],
+    ) -> None:
+        if len(metrics) != self.config.waves:
+            msg = f"stress cache metrics cover {len(metrics)}/{self.config.waves} waves"
+            raise AssertionError(msg)
+        cold = metrics[0]
+        if cold.full_scans < self.config.threads:
+            msg = f"cold wave produced {cold.full_scans}/{self.config.threads} full scans"
+            raise AssertionError(msg)
+        for wave, warm in enumerate(metrics[1:], start=1):
+            if warm.full_scans:
+                msg = f"warm wave {wave} performed {warm.full_scans} redundant full scans"
+                raise AssertionError(msg)
+            if warm.cache_hits < self.config.threads:
+                msg = f"warm wave {wave} produced {warm.cache_hits}/{self.config.threads} cache hits"
+                raise AssertionError(msg)
+
+    @staticmethod
+    def _assert_reservation_telemetry(metrics: StressLogMetrics) -> None:
+        if metrics.reservation_active_final is None:
+            msg = "stress run omitted outbound reservation lifecycle telemetry"
+            raise AssertionError(msg)
+        if metrics.reservation_active_final:
+            msg = f"stress run leaked {metrics.reservation_active_final} outbound thread reservations"
+            raise AssertionError(msg)
+
+
+def _wave_from_label(label: str) -> int | None:
+    fields = label.split(":")
+    return int(fields[1]) if fields[0] in {"wave", "overlap"} and len(fields) > 1 else None
+
+
+def _replacement_target(event: Mapping[str, Any]) -> str | None:
+    if event.get("type") != "m.room.message":
+        return None
+    content = event.get("content")
+    if not isinstance(content, dict):
+        return None
+    relation = content.get("m.relates_to")
+    if not isinstance(relation, dict) or relation.get("rel_type") != "m.replace":
+        return None
+    target = relation.get("event_id")
+    return target if isinstance(target, str) else None
+
+
+def _stream_status(event: Mapping[str, Any], *, is_edit: bool) -> str | None:
+    content = event.get("content")
+    if not isinstance(content, dict):
+        return None
+    status_source = content.get("m.new_content") if is_edit else content
+    if not isinstance(status_source, dict):
+        return None
+    status = status_source.get(STREAM_STATUS_KEY)
+    return status if isinstance(status, str) else None
+
+
+def _last_stress_pulse(body: str) -> int:
+    matches = re.findall(r"\bpulse=(\d{3})/\d{3}", body)
+    if not matches:
+        msg = "stress body omitted pulse marker"
+        raise AssertionError(msg)
+    return int(matches[-1])
+
+
+def _required_event_timestamp(event: Mapping[str, Any], label: str) -> int:
+    timestamp = event.get("origin_server_ts")
+    if not isinstance(timestamp, int):
+        msg = f"stress event for {label} omitted origin_server_ts"
+        raise TypeError(msg)
+    return timestamp
+
+
+async def _sample_stress_resources(
+    stack: ManagedTuwunelStack,
+    config: StressConfig,
+    stop: asyncio.Event,
+    samples: list[ResourceSample],
+) -> None:
+    """Sample process, sync, Tuwunel, and PostgreSQL health at bounded cadence."""
+    pid = stack.mindroom_pid
+    if pid is None:
+        msg = "MindRoom process missing before stress resource sampling"
+        raise RuntimeError(msg)
+    process = psutil.Process(pid)
+    process.cpu_percent(None)
+    started_at = time.monotonic()
+    async with httpx.AsyncClient(timeout=10) as client:
+        while not stop.is_set():
+            sample_started = time.monotonic()
+            health_latency_ms: float | None = None
+            sync_age_seconds: float | None = None
+            try:
+                response = await client.get(f"http://127.0.0.1:{stack.api_port}/api/health")
+                health_latency_ms = (time.monotonic() - sample_started) * 1000
+                response.raise_for_status()
+                health = response.json()
+                raw_sync_time = health.get("last_sync_time") if isinstance(health, dict) else None
+                if isinstance(raw_sync_time, str):
+                    sync_time = datetime.fromisoformat(raw_sync_time)
+                    sync_age_seconds = max(0.0, (datetime.now(UTC) - sync_time).total_seconds())
+            except (httpx.HTTPError, ValueError):
+                health_latency_ms = None
+            postgres = stack.stress_postgres
+            postgres_healthy, tuwunel_healthy = await asyncio.gather(
+                asyncio.to_thread(postgres.is_healthy) if postgres is not None else asyncio.sleep(0, result=False),
+                asyncio.to_thread(stack.tuwunel_is_healthy),
+            )
+            try:
+                cpu_percent = process.cpu_percent(None)
+                rss_bytes = process.memory_info().rss
+            except psutil.Error:
+                cpu_percent = 0.0
+                rss_bytes = 0
+            samples.append(
+                ResourceSample(
+                    offset_seconds=round(time.monotonic() - started_at, 3),
+                    cpu_percent=cpu_percent,
+                    rss_bytes=rss_bytes,
+                    sync_age_seconds=sync_age_seconds,
+                    health_latency_ms=health_latency_ms,
+                    tuwunel_healthy=tuwunel_healthy,
+                    postgres_healthy=postgres_healthy,
+                ),
+            )
+            try:
+                await asyncio.wait_for(
+                    stop.wait(),
+                    timeout=config.resource_sample_interval_seconds,
+                )
+            except TimeoutError:
+                continue
+
+
+async def _run_stress_live(
+    stack: ManagedTuwunelStack,
+    config: StressConfig,
+    *,
+    journal: Callable[[Mapping[str, object]], None] | None = None,
+) -> dict[str, object]:
+    """Own the Matrix client and sampler around one complete stress run."""
+    client = LiveMatrixClient(stack.homeserver, stack.room_id)
+    runner = LiveMatrixStressRunner(stack, client, config, journal=journal)
+    stop_sampler = asyncio.Event()
+    resource_samples: list[ResourceSample] = []
+    sampler = asyncio.create_task(
+        _sample_stress_resources(stack, config, stop_sampler, resource_samples),
+        name="live_matrix_stress_resource_sampler",
+    )
+    primary_error: BaseException | None = None
+    try:
+        result = await runner.run()
+    except BaseException as exc:
+        primary_error = exc
+        raise
+    finally:
+        stop_sampler.set()
+        sampler_result = await asyncio.gather(sampler, return_exceptions=True)
+        close_error = await _close_live_matrix_client(client)
+        cleanup_errors = [error for error in (*sampler_result, close_error) if isinstance(error, BaseException)]
+        if cleanup_errors:
+            if primary_error is not None:
+                for error in cleanup_errors:
+                    primary_error.add_note(f"stress cleanup failure: {error}")
+            else:
+                msg = "live Matrix stress cleanup failed"
+                raise ExceptionGroup(msg, cleanup_errors)
+    resources = resource_summary(resource_samples)
+    if resources["tuwunel_unhealthy_samples"] or resources["postgres_unhealthy_samples"]:
+        msg = f"stress dependency health sampling failed: {resources}"
+        raise AssertionError(msg)
+    health_latency = cast("Mapping[str, object]", resources["health_latency_ms"])
+    if health_latency.get("max", 0) > 5000:
+        msg = f"stress API health latency exceeded five-second watchdog boundary: {health_latency}"
+        raise AssertionError(msg)
+    result["resources"] = resources
+    result["resource_samples"] = [asdict(sample) for sample in resource_samples]
+    return result
+
+
 def _non_negative_int(value: str) -> int:
     parsed = int(value)
     if parsed < 0:
         msg = "must be non-negative"
+        raise argparse.ArgumentTypeError(msg)
+    return parsed
+
+
+def _positive_float(value: str) -> float:
+    parsed = float(value)
+    if parsed <= 0:
+        msg = "must be positive"
         raise argparse.ArgumentTypeError(msg)
     return parsed
 
@@ -4743,10 +5614,19 @@ def _parse_args() -> argparse.Namespace:
         required=True,
         help="clean exact mindroom-nio Git checkout loaded by the live MindRoom child",
     )
-    parser.add_argument("--profile", choices=("fuzz", "saturation", "chaos"), default="fuzz")
+    parser.add_argument("--profile", choices=("fuzz", "saturation", "chaos", "stress"), default="fuzz")
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--steps", type=_positive_int, default=200)
-    parser.add_argument("--threads", type=_positive_int, default=45)
+    parser.add_argument("--threads", type=_positive_int)
+    parser.add_argument("--stream-seconds", type=_positive_float, default=45.0)
+    parser.add_argument("--edit-interval", type=_positive_float, default=0.5)
+    parser.add_argument("--waves", type=_positive_int, default=2)
+    parser.add_argument("--history-turns", type=_non_negative_int, default=20)
+    parser.add_argument("--cache-backend", choices=("postgres",), default="postgres")
+    parser.add_argument("--baseline", type=Path)
+    parser.add_argument("--write-baseline", type=Path)
+    parser.add_argument("--enforce-performance", action="store_true")
+    parser.add_argument("--overlapping-followups", action="store_true")
     parser.add_argument("--max-batch-size", type=_positive_int, default=16)
     parser.add_argument("--restart-interval", type=_non_negative_int, default=100)
     parser.add_argument("--clients", type=_positive_int, default=4, help="chaos senders racing concurrently")
@@ -4768,8 +5648,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--artifact-root",
         type=Path,
-        default=DEFAULT_ARTIFACT_ROOT,
-        help="stable ignored directory holding one durable failure bundle per run",
+        help="stable ignored directory holding durable run evidence",
     )
     return parser.parse_args()
 
@@ -4833,6 +5712,9 @@ async def _run_live(
 
 def _scenario_from_args(args: argparse.Namespace) -> LiveFuzzScenario:
     """Build or load the requested trace."""
+    if args.profile == "stress":
+        msg = "stress profile uses StressConfig rather than LiveFuzzScenario"
+        raise ValueError(msg)
     if args.trace is not None:
         return LiveFuzzScenario.from_json(args.trace.read_text(encoding="utf-8"))
     if args.profile == "saturation":
@@ -4842,7 +5724,7 @@ def _scenario_from_args(args: argparse.Namespace) -> LiveFuzzScenario:
             args.seed,
             steps=args.steps,
             tuning=ChaosTuning(
-                thread_count=args.threads,
+                thread_count=args.threads or 45,
                 client_count=args.clients,
                 room_count=args.rooms,
                 max_batch_size=args.max_batch_size,
@@ -4855,7 +5737,7 @@ def _scenario_from_args(args: argparse.Namespace) -> LiveFuzzScenario:
     return live_scenario_from_seed(
         args.seed,
         steps=args.steps,
-        thread_count=args.threads,
+        thread_count=args.threads or 45,
         max_batch_size=args.max_batch_size,
         restart_interval=args.restart_interval,
     )
@@ -5506,12 +6388,304 @@ def _require_runtime_provenance(
     return provenance
 
 
+def _stress_config_from_args(args: argparse.Namespace) -> StressConfig:
+    """Build or replay one exact stress configuration."""
+    if args.trace is not None:
+        _require_persistent_stress_path(args.trace)
+        return StressConfig.from_json(args.trace.read_text(encoding="utf-8"))
+    config = StressConfig(
+        threads=args.threads or 50,
+        stream_seconds=args.stream_seconds,
+        edit_interval=args.edit_interval,
+        waves=args.waves,
+        history_turns=args.history_turns,
+        cache_backend=args.cache_backend,
+        seed=args.seed,
+        overlapping_followups=args.overlapping_followups,
+    )
+    config.validate()
+    return config
+
+
+def _require_persistent_stress_path(path: Path) -> None:
+    """Reject trace, baseline, and artifact paths rooted in temporary storage."""
+    resolved = path.expanduser().resolve()
+    if "tmp" in {part.lower() for part in resolved.parts}:
+        msg = f"live Matrix stress evidence must not use temporary storage: {path}"
+        raise ValueError(msg)
+
+
+def _stress_profile_name(config: StressConfig) -> str:
+    return f"stress-{config.threads}x{config.stream_seconds:g}s-{config.edit_interval:g}s-{config.waves}w"
+
+
+def _stress_config_sha256(config: StressConfig) -> str:
+    return hashlib.sha256(config.to_json().encode()).hexdigest()
+
+
+def _baseline_sample_from_result(result: Mapping[str, object]) -> BaselineSample:
+    raw_sample = result.get("performance_sample")
+    if not isinstance(raw_sample, dict):
+        msg = "stress result omitted performance sample"
+        raise TypeError(msg)
+    return BaselineSample(
+        source_to_final_p95_ms=float(raw_sample["source_to_final_p95_ms"]),
+        source_to_final_p99_ms=float(raw_sample["source_to_final_p99_ms"]),
+        throughput_responses_per_second=float(raw_sample["throughput_responses_per_second"]),
+    )
+
+
+def _compare_stress_baseline(
+    path: Path,
+    *,
+    config: StressConfig,
+    result: Mapping[str, object],
+) -> Mapping[str, object]:
+    _require_persistent_stress_path(path)
+    baseline = StressBaseline.from_json(path.read_text(encoding="utf-8"))
+    expected_profile = _stress_profile_name(config)
+    expected_hash = _stress_config_sha256(config)
+    if baseline.profile != expected_profile or baseline.config_sha256 != expected_hash:
+        msg = (
+            f"stress baseline workload mismatch: profile={baseline.profile!r}, config_sha256={baseline.config_sha256!r}"
+        )
+        raise ValueError(msg)
+    return baseline.compare(_baseline_sample_from_result(result))
+
+
+def _append_stress_baseline_sample(
+    path: Path,
+    *,
+    config: StressConfig,
+    source_revision: str,
+    result: Mapping[str, object],
+) -> Mapping[str, object]:
+    """Append one clean sample and materialize a baseline after three stable runs."""
+    _require_persistent_stress_path(path)
+    collection_path = path.with_suffix(path.suffix + ".samples")
+    profile = _stress_profile_name(config)
+    config_sha256 = _stress_config_sha256(config)
+    samples: list[dict[str, float]] = []
+    if collection_path.exists():
+        payload = json.loads(collection_path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            msg = "stress baseline sample collection must be an object"
+            raise TypeError(msg)
+        identity = (
+            payload.get("profile"),
+            payload.get("source_revision"),
+            payload.get("config_sha256"),
+            payload.get("machine_class"),
+        )
+        if identity != (profile, source_revision, config_sha256, current_machine_class()):
+            msg = f"stress baseline sample identity changed: {identity}"
+            raise ValueError(msg)
+        raw_samples = payload.get("samples")
+        if not isinstance(raw_samples, list):
+            msg = "stress baseline sample collection is missing samples"
+            raise TypeError(msg)
+        samples = [cast("dict[str, float]", sample) for sample in raw_samples if isinstance(sample, dict)]
+        if len(samples) != len(raw_samples):
+            msg = "stress baseline sample collection contains malformed samples"
+            raise TypeError(msg)
+    samples.append(asdict(_baseline_sample_from_result(result)))
+    collection = {
+        "version": 1,
+        "profile": profile,
+        "source_revision": source_revision,
+        "config_sha256": config_sha256,
+        "machine_class": current_machine_class(),
+        "samples": samples,
+    }
+    _atomic_json_write(collection_path, collection)
+    outcome: dict[str, object] = {
+        "sample_count": len(samples),
+        "sample_collection": str(collection_path),
+        "baseline": None,
+    }
+    if len(samples) < 3:
+        return outcome
+    baseline = StressBaseline(
+        profile=profile,
+        source_revision=source_revision,
+        config_sha256=config_sha256,
+        machine_class=current_machine_class(),
+        samples=tuple(BaselineSample(**sample) for sample in samples[-3:]),
+    )
+    _atomic_text_write(path, baseline.to_json() + "\n")
+    outcome["baseline"] = str(path)
+    outcome["medians"] = baseline.medians()
+    return outcome
+
+
+def _atomic_json_write(path: Path, payload: object) -> None:
+    _atomic_text_write(path, json.dumps(payload, indent=2, sort_keys=True) + "\n")
+
+
+def _atomic_text_write(path: Path, payload: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".pending")
+    temporary.write_text(payload, encoding="utf-8")
+    temporary.replace(path)
+
+
+def _capture_stress_bundle(
+    bundle: StressArtifactBundle,
+    stack: ManagedTuwunelStack,
+    config: StressConfig,
+    journal: Sequence[Mapping[str, object]],
+    *,
+    result: Mapping[str, object] | None,
+    failure: BaseException | None,
+    baseline_comparison: Mapping[str, object] | None,
+) -> None:
+    """Persist complete sanitized evidence before disposable services stop."""
+    provenance = stack.runtime_provenance or _run_provenance()
+    bundle.write_json("scenario.json", json.loads(config.to_json()))
+    bundle.write_json("git-runtime-provenance.json", provenance)
+    bundle.write_text(
+        "realized-operation-journal.jsonl",
+        "".join(json.dumps(entry, sort_keys=True) + "\n" for entry in journal),
+    )
+    bundle.write_text(
+        "mindroom-sanitized.log",
+        stack.log_path.read_text(encoding="utf-8", errors="replace")
+        if stack.log_path.exists()
+        else "<missing MindRoom log>\n",
+    )
+    bundle.write_text("tuwunel-sanitized.log", stack.tuwunel_log())
+    bundle.write_json("postgres-diagnostics.json", stack.stress_postgres_diagnostics())
+    bundle.write_text("replay.txt", write_replay_command())
+    if result is not None:
+        compact_summary = {
+            key: value
+            for key, value in result.items()
+            if key not in {"per_thread", "resource_samples", "oracle", "model"}
+        }
+        bundle.write_json("summary.json", compact_summary)
+        bundle.write_json("per-thread-samples.json", result.get("per_thread", []))
+        bundle.write_json("resource-samples.json", result.get("resource_samples", []))
+        bundle.write_json("model-timing.json", result.get("model", {}))
+        bundle.write_json("oracle-snapshot.json", result.get("oracle", {}))
+    if baseline_comparison is not None:
+        bundle.write_json("baseline-comparison.json", baseline_comparison)
+    if failure is not None:
+        bundle.write_text(
+            "failure.txt",
+            f"{type(failure).__name__}: {failure}\n",
+        )
+
+
+def _run_stress_main(args: argparse.Namespace) -> None:
+    """Run one complete stress campaign unit and retain success evidence."""
+    config = _stress_config_from_args(args)
+    if args.enforce_performance and args.baseline is None:
+        msg = "--enforce-performance requires --baseline"
+        raise ValueError(msg)
+    artifact_root = args.artifact_root or DEFAULT_STRESS_ARTIFACT_ROOT
+    _require_persistent_stress_path(artifact_root)
+    if args.save_trace is not None:
+        _require_persistent_stress_path(args.save_trace)
+        _atomic_text_write(args.save_trace, config.to_json() + "\n")
+    mindroom_revision = _required_mindroom_revision()
+    run_id = f"{time.strftime('%Y%m%dT%H%M%S')}-{secrets.token_hex(4)}"
+    bundle = StressArtifactBundle.create(artifact_root, run_id)
+    journal: list[Mapping[str, object]] = []
+    bundle.write_json("scenario.json", json.loads(config.to_json()))
+    stack = ManagedTuwunelStack(
+        room_keys=(ROOM_KEY,),
+        provenance_sink=lambda provenance: bundle.write_json(
+            "git-runtime-provenance.json",
+            provenance,
+        ),
+        artifact_directory=bundle.directory,
+        nio_overlay=args.nio_overlay,
+        mindroom_revision=mindroom_revision,
+        stress_config=config,
+    )
+    result: dict[str, object] | None = None
+    baseline_comparison: Mapping[str, object] | None = None
+    try:
+        stack.start()
+        started_at = time.monotonic()
+        result = asyncio.run(
+            _run_stress_live(
+                stack,
+                config,
+                journal=journal.append,
+            ),
+        )
+        result["wall_seconds"] = round(time.monotonic() - started_at, 3)
+        result["seed"] = config.seed
+        if args.baseline is not None:
+            baseline_comparison = _compare_stress_baseline(
+                args.baseline,
+                config=config,
+                result=result,
+            )
+        if args.write_baseline is not None:
+            result["baseline_write"] = _append_stress_baseline_sample(
+                args.write_baseline,
+                config=config,
+                source_revision=mindroom_revision,
+                result=result,
+            )
+        _require_runtime_provenance(stack, args.nio_overlay)
+    except BaseException as exc:
+        with suppress(BaseException):
+            _capture_stress_bundle(
+                bundle,
+                stack,
+                config,
+                journal,
+                result=result,
+                failure=exc,
+                baseline_comparison=baseline_comparison,
+            )
+        try:
+            stack.close()
+        except BaseException as cleanup_error:
+            exc.add_note(f"stress cleanup failure: {cleanup_error}")
+        with suppress(BaseException):
+            bundle.write_json(
+                "cleanup-manifest.json",
+                {"status": "FAILED", "resources_removed": True},
+            )
+        print(f"Live Matrix stress failure bundle: {bundle.directory}", file=sys.stderr)
+        raise
+
+    assert result is not None
+
+    def snapshot_evidence() -> None:
+        _capture_stress_bundle(
+            bundle,
+            stack,
+            config,
+            journal,
+            result=result,
+            failure=None,
+            baseline_comparison=baseline_comparison,
+        )
+
+    stack.close(before_destructive_cleanup=snapshot_evidence)
+    bundle.write_json(
+        "cleanup-manifest.json",
+        {"status": "PASS", "resources_removed": True},
+    )
+    result["artifact_directory"] = str(bundle.directory)
+    print(json.dumps(result, sort_keys=True))
+
+
 def main() -> None:
     """Run one trace against a fresh disposable real-server stack."""
     if len(sys.argv) >= 4 and sys.argv[1] == "__mindroom_runtime_child__":
         _run_mindroom_runtime_child(Path(sys.argv[2]), sys.argv[3:])
         return
     args = _parse_args()
+    if args.profile == "stress":
+        _run_stress_main(args)
+        return
+    args.artifact_root = args.artifact_root or DEFAULT_ARTIFACT_ROOT
     nio_overlay: NioOverlay = args.nio_overlay
     scenario = _scenario_from_args(args)
     if args.save_trace is not None:

@@ -4106,6 +4106,7 @@ def test_stack_close_attempts_every_stage_before_rethrowing_first_interrupt(
     stack._log_handle = FakeLog()
     stack._model_server = FakeServer()
     stack._model_thread = FakeThread()
+    stack.stress_postgres = None
     stack._created = True
     stack.instance_name = "fuzz-test"
     stack.temp_dir = FakeTempDir()
@@ -4164,6 +4165,7 @@ def test_stack_close_groups_ordinary_cleanup_failures() -> None:
     stack._log_handle = None
     stack._model_server = None
     stack._model_thread = None
+    stack.stress_postgres = None
     stack._created = False
     stack.temp_dir = FakeTempDir()
     stack._write_manifest = lambda **_kwargs: events.append("manifest")  # type: ignore[method-assign]
@@ -5770,6 +5772,7 @@ def test_main_preserves_base_exception_evidence_and_closes_stack(
     """An interrupted campaign preserves evidence and tears down its stack."""
     args = SimpleNamespace(
         artifact_root=tmp_path / "artifacts",
+        profile="fuzz",
         failure_log=None,
         nio_overlay=NioOverlay(path=tmp_path / "nio", revision="nio-head"),
         pending_grace=0.0,
@@ -5827,6 +5830,7 @@ def test_main_bad_failure_log_preserves_primary_and_closes_stack(
     mindroom_log.write_text("mindroom output\n", encoding="utf-8")
     args = SimpleNamespace(
         artifact_root=tmp_path / "artifacts",
+        profile="fuzz",
         failure_log=failure_log,
         nio_overlay=NioOverlay(path=tmp_path / "nio", revision="nio-head"),
         pending_grace=0.0,
@@ -5873,6 +5877,7 @@ def test_main_bundle_capture_failure_preserves_primary_and_closes_stack(
     """Any evidence-capture failure still preserves the run error and teardown."""
     args = SimpleNamespace(
         artifact_root=tmp_path / "artifacts",
+        profile="fuzz",
         failure_log=None,
         nio_overlay=NioOverlay(path=tmp_path / "nio", revision="nio-head"),
         pending_grace=0.0,
@@ -5924,6 +5929,7 @@ def test_main_stop_interrupt_preserves_primary_and_closes_stack(
     """An interrupted evidence stage cannot mask the run error or skip close."""
     args = SimpleNamespace(
         artifact_root=tmp_path / "artifacts",
+        profile="fuzz",
         failure_log=None,
         nio_overlay=NioOverlay(path=tmp_path / "nio", revision="nio-head"),
         pending_grace=0.0,
@@ -5991,6 +5997,7 @@ def test_main_rechecks_sources_at_teardown_and_receipt_boundaries(
     """PASS revalidates after runtime work and again after teardown."""
     args = SimpleNamespace(
         artifact_root=tmp_path / "artifacts",
+        profile="fuzz",
         failure_log=None,
         nio_overlay=NioOverlay(path=tmp_path / "nio", revision="nio-head"),
         pending_grace=0.0,
@@ -6080,6 +6087,7 @@ def test_main_cleanup_failure_retains_pre_teardown_evidence(
     artifact_root = tmp_path / "artifacts"
     args = SimpleNamespace(
         artifact_root=artifact_root,
+        profile="fuzz",
         failure_log=None,
         nio_overlay=NioOverlay(path=tmp_path / "nio", revision="nio-head"),
         pending_grace=0.0,
@@ -6211,6 +6219,7 @@ def test_main_missing_runtime_provenance_captures_bundle_before_teardown(
     log_path.write_text("runtime without attestation\n", encoding="utf-8")
     args = SimpleNamespace(
         artifact_root=artifact_root,
+        profile="fuzz",
         failure_log=None,
         nio_overlay=NioOverlay(path=tmp_path / "nio", revision="nio-head"),
         pending_grace=0.0,
