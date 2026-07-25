@@ -3410,7 +3410,9 @@ class LiveFuzzRunner:
         self.executed_batches = 0
         self.max_unsettled = 0
         self._mindroom_running = True
-        self._startup_maintenance_pending = False
+        # The stack starts MindRoom before the runner exists, so every profile
+        # begins with current-generation startup maintenance still owed.
+        self._startup_maintenance_pending = True
 
     async def run(self) -> dict[str, object]:
         """Execute every batch and enforce the reply invariant after each."""
@@ -3430,6 +3432,7 @@ class LiveFuzzRunner:
                 if self.scenario.profile == "chaos"
                 else await self._run_batches(self.scenario.batches)
             )
+        await self._wait_for_restart_recovery_window()
         return {**result, **await self._audit_final_state()}
 
     async def _run_saturation(self) -> dict[str, object]:
@@ -3687,9 +3690,10 @@ class LiveFuzzRunner:
         for relative_batch_index, batch in enumerate(batches):
             batch_index = batch_index_offset + relative_batch_index
             if batch[0].kind is LiveOperationKind.RESTART_MINDROOM:
-                self.stack.restart_mindroom()
-                self.restart_count += 1
-                self._record_lifecycle(LiveOperationKind.RESTART_MINDROOM)
+                await self._apply_lifecycle(
+                    LiveOperationKind.RESTART_MINDROOM,
+                    batch_index,
+                )
             else:
                 await self._apply_batch_in_completion_order(
                     batch,
@@ -3831,7 +3835,6 @@ class LiveFuzzRunner:
             self.max_unsettled = max(self.max_unsettled, len(self.oracle.unsettled_required_sources()))
 
         await self._checkpoint(len(self.scenario.batches))
-        await self._wait_for_restart_recovery_window()
         return {
             "batches": self.executed_batches,
             "canonical_agent_replies": len(self.oracle.expected_sources),

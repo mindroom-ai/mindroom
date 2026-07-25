@@ -3455,7 +3455,7 @@ def test_abandoned_process_group_requires_exact_command_marker(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("profile", ["fuzz", "chaos", "saturation"])
 async def test_every_live_profile_runs_the_shared_final_audit(profile: str) -> None:
-    """No workload may report PASS before the independent final-state audit."""
+    """Every workload settles current startup before the independent final audit."""
     calls: list[str] = []
 
     class FakeClient:
@@ -3473,6 +3473,16 @@ async def test_every_live_profile_runs_the_shared_final_audit(profile: str) -> N
         async def initialize(self) -> None:
             calls.append("oracle-init")
 
+        async def wait_until_exact(self, *, deadline_seconds: float, settle_seconds: float) -> None:
+            assert (deadline_seconds, settle_seconds) == (12.0, 0.75)
+            calls.append("oracle-quiet")
+
+    class FakeStack:
+        @staticmethod
+        def wait_for_startup_maintenance(*, timeout_seconds: float) -> None:
+            assert timeout_seconds == 12.0
+            calls.append("maintenance")
+
     async def send_roots(_threads: Collection[int]) -> None:
         calls.append("roots")
 
@@ -3486,8 +3496,12 @@ async def test_every_live_profile_runs_the_shared_final_audit(profile: str) -> N
 
     runner = object.__new__(LiveFuzzRunner)
     runner.clients = (FakeClient(),)
+    runner.stack = FakeStack()
     runner.oracle = FakeOracle()
     runner.scenario = LiveFuzzScenario(thread_count=1, batches=(), profile=profile)
+    runner.reply_timeout = 12.0
+    runner.settle_seconds = 0.75
+    runner._startup_maintenance_pending = True
     runner._send_roots = send_roots  # type: ignore[method-assign]
     runner._run_batches = run_profile  # type: ignore[method-assign]
     runner._run_chaos = run_profile  # type: ignore[method-assign]
@@ -3496,8 +3510,131 @@ async def test_every_live_profile_runs_the_shared_final_audit(profile: str) -> N
 
     result = await runner.run()
 
-    assert calls[-2:] == [profile, "audit"]
+    assert calls[-4:] == [profile, "maintenance", "oracle-quiet", "audit"]
     assert result == {"status": "PASS", "audited_events": 7}
+
+
+@pytest.mark.asyncio
+async def test_new_runner_owes_initial_startup_maintenance(tmp_path: Path) -> None:
+    """The process started before runner construction still needs the final fence."""
+    client = LiveMatrixClient("http://matrix.invalid", "!room:example")
+    stack = SimpleNamespace(
+        agent_id="@agent:example",
+        router_id="@router:example",
+        storage_path=tmp_path,
+    )
+    try:
+        runner = LiveFuzzRunner(
+            stack,  # type: ignore[arg-type]
+            (client,),
+            LiveFuzzScenario(thread_count=1, batches=()),
+            reply_timeout=12.0,
+            settle_seconds=0.75,
+        )
+        assert runner._startup_maintenance_pending is True
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_default_fuzz_restart_uses_shared_lifecycle_owner() -> None:
+    """Ordinary fuzz restarts must register current-generation maintenance debt."""
+    calls: list[str] = []
+
+    class FakeStack:
+        @staticmethod
+        def restart_mindroom() -> None:
+            calls.append("restart")
+
+    class FakeOracle:
+        def __init__(self) -> None:
+            self.expected_sources: dict[str, str] = {}
+
+        @staticmethod
+        async def wait_until_exact(*, deadline_seconds: float, settle_seconds: float) -> None:
+            assert (deadline_seconds, settle_seconds) == (12.0, 0.75)
+            calls.append("batch-quiet")
+
+    runner = object.__new__(LiveFuzzRunner)
+    runner.stack = FakeStack()
+    runner.oracle = FakeOracle()
+    runner.scenario = LiveFuzzScenario(thread_count=1, batches=())
+    runner.reply_timeout = 12.0
+    runner.settle_seconds = 0.75
+    runner.restart_count = 0
+    runner.executed_batches = 0
+    runner.operation_count = 0
+    runner._mindroom_running = True
+    runner._startup_maintenance_pending = False
+    runner._journal = None
+    restart = LiveOperation(
+        0,
+        LiveOperationKind.RESTART_MINDROOM,
+        0,
+        None,
+    )
+
+    result = await runner._run_batches(((restart,),))
+
+    assert calls == ["restart", "batch-quiet"]
+    assert runner.restart_count == 1
+    assert runner._startup_maintenance_pending is True
+    assert result["status"] == "PASS"
+
+
+@pytest.mark.asyncio
+async def test_startup_phase_failure_prevents_shared_final_audit() -> None:
+    """A failed current-generation phase blocks audit for every profile."""
+    calls: list[str] = []
+
+    class FakeClient:
+        @staticmethod
+        async def register() -> None:
+            return
+
+        @staticmethod
+        async def join_room() -> None:
+            return
+
+    class FakeOracle:
+        @staticmethod
+        async def initialize() -> None:
+            return
+
+    class FakeStack:
+        @staticmethod
+        def wait_for_startup_maintenance(*, timeout_seconds: float) -> None:
+            assert timeout_seconds == 12.0
+            calls.append("maintenance-failed")
+            failure = "startup phase failed"
+            raise AssertionError(failure)
+
+    async def send_roots(_threads: Collection[int]) -> None:
+        return
+
+    async def run_batches(*_args: object) -> dict[str, object]:
+        return {"status": "PASS"}
+
+    async def audit_final_state() -> dict[str, int]:
+        calls.append("audit")
+        return {}
+
+    runner = object.__new__(LiveFuzzRunner)
+    runner.clients = (FakeClient(),)
+    runner.stack = FakeStack()
+    runner.oracle = FakeOracle()
+    runner.scenario = LiveFuzzScenario(thread_count=1, batches=())
+    runner.reply_timeout = 12.0
+    runner.settle_seconds = 0.75
+    runner._startup_maintenance_pending = True
+    runner._send_roots = send_roots  # type: ignore[method-assign]
+    runner._run_batches = run_batches  # type: ignore[method-assign]
+    runner._audit_final_state = audit_final_state  # type: ignore[method-assign]
+
+    with pytest.raises(AssertionError, match="startup phase failed"):
+        await runner.run()
+
+    assert calls == ["maintenance-failed"]
 
 
 @pytest.mark.asyncio
