@@ -645,6 +645,33 @@ async def test_router_relay_is_admitted_while_original_ingress_claim_is_active(
 
 
 @pytest.mark.asyncio
+async def test_completed_router_alias_rejects_later_physical_relay(config: Config, tmp_path: Path) -> None:
+    """A new relay event cannot replay a human source already completed through another relay."""
+    harness = _build_harness(config, tmp_path)
+    room = _room_with_members(config, "general", ROUTER_AGENT_NAME)
+    original_event_id = "$human-complete:localhost"
+    harness.turn_store.record_turn(
+        TurnRecord.create(
+            ["$relay-complete:localhost"],
+            discovery_event_ids=[original_event_id],
+            response_event_id="$response-complete:localhost",
+        ),
+    )
+    duplicate_relay = _router_relay_event(
+        config,
+        event_id="$relay-duplicate:localhost",
+        original_event_id=original_event_id,
+        body=f"{_entity_user_id(config, 'general')} duplicate",
+        origin_server_ts=1_000_001,
+    )
+
+    await harness.deliver(room, duplicate_relay)
+
+    assert harness.runner.requests == []
+    assert harness.turn_store.get_turn_record("$relay-duplicate:localhost") is None
+
+
+@pytest.mark.asyncio
 async def test_router_relay_ignored_by_this_agent_does_not_index_human_alias(
     config: Config,
     tmp_path: Path,

@@ -201,11 +201,14 @@ class TurnStore:
 
     def try_claim_turn(self, turn_record: TurnRecord) -> bool:
         """Claim exclusive physical sources while aliases remain advisory."""
-        if not turn_record.source_event_ids:
+        if not turn_record.source_event_ids or any(map(self.is_handled, turn_record.discovery_event_ids)):
             return False
-        source_ids = set(turn_record.source_event_ids)
+        source_ids, discovery_ids = set(turn_record.source_event_ids), set(turn_record.discovery_event_ids)
         with self._pending_claim_lock:
-            if any(source_ids.intersection(claim.source_event_ids) for claim in self._pending_turn_claims):
+            if any(
+                source_ids.intersection(claim.source_event_ids) or discovery_ids.intersection(claim.discovery_event_ids)
+                for claim in self._pending_turn_claims
+            ):
                 return False
             self._pending_turn_claims.append(turn_record)
         return True
@@ -261,9 +264,7 @@ class TurnStore:
             (record := self._ledger.get_turn_record(source_event_id)) is not None
             and (
                 source_event_id in record.redacted_source_event_ids
-                or (
-                    source_event_id in record.source_event_ids and source_event_id not in record.replay_source_event_ids
-                )
+                or source_event_id in set(record.source_event_ids).difference(record.replay_source_event_ids)
             )
             for source_event_id in source_event_ids
         )

@@ -2014,7 +2014,6 @@ class TurnController:
             )
         try:
             if event_info.is_edit:
-                # Edits bypass coalescing and wait behind the conversation response lock.
                 await reservation_owner.release()
                 await self._handle_edit_event(room, prechecked_event, event_info, dispatch_timing)
                 return

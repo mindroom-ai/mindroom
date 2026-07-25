@@ -298,9 +298,9 @@ class EditRegenerator:
             await self._drain(room, record, mailbox)
 
         def retry_after_sync_restart() -> None:
-            applied.clear()
-            self.deps.turn_store.remove_stale_runs_for_edit(turn_record=record, requester_user_id=requester_id)
-            self.deps.restart_retry.register(driving_edit.revision[1], retry_mailbox, room_id=room.room_id)
+            if self.deps.restart_retry.register(driving_edit.revision[1], retry_mailbox, room_id=room.room_id):
+                applied.clear()
+                self.deps.turn_store.remove_stale_runs_for_edit(turn_record=record, requester_user_id=requester_id)
 
         return (
             ResponseRequest(

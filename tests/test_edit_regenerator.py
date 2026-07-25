@@ -1190,6 +1190,39 @@ async def test_swallowed_sync_restart_keeps_mailbox_snapshot_for_retry(tmp_path:
 
 
 @pytest.mark.asyncio
+async def test_second_sync_restart_durably_settles_one_shot_retry(tmp_path: Path) -> None:
+    """A retry interrupted again must commit its terminal snapshot instead of losing the edit."""
+    harness = _harness(tmp_path, turn_record=_turn_record())
+    attempts = 0
+
+    async def interrupt_twice(request: ResponseRequest) -> str:
+        nonlocal attempts
+        attempts += 1
+        assert request.on_sync_restart_cancelled is not None
+        request.on_sync_restart_cancelled()
+        return f"$interrupted-{attempts}:example.org"
+
+    harness.generate_response.side_effect = interrupt_twice
+    event, event_info = _edit_event(new_body="survive second restart")
+
+    await _handle_edit(harness, event, event_info)
+    assert harness.restart_retry.has_pending is True
+    harness.turn_store.record_turn.assert_not_called()
+
+    await harness.restart_retry.flush()
+
+    assert attempts == 2
+    assert harness.restart_retry.has_pending is False
+    recorded = harness.turn_store.record_turn.call_args.args[0]
+    assert recorded.response_event_id == "$interrupted-2:example.org"
+    assert recorded.source_event_prompts == {ORIGINAL_EVENT_ID: "survive second restart"}
+    assert recorded.source_event_revisions == {
+        ORIGINAL_EVENT_ID: (event.server_timestamp, event.event_id),
+    }
+    assert harness.regenerator._mailboxes == {}
+
+
+@pytest.mark.asyncio
 async def test_sync_restart_retries_waiting_coalesced_sibling(tmp_path: Path) -> None:
     """Restart cancellation must requeue every source waiting in the mailbox."""
     first_event_id = "$m1:example.org"

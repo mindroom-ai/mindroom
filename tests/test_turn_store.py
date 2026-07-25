@@ -156,6 +156,23 @@ def test_pending_turn_claim_allows_only_one_concurrent_owner(tmp_path: Path) -> 
     assert store.try_claim_turn(turn) is True
 
 
+def test_discovery_alias_allows_original_but_excludes_second_relay(tmp_path: Path) -> None:
+    """One human original may overlap its relay, but two relays for it may not."""
+    store = _store(tmp_path)
+    original = TurnRecord.create(["$human"], completed=False)
+    first_relay = TurnRecord.create(["$relay-one"], discovery_event_ids=["$human"], completed=False)
+    duplicate_relay = TurnRecord.create(["$relay-two"], discovery_event_ids=["$human"], completed=False)
+
+    assert store.try_claim_turn(original) is True
+    assert store.try_claim_turn(first_relay) is True
+    assert store.try_claim_turn(duplicate_relay) is False
+
+    store.release_pending_turn_claim(first_relay)
+    assert store.try_claim_turn(duplicate_relay) is True
+    store.release_pending_turn_claim(duplicate_relay)
+    store.release_pending_turn_claim(original)
+
+
 @pytest.mark.asyncio
 async def test_turn_settlement_waits_for_pending_claim_release(tmp_path: Path) -> None:
     """A waiter should remain blocked until response ownership reaches its existing release seam."""
