@@ -977,13 +977,16 @@ class MatrixConversationCache(ConversationCacheProtocol):
         caller_label: str = "unknown",
     ) -> ThreadReadResult:
         """Refresh strict full history directly from Matrix."""
-        result = await self._reads.refresh_thread_from_source(
-            room_id,
-            thread_id,
-            caller_label=caller_label,
-        )
-        self._evict_turn_thread_reads_for_thread(room_id, thread_id)
-        return result
+        try:
+            return await self._reads.refresh_thread_from_source(
+                room_id,
+                thread_id,
+                caller_label=caller_label,
+            )
+        finally:
+            # The source path can mark cache rows stale before raising or being cancelled.
+            self._evict_turn_thread_reads_for_thread(room_id, thread_id)
+            self._evict_turn_event_lookups_for_room(room_id)
 
     async def get_thread_id_for_event(self, room_id: str, event_id: str) -> str | None:
         """Resolve the cached thread root for one event when known."""
@@ -1070,7 +1073,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
                 turn_cache.pop(cache_key)
 
     def _evict_turn_thread_reads_for_thread(self, room_id: str, thread_id: str) -> None:
-        """Discard thread reads replaced by one explicit source refresh."""
+        """Discard thread reads touched by one explicit source refresh."""
         turn_cache = self._turn_thread_read_cache.get()
         if turn_cache is None:
             return
