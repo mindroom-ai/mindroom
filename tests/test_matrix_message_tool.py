@@ -2099,8 +2099,16 @@ async def test_matrix_message_room_threads_resolves_large_bundled_replacement_th
             body=json.dumps(
                 {
                     "msgtype": "m.text",
-                    "body": "Final bundled edit\n\n⏳ Preparing isolated worker...",
-                    "io.mindroom.visible_body": "Final bundled edit",
+                    "body": "* Final bundled edit\n\n⏳ Preparing isolated worker...",
+                    "m.new_content": {
+                        "msgtype": "m.text",
+                        "body": "Final bundled edit\n\n⏳ Preparing isolated worker...",
+                        "io.mindroom.visible_body": "Final bundled edit",
+                    },
+                    "m.relates_to": {
+                        "rel_type": "m.replace",
+                        "event_id": "$thread-root",
+                    },
                 },
             ).encode("utf-8"),
         ),
