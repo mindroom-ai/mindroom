@@ -236,11 +236,13 @@ class _RecordingEmbedder(Embedder):
         self.batch_requests.append(tuple(texts))
         if len(texts) > 1 and self.batch_error is not None:
             raise self.batch_error
-        self._maybe_fail(texts)
         embeddings = [[float(len(text)), 1.0] for text in texts]
         if len(texts) > 1 and self.short_batch:
+            # A short response is a cardinality fault: it happens before the
+            # backend would have reported anything about individual inputs.
             self.embedded_texts.extend(texts[:-1])
             return embeddings[:-1]
+        self._maybe_fail(texts)
         self.embedded_texts.extend(texts)
         return embeddings
 
@@ -1734,23 +1736,76 @@ async def test_batch_capability_failure_disables_batching_for_the_rest_of_the_ru
 
 
 @pytest.mark.asyncio
-async def test_rejected_array_input_falls_back_without_losing_the_build(
+async def test_ordinary_permanent_batch_error_fails_fast_without_a_request_storm(
     tmp_path: Path,
     embedder: _RecordingEmbedder,
 ) -> None:
-    """A backend that rejects array input outright still indexes, one chunk at a time."""
+    """Only a cardinality fault earns a fallback; a bad request must not be retried per chunk.
+
+    A rejected model or malformed request fails identically one input at a
+    time, so degrading to per-item would turn one clear error into one failed
+    request per chunk.
+    """
     docs_path = tmp_path / "docs"
-    _write_corpus(docs_path, 4)
+    _write_corpus(docs_path, 40)
     config = _config(tmp_path, docs_path)
     runtime_paths = runtime_paths_for(config)
     embedder.batch_error = EmbedderRequestError("embedder request failed (HTTP 400)")
 
-    assert await _manager(config).reindex_all() == 4
+    manager = _manager(config)
+    await manager.reindex_all()
 
-    state = _published_state(config, runtime_paths)
-    assert state is not None
-    assert state.status == "complete"
-    assert state.indexed_count == 4
+    assert manager._last_refresh_error is not None
+    assert "embedder request failed (HTTP 400)" in manager._last_refresh_error
+    assert _published_state(config, runtime_paths) is None
+    assert embedder.request_count <= 4, f"degraded into a request storm: {embedder.request_count}"
+
+
+@pytest.mark.asyncio
+async def test_unknown_model_batch_error_fails_fast(
+    tmp_path: Path,
+    embedder: _RecordingEmbedder,
+) -> None:
+    """A bad model is global: it must not be probed once per chunk."""
+    docs_path = tmp_path / "docs"
+    _write_corpus(docs_path, 30)
+    config = _config(tmp_path, docs_path)
+    runtime_paths = runtime_paths_for(config)
+    embedder.batch_error = EmbedderRequestError("embedder request failed (HTTP 404)")
+
+    manager = _manager(config)
+    await manager.reindex_all()
+
+    assert _published_state(config, runtime_paths) is None
+    assert embedder.request_count <= 4, f"degraded into a request storm: {embedder.request_count}"
+    assert load_candidate_checkpoint(_storage_path(config, runtime_paths)) is not None
+
+
+@pytest.mark.asyncio
+async def test_single_input_wrong_cardinality_still_fails_and_does_not_publish(
+    tmp_path: Path,
+    embedder: _RecordingEmbedder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A malformed single-input response is never excused as a batching quirk."""
+    monkeypatch.setattr(knowledge_manager_module, "_INDEX_FILES_PER_BATCH", 1)
+    docs_path = tmp_path / "docs"
+    _write_corpus(docs_path, 2)
+    config = _config(tmp_path, docs_path)
+    runtime_paths = runtime_paths_for(config)
+    embedder.failures["content 0"] = [
+        EmbedderRequestError("embedder returned 0 embeddings for 1 inputs") for _ in range(10)
+    ]
+
+    manager = _manager(config)
+    await manager.reindex_all()
+
+    assert manager._last_refresh_error is not None
+    assert "Indexed 1 of 2" in manager._last_refresh_error
+    assert _published_state(config, runtime_paths) is None
+    checkpoint = load_candidate_checkpoint(_storage_path(config, runtime_paths))
+    assert checkpoint is not None
+    assert set(checkpoint.failed) == {"doc0000.md"}
 
 
 def test_per_item_fallback_preserves_order_and_validates_dimensions() -> None:
@@ -1907,3 +1962,101 @@ async def test_config_mismatched_index_stays_unavailable_until_the_candidate_pub
     reopened = get_published_index("docs", config=changed_config, runtime_paths=runtime_paths)
     assert reopened.availability is KnowledgeAvailability.READY
     assert reopened.index is not None
+
+
+@pytest.mark.asyncio
+async def test_progress_and_resumable_state_stay_accurate_under_batch_fallback(
+    tmp_path: Path,
+    embedder: _RecordingEmbedder,
+) -> None:
+    """Falling back to per-item must not distort progress or resumability.
+
+    Request accounting, completed/remaining/failed counts and the resumable
+    checkpoint all have to keep telling the truth once batching is retired.
+    """
+    docs_path = tmp_path / "docs"
+    _write_corpus(docs_path, 8)
+    config = _config(tmp_path, docs_path)
+    runtime_paths = runtime_paths_for(config)
+    embedder.short_batch = True
+    original_index = KnowledgeManager._index_file_locked
+
+    async def _fail_two(self: KnowledgeManager, resolved_path: Path, **kwargs: object) -> bool:
+        if resolved_path.name in {"doc0006.md", "doc0007.md"}:
+            return False
+        return await original_index(self, resolved_path, **kwargs)
+
+    KnowledgeManager._index_file_locked = _fail_two  # type: ignore[method-assign]
+    try:
+        with capture_logs() as logs:
+            await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    finally:
+        KnowledgeManager._index_file_locked = original_index  # type: ignore[method-assign]
+
+    status = get_knowledge_index_status("docs", config=config, runtime_paths=runtime_paths)
+    assert status.indexed_count == 0, "nothing published, so nothing is queryable"
+    assert status.candidate is not None
+    assert status.candidate.total_files == 8
+    assert status.candidate.completed_count == 6
+    assert status.candidate.pending_count == 2
+    assert status.candidate.failed_count == 2
+    assert status.candidate.status == "failed"
+
+    summary = next(entry for entry in logs if entry["event"] == "knowledge_candidate_finished")
+    assert summary["published"] is False
+    assert summary["total"] == 8
+    assert summary["completed"] == 6
+    assert summary["pending"] == 2
+    assert summary["failed"] == 2
+    # Request accounting still reflects real provider traffic under fallback:
+    # one multi-input probe plus one request per remaining chunk.
+    assert summary["embedding_requests"] == embedder.request_count
+
+    # The recorded state is genuinely resumable: clearing the fault publishes
+    # without redoing any of the six files already completed.
+    embedder.embedded_texts.clear()
+    result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    assert result.index_published is True
+    for index in range(6):
+        assert embedder.embedded_count(f"content {index}") == 0
+    assert get_knowledge_index_status("docs", config=config, runtime_paths=runtime_paths).indexed_count == 8
+
+
+@pytest.mark.asyncio
+async def test_vectors_prefetched_before_a_later_fallback_are_still_reused(
+    tmp_path: Path,
+    embedder: _RecordingEmbedder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A capability failure in a later batch must not discard earlier batched work."""
+    monkeypatch.setattr(knowledge_manager_module, "_INDEX_FILES_PER_BATCH", 4)
+    docs_path = tmp_path / "docs"
+    _write_corpus(docs_path, 12)
+    config = _config(tmp_path, docs_path)
+    runtime_paths = runtime_paths_for(config)
+    original_batch = _RecordingEmbedder.get_embeddings_batch
+    calls = {"count": 0}
+
+    def _short_after_first_batch(self: _RecordingEmbedder, texts: list[str]) -> list[list[float]]:
+        calls["count"] += 1
+        # First batch succeeds normally; the second reveals the broken capability.
+        self.short_batch = calls["count"] > 1
+        return original_batch(self, texts)
+
+    monkeypatch.setattr(_RecordingEmbedder, "get_embeddings_batch", _short_after_first_batch)
+
+    assert await _manager(config).reindex_all() == 12
+
+    multi_input = [batch for batch in embedder.batch_requests if len(batch) > 1]
+    assert len(multi_input) == 2, "batching stopped after the batch that proved it broken"
+    # The first batch succeeded, so its vectors are served from cache and are
+    # never requested again.
+    for index in range(4):
+        assert embedder.embedded_count(f"content {index}") == 1, "an earlier successful batch was redone"
+    # The short batch's own inputs are re-embedded once each, because a partial
+    # response gives no safe mapping from vectors back to inputs.
+    for index in range(4, 12):
+        assert embedder.embedded_count(f"content {index}") <= 2
+    state = _published_state(config, runtime_paths)
+    assert state is not None
+    assert state.indexed_count == 12

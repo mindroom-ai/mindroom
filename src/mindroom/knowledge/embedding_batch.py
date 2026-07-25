@@ -30,6 +30,7 @@ from mindroom.embedding_errors import (
     EMBEDDER_EMPTY_VECTOR_DETAIL,
     EmbedderRequestError,
     describe_embedder_error,
+    embedder_batch_cardinality_mismatch,
     embedder_failure_is_transient,
     is_embedder_auth_failure_detail,
 )
@@ -192,12 +193,22 @@ class BatchPrefetchEmbedder(Embedder):
         try:
             embeddings = inner.get_embeddings_batch(list(pending))
         except Exception as exc:
-            if embedder_failure_is_transient(exc):
+            if embedder_failure_is_transient(exc) or not embedder_batch_cardinality_mismatch(exc):
+                # Transient faults keep their retry, and everything else
+                # (credentials, permissions, bad model, malformed payload)
+                # would fail exactly the same way one input at a time. Falling
+                # back would only turn one clear failure into one failed
+                # request per chunk.
                 raise
             self._disable_batching(f"multi-input request failed: {describe_embedder_error(exc)}")
             return self._embed_each_into_cache(pending)
 
         if len(embeddings) != len(pending):
+            # The partial result is discarded on purpose: with fewer vectors
+            # than inputs there is no trustworthy way to tell which input each
+            # one belongs to, and guessing by position would silently attach a
+            # vector to the wrong chunk. Vectors cached by earlier successful
+            # batches are untouched.
             self._disable_batching(
                 f"multi-input request returned {len(embeddings)} vectors for {len(pending)} inputs",
             )

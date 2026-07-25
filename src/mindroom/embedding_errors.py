@@ -107,6 +107,21 @@ def embedder_failure_is_transient(exc: BaseException) -> bool:
     return isinstance(exc, APIStatusError) and _status_code_is_transient(exc.status_code)
 
 
+_CARDINALITY_MISMATCH_PATTERN = re.compile(r"embedder returned \d+ embeddings for \d+ inputs")
+
+
+def embedder_batch_cardinality_mismatch(exc: BaseException) -> bool:
+    """Return whether a multi-input response came back with the wrong vector count.
+
+    This is the one failure that proves a backend does not really implement
+    batch input: it accepted the array and answered with a different number of
+    vectors. Credential rejections, bad models and ordinary request errors are
+    deliberately excluded, because they fail identically one input at a time
+    and retrying them per item would only multiply the damage.
+    """
+    return isinstance(exc, EmbedderRequestError) and _CARDINALITY_MISMATCH_PATTERN.fullmatch(str(exc)) is not None
+
+
 def embedder_retry_after_seconds(exc: BaseException) -> float | None:
     """Return the provider's ``Retry-After`` hint in seconds, when it gave one."""
     if isinstance(exc, EmbedderRequestError):
