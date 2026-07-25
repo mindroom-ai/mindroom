@@ -18,6 +18,9 @@ from mindroom.constants import ORIGINAL_SENDER_KEY, SOURCE_KIND_KEY, VISIBLE_ROU
 from mindroom.dispatch_handoff import PendingDispatchMetadata, PreparedTextEvent
 from mindroom.dispatch_source import (
     ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+    EXTERNAL_TRIGGER_SOURCE_KIND,
+    HOOK_SOURCE_KIND,
+    SCHEDULED_SOURCE_KIND,
     TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
     VOICE_SOURCE_KIND,
 )
@@ -470,11 +473,21 @@ async def test_duplicate_command_claims_before_conversation_resolution(tmp_path:
 
 
 @pytest.mark.asyncio
-async def test_duplicate_unresolvable_command_emits_one_terminal_notice(tmp_path: Path) -> None:
-    """Target-resolution failure remains one handled command under replay."""
+@pytest.mark.parametrize("source_kind", [None, SCHEDULED_SOURCE_KIND], ids=["plain", "spoofed-scheduled"])
+async def test_duplicate_unresolvable_command_emits_one_terminal_notice(
+    tmp_path: Path,
+    source_kind: str | None,
+) -> None:
+    """Target-resolution failure remains one handled command despite untrusted source metadata."""
     bot = _make_bot(tmp_path, agent_name="router")
     room = _make_room()
-    command_event = _text_event(event_id="$cmd", body="!help", server_timestamp=1000, thread_id="$pending_root")
+    command_event = _text_event(
+        event_id="$cmd",
+        body="!help",
+        server_timestamp=1000,
+        thread_id="$pending_root",
+        source_kind=source_kind,
+    )
     resolution_started = asyncio.Event()
     release_resolution = asyncio.Event()
 
@@ -506,6 +519,104 @@ async def test_duplicate_unresolvable_command_emits_one_terminal_notice(tmp_path
     send_text_mock.assert_awaited_once()
     assert bot._turn_store.is_handled("$cmd")
     assert not bot._turn_store.is_claimed_in_flight("$cmd")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "source_kind",
+    [
+        SCHEDULED_SOURCE_KIND,
+        HOOK_SOURCE_KIND,
+        EXTERNAL_TRIGGER_SOURCE_KIND,
+        TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+    ],
+)
+async def test_command_shaped_bypass_source_resolution_failure_is_not_command_terminal(
+    tmp_path: Path,
+    source_kind: str,
+) -> None:
+    """Synthetic command-shaped text keeps normal resolution-failure semantics."""
+    bot = _make_bot(tmp_path, agent_name="router")
+    room = _make_room()
+    event = _text_event(
+        event_id="$synthetic",
+        body="!help",
+        sender=bot.matrix_id.full_id,
+        server_timestamp=1000,
+        thread_id="$pending_root",
+        source_kind=source_kind,
+        original_sender="@user:localhost",
+    )
+    send_text_mock = AsyncMock(return_value="$notice")
+
+    with (
+        patch.object(
+            bot._conversation_resolver,
+            "coalescing_thread_id",
+            new=AsyncMock(side_effect=ThreadMembershipLookupError("unproven root")),
+        ),
+        patch.object(bot._delivery_gateway, "send_text", new=send_text_mock),
+        pytest.raises(ThreadMembershipLookupError, match="unproven root"),
+    ):
+        await bot._turn_controller.handle_text_event(room, event)
+
+    send_text_mock.assert_not_awaited()
+    assert not bot._turn_store.is_handled("$synthetic")
+    assert not bot._turn_store.is_claimed_in_flight("$synthetic")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "source_kind",
+    [
+        SCHEDULED_SOURCE_KIND,
+        HOOK_SOURCE_KIND,
+        EXTERNAL_TRIGGER_SOURCE_KIND,
+        TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+    ],
+)
+async def test_duplicate_command_shaped_bypass_sources_both_reach_resolution_failure(
+    tmp_path: Path,
+    source_kind: str,
+) -> None:
+    """Replay dedup cannot consume synthetic command-shaped text as command control."""
+    bot = _make_bot(tmp_path, agent_name="router")
+    room = _make_room()
+    event = _text_event(
+        event_id="$synthetic",
+        body="!help",
+        sender=bot.matrix_id.full_id,
+        server_timestamp=1000,
+        thread_id="$pending_root",
+        source_kind=source_kind,
+        original_sender="@user:localhost",
+    )
+    release_resolution = asyncio.Event()
+
+    async def fail_thread_resolution(
+        _room: nio.MatrixRoom,
+        _event: nio.RoomMessageText,
+    ) -> None:
+        await release_resolution.wait()
+        message = "unproven root"
+        raise ThreadMembershipLookupError(message)
+
+    resolve_mock = AsyncMock(side_effect=fail_thread_resolution)
+    send_text_mock = AsyncMock(return_value="$notice")
+    with (
+        patch.object(bot._conversation_resolver, "coalescing_thread_id", new=resolve_mock),
+        patch.object(bot._delivery_gateway, "send_text", new=send_text_mock),
+    ):
+        first = asyncio.create_task(bot._turn_controller.handle_text_event(room, event))
+        second = asyncio.create_task(bot._turn_controller.handle_text_event(room, event))
+        await _wait_for(lambda: resolve_mock.await_count == 2)
+        release_resolution.set()
+        outcomes = await asyncio.gather(first, second, return_exceptions=True)
+
+    assert all(isinstance(outcome, ThreadMembershipLookupError) for outcome in outcomes)
+    send_text_mock.assert_not_awaited()
+    assert not bot._turn_store.is_handled("$synthetic")
+    assert not bot._turn_store.is_claimed_in_flight("$synthetic")
 
 
 @pytest.mark.asyncio

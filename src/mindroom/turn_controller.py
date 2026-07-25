@@ -401,7 +401,11 @@ class TurnController:
     ) -> tuple[bool, _TurnClaimLease | None]:
         """Claim a raw command source before conversation resolution can suspend."""
         content = event.source.get("content") if isinstance(event.source, dict) else None
-        source_kind = self.deps.ingress.event_source_kind(event, content) if isinstance(content, dict) else None
+        source_kind = (
+            self.deps.ingress.event_source_kind(event, content)
+            if isinstance(content, dict) and self.deps.ingress.sender_is_trusted_for_ingress_metadata(event.sender)
+            else None
+        )
         command = (
             None
             if is_edit
@@ -874,9 +878,11 @@ class TurnController:
         self,
         room: nio.MatrixRoom,
         event: nio.RoomMessageText,
+        *,
+        is_command: bool,
     ) -> bool:
         """Fail one command visibly when its conversation cannot be resolved yet."""
-        if command_parser.parse(event.body.strip()) is None:
+        if not is_command:
             return False
         self.deps.logger.warning(
             "command_target_not_ready",
@@ -2134,6 +2140,7 @@ class TurnController:
                 event_info=event_info,
                 dispatch_timing=dispatch_timing,
                 reservation_owner=reservation_owner,
+                is_command=is_command,
                 command_claim=command_claim,
             )
         except IngressAdmissionClosedError:
@@ -2156,6 +2163,7 @@ class TurnController:
         event_info: EventInfo,
         dispatch_timing: DispatchPipelineTiming | None,
         reservation_owner: _PromptIngressReservationOwner,
+        is_command: bool,
         command_claim: _TurnClaimLease | None,
     ) -> None:
         """Resolve, normalize, and admit one live (non-edit) text event."""
@@ -2163,7 +2171,7 @@ class TurnController:
         try:
             ingress_thread_id = await self.deps.resolver.coalescing_thread_id(room, event)
         except ThreadMembershipLookupError:
-            if await self._notify_command_target_not_ready(room, event):
+            if await self._notify_command_target_not_ready(room, event, is_command=is_command):
                 return
             raise
         if await self._should_skip_router_before_shared_ingress_work(
