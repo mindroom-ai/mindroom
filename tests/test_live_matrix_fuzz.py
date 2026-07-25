@@ -4264,6 +4264,27 @@ def test_stack_close_groups_ordinary_cleanup_failures() -> None:
     assert "release host lease: lease failed" in str(raised.value.exceptions[1])
 
 
+def test_owned_resources_removed_requires_every_resource_and_lease_gone(tmp_path: Path) -> None:
+    """Cleanup evidence should report resource state independently of snapshot errors."""
+    stack = object.__new__(ManagedTuwunelStack)
+    disposable = tmp_path / "disposable"
+    disposable.mkdir()
+    stack.temp_dir = SimpleNamespace(name=str(disposable))
+    stack._mindroom_process = None
+    stack._log_handle = None
+    stack._model_server = None
+    stack._model_thread = None
+    stack.stress_postgres = SimpleNamespace(started=False)
+    stack._created = False
+    stack._host_lease = None
+
+    assert stack.owned_resources_removed() is False
+    disposable.rmdir()
+    assert stack.owned_resources_removed() is True
+    stack._created = True
+    assert stack.owned_resources_removed() is False
+
+
 def test_host_lease_excludes_second_live_stack(tmp_path: Path) -> None:
     """Separate worktrees cannot allocate colliding Matrix ports concurrently."""
     first = ManagedTuwunelStack(state_root=tmp_path / "state")

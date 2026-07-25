@@ -891,7 +891,10 @@ class ArtifactSanitizer:
         if isinstance(value, str):
             return self.text(value)
         if isinstance(value, Mapping):
-            return {str(item_key): self.value(item_value, key=str(item_key)) for item_key, item_value in value.items()}
+            return {
+                self.text(str(item_key)): self.value(item_value, key=str(item_key))
+                for item_key, item_value in value.items()
+            }
         if isinstance(value, list | tuple):
             return [self.value(item) for item in value]
         return value
@@ -1035,6 +1038,11 @@ class ManagedStressPostgres:
     image: str = "postgres:15-alpine"
     host_port: int | None = None
     _started: bool = False
+
+    @property
+    def started(self) -> bool:
+        """Return whether the owned PostgreSQL container should still exist."""
+        return self._started
 
     @property
     def database_url(self) -> str:

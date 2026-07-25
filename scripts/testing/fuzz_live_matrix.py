@@ -1920,6 +1920,20 @@ class ManagedTuwunelStack:
         _attempt_cleanup(errors, "release host lease", self._release_host_lease)
         _raise_cleanup_failures(errors, message="live Matrix fuzz cleanup failed")
 
+    def owned_resources_removed(self) -> bool:
+        """Return whether every disposable resource and host lease is gone."""
+        postgres_removed = self.stress_postgres is None or not self.stress_postgres.started
+        return (
+            self._mindroom_process is None
+            and self._log_handle is None
+            and self._model_server is None
+            and self._model_thread is None
+            and postgres_removed
+            and not self._created
+            and not Path(self.temp_dir.name).exists()
+            and self._host_lease is None
+        )
+
     def log_tail(self, lines: int = 80) -> str:
         """Return recent MindRoom output when a live invariant fails."""
         if not self.log_path.exists():
@@ -6778,16 +6792,14 @@ def _close_failed_stress_run(
     failure: BaseException,
 ) -> None:
     """Attempt cleanup and record whether disposable resources were removed."""
-    resources_removed = True
     try:
         stack.close()
     except BaseException as cleanup_error:
-        resources_removed = False
         failure.add_note(f"stress cleanup failure: {cleanup_error}")
     with suppress(BaseException):
         bundle.write_json(
             "cleanup-manifest.json",
-            {"status": "FAILED", "resources_removed": resources_removed},
+            {"status": "FAILED", "resources_removed": stack.owned_resources_removed()},
         )
 
 
@@ -6883,7 +6895,7 @@ def _run_stress_main(args: argparse.Namespace) -> None:
         with suppress(BaseException):
             bundle.write_json(
                 "cleanup-manifest.json",
-                {"status": "FAILED", "resources_removed": False},
+                {"status": "FAILED", "resources_removed": stack.owned_resources_removed()},
             )
         raise
     bundle.write_json(

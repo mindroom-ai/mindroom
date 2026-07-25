@@ -482,7 +482,11 @@ def test_artifact_bundle_retains_success_and_failure_evidence() -> None:
 
         summary_path = bundle.write_json(
             "summary.json",
-            {"room_id": "!room:synthetic.invalid", "result": "PASS"},
+            {
+                "room_id": "!room:synthetic.invalid",
+                "result": "PASS",
+                "repair_fetches_by_thread": {"$event:synthetic.invalid": 1},
+            },
         )
         failure_path = bundle.write_text(
             "failure.txt",
@@ -493,6 +497,7 @@ def test_artifact_bundle_retains_success_and_failure_evidence() -> None:
         assert failure_path.exists()
         assert "!room:" not in summary_path.read_text(encoding="utf-8")
         assert "$event" not in failure_path.read_text(encoding="utf-8")
+        assert "$event" not in summary_path.read_text(encoding="utf-8")
     finally:
         shutil.rmtree(run_root, ignore_errors=True)
 
