@@ -914,6 +914,30 @@ class TestSendMessageResult:
         assert mock_error.call_args.kwargs["exception_type"] == "OlmUnverifiedDeviceError"
 
     @pytest.mark.asyncio
+    async def test_sync_recovery_retry_signal_is_preserved(self) -> None:
+        """Limited-sync recovery must remain distinguishable from terminal delivery failure."""
+        client = _mock_client()
+        error = nio.SendRetryError("Room timeline recovery is still pending.")
+        client.room_send.side_effect = error
+
+        with (
+            patch(
+                "mindroom.matrix.client_delivery.prepare_large_message",
+                new=AsyncMock(side_effect=lambda *_: {"body": "hello", "msgtype": "m.text"}),
+            ),
+            patch("mindroom.matrix.client_delivery.logger.error") as mock_error,
+            pytest.raises(nio.SendRetryError) as raised,
+        ):
+            await send_message_result(
+                client,
+                "!room:localhost",
+                {"body": "hello", "msgtype": "m.text"},
+            )
+
+        assert raised.value is error
+        mock_error.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_unexpected_room_send_exception_logs_generic_sanitized_message(self) -> None:
         """Unexpected local delivery exceptions should log type plus a safe generic message."""
         client = _mock_client()

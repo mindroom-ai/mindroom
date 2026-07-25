@@ -112,6 +112,8 @@ async def _send_prepared_room_message(
         )
     except asyncio.CancelledError:
         raise
+    except nio.SendRetryError:
+        raise
     except Exception as error:
         _log_matrix_delivery_exception(
             error,
