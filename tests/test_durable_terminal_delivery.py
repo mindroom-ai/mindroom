@@ -30,8 +30,10 @@ from mindroom.final_delivery import StreamTransportOutcome
 from mindroom.hooks import MessageEnvelope
 from mindroom.matrix.stale_stream_cleanup import StaleStreamCleanupActor, recover_stale_streaming_messages
 from mindroom.message_target import MessageTarget
+from mindroom.redacted_turn_cleanup import RedactedTurnCleanup, RedactedTurnCleanupDeps
 from mindroom.terminal_delivery import TerminalDeliveryStore, _reset_terminal_delivery_store_runtime
 from tests.conftest import bind_runtime_paths, make_matrix_client_mock, message_origin, test_runtime_paths
+from tests.event_cache_test_support import raw_nio_redaction
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -530,6 +532,98 @@ class TestStaleStreamCleanupInteraction:
         assert result.cleaned_count == 0
         assert result.resumed_count == 0
         client.room_send.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_cleanup_does_not_auto_resume_a_durably_owned_stream(self, tmp_path: Path) -> None:
+        """A pending committed final never triggers a duplicate regenerated turn."""
+        config, runtime_paths = _config(tmp_path)
+        config.defaults.auto_resume_after_restart = True
+        bot_user_id = "@helper:localhost"
+        client = make_matrix_client_mock(user_id=bot_user_id)
+        client.joined_rooms = AsyncMock(return_value=nio.JoinedRoomsResponse(rooms=[ROOM_ID]))
+        interrupted_event = nio.RoomMessageText.from_dict(
+            {
+                "event_id": PLACEHOLDER_EVENT_ID,
+                "sender": bot_user_id,
+                "origin_server_ts": 1,
+                "type": "m.room.message",
+                "room_id": ROOM_ID,
+                "content": {"msgtype": "m.text", "body": "partial strea", STREAM_STATUS_KEY: "streaming"},
+            },
+        )
+        client.room_messages = AsyncMock(
+            return_value=nio.RoomMessagesResponse(room_id=ROOM_ID, chunk=[interrupted_event], start="", end=None),
+        )
+        resume_client = make_matrix_client_mock(user_id=bot_user_id)
+
+        result = await recover_stale_streaming_messages(
+            {
+                bot_user_id: StaleStreamCleanupActor(
+                    client=client,
+                    conversation_cache=None,
+                    pending_terminal_delivery_event_ids=lambda _room_id: frozenset({PLACEHOLDER_EVENT_ID}),
+                ),
+            },
+            resume_client=resume_client,
+            resume_conversation_cache=None,
+            config=config,
+            runtime_paths=runtime_paths,
+            startup_cutoff_ms=None,
+            scanned_room_ids=set(),
+        )
+
+        assert result.resumed_count == 0
+        resume_client.room_send.assert_not_awaited()
+
+
+class TestRedactionCancellation:
+    """Redacting a source or response stops the durable retry that owns it."""
+
+    @pytest.mark.asyncio
+    async def test_source_redaction_cancels_pending_delivery(self, tmp_path: Path) -> None:
+        """A redacted question never resurrects its undelivered answer."""
+        target = MessageTarget.resolve(ROOM_ID, None, SOURCE_EVENT_ID)
+        gateway, store = _gateway(tmp_path=tmp_path, client=make_matrix_client_mock(), target=target)
+        await gateway.finalize_streamed_response(
+            FinalizeStreamedResponseRequest(
+                target=target,
+                stream_transport_outcome=_stream_outcome(),
+                initial_delivery_kind="sent",
+                identity=_identity(target),
+                tool_trace=None,
+                extra_content=None,
+            ),
+        )
+        assert len(store.unsettled_items()) == 1
+        conversation_cache = MagicMock()
+        conversation_cache.apply_redaction = AsyncMock()
+        cleanup = RedactedTurnCleanup(
+            RedactedTurnCleanupDeps(
+                conversation_cache=conversation_cache,
+                turn_store=MagicMock(),
+                terminal_delivery_store=store,
+            ),
+        )
+        room = MagicMock()
+        room.room_id = ROOM_ID
+
+        await cleanup.handle(
+            room,
+            raw_nio_redaction(
+                {
+                    "type": "m.room.redaction",
+                    "event_id": "$redaction",
+                    "sender": "@user:localhost",
+                    "origin_server_ts": 1,
+                },
+                redacts=SOURCE_EVENT_ID,
+            ),
+        )
+
+        assert store.unsettled_items() == ()
+        settled = store.items()[0]
+        assert settled.state == "superseded"
+        assert settled.settled_reason == "source_event_redacted"
 
 
 class TestObservability:

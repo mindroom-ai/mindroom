@@ -1566,15 +1566,21 @@ class AgentBot:
             self.logger.info("agent_setup_complete", user_id=self.agent_user.user_id)
             await self._emit_agent_lifecycle_event(EVENT_AGENT_STARTED)
         except Exception:
-            client = self.client
-            self.running = False
-            self.client = None
-            if client is not None:
-                try:
-                    await client.close()
-                except Exception:
-                    self.logger.warning("Failed to close Matrix client after startup failure", exc_info=True)
+            await self._abort_startup()
             raise
+
+    async def _abort_startup(self) -> None:
+        """Release everything one failed startup attempt may already have claimed."""
+        client = self.client
+        self.running = False
+        self.client = None
+        await self._terminal_delivery_worker.stop()
+        if client is None:
+            return
+        try:
+            await client.close()
+        except Exception:
+            self.logger.warning("Failed to close Matrix client after startup failure", exc_info=True)
 
     async def try_start(self) -> bool:
         """Try to start the agent bot with smart retry logic.

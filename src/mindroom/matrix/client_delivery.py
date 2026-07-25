@@ -255,13 +255,16 @@ async def _send_prepared_room_message(
                 response_data=(room_id,),
             )
         # Bots have no interactive device-verification flow, so encrypted sends
-        # always deliver to unverified devices.
+        # always deliver to unverified devices. Only a caller that needs an
+        # idempotent repeat pins the transaction ID; ordinary sends keep nio's
+        # per-call identifier so retries of distinct sends stay distinct.
+        deterministic_transaction = {"tx_id": transaction_id} if transaction_id is not None else {}
         return await client.room_send(
             room_id=room_id,
             message_type=message_type,
             content=content_sent,
-            tx_id=transaction_id,
             ignore_unverified_devices=True,
+            **deterministic_transaction,
         )
 
     try:
