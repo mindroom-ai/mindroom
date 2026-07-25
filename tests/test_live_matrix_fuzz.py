@@ -3862,6 +3862,7 @@ def test_start_mindroom_uses_editable_overlay_and_persists_each_pid(
             "--with-editable",
             "/persistent/mindroom-nio",
         ]
+        assert commands[0][-2:] == ["--log-level", "INFO"]
         assert manifests == [
             {"state": "starting_mindroom", "mindroom_pid": 4242},
             {"state": "ready", "mindroom_pid": 4242},

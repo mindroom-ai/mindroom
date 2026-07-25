@@ -1703,7 +1703,9 @@ class ManagedTuwunelStack:
                 {
                     "MINDROOM_EVENT_CACHE_DATABASE_URL": self.stress_postgres.database_url,
                     "MINDROOM_LOG_FORMAT": "json",
-                    "MINDROOM_LOG_LEVEL": "DEBUG",
+                    "MINDROOM_LOGGER_LEVELS": (
+                        "mindroom.timing:DEBUG,mindroom.matrix.cache.outbound_thread_reservations:DEBUG"
+                    ),
                     "MINDROOM_TIMING": "1",
                 },
             )
@@ -2092,7 +2094,7 @@ class ManagedTuwunelStack:
                 "--api-port",
                 str(self.api_port),
                 "--log-level",
-                "DEBUG" if self.stress_config is not None else "INFO",
+                "INFO",
             ],
             cwd=mindroom_root,
             env=self._env,
