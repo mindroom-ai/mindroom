@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 from pydantic import ValidationError
+from structlog.testing import capture_logs
 
 from mindroom.attachments import _attachment_id_for_event, load_attachment, register_local_attachment
 from mindroom.bot import AgentBot
@@ -4244,15 +4245,28 @@ async def test_backlog_replay_keeps_mixed_requester_coalesced_turn(tmp_path: Pat
         },
     )
 
-    action_mock = AsyncMock(return_value=_DispatchPlan(kind="ignore"))
+    plan_calls: list[PreparedDispatch] = []
+
+    async def prepare_dispatch(*_args: object, **_kwargs: object) -> object:
+        return prepared_dispatch_result(dispatch)
+
+    async def plan_turn(
+        _room: object,
+        _event: object,
+        prepared_dispatch: PreparedDispatch,
+        **_kwargs: object,
+    ) -> _DispatchPlan:
+        plan_calls.append(prepared_dispatch)
+        return _DispatchPlan(kind="ignore")
+
     with (
+        capture_logs() as captured_logs,
         patch.object(
             bot._turn_controller,
             "_prepare_dispatch",
-            new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
+            new=prepare_dispatch,
         ),
-        patch.object(bot._turn_policy, "plan_turn", new=action_mock),
-        patch.object(bot._turn_controller.deps.logger, "warning") as warning_mock,
+        patch.object(bot._turn_policy, "plan_turn", new=plan_turn),
     ):
         await bot._turn_controller._dispatch_text_message(
             room,
@@ -4261,8 +4275,11 @@ async def test_backlog_replay_keeps_mixed_requester_coalesced_turn(tmp_path: Pat
             handled_turn=handled_turn,
         )
 
-    action_mock.assert_awaited_once()
-    warning_mock.assert_not_called()
+    assert plan_calls == [dispatch]
+    assert not any(
+        log.get("event") == "Thread replay guard degraded; proceeding without negative newer-message proof"
+        for log in captured_logs
+    )
     bot.event_cache.get_recent_room_events.assert_not_awaited()
     assert not bot._turn_store.is_handled("$alice")
     assert not bot._turn_store.is_handled("$bob")
