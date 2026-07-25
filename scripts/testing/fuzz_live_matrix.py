@@ -2015,8 +2015,15 @@ class ManagedTuwunelStack:
             process.wait(timeout=10)
             self._mindroom_process = None
             return
-        with suppress(ProcessLookupError):
+        try:
             os.killpg(process.pid, signal.SIGINT)
+        except ProcessLookupError as exc:
+            try:
+                return_code = process.wait(timeout=10)
+            finally:
+                self._mindroom_process = None
+            msg = f"MindRoom exited before managed SIGINT delivery with status {return_code}"
+            raise RuntimeError(msg) from exc
         try:
             return_code = process.wait(timeout=20)
         except subprocess.TimeoutExpired as exc:

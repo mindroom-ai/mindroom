@@ -282,6 +282,39 @@ def test_stop_mindroom_accepts_sigint_exit_status(
     assert stack._mindroom_process is None
 
 
+def test_stop_mindroom_rejects_exit_before_sigint_delivery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An expected-looking exit cannot pass when managed SIGINT never landed."""
+    wait_calls: list[float] = []
+
+    class FakeProcess:
+        pid = 4242
+
+        @staticmethod
+        def poll() -> None:
+            return None
+
+        @staticmethod
+        def wait(*, timeout: float) -> int:
+            wait_calls.append(timeout)
+            return 130
+
+    stack = object.__new__(ManagedTuwunelStack)
+    stack._mindroom_process = FakeProcess()
+
+    def missing_group(_pid: int, _sig: signal.Signals) -> None:
+        raise ProcessLookupError
+
+    monkeypatch.setattr(live_fuzz.os, "killpg", missing_group)
+
+    with pytest.raises(RuntimeError, match="exited before managed SIGINT delivery with status 130"):
+        stack._stop_mindroom()
+
+    assert wait_calls == [10]
+    assert stack._mindroom_process is None
+
+
 def test_final_runtime_health_rejects_preexited_process(tmp_path: Path) -> None:
     """Canonical state cannot turn an already-dead runtime into a PASS."""
 
