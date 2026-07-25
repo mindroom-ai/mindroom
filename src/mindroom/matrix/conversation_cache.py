@@ -814,6 +814,8 @@ class MatrixConversationCache(ConversationCacheProtocol):
                 room_id=room_id,
                 thread_count=len(thread_ids),
                 error=str(exc),
+                error_type=type(exc).__name__,
+                exc_info=True,
             )
             untrusted_thread_ids = None
         if untrusted_thread_ids is None or is_shutting_down() or not self.runtime.event_cache.durable_writes_available:

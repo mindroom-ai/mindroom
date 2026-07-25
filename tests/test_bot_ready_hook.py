@@ -1076,6 +1076,8 @@ async def test_startup_thread_prewarm_cache_probe_failure_is_fail_open(tmp_path:
         room_id="!room:localhost",
         thread_count=1,
         error="database unavailable",
+        error_type="RuntimeError",
+        exc_info=True,
     )
 
 
