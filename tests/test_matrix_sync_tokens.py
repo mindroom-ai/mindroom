@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import aiosqlite
 import nio
 import pytest
+from structlog.testing import capture_logs
 
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.bot import AgentBot, _create_task_wrapper
@@ -29,7 +30,13 @@ from mindroom.matrix.sync_certification import SyncCheckpoint, SyncTrustState
 from mindroom.matrix.sync_tokens import clear_sync_token, load_sync_checkpoint, save_sync_token
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.response_admission import ResponseAdmissionGate
-from mindroom.runtime_shutdown import GENERIC_SHUTDOWN, SYNC_RESTART_SHUTDOWN
+from mindroom.runtime_shutdown import (
+    ENTITY_REMOVED_SHUTDOWN,
+    GENERIC_SHUTDOWN,
+    ORDERLY_SHUTDOWN,
+    SYNC_RESTART_SHUTDOWN,
+    RuntimeShutdownIntent,
+)
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -984,6 +991,36 @@ async def test_prepare_for_sync_shutdown_flushes_latest_sync_token(tmp_path: Pat
     checkpoint = load_sync_checkpoint(tmp_path, bot.agent_name)
     assert checkpoint is not None
     assert checkpoint.token == "s_shutdown"  # noqa: S105
+
+
+@pytest.mark.parametrize(
+    ("shutdown_intent", "reason_category"),
+    [
+        (GENERIC_SHUTDOWN, "agent_shutdown"),
+        (ENTITY_REMOVED_SHUTDOWN, "agent_shutdown"),
+        (SYNC_RESTART_SHUTDOWN, "config_reload"),
+        (ORDERLY_SHUTDOWN, "process_shutdown"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_response_runtime_shutdown_log_names_its_agent_and_reason(
+    tmp_path: Path,
+    shutdown_intent: RuntimeShutdownIntent,
+    reason_category: str,
+) -> None:
+    """Full shutdown logs its agent, action, and response count, but no conversation."""
+    bot = _agent_bot(tmp_path)
+
+    with capture_logs() as logs:
+        await bot.prepare_for_sync_shutdown(shutdown_intent=shutdown_intent)
+
+    shutdown_logs = [entry for entry in logs if entry["event"] == "matrix_agent_response_runtime_shutdown"]
+    assert len(shutdown_logs) == 1
+    assert shutdown_logs[0]["agent"] == bot.agent_name
+    assert shutdown_logs[0]["active_response_count"] == 0
+    assert shutdown_logs[0]["restart_reason_category"] == reason_category
+    assert shutdown_logs[0]["resulting_action"] == "drain_then_cancel_response_runtime"
+    assert not {"room_id", "event_id", "user_id"} & shutdown_logs[0].keys()
 
 
 @pytest.mark.asyncio
