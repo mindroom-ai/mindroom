@@ -45,6 +45,7 @@ import nio
 import yaml
 
 import mindroom
+from mindroom.file_locks import advisory_file_lock
 from mindroom.matrix.sync_tokens import load_sync_checkpoint
 
 if TYPE_CHECKING:
@@ -53,6 +54,7 @@ if TYPE_CHECKING:
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 INSTANCE_REGISTRY = PROJECT_ROOT / "local" / "instances" / "deploy" / "instances.json"
+LIVE_FUZZ_LOCK_PATH = Path.home() / ".cache" / "mindroom" / "live-matrix-fuzz.lock"
 MODEL_ID = "mindroom-live-fuzz"
 AGENT_NAME = "general"
 ROOM_KEY = "lobby"
@@ -1412,24 +1414,7 @@ class ManagedTuwunelStack:
 
     def start(self) -> None:
         """Create every live dependency and wait for the managed room."""
-        active_instances = _active_fuzz_instances()
-        self.preexisting_fuzz_servers = len(active_instances)
-        if active_instances:
-            msg = f"live fuzz server already active: {', '.join(active_instances)}"
-            raise RuntimeError(msg)
-        _run_command("just", "local-instances-create", self.instance_name, "tuwunel")
-        self._created = True
-        registry = _read_instance_registry()
-        instance = registry["instances"][self.instance_name]
-        matrix_port = int(instance["matrix_port"])
-        domain = str(instance["domain"])
-        self.homeserver = f"http://127.0.0.1:{matrix_port}"
-        self.server_name = f"m-{domain}"
-        self.agent_id = f"@mindroom_{AGENT_NAME}_{self.namespace}:{self.server_name}"
-        self.router_id = f"@mindroom_router_{self.namespace}:{self.server_name}"
-
-        _run_command("just", "local-instances-start-matrix", self.instance_name)
-        self._wait_for_url(f"{self.homeserver}/_matrix/client/versions", timeout=30)
+        self._start_homeserver()
         model_port = self._start_model_server()
         self._write_config(model_port)
         self._env = {
@@ -1446,6 +1431,28 @@ class ManagedTuwunelStack:
         }
         self._log_handle = self.log_path.open("a", encoding="utf-8")
         self._start_mindroom()
+
+    def _start_homeserver(self) -> None:
+        """Reserve and start the sole live-fuzz homeserver under a process-wide lock."""
+        with advisory_file_lock(LIVE_FUZZ_LOCK_PATH):
+            active_instances = _active_fuzz_instances()
+            self.preexisting_fuzz_servers = len(active_instances)
+            if active_instances:
+                msg = f"live fuzz server already active: {', '.join(active_instances)}"
+                raise RuntimeError(msg)
+            _run_command("just", "local-instances-create", self.instance_name, "tuwunel")
+            self._created = True
+            registry = _read_instance_registry()
+            instance = registry["instances"][self.instance_name]
+            matrix_port = int(instance["matrix_port"])
+            domain = str(instance["domain"])
+            self.homeserver = f"http://127.0.0.1:{matrix_port}"
+            self.server_name = f"m-{domain}"
+            self.agent_id = f"@mindroom_{AGENT_NAME}_{self.namespace}:{self.server_name}"
+            self.router_id = f"@mindroom_router_{self.namespace}:{self.server_name}"
+
+            _run_command("just", "local-instances-start-matrix", self.instance_name)
+            self._wait_for_url(f"{self.homeserver}/_matrix/client/versions", timeout=30)
 
     def restart_mindroom(self) -> None:
         """Restart only MindRoom while preserving its cache and Matrix account."""

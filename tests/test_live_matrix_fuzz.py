@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -409,6 +410,85 @@ def test_instance_registry_read_fails_closed_when_malformed(
 
     with pytest.raises(RuntimeError, match="refusing to start"):
         fuzz_live_matrix._active_fuzz_instances()
+
+
+def test_live_stack_serializes_probe_reservation_and_readiness(  # noqa: PLR0915
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A second starter must observe the first stack only after it becomes live."""
+    first = object.__new__(fuzz_live_matrix.ManagedTuwunelStack)
+    second = object.__new__(fuzz_live_matrix.ManagedTuwunelStack)
+    for stack, name in ((first, "fuzz-first"), (second, "fuzz-second")):
+        stack.instance_name = name
+        stack.namespace = name
+        stack._created = False
+
+    first_waiting = threading.Event()
+    allow_first_ready = threading.Event()
+    first_ready = threading.Event()
+    second_started = threading.Event()
+    second_finished = threading.Event()
+    errors: dict[str, BaseException] = {}
+
+    monkeypatch.setattr(fuzz_live_matrix, "LIVE_FUZZ_LOCK_PATH", tmp_path / "live-fuzz.lock")
+    monkeypatch.setattr(
+        fuzz_live_matrix,
+        "_read_instance_registry",
+        lambda: {
+            "instances": {
+                "fuzz-first": {"matrix_port": 18001, "domain": "first.example"},
+                "fuzz-second": {"matrix_port": 18002, "domain": "second.example"},
+            },
+        },
+    )
+    monkeypatch.setattr(
+        fuzz_live_matrix,
+        "_active_fuzz_instances",
+        lambda: ("fuzz-first",) if first_ready.is_set() else (),
+    )
+    commands: list[tuple[str, ...]] = []
+    monkeypatch.setattr(fuzz_live_matrix, "_run_command", lambda *command: commands.append(command))
+
+    def wait_for_url(stack: fuzz_live_matrix.ManagedTuwunelStack, _url: str, *, timeout: float) -> None:
+        assert timeout == 30
+        if stack is first:
+            first_waiting.set()
+            assert allow_first_ready.wait(timeout=2)
+            first_ready.set()
+
+    monkeypatch.setattr(fuzz_live_matrix.ManagedTuwunelStack, "_wait_for_url", wait_for_url)
+
+    def start(stack: fuzz_live_matrix.ManagedTuwunelStack, name: str) -> None:
+        try:
+            if stack is second:
+                second_started.set()
+            stack._start_homeserver()
+        except BaseException as error:
+            errors[name] = error
+        finally:
+            if stack is second:
+                second_finished.set()
+
+    first_thread = threading.Thread(target=start, args=(first, "first"))
+    second_thread = threading.Thread(target=start, args=(second, "second"))
+    first_thread.start()
+    assert first_waiting.wait(timeout=2)
+    second_thread.start()
+    assert second_started.wait(timeout=2)
+    assert not second_finished.wait(timeout=0.05)
+    allow_first_ready.set()
+    first_thread.join(timeout=2)
+    second_thread.join(timeout=2)
+
+    assert not first_thread.is_alive()
+    assert not second_thread.is_alive()
+    assert "first" not in errors
+    assert isinstance(errors.get("second"), RuntimeError)
+    assert str(errors["second"]) == "live fuzz server already active: fuzz-first"
+    assert first.preexisting_fuzz_servers == 0
+    assert second.preexisting_fuzz_servers == 1
+    assert ("just", "local-instances-create", "fuzz-second", "tuwunel") not in commands
 
 
 def test_saturation_scenario_matches_original_two_phase_workload() -> None:
@@ -2007,6 +2087,8 @@ async def test_exact_reply_oracle_rejects_duplicate_canonical_replies() -> None:
                 "sender": "@agent:example",
                 "type": "m.room.message",
                 "content": {
+                    "body": "reply",
+                    "msgtype": "m.text",
                     "m.relates_to": {
                         "rel_type": "m.thread",
                         "event_id": "$source",
@@ -2016,7 +2098,8 @@ async def test_exact_reply_oracle_rejects_duplicate_canonical_replies() -> None:
             },
         )
 
-    with pytest.raises(AssertionError, match="duplicates"):
+    assert oracle.response_ids["$source"] == {"$response-one", "$response-two"}
+    with pytest.raises(AssertionError, match=r"duplicates=.*response-one.*response-two"):
         oracle._assert_no_wrong_replies()
     await client.close()
 
@@ -2025,7 +2108,7 @@ async def test_exact_reply_oracle_rejects_duplicate_canonical_replies() -> None:
 async def test_exact_reply_oracle_rejects_unexpected_router_source() -> None:
     """Router-authored events cannot hide an otherwise unexpected agent reply."""
     client = LiveMatrixClient("http://matrix.invalid", "!room:example")
-    oracle = ExactReplyOracle(client, "@agent:example")
+    oracle = ExactReplyOracle(client, "@agent:example", "@router:example")
     try:
         oracle._ingest_event(
             {
@@ -2041,6 +2124,8 @@ async def test_exact_reply_oracle_rejects_unexpected_router_source() -> None:
                 "sender": "@agent:example",
                 "type": "m.room.message",
                 "content": {
+                    "body": "reply",
+                    "msgtype": "m.text",
                     "m.relates_to": {
                         "rel_type": "m.thread",
                         "event_id": "$root",
@@ -2049,7 +2134,8 @@ async def test_exact_reply_oracle_rejects_unexpected_router_source() -> None:
                 },
             },
         )
-        with pytest.raises(AssertionError, match="unexpected"):
+        assert oracle.response_ids["$router-source"] == {"$response"}
+        with pytest.raises(AssertionError, match=r"unexpected=.*router-source.*response"):
             oracle._assert_no_wrong_replies()
     finally:
         await client.close()
