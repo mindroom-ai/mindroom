@@ -5111,6 +5111,7 @@ class LiveMatrixStressRunner:
         self._journal_sequence = 0
         self._sent_content: dict[str, Mapping[str, Any]] = {}
         self._wave_log_ranges: list[tuple[int, int]] = []
+        self._sync_fences: list[dict[str, object]] = []
 
     def _terminal_body_complete(self, body: str) -> bool:
         if body in self._expected_stress_bodies:
@@ -5136,10 +5137,12 @@ class LiveMatrixStressRunner:
         for wave in range(self.config.waves):
             start_offset = self.stack.log_path.stat().st_size
             turns = await self._run_wave(wave, roots, reply_targets)
+            reply_targets = {turn.thread: self._one_response_event(turn.event_id) for turn in turns}
+            if wave + 1 < self.config.waves:
+                await self._wait_for_agent_sync_fence(wave, reply_targets[0])
             end_offset = self.stack.log_path.stat().st_size
             self._wave_log_ranges.append((start_offset, end_offset))
             turns_by_wave.append(turns)
-            reply_targets = {turn.thread: self._one_response_event(turn.event_id) for turn in turns}
 
         self.controller.assert_complete()
         self.stack.assert_stress_dependencies_healthy()
@@ -5181,8 +5184,49 @@ class LiveMatrixStressRunner:
             "cache_by_wave": [metrics.summary() for metrics in wave_cache_metrics],
             "runtime_log_metrics": complete_log_metrics.summary(),
             "performance_sample": asdict(performance_sample),
+            "sync_fences": self._sync_fences,
             "oracle": _sanitized_oracle_snapshot(self.oracle),
         }
+
+    async def _wait_for_agent_sync_fence(self, wave: int, target_event_id: str) -> None:
+        """Keep the next wave behind the agent's sync of all prior Matrix edits."""
+        postgres = self.stack.stress_postgres
+        if postgres is None:
+            msg = "stress sync fence requires PostgreSQL"
+            raise RuntimeError(msg)
+        started_at = time.monotonic()
+        event_id = await self.client.send_event(
+            "m.reaction",
+            f"live-stress-sync-fence-{wave}",
+            {
+                "m.relates_to": {
+                    "rel_type": "m.annotation",
+                    "event_id": target_event_id,
+                    "key": f"live-stress-sync-fence-{wave}",
+                },
+            },
+        )
+        self._record_journal(
+            {
+                "kind": "stress_sync_fence",
+                "after_wave": wave,
+                "event_id": event_id,
+            },
+        )
+        await asyncio.to_thread(
+            postgres.wait_for_cached_event,
+            base_namespace=self.stack.namespace,
+            principal_id=self.stack.agent_id,
+            room_id=self.stack.room_id,
+            event_id=event_id,
+            timeout_seconds=self.config.settlement_timeout_seconds,
+        )
+        self._sync_fences.append(
+            {
+                "after_wave": wave,
+                "cache_wait_ms": round((time.monotonic() - started_at) * 1000, 1),
+            },
+        )
 
     async def _prepare_history(self) -> tuple[dict[int, str], dict[int, str]]:
         """Create 50 roots plus one fast long history before the cold boundary."""

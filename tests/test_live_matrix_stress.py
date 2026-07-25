@@ -602,6 +602,27 @@ def test_stress_cache_clear_covers_principal_scoped_namespaces(mocker: MockerFix
     assert sql.count("DELETE FROM") == 9
 
 
+def test_stress_sync_fence_waits_for_exact_principal_event(mocker: MockerFixture) -> None:
+    completed = mocker.Mock(returncode=0, stdout="t\n", stderr="")
+    run = mocker.patch("scripts.testing.live_matrix_stress.subprocess.run", return_value=completed)
+    postgres = ManagedStressPostgres("synthetic-postgres")
+    postgres._started = True
+
+    postgres.wait_for_cached_event(
+        base_namespace="synthetic",
+        principal_id="@mindroom_general_synthetic:localhost",
+        room_id="!room:localhost",
+        event_id="$event",
+        timeout_seconds=1,
+    )
+
+    command = run.call_args.args[0]
+    assert any(field.startswith("namespace=synthetic:principal:") for field in command)
+    assert "room_id=!room:localhost" in command
+    assert "event_id=$event" in command
+    assert "WHERE namespace = :'namespace' AND room_id = :'room_id' AND event_id = :'event_id'" in command[-1]
+
+
 def test_replay_command_uses_only_repository_relative_paths() -> None:
     command = write_replay_command()
 

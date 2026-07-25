@@ -69,6 +69,7 @@ Replay preserves operation batches and inputs, but external scheduling and runti
 The stress profile uses one room, one agent, 50 independent threads, a synchronized fake-model barrier, 45-second streams, 0.5-second pulses, two waves, and a disposable PostgreSQL event cache by default.
 It disables automatic thread summaries so background summary reads cannot cross cache-wave boundaries or consume model barrier slots.
 It clears only namespace data after deterministic history preparation so the first wave proves cold scans and the second wave proves warm reuse without replacing cache-certification metadata.
+Between waves, it sends a harmless reaction and waits for that exact event in the agent's principal-scoped PostgreSQL cache so the warm wave cannot overtake pending sync of the cold wave's real Matrix edits.
 Every stress run retains sanitized success or failure evidence under `artifacts/live-matrix-stress/`.
 Use `--write-baseline scripts/testing/baselines/live-matrix-stress-50x45x2.json` for three identical clean main runs before enabling `--baseline` and `--enforce-performance`.
 The first two baseline runs retain a sample collection, and the third run writes the versioned median-of-three baseline only when dispersion is within the configured 25 percent allowance.

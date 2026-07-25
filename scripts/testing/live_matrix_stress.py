@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
@@ -1189,6 +1190,65 @@ class ManagedStressPostgres:
         if result.returncode:
             msg = f"failed to clear synthetic stress cache namespace: {result.stderr}"
             raise RuntimeError(msg)
+
+    def wait_for_cached_event(
+        self,
+        *,
+        base_namespace: str,
+        principal_id: str,
+        room_id: str,
+        event_id: str,
+        timeout_seconds: float,
+    ) -> None:
+        """Wait until one exact sync event reaches a principal-scoped cache."""
+        if not self._started:
+            msg = "cannot inspect a stress PostgreSQL namespace before startup"
+            raise RuntimeError(msg)
+        principal_digest = hashlib.sha256(principal_id.encode()).hexdigest()
+        namespace = f"{base_namespace}:principal:{principal_digest}"
+        query = (
+            "SELECT EXISTS("
+            "SELECT 1 FROM mindroom_event_cache_events "
+            "WHERE namespace = :'namespace' AND room_id = :'room_id' AND event_id = :'event_id'"
+            ");"
+        )
+        deadline = time.monotonic() + timeout_seconds
+        while True:
+            result = subprocess.run(
+                (
+                    "docker",
+                    "exec",
+                    self.name,
+                    "psql",
+                    "-U",
+                    "cache",
+                    "-d",
+                    "mindroom",
+                    "-v",
+                    "ON_ERROR_STOP=1",
+                    "-v",
+                    f"namespace={namespace}",
+                    "-v",
+                    f"room_id={room_id}",
+                    "-v",
+                    f"event_id={event_id}",
+                    "-Atc",
+                    query,
+                ),
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            if result.returncode:
+                msg = f"failed to inspect synthetic stress cache namespace: {result.stderr}"
+                raise RuntimeError(msg)
+            if result.stdout.strip() == "t":
+                return
+            if time.monotonic() >= deadline:
+                msg = "stress sync fence did not reach the agent cache before timeout"
+                raise TimeoutError(msg)
+            time.sleep(0.1)
 
     def close(self) -> None:
         """Remove only the exact owned PostgreSQL container."""
