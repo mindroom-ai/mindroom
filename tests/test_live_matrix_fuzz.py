@@ -3112,6 +3112,7 @@ def test_child_provenance_uses_loaded_overlay(
     provenance = _validated_child_provenance(
         attestation,
         overlay=NioOverlay(path=tmp_path / "overlay", revision="nio-head"),
+        expected_mindroom_revision="mindroom-head",
     )
 
     assert provenance["nio_module_path"] == str((tmp_path / "overlay" / "nio" / "__init__.py").resolve())
@@ -3153,7 +3154,58 @@ def test_child_provenance_rejects_revision_changed_after_preflight(
         _validated_child_provenance(
             attestation,
             overlay=NioOverlay(path=overlay, revision="pinned-nio-head"),
+            expected_mindroom_revision="mindroom-head",
         )
+
+
+def test_restart_rejects_mindroom_head_move_and_keeps_first_generation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A restarted child cannot replace the run's frozen MindRoom revision."""
+    project_root = tmp_path / "mindroom"
+    overlay = tmp_path / "nio"
+    mindroom_path = project_root / "src" / "mindroom" / "__init__.py"
+    nio_path = overlay / "src" / "nio" / "__init__.py"
+    current_mindroom_revision = ["frozen-head"]
+    stack = ManagedTuwunelStack(
+        state_root=tmp_path / "state",
+        nio_overlay=NioOverlay(path=overlay, revision="nio-head"),
+        mindroom_revision="frozen-head",
+    )
+    stack.attestation_path.write_text(
+        json.dumps(
+            {
+                "mindroom_module_path": str(mindroom_path),
+                "nio_module_path": str(nio_path),
+            },
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(live_fuzz, "PROJECT_ROOT", project_root)
+    monkeypatch.setattr(
+        live_fuzz,
+        "_git_root_for_path",
+        lambda path: overlay if path == nio_path else project_root,
+    )
+    monkeypatch.setattr(
+        live_fuzz,
+        "_git_state_for_file",
+        lambda path, **_kwargs: ("nio-head", False) if path == nio_path else (current_mindroom_revision[0], False),
+    )
+    monkeypatch.setattr(stack, "_tuwunel_provenance", dict)
+    try:
+        stack._wait_for_runtime_attestation()
+        first_provenance = dict(stack.runtime_provenance or {})
+        current_mindroom_revision[0] = "moved-head"
+
+        with pytest.raises(RuntimeError, match="expected frozen-head, loaded moved-head"):
+            stack._wait_for_runtime_attestation()
+
+        assert stack.runtime_provenance == first_provenance
+        assert len(first_provenance["runtime_generations"]) == 1
+    finally:
+        stack.temp_dir.cleanup()
 
 
 @pytest.mark.parametrize(
@@ -3205,6 +3257,7 @@ def test_child_provenance_rejects_dirty_stack_inputs(
         _validated_child_provenance(
             attestation,
             overlay=NioOverlay(path=tmp_path / "nio", revision="nio-head"),
+            expected_mindroom_revision="mindroom-head",
         )
 
 
@@ -3232,6 +3285,7 @@ def test_child_provenance_rejects_nested_mindroom_checkout(
         _validated_child_provenance(
             attestation,
             overlay=NioOverlay(path=tmp_path / "nio", revision="nio-head"),
+            expected_mindroom_revision="mindroom-head",
         )
 
 
@@ -3258,6 +3312,7 @@ def test_child_provenance_rejects_same_head_from_other_mindroom_checkout(
         _validated_child_provenance(
             attestation,
             overlay=NioOverlay(path=tmp_path / "nio", revision="nio-head"),
+            expected_mindroom_revision="same-head",
         )
 
 
@@ -3298,6 +3353,7 @@ def test_child_provenance_rejects_pythonpath_checkout_override(
         _validated_child_provenance(
             attestation,
             overlay=NioOverlay(path=overlay, revision="same-head"),
+            expected_mindroom_revision="same-head",
         )
 
 
@@ -3518,10 +3574,29 @@ def test_pass_receipt_survives_bundle_discard(tmp_path: Path) -> None:
         "matrix_homeserver": "http://127.0.0.1:18008",
         "matrix_server_implementation": "tuwunel",
         "matrix_server_name": "m-fuzz.localhost",
+        "mindroom_dirty": False,
+        "mindroom_expected_revision": "abc",
+        "mindroom_frozen_revision": "abc",
         "mindroom_revision": "abc",
         "nio_dirty": False,
         "nio_expected_revision": "def",
         "nio_revision": "def",
+        "runtime_generations": [
+            {
+                "mindroom_dirty": False,
+                "mindroom_expected_revision": "abc",
+                "mindroom_revision": "abc",
+                "runtime_generation": 1,
+            },
+        ],
+        "final_source_validation": {
+            "mindroom_dirty": False,
+            "mindroom_expected_revision": "abc",
+            "mindroom_revision": "abc",
+            "nio_dirty": False,
+            "nio_expected_revision": "def",
+            "nio_revision": "def",
+        },
         "tuwunel_container": "fuzz-tuwunel",
         "tuwunel_image_id": "sha256:1234",
         "tuwunel_image_reference": "ghcr.io/mindroom-ai/tuwunel:latest",
@@ -3561,7 +3636,26 @@ def test_pass_receipt_rejects_unproven_nio(
         scenario=_bundle_scenario(),
         provenance={},
     )
-    provenance = {"nio_dirty": False, **nio_fields}
+    provenance = {
+        "final_source_validation": {
+            "mindroom_dirty": False,
+            "mindroom_expected_revision": "mindroom-head",
+            "mindroom_revision": "mindroom-head",
+            "nio_dirty": False,
+            "nio_expected_revision": nio_fields.get("nio_expected_revision"),
+            "nio_revision": nio_fields.get("nio_revision"),
+        },
+        "mindroom_frozen_revision": "mindroom-head",
+        "runtime_generations": [
+            {
+                "mindroom_dirty": False,
+                "mindroom_expected_revision": "mindroom-head",
+                "mindroom_revision": "mindroom-head",
+            },
+        ],
+        "nio_dirty": False,
+        **nio_fields,
+    }
 
     with pytest.raises(RuntimeError, match=message):
         bundle.retain_pass_receipt({"status": "PASS"}, provenance)
@@ -3579,6 +3673,7 @@ def test_runtime_provenance_identifies_tuwunel_server(
         state_root=tmp_path / "state",
         provenance_sink=lambda provenance: sink.append(dict(provenance)),
         nio_overlay=NioOverlay(path=tmp_path / "nio", revision="nio-head"),
+        mindroom_revision="abc",
     )
     try:
         stack.attestation_path.write_text("{}", encoding="utf-8")
@@ -3586,7 +3681,14 @@ def test_runtime_provenance_identifies_tuwunel_server(
         stack.server_name = "m-fuzz.localhost"
         monkeypatch.setattr(
             "scripts.testing.fuzz_live_matrix._validated_child_provenance",
-            lambda *_args, **_kwargs: {"mindroom_revision": "abc"},
+            lambda *_args, **_kwargs: {
+                "mindroom_dirty": False,
+                "mindroom_expected_revision": "abc",
+                "mindroom_revision": "abc",
+                "nio_dirty": False,
+                "nio_expected_revision": "nio-head",
+                "nio_revision": "nio-head",
+            },
         )
         monkeypatch.setattr(
             "scripts.testing.fuzz_live_matrix._run_command",
@@ -3601,17 +3703,77 @@ def test_runtime_provenance_identifies_tuwunel_server(
         )
 
         stack._wait_for_runtime_attestation()
+        stack._wait_for_runtime_attestation()
 
-        assert stack.runtime_provenance == {
-            "matrix_homeserver": "http://127.0.0.1:18008",
-            "matrix_server_implementation": "tuwunel",
-            "matrix_server_name": "m-fuzz.localhost",
-            "mindroom_revision": "abc",
-            "tuwunel_container": f"{stack.instance_name}-tuwunel",
-            "tuwunel_image_id": "sha256:1234",
-            "tuwunel_image_reference": "ghcr.io/mindroom-ai/tuwunel:latest",
-        }
-        assert sink == [stack.runtime_provenance]
+        assert stack.runtime_provenance is not None
+        generations = stack.runtime_provenance["runtime_generations"]
+        assert isinstance(generations, list)
+        assert [generation["runtime_generation"] for generation in generations] == [1, 2]
+        assert all(generation["mindroom_revision"] == "abc" for generation in generations)
+        assert stack.runtime_provenance["mindroom_frozen_revision"] == "abc"
+        assert stack.runtime_provenance["runtime_generation"] == 2
+        assert len(sink) == 2
+        assert len(sink[0]["runtime_generations"]) == 1
+        assert sink[1] == stack.runtime_provenance
+    finally:
+        stack.temp_dir.cleanup()
+
+
+@pytest.mark.parametrize(
+    ("dirty_checkout", "message"),
+    [
+        ("mindroom", "clean loaded MindRoom checkout"),
+        ("nio", "clean loaded mindroom-nio overlay"),
+    ],
+)
+def test_final_source_recheck_rejects_post_attestation_mutation(
+    dirty_checkout: str,
+    message: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A late lazy import or source write invalidates earlier clean evidence."""
+    project_root = tmp_path / "mindroom"
+    overlay = tmp_path / "nio"
+    mindroom_path = project_root / "src" / "mindroom" / "__init__.py"
+    nio_path = overlay / "src" / "nio" / "__init__.py"
+    dirty = {"mindroom": False, "nio": False}
+    stack = ManagedTuwunelStack(
+        state_root=tmp_path / "state",
+        nio_overlay=NioOverlay(path=overlay, revision="nio-head"),
+        mindroom_revision="mindroom-head",
+    )
+    stack.attestation_path.write_text(
+        json.dumps(
+            {
+                "mindroom_module_path": str(mindroom_path),
+                "nio_module_path": str(nio_path),
+            },
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(live_fuzz, "PROJECT_ROOT", project_root)
+    monkeypatch.setattr(
+        live_fuzz,
+        "_git_root_for_path",
+        lambda path: overlay if path == nio_path else project_root,
+    )
+
+    def git_state(path: Path, **_kwargs: object) -> tuple[str, bool]:
+        if path == nio_path:
+            return "nio-head", dirty["nio"]
+        return "mindroom-head", dirty["mindroom"]
+
+    monkeypatch.setattr(live_fuzz, "_git_state_for_file", git_state)
+    monkeypatch.setattr(stack, "_tuwunel_provenance", dict)
+    try:
+        stack._wait_for_runtime_attestation()
+        dirty[dirty_checkout] = True
+
+        with pytest.raises(RuntimeError, match=message):
+            stack.revalidate_runtime_provenance()
+
+        assert "final_source_validation" not in (stack.runtime_provenance or {})
     finally:
         stack.temp_dir.cleanup()
 
@@ -5209,7 +5371,7 @@ def test_main_preserves_base_exception_evidence_and_closes_stack(
 
     monkeypatch.setattr(live_fuzz, "_parse_args", lambda: args)
     monkeypatch.setattr(live_fuzz, "_scenario_from_args", lambda _args: _bundle_scenario())
-    monkeypatch.setattr(live_fuzz, "_run_provenance", dict)
+    monkeypatch.setattr(live_fuzz, "_run_provenance", lambda _revision: {})
     monkeypatch.setattr(live_fuzz, "ManagedTuwunelStack", InterruptedStack)
     monkeypatch.setattr(live_fuzz, "_run_live", interrupt_run)
     monkeypatch.setattr(
@@ -5265,7 +5427,7 @@ def test_main_bad_failure_log_preserves_primary_and_closes_stack(
 
     monkeypatch.setattr(live_fuzz, "_parse_args", lambda: args)
     monkeypatch.setattr(live_fuzz, "_scenario_from_args", lambda _args: _bundle_scenario())
-    monkeypatch.setattr(live_fuzz, "_run_provenance", dict)
+    monkeypatch.setattr(live_fuzz, "_run_provenance", lambda _revision: {})
     monkeypatch.setattr(live_fuzz, "ManagedTuwunelStack", InterruptedStack)
     monkeypatch.setattr(live_fuzz, "_run_live", interrupt_run)
     monkeypatch.setattr(live_fuzz, "_persist_failure_bundle", lambda *_args, **_kwargs: None)
@@ -5316,7 +5478,7 @@ def test_main_bundle_capture_failure_preserves_primary_and_closes_stack(
 
     monkeypatch.setattr(live_fuzz, "_parse_args", lambda: args)
     monkeypatch.setattr(live_fuzz, "_scenario_from_args", lambda _args: _bundle_scenario())
-    monkeypatch.setattr(live_fuzz, "_run_provenance", dict)
+    monkeypatch.setattr(live_fuzz, "_run_provenance", lambda _revision: {})
     monkeypatch.setattr(live_fuzz, "ManagedTuwunelStack", InterruptedStack)
     monkeypatch.setattr(live_fuzz, "_run_live", fail_run)
     monkeypatch.setattr(live_fuzz, "_persist_failure_bundle", fail_capture)
@@ -5381,7 +5543,7 @@ def test_main_stop_interrupt_preserves_primary_and_closes_stack(
 
     monkeypatch.setattr(live_fuzz, "_parse_args", lambda: args)
     monkeypatch.setattr(live_fuzz, "_scenario_from_args", lambda _args: _bundle_scenario())
-    monkeypatch.setattr(live_fuzz, "_run_provenance", dict)
+    monkeypatch.setattr(live_fuzz, "_run_provenance", lambda _revision: {})
     monkeypatch.setattr(live_fuzz, "ManagedTuwunelStack", InterruptedStack)
     monkeypatch.setattr(live_fuzz, "_run_live", fail_run)
 
@@ -5392,6 +5554,94 @@ def test_main_stop_interrupt_preserves_primary_and_closes_stack(
     cleanup_files = list((tmp_path / "artifacts").glob("*/cleanup_error.txt"))
     assert len(cleanup_files) == 1
     assert "KeyboardInterrupt" in cleanup_files[0].read_text(encoding="utf-8")
+
+
+def test_main_rechecks_sources_at_teardown_and_receipt_boundaries(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """PASS revalidates after runtime work and again after teardown."""
+    args = SimpleNamespace(
+        artifact_root=tmp_path / "artifacts",
+        failure_log=None,
+        nio_overlay=NioOverlay(path=tmp_path / "nio", revision="nio-head"),
+        pending_grace=0.0,
+        reply_timeout=1.0,
+        save_trace=None,
+        seed=1,
+        settle_seconds=0.0,
+        trace=None,
+    )
+    events: list[str] = []
+
+    class PassingStack:
+        def __init__(self, **_kwargs: object) -> None:
+            self.runtime_provenance = {
+                "mindroom_frozen_revision": "mindroom-head",
+                "nio_dirty": False,
+                "nio_expected_revision": "nio-head",
+                "nio_revision": "nio-head",
+                "runtime_generations": [
+                    {
+                        "mindroom_dirty": False,
+                        "mindroom_expected_revision": "mindroom-head",
+                        "mindroom_revision": "mindroom-head",
+                    },
+                ],
+            }
+
+        def start(self) -> None:
+            events.append("start")
+
+        def diagnostic_counts(self) -> dict[str, int]:
+            events.append("diagnostics")
+            return {}
+
+        def revalidate_runtime_provenance(self) -> dict[str, object]:
+            events.append("revalidate")
+            return self.runtime_provenance
+
+        def close(self, *, before_destructive_cleanup: Callable[[], None]) -> None:
+            events.append("stop")
+            before_destructive_cleanup()
+            events.append("teardown")
+
+    async def pass_run(*_args: object, **_kwargs: object) -> dict[str, object]:
+        return {"status": "PASS"}
+
+    def retain_receipt(
+        _bundle: FailureBundle,
+        _result: dict[str, object],
+        _provenance: dict[str, object],
+    ) -> Path:
+        events.append("receipt")
+        return tmp_path / "receipt.json"
+
+    monkeypatch.setattr(live_fuzz, "_parse_args", lambda: args)
+    monkeypatch.setattr(live_fuzz, "_scenario_from_args", lambda _args: _bundle_scenario())
+    monkeypatch.setattr(live_fuzz, "_run_provenance", lambda _revision: {})
+    monkeypatch.setattr(live_fuzz, "_required_mindroom_revision", lambda: "mindroom-head")
+    monkeypatch.setattr(live_fuzz, "ManagedTuwunelStack", PassingStack)
+    monkeypatch.setattr(live_fuzz, "_run_live", pass_run)
+    monkeypatch.setattr(
+        live_fuzz,
+        "_persist_run_bundle",
+        lambda *_args, **_kwargs: events.append("snapshot"),
+    )
+    monkeypatch.setattr(FailureBundle, "retain_pass_receipt", retain_receipt)
+
+    live_fuzz.main()
+
+    assert events == [
+        "start",
+        "diagnostics",
+        "stop",
+        "snapshot",
+        "revalidate",
+        "teardown",
+        "revalidate",
+        "receipt",
+    ]
 
 
 def test_main_cleanup_failure_retains_pre_teardown_evidence(
@@ -5420,10 +5670,20 @@ def test_main_cleanup_failure_retains_pre_teardown_evidence(
     class CleanupFailingStack:
         def __init__(self, **_kwargs: object) -> None:
             self.runtime_provenance = {
+                "mindroom_dirty": False,
+                "mindroom_expected_revision": "abc",
+                "mindroom_frozen_revision": "abc",
                 "mindroom_revision": "abc",
                 "nio_dirty": False,
                 "nio_expected_revision": "nio-head",
                 "nio_revision": "nio-head",
+                "runtime_generations": [
+                    {
+                        "mindroom_dirty": False,
+                        "mindroom_expected_revision": "abc",
+                        "mindroom_revision": "abc",
+                    },
+                ],
             }
             ledger_path.parent.mkdir(parents=True)
             _write_ledger(ledger_path, {})
@@ -5441,6 +5701,17 @@ def test_main_cleanup_failure_retains_pre_teardown_evidence(
         def tuwunel_log(self) -> str:
             events.append("tuwunel_log")
             return "complete Tuwunel log\n"
+
+        def revalidate_runtime_provenance(self) -> dict[str, object]:
+            self.runtime_provenance["final_source_validation"] = {
+                "mindroom_dirty": False,
+                "mindroom_expected_revision": "abc",
+                "mindroom_revision": "abc",
+                "nio_dirty": False,
+                "nio_expected_revision": "nio-head",
+                "nio_revision": "nio-head",
+            }
+            return self.runtime_provenance
 
         def close(self, *, before_destructive_cleanup: Callable[[], None]) -> None:
             events.append("stop")
@@ -5464,7 +5735,7 @@ def test_main_cleanup_failure_retains_pre_teardown_evidence(
 
     monkeypatch.setattr(live_fuzz, "_parse_args", lambda: args)
     monkeypatch.setattr(live_fuzz, "_scenario_from_args", lambda _args: _bundle_scenario())
-    monkeypatch.setattr(live_fuzz, "_run_provenance", dict)
+    monkeypatch.setattr(live_fuzz, "_run_provenance", lambda _revision: {})
     monkeypatch.setattr(live_fuzz, "ManagedTuwunelStack", CleanupFailingStack)
     monkeypatch.setattr(live_fuzz, "_run_live", pass_run)
 
@@ -5556,7 +5827,7 @@ def test_main_missing_runtime_provenance_captures_bundle_before_teardown(
 
     monkeypatch.setattr(live_fuzz, "_parse_args", lambda: args)
     monkeypatch.setattr(live_fuzz, "_scenario_from_args", lambda _args: _bundle_scenario())
-    monkeypatch.setattr(live_fuzz, "_run_provenance", dict)
+    monkeypatch.setattr(live_fuzz, "_run_provenance", lambda _revision: {})
     monkeypatch.setattr(live_fuzz, "ManagedTuwunelStack", MissingProvenanceStack)
     monkeypatch.setattr(live_fuzz, "_run_live", pass_run)
 

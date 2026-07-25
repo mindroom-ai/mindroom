@@ -1331,6 +1331,7 @@ class ManagedTuwunelStack:
         artifact_directory: Path | None = None,
         state_root: Path = DEFAULT_LIVE_FUZZ_STATE_ROOT,
         nio_overlay: NioOverlay | None = None,
+        mindroom_revision: str | None = None,
     ) -> None:
         token = secrets.token_hex(4)
         self._stream_profile = stream_profile or StreamProfile()
@@ -1346,6 +1347,7 @@ class ManagedTuwunelStack:
         self.log_path = self.root / "mindroom.log"
         self.attestation_path = self.root / "runtime-attestation.json"
         self.runtime_provenance: dict[str, object] | None = None
+        self._runtime_generations: list[dict[str, object]] = []
         self.api_port = 0
         self.homeserver = ""
         self.server_name = ""
@@ -1362,8 +1364,15 @@ class ManagedTuwunelStack:
         self._env: dict[str, str] = {}
         self._provenance_sink = provenance_sink
         self.nio_overlay = nio_overlay
+        self._mindroom_revision = mindroom_revision
         self._host_lease: TextIOWrapper | None = None
         self._mindroom_start_log_offset = 0
+
+    def _frozen_mindroom_revision(self) -> str:
+        """Freeze and return the one MindRoom revision allowed for this run."""
+        if self._mindroom_revision is None:
+            self._mindroom_revision = _required_mindroom_revision()
+        return self._mindroom_revision
 
     def _required_nio_overlay(self) -> NioOverlay:
         """Return the preflighted overlay or reject live stack creation."""
@@ -1528,6 +1537,7 @@ class ManagedTuwunelStack:
     def start(self) -> None:
         """Create every live dependency and wait for the managed room."""
         self._required_nio_overlay()
+        self._frozen_mindroom_revision()
         self._acquire_host_lease()
         self._recover_abandoned_runs()
         self._write_manifest(
@@ -1854,15 +1864,24 @@ class ManagedTuwunelStack:
     def _wait_for_runtime_attestation(self) -> None:
         """Capture and validate the exact modules loaded by the spawned child."""
         overlay = self._required_nio_overlay()
+        expected_mindroom_revision = self._frozen_mindroom_revision()
         deadline = time.monotonic() + 20
         while time.monotonic() < deadline:
             if self.attestation_path.exists():
-                self.runtime_provenance = {
+                generation = {
                     **_validated_child_provenance(
                         self.attestation_path,
                         overlay=overlay,
+                        expected_mindroom_revision=expected_mindroom_revision,
                     ),
                     **self._tuwunel_provenance(),
+                    "runtime_generation": len(self._runtime_generations) + 1,
+                }
+                self._runtime_generations.append(generation)
+                self.runtime_provenance = {
+                    **generation,
+                    "mindroom_frozen_revision": expected_mindroom_revision,
+                    "runtime_generations": [dict(item) for item in self._runtime_generations],
                 }
                 if self._provenance_sink is not None:
                     self._provenance_sink(self.runtime_provenance)
@@ -1873,6 +1892,37 @@ class ManagedTuwunelStack:
             time.sleep(0.05)
         msg = "MindRoom child did not attest loaded runtime paths"
         raise TimeoutError(msg)
+
+    def revalidate_runtime_provenance(self) -> Mapping[str, object]:
+        """Recheck exact clean sources at a destructive or PASS boundary."""
+        provenance = self.runtime_provenance
+        if provenance is None:
+            msg = "passing live run omitted child runtime provenance"
+            raise RuntimeError(msg)
+        validated = _validated_import_provenance(
+            provenance,
+            overlay=self._required_nio_overlay(),
+            expected_mindroom_revision=self._frozen_mindroom_revision(),
+        )
+        final_source_validation = {
+            key: validated[key]
+            for key in (
+                "mindroom_dirty",
+                "mindroom_expected_revision",
+                "mindroom_revision",
+                "nio_dirty",
+                "nio_expected_revision",
+                "nio_revision",
+            )
+        }
+        self.runtime_provenance = {
+            **provenance,
+            **final_source_validation,
+            "final_source_validation": final_source_validation,
+        }
+        if self._provenance_sink is not None:
+            self._provenance_sink(self.runtime_provenance)
+        return self.runtime_provenance
 
     def _tuwunel_provenance(self) -> dict[str, str]:
         """Return exact live homeserver and immutable container-image identity."""
@@ -4750,6 +4800,15 @@ def _git_revision(path: Path) -> str | None:
     return result.stdout.strip() if result.returncode == 0 else None
 
 
+def _required_mindroom_revision() -> str:
+    """Return the exact runner revision or fail before live setup."""
+    revision = _git_revision(PROJECT_ROOT)
+    if revision is None:
+        msg = "could not freeze the live runner MindRoom revision"
+        raise RuntimeError(msg)
+    return revision
+
+
 def _prepare_nio_overlay(path: Path | None) -> NioOverlay:
     """Fail closed before stack startup unless nio has a clean exact checkout."""
     if path is None:
@@ -4804,12 +4863,27 @@ def _validated_child_provenance(
     attestation_path: Path,
     *,
     overlay: NioOverlay,
+    expected_mindroom_revision: str,
 ) -> dict[str, object]:
     """Validate actual child imports against the runner and requested overlay."""
     raw = json.loads(attestation_path.read_text(encoding="utf-8"))
     if not isinstance(raw, dict):
         msg = "MindRoom runtime attestation must be a JSON object"
         raise TypeError(msg)
+    return _validated_import_provenance(
+        raw,
+        overlay=overlay,
+        expected_mindroom_revision=expected_mindroom_revision,
+    )
+
+
+def _validated_import_provenance(
+    raw: Mapping[str, object],
+    *,
+    overlay: NioOverlay,
+    expected_mindroom_revision: str,
+) -> dict[str, object]:
+    """Validate imported module paths against frozen exact clean checkouts."""
     mindroom_value = raw.get("mindroom_module_path")
     nio_value = raw.get("nio_module_path")
     if not isinstance(mindroom_value, str) or not isinstance(nio_value, str):
@@ -4834,9 +4908,7 @@ def _validated_child_provenance(
             PROJECT_ROOT / "uv.lock",
         ),
     )
-    nio_revision, nio_dirty = _git_state_for_file(nio_path, scopes=(nio_path.parent,))
-    expected_mindroom_revision = _git_revision(PROJECT_ROOT)
-    if mindroom_revision is None or expected_mindroom_revision is None:
+    if mindroom_revision is None:
         msg = "could not verify the loaded MindRoom revision"
         raise RuntimeError(msg)
     if mindroom_dirty:
@@ -4881,7 +4953,7 @@ def _validated_child_provenance(
     }
 
 
-def _run_provenance() -> dict[str, object]:
+def _run_provenance(mindroom_revision: str | None = None) -> dict[str, object]:
     """Capture parent identity until child-attested provenance replaces it.
 
     Only inert build/version identity is recorded; no credentials, tokens, or
@@ -4893,18 +4965,7 @@ def _run_provenance() -> dict[str, object]:
         "mindroom_module_path": str(Path(mindroom.__file__ or "").resolve()),
         "nio_module_path": str(Path(nio.__file__ or "").resolve()),
     }
-    try:
-        head = subprocess.run(
-            ["git", "-C", str(PROJECT_ROOT), "rev-parse", "HEAD"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        provenance["mindroom_head"] = f"<unavailable: {exc}>"
-    else:
-        provenance["mindroom_head"] = head.stdout.strip() or f"<git error: {head.stderr.strip()}>"
+    provenance["mindroom_head"] = mindroom_revision or _required_mindroom_revision()
     try:
         provenance["nio_version"] = version("mindroom-nio")
     except PackageNotFoundError:
@@ -5010,6 +5071,7 @@ class FailureBundle:
     ) -> Path:
         """Keep compact exact-head PASS evidence after deleting bulky run inputs."""
         _require_exact_nio_provenance(provenance)
+        _require_exact_mindroom_provenance(provenance, require_final=True)
         receipts = self.directory.parent / "receipts"
         receipts.mkdir(parents=True, exist_ok=True)
         destination = receipts / f"{self.directory.name}.json"
@@ -5220,6 +5282,60 @@ def _require_exact_nio_provenance(
         raise RuntimeError(msg)
 
 
+def _require_exact_mindroom_provenance(
+    provenance: Mapping[str, object],
+    *,
+    require_final: bool = False,
+) -> None:
+    """Reject mixed, dirty, or stale MindRoom generation evidence."""
+    frozen_revision = provenance.get("mindroom_frozen_revision")
+    generations = provenance.get("runtime_generations")
+    if not isinstance(frozen_revision, str) or not frozen_revision:
+        msg = "passing live run omitted the frozen MindRoom revision"
+        raise RuntimeError(msg)
+    if not isinstance(generations, list):
+        msg = "passing live run has invalid per-generation runtime attestations"
+        raise TypeError(msg)
+    if not generations:
+        msg = "passing live run omitted per-generation runtime attestations"
+        raise RuntimeError(msg)
+    for index, generation in enumerate(generations, start=1):
+        if not isinstance(generation, dict):
+            msg = f"passing live run has invalid runtime generation {index}"
+            raise TypeError(msg)
+        generation = cast("dict[str, object]", generation)
+        if (
+            generation.get("mindroom_revision") != frozen_revision
+            or generation.get("mindroom_expected_revision") != frozen_revision
+            or generation.get("mindroom_dirty") is not False
+        ):
+            msg = f"passing live run generation {index} did not use exact clean MindRoom {frozen_revision}"
+            raise RuntimeError(msg)
+    if not require_final:
+        return
+    final_validation = provenance.get("final_source_validation")
+    if not isinstance(final_validation, dict):
+        msg = "passing live run omitted final source validation"
+        raise TypeError(msg)
+    final_validation = cast("dict[str, object]", final_validation)
+    exact_fields = (
+        "mindroom_dirty",
+        "mindroom_expected_revision",
+        "mindroom_revision",
+        "nio_dirty",
+        "nio_expected_revision",
+        "nio_revision",
+    )
+    if (
+        final_validation.get("mindroom_revision") != frozen_revision
+        or final_validation.get("mindroom_expected_revision") != frozen_revision
+        or final_validation.get("mindroom_dirty") is not False
+        or any(final_validation.get(key) != provenance.get(key) for key in exact_fields)
+    ):
+        msg = "passing live run final source validation does not match its receipt provenance"
+        raise RuntimeError(msg)
+
+
 def _require_runtime_provenance(
     stack: ManagedTuwunelStack,
     nio_overlay: NioOverlay,
@@ -5229,6 +5345,7 @@ def _require_runtime_provenance(
     if provenance is None:
         msg = "passing live run omitted child runtime provenance"
         raise RuntimeError(msg)
+    _require_exact_mindroom_provenance(provenance)
     _require_exact_nio_provenance(
         provenance,
         required_revision=nio_overlay.revision,
@@ -5250,12 +5367,13 @@ def main() -> None:
     if reply_timeout is None:
         reply_timeout = _PROFILE_REPLY_TIMEOUTS[scenario.profile]
 
+    mindroom_revision = _required_mindroom_revision()
     run_id = f"{time.strftime('%Y%m%dT%H%M%S')}-{secrets.token_hex(4)}"
     bundle = FailureBundle.create(
         args.artifact_root,
         run_id,
         scenario=scenario,
-        provenance=_run_provenance(),
+        provenance=_run_provenance(mindroom_revision),
     )
     stack = ManagedTuwunelStack(
         stream_profile=_PROFILE_STREAMS[scenario.profile],
@@ -5263,6 +5381,7 @@ def main() -> None:
         provenance_sink=bundle.update_provenance,
         artifact_directory=bundle.directory,
         nio_overlay=nio_overlay,
+        mindroom_revision=mindroom_revision,
     )
     runner_holder: dict[str, LiveFuzzRunner] = {}
     try:
@@ -5288,7 +5407,9 @@ def main() -> None:
         raise
 
     def snapshot_runtime_evidence() -> None:
+        nonlocal provenance
         _persist_run_bundle(bundle, stack, runner_holder.get("runner"))
+        provenance = stack.revalidate_runtime_provenance()
 
     try:
         stack.close(
@@ -5298,7 +5419,13 @@ def main() -> None:
         _record_secondary_failure(bundle, cleanup_error, label="Live Matrix fuzz cleanup error")
         print(f"Live Matrix fuzz cleanup failure bundle: {bundle.directory}", file=sys.stderr)
         raise
-    receipt = bundle.retain_pass_receipt(result, provenance)
+    try:
+        provenance = stack.revalidate_runtime_provenance()
+        receipt = bundle.retain_pass_receipt(result, provenance)
+    except BaseException as provenance_error:
+        _record_secondary_failure(bundle, provenance_error, label="Final source validation error")
+        print(f"Live Matrix fuzz provenance failure bundle: {bundle.directory}", file=sys.stderr)
+        raise
     result["pass_receipt"] = str(receipt)
     print(json.dumps(result, sort_keys=True))
     # A passing run has no failure to preserve. Delete its bundle only after
