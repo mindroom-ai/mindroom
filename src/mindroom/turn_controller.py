@@ -16,7 +16,6 @@ from mindroom.coalescing_batch import (
     CoalescedBatch,
     CoalescingKey,
     PendingEvent,
-    TimestampFormatter,
     build_coalesced_batch,
 )
 from mindroom.coalescing_cleanup import close_pending_event_metadata_once
@@ -210,6 +209,21 @@ def _queued_notice_dispatch_metadata(
     )
 
 
+def _pending_turn_claim_dispatch_metadata(
+    turn_store: TurnStore,
+    turn_claim: TurnRecord | None,
+) -> tuple[PendingDispatchMetadata, ...]:
+    if turn_claim is None:
+        return ()
+    return (
+        PendingDispatchMetadata(
+            kind=_PENDING_TURN_CLAIM_METADATA_KIND,
+            payload=turn_claim,
+            close=lambda: turn_store.release_pending_turn_claim(turn_claim),
+        ),
+    )
+
+
 def _consume_queued_notice_reservations_from_metadata(
     dispatch_metadata: tuple[PendingDispatchMetadata, ...],
     *,
@@ -280,25 +294,6 @@ class _PrecheckedEvent[T]:
     requester_user_id: str
 
 
-@dataclass
-class _TurnClaimLease:
-    """Release or transfer one already-acquired pending-turn claim exactly once."""
-
-    turn_record: TurnRecord
-    owned: bool = True
-
-    def release(self, turn_store: TurnStore) -> None:
-        """Release the claim only while this lease still owns it."""
-        if not self.owned:
-            return
-        self.owned = False
-        turn_store.release_pending_turn_claim(self.turn_record)
-
-    def transfer(self) -> None:
-        """Transfer claim cleanup to the normal text-dispatch owner."""
-        self.owned = False
-
-
 type _PrecheckedTextDispatchEvent = _PrecheckedEvent[TextDispatchEvent]
 type _PrecheckedInboundMediaEvent = _PrecheckedEvent[MatrixMediaEvent]
 
@@ -347,7 +342,6 @@ class TurnControllerDeps:
     coalescing_gate: CoalescingGate
     edit_regenerator: _EditRegenerator
     ingress: IngressValidator
-    timestamp_formatter: TimestampFormatter
     interrupted_turn_rooms: InterruptedTurnRooms
 
 
@@ -553,7 +547,7 @@ class TurnController:
         )
         try:
             await self._enqueue_for_dispatch(
-                dispatch_event,
+                prepared_event,
                 room,
                 source_kind=envelope.source_kind,
                 dispatch_policy_source_kind=envelope.dispatch_policy_source_kind,
@@ -565,6 +559,7 @@ class TurnController:
                 queued_notice_reservation=queued_notice_reservation,
                 queued_notice_target=target,
                 trust_internal_payload_metadata=trust_internal_payload_metadata,
+                discovery_event_id=self.deps.ingress.router_relay_original_event_id(dispatch_event),
             )
         except asyncio.CancelledError:
             if queued_notice_reservation is not None:
@@ -759,8 +754,9 @@ class TurnController:
         prepared_source_kind = (
             self.deps.ingress.event_source_kind(prepared_event, content) if isinstance(content, dict) else None
         )
+        ingress_turn = reservation_owner.pending_turn_claim or TurnRecord.create([prepared_event.event_id])
         if self.deps.ingress.is_display_only_router_voice_echo(prepared_event):
-            self._mark_source_events_responded(TurnRecord.create([prepared_event.event_id]))
+            self._mark_source_events_responded(ingress_turn)
             return _IngressAdmissionOutcome.CONSUMED
         trusted_user_relay = original_sender is not None and prepared_source_kind in {
             TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
@@ -777,6 +773,7 @@ class TurnController:
             event_id=prepared_event.event_id,
             envelope=envelope,
         ):
+            self._mark_source_events_responded(ingress_turn)
             return _IngressAdmissionOutcome.CONSUMED
         if envelope.origin.may_answer_interactive_prompt:
             selection = await interactive.handle_text_response(
@@ -796,34 +793,22 @@ class TurnController:
                     selection=selection,
                     user_id=envelope.requester_id,
                     source_event_id=prepared_event.event_id,
+                    source_turn=ingress_turn,
                 )
                 return _IngressAdmissionOutcome.CONSUMED
         if self.deps.ingress.command_control_input(prepared_event, source_kind=envelope.source_kind) is not None:
-            turn_claim = reservation_owner.pending_turn_claim
-            if turn_claim is None:
-                routed_alias = self.deps.ingress.router_relay_original_event_id(dispatch_event)
-                claim_aliases = (routed_alias,) if routed_alias else ()
-                command_turn = TurnRecord.create(
-                    [dispatch_event.event_id],
-                    discovery_event_ids=claim_aliases,
-                    completed=False,
-                )
-                if not self.deps.turn_store.try_claim_turn(command_turn):
-                    return _IngressAdmissionOutcome.CONSUMED
-                turn_claim = command_turn
-            command_claim = _TurnClaimLease(turn_claim)
-            reservation_owner.pending_turn_claim = None
-            try:
-                await self._dispatch_command_control_input(
-                    room=room,
-                    dispatch_event=dispatch_event,
-                    envelope=envelope,
-                    coalescing_thread_id=coalescing_thread_id,
-                    requester_user_id=requester_user_id,
-                    command_claim=command_claim,
-                )
-            finally:
-                command_claim.release(self.deps.turn_store)
+            routed_alias = self.deps.ingress.router_relay_original_event_id(dispatch_event)
+            if (turn_claim := reservation_owner.pending_turn_claim) is not None:
+                self.deps.turn_store.release_pending_turn_claim(turn_claim)
+                reservation_owner.pending_turn_claim = None
+            await self._dispatch_command_control_input(
+                room=room,
+                dispatch_event=prepared_event,
+                envelope=envelope,
+                coalescing_thread_id=coalescing_thread_id,
+                requester_user_id=requester_user_id,
+                discovery_event_id=routed_alias,
+            )
             return _IngressAdmissionOutcome.CONSUMED
         return await self._enqueue_prepared_text_for_dispatch(
             room=room,
@@ -893,7 +878,13 @@ class TurnController:
                     ),
                 ),
             )
-        self._mark_source_events_responded(TurnRecord.create([event.event_id]))
+        routed_alias = self.deps.ingress.router_relay_original_event_id(event)
+        self._mark_source_events_responded(
+            TurnRecord.create(
+                [event.event_id],
+                discovery_event_ids=(routed_alias,) if routed_alias is not None else (),
+            ),
+        )
         return True
 
     async def _dispatch_command_control_input(
@@ -904,10 +895,9 @@ class TurnController:
         envelope: MessageEnvelope,
         coalescing_thread_id: str | None,
         requester_user_id: str,
-        command_claim: _TurnClaimLease,
+        discovery_event_id: str | None,
     ) -> None:
         """Dispatch one command as a control input without entering the coalescing gate."""
-        routed_alias = self.deps.ingress.router_relay_original_event_id(dispatch_event)
         pending_event = PendingEvent(
             event=dispatch_event,
             room=room,
@@ -917,16 +907,13 @@ class TurnController:
             hook_source=envelope.hook_source,
             message_received_depth=envelope.message_received_depth,
             trust_internal_payload_metadata=self.deps.ingress.should_trust_internal_payload_metadata(dispatch_event),
-            discovery_event_id=routed_alias,
+            discovery_event_id=discovery_event_id,
         )
         batch = build_coalesced_batch(
             CoalescingKey(room.room_id, coalescing_thread_id, requester_user_id),
             [pending_event],
         )
-        handoff = build_dispatch_handoff(
-            batch,
-            router_relay_original_event_id=routed_alias,
-        )
+        handoff = build_dispatch_handoff(batch)
         source_metadata = dict(handoff.source_event_metadata)
         routed_aliases = tuple(
             filter(None, (item.discovery_event_id for item in source_metadata.values())),
@@ -937,13 +924,8 @@ class TurnController:
             source_event_prompts=dict(handoff.source_event_prompts),
             source_event_metadata=source_metadata if len(handoff.source_event_ids) > 1 or routed_aliases else None,
         )
-        command_claim.transfer()
         try:
-            await self._dispatch_handoff(
-                handoff,
-                handled_turn=handled_turn,
-                turn_claim_held=True,
-            )
+            await self._dispatch_handoff(handoff, handled_turn=handled_turn)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -971,6 +953,7 @@ class TurnController:
         queued_notice_reservation: QueuedHumanNoticeReservation | None = None,
         queued_notice_target: MessageTarget | None = None,
         trust_internal_payload_metadata: bool | None = None,
+        discovery_event_id: str | None = None,
     ) -> _IngressAdmissionOutcome:
         """Route one inbound event through the live coalescing gate."""
         dispatch_timing = get_dispatch_pipeline_timing(event.source)
@@ -1000,15 +983,11 @@ class TurnController:
             timing_scope=timing_scope,
         )
         gate_enqueue_start = time.monotonic()
-        dispatch_metadata = _queued_notice_dispatch_metadata(queued_notice_reservation, queued_notice_target)
-        if (turn_claim := reservation_owner.pending_turn_claim) is not None:
-            dispatch_metadata += (
-                PendingDispatchMetadata(
-                    kind=_PENDING_TURN_CLAIM_METADATA_KIND,
-                    payload=turn_claim,
-                    close=lambda: self.deps.turn_store.release_pending_turn_claim(turn_claim),
-                ),
-            )
+        turn_claim = reservation_owner.pending_turn_claim
+        dispatch_metadata = _queued_notice_dispatch_metadata(
+            queued_notice_reservation,
+            queued_notice_target,
+        ) + _pending_turn_claim_dispatch_metadata(self.deps.turn_store, turn_claim)
         pending_event = PendingEvent(
             event=event,
             room=room,
@@ -1018,7 +997,7 @@ class TurnController:
             hook_source=hook_source,
             message_received_depth=message_received_depth,
             trust_internal_payload_metadata=resolved_trust_internal_payload_metadata,
-            discovery_event_id=self.deps.ingress.router_relay_original_event_id(event),
+            discovery_event_id=discovery_event_id,
             dispatch_metadata=dispatch_metadata,
         )
         if turn_claim is not None:
@@ -1305,6 +1284,7 @@ class TurnController:
         command: Command,
         *,
         target: MessageTarget,
+        handled_turn: TurnRecord | None = None,
     ) -> None:
         """Run one explicit command executor path from the turn controller."""
         event = await self.deps.normalizer.resolve_text_event(
@@ -1338,6 +1318,19 @@ class TurnController:
             (lambda: orchestrator.reload_plugins_now(source="command")) if orchestrator is not None else None
         )
 
+        command_turn = handled_turn or TurnRecord.create([event.event_id])
+
+        def record_command_turn(outcome: TurnRecord) -> None:
+            self.deps.turn_store.record_turn(
+                replace(
+                    outcome,
+                    discovery_event_ids=tuple(
+                        dict.fromkeys((*outcome.discovery_event_ids, *command_turn.discovery_event_ids)),
+                    ),
+                    source_event_metadata=outcome.source_event_metadata or command_turn.source_event_metadata,
+                ),
+            )
+
         context = CommandHandlerContext(
             client=self._client(),
             config=self.deps.runtime.config,
@@ -1347,7 +1340,7 @@ class TurnController:
             event_cache=self.deps.runtime.event_cache,
             matrix_admin=matrix_admin,
             stable_target=target,
-            record_handled_turn=self.deps.turn_store.record_turn,
+            record_handled_turn=record_command_turn,
             send_response=send_response,
             reload_plugins=reload_plugins,
             responder_candidates_for_room=self._responder_candidates_for_room,
@@ -1368,6 +1361,7 @@ class TurnController:
         command: Command,
         *,
         target: MessageTarget,
+        handled_turn: TurnRecord | None = None,
     ) -> None:
         """Execute one command only on the bot that owns its response."""
         if not agent_owns_command(
@@ -1384,6 +1378,7 @@ class TurnController:
             requester_user_id=requester_user_id,
             command=command,
             target=target,
+            handled_turn=handled_turn,
         )
 
     async def handle_interactive_selection(
@@ -1393,6 +1388,7 @@ class TurnController:
         selection: interactive.InteractiveSelection,
         user_id: str,
         source_event_id: str,
+        source_turn: TurnRecord | None = None,
     ) -> None:
         """Execute one validated interactive selection through the normal response path."""
         thread_history = (
@@ -1414,10 +1410,18 @@ class TurnController:
             thread_id=selection.thread_id,
             reply_to_event_id=selection.question_event_id,
         )
+        source_turn_aliases = source_turn.discovery_event_ids if source_turn is not None else ()
         selection_handled_turn = self.deps.turn_store.attach_response_context(
             TurnRecord.create(
                 [selection.question_event_id],
-                discovery_event_ids=((source_event_id,) if source_event_id != selection.question_event_id else ()),
+                discovery_event_ids=tuple(
+                    dict.fromkeys(
+                        (
+                            *((source_event_id,) if source_event_id != selection.question_event_id else ()),
+                            *source_turn_aliases,
+                        ),
+                    ),
+                ),
                 requester_id=user_id,
                 correlation_id=selection.question_event_id,
             ),
@@ -1914,128 +1918,40 @@ class TurnController:
 
     async def handle_coalesced_batch(self, batch: CoalescedBatch) -> None:
         """Dispatch one flushed batch through the normal text pipeline."""
-        salvaged_batch = self._claim_flushed_batch(batch)
-        if salvaged_batch is None:
-            return
-        batch = salvaged_batch
-        claimed_ids = tuple(batch.source_event_ids)
-        dispatch_owns_claim = False
         try:
-            try:
-                handoff = build_dispatch_handoff(
-                    batch,
-                    router_relay_original_event_id=self.deps.ingress.router_relay_original_event_id(
-                        batch.primary_event,
-                    ),
-                )
-            except BaseException:
-                # Close-and-clear so the gate's segment owner cannot close the
-                # same metadata a second time when this exception reaches it.
-                close_pending_event_metadata_once(list(batch.pending_events))
-                raise
-            _consume_queued_notice_reservations_from_metadata(
-                handoff.dispatch_metadata,
-                target_key=self._queued_notice_target_key_for_handoff(handoff),
-            )
-            timing_scope = event_timing_scope(handoff.event.event_id)
-            dispatch_timing = get_dispatch_pipeline_timing(handoff.event.source)
-            if dispatch_timing is not None:
-                dispatch_timing.mark("gate_exit")
-            async with self.deps.resolver.turn_thread_cache_scope():
-                dispatch_start = time.monotonic()
-                source_metadata = dict(handoff.source_event_metadata)
-                routed_aliases = tuple(
-                    filter(None, (item.discovery_event_id for item in source_metadata.values())),
-                )
-                handled_turn = TurnRecord.create(
-                    handoff.source_event_ids,
-                    discovery_event_ids=routed_aliases,
-                    source_event_prompts=dict(handoff.source_event_prompts),
-                    source_event_metadata=source_metadata
-                    if len(handoff.source_event_ids) > 1 or routed_aliases
-                    else None,
-                )
-                dispatch_owns_claim = True
-                await self._dispatch_handoff(
-                    handoff,
-                    handled_turn=handled_turn,
-                    turn_claim_held=True,
-                )
-                emit_elapsed_timing(
-                    "coalescing.handle_batch.dispatch_text_message",
-                    dispatch_start,
-                    source_event_count=len(batch.source_event_ids),
-                    timing_scope=timing_scope,
-                )
-        except BaseException:
-            if not dispatch_owns_claim:
-                self.deps.turn_store.release_pending_turn_claim(
-                    TurnRecord.create(list(claimed_ids), completed=False),
-                )
-            raise
-
-    def _claim_flushed_batch(self, batch: CoalescedBatch) -> CoalescedBatch | None:
-        """Atomically claim a flushed batch's sources, salvaging around stale duplicates.
-
-        A replayed source can pass the ingress in-flight precheck before its
-        original delivery claims, stall in resolution or its lane, and join a
-        later batch. The previous all-or-nothing claim then collided and
-        silently dropped the whole batch, starving innocent co-batched
-        sources. Claiming the still-unowned subset keeps the rest of the
-        batch's turn; a fully-owned batch drops idempotently.
-        """
-        relinquished_claims: list[TurnRecord] = []
-        discovery_event_ids_by_source: dict[str, str] = {}
-        for pending_event in batch.pending_events:
-            retained_metadata = []
-            for item in pending_event.dispatch_metadata:
-                if item.kind == _PENDING_TURN_CLAIM_METADATA_KIND:
-                    relinquished_claims.append(cast("TurnRecord", item.payload))
-                else:
-                    retained_metadata.append(item)
-            pending_event.dispatch_metadata = tuple(retained_metadata)
-            if pending_event.discovery_event_id is not None:
-                discovery_event_ids_by_source[pending_event.event.event_id] = pending_event.discovery_event_id
-
-        claimed = self.deps.turn_store.try_claim_turn_subset(
-            batch.source_event_ids,
-            relinquished_claims=relinquished_claims,
-            discovery_event_ids_by_source=discovery_event_ids_by_source,
-        )
-        try:
-            if len(claimed) == len(batch.source_event_ids):
-                return batch
-            claimed_id_set = set(claimed)
-            surviving = []
-            dropped = []
-            seen_survivor_ids: set[str] = set()
-            for pending_event in batch.pending_events:
-                event_id = pending_event.event.event_id
-                if event_id not in claimed_id_set or event_id in seen_survivor_ids:
-                    dropped.append(pending_event)
-                    continue
-                seen_survivor_ids.add(event_id)
-                surviving.append(pending_event)
-            close_pending_event_metadata_once(dropped)
-            self.deps.logger.info(
-                "coalesced_batch_dropped_already_owned_sources",
-                room_id=batch.room.room_id,
-                dropped_event_ids=[pending_event.event.event_id for pending_event in dropped],
-                surviving_event_ids=list(claimed),
-            )
-            if not claimed:
-                return None
-            return build_coalesced_batch(
-                batch.coalescing_key,
-                surviving,
-                timestamp_formatter=self.deps.timestamp_formatter,
-            )
+            handoff = build_dispatch_handoff(batch)
         except BaseException:
             close_pending_event_metadata_once(list(batch.pending_events))
-            self.deps.turn_store.release_pending_turn_claim(
-                TurnRecord.create(list(claimed), completed=False),
-            )
             raise
+        _consume_queued_notice_reservations_from_metadata(
+            handoff.dispatch_metadata,
+            target_key=self._queued_notice_target_key_for_handoff(handoff),
+        )
+        timing_scope = event_timing_scope(handoff.event.event_id)
+        dispatch_timing = get_dispatch_pipeline_timing(handoff.event.source)
+        if dispatch_timing is not None:
+            dispatch_timing.mark("gate_exit")
+        async with self.deps.resolver.turn_thread_cache_scope():
+            dispatch_start = time.monotonic()
+            source_metadata = dict(handoff.source_event_metadata)
+            routed_aliases = tuple(filter(None, (item.discovery_event_id for item in source_metadata.values())))
+            handled_turn = TurnRecord.create(
+                handoff.source_event_ids,
+                discovery_event_ids=routed_aliases,
+                source_event_prompts=dict(handoff.source_event_prompts),
+                source_event_metadata=source_metadata if len(handoff.source_event_ids) > 1 or routed_aliases else None,
+            )
+            close_pending_event_metadata_once(list(batch.pending_events))
+            await self._dispatch_handoff(
+                handoff,
+                handled_turn=handled_turn,
+            )
+            emit_elapsed_timing(
+                "coalescing.handle_batch.dispatch_text_message",
+                dispatch_start,
+                source_event_count=len(batch.source_event_ids),
+                timing_scope=timing_scope,
+            )
 
     def _queued_notice_target_key_for_handoff(self, handoff: DispatchHandoff) -> tuple[str, str | None]:
         coalescing_key = handoff.ingress.coalescing_key
@@ -2055,7 +1971,6 @@ class TurnController:
         handoff: DispatchHandoff,
         *,
         handled_turn: TurnRecord,
-        turn_claim_held: bool = False,
     ) -> None:
         """Dispatch one coalesced handoff and own opaque metadata cleanup."""
         await self._dispatch_text_message(
@@ -2068,7 +1983,6 @@ class TurnController:
             payload_metadata=handoff.payload,
             trust_hydrated_internal_metadata=handoff.trust_hydrated_internal_metadata,
             current_prompt_is_structured=handoff.current_prompt_is_structured,
-            turn_claim_held=turn_claim_held,
         )
 
     async def handle_text_event(
@@ -2226,7 +2140,6 @@ class TurnController:
         payload_metadata: DispatchPayloadMetadata | None = None,
         trust_hydrated_internal_metadata: bool | None = None,
         current_prompt_is_structured: bool = False,
-        turn_claim_held: bool = False,
     ) -> None:
         """Run the normal text or command dispatch pipeline for a prepared text event."""
         raw_event: TextDispatchEvent
@@ -2250,7 +2163,6 @@ class TurnController:
             payload_metadata=payload_metadata,
             trust_hydrated_internal_metadata=trust_hydrated_internal_metadata,
             current_prompt_is_structured=current_prompt_is_structured,
-            turn_claim_held=turn_claim_held,
         )
 
     async def handle_media_event(
@@ -2299,6 +2211,11 @@ class TurnController:
             prechecked_event.requester_user_id,
             receipt_time=receipt_time,
         )
+        turn_claim = TurnRecord.create([prechecked_event.event.event_id], completed=False)
+        if not self.deps.turn_store.try_claim_turn(turn_claim):
+            await reservation_owner.release()
+            return
+        reservation_owner.pending_turn_claim = turn_claim
         try:
             if is_audio_message_event(prechecked_event.event):
                 await self._on_audio_media_message(
@@ -2345,6 +2262,8 @@ class TurnController:
                 room_id=room.room_id,
             )
         finally:
+            if reservation_owner.pending_turn_claim is not None and not reservation_owner.admitted:
+                self.deps.turn_store.release_pending_turn_claim(reservation_owner.pending_turn_claim)
             await reservation_owner.release()
 
     async def _dispatch_special_media_as_text(
@@ -2395,9 +2314,11 @@ class TurnController:
                 prechecked_event=prechecked_event,
                 voice_target=voice_target,
                 dispatch_timing=dispatch_timing,
+                turn_claim=reservation_owner.pending_turn_claim,
             ),
             name=f"voice_ready:{room.room_id}:{event.event_id}",
         )
+        reservation_owner.pending_turn_claim = None
         await reservation_owner.admit(
             admission_key,
             ready_task=ready_task,
@@ -2436,11 +2357,14 @@ class TurnController:
         prechecked_event: _PrecheckedEvent[AudioMessageEvent],
         voice_target: MessageTarget,
         dispatch_timing: DispatchPipelineTiming | None,
+        turn_claim: TurnRecord | None,
     ) -> ReadyPendingEvent | None:
         """Normalize a raw voice event after its conversation key is fixed."""
         event = prechecked_event.event
         queued_notice_reservation = None
         reservation_released_or_handed_off = False
+        claim_handed_off = False
+        ready_event = None
         try:
             envelope = self.deps.resolver.build_ingress_envelope(
                 event=cast("DispatchEvent", event),
@@ -2497,8 +2421,7 @@ class TurnController:
                 envelope=envelope,
                 queued_notice_reservation=queued_notice_reservation,
             )
-            reservation_released_or_handed_off = True
-            return ReadyPendingEvent(
+            ready_event = ReadyPendingEvent(
                 pending_event=PendingEvent(
                     event=normalized_event,
                     room=room,
@@ -2508,26 +2431,38 @@ class TurnController:
                     hook_source=envelope.hook_source,
                     message_received_depth=envelope.message_received_depth,
                     trust_internal_payload_metadata=True,
-                    dispatch_metadata=_queued_notice_dispatch_metadata(queued_notice_reservation, normalized_target),
+                    dispatch_metadata=_queued_notice_dispatch_metadata(
+                        queued_notice_reservation,
+                        normalized_target,
+                    )
+                    + _pending_turn_claim_dispatch_metadata(self.deps.turn_store, turn_claim),
                 ),
             )
+            reservation_released_or_handed_off = True
+            claim_handed_off = True
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             if queued_notice_reservation is not None:
                 queued_notice_reservation.cancel()
                 queued_notice_reservation = None
-            return await self._ready_voice_fallback_event(
+            fallback = await self._ready_voice_fallback_event(
                 room=room,
                 event=event,
                 requester_user_id=prechecked_event.requester_user_id,
                 thread_id=voice_target.resolved_thread_id,
                 dispatch_timing=dispatch_timing,
                 error=exc,
+                turn_claim=turn_claim,
             )
+            claim_handed_off = True
+            return fallback
         finally:
             if not reservation_released_or_handed_off and queued_notice_reservation is not None:
                 queued_notice_reservation.cancel()
+            if not claim_handed_off and turn_claim is not None:
+                self.deps.turn_store.release_pending_turn_claim(turn_claim)
+        return ready_event
 
     async def _prepare_raw_voice_fallback_event(
         self,
@@ -2566,6 +2501,7 @@ class TurnController:
         thread_id: str | None,
         dispatch_timing: DispatchPipelineTiming | None,
         error: Exception,
+        turn_claim: TurnRecord | None,
     ) -> ReadyPendingEvent:
         """Return a raw-audio fallback when voice readiness fails before STT."""
         self.deps.logger.warning(
@@ -2622,7 +2558,11 @@ class TurnController:
                 hook_source=hook_source,
                 message_received_depth=message_received_depth,
                 trust_internal_payload_metadata=True,
-                dispatch_metadata=_queued_notice_dispatch_metadata(queued_notice_reservation, target),
+                dispatch_metadata=_queued_notice_dispatch_metadata(
+                    queued_notice_reservation,
+                    target,
+                )
+                + _pending_turn_claim_dispatch_metadata(self.deps.turn_store, turn_claim),
             ),
         )
 

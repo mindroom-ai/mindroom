@@ -77,6 +77,21 @@ class _PreparedTextDispatch:
     dispatch_started_at: float
 
 
+def _turn_claim_for_dispatch(
+    controller: TurnController,
+    raw_event: TextDispatchEvent,
+    handled_turn: TurnRecord | None,
+) -> TurnRecord:
+    if handled_turn is not None:
+        return handled_turn
+    routed_alias = controller.deps.ingress.router_relay_original_event_id(raw_event)
+    return TurnRecord.create(
+        [raw_event.event_id],
+        discovery_event_ids=(routed_alias,) if routed_alias is not None else (),
+        completed=False,
+    )
+
+
 async def dispatch_text_message(
     controller: TurnController,
     room: nio.MatrixRoom,
@@ -90,11 +105,10 @@ async def dispatch_text_message(
     payload_metadata: DispatchPayloadMetadata | None = None,
     trust_hydrated_internal_metadata: bool | None = None,
     current_prompt_is_structured: bool = False,
-    turn_claim_held: bool = False,
 ) -> None:
     """Run the normal text or command dispatch pipeline for a prepared text event."""
-    turn_claim = handled_turn or TurnRecord.create([raw_event.event_id], completed=False)
-    if not turn_claim_held and not _try_claim_turn(controller, turn_claim, queued_notice_reservation):
+    turn_claim = _turn_claim_for_dispatch(controller, raw_event, handled_turn)
+    if not _try_claim_turn(controller, turn_claim, queued_notice_reservation):
         return
     claim_transferred = False
 
@@ -104,12 +118,6 @@ async def dispatch_text_message(
 
     timing_scope_token = None
     try:
-        turn_claim, router_relay_alias = _claim_router_relay_alias(
-            controller,
-            raw_event,
-            turn_claim,
-            ingress_metadata=ingress_metadata,
-        )
         dispatch_timing = get_dispatch_pipeline_timing(raw_event.source)
         prepared = await _prepare_text_dispatch(
             controller,
@@ -117,7 +125,7 @@ async def dispatch_text_message(
             raw_event,
             requester_user_id,
             media_events=media_events,
-            handled_turn=handled_turn,
+            handled_turn=turn_claim,
             ingress_metadata=ingress_metadata,
             payload_metadata=payload_metadata,
             trust_hydrated_internal_metadata=trust_hydrated_internal_metadata,
@@ -161,7 +169,6 @@ async def dispatch_text_message(
             media_events=media_events,
             queued_notice_reservation=queued_notice_reservation,
             turn_claim=turn_claim,
-            router_relay_alias=router_relay_alias,
             mark_claim_transferred=mark_claim_transferred,
         )
     finally:
@@ -171,44 +178,6 @@ async def dispatch_text_message(
             queued_notice_reservation.cancel()
         if timing_scope_token is not None:
             timing_scope_context.reset(timing_scope_token)
-
-
-def _claim_router_relay_alias(
-    controller: TurnController,
-    raw_event: TextDispatchEvent,
-    turn_claim: TurnRecord,
-    *,
-    ingress_metadata: DispatchIngressMetadata | None,
-) -> tuple[TurnRecord, str | None]:
-    """Claim the routed-human alias a trusted router relay replies to, up front.
-
-    The relay knows the routed human event id from its own reply relation
-    before any await, so claiming it here keeps alias-addressed replays dropped
-    for exactly as long as this turn owns the response, without a preparation
-    window in which the alias is still claimable.
-
-    The claim is collision-aware: an alias already owned by another live turn is
-    left with its original owner (a relay may legitimately overlap the routed
-    original). The alias is folded into this turn's claim record only when it was
-    acquired, so the transfer and finally releases never strip another turn's
-    claim.
-    """
-    alias_event_id = (
-        ingress_metadata.router_relay_original_event_id
-        if ingress_metadata is not None
-        else controller.deps.ingress.router_relay_original_event_id(raw_event)
-    )
-    if alias_event_id is None or alias_event_id in turn_claim.indexed_event_ids:
-        return turn_claim, alias_event_id
-    if not controller.deps.turn_store.try_claim_turn_alias(alias_event_id):
-        return turn_claim, alias_event_id
-    return (
-        replace(
-            turn_claim,
-            discovery_event_ids=(*turn_claim.discovery_event_ids, alias_event_id),
-        ),
-        alias_event_id,
-    )
 
 
 def _try_claim_turn(
@@ -335,12 +304,14 @@ async def _blocked_before_plan(
             requester_user_id=requester_user_id,
             command=prepared.command,
             target=prepared.dispatch.target,
+            handled_turn=prepared.handled_turn,
         )
         return True
     if controller._should_skip_deep_synthetic_full_dispatch(
         event_id=prepared.event.event_id,
         envelope=prepared.dispatch.envelope,
     ):
+        controller._mark_source_events_responded(prepared.handled_turn)
         return True
 
     may_be_superseded = prepared.dispatch.envelope.origin.may_be_superseded_by_newer_requester_turn and all(
@@ -422,7 +393,6 @@ async def _apply_turn_plan(
     media_events: list[MediaDispatchEvent] | None,
     queued_notice_reservation: QueuedHumanNoticeReservation | None,
     turn_claim: TurnRecord,
-    router_relay_alias: str | None,
     mark_claim_transferred: Callable[[], None],
 ) -> None:
     if plan.kind == "ignore":
@@ -437,11 +407,6 @@ async def _apply_turn_plan(
 
     assert plan.response_action is not None
     handled_turn = prepared.handled_turn
-    if router_relay_alias is not None and router_relay_alias not in handled_turn.indexed_event_ids:
-        handled_turn = replace(
-            handled_turn,
-            discovery_event_ids=(*handled_turn.discovery_event_ids, router_relay_alias),
-        )
     response_history_scope = (
         controller.deps.turn_store.response_history_scope(
             plan.response_action,
@@ -581,6 +546,8 @@ def _tracked_route_turn(
 ) -> TurnRecord | None:
     if single_direct_media_route:
         return None
+    if prepared.handled_turn.discovery_event_ids:
+        return prepared.handled_turn
     if not prepared.handled_turn.is_coalesced and (
         not prepared.handled_turn.source_event_ids
         or prepared.handled_turn.source_event_ids[0] == prepared.event.event_id

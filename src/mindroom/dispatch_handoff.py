@@ -79,7 +79,6 @@ class DispatchIngressMetadata:
 
     source_kind: str
     coalescing_key: CoalescingKey | None = None
-    router_relay_original_event_id: str | None = None
     dispatch_policy_source_kind: str | None = None
     hook_source: str | None = None
     message_received_depth: int = 0
@@ -375,11 +374,7 @@ def _build_batch_dispatch_event(batch: CoalescedBatch) -> TextDispatchEvent:
     )
 
 
-def build_dispatch_handoff(
-    batch: CoalescedBatch,
-    *,
-    router_relay_original_event_id: str | None = None,
-) -> DispatchHandoff:
+def build_dispatch_handoff(batch: CoalescedBatch) -> DispatchHandoff:
     """Build the explicit dispatch handoff for one coalesced batch."""
     return DispatchHandoff(
         room=batch.room,
@@ -388,7 +383,6 @@ def build_dispatch_handoff(
         ingress=DispatchIngressMetadata(
             source_kind=batch.source_kind,
             coalescing_key=batch.coalescing_key,
-            router_relay_original_event_id=router_relay_original_event_id,
             dispatch_policy_source_kind=batch.dispatch_policy_source_kind,
             hook_source=batch.hook_source,
             message_received_depth=batch.message_received_depth,

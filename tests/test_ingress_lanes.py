@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Protocol, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -48,10 +48,22 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.coalescing_batch import CoalescedBatch
+    from mindroom.turn_store import TurnStore
+
+
+class _BotWithTurnStore(Protocol):
+    _turn_store: TurnStore
 
 
 def _room(room_id: str = "!room:localhost") -> nio.MatrixRoom:
     return nio.MatrixRoom(room_id, "@mindroom:localhost")
+
+
+def _assert_turn_reclaimable(bot: _BotWithTurnStore, event_id: str) -> None:
+    turn_store = bot._turn_store
+    turn = TurnRecord.create([event_id], completed=False)
+    assert turn_store.try_claim_turn(turn)
+    turn_store.release_pending_turn_claim(turn)
 
 
 def _plain_event(
@@ -449,11 +461,9 @@ async def test_duplicate_command_claims_before_conversation_resolution(tmp_path:
         _requester_user_id: str,
         *,
         handled_turn: TurnRecord,
-        turn_claim_held: bool,
         **_metadata: object,
     ) -> None:
-        assert turn_claim_held is True
-        bot._turn_store.release_pending_turn_claim(handled_turn)
+        assert handled_turn.source_event_ids == ("$cmd",)
 
     resolve_mock = AsyncMock(side_effect=resolve_thread_id)
     dispatch_mock = AsyncMock(side_effect=record_dispatch)
@@ -472,7 +482,37 @@ async def test_duplicate_command_claims_before_conversation_resolution(tmp_path:
 
     assert resolution_calls_before_release == 1
     dispatch_mock.assert_awaited_once()
-    assert not bot._turn_store.is_claimed_in_flight("$cmd")
+    _assert_turn_reclaimable(bot, "$cmd")
+
+
+@pytest.mark.asyncio
+async def test_duplicate_media_claims_before_conversation_resolution(tmp_path: Path) -> None:
+    """A replay cannot enter media resolution while the first delivery owns it."""
+    bot = _make_bot(tmp_path)
+    room = _make_room()
+    event = _image_event(event_id="$image", server_timestamp=1000)
+    resolution_started = asyncio.Event()
+    release_resolution = asyncio.Event()
+
+    async def resolve_thread_id(_room: nio.MatrixRoom, _event: nio.RoomMessageImage) -> None:
+        resolution_started.set()
+        await release_resolution.wait()
+
+    resolve_mock = AsyncMock(side_effect=resolve_thread_id)
+    with (
+        patch.object(bot._conversation_resolver, "coalescing_thread_id", new=resolve_mock),
+        patch.object(bot._turn_controller, "_dispatch_text_message", new=AsyncMock()),
+    ):
+        first = asyncio.create_task(bot._turn_controller.handle_media_event(room, event))
+        await resolution_started.wait()
+        second = asyncio.create_task(bot._turn_controller.handle_media_event(room, event))
+        await asyncio.sleep(0)
+        assert resolve_mock.await_count == 1
+        release_resolution.set()
+        await asyncio.gather(first, second)
+        await bot._coalescing_gate.drain_all()
+
+    _assert_turn_reclaimable(bot, event.event_id)
 
 
 @pytest.mark.asyncio
@@ -521,7 +561,7 @@ async def test_duplicate_unresolvable_command_emits_one_terminal_notice(
     assert resolution_calls_before_release == 1
     send_text_mock.assert_awaited_once()
     assert bot._turn_store.is_handled("$cmd")
-    assert not bot._turn_store.is_claimed_in_flight("$cmd")
+    _assert_turn_reclaimable(bot, "$cmd")
 
 
 @pytest.mark.asyncio
@@ -565,7 +605,7 @@ async def test_command_shaped_bypass_source_resolution_failure_is_not_command_te
 
     send_text_mock.assert_not_awaited()
     assert not bot._turn_store.is_handled("$synthetic")
-    assert not bot._turn_store.is_claimed_in_flight("$synthetic")
+    _assert_turn_reclaimable(bot, "$synthetic")
 
 
 @pytest.mark.asyncio
@@ -622,7 +662,7 @@ async def test_duplicate_command_shaped_bypass_source_is_claimed_before_resoluti
     assert outcomes[1] is None
     send_text_mock.assert_not_awaited()
     assert not bot._turn_store.is_handled("$synthetic")
-    assert not bot._turn_store.is_claimed_in_flight("$synthetic")
+    _assert_turn_reclaimable(bot, "$synthetic")
 
 
 @pytest.mark.asyncio
@@ -652,7 +692,6 @@ async def test_command_shaped_bypass_source_dispatches_as_conversation(
         original_sender="@user:localhost",
     )
     handled_turn = TurnRecord.create([event.event_id], completed=False)
-    assert bot._turn_store.try_claim_turn(handled_turn)
     prepared = _prepared_dispatch(
         event_id=event.event_id,
         requester_user_id="@user:localhost",
@@ -676,13 +715,12 @@ async def test_command_shaped_bypass_source_dispatches_as_conversation(
             "@user:localhost",
             handled_turn=handled_turn,
             ingress_metadata=DispatchIngressMetadata(source_kind=source_kind),
-            turn_claim_held=True,
         )
 
     assert prepare_dispatch.await_args.kwargs["use_command_context"] is False
     plan_turn.assert_awaited_once()
     execute_command.assert_not_awaited()
-    assert not bot._turn_store.is_claimed_in_flight(event.event_id)
+    _assert_turn_reclaimable(bot, event.event_id)
 
 
 @pytest.mark.asyncio
@@ -726,12 +764,11 @@ async def test_hydrated_sidecar_noncommand_releases_raw_command_claim_before_gat
         await bot._turn_controller.handle_text_event(room, event)
         await bot._coalescing_gate.drain_all()
 
-    assert bot.client.download.await_count == 2
-    assert all(call.kwargs == {"mxc": "mxc://localhost/sidecar"} for call in bot.client.download.await_args_list)
+    bot.client.download.assert_awaited_once_with(mxc="mxc://localhost/sidecar")
     assert prepare_dispatch.await_args.kwargs["use_command_context"] is False
     plan_turn.assert_awaited_once()
     execute_command.assert_not_awaited()
-    assert not bot._turn_store.is_claimed_in_flight(event.event_id)
+    _assert_turn_reclaimable(bot, event.event_id)
 
 
 @pytest.mark.asyncio
@@ -778,7 +815,7 @@ async def test_unresolvable_raw_command_with_hydrated_noncommand_is_not_terminal
     bot.client.download.assert_awaited_once_with(mxc="mxc://localhost/sidecar-ordinary")
     send_text.assert_not_awaited()
     assert not bot._turn_store.is_handled(event.event_id)
-    assert not bot._turn_store.is_claimed_in_flight(event.event_id)
+    _assert_turn_reclaimable(bot, event.event_id)
 
 
 @pytest.mark.asyncio
@@ -824,7 +861,7 @@ async def test_unresolvable_raw_noncommand_with_hydrated_command_is_terminal(tmp
     bot.client.download.assert_awaited_once_with(mxc="mxc://localhost/sidecar-command")
     send_text.assert_awaited_once()
     assert bot._turn_store.is_handled(event.event_id)
-    assert not bot._turn_store.is_claimed_in_flight(event.event_id)
+    _assert_turn_reclaimable(bot, event.event_id)
 
 
 @pytest.mark.asyncio

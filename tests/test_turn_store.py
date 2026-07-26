@@ -24,7 +24,7 @@ from mindroom import constants
 from mindroom.bot import AgentBot
 from mindroom.config.main import Config
 from mindroom.conversation_state_writer import ConversationStateWriter, ConversationStateWriterDeps
-from mindroom.dispatch_handoff import DispatchIngressMetadata, PreparedTextEvent
+from mindroom.dispatch_handoff import PreparedTextEvent
 from mindroom.handled_turns import (
     SourceEventMetadata,
     TurnRecord,
@@ -67,43 +67,44 @@ def _store(tmp_path: Path) -> TurnStore:
     )
 
 
-def test_try_claim_turn_alias_claims_a_free_alias(tmp_path: Path) -> None:
-    """A relay claims the routed-human alias when no live turn owns it."""
+def _is_claimed(store: TurnStore, event_id: str) -> bool:
+    """Inspect the reservation-owned records at the TurnStore unit seam."""
+    with store._pending_claim_lock:
+        return any(event_id in claim.indexed_event_ids for claim in store._pending_turn_claims)
+
+
+def test_complete_turn_claim_owns_source_and_discovery_alias(tmp_path: Path) -> None:
+    """One reservation-owned record carries every live identity."""
     store = _store(tmp_path)
-    claimed_turn = TurnRecord.create(["$relay"], completed=False)
+    claimed_turn = TurnRecord.create(
+        ["$relay"],
+        discovery_event_ids=("$routed",),
+        completed=False,
+    )
+
     assert store.try_claim_turn(claimed_turn)
-
-    assert store.try_claim_turn_alias("$routed") is True
-
-    assert store.is_claimed_in_flight("$routed") is True
-    expanded_turn = replace(claimed_turn, discovery_event_ids=("$routed",))
-    store.release_pending_turn_claim(expanded_turn)
-    assert store.is_claimed_in_flight("$routed") is False
-    assert store.is_claimed_in_flight("$relay") is False
+    assert _is_claimed(store, "$relay") is True
+    assert _is_claimed(store, "$routed") is True
+    store.release_pending_turn_claim(claimed_turn)
+    assert _is_claimed(store, "$routed") is False
+    assert _is_claimed(store, "$relay") is False
 
 
-def test_try_claim_turn_alias_leaves_another_live_turns_alias_untouched(tmp_path: Path) -> None:
-    """An alias already owned by another live turn is rejected, not stolen.
-
-    If turn B claimed turn A's live source and then finished, its release would
-    strip A's claim while A is still running, letting a replay of A's source
-    re-enter. The scalar alias claim must fail and leave the alias with A.
-    """
+def test_source_replay_collides_with_live_discovery_alias(tmp_path: Path) -> None:
+    """A routed source stays owned until both original and relay settle."""
     store = _store(tmp_path)
-    turn_a = TurnRecord.create(["$shared"], completed=False)
-    turn_b = TurnRecord.create(["$relay"], completed=False)
-    assert store.try_claim_turn(turn_a)
-    assert store.try_claim_turn(turn_b)
+    original = TurnRecord.create(["$routed"], completed=False)
+    relay = TurnRecord.create(["$relay"], discovery_event_ids=("$routed",), completed=False)
+    replay = TurnRecord.create(["$routed"], completed=False)
 
-    # B relays a message that replies to $shared, but A already owns it.
-    assert store.try_claim_turn_alias("$shared") is False
+    assert store.try_claim_turn(original)
+    assert store.try_claim_turn(relay)
+    store.release_pending_turn_claim(original)
+    assert store.try_claim_turn(replay) is False
 
-    # B finishes and releases only what it actually owns.
-    store.release_pending_turn_claim(turn_b)
-
-    # A's claim on the shared source survives B's release.
-    assert store.is_claimed_in_flight("$shared") is True
-    assert store.is_claimed_in_flight("$relay") is False
+    store.release_pending_turn_claim(relay)
+    assert store.try_claim_turn(replay) is True
+    store.release_pending_turn_claim(replay)
 
 
 @pytest.mark.asyncio
@@ -140,20 +141,14 @@ async def test_dispatch_releases_claim_when_router_alias_discovery_fails(tmp_pat
             "@user:example.org",
         )
 
-    assert store.is_claimed_in_flight("$relay") is False
+    assert _is_claimed(store, "$relay") is False
 
 
 @pytest.mark.asyncio
-async def test_dispatch_claims_router_relay_alias_up_front(tmp_path: Path) -> None:
-    """A trusted router relay claims its routed-human alias before the first await.
-
-    The relay knows the routed human event id from its own reply relation, so it
-    claims that alias up front and holds it for the whole turn. Without the claim,
-    an alias-addressed replay passed is_claimed_in_flight while the canonical
-    relay response was live.
-    """
+async def test_dispatch_claims_complete_router_relay_turn_before_first_await(tmp_path: Path) -> None:
+    """Dispatch claims source and routed alias together before preparation."""
     store = _store(tmp_path)
-    ingress = SimpleNamespace(router_relay_original_event_id=lambda _event: None)
+    ingress = SimpleNamespace(router_relay_original_event_id=lambda _event: "$routed")
     controller = cast(
         "TurnController",
         SimpleNamespace(deps=SimpleNamespace(turn_store=store, ingress=ingress)),
@@ -165,7 +160,14 @@ async def test_dispatch_claims_router_relay_alias_up_front(tmp_path: Path) -> No
         source={},
         server_timestamp=1_000,
     )
-    prepared = SimpleNamespace(handled_turn=TurnRecord.create(["$relay"], completed=False), event=raw_event)
+    prepared = SimpleNamespace(
+        handled_turn=TurnRecord.create(
+            ["$relay"],
+            discovery_event_ids=("$routed",),
+            completed=False,
+        ),
+        event=raw_event,
+    )
     observed: dict[str, bool] = {}
     prepared_turns: list[TurnRecord | None] = []
 
@@ -174,7 +176,7 @@ async def test_dispatch_claims_router_relay_alias_up_front(tmp_path: Path) -> No
         return prepared
 
     async def blocked(*_args: object, **_kwargs: object) -> bool:
-        observed["routed_in_flight"] = store.is_claimed_in_flight("$routed")
+        observed["routed_in_flight"] = _is_claimed(store, "$routed")
         return True
 
     with (
@@ -192,16 +194,18 @@ async def test_dispatch_claims_router_relay_alias_up_front(tmp_path: Path) -> No
             MagicMock(room_id="!room:example.org"),
             raw_event,
             "@user:example.org",
-            ingress_metadata=DispatchIngressMetadata(
-                source_kind="trusted_internal_relay",
-                router_relay_original_event_id="$routed",
-            ),
         )
 
     assert observed["routed_in_flight"] is True
-    assert prepared_turns == [None]
-    assert store.is_claimed_in_flight("$routed") is False
-    assert store.is_claimed_in_flight("$relay") is False
+    assert prepared_turns == [
+        TurnRecord.create(
+            ["$relay"],
+            discovery_event_ids=("$routed",),
+            completed=False,
+        ),
+    ]
+    assert _is_claimed(store, "$routed") is False
+    assert _is_claimed(store, "$relay") is False
 
 
 @pytest.mark.asyncio
@@ -250,10 +254,16 @@ async def test_dispatch_leaves_alias_owned_by_another_live_turn(tmp_path: Path) 
             "@user:example.org",
         )
 
-    # The relay released only $relay; the routed original still owns $routed.
-    assert prepared_claims == [None]
-    assert store.is_claimed_in_flight("$routed") is True
-    assert store.is_claimed_in_flight("$relay") is False
+    # The relay released its complete record; the routed original still owns its source.
+    assert prepared_claims == [
+        TurnRecord.create(
+            ["$relay"],
+            discovery_event_ids=("$routed",),
+            completed=False,
+        ),
+    ]
+    assert _is_claimed(store, "$routed") is True
+    assert _is_claimed(store, "$relay") is False
 
 
 def _prepared_replay_guard_dispatch(*, degraded: bool) -> tuple[_PreparedTextDispatch, TurnRecord]:
@@ -364,7 +374,10 @@ async def test_router_relay_response_persists_collided_alias_and_redaction(tmp_p
     prepared = SimpleNamespace(
         event=raw_event,
         payload_metadata=None,
-        handled_turn=TurnRecord.create(["$relay"]),
+        handled_turn=TurnRecord.create(
+            ["$relay"],
+            discovery_event_ids=("$routed",),
+        ),
         dispatch=SimpleNamespace(
             requester_user_id="@user:example.org",
             target=target,
@@ -415,38 +428,13 @@ async def test_router_relay_response_persists_collided_alias_and_redaction(tmp_p
     assert persisted.discovery_event_ids == ("$routed",)
     assert persisted.redacted_source_event_ids == ("$routed",)
     # The relay released only its own claim; the overlapping original still owns its alias.
-    assert store.is_claimed_in_flight("$routed") is True
-    assert store.is_claimed_in_flight("$relay") is False
+    assert _is_claimed(store, "$routed") is True
+    assert _is_claimed(store, "$relay") is False
 
     store._ledger.flush()
     _reset_handled_turn_ledger_runtime()
     restarted = _store(tmp_path)
     assert restarted.get_turn_record("$routed") == persisted
-
-
-def test_try_claim_turn_subset_claims_only_unowned_sources(tmp_path: Path) -> None:
-    """Salvage claims exactly the sources no live or finished turn owns."""
-    store = _store(tmp_path)
-    assert store.try_claim_turn(TurnRecord.create(["$live"], completed=False))
-    store.record_turn(TurnRecord.create(["$handled"]))
-
-    claimed = store.try_claim_turn_subset(["$live", "$handled", "$fresh", "$fresh"])
-
-    assert claimed == ("$fresh",)
-    assert store.is_claimed_in_flight("$fresh")
-    # The stale duplicate stays owned by its original live turn.
-    assert store.is_claimed_in_flight("$live")
-    assert not store.is_claimed_in_flight("$handled")
-
-
-def test_try_claim_turn_subset_empty_when_every_source_is_owned(tmp_path: Path) -> None:
-    """A fully-owned batch salvages nothing and leaves existing claims intact."""
-    store = _store(tmp_path)
-    assert store.try_claim_turn(TurnRecord.create(["$a", "$b"], completed=False))
-
-    assert store.try_claim_turn_subset(["$a", "$b"]) == ()
-    assert store.is_claimed_in_flight("$a")
-    assert store.is_claimed_in_flight("$b")
 
 
 def _load_with_recovery(
@@ -555,11 +543,11 @@ def test_is_claimed_in_flight_tracks_live_claims(tmp_path: Path) -> None:
     store = _store(tmp_path)
     turn = TurnRecord.create(["$source"], completed=False)
 
-    assert store.is_claimed_in_flight("$source") is False
+    assert _is_claimed(store, "$source") is False
     assert store.try_claim_turn(turn) is True
-    assert store.is_claimed_in_flight("$source") is True
+    assert _is_claimed(store, "$source") is True
     store.release_pending_turn_claim(turn)
-    assert store.is_claimed_in_flight("$source") is False
+    assert _is_claimed(store, "$source") is False
 
 
 def test_same_turn_can_reclaim_terminal_owner_for_recovery(tmp_path: Path) -> None:
@@ -569,7 +557,7 @@ def test_same_turn_can_reclaim_terminal_owner_for_recovery(tmp_path: Path) -> No
     store.record_turn(turn)
 
     assert store.try_claim_turn(turn) is True
-    assert store.is_claimed_in_flight("$source") is True
+    assert _is_claimed(store, "$source") is True
     store.release_pending_turn_claim(turn)
 
 
@@ -582,7 +570,7 @@ def test_is_claimed_in_flight_sees_absorbed_discovery_alias(tmp_path: Path) -> N
     )
 
     assert store.try_claim_turn(turn) is True
-    assert store.is_claimed_in_flight("$alias") is True
+    assert _is_claimed(store, "$alias") is True
 
 
 def test_discovery_alias_allows_original_but_excludes_second_relay(tmp_path: Path) -> None:

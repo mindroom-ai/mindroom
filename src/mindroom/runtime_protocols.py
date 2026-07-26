@@ -101,6 +101,9 @@ class SupportsClientConfigGeneration(SupportsClientConfig, Protocol):
     @property
     def runtime_generation(self) -> str: ...  # noqa: D102
 
+    @property
+    def stopped_runtime_generations(self) -> set[str]: ...  # noqa: D102
+
 
 class SupportsConfigOrchestrator(SupportsConfig, Protocol):
     """Expose the config plus optional orchestrator handle."""

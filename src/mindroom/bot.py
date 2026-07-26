@@ -582,7 +582,6 @@ class AgentBot:
                 coalescing_gate=self._coalescing_gate,
                 edit_regenerator=self._edit_regenerator,
                 ingress=self._ingress_validator,
-                timestamp_formatter=timestamp_formatter,
                 interrupted_turn_rooms=self._interrupted_turn_rooms,
             ),
         )
@@ -622,6 +621,11 @@ class AgentBot:
     def runtime_generation(self) -> str:
         """Clock-free ownership stamp for streams created by this bot start."""
         return self._runtime_view.runtime_generation
+
+    @property
+    def stopped_runtime_generations(self) -> frozenset[str]:
+        """Generations this bot instance positively stopped."""
+        return frozenset(self._runtime_view.stopped_runtime_generations)
 
     @property
     def client(self) -> nio.AsyncClient | None:
@@ -1622,6 +1626,7 @@ class AgentBot:
         if self.client is not None:
             self.logger.warning("Client is not None in stop()")
             await self.client.close()
+        self._runtime_view.mark_runtime_stopped()
         self.logger.info("Stopped agent bot")
 
     async def _send_welcome_message_if_empty(self, room_id: str, visible_to_sender_id: str | None = None) -> None:

@@ -81,12 +81,17 @@ class BotRuntimeState:
     # rotated on every runtime start so a stopped-then-restarted bot object
     # can still repair streams left behind by its previous run.
     runtime_generation: str = field(default_factory=lambda: uuid4().hex)
+    stopped_runtime_generations: set[str] = field(default_factory=set)
     callback_failure_count: int = 0
 
     def mark_runtime_started(self) -> None:
         """Record the runtime start time and rotate the generation for this bot start."""
         self.runtime_started_at = time.time()
         self.runtime_generation = uuid4().hex
+
+    def mark_runtime_stopped(self) -> None:
+        """Record positive proof that this generation no longer owns live work."""
+        self.stopped_runtime_generations.add(self.runtime_generation)
 
     def mark_callback_failed(self) -> None:
         """Record that a Matrix callback failed after sync certification."""

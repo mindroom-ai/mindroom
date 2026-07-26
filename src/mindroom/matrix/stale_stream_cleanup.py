@@ -110,6 +110,9 @@ class StaleStreamCleanupActor:
     # latest content carries this stamp are live current-generation output and
     # must never be repaired, regardless of clocks or live-task snapshots.
     runtime_generation: str
+    # Positive lifecycle proof collected only after the owning bot completed
+    # its shutdown drain and closed its client.
+    stopped_runtime_generations: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -569,7 +572,7 @@ async def _process_stale_room_candidate(
         return False, None
     if scan_policy.terminal_interrupted_only and not _has_resumable_interrupted_note(state):
         return False, None
-    if _is_current_generation_stream(state, actor=actor):
+    if not _has_cleanup_authority(state, actor=actor):
         return False, None
     if _is_cleanup_candidate(state):
         return await _cleanup_candidate_message(
@@ -1738,20 +1741,12 @@ def _interrupted_thread_from_terminal_state(
     )
 
 
-def _is_current_generation_stream(state: _MessageState, *, actor: StaleStreamCleanupActor) -> bool:
-    """Return whether the scanned stamp proves this runtime owns the stream.
-
-    The generation stamp read from the same content snapshot is the clock-free
-    proof of current-run ownership.
-    MindRoom does not enforce its unsupported assumption that one runtime owns each
-    Matrix principal, so a concurrent runtime can see a foreign generation and
-    terminate the first runtime's live streams.
-    Even when the live response finalizes between scan and this check, the
-    stamped snapshot still names the current generation, so a current-run
-    stream is never repaired from history regardless of homeserver clock skew.
-    """
+def _has_cleanup_authority(state: _MessageState, *, actor: StaleStreamCleanupActor) -> bool:
+    """Require positive stopped-owner proof before repairing stamped output."""
     latest_generation = (state.latest_content or {}).get(STREAM_GENERATION_KEY)
-    return latest_generation == actor.runtime_generation
+    if not isinstance(latest_generation, str):
+        return True
+    return latest_generation != actor.runtime_generation and latest_generation in actor.stopped_runtime_generations
 
 
 def _is_cleanup_candidate(state: _MessageState) -> bool:

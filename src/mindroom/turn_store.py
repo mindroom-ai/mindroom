@@ -20,7 +20,7 @@ from mindroom.history.storage import invalidate_compacted_replay, read_scope_see
 from mindroom.session_ids import create_session_id
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Mapping
 
     import nio
 
@@ -70,7 +70,6 @@ class TurnStore:
     _pending_claim_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
     _pending_claim_changed: asyncio.Event = field(default_factory=asyncio.Event, init=False, repr=False)
     _pending_turn_claims: list[TurnRecord] = field(default_factory=list, init=False, repr=False)
-    _pending_claimed_alias_event_ids: set[str] = field(default_factory=set, init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Construct the private handled-turn ledger for this runtime entity."""
@@ -201,17 +200,18 @@ class TurnStore:
         )
 
     def try_claim_turn(self, turn_record: TurnRecord) -> bool:
-        """Claim exclusive physical sources while aliases remain advisory."""
-        alias_owners = map(self.get_turn_record, turn_record.discovery_event_ids)
+        """Claim one complete turn identity without blocking on durable I/O."""
+        durable_owners = map(self.get_turn_record, turn_record.indexed_event_ids)
         if not turn_record.source_event_ids or any(
             owner is not None and owner.completed and not same_turn_identity(owner, turn_record)
-            for owner in alias_owners
+            for owner in durable_owners
         ):
             return False
         source_ids, discovery_ids = set(turn_record.source_event_ids), set(turn_record.discovery_event_ids)
         with self._pending_claim_lock:
             if any(
-                source_ids.intersection(claim.source_event_ids) or discovery_ids.intersection(claim.discovery_event_ids)
+                source_ids.intersection(claim.indexed_event_ids)
+                or discovery_ids.intersection(claim.discovery_event_ids)
                 for claim in self._pending_turn_claims
             ):
                 return False
@@ -221,10 +221,7 @@ class TurnStore:
     def release_pending_turn_claim(self, turn_record: TurnRecord) -> None:
         """Release a response claim after terminal settlement or failure."""
         with self._pending_claim_lock:
-            self._pending_turn_claims = [
-                claim for claim in self._pending_turn_claims if not same_turn_identity(claim, turn_record)
-            ]
-            self._pending_claimed_alias_event_ids.difference_update(turn_record.discovery_event_ids)
+            self._pending_turn_claims = [claim for claim in self._pending_turn_claims if claim != turn_record]
             claim_changed, self._pending_claim_changed = self._pending_claim_changed, asyncio.Event()
         claim_changed.set()
 
@@ -237,99 +234,6 @@ class TurnStore:
                     return
                 claim_changed = self._pending_claim_changed
             await claim_changed.wait()
-
-    def is_claimed_in_flight(self, event_id: str) -> bool:
-        """Return whether one source event is already claimed by a live turn.
-
-        A replayed sync delivery of an event whose first delivery is still
-        being answered would otherwise re-enter coalescing and, once folded
-        into a follow-up batch, poison the whole batch's all-or-nothing claim.
-        """
-        with self._pending_claim_lock:
-            return event_id in self._pending_claimed_alias_event_ids or any(
-                event_id in claim.indexed_event_ids for claim in self._pending_turn_claims
-            )
-
-    def try_claim_turn_alias(self, event_id: str) -> bool:
-        """Atomically claim one identity alias only when no live turn owns it.
-
-        A trusted router relay knows the routed human event id it replies to
-        before it starts preparing, so the relay claims that alias up front to
-        keep alias-addressed replays dropped while the response is live.
-
-        The claim is collision-aware: if another live turn already owns the
-        alias, this returns ``False`` and leaves that owner untouched. A router
-        relay can legitimately overlap the original routed turn, so the caller
-        folds the alias into its own claim record only when it acquired it and
-        never releases a claim it did not take.
-        """
-        with self._pending_claim_lock:
-            if event_id in self._pending_claimed_alias_event_ids or any(
-                event_id in claim.indexed_event_ids for claim in self._pending_turn_claims
-            ):
-                return False
-            self._pending_claimed_alias_event_ids.add(event_id)
-            return True
-
-    def try_claim_turn_subset(
-        self,
-        event_ids: Sequence[str],
-        *,
-        relinquished_claims: Sequence[TurnRecord] = (),
-        discovery_event_ids_by_source: Mapping[str, str] | None = None,
-    ) -> tuple[str, ...]:
-        """Atomically claim whichever of these sources no live or finished turn owns.
-
-        The ingress in-flight precheck is only a fast path: a replayed source
-        can pass it before its original delivery claims, stall, and join a
-        later coalesced batch. The batch's all-or-nothing claim then collided
-        and silently starved innocent co-batched sources. Claiming the exact
-        still-unowned subset in one lock acquisition lets the flush drop only
-        the stale duplicates and keep the rest of the batch's turn.
-        """
-        discovery_by_source = discovery_event_ids_by_source or {}
-        alias_owners = {alias: self.get_turn_record(alias) for alias in discovery_by_source.values()}
-        with self._pending_claim_lock:
-            self._pending_turn_claims = [
-                claim
-                for claim in self._pending_turn_claims
-                if not any(same_turn_identity(claim, relinquished) for relinquished in relinquished_claims)
-            ]
-            claimed_source_ids = {
-                event_id for claim in self._pending_turn_claims for event_id in claim.source_event_ids
-            }
-            claimed_discovery_ids = {
-                event_id for claim in self._pending_turn_claims for event_id in claim.discovery_event_ids
-            }
-            claimable: list[str] = []
-            for event_id in dict.fromkeys(event_ids):
-                alias = discovery_by_source.get(event_id)
-                owner = alias_owners.get(alias) if alias is not None else None
-                candidate = TurnRecord.create([event_id], completed=False)
-                alias_conflicts = alias is not None and (
-                    alias in claimed_discovery_ids
-                    or (owner is not None and owner.completed and not same_turn_identity(owner, candidate))
-                )
-                if (
-                    event_id in claimed_source_ids
-                    or event_id in self._pending_claimed_alias_event_ids
-                    or self.is_handled(event_id)
-                    or alias_conflicts
-                ):
-                    continue
-                claimable.append(event_id)
-            if claimable:
-                discovery_event_ids = tuple(
-                    alias for event_id in claimable if (alias := discovery_by_source.get(event_id)) is not None
-                )
-                self._pending_turn_claims.append(
-                    TurnRecord.create(
-                        claimable,
-                        discovery_event_ids=discovery_event_ids,
-                        completed=False,
-                    ),
-                )
-        return tuple(claimable)
 
     def mark_source_redacted(
         self,
