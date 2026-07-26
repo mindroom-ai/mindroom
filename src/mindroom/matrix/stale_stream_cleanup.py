@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast
@@ -56,8 +57,9 @@ from mindroom.matrix.thread_projection import (
     resolve_thread_ids_for_event_infos,
 )
 from mindroom.runtime_generation_lease import (
-    RUNTIME_GENERATION_PROOF_RETENTION_SECONDS,
+    acknowledge_stopped_runtime_generation_proofs,
     runtime_generation_owner_stopped,
+    stopped_runtime_generation_proofs,
 )
 from mindroom.streaming import (
     INTERRUPTED_RESPONSE_NOTE,
@@ -79,7 +81,7 @@ _ROOM_HISTORY_PAGE_SIZE = 100
 # Restart cleanup should only edit active-looking messages from the current
 # outage window. Explicit terminal interrupted notes may still be auto-resumed
 # later because they are already user-visible interrupted outcomes.
-_STALE_STREAM_LOOKBACK_MS = RUNTIME_GENERATION_PROOF_RETENTION_SECONDS * 1000
+_STALE_STREAM_LOOKBACK_MS = 6 * 60 * 60 * 1000
 _RATE_LIMIT_DELAY_SECONDS = 0.15
 _RECOVERY_ROOM_CONCURRENCY = 8
 _STOP_REACTION_KEYS = frozenset({"🛑", "⏹️"})
@@ -206,13 +208,23 @@ async def recover_stale_streaming_messages(
     room_concurrency: int = _RECOVERY_ROOM_CONCURRENCY,
 ) -> _StaleStreamRecoveryResult:
     """Recover stale streams through one concurrent Matrix-history path."""
+    stopped_generations = stopped_runtime_generation_proofs(runtime_paths)
+    all_room_actors, joined_room_scan_complete = await _joined_room_actors(actors)
     room_actors = {
         room_id: joined_actors
-        for room_id, joined_actors in (await _joined_room_actors(actors)).items()
+        for room_id, joined_actors in all_room_actors.items()
         if room_id not in scanned_room_ids and (target_room_ids is None or room_id in target_room_ids)
     }
     scanned_room_ids.update(room_actors)
     if not room_actors:
+        _acknowledge_stopped_proofs_after_complete_scan(
+            runtime_paths=runtime_paths,
+            stopped_generations=stopped_generations,
+            joined_room_scan_complete=joined_room_scan_complete,
+            target_room_ids=target_room_ids,
+            all_room_ids=set(all_room_actors),
+            scanned_room_ids=scanned_room_ids,
+        )
         return _StaleStreamRecoveryResult(room_count=0, cleaned_count=0, resumed_count=0)
 
     semaphore = asyncio.Semaphore(max(1, room_concurrency))
@@ -268,6 +280,15 @@ async def recover_stale_streaming_messages(
                 task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
 
+    _acknowledge_stopped_proofs_after_complete_scan(
+        runtime_paths=runtime_paths,
+        stopped_generations=stopped_generations,
+        joined_room_scan_complete=joined_room_scan_complete,
+        target_room_ids=target_room_ids,
+        all_room_ids=set(all_room_actors),
+        scanned_room_ids=scanned_room_ids,
+    )
+
     return _StaleStreamRecoveryResult(
         room_count=len(room_actors),
         cleaned_count=cleaned_count,
@@ -275,15 +296,29 @@ async def recover_stale_streaming_messages(
     )
 
 
+def _acknowledge_stopped_proofs_after_complete_scan(
+    *,
+    runtime_paths: RuntimePaths,
+    stopped_generations: set[str],
+    joined_room_scan_complete: bool,
+    target_room_ids: set[str] | None,
+    all_room_ids: set[str],
+    scanned_room_ids: set[str],
+) -> None:
+    """Acknowledge pre-scan stopped proofs only after one complete global scan."""
+    if joined_room_scan_complete and target_room_ids is None and all_room_ids.issubset(scanned_room_ids):
+        acknowledge_stopped_runtime_generation_proofs(runtime_paths, stopped_generations)
+
+
 async def _joined_room_actors(
     actors: dict[str, StaleStreamCleanupActor],
-) -> dict[str, dict[str, StaleStreamCleanupActor]]:
+) -> tuple[dict[str, dict[str, StaleStreamCleanupActor]], bool]:
     """Return each joined room once with every available bot account in it."""
 
     async def joined_rooms_for_actor(
         bot_user_id: str,
         actor: StaleStreamCleanupActor,
-    ) -> tuple[str, StaleStreamCleanupActor, list[str]]:
+    ) -> tuple[str, StaleStreamCleanupActor, list[str] | None]:
         try:
             joined_rooms = await get_joined_rooms(actor.client)
         except Exception:
@@ -293,16 +328,20 @@ async def _joined_room_actors(
                 exc_info=True,
             )
             joined_rooms = None
-        return bot_user_id, actor, joined_rooms or []
+        return bot_user_id, actor, joined_rooms
 
     joined_room_results = await asyncio.gather(
         *(joined_rooms_for_actor(bot_user_id, actor) for bot_user_id, actor in actors.items()),
     )
     room_actors: dict[str, dict[str, StaleStreamCleanupActor]] = {}
+    scan_complete = True
     for bot_user_id, actor, joined_room_ids in joined_room_results:
+        if joined_room_ids is None:
+            scan_complete = False
+            continue
         for room_id in joined_room_ids:
             room_actors.setdefault(room_id, {})[bot_user_id] = actor
-    return room_actors
+    return room_actors, scan_complete
 
 
 async def _auto_resume_interrupted_threads(
@@ -348,7 +387,16 @@ async def _auto_resume_interrupted_threads(
                 runtime_paths=runtime_paths,
             )
             delay_due = True
-            delivered = await send_message_result(client, interrupted_thread.room_id, content)
+            delivered = await send_message_result(
+                client,
+                interrupted_thread.room_id,
+                content,
+                transaction_id=_recovery_transaction_id(
+                    "auto-resume",
+                    interrupted_thread.room_id,
+                    interrupted_thread.target_event_id,
+                ),
+            )
             if delivered is not None:
                 if conversation_cache is not None:
                     conversation_cache.notify_outbound_message(
@@ -576,7 +624,7 @@ async def _process_stale_room_candidate(
     if not _has_cleanup_authority(state, actor=actor, runtime_paths=runtime_paths):
         return False, None
     if _is_cleanup_candidate(state):
-        return await _cleanup_candidate_message(
+        result = await _cleanup_candidate_message(
             actor.client,
             room_id=room_id,
             target_event_id=target_event_id,
@@ -588,22 +636,27 @@ async def _process_stale_room_candidate(
             agent_name=agent_name,
             prior_edit_succeeded=prior_edit_succeeded,
         )
-    if not (_has_restart_interrupted_note(state.latest_body) or _has_resumable_interrupted_note(state)):
+    elif _has_restart_interrupted_note(state.latest_body) or _has_resumable_interrupted_note(state):
+        result = await _handle_interrupted_message(
+            actor.client,
+            room_id=room_id,
+            target_event_id=target_event_id,
+            state=state,
+            auto_resume_target_event_ids=auto_resume_target_event_ids,
+            can_auto_resume=_has_resumable_interrupted_note(state),
+            bot_user_ids=bot_user_ids,
+            config=config,
+            runtime_paths=runtime_paths,
+            conversation_cache=actor.conversation_cache,
+            agent_name=agent_name,
+            prior_edit_succeeded=prior_edit_succeeded,
+        )
+    else:
         return False, None
-    return await _handle_interrupted_message(
-        actor.client,
-        room_id=room_id,
-        target_event_id=target_event_id,
-        state=state,
-        auto_resume_target_event_ids=auto_resume_target_event_ids,
-        can_auto_resume=_has_resumable_interrupted_note(state),
-        bot_user_ids=bot_user_ids,
-        config=config,
-        runtime_paths=runtime_paths,
-        conversation_cache=actor.conversation_cache,
-        agent_name=agent_name,
-        prior_edit_succeeded=prior_edit_succeeded,
-    )
+    if _has_runtime_generation_stamp(state) and not result[0]:
+        msg = f"Stopped-owner certification incomplete for {room_id} {target_event_id}"
+        raise RuntimeError(msg)
+    return result
 
 
 async def _handle_interrupted_message(
@@ -909,12 +962,8 @@ async def _collect_room_history_events(
             direction=nio.MessageDirection.back,
         )
         if not isinstance(response, nio.RoomMessagesResponse):
-            logger.warning(
-                "Failed to fetch room history during stale stream cleanup",
-                room_id=room_id,
-                error=str(response),
-            )
-            return {}, []
+            msg = f"Failed to fetch room history during stale stream cleanup for {room_id}: {response}"
+            raise TypeError(msg)
 
         if not response.chunk:
             break
@@ -1513,6 +1562,7 @@ async def _edit_stale_message(
         content,
         new_text,
         extra_content=extra_content,
+        transaction_id=_recovery_transaction_id("certify", room_id, target_event_id),
     )
     if delivered is not None:
         if conversation_cache is not None:
@@ -1676,6 +1726,12 @@ def _truncate_partial_text(text: str, *, limit: int = _INTERRUPTED_PARTIAL_TEXT_
     if len(stripped_text) <= limit:
         return stripped_text
     return f"{stripped_text[: limit - 1]}…"
+
+
+def _recovery_transaction_id(operation: str, room_id: str, target_event_id: str) -> str:
+    """Return one stable Matrix transaction ID for an idempotent recovery action."""
+    identity = f"{operation}\0{room_id}\0{target_event_id}"
+    return f"mindroom-{operation}-{hashlib.sha256(identity.encode()).hexdigest()}"
 
 
 def _ordered_auto_resume_candidates(

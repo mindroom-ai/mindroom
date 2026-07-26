@@ -128,6 +128,7 @@ async def _send_prepared_room_message(
     cache_bypass: bool,
     operation: str,
     retry_sync_recovery: bool,
+    transaction_id: str | None,
 ) -> object | None:
     """Send one prepared Matrix room message and normalize local delivery exceptions."""
 
@@ -147,7 +148,7 @@ async def _send_prepared_room_message(
                 room_id,
                 message_type,
                 content_sent,
-                uuid4(),
+                transaction_id or uuid4(),
             )
             return await client._send(
                 nio.RoomSendResponse,
@@ -158,6 +159,14 @@ async def _send_prepared_room_message(
             )
         # Bots have no interactive device-verification flow, so encrypted sends
         # always deliver to unverified devices.
+        if transaction_id is not None:
+            return await client.room_send(
+                room_id=room_id,
+                message_type=message_type,
+                content=content_sent,
+                tx_id=transaction_id,
+                ignore_unverified_devices=True,
+            )
         return await client.room_send(
             room_id=room_id,
             message_type=message_type,
@@ -250,6 +259,7 @@ async def send_message_result(
     *,
     operation: str = "send_message",
     retry_sync_recovery: bool = False,
+    transaction_id: str | None = None,
 ) -> DeliveredMatrixEvent | None:
     """Send a message to a Matrix room and return the exact delivered payload."""
     if not _can_send_to_encrypted_room(client, room_id, operation=operation):
@@ -308,6 +318,7 @@ async def send_message_result(
         cache_bypass=cache_bypass,
         operation=operation,
         retry_sync_recovery=retry_sync_recovery,
+        transaction_id=transaction_id,
     )
     if response is None:
         emit_timing_event(
@@ -710,6 +721,7 @@ async def edit_message_result(
     *,
     extra_content: dict[str, Any] | None = None,
     retry_sync_recovery: bool = False,
+    transaction_id: str | None = None,
 ) -> DeliveredMatrixEvent | None:
     """Edit an existing Matrix message and return the exact delivered payload."""
     edit_content = build_edit_event_content(
@@ -725,6 +737,7 @@ async def edit_message_result(
         edit_content,
         operation="edit_message",
         retry_sync_recovery=retry_sync_recovery,
+        transaction_id=transaction_id,
     )
 
 
