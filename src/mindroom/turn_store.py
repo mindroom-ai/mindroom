@@ -17,6 +17,7 @@ from mindroom.agent_storage import get_agent_session, get_team_session
 from mindroom.agents import remove_run_by_event_id
 from mindroom.handled_turns import HandledTurnLedger, TurnRecord, TurnRecordCodec, merge_edit_facts, same_turn_identity
 from mindroom.history.storage import invalidate_compacted_replay, read_scope_seen_event_ids
+from mindroom.logging_config import get_logger
 from mindroom.session_ids import create_session_id
 
 if TYPE_CHECKING:
@@ -30,6 +31,12 @@ if TYPE_CHECKING:
     from mindroom.message_target import MessageTarget
     from mindroom.tool_system.runtime_context import ToolRuntimeSupport
     from mindroom.turn_policy import ResponseAction
+
+logger = get_logger(__name__)
+
+
+class _PendingTurnReplayError(RuntimeError):
+    """Raised inside an atomic ledger update to leave incompatible mappings untouched."""
 
 
 @dataclass(frozen=True)
@@ -162,46 +169,19 @@ class TurnStore:
             return None
         pending_record = replace(turn_record, completed=False, timestamp=0.0)
 
-        def merge_pending(existing_records: Mapping[str, TurnRecord]) -> TurnRecord:
-            compatible_existing_records = tuple(
-                existing
-                for existing in existing_records.values()
-                if not existing.completed or same_turn_identity(existing, pending_record)
+        try:
+            return self._ledger.update_handled_turn(
+                pending_record.indexed_event_ids,
+                lambda existing_records: _merge_pending_record(pending_record, existing_records),
+                wait_for_persist=True,
             )
-            existing_record = max(
-                compatible_existing_records,
-                key=lambda record: (record.completed, record.timestamp),
-                default=None,
+        except _PendingTurnReplayError as error:
+            logger.warning(
+                "pending_turn_replay_rejected",
+                reason=str(error),
+                source_event_count=len(pending_record.source_event_ids),
             )
-            merged_record = (
-                _backfill_missing_turn_facts(pending_record, existing_record)
-                if existing_record is not None
-                else pending_record
-            )
-            redacted_source_event_ids, pending_redaction_cleanup_event_ids = _merged_redaction_markers(
-                pending_record,
-                merged_record,
-                compatible_existing_records,
-            )
-            if _has_redaction_cleanup_context(merged_record):
-                pending_event_ids = set(pending_redaction_cleanup_event_ids)
-                pending_event_ids.update(redacted_source_event_ids)
-                pending_redaction_cleanup_event_ids = tuple(
-                    event_id for event_id in merged_record.indexed_event_ids if event_id in pending_event_ids
-                )
-            return replace(
-                merged_record,
-                completed=False,
-                redacted_source_event_ids=redacted_source_event_ids,
-                pending_redaction_cleanup_event_ids=pending_redaction_cleanup_event_ids,
-                timestamp=0.0,
-            )
-
-        return self._ledger.update_handled_turn(
-            pending_record.indexed_event_ids,
-            merge_pending,
-            wait_for_persist=True,
-        )
+            return None
 
     def try_claim_turn(self, turn_record: TurnRecord) -> bool:
         """Claim exclusive physical sources while aliases remain advisory."""
@@ -650,6 +630,188 @@ class TurnStore:
                 history_scope=turn_record.history_scope.key,
             )
         return removed_any
+
+
+def _merge_pending_record(
+    pending_record: TurnRecord,
+    existing_records: Mapping[str, TurnRecord],
+) -> TurnRecord:
+    """Merge one pending candidate without replacing an existing authority."""
+    canonical_replay = _canonical_pending_replay(pending_record, existing_records)
+    if canonical_replay is not None:
+        return canonical_replay
+    compatible_existing_records = tuple(
+        existing
+        for existing in existing_records.values()
+        if not existing.completed or same_turn_identity(existing, pending_record)
+    )
+    existing_record = max(
+        compatible_existing_records,
+        key=lambda record: (record.completed, record.timestamp),
+        default=None,
+    )
+    merged_record = (
+        _backfill_missing_turn_facts(pending_record, existing_record) if existing_record is not None else pending_record
+    )
+    redacted_source_event_ids, pending_redaction_cleanup_event_ids = _merged_redaction_markers(
+        pending_record,
+        merged_record,
+        compatible_existing_records,
+    )
+    if _has_redaction_cleanup_context(merged_record):
+        pending_event_ids = {*pending_redaction_cleanup_event_ids, *redacted_source_event_ids}
+        pending_redaction_cleanup_event_ids = tuple(
+            event_id for event_id in merged_record.indexed_event_ids if event_id in pending_event_ids
+        )
+    return replace(
+        merged_record,
+        completed=False,
+        redacted_source_event_ids=redacted_source_event_ids,
+        pending_redaction_cleanup_event_ids=pending_redaction_cleanup_event_ids,
+        timestamp=0.0,
+    )
+
+
+def _canonical_pending_replay(
+    pending_record: TurnRecord,
+    existing_records: Mapping[str, TurnRecord],
+) -> TurnRecord | None:
+    """Return the prior pending authority for a safe physical subset replay."""
+    authority = _pending_source_authority(pending_record, existing_records)
+    if authority is None or same_turn_identity(authority, pending_record):
+        return None
+    if authority.completed:
+        message = "candidate source superset is already completed"
+        raise _PendingTurnReplayError(message)
+    if not set(pending_record.source_event_ids).issubset(authority.source_event_ids):
+        message = "candidate is not a physical subset of its pending owner"
+        raise _PendingTurnReplayError(message)
+    if any(existing != authority for existing in existing_records.values()):
+        message = "candidate indexed IDs map to incompatible owners"
+        raise _PendingTurnReplayError(message)
+    if not _pending_replay_context_matches(authority, pending_record):
+        message = "candidate response context does not match its pending owner"
+        raise _PendingTurnReplayError(message)
+    redacted_source_event_ids, pending_redaction_cleanup_event_ids = _merged_redaction_markers(
+        pending_record,
+        authority,
+        (authority,),
+    )
+    return replace(
+        authority,
+        redacted_source_event_ids=redacted_source_event_ids,
+        pending_redaction_cleanup_event_ids=pending_redaction_cleanup_event_ids,
+    )
+
+
+def _pending_source_authority(
+    pending_record: TurnRecord,
+    existing_records: Mapping[str, TurnRecord],
+) -> TurnRecord | None:
+    """Resolve physical candidate mappings without accepting aliases or fragments."""
+    source_owners = tuple(existing_records.get(event_id) for event_id in pending_record.source_event_ids)
+    mapped_source_owners = tuple(owner for owner in source_owners if owner is not None)
+    if not mapped_source_owners:
+        if existing_records:
+            message = "candidate sources are only discovery aliases"
+            raise _PendingTurnReplayError(message)
+        return None
+    if len(mapped_source_owners) != len(source_owners):
+        redaction_tombstones_only = all(
+            owner is None or _is_context_free_redaction_tombstone(event_id, owner)
+            for event_id, owner in zip(pending_record.source_event_ids, source_owners, strict=True)
+        )
+        if redaction_tombstones_only:
+            return None
+        message = "candidate mixes owned and unowned physical sources"
+        raise _PendingTurnReplayError(message)
+    if not all(
+        event_id in owner.source_event_ids
+        for event_id, owner in zip(pending_record.source_event_ids, mapped_source_owners, strict=True)
+    ):
+        message = "candidate physical source resolves through a discovery alias"
+        raise _PendingTurnReplayError(message)
+    unique_source_owners = _unique_turn_records(mapped_source_owners)
+    if len(unique_source_owners) != 1:
+        message = "candidate sources have fragmented pending owners"
+        raise _PendingTurnReplayError(message)
+    return unique_source_owners[0]
+
+
+def _unique_turn_records(records: tuple[TurnRecord, ...]) -> tuple[TurnRecord, ...]:
+    """Deduplicate multiple physical indexes pointing at one immutable record."""
+    unique: list[TurnRecord] = []
+    for record in records:
+        if record not in unique:
+            unique.append(record)
+    return tuple(unique)
+
+
+def _pending_replay_context_matches(authority: TurnRecord, candidate: TurnRecord) -> bool:
+    """Return whether a physical replay may adopt one existing pending response."""
+    if not _has_complete_pending_response_context(authority) or not _has_complete_pending_response_context(candidate):
+        return False
+    if (
+        authority.response_owner != candidate.response_owner
+        or authority.requester_id != candidate.requester_id
+        or authority.history_scope != candidate.history_scope
+    ):
+        return False
+    authority_target = authority.conversation_target
+    candidate_target = candidate.conversation_target
+    assert authority_target is not None
+    assert candidate_target is not None
+    if authority_target.room_id != candidate_target.room_id:
+        return False
+    if authority_target.source_thread_id is not None or candidate_target.source_thread_id is not None:
+        target_matches = (
+            authority_target.source_thread_id == candidate_target.source_thread_id
+            and authority_target.resolved_thread_id == candidate_target.resolved_thread_id
+            and authority_target.session_id == candidate_target.session_id
+        )
+    elif authority_target.resolved_thread_id is None or candidate_target.resolved_thread_id is None:
+        target_matches = (
+            authority_target.resolved_thread_id is None
+            and candidate_target.resolved_thread_id is None
+            and authority_target.session_id == candidate_target.session_id
+        )
+    else:
+        authority_is_self_root = authority_target.resolved_thread_id == authority.anchor_event_id
+        candidate_is_self_root = candidate_target.resolved_thread_id == candidate.anchor_event_id
+        target_matches = (
+            authority_is_self_root and candidate_is_self_root
+            if authority_is_self_root or candidate_is_self_root
+            else (
+                authority_target.resolved_thread_id == candidate_target.resolved_thread_id
+                and authority_target.session_id == candidate_target.session_id
+            )
+        )
+    return target_matches
+
+
+def _has_complete_pending_response_context(record: TurnRecord) -> bool:
+    """Return whether a pending record can authoritatively identify one response."""
+    return (
+        record.response_owner is not None
+        and record.requester_id is not None
+        and record.correlation_id is not None
+        and record.history_scope is not None
+        and record.conversation_target is not None
+    )
+
+
+def _is_context_free_redaction_tombstone(event_id: str, record: TurnRecord) -> bool:
+    """Return whether one mapping is only the pre-registration redaction fence."""
+    return (
+        not record.completed
+        and record.source_event_ids == (event_id,)
+        and record.redacted_source_event_ids == (event_id,)
+        and record.response_owner is None
+        and record.requester_id is None
+        and record.correlation_id is None
+        and record.history_scope is None
+        and record.conversation_target is None
+    )
 
 
 def _merged_redaction_markers(

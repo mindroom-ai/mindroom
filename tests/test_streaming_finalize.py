@@ -714,6 +714,29 @@ async def test_terminal_persist_failure_handles_placeholder_only_after_failure_e
 
 
 @pytest.mark.asyncio
+async def test_terminal_owner_gateway_builds_canonical_identity(tmp_path: Path) -> None:
+    """Ingress callers cross the delivery boundary without constructing its identity type."""
+    gateway = _delivery_gateway(tmp_path)
+    owner = MagicMock()
+    gateway.deps.terminal_delivery_coordinator.owned_delivery.return_value = owner
+    envelope = _envelope()
+
+    result = await gateway.owned_terminal_delivery_for_turn(
+        response_kind="agent",
+        response_envelope=envelope,
+        correlation_id="$correlation",
+        source_event_ids=("$first", "$second"),
+    )
+
+    assert result is owner
+    identity = gateway.deps.terminal_delivery_coordinator.owned_delivery.await_args.args[0]
+    assert identity.response_kind == "agent"
+    assert identity.response_envelope == envelope
+    assert identity.correlation_id == "$correlation"
+    assert identity.source_event_ids == ("$first", "$second")
+
+
+@pytest.mark.asyncio
 async def test_durable_pending_edit_never_competes_with_placeholder_failure_update(tmp_path: Path) -> None:
     """A frozen stable transaction must remain the only edit after an ambiguous failure."""
     gateway = _delivery_gateway(tmp_path)

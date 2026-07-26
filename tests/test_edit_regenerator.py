@@ -570,6 +570,10 @@ async def test_newer_edit_arriving_under_response_lock_is_drained(tmp_path: Path
         "older body",
         "newest body",
     ]
+    assert [call.args[0].correlation_id for call in harness.generate_response.await_args_list] == [
+        "$edit-old:example.org",
+        "$edit-new:example.org",
+    ]
     recorded = harness.turn_store.record_turn.call_args.args[0]
     assert recorded.source_event_prompts == {ORIGINAL_EVENT_ID: "newest body"}
     assert recorded.source_event_revisions == {

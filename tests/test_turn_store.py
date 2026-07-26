@@ -120,6 +120,26 @@ def _owned_turn_record(target: MessageTarget) -> TurnRecord:
     )
 
 
+def _pending_turn(
+    source_event_ids: tuple[str, ...],
+    *,
+    target: MessageTarget,
+    requester_id: str = "@user:example.org",
+    correlation_id: str | None = None,
+    discovery_event_ids: tuple[str, ...] = (),
+) -> TurnRecord:
+    return TurnRecord.create(
+        source_event_ids,
+        discovery_event_ids=discovery_event_ids,
+        completed=False,
+        response_owner="agent",
+        requester_id=requester_id,
+        correlation_id=correlation_id,
+        history_scope=HistoryScope(kind="agent", scope_id="agent"),
+        conversation_target=target,
+    )
+
+
 def _prepare_redaction(
     store: TurnStore,
     target: MessageTarget,
@@ -132,6 +152,156 @@ def _prepare_redaction(
         target=target,
         source_event_ids=("$later",),
     )
+
+
+@pytest.mark.parametrize(
+    "replayed_source_event_ids",
+    [("$first",), ("$second", "$first")],
+    ids=["partial-subset", "reordered"],
+)
+def test_pending_coalesced_replay_reuses_authoritative_identity(
+    tmp_path: Path,
+    replayed_source_event_ids: tuple[str, ...],
+) -> None:
+    """Subset and reordered replay retain original physical identity and correlation."""
+    authority_target = MessageTarget.resolve("!room:example.org", "$thread", "$second")
+    replay_target = MessageTarget.resolve("!room:example.org", "$thread", replayed_source_event_ids[-1])
+    store = _store(tmp_path)
+    authority = store.record_pending_turn(
+        _pending_turn(
+            ("$first", "$second"),
+            target=authority_target,
+            correlation_id="$second",
+        ),
+    )
+    assert authority is not None
+
+    replayed = store.record_pending_turn(
+        _pending_turn(
+            replayed_source_event_ids,
+            target=replay_target,
+            correlation_id=replayed_source_event_ids[-1],
+        ),
+    )
+
+    assert replayed == authority
+    assert replayed.source_event_ids == ("$first", "$second")
+    assert replayed.anchor_event_id == "$second"
+    assert replayed.correlation_id == "$second"
+    assert replayed.conversation_target == authority_target
+    restarted = _store(tmp_path)
+    assert restarted.get_turn_record("$first") == authority
+    assert restarted.get_turn_record("$second") == authority
+
+
+@pytest.mark.parametrize("target_mode", ["room", "fresh-self-root"])
+def test_pending_replay_ignores_only_expected_target_drift(tmp_path: Path, target_mode: str) -> None:
+    """Room replies and fresh self-roots retain the first pending target."""
+    if target_mode == "room":
+        authority_target = MessageTarget.resolve(
+            "!room:example.org",
+            None,
+            "$second",
+            room_mode=True,
+        )
+        replay_target = MessageTarget.resolve(
+            "!room:example.org",
+            None,
+            "$first",
+            room_mode=True,
+        )
+    else:
+        authority_target = MessageTarget.resolve(
+            "!room:example.org",
+            None,
+            "$second",
+            thread_start_root_event_id="$second",
+        )
+        replay_target = MessageTarget.resolve(
+            "!room:example.org",
+            None,
+            "$first",
+            thread_start_root_event_id="$first",
+        )
+    store = _store(tmp_path)
+    authority = store.record_pending_turn(
+        _pending_turn(
+            ("$first", "$second"),
+            target=authority_target,
+            correlation_id="$second",
+        ),
+    )
+    assert authority is not None
+
+    replayed = store.record_pending_turn(
+        _pending_turn(
+            ("$first",),
+            target=replay_target,
+            correlation_id="$first",
+        ),
+    )
+
+    assert replayed == authority
+    assert replayed.conversation_target == authority_target
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["mixed", "alias-only", "context-mismatch", "fragmented", "redacted-owned-mixed", "missing-context"],
+)
+def test_incompatible_pending_replay_leaves_existing_ownership_untouched(
+    tmp_path: Path,
+    case: str,
+) -> None:
+    """Ambiguous source mappings fail closed without fragmenting durable ownership."""
+    target = MessageTarget.resolve("!room:example.org", "$thread", "$second")
+    store = _store(tmp_path)
+    if case == "fragmented":
+        assert store.record_pending_turn(_pending_turn(("$first",), target=target, correlation_id="$first"))
+        assert store.record_pending_turn(_pending_turn(("$second",), target=target, correlation_id="$second"))
+        candidate = _pending_turn(("$first", "$second"), target=target, correlation_id="$second")
+        lookup_ids = ("$first", "$second")
+    elif case == "missing-context":
+        authority = TurnRecord.create(("$first", "$second"), completed=False)
+        assert store.record_pending_turn(authority)
+        candidate = TurnRecord.create(("$first",), completed=False)
+        lookup_ids = ("$first", "$second")
+    else:
+        authority = _pending_turn(
+            ("$first", "$second"),
+            target=target,
+            correlation_id="$second",
+            discovery_event_ids=("$alias",),
+        )
+        assert store.record_pending_turn(authority)
+        if case == "mixed":
+            candidate = _pending_turn(("$first", "$new"), target=target, correlation_id="$new")
+            lookup_ids = ("$first", "$second", "$new", "$alias")
+        elif case == "redacted-owned-mixed":
+            store.mark_source_redacted("$first")
+            candidate = _pending_turn(("$first", "$new"), target=target, correlation_id="$new")
+            lookup_ids = ("$first", "$second", "$new", "$alias")
+        elif case == "alias-only":
+            candidate = _pending_turn(("$alias",), target=target, correlation_id="$alias")
+            lookup_ids = ("$first", "$second", "$alias")
+        else:
+            candidate = _pending_turn(
+                ("$first",),
+                target=target,
+                requester_id="@other:example.org",
+                correlation_id="$first",
+            )
+            lookup_ids = ("$first", "$second", "$alias")
+    store.flush()
+    before_records = {event_id: store.get_turn_record(event_id) for event_id in lookup_ids}
+    before_bytes = store._ledger._responses_file.read_bytes()
+
+    replayed = store.record_pending_turn(candidate)
+    store.flush()
+
+    assert replayed is None
+    assert {event_id: store.get_turn_record(event_id) for event_id in lookup_ids} == before_records
+    assert store._ledger._responses_file.read_bytes() == before_bytes
 
 
 def test_pending_turn_claim_allows_only_one_concurrent_owner(tmp_path: Path) -> None:

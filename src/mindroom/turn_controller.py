@@ -1368,6 +1368,35 @@ class TurnController:
         if pending_turn is None or pending_turn.completed or pending_turn.redacted_source_event_ids:
             return
         selection_handled_turn = pending_turn
+        registry = entity_identity_registry(self.deps.runtime.config, self.deps.runtime_paths)
+        response_envelope = MessageEnvelope(
+            source_event_id=source_event_id,
+            target=response_target,
+            body=f"The user selected: {selection.selected_value}",
+            attachment_ids=(),
+            mentioned_agents=(),
+            agent_name=self.deps.agent_name,
+            origin=classify_turn_origin(
+                transport_sender_id=user_id,
+                requester_id=user_id,
+                sender_entity_name=registry.current_entity_name_for_user_id(user_id),
+                requester_entity_name=registry.current_entity_name_for_user_id(user_id),
+                source_kind=MESSAGE_SOURCE_KIND,
+                original_sender=None,
+                trusted_user_relay=False,
+            ),
+        )
+        owned_delivery = await self.deps.delivery_gateway.owned_terminal_delivery_for_turn(
+            response_kind="agent",
+            response_envelope=response_envelope,
+            correlation_id=selection_handled_turn.correlation_id or selection.question_event_id,
+            source_event_ids=selection_handled_turn.indexed_event_ids,
+        )
+        if owned_delivery is not None:
+            self._mark_source_events_responded(
+                replace(selection_handled_turn, response_event_id=owned_delivery.target_event_id),
+            )
+            return
         ack_event_id = await self.deps.delivery_gateway.send_text(
             SendTextRequest(
                 target=ack_target,
@@ -1409,23 +1438,9 @@ class TurnController:
             return
         selection_attachment_ids = tuple(selection_payload.attachment_ids or ())
         selection_matrix_run_metadata = self.deps.turn_store.build_run_metadata(selection_handled_turn)
-        registry = entity_identity_registry(self.deps.runtime.config, self.deps.runtime_paths)
-        response_envelope = MessageEnvelope(
-            source_event_id=source_event_id,
-            target=response_target,
-            body=f"The user selected: {selection.selected_value}",
+        response_envelope = replace(
+            response_envelope,
             attachment_ids=selection_attachment_ids,
-            mentioned_agents=(),
-            agent_name=self.deps.agent_name,
-            origin=classify_turn_origin(
-                transport_sender_id=user_id,
-                requester_id=user_id,
-                sender_entity_name=registry.current_entity_name_for_user_id(user_id),
-                requester_entity_name=registry.current_entity_name_for_user_id(user_id),
-                source_kind=MESSAGE_SOURCE_KIND,
-                original_sender=None,
-                trusted_user_relay=False,
-            ),
         )
 
         response_event_id = await self.deps.response_runner.generate_response(
