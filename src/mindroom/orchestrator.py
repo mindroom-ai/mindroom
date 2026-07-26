@@ -1113,6 +1113,9 @@ class _MultiAgentOrchestrator:
             cleaned_count=result.cleaned_count,
             resumed_count=result.resumed_count,
         )
+        if result.retry_required:
+            msg = "Stale stream recovery incomplete"
+            raise RuntimeError(msg)
 
     def _capture_replacement_recovery_rooms(
         self,

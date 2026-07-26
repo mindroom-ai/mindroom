@@ -102,10 +102,68 @@ async def test_startup_maintenance_continues_after_failed_recovery_and_room_setu
         mark_runtime_support_ready=mark_runtime_support_ready,
     )
 
-    controller.start([MagicMock()], MagicMock())
-    await _wait_for_controller(controller)
+    with patch("mindroom.startup_maintenance.asyncio.sleep", new=AsyncMock()):
+        controller.start([MagicMock()], MagicMock())
+        await _wait_for_controller(controller)
 
-    assert call_order == ["recover", "setup", "recover", "support", "approval_ready"]
+    assert call_order == [
+        "recover",
+        "setup",
+        "recover",
+        "recover",
+        "recover",
+        "recover",
+        "support",
+        "approval_ready",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_startup_maintenance_retries_transient_second_wave_failure_without_reload() -> None:
+    """A transient joined-room delta failure must retry within the same maintenance run."""
+    recover_attempts = 0
+
+    async def recover_stale(_: list[object], __: object, ___: set[str]) -> None:
+        nonlocal recover_attempts
+        recover_attempts += 1
+        if recover_attempts == 2:
+            msg = "transient certification failure"
+            raise RuntimeError(msg)
+
+    controller = StartupMaintenanceController(
+        recover_stale_streams=recover_stale,
+        setup_rooms_and_memberships=AsyncMock(),
+        sync_runtime_support=AsyncMock(),
+        mark_runtime_support_ready=AsyncMock(),
+    )
+
+    with patch("mindroom.startup_maintenance.asyncio.sleep", new=AsyncMock()) as sleep:
+        controller.start([MagicMock()], MagicMock())
+        await _wait_for_controller(controller)
+
+    assert recover_attempts == 3
+    sleep.assert_awaited_once()
+    assert controller.replay_pending is False
+
+
+@pytest.mark.asyncio
+async def test_startup_maintenance_bounds_recovery_retries_and_retains_debt() -> None:
+    """Repeated joined-room recovery failure must stop retrying and retain replay debt."""
+    recover_stale = AsyncMock(side_effect=RuntimeError("persistent certification failure"))
+    controller = StartupMaintenanceController(
+        recover_stale_streams=recover_stale,
+        setup_rooms_and_memberships=AsyncMock(),
+        sync_runtime_support=AsyncMock(),
+        mark_runtime_support_ready=AsyncMock(),
+    )
+
+    with patch("mindroom.startup_maintenance.asyncio.sleep", new=AsyncMock()) as sleep:
+        controller.start([MagicMock()], MagicMock())
+        await _wait_for_controller(controller)
+
+    assert recover_stale.await_count == 5
+    assert sleep.await_count == 3
+    assert controller.replay_pending is True
 
 
 @pytest.mark.asyncio

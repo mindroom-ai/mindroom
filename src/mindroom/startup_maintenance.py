@@ -21,6 +21,8 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
+_STALE_RECOVERY_RETRY_DELAYS_SECONDS = (0.25, 0.5, 1.0)
+
 type _StartupBot = AgentBot | TeamBot
 type _SetupRooms = Callable[[list[_StartupBot]], Awaitable[None]]
 type _RecoverStaleStreams = Callable[[list[_StartupBot], Config, set[str]], Awaitable[None]]
@@ -126,11 +128,21 @@ class StartupMaintenanceController:
                 failure_message="Initial startup stale stream recovery failed",
             )
             await room_setup_task
-            await self._run_phase(
+            recovery_complete = await self._run_phase(
                 "startup_maintenance.stale_stream_recovery.joined_room_delta",
                 lambda: self.recover_stale_streams(bots, config, scanned_room_ids),
                 failure_message="Joined-room delta stale stream recovery failed",
             )
+            for delay_seconds in _STALE_RECOVERY_RETRY_DELAYS_SECONDS:
+                if recovery_complete:
+                    break
+                await asyncio.sleep(delay_seconds)
+                recovery_complete = await self._run_phase(
+                    "startup_maintenance.stale_stream_recovery.retry",
+                    lambda: self.recover_stale_streams(bots, config, scanned_room_ids),
+                    failure_message="Startup stale stream recovery retry failed",
+                )
+            self.replay_pending = not recovery_complete
         finally:
             if not room_setup_task.done():
                 room_setup_task.cancel()
