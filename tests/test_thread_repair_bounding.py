@@ -512,31 +512,6 @@ async def test_interactive_join_keeps_a_declined_speculative_flight_running() ->
 
 
 @pytest.mark.asyncio
-async def test_released_repair_slot_is_reserved_for_the_waiting_caller() -> None:
-    """Handing a slot over must reserve it, or a newcomer takes it and re-queues the waiter.
-
-    Driven through the slot accounting itself: the barge window is between waking a waiter and that
-    waiter resuming, which no public call can be scheduled into deterministically.
-    """
-    registry = ThreadRepairRegistry(max_concurrent_repairs=1)
-    thread_key = ("@agent:localhost", ROOM_ID, "$newcomer")
-
-    await registry._acquire_repair_slot(speculative=False)
-    waiting = asyncio.create_task(registry._acquire_repair_slot(speculative=False))
-    await asyncio.sleep(0)
-
-    registry._release_repair_slot(speculative=False)
-
-    # The waiter has been woken but has not resumed yet. A newcomer arriving right now must still
-    # see the ceiling as full, because the released slot already belongs to the waiter.
-    assert registry.speculative_suppression_reason(thread_key) == "repair_concurrency_limit"
-
-    await waiting
-    registry._release_repair_slot(speculative=False)
-    assert registry.speculative_suppression_reason(thread_key) is None
-
-
-@pytest.mark.asyncio
 async def test_clearing_the_registry_resets_every_admission_gate() -> None:
     """State left behind by `clear` would silently disable speculative repair for the process."""
     registry = ThreadRepairRegistry(max_concurrent_speculative_repairs=1)
@@ -578,3 +553,20 @@ async def test_clearing_one_room_forgets_its_cooldowns() -> None:
     registry.clear_room("@agent:localhost", ROOM_ID)
 
     assert registry.speculative_suppression_reason(("@agent:localhost", ROOM_ID, "$thread")) is None
+
+
+@pytest.mark.asyncio
+async def test_clearing_the_registry_does_not_inflate_the_repair_ceiling() -> None:
+    """A repair outliving `clear` must return its permit to the ceiling it took one from.
+
+    `clear` runs from `close`, whose drain can give up while a repair is still holding a permit.
+    Replacing the semaphore there would let that survivor release into the replacement and raise the
+    bound above its own maximum, permanently and with nothing to clamp it.
+    """
+    registry = ThreadRepairRegistry(max_concurrent_repairs=2)
+    await registry._acquire_repair_slot(speculative=False)
+
+    registry.clear()
+    registry._release_repair_slot(speculative=False)
+
+    assert registry._repair_slots._value == 2

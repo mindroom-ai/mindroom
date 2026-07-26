@@ -371,9 +371,14 @@ class ThreadMutationCacheOps:
 
         Shielding alone is not enough: it keeps the write running but leaves it untracked, so
         ``close`` returns without it and a marker abandoned mid-shutdown is the fail-open this
-        handler exists to prevent. Owning the task puts it in the set ``close`` waits on, within the
-        same bounded budget as every other cache write -- a backend too wedged to finish inside that
-        budget loses the marker, but by then it is failing every write, not just this one.
+        handler exists to prevent. Owning the task puts it in the set ``close`` waits on.
+
+        One ordering is still not covered. When the append is itself cancelled *by* that drain, the
+        five-second budget has already been spent on the append, and the marker created in its
+        handler inherits only the remainder of one 0.1s cancel round before the next round cancels
+        it too. A healthy marker write is about a millisecond, so this needs a congested write path
+        on top of a drain that already failed -- and a slow homeserver scan in the same owned set
+        reaches that state with a perfectly healthy cache.
         """
         # Every caller reaches an append only through `cache_runtime_available`, and the queue
         # helpers dereference the coordinator unguarded, so a missing one is a bug, not a mode.

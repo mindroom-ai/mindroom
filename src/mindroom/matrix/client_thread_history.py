@@ -1357,6 +1357,7 @@ async def refresh_thread_history_from_source(
     once. Callers nobody is waiting on pass ``1``: a retryable conflict means another writer owns
     the thread right now, so an undelayed rescan is least likely to win and most expensive to run.
     """
+    assert max_repair_attempts is None or max_repair_attempts >= 1
     attempt_limit = _MAX_THREAD_REPAIR_ATTEMPTS if max_repair_attempts is None else max_repair_attempts
     fetch_result: _ThreadHistoryFetchResult | None = None
     attempt: _ThreadCacheRefillAttempt | None = None
