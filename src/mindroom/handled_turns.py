@@ -959,9 +959,6 @@ def _project_redaction_alias(
         if turn_record.anchor_event_id in retained_source_event_ids
         else retained_source_event_ids[-1]
     )
-    retained_sources_have_metadata = all(
-        event_id in (turn_record.source_event_metadata or {}) for event_id in retained_source_event_ids
-    )
     return replace(
         turn_record,
         source_event_ids=retained_source_event_ids,
@@ -971,9 +968,9 @@ def _project_redaction_alias(
             if turn_record.is_coalesced and turn_record.source_event_metadata is None
             else turn_record.source_event_metadata
         ),
-        requester_id=(
-            turn_record.requester_id if not turn_record.is_coalesced or retained_sources_have_metadata else None
-        ),
+        # Turn-level requester context remains required for owed redaction cleanup; an explicit
+        # empty source map keeps per-source replay ownership fail-closed after projection.
+        requester_id=turn_record.requester_id,
     )
 
 

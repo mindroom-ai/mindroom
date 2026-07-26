@@ -761,6 +761,75 @@ def test_redaction_cleanup_clears_after_pending_coalesced_turn_splits(tmp_path: 
     assert completed_sibling.response_event_id == "$second-reply"
 
 
+def test_redaction_cleanup_keeps_context_after_colliding_alias_projection(tmp_path: Path) -> None:
+    """Projecting a redacted physical source must retain the context needed to sanitize it."""
+    relay_event_id = "$relay"
+    human_event_id = "$human"
+    requester_user_id = "@alice:example.org"
+    target = MessageTarget.resolve("!room:example.org", "$thread", human_event_id)
+    scope = HistoryScope(kind="agent", scope_id="agent")
+    session = AgentSession(
+        session_id=target.session_id,
+        agent_id="agent",
+        runs=[
+            RunOutput(
+                session_id=target.session_id,
+                metadata={constants.MATRIX_EVENT_ID_METADATA_KEY: human_event_id},
+            ),
+        ],
+        summary=SessionSummary(summary="contains REDACTED_SECRET"),
+    )
+    update_scope_seen_event_ids(session, scope, [human_event_id])
+    storage = _FakeAgentStorage(session)
+    store = _store_with_storage(tmp_path, storage)
+    store.record_pending_turn(
+        TurnRecord.create(
+            [relay_event_id, human_event_id],
+            completed=False,
+            source_event_metadata={
+                relay_event_id: SourceEventMetadata(
+                    sender="@bob:example.org",
+                    discovery_event_id=human_event_id,
+                ),
+                human_event_id: SourceEventMetadata(sender=requester_user_id),
+            },
+            requester_id=requester_user_id,
+            response_owner="agent",
+            history_scope=scope,
+            conversation_target=target,
+        ),
+    )
+    store.record_turn(
+        TurnRecord.create(
+            [relay_event_id],
+            response_event_id="$relay-reply",
+            requester_id="@bob:example.org",
+        ),
+    )
+
+    projected = store.mark_source_redacted(human_event_id)
+
+    assert projected is not None
+    assert projected.source_event_ids == (human_event_id,)
+    assert projected.source_event_metadata == {}
+    assert projected.requester_id == requester_user_id
+    assert projected.requester_id_for_source(human_event_id) is None
+    assert projected.pending_redaction_cleanup_event_ids == (human_event_id,)
+
+    should_suppress = store.prepare_response_for_redactions(
+        target=target,
+        source_event_ids=("$later",),
+    )
+
+    assert should_suppress is False
+    assert storage.upserted_session is session
+    assert session.summary is None
+    assert read_scope_seen_event_ids(session, scope) == set()
+    cleaned = store.get_turn_record(human_event_id)
+    assert cleaned is not None
+    assert cleaned.pending_redaction_cleanup_event_ids == ()
+
+
 def test_active_ad_hoc_team_redaction_uses_pending_response_scope(tmp_path: Path) -> None:
     """Post-lock cleanup must retain the exact team scope recorded before generation."""
     target = MessageTarget.resolve("!room:example.org", "$thread", "$user_msg")
