@@ -618,7 +618,7 @@ async def test_advisory_joiner_keeps_stale_fallback_from_strict_owner_failure(tm
         release_strict_scan.set()
         with pytest.raises(RuntimeError, match="strict scan failed"):
             await strict
-        advisory_result = await advisory
+        advisory_result = await asyncio.wait_for(advisory, timeout=1.0)
     finally:
         release_strict_scan.set()
         await coordinator.close()
@@ -1173,19 +1173,30 @@ async def test_strict_thread_history_waits_out_repair_backoff(tmp_path: Path) ->
         ],
     )
     conversation_cache.runtime.event_cache_write_coordinator = coordinator
+    logger = MagicMock()
 
     try:
-        result = await conversation_cache.get_strict_thread_history(
-            "!room:localhost",
-            "$thread:localhost",
-            caller_label="dispatch_post_lock_refresh",
-        )
+        with (
+            patch("mindroom.matrix.cache.thread_reads.time.perf_counter", side_effect=[10.0, 10.1, 20.0]),
+            patch("mindroom.matrix.client_thread_history.logger", logger),
+        ):
+            result = await conversation_cache.get_strict_thread_history(
+                "!room:localhost",
+                "$thread:localhost",
+                caller_label="dispatch_post_lock_refresh",
+            )
     finally:
         await event_cache.close()
 
     assert result == fresh_history
     assert result.is_full_history is True
     assert coordinator.run_thread_repair.await_count == 2
+    refreshed_log = next(
+        call
+        for call in logger.info.call_args_list
+        if call.args and call.args[0] == "matrix_cache_thread_history_refreshed"
+    )
+    assert refreshed_log.kwargs["coordinator_queue_wait_ms"] == pytest.approx(100.0)
 
 
 @pytest.mark.asyncio
@@ -1415,6 +1426,7 @@ async def test_strict_source_refresh_bypasses_usable_cache(
     finally:
         release_write.set()
         await pending_write_task
+        await coordinator.close()
         await event_cache.close()
 
     assert [message.event_id for message in result] == ["$target"]

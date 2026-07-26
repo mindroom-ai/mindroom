@@ -234,14 +234,14 @@ class ThreadReadPolicy:
         queue_wait_started: float,
     ) -> ThreadHistoryResult:
         """Load one read that may wait, absorbing repair backoff instead of leaking it to callers."""
+        coordinator_queue_wait_ms = elapsed_ms_since(queue_wait_started, clock=time.perf_counter)
         while True:
             try:
-                return await self._load_thread_read(
+                return await fetcher(
                     room_id,
                     thread_id,
-                    fetcher=fetcher,
                     caller_label=caller_label,
-                    queue_wait_started=queue_wait_started,
+                    coordinator_queue_wait_ms=coordinator_queue_wait_ms,
                 )
             except ThreadRepairBackoffError as exc:
                 # Reads without a dispatch timeout wait the throttle out rather than leak this
