@@ -13,9 +13,9 @@ Read-side invariants:
    (``THREAD_HISTORY_SOURCE_DEGRADED``) instead of blocking dispatch; consumers must treat that result
    as unusable for caching, memoization, and root proofs.
 
-3. ``ADVISORY_FULL`` and ``STRICT_FULL`` have no dispatch timeout and run through the same-thread
-   barrier; ``STRICT_FULL`` is intentionally not dispatch-safe because it may block for authoritative
-   post-lock model context.
+3. ``ADVISORY_FULL``, ``STRICT_FULL``, and ``STRICT_SOURCE_REFRESH`` have no dispatch timeout and run
+   through the same-thread barrier; strict modes are intentionally not dispatch-safe because they may
+   block for authoritative post-lock model context or a direct source refresh.
 
 4. A stale-cache thread tail is never used for MSC3440 latest-event fallback:
    ``get_latest_thread_event_id_if_needed`` falls back to the thread root instead.
@@ -68,6 +68,7 @@ class ThreadReadMode(Enum):
     DISPATCH_SNAPSHOT = auto()
     DISPATCH_FULL = auto()
     STRICT_FULL = auto()
+    STRICT_SOURCE_REFRESH = auto()
 
     @property
     def full_history(self) -> bool:
@@ -76,6 +77,7 @@ class ThreadReadMode(Enum):
             ThreadReadMode.ADVISORY_FULL,
             ThreadReadMode.DISPATCH_FULL,
             ThreadReadMode.STRICT_FULL,
+            ThreadReadMode.STRICT_SOURCE_REFRESH,
         }
 
     @property
@@ -140,6 +142,7 @@ class ThreadReadPolicy:
             ThreadReadMode.DISPATCH_SNAPSHOT: self.fetch_dispatch_thread_snapshot_from_client,
             ThreadReadMode.DISPATCH_FULL: self.fetch_dispatch_thread_history_from_client,
             ThreadReadMode.STRICT_FULL: self.fetch_dispatch_thread_history_from_client,
+            ThreadReadMode.STRICT_SOURCE_REFRESH: self.refresh_thread_history_from_source,
         }[mode]
 
     def _operation_name_for_mode(self, mode: ThreadReadMode) -> str:
@@ -147,6 +150,7 @@ class ThreadReadPolicy:
         return {
             ThreadReadMode.ADVISORY_FULL: "matrix_cache_refresh_thread_history",
             ThreadReadMode.STRICT_FULL: "matrix_cache_refresh_strict_thread_history",
+            ThreadReadMode.STRICT_SOURCE_REFRESH: "matrix_cache_refresh_strict_thread_from_source",
         }[mode]
 
     async def _wait_for_pending_thread_cache_updates(self, room_id: str, thread_id: str) -> None:
@@ -374,26 +378,6 @@ class ThreadReadPolicy:
             fetcher=fetcher,
             name=self._operation_name_for_mode(mode),
             full_history=mode.full_history,
-            caller_label=caller_label,
-            queue_wait_started=queue_wait_started,
-        )
-
-    async def refresh_thread_from_source(
-        self,
-        room_id: str,
-        thread_id: str,
-        *,
-        caller_label: str,
-    ) -> ThreadHistoryResult:
-        """Refresh one full thread directly from Matrix through the same-thread write barrier."""
-        queue_wait_started = time.perf_counter()
-        await self._wait_for_pending_thread_cache_updates(room_id, thread_id)
-        return await self._run_thread_read(
-            room_id,
-            thread_id,
-            fetcher=self.refresh_thread_history_from_source,
-            name="matrix_cache_refresh_strict_thread_from_source",
-            full_history=True,
             caller_label=caller_label,
             queue_wait_started=queue_wait_started,
         )

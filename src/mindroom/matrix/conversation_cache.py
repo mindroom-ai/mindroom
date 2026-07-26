@@ -977,17 +977,12 @@ class MatrixConversationCache(ConversationCacheProtocol):
         caller_label: str = "unknown",
     ) -> ThreadReadResult:
         """Refresh strict full history directly from Matrix."""
-        try:
-            return await self._reads.refresh_thread_from_source(
-                room_id,
-                thread_id,
-                caller_label=caller_label,
-            )
-        finally:
-            # Opaque source history can mark every thread in the room stale before
-            # raising or being cancelled.
-            self._evict_turn_thread_reads_for_room(room_id)
-            self._evict_turn_event_lookups_for_room(room_id)
+        return await self._reads.read_thread(
+            room_id,
+            thread_id,
+            mode=ThreadReadMode.STRICT_SOURCE_REFRESH,
+            caller_label=caller_label,
+        )
 
     async def get_thread_id_for_event(self, room_id: str, event_id: str) -> str | None:
         """Resolve the cached thread root for one event when known."""

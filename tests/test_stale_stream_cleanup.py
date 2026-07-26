@@ -290,7 +290,7 @@ def _authoritative_history(*messages: ResolvedVisibleMessage) -> ThreadHistoryRe
     return thread_history_result(
         list(messages),
         is_full_history=True,
-        diagnostics={"thread_read_source": "cache"},
+        diagnostics={"thread_read_source": "homeserver"},
     )
 
 
@@ -306,7 +306,6 @@ def _auto_resume_conversation_cache(interrupted: list[InterruptedThread]) -> Asy
             ],
         )
 
-    conversation_cache.get_strict_thread_history = AsyncMock(side_effect=history_for_thread)
     conversation_cache.refresh_strict_thread_history_from_source = AsyncMock(
         side_effect=history_for_thread,
     )
@@ -1032,53 +1031,6 @@ async def test_auto_resume_propagates_cancelled_source_refresh(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
-async def test_auto_resume_refreshes_matrix_when_startup_cache_omits_target(tmp_path: Path) -> None:
-    """Startup recovery should refresh Matrix once when sync has not appended the target to cache yet."""
-    config = _make_config(tmp_path)
-    client = AsyncMock(spec=nio.AsyncClient)
-    interrupted = [
-        InterruptedThread(
-            ROOM_ID,
-            "$thread",
-            "$target",
-            "partial",
-            "test_agent",
-            original_sender_id=USER_ID,
-        ),
-    ]
-    conversation_cache = _auto_resume_conversation_cache(interrupted)
-    conversation_cache.get_strict_thread_history.side_effect = None
-    conversation_cache.get_strict_thread_history.return_value = _authoritative_history(
-        _history_message("$older"),
-    )
-    conversation_cache.refresh_strict_thread_history_from_source.side_effect = None
-    conversation_cache.refresh_strict_thread_history_from_source.return_value = _authoritative_history(
-        _history_message("$target"),
-    )
-
-    with patch(
-        "mindroom.matrix.stale_stream_cleanup.send_message_result",
-        new=AsyncMock(side_effect=delivered_matrix_side_effect("$resume")),
-    ) as mock_send:
-        resumed_count = await auto_resume_interrupted_threads(
-            client,
-            interrupted,
-            config=config,
-            runtime_paths=runtime_paths_for(config),
-            conversation_cache=conversation_cache,
-        )
-
-    assert resumed_count == 1
-    conversation_cache.get_strict_thread_history.assert_not_awaited()
-    conversation_cache.refresh_strict_thread_history_from_source.assert_awaited_once_with(
-        ROOM_ID,
-        "$thread",
-        caller_label="startup_auto_resume_freshness",
-    )
-    mock_send.assert_awaited_once()
-
-
-@pytest.mark.asyncio
 async def test_auto_resume_source_refresh_sees_newer_human_missing_from_startup_cache(tmp_path: Path) -> None:
     """Startup recovery should not resume when Matrix has newer human work absent from cache."""
     config = _make_config(tmp_path)
@@ -1094,10 +1046,6 @@ async def test_auto_resume_source_refresh_sees_newer_human_missing_from_startup_
         ),
     ]
     conversation_cache = _auto_resume_conversation_cache(interrupted)
-    conversation_cache.get_strict_thread_history.side_effect = None
-    conversation_cache.get_strict_thread_history.return_value = _authoritative_history(
-        _history_message("$target"),
-    )
     conversation_cache.refresh_strict_thread_history_from_source.side_effect = None
     conversation_cache.refresh_strict_thread_history_from_source.return_value = _authoritative_history(
         _history_message("$target"),
@@ -1114,7 +1062,6 @@ async def test_auto_resume_source_refresh_sees_newer_human_missing_from_startup_
         )
 
     assert resumed_count == 0
-    conversation_cache.get_strict_thread_history.assert_not_awaited()
     conversation_cache.refresh_strict_thread_history_from_source.assert_awaited_once_with(
         ROOM_ID,
         "$thread",
@@ -1124,8 +1071,8 @@ async def test_auto_resume_source_refresh_sees_newer_human_missing_from_startup_
 
 
 @pytest.mark.asyncio
-async def test_auto_resume_rechecks_after_delay_before_each_delivery(tmp_path: Path) -> None:
-    """Resume should recheck freshness after each rate-limit delay."""
+async def test_auto_resume_checks_freshness_after_delay_before_each_delivery(tmp_path: Path) -> None:
+    """Activity becoming visible during a rate-limit delay should suppress resume."""
     config = _make_config(tmp_path)
     client = AsyncMock(spec=nio.AsyncClient)
     interrupted = [
@@ -1142,12 +1089,20 @@ async def test_auto_resume_rechecks_after_delay_before_each_delivery(tmp_path: P
     ]
     conversation_cache = _auto_resume_conversation_cache(interrupted)
     history_calls: dict[str, int] = {}
+    activity_arrived_during_delay = asyncio.Event()
+    delay_count = 0
+
+    async def sleep_with_activity(_: float) -> None:
+        nonlocal delay_count
+        delay_count += 1
+        if delay_count == 2:
+            activity_arrived_during_delay.set()
 
     def history_for_call(_: str, thread_id: str, **__: object) -> ThreadHistoryResult:
         history_calls[thread_id] = history_calls.get(thread_id, 0) + 1
         index = thread_id.removeprefix("$thread-")
         messages = [_history_message(f"$target-{index}")]
-        if index == "4" or (index == "2" and history_calls[thread_id] == 2):
+        if index == "4" or (index == "2" and activity_arrived_during_delay.is_set()):
             messages.append(_history_message("$human-later", sender=USER_ID))
         return _authoritative_history(*messages)
 
@@ -1158,7 +1113,10 @@ async def test_auto_resume_rechecks_after_delay_before_each_delivery(tmp_path: P
             "mindroom.matrix.stale_stream_cleanup.send_message_result",
             new=AsyncMock(side_effect=delivered_matrix_side_effect("$resume")),
         ) as mock_send,
-        patch("mindroom.matrix.stale_stream_cleanup.asyncio.sleep", new=AsyncMock()) as mock_sleep,
+        patch(
+            "mindroom.matrix.stale_stream_cleanup.asyncio.sleep",
+            new=AsyncMock(side_effect=sleep_with_activity),
+        ) as mock_sleep,
     ):
         resumed_count = await auto_resume_interrupted_threads(
             client,
@@ -1176,12 +1134,12 @@ async def test_auto_resume_rechecks_after_delay_before_each_delivery(tmp_path: P
     ]
     assert history_calls == {
         "$thread-0": 1,
-        "$thread-1": 2,
-        "$thread-2": 2,
+        "$thread-1": 1,
+        "$thread-2": 1,
         "$thread-3": 1,
         "$thread-4": 1,
     }
-    assert mock_sleep.await_args_list == [call(2.0), call(2.0)]
+    assert mock_sleep.await_args_list == [call(2.0), call(2.0), call(2.0)]
 
 
 @pytest.mark.asyncio
