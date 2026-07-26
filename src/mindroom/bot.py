@@ -115,7 +115,7 @@ from .scheduling import (
 )
 from .startup_errors import PermanentStartupError
 from .sync_restart_retry import InterruptedTurnRooms
-from .terminal_delivery import TerminalDeliveryCoordinator, TerminalDeliveryCoordinatorDeps, TerminalDeliveryStore
+from .terminal_delivery import TerminalDeliveryCoordinator, TerminalDeliveryCoordinatorDeps
 from .turn_controller import TurnController, TurnControllerDeps
 from .turn_policy import IngressHookRunner, TurnPolicy, TurnPolicyDeps
 from .turn_store import TurnStore, TurnStoreDeps
@@ -460,10 +460,6 @@ class AgentBot:
                 runtime_paths=self.runtime_paths,
             ),
         )
-        terminal_delivery_store = TerminalDeliveryStore(
-            agent_name=self.agent_name,
-            base_path=self.storage_path / "tracking",
-        )
         self._tool_runtime_support = ToolRuntimeSupport(
             runtime=self._runtime_view,
             logger=self.logger,
@@ -495,7 +491,6 @@ class AgentBot:
         self._terminal_delivery_coordinator = TerminalDeliveryCoordinator(
             TerminalDeliveryCoordinatorDeps(
                 runtime=self._runtime_view,
-                store=terminal_delivery_store,
                 turn_store=self._turn_store,
                 conversation_cache=self._conversation_cache,
                 response_hooks=response_hooks,
@@ -614,7 +609,6 @@ class AgentBot:
             and not self._sync_shutting_down
             and self._first_sync_done
             and self._runtime_view.client is not None
-            and self._terminal_delivery_coordinator.redaction_barriers_ready
         )
 
     def pending_terminal_delivery_event_ids(self, room_id: str | None = None) -> frozenset[str]:

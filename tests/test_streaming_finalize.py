@@ -641,9 +641,9 @@ async def test_final_delivery_failure_replaces_placeholder_with_failure_update(t
     gateway = _delivery_gateway(tmp_path)
     coordinator = gateway.deps.terminal_delivery_coordinator
     coordinator.commit_and_attempt.return_value = TerminalDeliveryCommit(
-        item=None,
         status="deferred",
         reason="edit_failed",
+        lifecycle_managed=False,
     )
     object.__setattr__(
         gateway,
@@ -742,7 +742,6 @@ async def test_durable_pending_edit_never_competes_with_placeholder_failure_upda
     gateway = _delivery_gateway(tmp_path)
     coordinator = gateway.deps.terminal_delivery_coordinator
     coordinator.commit_and_attempt.return_value = TerminalDeliveryCommit(
-        item=MagicMock(settled=False),
         status="deferred",
         reason="edit_failed",
     )

@@ -89,7 +89,6 @@ from mindroom.runtime_support import StartupThreadPrewarmRegistry
 from mindroom.terminal_delivery import (
     TerminalDeliveryCommit,
     TerminalDeliveryCoordinator,
-    TerminalDeliveryStore,
 )
 from mindroom.thread_utils import decide_agent_response
 from mindroom.turn_controller import TurnController, _DispatchPreparation, _ReplayGuardContext
@@ -1087,24 +1086,15 @@ def runtime_paths_for(config: Config) -> RuntimePaths:
     return runtime_paths
 
 
-def terminal_delivery_store_for(runtime_paths: RuntimePaths, agent_name: str) -> TerminalDeliveryStore:
-    """Build the required terminal-delivery store for one test gateway."""
-    return TerminalDeliveryStore(
-        agent_name=agent_name,
-        base_path=runtime_paths.storage_root / "tracking",
-    )
-
-
 def terminal_delivery_coordinator_for(
     runtime_paths: RuntimePaths,
     agent_name: str,
 ) -> TerminalDeliveryCoordinator:
     """Build a successful terminal-delivery authority for gateway seam tests."""
+    del runtime_paths, agent_name
     coordinator = MagicMock(spec=TerminalDeliveryCoordinator)
-    coordinator.store = terminal_delivery_store_for(runtime_paths, agent_name)
     coordinator.commit_and_attempt = AsyncMock(
         return_value=TerminalDeliveryCommit(
-            item=None,
             status="delivered",
             reason="delivered",
             lifecycle_managed=False,

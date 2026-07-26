@@ -114,11 +114,11 @@ def _completed_outcome(event_id: str = "$response", body: str = "ok") -> FinalDe
     )
 
 
-def _terminal_owner(*, target_was_placeholder: bool, transport_delivered: bool) -> PendingTerminalDelivery:
+def _terminal_owner() -> PendingTerminalDelivery:
     owner = MagicMock(spec=PendingTerminalDelivery)
     owner.target_event_id = "$original-placeholder"
-    owner.target_was_placeholder = target_was_placeholder
-    owner.transport_delivered = transport_delivered
+    owner.target_was_placeholder = True
+    owner.transport_delivered = False
     return owner
 
 
@@ -475,118 +475,6 @@ async def test_begin_locked_turn_excludes_early_placeholder_from_refreshed_histo
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("target_was_placeholder", "transport_delivered", "existing_event_is_placeholder"),
-    [(True, False, True), (False, False, False), (True, True, False)],
-    ids=["pending-placeholder", "pending-visible-edit", "terminal-visible"],
-)
-async def test_begin_locked_turn_adopts_durable_target_before_new_placeholder(
-    tmp_path: Path,
-    *,
-    target_was_placeholder: bool,
-    transport_delivered: bool,
-    existing_event_is_placeholder: bool,
-) -> None:
-    """Restart replay must reuse durable ownership instead of creating a changed placeholder target."""
-    bot = _bot(tmp_path)
-    target = _target(thread_id="$thread", reply_to_event_id="$event")
-    envelope = _envelope(target, source_event_id="$event")
-    delivery_gateway = MagicMock()
-    delivery_gateway.owned_terminal_delivery = AsyncMock(
-        return_value=_terminal_owner(
-            target_was_placeholder=target_was_placeholder,
-            transport_delivered=transport_delivered,
-        ),
-    )
-    delivery_gateway.send_text = AsyncMock(return_value="$replayed-placeholder")
-    runner = ResponseRunner(
-        replace(
-            unwrap_extracted_collaborator(bot._response_runner).deps,
-            delivery_gateway=delivery_gateway,
-        ),
-    )
-    request = ResponseRequest(
-        thread_history=[],
-        prompt="hello",
-        user_id="@user:localhost",
-        response_envelope=envelope,
-    )
-
-    prepared_request = await runner._begin_locked_turn(
-        request,
-        resolved_target=target,
-        history_scope=runner.deps.state_writer.history_scope(),
-        execution_identity=runner.deps.tool_runtime.build_execution_identity(
-            target=target,
-            user_id=request.user_id,
-        ),
-        placeholder_message="Thinking...",
-    )
-
-    assert prepared_request is not None
-    assert prepared_request.existing_event_id == "$original-placeholder"
-    assert prepared_request.existing_event_is_placeholder is existing_event_is_placeholder
-    assert prepared_request.recovered_terminal_delivery
-    delivery_gateway.send_text.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_edit_replay_adopts_durable_owner_before_lifecycle_mutation(tmp_path: Path) -> None:
-    """Existing edit targets must not bypass durable ownership or mutate session state."""
-    bot = _bot(tmp_path)
-    target = _target(thread_id="$thread", reply_to_event_id="$event")
-    envelope = _envelope(target, source_event_id="$event")
-    events: list[str] = []
-    owner = _terminal_owner(target_was_placeholder=False, transport_delivered=True)
-    delivery_gateway = MagicMock(spec=DeliveryGateway)
-
-    async def owned_terminal_delivery(_identity: object) -> PendingTerminalDelivery:
-        events.append("owner")
-        return owner
-
-    delivery_gateway.owned_terminal_delivery = AsyncMock(side_effect=owned_terminal_delivery)
-    delivery_gateway.send_text = AsyncMock(side_effect=AssertionError("must not create a placeholder"))
-    runner = ResponseRunner(
-        replace(
-            unwrap_extracted_collaborator(bot._response_runner).deps,
-            delivery_gateway=delivery_gateway,
-        ),
-    )
-
-    def prepare_source_turn() -> bool:
-        events.append("redaction")
-        return False
-
-    request = ResponseRequest(
-        thread_history=[],
-        prompt="edited prompt",
-        user_id="@user:localhost",
-        response_envelope=envelope,
-        existing_event_id="$edit-regeneration-target",
-        correlation_id="$edit-revision",
-        prepare_source_turn=prepare_source_turn,
-        on_lifecycle_lock_acquired=lambda: events.append("lifecycle"),
-    )
-
-    prepared_request = await runner._begin_locked_turn(
-        request,
-        resolved_target=target,
-        history_scope=runner.deps.state_writer.history_scope(),
-        execution_identity=runner.deps.tool_runtime.build_execution_identity(
-            target=target,
-            user_id=request.user_id,
-        ),
-        placeholder_message="Thinking...",
-    )
-
-    assert prepared_request is not None
-    assert prepared_request.existing_event_id == owner.target_event_id
-    assert prepared_request.recovered_terminal_delivery
-    assert events == ["redaction", "owner"]
-    delivery_gateway.send_text.assert_not_awaited()
-
-
-@pytest.mark.asyncio
 async def test_generate_response_replay_returns_frozen_target_without_generation_or_delivery(tmp_path: Path) -> None:
     """A durable replay owner must return its exact target for handled recording without competing work."""
     bot = _bot(tmp_path)
@@ -594,10 +482,7 @@ async def test_generate_response_replay_returns_frozen_target_without_generation
     envelope = _envelope(target, source_event_id="$event")
     delivery_gateway = MagicMock()
     delivery_gateway.owned_terminal_delivery = AsyncMock(
-        return_value=_terminal_owner(
-            target_was_placeholder=True,
-            transport_delivered=True,
-        ),
+        return_value=_terminal_owner(),
     )
     delivery_gateway.send_text = AsyncMock(side_effect=AssertionError("must not create a placeholder"))
     delivery_gateway.deliver_final = AsyncMock(side_effect=AssertionError("must not edit the frozen target"))

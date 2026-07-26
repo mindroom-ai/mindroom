@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 from mindroom import interactive
 from mindroom.background_tasks import create_background_task
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
-from mindroom.thread_summary import deliver_frozen_thread_summary, maybe_generate_thread_summary
+from mindroom.thread_summary import maybe_generate_thread_summary
 from mindroom.thread_summary import should_queue_thread_summary as should_queue_thread_summary_check
 from mindroom.timing import timed
 
@@ -24,7 +24,6 @@ if TYPE_CHECKING:
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.conversation_cache import ConversationCacheProtocol
     from mindroom.message_target import MessageTarget
-    from mindroom.response_identity import FrozenThreadSummary
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
@@ -138,8 +137,6 @@ class PostResponseEffectsSupport:
         room_id: str,
         thread_id: str,
         entity_name: str | None,
-        *,
-        idempotency_key: str | None = None,
     ) -> None:
         """Queue background thread summarization with timing instrumentation."""
         summary_coro = maybe_generate_thread_summary(
@@ -155,53 +152,8 @@ class PostResponseEffectsSupport:
             self._timed_thread_summary(
                 summary_coro=summary_coro,
             ),
-            name=f"thread_summary_{idempotency_key or f'{room_id}_{thread_id}'}",
+            name=f"thread_summary_{room_id}_{thread_id}",
             owner=self.runtime,
-        )
-
-    async def prepare_thread_summary(
-        self,
-        room_id: str,
-        thread_id: str,
-        entity_name: str | None,
-    ) -> FrozenThreadSummary | None:
-        """Generate and freeze an eligible summary without sending it."""
-        frozen: FrozenThreadSummary | None = None
-
-        async def capture(candidate: FrozenThreadSummary) -> str:
-            nonlocal frozen
-            frozen = candidate
-            return "$frozen-terminal-summary"
-
-        await maybe_generate_thread_summary(
-            client=self._client(),
-            room_id=room_id,
-            thread_id=thread_id,
-            config=self.runtime.config,
-            runtime_paths=self.runtime_paths,
-            conversation_cache=self.conversation_cache,
-            entity_name=entity_name,
-            raise_on_failure=True,
-            frozen_delivery=capture,
-        )
-        return frozen
-
-    async def deliver_thread_summary(
-        self,
-        room_id: str,
-        thread_id: str,
-        frozen: FrozenThreadSummary,
-        *,
-        transaction_id: str,
-    ) -> None:
-        """Deliver one persisted exact summary payload."""
-        await deliver_frozen_thread_summary(
-            self._client(),
-            room_id,
-            thread_id,
-            frozen,
-            transaction_id,
-            self.conversation_cache,
         )
 
     def build_deps(
@@ -307,7 +259,6 @@ async def apply_post_response_effects(
 
     if (
         outcome.run_succeeded
-        and not final_delivery_outcome.durable_lifecycle_managed
         and final_delivery_outcome.terminal_status == "completed"
         and response_event_id is not None
         and not final_delivery_outcome.suppressed

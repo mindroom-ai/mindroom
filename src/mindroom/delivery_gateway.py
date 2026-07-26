@@ -40,7 +40,6 @@ from mindroom.matrix.client_delivery import (
 )
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import build_message_content
-from mindroom.response_identity import ResponseIdentity
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
 from mindroom.streaming import (
     StreamingResponse,
@@ -71,8 +70,8 @@ if TYPE_CHECKING:
         CompactionLifecycleStart,
         CompactionOutcome,
     )
-    from mindroom.hooks import MessageEnvelope
     from mindroom.message_target import MessageTarget
+    from mindroom.response_identity import ResponseIdentity
     from mindroom.streaming import StreamInputChunk
     from mindroom.timing import DispatchPipelineTiming
     from mindroom.tool_system.events import ToolTraceEntry
@@ -358,24 +357,6 @@ class DeliveryGateway:
         """Return durable target ownership for a replayed response."""
         return await self.deps.terminal_delivery_coordinator.owned_delivery(identity)
 
-    async def owned_terminal_delivery_for_turn(
-        self,
-        *,
-        response_kind: str,
-        response_envelope: MessageEnvelope,
-        correlation_id: str,
-        source_event_ids: tuple[str, ...],
-    ) -> PendingTerminalDelivery | None:
-        """Resolve ownership without exposing delivery identity internals to callers."""
-        return await self.owned_terminal_delivery(
-            ResponseIdentity(
-                response_kind=response_kind,
-                response_envelope=response_envelope,
-                correlation_id=correlation_id,
-                source_event_ids=source_event_ids,
-            ),
-        )
-
     @staticmethod
     def _cancelled_error_failure_reason(error: asyncio.CancelledError) -> str:
         """Normalize CancelledError values to the canonical cancellation reason strings."""
@@ -573,7 +554,6 @@ class DeliveryGateway:
         )
         if intent is None:
             return TerminalDeliveryCommit(
-                item=None,
                 status="deferred",
                 reason="terminal_intent_unavailable",
                 lifecycle_managed=False,

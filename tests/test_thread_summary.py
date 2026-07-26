@@ -19,7 +19,7 @@ from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths
 from mindroom.entity_resolution import resolve_room_scoped_model_override
 from mindroom.logging_config import setup_logging
-from mindroom.matrix.client import DeliveredMatrixEvent, ResolvedVisibleMessage
+from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.prompts import THREAD_SUMMARY_INSTRUCTIONS
 from mindroom.thread_summary import (
     _MAX_MESSAGES_BEFORE_TRUNCATION,
@@ -40,7 +40,6 @@ from mindroom.thread_summary import (
     _thread_summary_cache_key,
     _ThreadEnrichment,
     _ThreadSummary,
-    deliver_frozen_thread_summary,
     maybe_generate_thread_summary,
     normalize_thread_summary_text,
     send_thread_summary_event,
@@ -55,8 +54,6 @@ from tests.conftest import make_matrix_client_mock
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
-
-    from mindroom.response_identity import FrozenThreadSummary
 
 _TRUSTED_SUMMARY_SENDERS = frozenset(
     {
@@ -742,69 +739,6 @@ class TestMaybeGenerateThreadSummary:
         client.room_send.assert_awaited_once()
         assert _last_summary_counts[_thread_summary_cache_key("!room:x", "$thread1")] == 5
 
-    async def test_frozen_summary_advances_count_only_after_successful_delivery(self) -> None:
-        """Freezing must not suppress retry eligibility before the durable send succeeds."""
-        client = _mock_client()
-        config = _mock_config()
-        rp = _mock_runtime_paths()
-        frozen: list[FrozenThreadSummary] = []
-
-        async def capture(candidate: FrozenThreadSummary) -> str:
-            frozen.append(candidate)
-            return "$frozen"
-
-        with (
-            patch(
-                "mindroom.thread_summary._load_thread_history",
-                return_value=_make_thread_history(5),
-            ),
-            patch(
-                "mindroom.thread_summary._generate_summary",
-                return_value="Users discussed testing strategies",
-            ),
-        ):
-            await maybe_generate_thread_summary(
-                client,
-                "!room:x",
-                "$thread1",
-                config,
-                rp,
-                conversation_cache=self.conversation_cache,
-                raise_on_failure=True,
-                frozen_delivery=capture,
-            )
-
-        cache_key = _thread_summary_cache_key("!room:x", "$thread1")
-        assert cache_key not in _last_summary_counts
-        [payload] = frozen
-        sends = AsyncMock(
-            side_effect=[
-                None,
-                DeliveredMatrixEvent(event_id="$summary", content_sent={"body": "summary"}),
-            ],
-        )
-        with patch("mindroom.thread_summary.send_message_result", sends):
-            with pytest.raises(RuntimeError, match="Thread summary delivery failed"):
-                await deliver_frozen_thread_summary(
-                    client,
-                    "!room:x",
-                    "$thread1",
-                    payload,
-                    "stable-transaction",
-                    self.conversation_cache,
-                )
-            assert cache_key not in _last_summary_counts
-            await deliver_frozen_thread_summary(
-                client,
-                "!room:x",
-                "$thread1",
-                payload,
-                "stable-transaction",
-                self.conversation_cache,
-            )
-
-        assert _last_summary_counts[cache_key] == 5
-
     async def test_first_summary_call_is_summary_only(self) -> None:
         """The early first summary should not assign tags before the topic settles."""
         client = _mock_client()
@@ -842,7 +776,6 @@ class TestMaybeGenerateThreadSummary:
             "default",
             self.conversation_cache,
             initial_enrichment_complete=None,
-            frozen_delivery=None,
         )
         set_tags.assert_not_awaited()
 
@@ -897,7 +830,6 @@ class TestMaybeGenerateThreadSummary:
             "default",
             self.conversation_cache,
             initial_enrichment_complete=True,
-            frozen_delivery=None,
         )
         set_tags.assert_awaited_once_with(
             client,
@@ -1405,7 +1337,6 @@ class TestMaybeGenerateThreadSummary:
             "default",
             self.conversation_cache,
             initial_enrichment_complete=None,
-            frozen_delivery=None,
         )
         assert _last_summary_counts[_thread_summary_cache_key("!room:x", "$thread1")] == 5
 
@@ -1440,7 +1371,6 @@ class TestMaybeGenerateThreadSummary:
             "default",
             self.conversation_cache,
             initial_enrichment_complete=None,
-            frozen_delivery=None,
         )
         assert _last_summary_counts[_thread_summary_cache_key("!room:x", "$thread1")] == 5
 

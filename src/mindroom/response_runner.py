@@ -1104,13 +1104,6 @@ class ResponseRunner:
             response_envelope=request.response_envelope,
             correlation_id=self._correlation_id_for_request(request),
             source_event_ids=request.source_event_ids or (request.response_envelope.source_event_id,),
-            thread_summary_message_count_hint=thread_summary_message_count_hint(
-                request.thread_history,
-                trusted_sender_ids=current_internal_sender_ids(
-                    self.deps.runtime.config,
-                    self.deps.runtime_paths,
-                ),
-            ),
         )
 
     def _agent_turn_context(

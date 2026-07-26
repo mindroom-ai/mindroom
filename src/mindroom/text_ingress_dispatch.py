@@ -26,7 +26,7 @@ from mindroom.dispatch_handoff import (
     payload_metadata_from_source,
 )
 from mindroom.dispatch_source import VOICE_SOURCE_KIND, is_voice_event
-from mindroom.handled_turns import TurnRecord, same_turn_identity
+from mindroom.handled_turns import TurnRecord
 from mindroom.inbound_turn_normalizer import TextNormalizationRequest
 from mindroom.matrix.media import is_audio_message_event, is_matrix_media_dispatch_event
 from mindroom.matrix.rooms import is_dm_room
@@ -300,6 +300,12 @@ async def _blocked_before_plan(
     *,
     requester_user_id: str,
 ) -> bool:
+    checkpoint_owner = await asyncio.to_thread(
+        controller.deps.turn_store.terminal_checkpoint_for_sources,
+        prepared.handled_turn.source_event_ids,
+    )
+    if checkpoint_owner is not None:
+        return True
     if prepared.command is not None:
         await controller._execute_command_if_owned(
             room=room,
@@ -423,36 +429,7 @@ async def _apply_turn_plan(
     )
     if pending_turn is None or pending_turn.completed or pending_turn.redacted_source_event_ids:
         return
-    canonical_pending_replay = not same_turn_identity(pending_turn, handled_turn)
     handled_turn = pending_turn
-    if canonical_pending_replay:
-        target = handled_turn.conversation_target
-        correlation_id = handled_turn.correlation_id
-        anchor_event_id = handled_turn.anchor_event_id
-        assert target is not None
-        assert correlation_id is not None
-        assert anchor_event_id is not None
-        canonical_envelope = replace(
-            prepared.dispatch.envelope,
-            source_event_id=anchor_event_id,
-            target=target,
-        )
-        owner = await controller.deps.delivery_gateway.owned_terminal_delivery_for_turn(
-            response_kind="team"
-            if response_history_scope is not None and response_history_scope.kind == "team"
-            else "agent",
-            response_envelope=canonical_envelope,
-            correlation_id=correlation_id,
-            source_event_ids=handled_turn.indexed_event_ids,
-        )
-        if owner is not None:
-            controller._mark_source_events_responded(
-                replace(
-                    handled_turn,
-                    response_event_id=owner.target_event_id,
-                ),
-            )
-        return
 
     payload_inputs = DispatchPayloadInputs(
         message_attachment_ids=tuple(message_attachment_ids),

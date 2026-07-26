@@ -52,12 +52,10 @@ from mindroom.inbound_turn_normalizer import (
 from mindroom.ingress_validation import IngressValidator, IngressValidatorDeps
 from mindroom.logging_config import get_logger
 from mindroom.matrix.cache.thread_history_result import thread_history_result
-from mindroom.message_target import MessageTarget
 from mindroom.response_admission import ResponseAdmissionRefusedError
 from mindroom.response_payload_preparation import DispatchPayloadInputs, ResponsePayloadPreparation
 from mindroom.response_runner import ResponseRequest
 from mindroom.sync_restart_retry import InterruptedTurnRooms
-from mindroom.terminal_delivery import PendingTerminalDelivery
 from mindroom.tool_system.runtime_context import ToolRuntimeSupport
 from mindroom.turn_controller import TurnController, TurnControllerDeps
 from mindroom.turn_origin import TurnIntent
@@ -82,7 +80,7 @@ if TYPE_CHECKING:
     from mindroom.hooks import MessageEnvelope
     from mindroom.matrix.cache import ThreadHistoryResult
     from mindroom.matrix.event_info import EventInfo
-    from mindroom.response_identity import ResponseIdentity
+    from mindroom.message_target import MessageTarget
     from mindroom.response_lifecycle import QueuedHumanNoticeReservation
     from mindroom.response_runner import ResponseRunner
     from mindroom.turn_policy import ResponseAction
@@ -173,24 +171,12 @@ class _RecordingResponseRunner:
 
 
 @dataclass
-class _OwnershipLookup:
-    """Arguments crossing the terminal-ownership gateway boundary."""
-
-    response_kind: str
-    response_envelope: MessageEnvelope
-    correlation_id: str
-    source_event_ids: tuple[str, ...]
-
-
-@dataclass
 class _RecordingDeliveryGateway:
     """Typed DeliveryGateway stand-in that records visible sends."""
 
     sent: list[SendTextRequest] = field(default_factory=list)
     edited: list[EditTextRequest] = field(default_factory=list)
     edit_succeeds: bool = True
-    terminal_owner: PendingTerminalDelivery | None = None
-    ownership_lookups: list[_OwnershipLookup] = field(default_factory=list)
 
     async def send_text(self, request: SendTextRequest) -> str | None:
         self.sent.append(request)
@@ -199,35 +185,6 @@ class _RecordingDeliveryGateway:
     async def edit_text(self, request: EditTextRequest) -> bool:
         self.edited.append(request)
         return self.edit_succeeds
-
-    async def owned_terminal_delivery(self, identity: ResponseIdentity) -> PendingTerminalDelivery | None:
-        self.ownership_lookups.append(
-            _OwnershipLookup(
-                response_kind=identity.response_kind,
-                response_envelope=identity.response_envelope,
-                correlation_id=identity.correlation_id,
-                source_event_ids=identity.source_event_ids,
-            ),
-        )
-        return self.terminal_owner
-
-    async def owned_terminal_delivery_for_turn(
-        self,
-        *,
-        response_kind: str,
-        response_envelope: MessageEnvelope,
-        correlation_id: str,
-        source_event_ids: tuple[str, ...],
-    ) -> PendingTerminalDelivery | None:
-        self.ownership_lookups.append(
-            _OwnershipLookup(
-                response_kind=response_kind,
-                response_envelope=response_envelope,
-                correlation_id=correlation_id,
-                source_event_ids=source_event_ids,
-            ),
-        )
-        return self.terminal_owner
 
 
 @dataclass
@@ -624,70 +581,6 @@ async def test_coalesced_router_relays_index_every_human_source_for_edit_lookup(
     assert first_lookup.source_event_metadata is not None
     assert first_lookup.source_event_metadata["$relay-one:localhost"].discovery_event_id == "$human-one:localhost"
     assert first_lookup.source_event_metadata["$relay-two:localhost"].discovery_event_id == "$human-two:localhost"
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("owner_exists", [False, True], ids=["missing-owner", "settled-owner"])
-async def test_partial_coalesced_replay_resolves_authoritative_terminal_owner_before_execution(
-    config: Config,
-    tmp_path: Path,
-    *,
-    owner_exists: bool,
-) -> None:
-    """A partial replay must settle or fail closed before response execution."""
-    harness = _build_harness(config, tmp_path)
-    room = _room_with_members(config, "general")
-    first_event_id = "$first:localhost"
-    second_event_id = "$second:localhost"
-    authority_target = MessageTarget.resolve(_ROOM_ID, _THREAD_ROOT, second_event_id)
-    authority = harness.turn_store.record_pending_turn(
-        TurnRecord.create(
-            (first_event_id, second_event_id),
-            completed=False,
-            response_owner="general",
-            requester_id=_SENDER,
-            correlation_id=second_event_id,
-            history_scope=harness.turn_store.deps.state_writer.history_scope(),
-            conversation_target=authority_target,
-        ),
-    )
-    assert authority is not None
-    owner = MagicMock(spec=PendingTerminalDelivery)
-    owner.target_event_id = "$original-response:localhost"
-    if owner_exists:
-        harness.gateway.terminal_owner = owner
-    first_event = _text_event(
-        f"{_entity_user_id(config, 'general')} first",
-        event_id=first_event_id,
-        thread_id=_THREAD_ROOT,
-    )
-    batch = build_coalesced_batch(
-        CoalescingKey(_ROOM_ID, _THREAD_ROOT, _SENDER),
-        [
-            PendingEvent(
-                event=first_event,
-                room=room,
-                source_kind="message",
-                requester_user_id=_SENDER,
-            ),
-        ],
-    )
-
-    await harness.controller.handle_coalesced_batch(batch)
-    await harness.runner.settle_inbox_responses()
-
-    assert harness.runner.requests == []
-    assert harness.gateway.sent == []
-    assert len(harness.gateway.ownership_lookups) == 1
-    identity = harness.gateway.ownership_lookups[0]
-    assert identity.source_event_ids == authority.indexed_event_ids
-    assert identity.correlation_id == second_event_id
-    assert identity.response_envelope.source_event_id == second_event_id
-    assert identity.response_envelope.target == authority_target
-    record = harness.turn_store.get_turn_record(first_event_id)
-    assert record is not None
-    assert record.completed is owner_exists
-    assert record.response_event_id == (owner.target_event_id if owner_exists else None)
 
 
 @pytest.mark.asyncio
@@ -1644,50 +1537,6 @@ async def test_interactive_selection_acks_generates_and_records_once(config: Con
 
     assert harness.turn_store.is_handled(selection.question_event_id) is True
     assert harness.turn_store.is_handled("$selection:localhost") is True
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("settled", [False, True], ids=["pending-owner", "settled-owner"])
-async def test_interactive_selection_replay_adopts_owner_before_ack(
-    config: Config,
-    tmp_path: Path,
-    *,
-    settled: bool,
-) -> None:
-    """Pending and settled restart owners both suppress a duplicate acknowledgment."""
-    harness = _build_harness(config, tmp_path)
-    room = nio.MatrixRoom(_ROOM_ID, _entity_user_id(config, "general"))
-    selection = interactive.InteractiveSelection(
-        question_event_id="$question:localhost",
-        question_text="Which option should I use?",
-        selection_key="1",
-        selected_label="Option 1",
-        selected_value="Option 1",
-        thread_id="$thread-root:localhost",
-    )
-    owner = MagicMock(spec=PendingTerminalDelivery)
-    owner.target_event_id = "$original-ack:localhost"
-    owner.settled = settled
-    harness.gateway.terminal_owner = owner
-
-    await harness.controller.handle_interactive_selection(
-        room,
-        selection=selection,
-        user_id=_SENDER,
-        source_event_id="$selection:localhost",
-    )
-
-    assert len(harness.gateway.ownership_lookups) == 1
-    identity = harness.gateway.ownership_lookups[0]
-    assert identity.correlation_id == selection.question_event_id
-    assert identity.response_envelope.source_event_id == "$selection:localhost"
-    assert identity.source_event_ids == (selection.question_event_id, "$selection:localhost")
-    assert harness.gateway.sent == []
-    assert harness.runner.requests == []
-    record = harness.turn_store.get_turn_record("$selection:localhost")
-    assert record is not None
-    assert record.completed
-    assert record.response_event_id == owner.target_event_id
 
 
 @pytest.mark.asyncio
