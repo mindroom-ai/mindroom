@@ -2853,6 +2853,56 @@ class TestThreadHistory:
 
         assert [source["event_id"] for source in grouped["$root"]] == ["$root", "$thread_reply", "$plain1", "$plain2"]
 
+    @pytest.mark.asyncio
+    async def test_room_scan_marks_opaque_replacement_of_thread_child_unresolved(self) -> None:
+        """An undecryptable replacement cannot disappear while its target thread is certified."""
+        root_source = {
+            "event_id": "$root",
+            "origin_server_ts": 1000,
+            "sender": "@user:localhost",
+            "type": "m.room.message",
+            "content": {"msgtype": "m.text", "body": "root"},
+        }
+        child_source = {
+            "event_id": "$child",
+            "origin_server_ts": 2000,
+            "sender": "@user:localhost",
+            "type": "m.room.message",
+            "content": {
+                "msgtype": "m.text",
+                "body": "child",
+                "m.relates_to": {"event_id": "$root", "rel_type": "m.thread"},
+            },
+        }
+        opaque_edit = {
+            "event_id": "$opaque_edit",
+            "sender": "@user:localhost",
+            "origin_server_ts": 3000,
+            "type": "m.room.encrypted",
+            "content": {
+                "algorithm": "m.megolm.v1.aes-sha2",
+                "ciphertext": "opaque",
+                "device_id": "DEVICE",
+                "sender_key": "sender-key",
+                "session_id": "session",
+                "m.relates_to": {"event_id": "$child", "rel_type": "m.replace"},
+            },
+        }
+
+        grouped, unresolved_opaque = await _group_scanned_sources_by_thread(
+            room_id="!room:localhost",
+            thread_root_ids=("$root",),
+            edit_candidates_by_original_event_id={},
+            scanned_message_sources={
+                "$root": root_source,
+                "$child": child_source,
+                "$opaque_edit": opaque_edit,
+            },
+        )
+
+        assert [source["event_id"] for source in grouped["$root"]] == ["$root", "$child"]
+        assert unresolved_opaque == frozenset({"$opaque_edit"})
+
     def test_ordered_event_ids_from_scanned_event_sources_preserves_input_order_on_timestamp_ties(self) -> None:
         """Scanned-source ordering should preserve first-seen order before falling back to event IDs."""
         ordered_event_ids = ordered_event_ids_from_scanned_event_sources(

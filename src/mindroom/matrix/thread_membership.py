@@ -457,7 +457,15 @@ def map_backed_thread_membership_access(
         return resolved_thread_ids.get(event_id)
 
     async def fetch_event_info(_room_id: str, event_id: str) -> EventInfo | None:
-        return event_infos.get(event_id)
+        event_info = event_infos.get(event_id)
+        if event_info is None or event_sources_by_event_id is None:
+            return event_info
+        event_source = event_sources_by_event_id.get(event_id)
+        return (
+            event_info
+            if event_source is not None and event_source_supports_valid_thread_relations(event_source, _room_id)
+            else None
+        )
 
     async def prove_thread_root(_room_id: str, thread_root_id: str) -> ThreadRootProof:
         has_children = any(

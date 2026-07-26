@@ -528,6 +528,68 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
 
         assert resolved == ({child_id: root_id} if invalid_position == "root" else {})
 
+    @pytest.mark.parametrize("invalidity", ["state", "wrong-room", "malformed"])
+    @pytest.mark.asyncio
+    async def test_batch_resolution_rejects_invalid_related_ancestor_source(self, invalidity: str) -> None:
+        """A valid reply cannot inherit membership through an invalid supplied ancestor."""
+        room_id = "!test:localhost"
+        root_id = "$root:localhost"
+        ancestor_id = "$ancestor:localhost"
+        child_id = "$child:localhost"
+        event_sources: dict[str, dict[str, object]] = {
+            root_id: {
+                "content": {"body": "root", "msgtype": "m.text"},
+                "event_id": root_id,
+                "origin_server_ts": 1,
+                "room_id": room_id,
+                "sender": "@user:localhost",
+                "type": "m.room.message",
+            },
+            ancestor_id: {
+                "content": {
+                    "body": "ancestor",
+                    "msgtype": "m.text",
+                    "m.relates_to": {"event_id": root_id, "rel_type": "m.thread"},
+                },
+                "event_id": ancestor_id,
+                "origin_server_ts": 2,
+                "room_id": room_id,
+                "sender": "@user:localhost",
+                "type": "m.room.message",
+            },
+            child_id: {
+                "content": {
+                    "body": "child",
+                    "msgtype": "m.text",
+                    "m.relates_to": {"m.in_reply_to": {"event_id": ancestor_id}},
+                },
+                "event_id": child_id,
+                "origin_server_ts": 3,
+                "room_id": room_id,
+                "sender": "@user:localhost",
+                "type": "m.room.message",
+            },
+        }
+        invalid_source = event_sources[ancestor_id]
+        if invalidity == "state":
+            invalid_source["state_key"] = ""
+        elif invalidity == "wrong-room":
+            invalid_source["room_id"] = "!other:localhost"
+        else:
+            content = invalid_source["content"]
+            assert isinstance(content, dict)
+            del content["msgtype"]
+        event_infos = {event_id: EventInfo.from_event(event_source) for event_id, event_source in event_sources.items()}
+
+        resolved = await resolve_thread_ids_for_event_infos(
+            room_id,
+            event_infos=event_infos,
+            event_sources_by_event_id=event_sources,
+            ordered_event_ids=[root_id, ancestor_id, child_id],
+        )
+
+        assert resolved == {}
+
     @pytest.mark.asyncio
     async def test_batch_resolution_promotes_rich_reply_with_explicit_thread_child(self) -> None:
         """Local child proof makes a rich reply its own root before parent ancestry wins."""
