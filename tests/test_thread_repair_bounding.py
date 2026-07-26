@@ -548,9 +548,14 @@ async def test_clearing_the_registry_resets_every_admission_gate() -> None:
         result_arms_backoff=lambda _r: False,
         speculative=True,
     )
-    # A repair just ran, so its cooldown and slot bookkeeping are populated.
+    # Every gate must be non-empty before the clear, or asserting it is empty afterwards proves
+    # nothing. The cooldown is populated by the repair above; the rest are seeded here.
     assert registry.speculative_suppression_reason(thread_key) == "recently_repaired"
     registry._running_speculative_repairs = 1
+    registry._interactive_joins[_flight_key("$thread", hydrate_sidecars=False)] = 1
+    for _ in range(registry.max_concurrent_repairs):
+        await registry._repair_slots.acquire()
+    assert registry._repair_slots.locked()
 
     registry.clear()
 

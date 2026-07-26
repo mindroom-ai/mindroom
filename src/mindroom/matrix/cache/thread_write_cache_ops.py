@@ -367,12 +367,13 @@ class ThreadMutationCacheOps:
         return True
 
     async def _write_append_failure_marker(self, room_id: str, thread_id: str, *, reason: str) -> None:
-        """Persist the marker a rolled-back append owes, surviving a second cancellation.
+        """Persist the marker a rolled-back append owes, surviving the cancellation that caused it.
 
-        Shutdown cancels pending work in bounded rounds, so shielding alone is not enough: the shield
-        keeps the write running but leaves it untracked, and a marker abandoned mid-shutdown is the
-        fail-open this handler exists to prevent. Owning the task hands it to the same drain that
-        waits for every other cache write.
+        Shielding alone is not enough: it keeps the write running but leaves it untracked, so
+        ``close`` returns without it and a marker abandoned mid-shutdown is the fail-open this
+        handler exists to prevent. Owning the task puts it in the set ``close`` waits on, within the
+        same bounded budget as every other cache write -- a backend too wedged to finish inside that
+        budget loses the marker, but by then it is failing every write, not just this one.
         """
         coordinator = self.runtime.event_cache_write_coordinator
         marker = self.invalidate_known_thread(room_id, thread_id, reason=reason)
