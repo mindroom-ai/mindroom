@@ -476,8 +476,7 @@ class DeliveryGateway:
         )
         return FinalDeliveryOutcome(
             terminal_status="error",
-            event_id=request.event_id,
-            is_visible_response=True,
+            event_id=None,
             failure_reason=request.failure_reason,
             deferred_terminal_delivery=request.failure_reason == _DURABLE_TERMINAL_RETRY_FAILURE_REASON,
             tool_trace=tuple(request.tool_trace or ()),
@@ -835,6 +834,17 @@ class DeliveryGateway:
                     "Failed to persist terminal delivery before Matrix transport",
                     correlation_id=request.identity.correlation_id,
                 )
+                if request.existing_event_is_placeholder:
+                    return await self._finish_placeholder_delivery_failure(
+                        _PlaceholderFailureUpdateRequest(
+                            target=request.target,
+                            event_id=request.existing_event_id,
+                            identity=request.identity,
+                            failure_reason="terminal_delivery_persist_failed",
+                            tool_trace=draft.tool_trace,
+                            extra_content=draft.extra_content,
+                        ),
+                    )
                 return FinalDeliveryOutcome(
                     terminal_status="error",
                     event_id=request.existing_event_id,

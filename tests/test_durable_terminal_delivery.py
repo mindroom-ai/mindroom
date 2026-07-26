@@ -775,6 +775,34 @@ async def test_persisted_redaction_barrier_blocks_record_while_tombstone_is_in_f
 
 
 @pytest.mark.asyncio
+async def test_cancelled_redaction_drains_durable_tombstone_before_propagating(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    coordinator, _hooks = _coordinator(store)
+    tombstone_started = threading.Event()
+    release_tombstone = threading.Event()
+
+    def persist_tombstone(event_id: str) -> None:
+        tombstone_started.set()
+        release_tombstone.wait()
+        coordinator.deps.turn_store.redacted.add(event_id)
+
+    coordinator.deps.turn_store.mark_source_redacted = MagicMock(side_effect=persist_tombstone)  # type: ignore[method-assign]
+    redaction = asyncio.create_task(coordinator.redact(room_id=ROOM, event_id=SOURCE))
+    await asyncio.to_thread(tombstone_started.wait)
+    redaction.cancel()
+    await asyncio.sleep(0)
+    returned_before_write = redaction.done()
+    release_tombstone.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await redaction
+
+    assert not returned_before_write
+    assert SOURCE in coordinator.deps.turn_store.redacted
+    assert tuple(barrier.event_id for barrier in store.redaction_barriers()) == (SOURCE,)
+
+
+@pytest.mark.asyncio
 async def test_settled_receipt_survives_until_handled_turn_is_durable(tmp_path: Path) -> None:
     store = _store(tmp_path)
     coordinator, _hooks = _coordinator(store)
@@ -998,6 +1026,43 @@ async def test_cancellation_during_record_returns_durable_managed_ownership(tmp_
 
 
 @pytest.mark.asyncio
+async def test_cancelled_store_update_drains_disk_mutation_before_propagating(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    item = store.record(_intent())
+    assert item is not None
+    coordinator, _hooks = _coordinator(store)
+    update_started = threading.Event()
+    release_update = threading.Event()
+    original_update = store.update
+
+    def blocked_update(
+        delivery_id: str,
+        *,
+        revision: int,
+        **changes: object,
+    ) -> PendingTerminalDelivery | None:
+        update_started.set()
+        release_update.wait()
+        return original_update(delivery_id, revision=revision, **changes)
+
+    store.update = MagicMock(side_effect=blocked_update)  # type: ignore[method-assign]
+    mutation = asyncio.create_task(coordinator._defer(item, store.clock() + 1))
+    await asyncio.to_thread(update_started.wait)
+    mutation.cancel()
+    await asyncio.sleep(0)
+    returned_before_write = mutation.done()
+    release_update.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await mutation
+
+    current = store.get(item.delivery_id)
+    assert not returned_before_write
+    assert current is not None
+    assert current.attempts == 1
+
+
+@pytest.mark.asyncio
 async def test_stale_settlement_cannot_delete_newer_regeneration(tmp_path: Path) -> None:
     store = _store(tmp_path)
     old = store.record(_intent())
@@ -1110,6 +1175,42 @@ async def test_stop_cancels_stalled_hook_and_restart_retries_it(tmp_path: Path) 
     restarted_hooks.emit_after_response.assert_not_awaited()
     [receipt] = restarted_store.items()
     assert receipt.settled
+
+
+@pytest.mark.asyncio
+async def test_stop_waits_for_cancelled_settlement_store_mutation(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    item = store.record(_intent())
+    assert item is not None
+    coordinator, _hooks = _coordinator(store)
+    update_started = threading.Event()
+    release_update = threading.Event()
+    original_update = store.update
+
+    def blocked_update(
+        delivery_id: str,
+        *,
+        revision: int,
+        **changes: object,
+    ) -> PendingTerminalDelivery | None:
+        update_started.set()
+        release_update.wait()
+        return original_update(delivery_id, revision=revision, **changes)
+
+    store.update = MagicMock(side_effect=blocked_update)  # type: ignore[method-assign]
+    settlement = asyncio.create_task(coordinator._defer(item, store.clock() + 1))
+    coordinator._settlement = settlement
+    await asyncio.to_thread(update_started.wait)
+    stopping = asyncio.create_task(coordinator.stop())
+    done, _pending = await asyncio.wait({stopping}, timeout=0.1)
+    returned_before_write = stopping in done
+    release_update.set()
+    await asyncio.wait_for(stopping, 1)
+
+    assert not returned_before_write
+    current = store.get(item.delivery_id)
+    assert current is not None
+    assert current.attempts == 1
 
 
 @pytest.mark.asyncio

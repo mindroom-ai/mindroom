@@ -516,6 +516,41 @@ class TerminalDeliveryCommit:
         return self.item if not self.settled else None
 
 
+@dataclass(frozen=True, slots=True)
+class _StoreMutationOutcome[ResultT]:
+    """Completed store work plus cancellation deferred until its disk thread drained."""
+
+    value: ResultT
+    cancellation: asyncio.CancelledError | None
+
+    def unwrap(self) -> ResultT:
+        """Return the completed value or propagate deferred caller cancellation."""
+        if self.cancellation is not None:
+            raise self.cancellation
+        return self.value
+
+
+async def _run_durable_mutation[**ParamsT, ResultT](
+    operation: Callable[ParamsT, ResultT],
+    *args: ParamsT.args,
+    **kwargs: ParamsT.kwargs,
+) -> _StoreMutationOutcome[ResultT]:
+    """Shield and drain one durable write before exposing cancellation."""
+    worker = asyncio.create_task(
+        asyncio.to_thread(operation, *args, **kwargs),
+        name="terminal_delivery_store_mutation",
+    )
+    cancellation: asyncio.CancelledError | None = None
+    while not worker.done():
+        try:
+            await asyncio.shield(worker)
+        except asyncio.CancelledError as error:
+            if worker.cancelled():
+                raise
+            cancellation = error
+    return _StoreMutationOutcome(worker.result(), cancellation)
+
+
 @dataclass(frozen=True)
 class TerminalDeliveryCoordinatorDeps:
     """Runtime collaborators for terminal convergence."""
@@ -564,7 +599,7 @@ class TerminalDeliveryCoordinator:
 
     async def warm(self) -> tuple[PendingTerminalDelivery, ...]:
         """Load durable work and reconcile temporary redaction barriers."""
-        recovered = await asyncio.to_thread(self.store.warm)
+        recovered = (await _run_durable_mutation(self.store.warm)).unwrap()
         await self.reconcile_redactions()
         return recovered
 
@@ -634,11 +669,13 @@ class TerminalDeliveryCoordinator:
         """Announce redaction before durable authority and keep failures fail-closed."""
         self._redacting.add(event_id)
         try:
-            barrier = await asyncio.to_thread(
-                self.store.record_redaction,
-                room_id=room_id,
-                event_id=event_id,
-            )
+            barrier = (
+                await _run_durable_mutation(
+                    self.store.record_redaction,
+                    room_id=room_id,
+                    event_id=event_id,
+                )
+            ).unwrap()
         except BaseException:
             self._redaction_barrier_failed = True
             raise
@@ -646,7 +683,8 @@ class TerminalDeliveryCoordinator:
 
     async def reconcile_redactions(self) -> None:
         """Retry temporary barriers into TurnStore without dropping failed work."""
-        for barrier in await asyncio.to_thread(self.store.redaction_barriers):
+        barriers = await asyncio.to_thread(self.store.redaction_barriers)
+        for barrier in barriers:
             try:
                 await self._reconcile_redaction(barrier)
             except asyncio.CancelledError:
@@ -659,18 +697,25 @@ class TerminalDeliveryCoordinator:
                 )
 
     async def _reconcile_redaction(self, barrier: _TerminalRedactionBarrier) -> None:
-        await asyncio.to_thread(self.deps.turn_store.mark_source_redacted, barrier.event_id)
-        for item in await asyncio.to_thread(
+        (
+            await _run_durable_mutation(
+                self.deps.turn_store.mark_source_redacted,
+                barrier.event_id,
+            )
+        ).unwrap()
+        matching = await asyncio.to_thread(
             self.store.matching,
             room_id=barrier.room_id,
             event_id=barrier.event_id,
-        ):
+        )
+        for item in matching:
             async with self._lock_for(item.target.room_id, item.target_event_id):
                 current = await asyncio.to_thread(self.store.get, item.delivery_id)
                 if current is not None and current.revision == item.revision:
-                    await asyncio.to_thread(self.store.finish, item.delivery_id, revision=item.revision)
-        await asyncio.to_thread(self.store.finish_redaction, barrier)
+                    (await _run_durable_mutation(self.store.finish, item.delivery_id, revision=item.revision)).unwrap()
+        finish = await _run_durable_mutation(self.store.finish_redaction, barrier)
         self._redacting.discard(barrier.event_id)
+        finish.unwrap()
 
     def pending_target_event_ids(self, room_id: str | None = None) -> frozenset[str]:
         """Return targets still durably owned."""
@@ -724,7 +769,13 @@ class TerminalDeliveryCoordinator:
             if current.settled:
                 await asyncio.to_thread(self.deps.turn_store.flush)
                 if all(self.deps.turn_store.is_handled(event_id) for event_id in current.source_event_ids):
-                    await asyncio.to_thread(self.store.finish, current.delivery_id, revision=current.revision)
+                    (
+                        await _run_durable_mutation(
+                            self.store.finish,
+                            current.delivery_id,
+                            revision=current.revision,
+                        )
+                    ).unwrap()
                 else:
                     await self._defer(current, self.store.clock() + self.deps.poll_interval_seconds)
                 return
@@ -771,19 +822,10 @@ class TerminalDeliveryCoordinator:
             or self.deps.turn_store.any_source_redacted(event_ids)
         ):
             return None, False
-        record = asyncio.create_task(
-            asyncio.to_thread(self.store.record, intent),
-            name="terminal_delivery_record",
-        )
-        cancelled = False
-        while not record.done():
-            try:
-                await asyncio.shield(record)
-            except asyncio.CancelledError:
-                if record.cancelled():
-                    raise
-                cancelled = True
-        return record.result(), cancelled
+        # Record uniquely consumes deferred cancellation: once ownership may
+        # exist, durable retry must win over outer cancelled-lifecycle cleanup.
+        record = await _run_durable_mutation(self.store.record, intent)
+        return record.value, record.cancellation is not None
 
     async def _attempt_locked(self, item: PendingTerminalDelivery) -> tuple[TerminalDeliveryStatus, str]:
         if not self.redaction_barriers_ready:
@@ -820,32 +862,36 @@ class TerminalDeliveryCoordinator:
         if current is None or current.revision != item.revision:
             return True
         if status == "superseded":
-            await asyncio.to_thread(self.store.finish, item.delivery_id, revision=item.revision)
+            (await _run_durable_mutation(self.store.finish, item.delivery_id, revision=item.revision)).unwrap()
             return True
         if status == "deferred":
             await self._defer(current, next_attempt_at)
             return False
-        current = await asyncio.to_thread(
-            self.store.update,
-            item.delivery_id,
-            revision=item.revision,
-            transport_delivered=True,
-        )
+        current = (
+            await _run_durable_mutation(
+                self.store.update,
+                item.delivery_id,
+                revision=item.revision,
+                transport_delivered=True,
+            )
+        ).unwrap()
         if current is None:
             return True
         if not await self._complete_lifecycle(current):
             if await self._is_current_and_live(current):
                 await self._defer(current, next_attempt_at)
             else:
-                await asyncio.to_thread(self.store.finish, item.delivery_id, revision=item.revision)
+                (await _run_durable_mutation(self.store.finish, item.delivery_id, revision=item.revision)).unwrap()
             return False
-        settled = await asyncio.to_thread(
-            self.store.update,
-            item.delivery_id,
-            revision=item.revision,
-            settled=True,
-            next_attempt_at=self.store.clock() + self.deps.poll_interval_seconds,
-        )
+        settled = (
+            await _run_durable_mutation(
+                self.store.update,
+                item.delivery_id,
+                revision=item.revision,
+                settled=True,
+                next_attempt_at=self.store.clock() + self.deps.poll_interval_seconds,
+            )
+        ).unwrap()
         return settled is not None
 
     async def _claim_after_response(self, item: PendingTerminalDelivery) -> PendingTerminalDelivery | None:
@@ -854,12 +900,14 @@ class TerminalDeliveryCoordinator:
             return None
         if current.after_response_claimed:
             return current
-        current = await asyncio.to_thread(
-            self.store.update,
-            item.delivery_id,
-            revision=item.revision,
-            after_response_claimed=True,
-        )
+        current = (
+            await _run_durable_mutation(
+                self.store.update,
+                item.delivery_id,
+                revision=item.revision,
+                after_response_claimed=True,
+            )
+        ).unwrap()
         if current is None:
             return None
         try:
@@ -898,12 +946,14 @@ class TerminalDeliveryCoordinator:
                 self.deps.logger.exception("terminal_delivery_lifecycle_step_failed", step=step, **item.log_context)
                 return False
             completed = tuple(dict.fromkeys((*current.completed_lifecycle_steps, step)))
-            current = await asyncio.to_thread(
-                self.store.update,
-                item.delivery_id,
-                revision=item.revision,
-                completed_lifecycle_steps=completed,
-            )
+            current = (
+                await _run_durable_mutation(
+                    self.store.update,
+                    item.delivery_id,
+                    revision=item.revision,
+                    completed_lifecycle_steps=completed,
+                )
+            ).unwrap()
             if current is None:
                 return False
         return True
@@ -982,12 +1032,14 @@ class TerminalDeliveryCoordinator:
             return item
         if not await self._is_current_and_live(item):
             return None
-        return await asyncio.to_thread(
-            self.store.update,
-            item.delivery_id,
-            revision=item.revision,
-            thread_summary=frozen,
-        )
+        return (
+            await _run_durable_mutation(
+                self.store.update,
+                item.delivery_id,
+                revision=item.revision,
+                thread_summary=frozen,
+            )
+        ).unwrap()
 
     async def _is_current_and_live(self, item: PendingTerminalDelivery) -> bool:
         current = await asyncio.to_thread(self.store.get, item.delivery_id)
@@ -1002,13 +1054,15 @@ class TerminalDeliveryCoordinator:
         )
 
     async def _defer(self, item: PendingTerminalDelivery, next_attempt_at: float) -> None:
-        await asyncio.to_thread(
-            self.store.update,
-            item.delivery_id,
-            revision=item.revision,
-            attempts=item.attempts + 1,
-            next_attempt_at=next_attempt_at,
-        )
+        (
+            await _run_durable_mutation(
+                self.store.update,
+                item.delivery_id,
+                revision=item.revision,
+                attempts=item.attempts + 1,
+                next_attempt_at=next_attempt_at,
+            )
+        ).unwrap()
 
     def _lock_for(self, room_id: str, target_event_id: str) -> asyncio.Lock:
         lock_key = (room_id, target_event_id)

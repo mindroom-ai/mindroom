@@ -679,6 +679,41 @@ async def test_final_delivery_failure_replaces_placeholder_with_failure_update(t
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("failure_edit_succeeds", [True, False])
+async def test_terminal_persist_failure_handles_placeholder_only_after_failure_edit(
+    tmp_path: Path,
+    *,
+    failure_edit_succeeds: bool,
+) -> None:
+    """Disk failure leaves source replayable unless a terminal Matrix edit lands."""
+    gateway = _delivery_gateway(tmp_path)
+    coordinator = gateway.deps.terminal_delivery_coordinator
+    coordinator.commit_and_attempt.side_effect = OSError("disk full")
+    object.__setattr__(gateway, "edit_text", AsyncMock(return_value=failure_edit_succeeds))
+
+    outcome = await gateway.deliver_final(
+        FinalDeliveryRequest(
+            target=MessageTarget.resolve("!room:localhost", None, "$reply"),
+            existing_event_id="$placeholder",
+            existing_event_is_placeholder=True,
+            response_text="final answer",
+            identity=ResponseIdentity(
+                response_kind="ai",
+                response_envelope=_envelope(),
+                correlation_id="corr-terminal-persist-failure",
+            ),
+            tool_trace=None,
+            extra_content=None,
+        ),
+    )
+
+    assert outcome.failure_reason == "terminal_delivery_persist_failed"
+    assert outcome.mark_handled is failure_edit_succeeds
+    assert outcome.final_visible_event_id == ("$placeholder" if failure_edit_succeeds else None)
+    gateway.edit_text.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_durable_pending_edit_never_competes_with_placeholder_failure_update(tmp_path: Path) -> None:
     """A frozen stable transaction must remain the only edit after an ambiguous failure."""
     gateway = _delivery_gateway(tmp_path)
@@ -745,10 +780,10 @@ async def test_persistent_sync_recovery_barrier_returns_new_send_delivery_failur
 
 
 @pytest.mark.asyncio
-async def test_streaming_placeholder_delivery_failure_stays_terminal_when_failure_update_fails(
+async def test_streaming_placeholder_delivery_failure_stays_replayable_when_failure_update_fails(
     tmp_path: Path,
 ) -> None:
-    """If Matrix rejects the failure update too, finalization still returns a failed visible outcome."""
+    """If Matrix rejects the failure update too, the pending source remains replayable."""
     config = _config(tmp_path)
     response_hooks = SimpleNamespace(
         apply_before_response=AsyncMock(),
@@ -795,10 +830,10 @@ async def test_streaming_placeholder_delivery_failure_stays_terminal_when_failur
     )
 
     assert outcome.terminal_status == "error"
-    assert outcome.final_visible_event_id == "$placeholder"
+    assert outcome.final_visible_event_id is None
     assert outcome.final_visible_body is None
     assert outcome.failure_reason == "terminal_update_failed"
-    assert outcome.mark_handled is True
+    assert outcome.mark_handled is False
     logger.error.assert_called_once_with(
         "Failed to deliver placeholder failure update",
         room_id="!room:localhost",

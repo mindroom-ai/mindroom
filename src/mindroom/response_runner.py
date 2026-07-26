@@ -1191,8 +1191,6 @@ class ResponseRunner:
             execution_identity=execution_identity,
         ):
             return None
-        if request.on_lifecycle_lock_acquired is not None:
-            request.on_lifecycle_lock_acquired()
         request = self._request_with_locked_target(request, resolved_target)
         if request.prepare_source_turn is not None and await _run_locked_source_preparation(
             request.prepare_source_turn,
@@ -1215,23 +1213,24 @@ class ResponseRunner:
                     ),
                 )
             return None
-        if request.existing_event_id is None:
-            owned_delivery = await self.deps.delivery_gateway.owned_terminal_delivery(
-                self._response_identity(
-                    request,
-                    response_kind="team" if history_scope.kind == "team" else "agent",
+        owned_delivery = await self.deps.delivery_gateway.owned_terminal_delivery(
+            self._response_identity(
+                request,
+                response_kind="team" if history_scope.kind == "team" else "agent",
+            ),
+        )
+        if owned_delivery is not None:
+            request = replace(
+                request,
+                existing_event_id=owned_delivery.target_event_id,
+                existing_event_is_placeholder=(
+                    owned_delivery.target_was_placeholder and not owned_delivery.transport_delivered
                 ),
+                recovered_terminal_delivery=True,
             )
-            if owned_delivery is not None:
-                request = replace(
-                    request,
-                    existing_event_id=owned_delivery.target_event_id,
-                    existing_event_is_placeholder=(
-                        owned_delivery.target_was_placeholder and not owned_delivery.transport_delivered
-                    ),
-                    recovered_terminal_delivery=True,
-                )
-                return self._request_with_locked_target(request, resolved_target)
+            return self._request_with_locked_target(request, resolved_target)
+        if request.on_lifecycle_lock_acquired is not None:
+            request.on_lifecycle_lock_acquired()
         excluded_history_event_id = None
         if (
             placeholder_message is not None
