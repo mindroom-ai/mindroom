@@ -16,21 +16,29 @@ GitHub builds and static checks were green while smoke, pytest, and Greptile wer
 Real Tuwunel had not run.
 These results remain diagnostic evidence but cannot certify a corrected head.
 
-## Active correctness blocker
+## Active correction
 
-Fresh exact-head review reproduced a room-scan identity-state loss:
+Two fresh exact-`719307bc4` reviewers reproduced five blockers before production changes:
 
-1. Two conflicting explicit representations of event ID `E` correctly quarantine `E` while scanning.
-2. The scan retains only surviving source values and separately records `E` in `conflicting_event_ids`.
-3. Final canonicalization ignores the prior conflict set and sees only a root bundling `E`.
-4. The bundled representation resurrects `E` and edits the root despite the immutable identity conflict.
+1. Final room-scan canonicalization forgot already-quarantined event IDs and resurrected a conflicting bundled edit.
+2. Trusted provisional plaintext outbound events conflicted with opaque encrypted sync echoes and were tombstoned in both arrival orders.
+3. Bundles from superseded provisional or opaque top-level representations poisoned the final canonical identity set.
+4. Scrubbing a bundled edit did not advance the parent point row's `write_seq`, so process-local resolution reuse served the redacted edit.
+5. A definitive `NOT_A_THREAD_ROOT` proof was overwritten by a stale advisory thread index.
 
-Strict TDD order:
+Strict TDD evidence:
 
-- Add an actual room-scan regression with bundled `E` plus two conflicting explicit `E` representations.
-- Prove RED before production edits.
-- Carry prior conflict evidence through final canonicalization/scrubbing at the owning seam.
-- Run owning full-resolution tests, SQLite/PostgreSQL parity where affected, then all final gates.
+- The first two regressions failed `6/6` cases before their production correction.
+- The remaining three regression families failed `18/18` cases before their production correction.
+- The combined matrix now passes `24/24`, including both SQLite and PostgreSQL.
+- Full owning suites pass for thread history, cache mutations, event cache, resolution reuse, and membership resolution.
+- Ruff, formatting, ty, Tach, and `git diff --check` pass.
+
+The correction keeps one two-phase identity policy: settle final top-level representations, then observe only their bundles.
+Room scans carry prior conflict evidence into that canonical pass.
+Provisional plaintext is preserved over opaque sync echoes until a canonical clear echo arrives.
+Bundled scrubs advance the durable point revision in both backends.
+Definitive relation/root proof now wins over stale cache indexes.
 
 ## Final gates
 

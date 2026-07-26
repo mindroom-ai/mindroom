@@ -371,7 +371,7 @@ async def resolve_event_thread_membership(
     return resolution
 
 
-async def resolve_related_event_thread_membership(  # noqa: C901
+async def resolve_related_event_thread_membership(
     room_id: str,
     related_event_id: str,
     *,
@@ -386,8 +386,6 @@ async def resolve_related_event_thread_membership(  # noqa: C901
         if current_event_id in visited_event_ids:
             break
         visited_event_ids.add(current_event_id)
-
-        indexed_thread_id = await access.lookup_thread_id(room_id, current_event_id)
 
         try:
             related_event_info = await access.fetch_event_info(room_id, current_event_id)
@@ -429,9 +427,6 @@ async def resolve_related_event_thread_membership(  # noqa: C901
         if next_target is not None:
             current_event_id = next_target
             continue
-        if indexed_thread_id is not None and not related_event_info.is_edit:
-            resolution = ThreadResolution.threaded(indexed_thread_id)
-            break
         break
 
     return resolution

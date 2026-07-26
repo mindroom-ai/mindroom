@@ -979,6 +979,61 @@ class TestMatrixConversationCacheThreadReads:
         assert [event["event_id"] for event in recent_events].count(event_id) == 1
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("sync_echo_first", [False, True])
+    async def test_outbound_send_opaque_sync_echo_preserves_provisional_plaintext(
+        self,
+        event_cache: ConversationEventCache,
+        *,
+        sync_echo_first: bool,
+    ) -> None:
+        """An undecryptable sync echo cannot quarantine the richer local sent payload."""
+        room_id = "!room:localhost"
+        event_id = "$message:localhost"
+        client = _make_client_mock(user_id="@agent:localhost")
+        access = MatrixConversationCache(
+            logger=MagicMock(),
+            runtime=_conversation_runtime(client=client, event_cache=event_cache),
+        )
+        sync_echo = nio.MegolmEvent.from_dict(
+            {
+                "content": {
+                    "algorithm": "m.megolm.v1.aes-sha2",
+                    "ciphertext": "cipher",
+                    "device_id": "DEVICE",
+                    "sender_key": "sender-key",
+                    "session_id": "session",
+                },
+                "event_id": event_id,
+                "sender": "@agent:localhost",
+                "origin_server_ts": 1234567890,
+                "room_id": room_id,
+                "type": "m.room.encrypted",
+            },
+        )
+        assert isinstance(sync_echo, nio.MegolmEvent)
+        response = MagicMock()
+        response.__class__ = nio.SyncResponse
+        response.rooms = MagicMock(
+            join={room_id: MagicMock(timeline=MagicMock(events=[sync_echo], limited=False))},
+        )
+
+        if sync_echo_first:
+            await asyncio.gather(*access.cache_sync_timeline(response))
+            await _wait_for_room_cache_idle(access.runtime.event_cache_write_coordinator)
+        access.notify_outbound_message(room_id, event_id, {"body": "synthetic local row", "msgtype": "m.text"})
+        if not sync_echo_first:
+            await asyncio.gather(*access.cache_sync_timeline(response))
+        await _wait_for_room_cache_idle(access.runtime.event_cache_write_coordinator)
+
+        cached_event = await event_cache.get_event(room_id, event_id)
+
+        assert cached_event is not None
+        assert cached_event["type"] == "m.room.message"
+        assert cached_event["content"]["body"] == "synthetic local row"
+        assert cached_event.get("io.mindroom.provisional_outbound") is True
+        assert await event_cache.redacted_event_ids(room_id, {event_id}) == set()
+
+    @pytest.mark.asyncio
     async def test_notify_outbound_reaction_persists_lookup_without_thread_invalidation(self) -> None:
         """Outbound reactions should be cached for later redaction lookups without staling thread history."""
         event_cache = _runtime_event_cache()

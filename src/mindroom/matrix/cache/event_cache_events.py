@@ -85,15 +85,14 @@ def _observe_cached_event_and_bundles(
     room_id: str,
 ) -> _CachedObservation | None:
     """Observe one eligible cache row and every room-scoped non-self bundle."""
-    if not event_source_matches_room(event, room_id):
-        return None
-    transition = observe_event_representation(
+    transition = _observe_cached_event(
         observed,
         conflicting_event_ids,
         event,
         room_id=room_id,
-        require_timeline=False,
     )
+    if transition is None:
+        return None
     for bundled in bundled_replacement_candidates(event):
         observe_event_representation(
             observed,
@@ -103,6 +102,50 @@ def _observe_cached_event_and_bundles(
             container=event,
         )
     return transition
+
+
+def _observe_cached_event(
+    observed: dict[str, dict[str, Any]],
+    conflicting_event_ids: set[str],
+    event: Mapping[str, Any],
+    *,
+    room_id: str,
+) -> _CachedObservation | None:
+    """Observe one room-scoped top-level cache row."""
+    if not event_source_matches_room(event, room_id):
+        return None
+    return observe_event_representation(
+        observed,
+        conflicting_event_ids,
+        event,
+        room_id=room_id,
+        require_timeline=False,
+    )
+
+
+def _observe_final_cached_bundles(
+    observed: dict[str, dict[str, Any]],
+    conflicting_event_ids: set[str],
+    top_level_event_ids: Iterable[object],
+    *,
+    room_id: str,
+) -> None:
+    """Observe bundles only from the final surviving top-level cache rows."""
+    for event_id in dict.fromkeys(top_level_event_ids):
+        if (
+            not isinstance(event_id, str)
+            or event_id in conflicting_event_ids
+            or (container := observed.get(event_id)) is None
+        ):
+            continue
+        for bundled in bundled_replacement_candidates(container):
+            observe_event_representation(
+                observed,
+                conflicting_event_ids,
+                bundled,
+                room_id=room_id,
+                container=container,
+            )
 
 
 def _without_tombstoned_serialized_events(
@@ -138,7 +181,7 @@ async def safe_cached_event_transitions(
     seen_top_level_event_ids: set[str] = set()
 
     for existing_event in existing.values():
-        _observe_cached_event_and_bundles(
+        _observe_cached_event(
             observed,
             conflicting_event_ids,
             existing_event,
@@ -146,7 +189,7 @@ async def safe_cached_event_transitions(
         )
 
     for event in serialized_events:
-        transition = _observe_cached_event_and_bundles(
+        transition = _observe_cached_event(
             observed,
             conflicting_event_ids,
             event.event,
@@ -159,6 +202,15 @@ async def safe_cached_event_transitions(
             seen_top_level_event_ids.add(event.event_id)
         if transition == "accept":
             accepted_top_level_event_ids.add(event.event_id)
+    _observe_final_cached_bundles(
+        observed,
+        conflicting_event_ids,
+        [
+            *(event.get("event_id") for event in existing.values()),
+            *ordered_top_level_event_ids,
+        ],
+        room_id=room_id,
+    )
     indexable = [
         serialize_cached_event(event_id, observed[event_id])
         for event_id in ordered_top_level_event_ids

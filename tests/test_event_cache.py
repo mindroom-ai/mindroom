@@ -2427,6 +2427,75 @@ async def test_duplicate_ids_in_one_batch_derive_only_final_canonical_state(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("upgrade_kind", ["encrypted", "provisional"])
+@pytest.mark.parametrize("batch_order", [("stale", "canonical"), ("canonical", "stale")])
+async def test_duplicate_ids_in_one_batch_discard_superseded_bundles(
+    event_cache: ConversationEventCache,
+    upgrade_kind: str,
+    batch_order: tuple[str, str],
+) -> None:
+    """Bundles from a discarded top-level view cannot quarantine a valid explicit event."""
+    room_id = "!room:localhost"
+    original_id = "$original:localhost"
+    edit_id = "$edit:localhost"
+    canonical = _clear_payload(
+        original_id,
+        body="Original",
+        room_id=room_id,
+        origin_server_ts=1000,
+    )
+    stale_edit = _clear_payload(
+        edit_id,
+        body="Stale",
+        room_id=room_id,
+        edit_of=original_id,
+        origin_server_ts=2000,
+    )
+    if upgrade_kind == "encrypted":
+        stale = _opaque_payload(original_id, origin_server_ts=1000)
+        stale["room_id"] = room_id
+    else:
+        stale = event_normalization.mark_provisional_outbound_event(
+            _clear_payload(
+                original_id,
+                body="Provisional",
+                room_id=room_id,
+                origin_server_ts=1000,
+            ),
+        )
+    stale["unsigned"] = {"m.relations": {"m.replace": stale_edit}}
+    explicit_edit = _clear_payload(
+        edit_id,
+        body="Real",
+        room_id=room_id,
+        edit_of=original_id,
+        origin_server_ts=2000,
+    )
+    payloads = {"stale": stale, "canonical": canonical}
+
+    await event_cache.store_events_batch(
+        [
+            *((original_id, room_id, payloads[payload_kind]) for payload_kind in batch_order),
+            (edit_id, room_id, explicit_edit),
+        ],
+    )
+
+    cached_original = await event_cache.get_event(room_id, original_id)
+    cached_edit = await event_cache.get_event(room_id, edit_id)
+    assert cached_original is not None
+    assert cached_original["content"]["body"] == "Original"
+    assert cached_edit is not None
+    assert cached_edit["content"]["m.new_content"]["body"] == "Real"
+    latest = await event_cache.get_latest_edit(
+        room_id,
+        cached_original,
+        validator=valid_room_message_replacement,
+    )
+    assert latest is not None
+    assert latest["event_id"] == edit_id
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("promotion_write", ["point_store", "thread_append"])
 async def test_promoting_indexed_rich_reply_root_invalidates_old_parent_snapshot(
     event_cache: ConversationEventCache,
@@ -6120,6 +6189,62 @@ async def test_mxc_text_cache_round_trips_across_event_cache_reopen(
         await reopened_cache.close()
 
     assert cached_text == "Full text sidecar"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("removal", ["redaction", "identity-conflict"])
+async def test_bundled_replacement_removal_advances_thread_point_revision(
+    event_cache: ConversationEventCache,
+    removal: str,
+) -> None:
+    """Scrubbing a bundled edit must invalidate process-local resolved-history reuse."""
+    room_id = "!room:localhost"
+    thread_id = "$thread_root"
+    edit_id = "$edit"
+    root = _clear_payload(
+        thread_id,
+        body="Root",
+        room_id=room_id,
+        origin_server_ts=1000,
+    )
+    root["unsigned"] = {
+        "m.relations": {
+            "m.replace": _clear_payload(
+                edit_id,
+                body="Bundled",
+                room_id=room_id,
+                edit_of=thread_id,
+                origin_server_ts=2000,
+            ),
+        },
+    }
+    await _replace_thread(event_cache, room_id, thread_id, [root])
+    before = await event_cache.get_thread_revision(room_id, thread_id)
+
+    if removal == "redaction":
+        assert await event_cache.redact_event(room_id, edit_id)
+    else:
+        await event_cache.store_event(
+            edit_id,
+            room_id,
+            _clear_payload(
+                edit_id,
+                body="Conflicting explicit",
+                room_id=room_id,
+                edit_of=thread_id,
+                origin_server_ts=2000,
+            ),
+        )
+
+    after = await event_cache.get_thread_revision(room_id, thread_id)
+    cached_root = await event_cache.get_event(room_id, thread_id)
+
+    assert before is not None
+    assert after is not None
+    assert after.event_count == before.event_count
+    assert after.max_write_seq > before.max_write_seq
+    assert cached_root is not None
+    assert "m.replace" not in cached_root["unsigned"]["m.relations"]
 
 
 @pytest.mark.asyncio

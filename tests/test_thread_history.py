@@ -430,6 +430,80 @@ class TestThreadHistory:
         assert resolution.related_event_id_by_event_id == {}
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("upgrade_kind", ["encrypted", "provisional"])
+    @pytest.mark.parametrize("representation_order", ["stale-first", "canonical-first"])
+    async def test_canonical_identity_upgrade_discards_superseded_bundles(
+        self,
+        upgrade_kind: str,
+        representation_order: str,
+    ) -> None:
+        """Only bundles on the final top-level representation may contribute identity evidence."""
+        room_id = "!room:localhost"
+        root_id = "$root:localhost"
+        edit_id = "$edit:localhost"
+        sender = "@alice:localhost"
+        canonical = {
+            "event_id": root_id,
+            "room_id": room_id,
+            "sender": sender,
+            "origin_server_ts": 1000,
+            "type": "m.room.message",
+            "content": {"body": "Original", "msgtype": "m.text"},
+        }
+        stale_edit = {
+            "event_id": edit_id,
+            "room_id": room_id,
+            "sender": sender,
+            "origin_server_ts": 2000,
+            "type": "m.room.message",
+            "content": {
+                "body": "* Stale",
+                "msgtype": "m.text",
+                "m.new_content": {"body": "Stale", "msgtype": "m.text"},
+                "m.relates_to": {"rel_type": "m.replace", "event_id": root_id},
+            },
+        }
+        stale = {
+            **canonical,
+            "content": {
+                "algorithm": "m.megolm.v1.aes-sha2",
+                "ciphertext": "opaque",
+                "device_id": "DEVICE",
+                "sender_key": "sender-key",
+                "session_id": "session",
+            }
+            if upgrade_kind == "encrypted"
+            else {"body": "Provisional", "msgtype": "m.text"},
+            "type": "m.room.encrypted" if upgrade_kind == "encrypted" else "m.room.message",
+            "unsigned": {"m.relations": {"m.replace": stale_edit}},
+        }
+        if upgrade_kind == "provisional":
+            stale["io.mindroom.provisional_outbound"] = True
+        explicit_edit = {
+            **stale_edit,
+            "content": {
+                "body": "* Real",
+                "msgtype": "m.text",
+                "m.new_content": {"body": "Real", "msgtype": "m.text"},
+                "m.relates_to": {"rel_type": "m.replace", "event_id": root_id},
+            },
+        }
+        duplicate_representations = [stale, canonical] if representation_order == "stale-first" else [canonical, stale]
+
+        resolution = await _resolve_thread_history_from_event_sources_timed(
+            AsyncMock(),
+            room_id=room_id,
+            thread_id=root_id,
+            event_sources=[*duplicate_representations, explicit_edit],
+            hydrate_sidecars=False,
+            event_cache=_event_cache(),
+        )
+
+        assert [(message.event_id, message.body, message.latest_event_id) for message in resolution.messages] == [
+            (root_id, "Real", edit_id),
+        ]
+
+    @pytest.mark.asyncio
     async def test_conflicting_replacement_identity_across_originals_is_rejected(
         self,
         tmp_path: Path,
@@ -2670,6 +2744,76 @@ class TestThreadHistory:
         )
         response = MagicMock(spec=nio.RoomMessagesResponse)
         response.chunk = [root, explicit_edit] if representation_order == "bundle-first" else [explicit_edit, root]
+        response.end = None
+        client.room_messages.return_value = response
+
+        history = await fetch_thread_history(
+            client,
+            room_id,
+            "$root",
+        )
+
+        assert [(message.event_id, message.body, message.latest_event_id) for message in history] == [
+            ("$root", "Root", "$root"),
+        ]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "explicit_bodies",
+        [
+            ("Explicit one", "Explicit two"),
+            ("Explicit two", "Explicit one"),
+        ],
+    )
+    async def test_room_scan_preserves_prior_conflict_when_canonicalizing_bundles(
+        self,
+        explicit_bodies: tuple[str, str],
+    ) -> None:
+        """Final room-scan collapse must not resurrect an already-conflicting bundled ID."""
+        client = AsyncMock()
+        room_id = "!room:localhost"
+        root = self._make_text_event(
+            event_id="$root",
+            sender="@alice:localhost",
+            body="Root",
+            server_timestamp=1000,
+            source_content={"body": "Root"},
+        )
+        bundled_edit = self._make_text_event(
+            event_id="$same",
+            sender="@alice:localhost",
+            body="* Bundled",
+            server_timestamp=3000,
+            source_content={
+                "body": "* Bundled",
+                "m.new_content": {"body": "Bundled", "msgtype": "m.text"},
+                "m.relates_to": {"rel_type": "m.replace", "event_id": "$root"},
+            },
+        )
+        root.source["unsigned"] = {
+            "m.relations": {
+                "m.replace": _event_source_for_cache(bundled_edit),
+            },
+        }
+        explicit_edits = [
+            self._make_text_event(
+                event_id="$same",
+                sender="@alice:localhost",
+                body=f"* {body}",
+                server_timestamp=3000,
+                source_content={
+                    "body": f"* {body}",
+                    "m.new_content": {"body": body, "msgtype": "m.text"},
+                    "m.relates_to": {
+                        "rel_type": "m.replace",
+                        "event_id": "$root",
+                    },
+                },
+            )
+            for body in explicit_bodies
+        ]
+        response = MagicMock(spec=nio.RoomMessagesResponse)
+        response.chunk = [root, *explicit_edits]
         response.end = None
         client.room_messages.return_value = response
 

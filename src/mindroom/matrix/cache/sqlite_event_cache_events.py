@@ -498,17 +498,23 @@ async def redact_event_locked(
     )
     bundled_rows = list(await scrubbed_cursor.fetchall())
     await scrubbed_cursor.close()
+    write_sequences = await allocate_write_sequences(db, len(bundled_rows))
     await db.executemany(
-        """UPDATE events SET event_json = ?
+        """UPDATE events SET event_json = ?, write_seq = ?
         WHERE principal_id = ? AND room_id = ? AND event_id = ?""",
         [
             (
                 scrub_bundled_replacement_json(event_json, event_id),
+                write_sequence,
                 principal_id,
                 room_id,
                 cached_event_id,
             )
-            for cached_event_id, event_json in bundled_rows
+            for (cached_event_id, event_json), write_sequence in zip(
+                bundled_rows,
+                write_sequences,
+                strict=True,
+            )
         ],
     )
     scrubbed_rows = len(bundled_rows)

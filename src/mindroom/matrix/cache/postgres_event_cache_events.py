@@ -465,7 +465,8 @@ async def redact_event_locked(
     for cached_event_id, event_json in bundled_rows:
         scrubbed_rows += await rowcount(
             db,
-            """UPDATE mindroom_event_cache_events SET event_json = %s
+            """UPDATE mindroom_event_cache_events
+            SET event_json = %s, write_seq = nextval('mindroom_event_cache_write_seq')
             WHERE namespace = %s AND room_id = %s AND event_id = %s""",
             (
                 scrub_bundled_replacement_json(event_json, event_id),

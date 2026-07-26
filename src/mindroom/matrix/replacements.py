@@ -184,13 +184,15 @@ def canonical_event_sources(
     event_sources: Iterable[Mapping[str, Any]],
     *,
     room_id: str | None,
+    known_conflicting_event_ids: Collection[str] = (),
 ) -> tuple[list[dict[str, Any]], frozenset[str]]:
     """Return one final room-scoped top-level view per event ID after observing bundles."""
+    sources = list(event_sources)
     observed: dict[str, dict[str, Any]] = {}
-    conflicting_event_ids: set[str] = set()
+    conflicting_event_ids = set(known_conflicting_event_ids)
     ordered_top_level_event_ids: list[str] = []
     seen_top_level_event_ids: set[str] = set()
-    for event_source in event_sources:
+    for event_source in sources:
         observe_event_representation(
             observed,
             conflicting_event_ids,
@@ -206,13 +208,16 @@ def canonical_event_sources(
         ):
             ordered_top_level_event_ids.append(event_id)
             seen_top_level_event_ids.add(event_id)
-        for bundled in bundled_replacement_candidates(event_source):
+    for event_id in ordered_top_level_event_ids:
+        if event_id in conflicting_event_ids or (container := observed.get(event_id)) is None:
+            continue
+        for bundled in bundled_replacement_candidates(container):
             observe_event_representation(
                 observed,
                 conflicting_event_ids,
                 bundled,
                 room_id=room_id,
-                container=event_source,
+                container=container,
             )
     conflicts = frozenset(conflicting_event_ids)
     return (

@@ -1939,11 +1939,13 @@ def _canonical_scanned_room_sources(
     scanned_message_sources: Mapping[str, dict[str, Any]],
     *,
     room_id: str,
+    conflicting_event_ids: Collection[str],
 ) -> tuple[dict[str, dict[str, Any]], ThreadEditCandidatesByOriginalEventId]:
     """Collapse one room scan to final identities and rebuild explicit edit buckets."""
     canonical_sources, _conflicting_event_ids = canonical_event_sources(
         scanned_message_sources.values(),
         room_id=room_id,
+        known_conflicting_event_ids=conflicting_event_ids,
     )
     canonical_by_event_id = {
         event_id: event_source
@@ -2204,6 +2206,7 @@ async def _bulk_scan_thread_event_sources(
     scanned_message_sources, edit_candidates_by_original_event_id = _canonical_scanned_room_sources(
         scanned_message_sources,
         room_id=room_id,
+        conflicting_event_ids=conflicting_event_ids,
     )
     remaining_root_ids.update(root_id for root_id in thread_root_ids if root_id not in scanned_message_sources)
     thread_event_sources, unresolved_opaque_event_ids = await _group_scanned_sources_by_thread(

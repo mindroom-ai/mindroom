@@ -57,15 +57,22 @@ def event_representation_transition(
     if not same_envelope or rooms_conflict or replacement_targets_conflict:
         return "conflict"
 
+    existing_is_encrypted = existing.get("type") == "m.room.encrypted"
+    candidate_is_encrypted = candidate.get("type") == "m.room.encrypted"
+    if existing_is_encrypted != candidate_is_encrypted:
+        has_provisional_view = (
+            existing.get(PROVISIONAL_OUTBOUND_KEY) is True or candidate.get(PROVISIONAL_OUTBOUND_KEY) is True
+        )
+        return (
+            "conflict"
+            if not has_provisional_view and existing.get("origin_server_ts") != candidate.get("origin_server_ts")
+            else ("accept" if existing_is_encrypted else "ignore")
+        )
     provisional_transition = _provisional_transition(existing, candidate)
     if provisional_transition is not None:
         return provisional_transition
     if existing.get("origin_server_ts") != candidate.get("origin_server_ts"):
         return "conflict"
-    existing_is_encrypted = existing.get("type") == "m.room.encrypted"
-    candidate_is_encrypted = candidate.get("type") == "m.room.encrypted"
-    if existing_is_encrypted != candidate_is_encrypted:
-        return "accept" if existing_is_encrypted else "ignore"
     if (existing.get("type"), existing.get("content")) != (candidate.get("type"), candidate.get("content")):
         return "conflict"
     return "accept"

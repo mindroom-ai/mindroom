@@ -722,6 +722,48 @@ class TestFetchPathIntegration:
         assert second.diagnostics["thread_resolution_reuse"] == "reuse"
 
     @pytest.mark.asyncio
+    async def test_bundled_redaction_forces_full_resolution(self, tmp_path: Path) -> None:
+        """A bundled edit scrub must invalidate an already-resolved process-local snapshot."""
+        from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache  # noqa: PLC0415
+
+        cache = SqliteEventCache(tmp_path / "event_cache.db")
+        await cache.initialize()
+        root = _message_row(THREAD, 1000, "Root")
+        root["unsigned"] = {
+            "m.relations": {
+                "m.replace": _edit_row(
+                    "$edit",
+                    2000,
+                    target=THREAD,
+                    body="Edited",
+                ),
+            },
+        }
+        rows = [root, _message_row("$child", 1500, "Child")]
+        await replace_thread_unconditionally(cache, ROOM, THREAD, rows)
+
+        client = MagicMock()
+        client.user_id = "@mindroom_general:localhost"
+        client.room_messages = AsyncMock(side_effect=AssertionError("should not refetch fresh cache"))
+        reuse = ThreadResolutionReuseCache()
+        try:
+            first = await fetch_thread_history(client, ROOM, THREAD, event_cache=cache, resolution_reuse=reuse)
+            assert await cache.redact_event(ROOM, "$edit")
+            second = await fetch_thread_history(client, ROOM, THREAD, event_cache=cache, resolution_reuse=reuse)
+        finally:
+            await cache.close()
+
+        assert [(message.body, message.latest_event_id) for message in first] == [
+            ("Edited", "$edit"),
+            ("Child", "$child"),
+        ]
+        assert [(message.body, message.latest_event_id) for message in second] == [
+            ("Root", THREAD),
+            ("Child", "$child"),
+        ]
+        assert second.diagnostics["thread_resolution_reuse"] == "full"
+
+    @pytest.mark.asyncio
     async def test_fetch_thread_history_reads_only_new_rows_for_safe_append(self, tmp_path: Path) -> None:
         """A fresh append is merged from the durable write-sequence delta."""
         from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache  # noqa: PLC0415
