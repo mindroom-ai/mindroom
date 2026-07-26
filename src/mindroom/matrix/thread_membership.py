@@ -216,12 +216,13 @@ async def _replacement_ancestry_is_valid(
     original_event_id: str,
     *,
     access: ThreadMembershipAccess,
+    candidate_source: Mapping[str, Any] | None = None,
 ) -> bool:
     """Return whether one replacement may inherit its original's membership."""
     if access.fetch_event_source is None:
         msg = f"Replacement ancestry lookup unavailable for {replacement_event_id}"
         raise ThreadMembershipLookupError(msg)
-    candidate = await access.fetch_event_source(room_id, replacement_event_id)
+    candidate = candidate_source or await access.fetch_event_source(room_id, replacement_event_id)
     original = await access.fetch_event_source(room_id, original_event_id)
     if candidate is None or original is None:
         msg = f"Replacement ancestry lookup unavailable for {replacement_event_id}"
@@ -248,19 +249,33 @@ def conversation_relation_thread_membership_access(
     access: ThreadMembershipAccess,
 ) -> ThreadMembershipAccess:
     """Reject non-message ancestors and stale indexes from conversation relation walks."""
+    event_sources: dict[tuple[str, str], Mapping[str, Any] | None] = {}
 
     async def fetch_event_info(room_id: str, event_id: str) -> EventInfo | None:
-        event_info = await access.fetch_event_info(room_id, event_id)
+        source_key = (room_id, event_id)
+        if source_key in event_sources:
+            event_source = event_sources[source_key]
+            event_info = EventInfo.from_event(dict(event_source)) if event_source is not None else None
+        else:
+            event_info = await access.fetch_event_info(room_id, event_id)
         if event_info is not None and not event_type_supports_thread_relations(event_info.event_type):
             msg = f"Related event {event_id} cannot carry conversation thread membership"
             raise ThreadMembershipLookupError(msg)
         return event_info
 
+    async def fetch_event_source(room_id: str, event_id: str) -> Mapping[str, Any] | None:
+        source_key = (room_id, event_id)
+        if source_key not in event_sources:
+            event_sources[source_key] = (
+                None if access.fetch_event_source is None else await access.fetch_event_source(room_id, event_id)
+            )
+        return event_sources[source_key]
+
     return ThreadMembershipAccess(
         lookup_thread_id=access.lookup_thread_id,
         fetch_event_info=fetch_event_info,
         prove_thread_root=access.prove_thread_root,
-        fetch_event_source=access.fetch_event_source,
+        fetch_event_source=fetch_event_source,
     )
 
 
@@ -287,6 +302,7 @@ async def resolve_event_thread_membership(
     *,
     access: ThreadMembershipAccess,
     event_id: str | None = None,
+    event_source: Mapping[str, Any] | None = None,
     allow_current_root: bool = False,
 ) -> ThreadResolution:
     """Return canonical thread membership for one event."""
@@ -306,6 +322,7 @@ async def resolve_event_thread_membership(
                     event_id,
                     related_event_id,
                     access=access,
+                    candidate_source=event_source,
                 )
             except Exception as exc:
                 return ThreadResolution.indeterminate(

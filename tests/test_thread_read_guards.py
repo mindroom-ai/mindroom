@@ -58,6 +58,20 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         """Live edit caching should degrade cleanly when SQLite lookup fails."""
         event_cache = _runtime_event_cache()
         event_cache.get_thread_id_for_event = AsyncMock(side_effect=RuntimeError("database is locked"))
+        event_cache.get_event = AsyncMock(
+            return_value={
+                "event_id": "$thread_msg:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567889,
+                "room_id": "!test:localhost",
+                "type": "m.room.message",
+                "content": {
+                    "body": "Thread message",
+                    "msgtype": "m.text",
+                    "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root:localhost"},
+                },
+            },
+        )
         event_cache.append_event = AsyncMock()
         bot.event_cache = event_cache
 
@@ -173,7 +187,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         )
         await _wait_for_room_cache_idle(bot.event_cache_write_coordinator)
 
-        event_cache.get_thread_id_for_event.assert_awaited_once_with("!test:localhost", "$missing-room-msg:localhost")
+        event_cache.get_thread_id_for_event.assert_not_awaited()
         event_cache.get_event.assert_awaited_once_with("!test:localhost", "$missing-room-msg:localhost")
         event_cache.mark_room_threads_stale.assert_awaited_once_with(
             "!test:localhost",

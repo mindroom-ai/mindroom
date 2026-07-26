@@ -849,6 +849,20 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         event_cache.append_event = AsyncMock(return_value=False)
         event_cache.redact_event = AsyncMock()
         event_cache.get_thread_id_for_event = AsyncMock(return_value="$thread_root:localhost")
+        event_cache.get_event = AsyncMock(
+            return_value={
+                "event_id": "$thread_msg:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567890,
+                "room_id": "!test:localhost",
+                "type": "m.room.message",
+                "content": {
+                    "body": "Thread reply",
+                    "msgtype": "m.text",
+                    "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root:localhost"},
+                },
+            },
+        )
         bot.event_cache = event_cache
         _install_runtime_write_coordinator(bot)
 
@@ -1107,7 +1121,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         bot._conversation_cache.cache_sync_timeline(sync_response)
         await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
 
-        event_cache.get_thread_id_for_event.assert_awaited_once_with("!test:localhost", "$missing-room-msg:localhost")
+        event_cache.get_thread_id_for_event.assert_not_awaited()
         event_cache.get_event.assert_awaited_once_with("!test:localhost", "$missing-room-msg:localhost")
         event_cache.mark_room_threads_stale.assert_awaited_once_with(
             "!test:localhost",

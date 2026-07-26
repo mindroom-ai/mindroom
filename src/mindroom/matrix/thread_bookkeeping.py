@@ -384,6 +384,7 @@ class ThreadMutationResolver:
                 room_id,
                 event_info,
                 event_id=event_id,
+                event_source=event_source,
                 access=self._thread_membership_access(
                     room_id=room_id,
                     resolution_context=resolution_context,

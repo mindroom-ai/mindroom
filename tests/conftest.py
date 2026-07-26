@@ -635,6 +635,9 @@ def _make_room_get_event_response(event_id: str) -> nio.RoomGetEventResponse:
     event.body = event_id
     event.server_timestamp = 0
     event.source = {
+        "event_id": event_id,
+        "sender": "@user:localhost",
+        "origin_server_ts": 0,
         "type": "m.room.message",
         "content": {
             "msgtype": "m.text",

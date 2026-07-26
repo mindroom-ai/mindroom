@@ -118,7 +118,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                         "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root:localhost"},
                     },
                     "event_id": "$thread_msg:localhost",
-                    "sender": "@mindroom_general:localhost",
+                    "sender": "@user:localhost",
                     "origin_server_ts": 1234567893,
                     "room_id": "!test:localhost",
                     "type": "m.room.message",
@@ -177,7 +177,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                         "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root:localhost"},
                     },
                     "event_id": "$thread_msg:localhost",
-                    "sender": "@mindroom_general:localhost",
+                    "sender": "@user:localhost",
                     "origin_server_ts": 1234567893,
                     "room_id": "!test:localhost",
                     "type": "m.room.message",
@@ -1896,6 +1896,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             room.room_id,
             EventInfo.from_event(event.source),
             event_id=event.event_id,
+            event_source=event.source,
             access=access,
         )
 

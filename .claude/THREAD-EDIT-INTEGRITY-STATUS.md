@@ -1,15 +1,14 @@
 # Thread edit integrity gate status
 
-Updated 2026-07-25 after correcting the exact-`09090b1ec` replacement-ancestry review blockers.
+Updated 2026-07-25 after the exact-`845b12e1d` full-suite follow-up.
 
 ## Exact target
 
 - PR: `mindroom-ai/mindroom#1641`
 - Branch: `fix/thread-edit-integrity`
-- Latest production commit: `b7efe325d`
+- Latest published production commit before this follow-up: `b7efe325d`
 - Current base and merge base: `f6190d4c2457381e63f40f99fb27e794ae8667b8`
-- The production and deterministic regression correction is pushed.
-- The tracked tree is clean apart from this crash-handoff successor.
+- The full-suite follow-up and corrected intended-valid fixtures are being committed with this handoff.
 - Resolve local, remote, and PR heads before counting any exact-head gate.
 - Resolve and compare local, origin, and GitHub heads before counting any gate.
 - Three pre-existing untracked `.claude/TASK-*.md` notes are user-owned and must remain untouched.
@@ -38,6 +37,8 @@ Updated 2026-07-25 after correcting the exact-`09090b1ec` replacement-ancestry r
 - The current correction requires canonical replacement validity before an edit may supply thread ancestry in point, scan, cache-certification, snapshot, cleanup, or mutation paths.
 - The current correction rejects malformed `m.room.message` point events and cache rows before their raw relations can create durable thread indexes.
 - Known invalid edits resolve room-level; unavailable replacement ancestry remains indeterminate so mutation writes fail closed.
+- The current follow-up supplies the exact inbound edit source to canonical validation before it is persisted and reuses one fetched original for relation resolution.
+- Intended-valid tests now use same-sender originals and complete point-event envelopes; missing-original mutation tests assert direct fail-closed invalidation without an obsolete index lookup.
 
 ## Reconciled review status
 
@@ -64,9 +65,13 @@ Updated 2026-07-25 after correcting the exact-`09090b1ec` replacement-ancestry r
 - One reviewer also found that a successful `nio.BadEvent` message envelope could supply a raw thread relation and persist self/root indexes.
 - Ten wrong-sender, malformed, wrong-type, edit-of-edit, cache-certification, point-read, and SQLite/PostgreSQL index variants failed before this correction.
 - All exact claims were reproduced before implementation; the correction centralizes replacement validation in `thread_membership` and leaves storage/transport seams responsible only for source loading.
+- Exact-`845b12e1d` full pytest exposed sixteen deterministic failures in the newly tightened seams.
+- One was a real current-event visibility gap; the remaining failures were incomplete envelopes, cross-sender fixtures that claimed to be valid, or obsolete lookup-count expectations.
+- The exact failed files were corrected without weakening production validation.
 - The withdrawn edit-index timestamp-poison claim remains excluded because it required direct inconsistent SQL writes outside production paths.
 - This correction adds `+196/-15` production lines, net `+181`.
 - Production source against current `main` is `+1899/-1178`, net `+721`.
+- The current full-suite follow-up adds `+28/-4` production lines, net `+24`; exact total counts must be refreshed after commit.
 
 ## Validation already completed
 
@@ -100,12 +105,16 @@ Updated 2026-07-25 after correcting the exact-`09090b1ec` replacement-ancestry r
 - The ten new exact review cases fail before the current correction; all thirteen parametrized regression variants pass afterward across SQLite and PostgreSQL.
 - Three neighboring live/outbound mutation tests initially caught missing current-source and unavailable-original handling; all three pass after the source is seeded and unavailable ancestry remains indeterminate.
 - The complete twelve-file owning selection passes `792` tests, including SQLite, PostgreSQL, 45-thread fanout, seeded fuzz, snapshots, mutations, tags, room scans, and cleanup.
+- The exact sixteen full-suite failures reproduce before the follow-up.
+- All `54` directly affected tests pass afterward.
+- The expanded seventeen-file owning and affected selection passes `958` tests, including SQLite, PostgreSQL, fanout, seeded fuzz, inbound context, sync/live mutation, and turn control.
 - Ruff, format, `ty`, Tach dependencies/interfaces, and diff checks pass for the current correction.
+- Ruff, format, `ty`, Tach dependencies/interfaces, and diff checks pass for the full-suite follow-up.
 - Git author was verified as `Bas Nijholt <bas@nijho.lt>` before every new commit.
 
 ## Pending exact-head gates
 
-- Commit and push this crash-handoff successor, then freeze its exact head.
+- Commit and push the full-suite follow-up and crash-handoff successor, then freeze its exact head.
 - Fresh CI must complete on that exact head.
 - A fresh independent native Codex correctness review is required on that exact head.
 - Exact-head PostgreSQL owning and stress selections are required.

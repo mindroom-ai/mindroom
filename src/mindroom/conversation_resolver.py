@@ -53,7 +53,7 @@ from mindroom.thread_utils import check_agent_mentioned
 from mindroom.turn_origin import TurnOrigin, classify_turn_origin
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Sequence
+    from collections.abc import AsyncIterator, Mapping, Sequence
 
     import structlog
 
@@ -521,6 +521,7 @@ class ConversationResolver:
                 room.room_id,
                 event_info,
                 event_id=event.event_id,
+                event_source=event.source,
                 access=self.thread_membership_access(
                     mode=ThreadReadMode.DISPATCH_SNAPSHOT,
                     caller_label="coalescing_thread_id",
@@ -544,6 +545,7 @@ class ConversationResolver:
         event_id: str | None,
         event_info: EventInfo,
         *,
+        event_source: Mapping[str, Any] | None = None,
         mode: ThreadReadMode,
         caller_label: str,
     ) -> _ThreadIdLookup:
@@ -556,6 +558,7 @@ class ConversationResolver:
             room_id,
             event_info,
             event_id=event_id,
+            event_source=event_source,
             access=access,
         )
         thread_history = (
@@ -664,6 +667,7 @@ class ConversationResolver:
         event_id: str | None,
         event_info: EventInfo,
         *,
+        event_source: Mapping[str, Any] | None = None,
         mode: ThreadReadMode,
         caller_label: str,
     ) -> _ThreadContextLookup:
@@ -672,6 +676,7 @@ class ConversationResolver:
             room_id,
             event_id,
             event_info,
+            event_source=event_source,
             mode=mode,
             caller_label=caller_label,
         )
@@ -850,6 +855,7 @@ class ConversationResolver:
                 room.room_id,
                 event.event_id,
                 event_info,
+                event_source=resolved_event_source,
                 mode=mode,
                 caller_label=caller_label,
             )
