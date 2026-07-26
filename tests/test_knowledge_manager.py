@@ -12,6 +12,7 @@ from contextlib import asynccontextmanager
 from dataclasses import replace
 from pathlib import Path
 from threading import Event, Lock, get_ident
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, ClassVar
 from unittest.mock import MagicMock
 
@@ -39,6 +40,7 @@ from mindroom.config.knowledge import KnowledgeBaseConfig, KnowledgeGitConfig
 from mindroom.config.main import Config
 from mindroom.credentials import get_runtime_shared_credentials_manager
 from mindroom.credentials_sync import get_embedder_api_key
+from mindroom.file_memory_knowledge import resolve_file_memory_knowledge
 from mindroom.knowledge import KnowledgeRefreshScheduler, resolve_agent_knowledge_access
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.candidate_checkpoint import load_candidate_checkpoint
@@ -61,6 +63,7 @@ from mindroom.knowledge.registry import (
 )
 from mindroom.knowledge.utils import KnowledgeAvailabilityDetail
 from mindroom.knowledge.watch import KnowledgeSourceWatcher
+from mindroom.memory_scope_ids import agent_scope_user_id
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, agent_workspace_root_path
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
@@ -432,6 +435,56 @@ async def test_file_memory_overlay_query_returns_memory_markdown_hit(tmp_path: P
 
 
 @pytest.mark.asyncio
+async def test_cold_file_memory_overlay_waits_for_managed_content_before_publish(tmp_path: Path) -> None:
+    """A cold runtime memory base must remain initializing until its corpus exists."""
+    config = _file_memory_config(tmp_path, "helper")
+    runtime_paths = runtime_paths_for(config)
+    root = agent_workspace_root_path(runtime_paths.storage_root, "helper")
+    resolution = resolve_file_memory_knowledge(
+        scope_user_id=agent_scope_user_id("helper"),
+        root=root,
+        config=config,
+        search_config=config.resolve_entity("helper").memory_search,
+    )
+
+    empty_result = await refresh_knowledge_binding(
+        resolution.base_id,
+        config=resolution.config,
+        runtime_paths=runtime_paths,
+    )
+    cold_lookup = get_published_index(
+        resolution.base_id,
+        config=resolution.config,
+        runtime_paths=runtime_paths,
+    )
+
+    assert empty_result.index_published is False
+    assert empty_result.availability is KnowledgeAvailability.INITIALIZING
+    assert cold_lookup.index is None
+
+    memory_file = root / "memory" / "notes.md"
+    memory_file.parent.mkdir(parents=True)
+    memory_file.write_text("published-after-content-exists\n", encoding="utf-8")
+    populated_result = await refresh_knowledge_binding(
+        resolution.base_id,
+        config=resolution.config,
+        runtime_paths=runtime_paths,
+    )
+    populated_lookup = get_published_index(
+        resolution.base_id,
+        config=resolution.config,
+        runtime_paths=runtime_paths,
+    )
+
+    assert populated_result.index_published is True
+    assert populated_result.availability is KnowledgeAvailability.READY
+    assert populated_lookup.index is not None
+    assert [
+        document.content.strip() for document in populated_lookup.index.knowledge.search("published", max_results=5)
+    ] == ["published-after-content-exists"]
+
+
+@pytest.mark.asyncio
 async def test_file_memory_knowledge_is_cross_agent_isolated(tmp_path: Path) -> None:
     """Distinct agent workspaces must never expose each other's file-memory index."""
     config = _file_memory_config(tmp_path, "alpha", "beta")
@@ -472,6 +525,58 @@ async def test_file_memory_knowledge_is_cross_agent_isolated(tmp_path: Path) -> 
     assert any(beta_marker in document.content for document in beta_own)
     assert all(beta_marker not in document.content for document in alpha_cross)
     assert all(alpha_marker not in document.content for document in beta_cross)
+
+
+def test_default_merged_search_represents_every_source_at_the_result_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The default result budget must include the appended memory source."""
+    authored_base_ids = [f"source_{index}" for index in range(10)]
+    config = _file_memory_config(tmp_path, "helper")
+    config.agents["helper"].knowledge_bases = authored_base_ids
+    config.knowledge_bases.update(
+        {
+            base_id: KnowledgeBaseConfig(path=str(tmp_path / base_id), description=f"Source {base_id}")
+            for base_id in authored_base_ids
+        },
+    )
+    runtime_paths = runtime_paths_for(config)
+
+    def _published_index(base_id: str, **_kwargs: object) -> object:
+        vector_db = _VectorDb(collection=f"collection_{base_id}")
+        vector_db.create()
+        _VectorDb.collections[vector_db.collection_name] = [
+            {
+                "content": f"result from {base_id}",
+                "metadata": {"source_path": f"{base_id}.md"},
+            },
+        ]
+        knowledge = SimpleNamespace(
+            vector_db=vector_db,
+            name=None,
+            description=None,
+            max_results=10,
+        )
+        return SimpleNamespace(
+            key=SimpleNamespace(base_id=base_id),
+            index=SimpleNamespace(
+                knowledge=knowledge,
+                state=SimpleNamespace(last_refresh_at=None, last_published_at=None),
+            ),
+            availability=KnowledgeAvailability.READY,
+            state=None,
+            schedule_refresh_on_access=False,
+        )
+
+    monkeypatch.setattr(knowledge_utils, "get_published_index", _published_index)
+
+    knowledge = resolve_agent_knowledge_access("helper", config, runtime_paths).knowledge
+    assert knowledge is not None
+    documents = knowledge.search("anything")
+
+    assert len(documents) == 11
+    assert any(document.content.startswith("result from file_memory_agent_helper_") for document in documents)
 
 
 def _set_git_tracked_files(manager: KnowledgeManager, *relative_paths: str) -> None:
@@ -5928,6 +6033,46 @@ async def test_refresh_status_is_visible_across_scheduler_instances(
         release.set()
         await matrix_scheduler.shutdown()
         await api_scheduler.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_refresh_scheduler_claim_is_exclusive_across_instances(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two schedulers must not launch duplicate refreshes for one physical binding."""
+    docs_path = tmp_path / "docs"
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    matrix_scheduler = KnowledgeRefreshScheduler()
+    api_scheduler = KnowledgeRefreshScheduler()
+    started = asyncio.Event()
+    release = asyncio.Event()
+    calls = 0
+
+    async def _blocked_refresh(_base_id: str, **_kwargs: object) -> object:
+        nonlocal calls
+        calls += 1
+        started.set()
+        await release.wait()
+        return object()
+
+    monkeypatch.setattr(
+        "mindroom.knowledge.refresh_scheduler.refresh_knowledge_binding_in_subprocess",
+        _blocked_refresh,
+    )
+
+    matrix_scheduler.schedule_refresh("docs", config=config, runtime_paths=runtime_paths)
+    api_scheduler.schedule_refresh("docs", config=config, runtime_paths=runtime_paths)
+    await asyncio.wait_for(started.wait(), timeout=1)
+    await asyncio.sleep(0)
+
+    assert calls == 1
+    assert len(matrix_scheduler._tasks) + len(api_scheduler._tasks) == 1
+
+    release.set()
+    await matrix_scheduler.shutdown()
+    await api_scheduler.shutdown()
 
 
 @pytest.mark.asyncio

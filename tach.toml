@@ -175,6 +175,7 @@ visibility = ["mindroom.response_turn"]
 path = "mindroom.file_memory_knowledge"
 depends_on = [
     "mindroom.config.knowledge",
+    "mindroom.memory_scope_ids",
     "mindroom.runtime_resolution",
 ]
 visibility = [
@@ -1538,9 +1539,20 @@ visibility = [
 ]
 
 [[modules]]
+path = "mindroom.memory_scope_ids"
+depends_on = []
+visibility = [
+    "mindroom.file_memory_knowledge",
+    "mindroom.memory._file_backend",
+    "mindroom.memory._mem0_backend",
+    "mindroom.memory._policy",
+]
+
+[[modules]]
 path = "mindroom.memory._policy"
 depends_on = [
     "mindroom.memory._shared",
+    "mindroom.memory_scope_ids",
     "mindroom.runtime_resolution",
 ]
 visibility = [
@@ -1617,6 +1629,7 @@ depends_on = [
     "mindroom.memory._policy",
     "mindroom.memory._shared",
     "mindroom.memory._semantic_file_search",
+    "mindroom.memory_scope_ids",
     "mindroom.timing",
 ]
 visibility = ["mindroom.memory._backend", "mindroom.memory.functions"]
@@ -1642,6 +1655,7 @@ depends_on = [
     "mindroom.memory._policy",
     "mindroom.memory._prompting",
     "mindroom.memory._shared",
+    "mindroom.memory_scope_ids",
     "mindroom.timing",
 ]
 visibility = ["mindroom.memory._backend"]

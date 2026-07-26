@@ -13,6 +13,7 @@ from mindroom.file_memory_knowledge import (
     resolve_file_memory_knowledge,
 )
 from mindroom.knowledge.indexing_config import indexing_settings_key
+from mindroom.memory_scope_ids import agent_scope_user_id
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, agent_workspace_root_path
 from tests.conftest import bind_runtime_paths, test_runtime_paths
 
@@ -53,7 +54,7 @@ def test_memory_and_agent_resolvers_share_base_and_index_identity(tmp_path: Path
     search_config = config.resolve_entity("alpha").memory_search
 
     memory_resolution = resolve_file_memory_knowledge(
-        scope_user_id="agent_alpha",
+        scope_user_id=agent_scope_user_id("alpha"),
         root=root,
         config=config,
         search_config=search_config,

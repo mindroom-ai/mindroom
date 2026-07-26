@@ -150,12 +150,13 @@ memory:
 It does not relocate canonical agent file memory (which always lives under the agent's workspace root).
 It can affect team file memory when the resolution determines the configured path should be used.
 `memory.search` controls how `search_memories` reads file-backed agent memory.
-`mode: keyword` scans markdown files directly.
+`mode: keyword` scans `MEMORY.md` and `memory/**/*.md` directly.
 `mode: semantic` builds a lazy per-agent or per-requester vector index under `mindroom_data/memory_search_db/` and uses `memory.embedder`.
-`include` contains root-relative glob patterns below the effective file-memory root.
-The default `memory/**/*.md` searches dated memory files and excludes `MEMORY.md`.
-Set `include_entrypoint: true` only if you also want `MEMORY.md` returned by search.
+`include` contains root-relative glob patterns for semantic search below the effective file-memory root.
+The default semantic include `memory/**/*.md` searches dated memory files and excludes `MEMORY.md`.
+Set `include_entrypoint: true` only if you also want `MEMORY.md` returned by semantic search.
 MindRoom already preloads `MEMORY.md` into the prompt, so the default avoids duplicate retrieval.
+Semantic fallback uses the same fixed `MEMORY.md` and `memory/**/*.md` corpus as keyword mode rather than the semantic include patterns.
 Semantic mode applies to the agent's own file-memory scope.
 Team-visible file memory is still keyword searched.
 File memory is already searchable on demand through `search_memories`.
@@ -284,6 +285,8 @@ agents:
 ```
 
 This exposes `add_memory`, `search_memories`, `list_memories`, `get_memory`, `update_memory`, and `delete_memory`.
+Persisted IDs and file-backed `file:<path>:<line>` IDs support read, update, and delete operations.
+Semantic file-memory results use read-only `semantic:<source_file>:<rank>` locators.
 
 ## Agno Learning
 

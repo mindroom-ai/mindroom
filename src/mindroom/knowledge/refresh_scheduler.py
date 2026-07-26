@@ -19,10 +19,10 @@ from mindroom.embedder_health import (
 from mindroom.embedding_errors import extract_classified_embedder_detail
 from mindroom.knowledge.refresh_runner import (
     is_refresh_active,
-    mark_refresh_active,
     mark_refresh_inactive,
     refresh_knowledge_binding,
     refresh_knowledge_binding_in_subprocess,
+    try_mark_refresh_active,
 )
 from mindroom.knowledge.registry import (
     KnowledgeRefreshTarget,
@@ -194,7 +194,9 @@ class KnowledgeRefreshScheduler:
         loop = _running_loop_for_schedule(key.base_id)
         if loop is None:
             return
-        mark_refresh_active(key)
+        if not try_mark_refresh_active(key):
+            logger.debug("Skipping duplicate knowledge refresh owned by another scheduler", base_id=key.base_id)
+            return
         task = loop.create_task(self._run_refresh(key, request), name=f"knowledge_refresh:{key.base_id}")
         self._tasks[key] = task
 

@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from mindroom.config.knowledge import KnowledgeBaseConfig
+from mindroom.memory_scope_ids import agent_scope_user_id
 from mindroom.runtime_resolution import resolve_agent_runtime
 
 if TYPE_CHECKING:
@@ -70,6 +71,7 @@ def resolve_file_memory_knowledge(
         description=_FILE_MEMORY_DESCRIPTION,
         path=str(resolved_root),
         watch=False,
+        require_content_before_publish=True,
         chunk_size=_CHUNK_SIZE,
         chunk_overlap=_CHUNK_OVERLAP,
         include_extensions=[".md"],
@@ -106,7 +108,7 @@ def resolve_agent_file_memory_knowledge(
         msg = f"File-memory agent '{agent_name}' did not resolve a file-memory root"
         raise ValueError(msg)
     return resolve_file_memory_knowledge(
-        scope_user_id=f"agent_{agent_name}",
+        scope_user_id=agent_scope_user_id(agent_name),
         root=runtime.file_memory_root,
         config=config,
         search_config=entity.memory_search,

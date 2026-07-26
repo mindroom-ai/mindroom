@@ -162,10 +162,19 @@ async def _acquire_refresh_lock(key: KnowledgeSourceRoot) -> AsyncIterator[None]
         _release_refresh_lock_for_key(key, entry)
 
 
-def mark_refresh_active(key: KnowledgeRefreshTarget) -> None:
+def _mark_refresh_active(key: KnowledgeRefreshTarget) -> None:
     """Record scheduler-level refresh activity before a task reaches the runner."""
     with _active_refresh_counts_guard:
         _active_refresh_counts[key] = _active_refresh_counts.get(key, 0) + 1
+
+
+def try_mark_refresh_active(key: KnowledgeRefreshTarget) -> bool:
+    """Atomically claim scheduler ownership of one physical refresh target."""
+    with _active_refresh_counts_guard:
+        if _active_refresh_counts.get(key, 0) > 0:
+            return False
+        _active_refresh_counts[key] = 1
+        return True
 
 
 def mark_refresh_inactive(key: KnowledgeRefreshTarget) -> None:
@@ -447,7 +456,7 @@ async def _refresh_resolved_knowledge_binding(
 ) -> KnowledgeRefreshResult:
     refresh_target = refresh_target_for_published_index_key(key)
     source_root = source_root_for_published_index_key(key)
-    mark_refresh_active(refresh_target)
+    _mark_refresh_active(refresh_target)
     try:
         async with _acquire_refresh_lock(source_root), _acquire_refresh_file_lock(source_root):
             initial_state = await asyncio.to_thread(
@@ -525,6 +534,20 @@ async def _refresh_knowledge_binding_locked(
             storage_path=binding.storage_root,
             knowledge_path=binding.knowledge_path,
         )
+        if await _should_defer_cold_empty_publication(manager, key):
+            await asyncio.to_thread(
+                mark_published_index_stale,
+                key,
+                reason="source_empty",
+                refresh_job="idle",
+            )
+            return KnowledgeRefreshResult(
+                key=key,
+                indexed_count=0,
+                index_published=False,
+                availability=KnowledgeAvailability.INITIALIZING,
+                last_error=None,
+            )
         unchanged_result = await _maybe_publish_unchanged_index(
             manager,
             key,
@@ -554,6 +577,20 @@ async def _refresh_knowledge_binding_locked(
         config=config,
         runtime_paths=runtime_paths,
     )
+
+
+async def _should_defer_cold_empty_publication(
+    manager: KnowledgeManager,
+    key: PublishedIndexKey,
+) -> bool:
+    """Return whether a content-gated cold index has no corpus to publish yet."""
+    if not manager.config.get_knowledge_base_config(manager.base_id).require_content_before_publish:
+        return False
+    files = await asyncio.to_thread(manager.list_files)
+    if files:
+        return False
+    state = await asyncio.to_thread(load_published_index_state, published_index_metadata_path(key))
+    return state is None or state.status != "complete" or not state.indexed_count
 
 
 async def _publish_file_mode_source_metadata(

@@ -149,10 +149,12 @@ class MemoryTools(Toolkit):
         """Search your memories for information relevant to a query.
 
         Use this when you need to recall previously stored facts, notes, or context.
-        For file memory, this searches configured Markdown paths
-        (default: memory/**/*.md) and falls back to keyword search when
-        semantic search is unavailable.
-        Returned memory IDs can be passed to get_memory, update_memory, or delete_memory.
+        For file memory, semantic search uses configured Markdown paths
+        (default: memory/**/*.md). Keyword mode searches MEMORY.md and memory/**/*.md.
+        When semantic search is unavailable, it falls back to keyword search
+        over that same fixed corpus.
+        Persisted memory IDs and file:* IDs can be passed to get_memory, update_memory, or delete_memory.
+        semantic:* IDs are read-only locators.
 
         Args:
             query: What to search for in your memories.

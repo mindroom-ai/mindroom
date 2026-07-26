@@ -3335,12 +3335,16 @@ def test_agent_without_workspace_omits_skill_authoring_guidance(tmp_path: Path) 
     assert WORKSPACE_SKILL_AUTHORING_PROMPT not in agent.instructions
 
 
-def test_agent_knowledge_search_tool_description_lists_configured_sources(
+@pytest.mark.parametrize("has_memory_tool", [False, True])
+@pytest.mark.asyncio
+async def test_agent_knowledge_search_tool_description_lists_configured_sources_by_capability(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    has_memory_tool: bool,
 ) -> None:
-    """The model-facing knowledge search tool should explain what each source contains."""
+    """Knowledge search should only recommend memory search when that function exists."""
     config = _test_config()
+    config.agents["general"].tools = ["memory"] if has_memory_tool else []
     config.agents["general"].knowledge_bases = ["engineering", "product"]
     config.knowledge_bases = {
         "engineering": KnowledgeBaseConfig(
@@ -3383,7 +3387,7 @@ def test_agent_knowledge_search_tool_description_lists_configured_sources(
 
     search_tools = [
         tool
-        for tool in agent.get_tools(run_output, run_context, session)
+        for tool in await agent.aget_tools(run_output, run_context, session)
         if isinstance(tool, Function) and tool.name == "search_knowledge_base"
     ]
 
@@ -3397,7 +3401,8 @@ def test_agent_knowledge_search_tool_description_lists_configured_sources(
         in description
     )
     assert "This list only describes sources available through search_knowledge_base." in description
-    assert "For resilient memory search, team-visible memory, and memory IDs, use search_memories." in description
+    recommendation = "For resilient memory search, team-visible memory, and memory IDs, use search_memories."
+    assert (recommendation in description) is has_memory_tool
 
 
 def test_memory_only_agent_gets_semantic_knowledge_search_description(
@@ -3467,7 +3472,7 @@ def test_memory_only_agent_gets_semantic_knowledge_search_description(
         f"- {seen_base_ids[0]}: Configured file memory for this agent. "
         "Read-only semantic search over configured Markdown paths (default: memory/**/*.md)."
     ) in description
-    assert "For resilient memory search, team-visible memory, and memory IDs, use search_memories." in description
+    assert "use search_memories" not in description
 
 
 def test_agent_knowledge_search_tool_description_preserves_colon_space_source_ids(

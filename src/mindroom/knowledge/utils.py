@@ -724,7 +724,7 @@ def _merge_knowledge(agent_name: str, knowledges: list[Knowledge]) -> Knowledge 
     return KnowledgeWithSourceDescriptions(
         name=f"{agent_name}_multi_knowledge",
         vector_db=_MultiKnowledgeVectorDb(vector_dbs=vector_db_sources),
-        max_results=max(knowledge.max_results for knowledge in queryable_knowledges),
+        max_results=max(len(queryable_knowledges), *(knowledge.max_results for knowledge in queryable_knowledges)),
         source_descriptions=source_descriptions,
     )
 

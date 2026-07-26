@@ -26,11 +26,9 @@ The narrower, real gap: the `file_memory_*` runtime-overlay base never reaches `
 
 This file is the single authoritative implementation plan.
 
-This phase authorizes no implementation or source-code changes.
+Bas explicitly authorized both stages on 2026-07-26: "do stage 0 and 1".
 
-Stage 0 is the agreed description/docs correction that is safe to ship under either answer from Bas, but its implementation is not authorized yet.
-
-Stage 1 remains gated on Bas explicitly confirming the inferred behavior change.
+The confirmation gate is satisfied, and Stage 0 and Stage 1 are implemented together on the `issue-256` branch.
 
 ## Correction: isolation authority
 
@@ -50,7 +48,7 @@ The current memory/knowledge split is deliberate at the capability and result-co
 
 `search_memories` owns capabilities the generic knowledge surface does not:
 
-- It returns memory IDs, including `semantic:<source_file>:<rank>`, that feed memory read/update/delete operations (`src/mindroom/memory/_semantic_file_search.py:129-152`; `src/mindroom/custom_tools/memory.py:213-240` and the following update/delete methods).
+- It returns CRUD-capable persisted and `file:<path>:<line>` memory IDs, while semantic matches use read-only `semantic:<source_file>:<rank>` locators (`src/mindroom/memory/_semantic_file_search.py:129-152`; `src/mindroom/custom_tools/memory.py:213-240` and the following update/delete methods).
 - It falls back to direct keyword search when the semantic index is cold or degraded and preserves `SemanticFileMemoryIndexUnavailableError.degraded_reason` (`src/mindroom/memory/_file_backend.py:883-943`; `src/mindroom/memory/_semantic_file_search.py:42-52`).
 - It merges team-visible file memory through keyword search (`src/mindroom/memory/_file_backend.py:755-814`).
 - Its results and degradation notice are auto-injected during prompt assembly independently of Agno knowledge search (`src/mindroom/memory/functions.py:191-253`).
@@ -122,17 +120,17 @@ It is valid and safe under either eventual answer from Bas.
 
 5. Add focused tests for the generated `search_memories` description and the non-closed-world knowledge-tool description.
 
-### Confirmation gate
+### Confirmation gate — satisfied
 
-After Stage 0, tell Bas that memory was already searchable on demand and that the descriptions are now corrected.
+On 2026-07-26, Bas answered "do stage 0 and 1".
 
-Ask whether he additionally wants a ready semantic agent-memory index listed inside `search_knowledge_base`.
+That affirmative answer authorized listing a ready semantic agent-memory index inside `search_knowledge_base`.
 
-State the limitations explicitly: semantic only, agent scope only, no keyword fallback, no team-visible memory, and no memory IDs.
+The limitations remain explicit: semantic only, agent scope only, no keyword fallback, no team-visible memory, and no memory IDs through the knowledge surface.
 
-Do not begin or ship Stage 1 without an affirmative answer.
+Stage 0 and Stage 1 were therefore implemented together without a second confirmation pause.
 
-### Stage 1 — additive behavior, gated on confirmation
+### Stage 1 — additive behavior, authorized 2026-07-26
 
 1. Add a focused cycle-free leaf such as `src/mindroom/file_memory_knowledge.py`.
 
@@ -155,7 +153,9 @@ Do not begin or ship Stage 1 without an affirmative answer.
 
    Use the effective overlaid config for lookup, append the memory base after authored semantic bases to preserve existing authored-source order, and route ready handles through `_merge_knowledge()` at `src/mindroom/knowledge/utils.py:695-719`.
 
-   Appending last is deterministic and minimally disruptive, but it does not guarantee fairness because `_interleave_documents()` can starve later sources when `limit` is smaller than the number of sources (`src/mindroom/knowledge/utils.py:674-691`).
+   Appending last is deterministic and minimally disruptive.
+
+   The merged default result budget must be at least the number of queryable sources so `_interleave_documents()` gives every source, including the appended memory base, one result slot when each source has a match (`src/mindroom/knowledge/utils.py:674-719`).
 
    Do not add the runtime ID to authored entity IDs or Docker projection.
 
@@ -268,7 +268,7 @@ Use the same builders from both the memory and knowledge paths so the base ID, r
 - Removing, renaming, or folding away `search_memories`.
 - Changing the memory ID or get/update/delete contracts.
 - Keyword fallback, team-scope indexing, team-memory exposure, or writes through `search_knowledge_base`.
-- Changing memory-search defaults, embedding configuration, chunking, publication format, or multi-source ranking/allocation.
+- Changing memory-search defaults, embedding configuration, chunking, publication format, or score-based multi-source ranking.
 - Dashboard listing or editing of runtime-only file-memory bases.
 - Docker serialization of `file_memory_*` runtime IDs.
 - Aliased-workspace bleed.
