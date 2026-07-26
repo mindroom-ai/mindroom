@@ -648,7 +648,6 @@ class EventCacheWriteCoordinator:
         hydrate_sidecars: bool,
         allow_stale_fallback: bool,
         result_arms_backoff: Callable[[T], bool],
-        result_needs_own_flight: Callable[[T], bool] | None = None,
         bypass_failure_backoff: bool = False,
         speculative: bool = False,
     ) -> T:
@@ -673,7 +672,6 @@ class EventCacheWriteCoordinator:
             ),
             repair=repair_coro_factory,
             result_arms_backoff=result_arms_backoff,
-            result_needs_own_flight=result_needs_own_flight,
             bypass_failure_backoff=bypass_failure_backoff,
             speculative=speculative,
         )

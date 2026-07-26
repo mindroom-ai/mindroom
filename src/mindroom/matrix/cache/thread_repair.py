@@ -94,11 +94,13 @@ class ThreadRepairRegistry:
     _deltas: dict[_ThreadRepairDeltaKey, dict[str, _RetainedDelta]] = field(default_factory=dict, init=False)
     _speculative_cooldowns: dict[_ThreadRepairDeltaKey, float] = field(default_factory=dict, init=False)
     _interactive_joins: dict[_ThreadRepairFlightKey, int] = field(default_factory=dict, init=False)
-    _speculative_flights: set[_ThreadRepairFlightKey] = field(default_factory=set, init=False)
-    _slot_waiters: list[asyncio.Future[None]] = field(default_factory=list, init=False)
-    _running_repairs: int = field(default=0, init=False)
+    _repair_slots: asyncio.Semaphore = field(init=False, repr=False)
     _running_speculative_repairs: int = field(default=0, init=False)
     _speculative_suppression_depth: int = field(default=0, init=False)
+
+    def __post_init__(self) -> None:
+        """Bind the global repair ceiling. A semaphore binds its loop on first blocking acquire."""
+        self._repair_slots = asyncio.Semaphore(self.max_concurrent_repairs)
 
     @staticmethod
     def _thread_key(key: _ThreadRepairFlightKey) -> _ThreadRepairDeltaKey:
@@ -111,17 +113,13 @@ class ThreadRepairRegistry:
         if task is None:
             return None
         if task.done():
-            # Dropping ownership here means the done callback can no longer match this task, so the
-            # flight's tier has to be forgotten in the same step or it outlives every flight.
             self._tasks.pop(key, None)
-            self._speculative_flights.discard(key)
             return None
         return task
 
     def _clear_task(self, key: _ThreadRepairFlightKey, task: asyncio.Task[object]) -> None:
         if self._tasks.get(key) is task:
             self._tasks.pop(key, None)
-            self._speculative_flights.discard(key)
 
     def _has_active_task(self, key: _ThreadRepairDeltaKey) -> bool:
         """Return whether any caller contract owns this thread's repair."""
@@ -200,7 +198,9 @@ class ThreadRepairRegistry:
             return "recently_repaired"
         if self._running_speculative_repairs >= self.max_concurrent_speculative_repairs:
             return "speculative_concurrency_limit"
-        if self._slot_waiters or self._running_repairs >= self.max_concurrent_repairs:
+        # ``locked`` is true while anyone is queued as well as at capacity, so a speculative caller
+        # never steps in front of an interactive one waiting for a slot.
+        if self._repair_slots.locked():
             return "repair_concurrency_limit"
         return None
 
@@ -217,49 +217,21 @@ class ThreadRepairRegistry:
             else:
                 self._interactive_joins.pop(key, None)
 
-    def _discard_slot_waiter(self, waiter: asyncio.Future[None]) -> None:
-        self._slot_waiters = [existing for existing in self._slot_waiters if existing is not waiter]
-
-    def _wake_next_slot_waiter(self) -> None:
-        """Hand the just-released slot to the longest-waiting caller."""
-        while self._slot_waiters:
-            waiter = self._slot_waiters.pop(0)
-            if not waiter.done():
-                # Reserved here rather than by the waiter itself: a newcomer resuming first would
-                # otherwise take the slot and push the waiter back to the end of the queue.
-                self._running_repairs += 1
-                waiter.set_result(None)
-                return
-
     async def _acquire_repair_slot(self, *, speculative: bool) -> None:
         """Take one global repair slot, waiting only for callers someone is blocked on.
 
         The slot is taken immediately before the scan, never while the flight is still queued behind
         same-thread predecessors, so a slot always measures work actually in progress. Speculative
-        callers re-check capacity without blocking first, so only interactive callers ever join the
-        waiter queue, and they are served in arrival order.
+        callers test capacity without blocking first, so only interactive callers ever queue here.
         """
-        if not self._slot_waiters and self._running_repairs < self.max_concurrent_repairs:
-            self._running_repairs += 1
-        else:
-            waiter = asyncio.get_running_loop().create_future()
-            self._slot_waiters.append(waiter)
-            try:
-                await waiter
-            except asyncio.CancelledError:
-                self._discard_slot_waiter(waiter)
-                if waiter.done() and not waiter.cancelled():
-                    # The slot was handed over before the cancellation landed; pass it along.
-                    self._release_repair_slot(speculative=False)
-                raise
+        await self._repair_slots.acquire()
         if speculative:
             self._running_speculative_repairs += 1
 
     def _release_repair_slot(self, *, speculative: bool) -> None:
-        self._running_repairs = max(0, self._running_repairs - 1)
         if speculative:
             self._running_speculative_repairs = max(0, self._running_speculative_repairs - 1)
-        self._wake_next_slot_waiter()
+        self._repair_slots.release()
 
     def _arm_speculative_cooldown(self, key: _ThreadRepairFlightKey) -> None:
         """Hold off further speculative scans of this thread after one has just run.
@@ -331,30 +303,18 @@ class ThreadRepairRegistry:
         active_task: asyncio.Task[object],
         *,
         speculative: bool,
-        result_needs_own_flight: Callable[[T], bool] | None,
-    ) -> tuple[bool, T]:
-        """Await the flight this caller joins and report whether its result settles the call.
+    ) -> T:
+        """Await the flight this caller joins.
 
-        The joined flight's tier is read at the instant of the join, so no flight can slip in
-        between. An interactive caller that inherited a speculative flight's unusable result is
-        owed its own scan, unless another flight already owns the thread and can be joined on
-        equal terms.
+        A speculative flight scans a lost guarded replacement once where an interactive one scans
+        twice, but the loser still returns the history it just fetched -- only the durable snapshot
+        is missing, and the thread stays stale for the next read to install it. So a joining reader
+        inherits a complete answer either way and is never owed a second scan for the difference.
         """
         if speculative:
-            return True, cast("T", await asyncio.shield(active_task))
-        joined_speculative_flight = key in self._speculative_flights
+            return cast("T", await asyncio.shield(active_task))
         with self._joined_interactively(key):
-            value = cast("T", await asyncio.shield(active_task))
-        if not joined_speculative_flight or result_needs_own_flight is None or not result_needs_own_flight(value):
-            return True, value
-        follow_on_task = self._active_task(key)
-        if follow_on_task is None or key in self._speculative_flights:
-            return False, value
-        # Every caller that shared the speculative flight reaches here together, and only the first
-        # to resume gets to own the replacement. The rest join it rather than returning the result
-        # they just judged insufficient: it carries the same contract, so its answer is theirs too.
-        with self._joined_interactively(key):
-            return True, cast("T", await asyncio.shield(follow_on_task))
+            return cast("T", await asyncio.shield(active_task))
 
     async def run[T](
         self,
@@ -363,7 +323,6 @@ class ThreadRepairRegistry:
         schedule: Callable[[Callable[[], Awaitable[T]]], asyncio.Task[T]],
         repair: Callable[[], Awaitable[T]],
         result_arms_backoff: Callable[[T], bool],
-        result_needs_own_flight: Callable[[T], bool] | None = None,
         bypass_failure_backoff: bool = False,
         speculative: bool = False,
     ) -> T:
@@ -372,11 +331,6 @@ class ThreadRepairRegistry:
         Authoritative untimed reads may bypass an existing delay while preserving its failure count.
         A speculative caller raises ``ThreadRepairSuppressedError`` instead of adding a scan whenever
         the fan-out gate declines it.
-
-        Joining a flight means inheriting its contract, and a speculative flight rescans a lost
-        guarded replacement one fewer time than a waiting reader is owed. ``result_needs_own_flight``
-        lets an interactive caller that inherited such a result repair again under its own contract.
-        The tier is read at the instant of the join, so no flight can start in between.
         """
 
         async def run_repair() -> T:
@@ -395,14 +349,7 @@ class ThreadRepairRegistry:
 
         active_task = self._active_task(key)
         if active_task is not None:
-            settled, joined_value = await self._join_running_flight(
-                key,
-                active_task,
-                speculative=speculative,
-                result_needs_own_flight=result_needs_own_flight,
-            )
-            if settled:
-                return joined_value
+            return await self._join_running_flight(key, active_task, speculative=speculative)
         admission_error = self._admission_error(
             key,
             speculative=speculative,
@@ -413,10 +360,6 @@ class ThreadRepairRegistry:
 
         task = schedule(lambda: self._run_in_repair_slot(key, run_repair, speculative=speculative))
         self._tasks[key] = task
-        if speculative:
-            self._speculative_flights.add(key)
-        else:
-            self._speculative_flights.discard(key)
         task.add_done_callback(lambda done_task: self._clear_task(key, done_task))
         return await asyncio.shield(task)
 
@@ -464,9 +407,6 @@ class ThreadRepairRegistry:
     def clear_room(self, coordination_scope: str, room_id: str) -> None:
         """Drop retained deltas and failure history at one membership boundary."""
         self._tasks = {key: task for key, task in self._tasks.items() if key[:2] != (coordination_scope, room_id)}
-        self._speculative_flights = {
-            key for key in self._speculative_flights if key[:2] != (coordination_scope, room_id)
-        }
         self._deltas = {key: deltas for key, deltas in self._deltas.items() if key[:2] != (coordination_scope, room_id)}
         self._failure_backoffs = {
             key: backoff for key, backoff in self._failure_backoffs.items() if key[:2] != (coordination_scope, room_id)
@@ -484,7 +424,5 @@ class ThreadRepairRegistry:
         self._deltas.clear()
         self._speculative_cooldowns.clear()
         self._interactive_joins.clear()
-        self._speculative_flights.clear()
-        self._slot_waiters.clear()
-        self._running_repairs = 0
+        self._repair_slots = asyncio.Semaphore(self.max_concurrent_repairs)
         self._running_speculative_repairs = 0

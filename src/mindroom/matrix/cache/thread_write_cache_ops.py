@@ -318,7 +318,7 @@ class ThreadMutationCacheOps:
                 event_source,
                 append_failed_reason=append_failed_reason,
             )
-        except BaseException as exc:
+        except (Exception, asyncio.CancelledError) as exc:
             self.logger.warning(
                 "Failed to append thread event to cache",
                 room_id=room_id,
@@ -334,7 +334,7 @@ class ThreadMutationCacheOps:
             # is caught here too.
             await self._write_append_failure_marker(room_id, thread_id, reason=append_failed_reason)
             self._schedule_repair_if_available(room_id, thread_id)
-            if raise_on_failure or not isinstance(exc, Exception):
+            if raise_on_failure or isinstance(exc, asyncio.CancelledError):
                 raise
             return False
 

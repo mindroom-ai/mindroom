@@ -115,7 +115,6 @@ _SPECULATIVE_REPAIR_ATTEMPTS = 1
 
 # Store outcomes another bounded reconstruction could still turn into a snapshot. Every other
 # outcome is settled, so a second flight would only repeat it.
-_RETRYABLE_STORE_OUTCOMES = frozenset(outcome.value for outcome in ThreadCacheReplaceOutcome if outcome.retryable)
 
 
 def is_sync_replay_batch(response: nio.SyncResponse) -> bool:
@@ -925,10 +924,6 @@ class MatrixConversationCache(ConversationCacheProtocol):
             hydrate_sidecars=wants_full_history,
             allow_stale_fallback=allows_stale_fallback,
             result_arms_backoff=self._thread_repair_result_arms_backoff,
-            # A reader that joins a speculative flight inherits its single rescan of a lost guarded
-            # replacement, so a shared result that a fuller budget could still improve is repaired
-            # again under this caller's own contract.
-            result_needs_own_flight=self._thread_repair_result_needs_own_flight,
             bypass_failure_backoff=bypass_repair_backoff,
             speculative=speculative,
         )
@@ -979,17 +974,6 @@ class MatrixConversationCache(ConversationCacheProtocol):
         """Return whether one flight left a trusted durable snapshot."""
         source = result.diagnostics.get(THREAD_HISTORY_SOURCE_DIAGNOSTIC)
         return source == THREAD_HISTORY_SOURCE_CACHE or result.diagnostics.get("cache_repair_usable") is True
-
-    def _thread_repair_result_needs_own_flight(self, result: ThreadHistoryResult) -> bool:
-        """Return whether a caller's own attempt budget could still improve this shared result.
-
-        Only a lost guarded replacement qualifies. A hard failure or an unavailable backend is
-        settled however many attempts a caller is allowed, so rescanning it would spend a scan to
-        reach the same answer and then meet the failure backoff the first flight just armed.
-        """
-        if self._thread_repair_result_is_usable(result):
-            return False
-        return result.diagnostics.get("cache_store_outcome") in _RETRYABLE_STORE_OUTCOMES
 
     @staticmethod
     def _thread_repair_result_arms_backoff(result: ThreadHistoryResult) -> bool:
