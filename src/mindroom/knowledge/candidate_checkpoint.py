@@ -338,14 +338,3 @@ def delete_candidate_checkpoint(base_storage_path: Path) -> None:
     """Remove candidate state once the candidate is published or discarded."""
     _candidate_checkpoint_path(base_storage_path).unlink(missing_ok=True)
     _candidate_journal_path(base_storage_path).unlink(missing_ok=True)
-
-
-def candidate_is_resumable(checkpoint: CandidateCheckpoint | None, settings: IndexingSettings) -> bool:
-    """Return whether a persisted candidate may be continued under current settings.
-
-    Every identity that could make already-embedded vectors wrong must match:
-    base and storage identity, source path, mode, embedder provider/model/host/
-    dimensions, chunking, and the repository/filter identity that decides which
-    files belong to the corpus. That is exactly ``IndexingSettings`` equality.
-    """
-    return checkpoint is not None and checkpoint.settings == settings

@@ -2562,7 +2562,7 @@ async def test_journal_compaction_bound_survives_restart(
             final_path,
             upsert=True,
             knowledge=run.knowledge,
-            indexed_files=run.completed_paths,
+            indexed_files=None,
             indexed_signatures=run.completed,
         )
         await manager._persist_candidate_batch(run, (final_path,))

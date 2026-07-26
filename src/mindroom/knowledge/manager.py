@@ -41,7 +41,6 @@ from mindroom.knowledge.candidate_checkpoint import (
     CandidateFailure,
     FileSignature,
     append_candidate_journal,
-    candidate_is_resumable,
     delete_candidate_checkpoint,
     load_candidate_checkpoint,
     save_candidate_checkpoint,
@@ -107,8 +106,6 @@ _INDEXING_STATUSES = {
     _INDEXING_STATUS_INDEXING,
     _INDEXING_STATUS_COMPLETE,
 }
-_FileSignature = FileSignature
-
 #: Files pulled into one prepare/embed/write batch. This bounds live asyncio
 #: tasks and peak memory independently of corpus size; the provider request
 #: bounds are applied separately when the batch's chunks are planned.
@@ -197,8 +194,7 @@ class _CandidateRun:
     knowledge: Knowledge
     vector_db: ChromaDb
     embedder: BatchPrefetchEmbedder | None
-    completed: dict[str, _FileSignature | None] = field(default_factory=dict)
-    completed_paths: set[str] = field(default_factory=set)
+    completed: dict[str, FileSignature] = field(default_factory=dict)
     failed: dict[str, CandidateFailure] = field(default_factory=dict)
     vanished: set[str] = field(default_factory=set)
     #: Completed entries whose vectors this process has already confirmed, so
@@ -212,12 +208,6 @@ class _CandidateRun:
     journal_appends: int = 0
     resumed: bool = False
     published: bool = False
-
-    def completed_signatures(self) -> dict[str, _FileSignature]:
-        """Return completed entries that carry a usable source signature."""
-        return {
-            relative_path: signature for relative_path, signature in self.completed.items() if signature is not None
-        }
 
 
 @dataclass(frozen=True)
@@ -505,7 +495,7 @@ def knowledge_source_signature(
     return digest.hexdigest()
 
 
-def _source_signature_from_file_signatures(file_signatures: Mapping[str, _FileSignature]) -> str:
+def _source_signature_from_file_signatures(file_signatures: Mapping[str, FileSignature]) -> str:
     """Return the same corpus signature from already-indexed relative path signatures."""
     digest = hashlib.sha256()
     for relative_path, (source_mtime_ns, source_size, source_digest) in sorted(file_signatures.items()):
@@ -535,7 +525,7 @@ class KnowledgeManager:
     _git_lfs_hydrated_head_path: Path = field(init=False)
     _knowledge: Knowledge = field(init=False)
     _indexed_files: set[str] = field(default_factory=set, init=False)
-    _indexed_signatures: dict[str, _FileSignature | None] = field(default_factory=dict, init=False)
+    _indexed_signatures: dict[str, FileSignature] = field(default_factory=dict, init=False)
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
     _state_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
     _git_sync_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
@@ -956,7 +946,7 @@ class KnowledgeManager:
     def _relative_path(self, file_path: Path) -> str:
         return file_path.relative_to(self._knowledge_source_path()).as_posix()
 
-    def _file_signature(self, file_path: Path) -> _FileSignature:
+    def _file_signature(self, file_path: Path) -> FileSignature:
         stat = file_path.stat()
         return stat.st_mtime_ns, stat.st_size, _file_content_digest(file_path)
 
@@ -1140,7 +1130,7 @@ class KnowledgeManager:
         *,
         candidate_vector_db: ChromaDb,
         indexed_files: set[str],
-        indexed_signatures: dict[str, _FileSignature | None],
+        indexed_signatures: dict[str, FileSignature],
     ) -> None:
         self._knowledge.vector_db = candidate_vector_db
         async with self._state_lock:
@@ -1152,7 +1142,7 @@ class KnowledgeManager:
         *,
         candidate_vector_db: ChromaDb,
         indexed_files: set[str],
-        indexed_signatures: dict[str, _FileSignature | None],
+        indexed_signatures: dict[str, FileSignature],
         indexed_count: int,
         source_signature: str,
         publish_state: _CandidatePublishState,
@@ -1205,7 +1195,7 @@ class KnowledgeManager:
         upsert: bool,
         knowledge: Knowledge | None = None,
         indexed_files: set[str] | None = None,
-        indexed_signatures: dict[str, _FileSignature | None] | None = None,
+        indexed_signatures: dict[str, FileSignature] | None = None,
     ) -> bool:
         """Index one file while the caller owns the operation lock."""
         relative_path = self._relative_path(resolved_path)
@@ -1280,8 +1270,9 @@ class KnowledgeManager:
                 indexed_signatures=indexed_signatures,
             )
 
-        if indexed_files is not None and indexed_signatures is not None:
-            indexed_files.add(relative_path)
+        if indexed_signatures is not None:
+            if indexed_files is not None:
+                indexed_files.add(relative_path)
             indexed_signatures[relative_path] = (source_mtime_ns, source_size, source_digest)
         else:
             async with self._state_lock:
@@ -1297,16 +1288,17 @@ class KnowledgeManager:
     async def _handle_vectorless_file(
         self,
         relative_path: str,
-        signature: _FileSignature,
+        signature: FileSignature,
         *,
         indexed_files: set[str] | None,
-        indexed_signatures: dict[str, _FileSignature | None] | None,
+        indexed_signatures: dict[str, FileSignature] | None,
     ) -> bool:
         """Record one insert that produced no vectors; success only for empty sources."""
         source_size = signature[1]
         if source_size == 0:
-            if indexed_files is not None and indexed_signatures is not None:
-                indexed_files.add(relative_path)
+            if indexed_signatures is not None:
+                if indexed_files is not None:
+                    indexed_files.add(relative_path)
                 indexed_signatures[relative_path] = signature
             else:
                 async with self._state_lock:
@@ -1316,8 +1308,9 @@ class KnowledgeManager:
             return True
 
         logger.warning("Indexing produced no vectors for file", base_id=self.base_id, path=relative_path)
-        if indexed_files is not None and indexed_signatures is not None:
-            indexed_files.discard(relative_path)
+        if indexed_signatures is not None:
+            if indexed_files is not None:
+                indexed_files.discard(relative_path)
             indexed_signatures.pop(relative_path, None)
         else:
             async with self._state_lock:
@@ -1484,7 +1477,7 @@ class KnowledgeManager:
         *,
         knowledge: Knowledge | None = None,
         indexed_files: set[str] | None = None,
-        indexed_signatures: dict[str, _FileSignature | None] | None = None,
+        indexed_signatures: dict[str, FileSignature] | None = None,
         vanished_files: set[str] | None = None,
         embedder: BatchPrefetchEmbedder | None = None,
         on_file_result: Callable[[Path], Awaitable[None]] | None = None,
@@ -1536,7 +1529,7 @@ class KnowledgeManager:
         *,
         knowledge: Knowledge | None,
         indexed_files: set[str] | None,
-        indexed_signatures: dict[str, _FileSignature | None] | None,
+        indexed_signatures: dict[str, FileSignature] | None,
         vanished_files: set[str] | None,
     ) -> bool:
         try:
@@ -1570,7 +1563,7 @@ class KnowledgeManager:
         *,
         knowledge: Knowledge | None,
         indexed_files: set[str] | None,
-        indexed_signatures: dict[str, _FileSignature | None] | None,
+        indexed_signatures: dict[str, FileSignature] | None,
         vanished_files: set[str] | None,
         on_file_result: Callable[[Path], Awaitable[None]] | None = None,
     ) -> int:
@@ -1691,7 +1684,7 @@ class KnowledgeManager:
             # would mutate a live queryable index.
             await asyncio.to_thread(delete_candidate_checkpoint, self._base_storage_path)
             checkpoint = None
-        if checkpoint is not None and not candidate_is_resumable(checkpoint, self._indexing_settings):
+        if checkpoint is not None and checkpoint.settings != self._indexing_settings:
             logger.info(
                 "Discarding knowledge candidate built under incompatible settings",
                 base_id=self.base_id,
@@ -1738,7 +1731,6 @@ class KnowledgeManager:
             vector_db=vector_db,
             embedder=embedder,
             completed=dict(checkpoint.completed),
-            completed_paths=set(checkpoint.completed),
             failed=dict(checkpoint.failed),
             journal_appends=checkpoint.replayed_journal_entries,
             resumed=resumed,
@@ -1841,11 +1833,11 @@ class KnowledgeManager:
             return True
         return False
 
-    async def _file_signatures_for(self, files: Sequence[Path]) -> dict[str, tuple[_FileSignature, Path]]:
+    async def _file_signatures_for(self, files: Sequence[Path]) -> dict[str, tuple[FileSignature, Path]]:
         """Return current signatures for the listed files, skipping vanished ones."""
 
-        def _scan(batch: Sequence[Path]) -> list[tuple[str, _FileSignature, Path]]:
-            scanned: list[tuple[str, _FileSignature, Path]] = []
+        def _scan(batch: Sequence[Path]) -> list[tuple[str, FileSignature, Path]]:
+            scanned: list[tuple[str, FileSignature, Path]] = []
             for file_path in batch:
                 relative_path = self._relative_path(file_path)
                 try:
@@ -1855,7 +1847,7 @@ class KnowledgeManager:
                 scanned.append((relative_path, signature, file_path))
             return scanned
 
-        signatures: dict[str, tuple[_FileSignature, Path]] = {}
+        signatures: dict[str, tuple[FileSignature, Path]] = {}
         for start in range(0, len(files), _SIGNATURE_SCAN_CHUNK):
             for relative_path, signature, file_path in await asyncio.to_thread(
                 _scan,
@@ -1884,7 +1876,6 @@ class KnowledgeManager:
         await asyncio.to_thread(self._delete_candidate_vectors, run.vector_db, relative_paths)
         for relative_path in relative_paths:
             run.completed.pop(relative_path, None)
-            run.completed_paths.discard(relative_path)
             run.failed.pop(relative_path, None)
             run.verified.discard(relative_path)
         await asyncio.to_thread(
@@ -1897,7 +1888,7 @@ class KnowledgeManager:
     async def _restamp_candidate_paths(
         self,
         run: _CandidateRun,
-        restamped: Sequence[tuple[str, _FileSignature]],
+        restamped: Sequence[tuple[str, FileSignature]],
     ) -> None:
         """Adopt new mtimes for files whose content is unchanged."""
         for relative_path, signature in restamped:
@@ -1929,15 +1920,15 @@ class KnowledgeManager:
         # Vectors are dropped for paths that left the corpus and for paths whose
         # content changed: a changed file whose re-index later fails must not
         # leave either a stale checkpoint claim or stale vectors behind.
-        gone = (run.completed_paths | set(run.failed)) - present
+        gone = (set(run.completed) | set(run.failed)) - present
         changed: set[str] = set()
-        restamped: list[tuple[str, _FileSignature]] = []
-        for relative_path in run.completed_paths & present:
-            recorded = run.completed.get(relative_path)
+        restamped: list[tuple[str, FileSignature]] = []
+        for relative_path in set(run.completed) & present:
+            recorded = run.completed[relative_path]
             current = signatures[relative_path][0]
             # Git checkouts and archive restores may change only mtime. Size and
             # digest are the content identity that decides whether vectors survive.
-            if recorded is None or recorded[1:] != current[1:]:
+            if recorded[1:] != current[1:]:
                 changed.add(relative_path)
             elif recorded != current:
                 # Same bytes, new mtime: keep the vectors and adopt the new
@@ -1949,7 +1940,7 @@ class KnowledgeManager:
         if restamped:
             await self._restamp_candidate_paths(run, restamped)
 
-        unverified = sorted((run.completed_paths & present) - run.verified)
+        unverified = sorted((set(run.completed) & present) - run.verified)
         missing_vectors = await self._candidate_paths_missing_vectors(run, unverified)
         if missing_vectors:
             logger.warning(
@@ -1963,19 +1954,19 @@ class KnowledgeManager:
         pending = tuple(
             file_path
             for relative_path, (_signature, file_path) in sorted(signatures.items())
-            if relative_path not in run.completed_paths or relative_path in run.failed
+            if relative_path not in run.completed or relative_path in run.failed
         )
         run.total_files = len(present)
         return _CandidateReconciliation(expected=frozenset(present), pending=pending)
 
     async def _persist_candidate_batch(self, run: _CandidateRun, batch: Sequence[Path]) -> None:
         """Durably record finished files' outcomes on the candidate."""
-        completed: list[tuple[str, _FileSignature]] = []
+        completed: list[tuple[str, FileSignature]] = []
         failed: list[tuple[str, CandidateFailure]] = []
         for file_path in batch:
             relative_path = self._relative_path(file_path)
             signature = run.completed.get(relative_path)
-            if relative_path in run.completed_paths and signature is not None:
+            if signature is not None:
                 run.failed.pop(relative_path, None)
                 completed.append((relative_path, signature))
             elif relative_path not in run.vanished:
@@ -2009,7 +2000,7 @@ class KnowledgeManager:
             replace(
                 run.checkpoint,
                 status="failed" if run.failed else "building",
-                completed=run.completed_signatures(),
+                completed=dict(run.completed),
                 failed=dict(run.failed),
                 # The target revision advances only once the reconciled state
                 # it describes is about to be durable.
@@ -2041,7 +2032,7 @@ class KnowledgeManager:
                 resumed=run.resumed,
                 target_revision=run.checkpoint.target_revision,
                 collection=run.checkpoint.collection,
-                completed=len(run.completed_paths),
+                completed=len(run.completed),
             )
             try:
                 await self._advance_candidate(run, progress)
@@ -2082,7 +2073,7 @@ class KnowledgeManager:
             files = await asyncio.to_thread(self.list_files)
             plan = await self._reconcile_candidate(run, files)
             progress.total = len(plan.expected)
-            progress.completed = len(run.completed_paths)
+            progress.completed = len(run.completed)
             if run.checkpoint.total_files != run.total_files:
                 # Publish the corpus size as soon as it is known, so a reader
                 # watching a long build sees real outstanding work instead of
@@ -2093,7 +2084,7 @@ class KnowledgeManager:
 
                 async def _record_file(file_path: Path, active_run: _CandidateRun = run) -> None:
                     await self._persist_candidate_batch(active_run, (file_path,))
-                    progress.completed = len(active_run.completed_paths)
+                    progress.completed = len(active_run.completed)
                     progress.failed = len(active_run.failed)
                     progress.retrying = self._embedding_retry_count
                     progress.maybe_log()
@@ -2105,20 +2096,20 @@ class KnowledgeManager:
                 progress.indexed_this_run += await self._reindex_files_locked(
                     list(plan.pending),
                     knowledge=run.knowledge,
-                    indexed_files=run.completed_paths,
+                    indexed_files=None,
                     indexed_signatures=run.completed,
                     vanished_files=run.vanished,
                     embedder=run.embedder,
                     on_file_result=_record_file,
                     on_batch_complete=_record_batch,
                 )
-                progress.completed = len(run.completed_paths)
+                progress.completed = len(run.completed)
                 progress.failed = len(run.failed)
 
             expected_paths = set(plan.expected) - run.vanished
-            unresolved = expected_paths - run.completed_paths
+            unresolved = expected_paths - set(run.completed)
             if unresolved:
-                summary = f"Indexed {len(run.completed_paths)} of {len(plan.expected)} managed knowledge files"
+                summary = f"Indexed {len(run.completed)} of {len(plan.expected)} managed knowledge files"
                 if self._last_file_index_error is not None:
                     summary = f"{summary} (first error: {self._last_file_index_error})"
                 self._last_refresh_error = summary
@@ -2126,7 +2117,7 @@ class KnowledgeManager:
 
             candidate_signatures = {
                 relative_path: signature
-                for relative_path, signature in run.completed_signatures().items()
+                for relative_path, signature in run.completed.items()
                 if relative_path in expected_paths
             }
             if set(candidate_signatures) != expected_paths:
@@ -2169,9 +2160,9 @@ class KnowledgeManager:
         try:
             await self._publish_candidate_after_metadata_save(
                 candidate_vector_db=run.vector_db,
-                indexed_files=set(run.completed_paths),
+                indexed_files=set(run.completed),
                 indexed_signatures=dict(run.completed),
-                indexed_count=len(run.completed_paths),
+                indexed_count=len(run.completed),
                 source_signature=source_signature,
                 publish_state=publish_state,
             )
