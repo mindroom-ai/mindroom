@@ -80,6 +80,7 @@ from mindroom.matrix.event_info import (
     is_thread_affecting_relation,
 )
 from mindroom.matrix.media import (
+    event_source_supports_valid_thread_relations,
     parse_room_message_event_source,
     valid_room_message_replacement,
 )
@@ -1548,7 +1549,10 @@ async def _thread_history_cache_rejection_reason(
     return (
         _INVALID_THREAD_MEMBERSHIP_REJECTION
         if any(
-            event_id != thread_id and resolved_thread_ids.get(event_id) != thread_id for event_id in sources_by_event_id
+            event_id != thread_id
+            and event_type_supports_thread_relations(event_source.get("type"))
+            and resolved_thread_ids.get(event_id) != thread_id
+            for event_id, event_source in sources_by_event_id.items()
         )
         else None
     )
@@ -1822,9 +1826,16 @@ async def _fetch_thread_history_via_room_messages_with_events(
     )
 
 
-def _is_opaque_thread_affecting_event_source(event_source: Mapping[str, Any]) -> bool:
+def _is_opaque_thread_affecting_event_source(
+    event_source: Mapping[str, Any],
+    *,
+    room_id: str,
+) -> bool:
     """Return whether one scanned payload is undecrypted ciphertext with exposed thread-affecting relations."""
-    if not is_opaque_encrypted_event_source(event_source):
+    if not is_opaque_encrypted_event_source(event_source) or not event_source_supports_valid_thread_relations(
+        event_source,
+        room_id,
+    ):
         return False
     event_info = EventInfo.from_event(dict(event_source))
     return is_thread_affecting_relation(event_info, event_type=event_info.event_type)
@@ -1841,7 +1852,7 @@ def _record_scanned_room_message_source(
     event_source = event.source if isinstance(event.source, dict) else {}
     if not event_source_is_timeline_in_room(event_source, room_id):
         return None
-    if _is_opaque_thread_affecting_event_source(event_source):
+    if _is_opaque_thread_affecting_event_source(event_source, room_id=room_id):
         # Undecryptable relation-bearing ciphertext is recorded as fail-closed evidence: it resolves
         # thread membership through its exposed relation and poisons only that reconstruction.
         scanned_message_sources[event.event_id] = _event_source_for_cache(event)

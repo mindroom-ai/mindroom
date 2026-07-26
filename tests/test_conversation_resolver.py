@@ -123,6 +123,44 @@ def _room() -> nio.MatrixRoom:
     return nio.MatrixRoom(_ROOM_ID, "@mindroom_general:localhost")
 
 
+@pytest.mark.parametrize("invalidity", ["wrong-event-id", "malformed-encrypted"])
+@pytest.mark.asyncio
+async def test_point_event_source_rejects_invalid_relation_envelopes(
+    config: Config,
+    invalidity: str,
+) -> None:
+    """Point ancestry accepts only the exact requested event with a valid envelope."""
+    source: dict[str, Any] = {
+        "content": {
+            "body": "thread child",
+            "msgtype": "m.text",
+            "m.relates_to": {"rel_type": "m.thread", "event_id": _THREAD_ROOT},
+        },
+        "event_id": _PARENT,
+        "sender": _SENDER,
+        "origin_server_ts": 1,
+        "room_id": _ROOM_ID,
+        "type": "m.room.message",
+    }
+    if invalidity == "wrong-event-id":
+        source["event_id"] = "$different:localhost"
+    else:
+        source["type"] = "m.room.encrypted"
+        source["content"] = {
+            "m.relates_to": {"rel_type": "m.thread", "event_id": _THREAD_ROOT},
+        }
+    response = nio.RoomGetEventResponse.from_dict(source)
+    if invalidity == "malformed-encrypted":
+        assert isinstance(response.event, nio.BadEvent)
+    cache = make_conversation_cache_mock()
+    cache.get_event = AsyncMock(return_value=response)
+    resolver = _resolver(config, conversation_cache=cache)
+
+    event_source = await resolver._event_source_for_event_id(_ROOM_ID, _PARENT)
+
+    assert event_source is None
+
+
 @pytest.mark.asyncio
 async def test_threaded_event_resolves_explicit_thread_root(config: Config) -> None:
     """An m.thread relation is authoritative for thread identity and the delivery target."""

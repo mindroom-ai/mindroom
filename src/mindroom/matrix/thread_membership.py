@@ -317,10 +317,14 @@ async def resolve_event_thread_membership(
     """Return canonical thread membership for one event."""
     explicit_thread_id = event_info.thread_id
     if explicit_thread_id is not None:
-        explicit_thread_is_valid = explicit_thread_id != event_id and (
-            event_source_supports_valid_explicit_thread_relation(event_source, room_id)
-            if event_source is not None
-            else isinstance(event_info.event_type, str) and bool(event_info.event_type.strip())
+        explicit_thread_is_valid = (
+            explicit_thread_id != event_id
+            and event_type_supports_thread_relations(event_info.event_type)
+            and (
+                event_source_supports_valid_explicit_thread_relation(event_source, room_id)
+                if event_source is not None
+                else True
+            )
         )
         return (
             ThreadResolution.threaded(explicit_thread_id) if explicit_thread_is_valid else ThreadResolution.room_level()

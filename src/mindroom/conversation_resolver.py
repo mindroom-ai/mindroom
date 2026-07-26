@@ -30,12 +30,11 @@ from mindroom.entity_resolution import entity_identity_registry
 from mindroom.matrix.cache.thread_history_result import ThreadHistoryResult
 from mindroom.matrix.cache.thread_reads import ThreadReadMode
 from mindroom.matrix.client_delivery import cached_room as matrix_cached_room
-from mindroom.matrix.event_info import EventInfo, event_source_is_timeline_in_room
+from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.media import (
     MatrixMediaEvent,
     is_audio_message_event,
     is_image_message_event,
-    valid_room_message_event_source,
 )
 from mindroom.matrix.message_content import resolve_event_source_content
 from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
@@ -47,6 +46,7 @@ from mindroom.matrix.thread_membership import (
     resolve_related_event_thread_id_best_effort,
     thread_messages_thread_membership_access,
 )
+from mindroom.matrix.thread_room_scan import validated_event_source_from_lookup_response
 from mindroom.message_target import MessageTarget
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
 from mindroom.thread_utils import check_agent_mentioned
@@ -654,12 +654,11 @@ class ConversationResolver:
             )
             msg = f"Failed to resolve related Matrix event {event_id}: {detail}"
             raise RuntimeError(msg)
-        event_source = target_event.event.source
-        if not event_source_is_timeline_in_room(event_source, room_id) or (
-            event_source.get("type") == "m.room.message" and not valid_room_message_event_source(event_source)
-        ):
-            return None
-        return {key: value for key, value in event_source.items() if isinstance(key, str)}
+        return validated_event_source_from_lookup_response(
+            target_event,
+            room_id=room_id,
+            event_id=event_id,
+        )
 
     async def _resolve_thread_context(
         self,

@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, patch
 
+import nio
 import pytest
 
 from mindroom.logging_config import get_logger
@@ -35,8 +36,6 @@ from tests.event_cache_test_support import (
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
-
-    import nio
 
     from mindroom.bot_runtime_view import BotRuntimeView
 
@@ -1069,6 +1068,25 @@ def _encrypted_source(
     if relation is not None:
         content["m.relates_to"] = relation
     return _event_source(event_id, "m.room.encrypted", content, timestamp=timestamp)
+
+
+@pytest.mark.asyncio
+async def test_malformed_encrypted_thread_relation_is_never_indexed(
+    event_cache: ConversationEventCache,
+) -> None:
+    """A malformed encrypted envelope cannot create durable thread membership."""
+    malformed_child = _encrypted_source("$malformed-child", timestamp=59, relation=_thread_relation())
+    content = malformed_child["content"]
+    assert isinstance(content, dict)
+    del content["sender_key"]
+    parsed_event = nio.RoomGetEventResponse.from_dict(malformed_child).event
+    assert isinstance(parsed_event, nio.BadEvent)
+
+    await event_cache.store_event("$malformed-child", _ROOM_ID, malformed_child)
+
+    assert await event_cache.get_event(_ROOM_ID, "$malformed-child") == malformed_child
+    assert await event_cache.get_thread_id_for_event(_ROOM_ID, "$malformed-child") is None
+    assert await event_cache.get_thread_id_for_event(_ROOM_ID, _THREAD_ID) is None
 
 
 @pytest.mark.asyncio

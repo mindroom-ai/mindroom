@@ -275,7 +275,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         finally:
             await real_event_cache.close()
 
-    @pytest.mark.parametrize("invalidity", ["state", "wrong-room", "malformed"])
+    @pytest.mark.parametrize("invalidity", ["state", "wrong-room", "malformed", "unsupported-type"])
     @pytest.mark.asyncio
     async def test_invalid_current_source_cannot_supply_explicit_thread_membership(
         self,
@@ -302,6 +302,16 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             source["state_key"] = ""
         elif invalidity == "wrong-room":
             source["room_id"] = "!other:localhost"
+        elif invalidity == "unsupported-type":
+            source["type"] = "m.sticker"
+            source["content"] = {
+                "body": "sticker",
+                "m.relates_to": {
+                    "rel_type": "m.thread",
+                    "event_id": "$foreign-root:localhost",
+                },
+                "url": "mxc://localhost/sticker",
+            }
         else:
             content = source["content"]
             assert isinstance(content, dict)

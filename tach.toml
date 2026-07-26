@@ -2742,6 +2742,7 @@ depends_on = [
     "mindroom.matrix.message_content",
     "mindroom.matrix.thread_diagnostics",
     "mindroom.matrix.thread_membership",
+    "mindroom.matrix.thread_room_scan",
     "mindroom.runtime_protocols",
 ]
 
@@ -4174,7 +4175,11 @@ expose = [
     "validated_event_source_from_lookup_response",
 ]
 from = ["mindroom.matrix.thread_room_scan"]
-visibility = ["mindroom.matrix.conversation_cache", "mindroom.matrix.thread_bookkeeping"]
+visibility = [
+    "mindroom.conversation_resolver",
+    "mindroom.matrix.conversation_cache",
+    "mindroom.matrix.thread_bookkeeping",
+]
 exclusive = true
 
 [[interfaces]]

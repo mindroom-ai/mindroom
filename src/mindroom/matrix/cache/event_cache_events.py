@@ -12,9 +12,8 @@ from mindroom.matrix.event_info import (
     EventInfo,
     event_source_is_timeline_in_room,
     event_source_matches_room,
-    event_source_supports_thread_relations,
 )
-from mindroom.matrix.media import valid_room_message_event_source
+from mindroom.matrix.media import event_source_supports_valid_thread_relations
 from mindroom.matrix.replacements import bundled_replacement_candidates
 from mindroom.matrix.sidecar_content import sidecar_mxc_url
 
@@ -270,9 +269,7 @@ def _event_thread_row(room_id: str, event: SerializedCachedEvent) -> _EventThrea
 
 def _event_can_supply_thread_index(event: dict[str, Any], *, room_id: str) -> bool:
     """Return whether one timeline event may create durable thread-index rows."""
-    return event_source_supports_thread_relations(event, room_id) and (
-        event.get("type") != "m.room.message" or valid_room_message_event_source(event)
-    )
+    return event_source_supports_valid_thread_relations(event, room_id)
 
 
 def _with_thread_root_self_rows(thread_rows: list[_EventThreadRow]) -> list[_EventThreadRow]:
