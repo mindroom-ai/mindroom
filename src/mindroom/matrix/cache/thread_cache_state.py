@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import TYPE_CHECKING
 
 from .event_cache import ThreadCacheState, ThreadRevision
@@ -17,6 +18,38 @@ _INCREMENTAL_THREAD_REVALIDATION_REASONS = (
 )
 THREAD_HISTORY_TRUST_METADATA_KEY = "thread_history_trust_version"
 THREAD_HISTORY_TRUST_VERSION = "opaque_encrypted_relations_v1"
+
+
+class ThreadCacheReplaceOutcome(StrEnum):
+    """Describe whether one guarded thread snapshot became usable."""
+
+    STORED = "stored"
+    EXISTING_USABLE = "existing_usable"
+    RETRYABLE_CONFLICT = "retryable_conflict"
+    INVALIDATED = "invalidated"
+    WRITES_UNAVAILABLE = "writes_unavailable"
+    HARD_FAILURE = "hard_failure"
+
+    @property
+    def written(self) -> bool:
+        """Return whether this operation installed the supplied snapshot."""
+        return self is ThreadCacheReplaceOutcome.STORED
+
+    @property
+    def usable(self) -> bool:
+        """Return whether a trusted snapshot exists after this operation."""
+        return self in {
+            ThreadCacheReplaceOutcome.STORED,
+            ThreadCacheReplaceOutcome.EXISTING_USABLE,
+        }
+
+    @property
+    def retryable(self) -> bool:
+        """Return whether another bounded reconstruction may still install a snapshot."""
+        return self in {
+            ThreadCacheReplaceOutcome.INVALIDATED,
+            ThreadCacheReplaceOutcome.RETRYABLE_CONFLICT,
+        }
 
 
 def incremental_thread_revalidation_reasons() -> tuple[str, ...]:
@@ -113,6 +146,31 @@ def thread_cache_state_changed_after(
         timestamp is not None and timestamp > fetch_started_at
         for timestamp in (cache_state.validated_at, cache_state.invalidated_at, cache_state.room_invalidated_at)
     )
+
+
+def guarded_thread_replacement_conflict(
+    cache_state: ThreadCacheStateRow | None,
+    *,
+    fetch_started_at: float,
+    has_snapshot_rows: bool,
+) -> ThreadCacheReplaceOutcome | None:
+    """Classify state changed after one snapshot fetch, if any."""
+    if cache_state is None or not thread_cache_state_changed_after(cache_state, fetch_started_at=fetch_started_at):
+        return None
+    trusted_existing = (
+        cache_state.validated_at is not None
+        and (cache_state.invalidated_at is None or cache_state.invalidated_at < cache_state.validated_at)
+        and (cache_state.room_invalidated_at is None or cache_state.room_invalidated_at < cache_state.validated_at)
+    )
+    if trusted_existing and has_snapshot_rows:
+        return ThreadCacheReplaceOutcome.EXISTING_USABLE
+    invalidated_after_fetch = any(
+        timestamp is not None and timestamp > fetch_started_at
+        for timestamp in (cache_state.invalidated_at, cache_state.room_invalidated_at)
+    )
+    if invalidated_after_fetch:
+        return ThreadCacheReplaceOutcome.INVALIDATED
+    return ThreadCacheReplaceOutcome.RETRYABLE_CONFLICT
 
 
 def can_revalidate_after_incremental_update(cache_state: ThreadCacheStateRow | None) -> bool:

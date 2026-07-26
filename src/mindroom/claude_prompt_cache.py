@@ -50,6 +50,7 @@ can still replay poisoned history.
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING, Any, cast
 
 from mindroom.hooks.enrichment import is_transient_context
@@ -58,6 +59,8 @@ from mindroom.model_defaults import TOOL_SEARCH_UNSUPPORTED_MODEL_ID_PREFIXES
 from mindroom.model_instance_checks import isinstance_of_loaded
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from agno.models.anthropic import Claude as AnthropicClaude
 
 _PROMPT_CACHE_HOOK_ATTR = "_mindroom_claude_prompt_cache_hook_installed"
@@ -478,12 +481,65 @@ def _request_kwargs_with_prompt_cache_ladder(
     return prepared_kwargs
 
 
+class _OffloadedAsyncStreamManager:
+    """Construct one synchronous SDK stream manager away from the event loop."""
+
+    def __init__(self, stream_factory: Callable[[], Any]) -> None:
+        self._stream_factory = stream_factory
+        self._stream_manager: Any = None
+
+    async def __aenter__(self) -> object:
+        current_task = asyncio.current_task()
+        assert current_task is not None
+        deferred_cancel_count = 0
+        deferred_cancel: asyncio.CancelledError | None = None
+        setup_task = asyncio.create_task(asyncio.to_thread(self._stream_factory))
+
+        while not setup_task.done():
+            try:
+                await asyncio.shield(setup_task)
+            except asyncio.CancelledError as exc:
+                if setup_task.cancelled():
+                    raise
+                caller_cancel_count = current_task.cancelling()
+                if caller_cancel_count <= 0:
+                    raise
+                for _ in range(caller_cancel_count):
+                    current_task.uncancel()
+                deferred_cancel_count += caller_cancel_count
+                deferred_cancel = deferred_cancel or exc
+
+        try:
+            self._stream_manager = setup_task.result()
+        except BaseException as setup_error:
+            if deferred_cancel is None:
+                raise
+            for _ in range(deferred_cancel_count):
+                current_task.cancel()
+            raise deferred_cancel from setup_error
+
+        for _ in range(deferred_cancel_count):
+            current_task.cancel()
+        return await self._stream_manager.__aenter__()
+
+    async def __aexit__(self, exc_type: object, exc_value: object, traceback: object) -> bool | None:
+        result: bool | None = await self._stream_manager.__aexit__(exc_type, exc_value, traceback)
+        return result
+
+
 class _PromptCacheMessagesProxy:
     """Messages namespace proxy that adds the cache ladder on create/stream."""
 
-    def __init__(self, messages_namespace: object, model: AnthropicClaude) -> None:
+    def __init__(
+        self,
+        messages_namespace: object,
+        model: AnthropicClaude,
+        *,
+        offload_stream_setup: bool,
+    ) -> None:
         self._messages_namespace: Any = messages_namespace
         self._model = model
+        self._offload_stream_setup = offload_stream_setup
 
     def _prepared(self, request_kwargs: dict[str, Any]) -> dict[str, Any]:
         return prepare_claude_request_kwargs(self._model, request_kwargs)
@@ -492,6 +548,10 @@ class _PromptCacheMessagesProxy:
         return self._messages_namespace.create(**self._prepared(request_kwargs))
 
     def stream(self, **request_kwargs: object) -> object:
+        if self._offload_stream_setup:
+            return _OffloadedAsyncStreamManager(
+                lambda: self._messages_namespace.stream(**self._prepared(request_kwargs)),
+            )
         return self._messages_namespace.stream(**self._prepared(request_kwargs))
 
     def __getattr__(self, name: str) -> object:
@@ -518,13 +578,24 @@ def prepare_claude_request_kwargs(
 class _PromptCacheBetaProxy:
     """Beta namespace proxy that routes beta.messages through the ladder."""
 
-    def __init__(self, beta_namespace: object, model: AnthropicClaude) -> None:
+    def __init__(
+        self,
+        beta_namespace: object,
+        model: AnthropicClaude,
+        *,
+        offload_stream_setup: bool,
+    ) -> None:
         self._beta_namespace: Any = beta_namespace
         self._model = model
+        self._offload_stream_setup = offload_stream_setup
 
     @property
     def messages(self) -> _PromptCacheMessagesProxy:
-        return _PromptCacheMessagesProxy(self._beta_namespace.messages, self._model)
+        return _PromptCacheMessagesProxy(
+            self._beta_namespace.messages,
+            self._model,
+            offload_stream_setup=self._offload_stream_setup,
+        )
 
     def __getattr__(self, name: str) -> object:
         return getattr(self._beta_namespace, name)
@@ -533,17 +604,32 @@ class _PromptCacheBetaProxy:
 class _PromptCacheClientProxy:
     """Anthropic SDK client proxy that applies the ladder to message requests."""
 
-    def __init__(self, client: object, model: AnthropicClaude) -> None:
+    def __init__(
+        self,
+        client: object,
+        model: AnthropicClaude,
+        *,
+        offload_stream_setup: bool = False,
+    ) -> None:
         self._client: Any = client
         self._model = model
+        self._offload_stream_setup = offload_stream_setup
 
     @property
     def messages(self) -> _PromptCacheMessagesProxy:
-        return _PromptCacheMessagesProxy(self._client.messages, self._model)
+        return _PromptCacheMessagesProxy(
+            self._client.messages,
+            self._model,
+            offload_stream_setup=self._offload_stream_setup,
+        )
 
     @property
     def beta(self) -> _PromptCacheBetaProxy:
-        return _PromptCacheBetaProxy(self._client.beta, self._model)
+        return _PromptCacheBetaProxy(
+            self._client.beta,
+            self._model,
+            offload_stream_setup=self._offload_stream_setup,
+        )
 
     # Python looks dunder methods up on the type, bypassing __getattr__, so
     # context-manager use of the proxied client must be delegated explicitly.
@@ -595,7 +681,7 @@ def install_claude_prompt_cache_hook(model: object) -> None:
 
     def _get_async_client_with_prompt_cache() -> object:
         client = original_get_async_client()
-        return _PromptCacheClientProxy(client, claude_model)
+        return _PromptCacheClientProxy(client, claude_model, offload_stream_setup=True)
 
     model_dict["get_client"] = _get_client_with_prompt_cache
     model_dict["get_async_client"] = _get_async_client_with_prompt_cache

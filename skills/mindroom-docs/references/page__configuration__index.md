@@ -347,6 +347,7 @@ teams:
       enabled: true
       threshold_percent: 0.8
       reserve_tokens: 16384
+      timeout_seconds: 600
     rooms: []                      # Optional: Rooms to auto-join
 
 # Culture configurations (optional)
@@ -389,6 +390,7 @@ defaults:
     # Destructive compaction requires a resolved summary input budget greater than 2,000 tokens.
     replay_window_tokens: null     # Optional operational cap; does not change the model's real context window
     reserve_tokens: 16384
+    timeout_seconds: 600           # Maximum seconds allowed for each compaction summary request
   max_tool_calls_from_history: null  # Limit tool call messages replayed from history (null = no limit)
   show_tool_calls: true            # Default: true (show tool details inline; hidden mode still allows generic worker warmup copy)
   worker_tools: null               # Default: null (tool names to route through workers; null = use MindRoom's default routing policy, [] = disable)

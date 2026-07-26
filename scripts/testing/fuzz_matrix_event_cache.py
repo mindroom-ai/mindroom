@@ -37,6 +37,7 @@ from mindroom.matrix.cache import (
     thread_cache_rejection_reason,
 )
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
+from mindroom.matrix.cache.thread_cache_state import ThreadCacheReplaceOutcome
 from mindroom.matrix.cache.thread_write_cache_ops import ThreadMutationCacheOps
 from mindroom.matrix.cache.thread_writes import ThreadSyncWritePolicy
 from mindroom.matrix.event_info import EventInfo
@@ -537,7 +538,7 @@ class CacheFuzzRunner:
                     fetch_started_at=float("inf"),
                     validated_at=time.time(),
                 )
-                assert replaced
+                assert replaced is ThreadCacheReplaceOutcome.STORED
                 self.known_ids.add((current_room_id, root_event_id))
 
     async def run(self) -> ObservableCacheState:

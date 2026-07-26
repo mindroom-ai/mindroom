@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Literal
 
 from mindroom.knowledge import registry
 from mindroom.knowledge.availability import KnowledgeAvailability
+from mindroom.knowledge.candidate_checkpoint import load_candidate_checkpoint
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
@@ -15,6 +16,30 @@ if TYPE_CHECKING:
 
 _PersistedIndexStatus = Literal["resetting", "indexing", "complete", "failed"]
 _KnowledgeRefreshState = Literal["none", "stale", "refreshing", "refresh_failed"]
+
+
+@dataclass(frozen=True)
+class KnowledgeCandidateStatus:
+    """Progress of the private candidate index being built for one base.
+
+    Deliberately separate from ``indexed_count``: candidate work is not
+    queryable, and reporting it as published would tell operators an index is
+    usable when nothing has been published yet.
+    """
+
+    collection: str
+    status: Literal["building", "failed"]
+    completed_count: int
+    failed_count: int
+    total_files: int
+    target_revision: str | None = None
+    created_at: str | None = None
+    updated_at: str | None = None
+
+    @property
+    def pending_count(self) -> int:
+        """Return files the candidate still owes before it can be published."""
+        return max(self.total_files - self.completed_count, 0)
 
 
 @dataclass(frozen=True)
@@ -29,6 +54,7 @@ class KnowledgeIndexStatus:
     last_published_at: str | None = None
     published_revision: str | None = None
     metadata_exists: bool = False
+    candidate: KnowledgeCandidateStatus | None = None
 
     @property
     def initial_sync_complete(self) -> bool:
@@ -47,6 +73,22 @@ def _indexed_count_for_state(
     if not registry.published_index_settings_compatible(state.settings, key.indexing_settings):
         return 0
     return state.indexed_count or 0
+
+
+def _candidate_status_for_key(key: registry.PublishedIndexKey) -> KnowledgeCandidateStatus | None:
+    checkpoint = load_candidate_checkpoint(registry.published_index_storage_path(key))
+    if checkpoint is None or checkpoint.settings != key.indexing_settings:
+        return None
+    return KnowledgeCandidateStatus(
+        collection=checkpoint.collection,
+        status=checkpoint.status,
+        completed_count=checkpoint.completed_count,
+        failed_count=len(checkpoint.failed),
+        total_files=checkpoint.total_files,
+        target_revision=checkpoint.target_revision,
+        created_at=checkpoint.created_at or None,
+        updated_at=checkpoint.updated_at or None,
+    )
 
 
 def get_knowledge_index_status(
@@ -69,6 +111,7 @@ def get_knowledge_index_status(
     metadata_exists = metadata_path.exists()
     state = registry.load_published_index_state(metadata_path)
     return KnowledgeIndexStatus(
+        candidate=_candidate_status_for_key(key),
         indexed_count=_indexed_count_for_state(key, state),
         refresh_state=registry.published_index_refresh_state(state, metadata_exists=metadata_exists),
         availability=registry.published_index_availability_for_state(

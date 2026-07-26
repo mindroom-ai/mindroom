@@ -1201,6 +1201,17 @@ describe("AgentEditor", () => {
     });
   });
 
+  it("preserves timeout-only compaction overrides as enabled", () => {
+    expect(
+      normalizeAgentUpdates(mockAgent, {
+        compaction: { timeout_seconds: 300 },
+      }).compaction,
+    ).toEqual({
+      enabled: true,
+      timeout_seconds: 300,
+    });
+  });
+
   it("authors a replay window from the editor", async () => {
     render(<AgentEditor />);
 
@@ -1229,6 +1240,30 @@ describe("AgentEditor", () => {
       config: {
         ...mockConfig,
         agents: { test_agent: compactionAgent },
+      },
+    });
+
+    render(<AgentEditor />);
+
+    expect(
+      screen.getByRole("checkbox", {
+        name: /enable automatic required compaction/i,
+      }),
+    ).toBeChecked();
+  });
+
+  it("treats a timeout-only override as enabled even when defaults disable compaction", () => {
+    const compactionAgent: Agent = {
+      ...mockAgent,
+      compaction: { timeout_seconds: 300 },
+    };
+    (useConfigStore as any).mockReturnValue({
+      ...mockStore,
+      agents: [compactionAgent],
+      config: {
+        ...mockConfig,
+        agents: { test_agent: compactionAgent },
+        defaults: { ...mockConfig.defaults, compaction: { enabled: false } },
       },
     });
 

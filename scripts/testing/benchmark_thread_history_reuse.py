@@ -24,6 +24,7 @@ from typing import Any
 from unittest.mock import AsyncMock
 
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
+from mindroom.matrix.cache.thread_cache_state import ThreadCacheReplaceOutcome
 from mindroom.matrix.client_thread_history import _load_cached_thread_history_if_usable
 from mindroom.matrix.thread_resolution_reuse import ThreadResolutionReuseCache
 
@@ -153,7 +154,7 @@ async def run_benchmark(*, visible_messages: int, edits_per_agent_message: int, 
             fetch_started_at=fetch_started_at,
             validated_at=fetch_started_at,
         )
-        assert replaced
+        assert replaced is ThreadCacheReplaceOutcome.STORED
         del rows
         gc.collect()
 

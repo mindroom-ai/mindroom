@@ -358,14 +358,14 @@ def _conversation_runtime_config() -> Config:
     )
 
 
-async def _assert_thread_read_guard_rejects_cache_when_unknown_live_mutation_races_fetch(  # noqa: PLR0915
+async def _assert_thread_read_guard_retries_when_unknown_live_mutation_races_fetch(  # noqa: PLR0915
     tmp_path: Path,
     *,
     read_thread: Callable[[MatrixConversationCache, str, str], Coroutine[Any, Any, ThreadHistoryResult]],
     force_refetch_reason: str,
     expected_full_history: bool,
 ) -> None:
-    """Assert a blocked thread read does not validate cache after a racing UNKNOWN live mutation."""
+    """Assert a blocked thread read retries before validating after a racing UNKNOWN live mutation."""
     room_id = "!test:localhost"
     thread_id = "$thread:localhost"
     event_cache = SqliteEventCache(tmp_path / "event_cache.db")
@@ -448,7 +448,6 @@ async def _assert_thread_read_guard_rejects_cache_when_unknown_live_mutation_rac
 
     try:
         await asyncio.wait_for(fetch_started.wait(), timeout=1.0)
-        await asyncio.sleep(0.01)
         live_task = asyncio.create_task(
             access.append_live_event(
                 room_id,
@@ -483,9 +482,9 @@ async def _assert_thread_read_guard_rejects_cache_when_unknown_live_mutation_rac
     assert thread_state is not None
     assert thread_state.validated_at is not None
     assert thread_state.room_invalidated_at is not None
-    assert thread_state.room_invalidated_at > thread_state.validated_at
-    assert matrix_cache.thread_cache_rejection_reason(thread_state) is not None
-    client.room_messages.assert_awaited_once()
+    assert thread_state.room_invalidated_at < thread_state.validated_at
+    assert matrix_cache.thread_cache_rejection_reason(thread_state) is None
+    assert client.room_messages.await_count == 2
 
 
 def _install_runtime_write_coordinator(bot: AgentBot) -> EventCacheWriteCoordinator:

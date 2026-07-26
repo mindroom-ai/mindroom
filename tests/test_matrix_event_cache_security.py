@@ -17,6 +17,7 @@ from mindroom.matrix import client_thread_history
 from mindroom.matrix.cache import (
     ConversationEventCache,
     SharedConversationEventCache,
+    ThreadCacheReplaceOutcome,
     postgres_event_cache_events,
     postgres_event_cache_threads,
     sqlite_event_cache,
@@ -1106,7 +1107,7 @@ async def test_pre_departure_thread_refill_cannot_resurrect_after_rejoin(
             fetch_started_at=100.0,
         )
 
-        assert replaced is False
+        assert replaced is ThreadCacheReplaceOutcome.RETRYABLE_CONFLICT
         assert await cache.get_thread_events(room_id, thread_id) is None
         assert await cache.get_event(room_id, "$redacted") is None
     finally:
@@ -1158,16 +1159,19 @@ async def test_pre_departure_thread_refill_from_another_runtime_cannot_resurrect
             fetch_started_at=state.room_invalidated_at - 1.0,
         )
 
-        assert replaced is False
+        assert replaced is ThreadCacheReplaceOutcome.RETRYABLE_CONFLICT
         assert await departing_cache.get_thread_events(room_id, thread_id) is None
         assert await departing_cache.get_event(room_id, "$secret") is None
 
-        assert await stale_cache.replace_thread_if_not_newer(
-            room_id,
-            thread_id,
-            events,
-            expected_membership_epoch=await stale_cache.room_membership_epoch(room_id),
-            fetch_started_at=state.room_invalidated_at + 1.0,
+        assert (
+            await stale_cache.replace_thread_if_not_newer(
+                room_id,
+                thread_id,
+                events,
+                expected_membership_epoch=await stale_cache.room_membership_epoch(room_id),
+                fetch_started_at=state.room_invalidated_at + 1.0,
+            )
+            is ThreadCacheReplaceOutcome.STORED
         )
     finally:
         await stale_root.close()
@@ -1233,21 +1237,28 @@ async def test_departed_refill_guard_blocks_point_plaintext_and_thread_writes_af
             "stale plaintext",
             expected_membership_epoch=departed_membership_epoch,
         )
-        assert not await refill_cache.replace_thread_if_not_newer(
-            room_id,
-            thread_id,
-            events,
-            expected_membership_epoch=departed_membership_epoch,
-            fetch_started_at=float("inf"),
+        assert (
+            await refill_cache.replace_thread_if_not_newer(
+                room_id,
+                thread_id,
+                events,
+                expected_membership_epoch=departed_membership_epoch,
+                fetch_started_at=float("inf"),
+            )
+            is ThreadCacheReplaceOutcome.RETRYABLE_CONFLICT
         )
+        assert await refill_cache.get_thread_events(room_id, thread_id) is None
         assert await _raw_mxc_text_count(refill_cache, room_id, mxc_url) == 0
 
-        assert await refill_cache.replace_thread_if_not_newer(
-            room_id,
-            thread_id,
-            events,
-            expected_membership_epoch=joined_membership_epoch,
-            fetch_started_at=float("inf"),
+        assert (
+            await refill_cache.replace_thread_if_not_newer(
+                room_id,
+                thread_id,
+                events,
+                expected_membership_epoch=joined_membership_epoch,
+                fetch_started_at=float("inf"),
+            )
+            is ThreadCacheReplaceOutcome.STORED
         )
         assert await refill_cache.store_mxc_text(
             room_id,

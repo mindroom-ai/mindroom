@@ -405,11 +405,11 @@ class TestAgentBot(AgentBotTestBase):
             room.room_id,
             "$thread_root",
             event_cache=bot.event_cache,
-            cache_write_guard_started_at=ANY,
             trusted_sender_ids=trusted_sender_ids,
             caller_label="dispatch_context",
             coordinator_queue_wait_ms=ANY,
             resolution_reuse=ANY,
+            refill=ANY,
         )
 
     @pytest.mark.asyncio

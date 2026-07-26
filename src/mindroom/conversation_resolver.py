@@ -657,17 +657,44 @@ class ConversationResolver:
         )
         thread_id = thread_lookup.thread_id
         if thread_id is None:
-            if thread_lookup.candidate_thread_root_id is None:
-                return _ThreadContextLookup.room_level()
+            candidate_thread_root_id = thread_lookup.candidate_thread_root_id
             candidate_history = thread_lookup.thread_history
-            if candidate_history is None:
-                return _ThreadContextLookup.unproven_candidate_without_history(
-                    thread_lookup.candidate_thread_root_id,
+            if (
+                candidate_thread_root_id is not None
+                and candidate_history is not None
+                and mode.dispatch_safe
+                and is_thread_history_degraded(candidate_history)
+            ):
+                strict_lookup = await self._explicit_thread_id_for_event(
+                    room_id,
+                    event_id,
+                    event_info,
+                    mode=ThreadReadMode.STRICT_FULL,
+                    caller_label=f"{caller_label}_strict_candidate_fallback",
                 )
-            return _ThreadContextLookup.unproven_candidate_demoted(
-                thread_lookup.candidate_thread_root_id,
-                candidate_history,
-            )
+                if strict_lookup.thread_id is not None:
+                    thread_lookup = strict_lookup
+                    thread_id = strict_lookup.thread_id
+                elif strict_lookup.thread_history is None:
+                    return _ThreadContextLookup.unproven_candidate_without_history(
+                        candidate_thread_root_id,
+                    )
+                else:
+                    return _ThreadContextLookup.unproven_candidate_demoted(
+                        candidate_thread_root_id,
+                        strict_lookup.thread_history,
+                    )
+            if thread_id is None:
+                if candidate_thread_root_id is None:
+                    return _ThreadContextLookup.room_level()
+                if candidate_history is None:
+                    return _ThreadContextLookup.unproven_candidate_without_history(
+                        candidate_thread_root_id,
+                    )
+                return _ThreadContextLookup.unproven_candidate_demoted(
+                    candidate_thread_root_id,
+                    candidate_history,
+                )
 
         thread_messages = thread_lookup.thread_history
         if thread_messages is None:
