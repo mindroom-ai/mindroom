@@ -232,6 +232,14 @@ async def _replacement_ancestry_is_valid(
     if candidate is None or original is None:
         msg = f"Replacement ancestry lookup unavailable for {replacement_event_id}"
         raise ThreadMembershipLookupError(msg)
+    if candidate.get("type") == "m.room.encrypted":
+        return (
+            EventInfo.from_event(dict(candidate)).original_event_id == original_event_id
+            and event_source_supports_valid_thread_relations(candidate, room_id)
+            and event_source_supports_valid_thread_relations(original, room_id)
+            and not EventInfo.from_event(dict(original)).is_edit
+            and candidate.get("sender") == original.get("sender")
+        )
     return valid_room_message_event_source(original) and is_valid_replacement(
         original,
         candidate,

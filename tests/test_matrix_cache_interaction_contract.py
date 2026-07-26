@@ -1111,6 +1111,51 @@ async def test_opaque_encrypted_thread_child_leaves_only_its_thread_stale(
 
 
 @pytest.mark.asyncio
+async def test_opaque_encrypted_replacement_leaves_only_its_target_thread_stale(
+    event_cache: ConversationEventCache,
+) -> None:
+    """An undecryptable same-sender edit must fail closed for its original's thread."""
+    await _seed_thread(event_cache)
+    await _seed_other_thread(event_cache)
+    opaque_edit = _encrypted_source(
+        "$opaque-edit",
+        timestamp=60,
+        relation={"event_id": _THREAD_CHILD_ID, "rel_type": "m.replace"},
+    )
+
+    await _build_sync_harness(event_cache).apply(_sync_response([raw_nio_event(opaque_edit)]))
+
+    assert await event_cache.get_event(_ROOM_ID, "$opaque-edit") == opaque_edit
+    affected_state = await event_cache.get_thread_cache_state(_ROOM_ID, _THREAD_ID)
+    assert affected_state is not None
+    assert affected_state.invalidation_reason == "sync_opaque_encrypted_event"
+    assert thread_cache_rejection_reason(affected_state) == "thread_invalidated_after_validation"
+    other_state = await event_cache.get_thread_cache_state(_ROOM_ID, _OTHER_THREAD_ID)
+    assert other_state is not None
+    assert thread_cache_rejection_reason(other_state) is None
+
+
+@pytest.mark.asyncio
+async def test_wrong_sender_opaque_encrypted_replacement_does_not_stale_thread(
+    event_cache: ConversationEventCache,
+) -> None:
+    """Visible sender mismatch proves an undecryptable replacement cannot apply."""
+    await _seed_thread(event_cache)
+    before_state = await event_cache.get_thread_cache_state(_ROOM_ID, _THREAD_ID)
+    opaque_edit = _encrypted_source(
+        "$opaque-edit",
+        timestamp=60,
+        relation={"event_id": _THREAD_CHILD_ID, "rel_type": "m.replace"},
+    )
+    opaque_edit["sender"] = "@mallory:example.org"
+
+    await _build_sync_harness(event_cache).apply(_sync_response([raw_nio_event(opaque_edit)]))
+
+    assert await event_cache.get_event(_ROOM_ID, "$opaque-edit") == opaque_edit
+    assert await event_cache.get_thread_cache_state(_ROOM_ID, _THREAD_ID) == before_state
+
+
+@pytest.mark.asyncio
 async def test_limited_sync_with_opaque_child_preserves_both_fail_closed_reasons(
     event_cache: ConversationEventCache,
 ) -> None:

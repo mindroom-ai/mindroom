@@ -1950,11 +1950,18 @@ async def _unresolved_opaque_relation_event_ids(
     )
     unresolved_event_ids: set[str] = set()
     for event_id, event_source in scanned_message_sources.items():
-        if event_id in resolved_thread_ids or not is_opaque_encrypted_event_source(event_source):
+        event_info = event_infos[event_id]
+        if not is_opaque_encrypted_event_source(event_source) or (
+            event_info.is_edit and event_info.original_event_id is None
+        ):
+            continue
+        if event_id in resolved_thread_ids:
+            if event_info.is_edit and resolved_thread_ids[event_id] in thread_root_ids:
+                unresolved_event_ids.add(event_id)
             continue
         resolution = await resolve_event_thread_membership(
             room_id,
-            event_infos[event_id],
+            event_info,
             access=access,
             event_id=event_id,
             event_source=event_source,
@@ -1962,12 +1969,10 @@ async def _unresolved_opaque_relation_event_ids(
         if resolution.state is ThreadResolutionState.INDETERMINATE:
             unresolved_event_ids.add(event_id)
             continue
-        if not event_infos[event_id].is_edit or resolution.state is not ThreadResolutionState.ROOM_LEVEL:
+        if not event_info.is_edit or resolution.state is not ThreadResolutionState.ROOM_LEVEL:
             continue
-        original_event_id = event_infos[event_id].next_related_event_id("")
-        if original_event_id is None:
-            unresolved_event_ids.add(event_id)
-            continue
+        original_event_id = event_info.original_event_id
+        assert original_event_id is not None
         original_source = scanned_message_sources.get(original_event_id)
         if original_source is None:
             unresolved_event_ids.add(event_id)

@@ -2917,6 +2917,49 @@ class TestThreadHistory:
 
         assert wrong_sender_unresolved == frozenset()
 
+    @pytest.mark.parametrize("invalid_target", [None, "", 123])
+    @pytest.mark.asyncio
+    async def test_room_scan_ignores_opaque_replacement_without_valid_target(
+        self,
+        invalid_target: object,
+    ) -> None:
+        """Malformed exposed replacement targets cannot poison unrelated thread snapshots."""
+        relation: dict[str, object] = {"rel_type": "m.replace"}
+        if invalid_target is not None:
+            relation["event_id"] = invalid_target
+        opaque_edit = {
+            "event_id": "$opaque_edit",
+            "sender": "@user:localhost",
+            "origin_server_ts": 3000,
+            "type": "m.room.encrypted",
+            "content": {
+                "algorithm": "m.megolm.v1.aes-sha2",
+                "ciphertext": "opaque",
+                "device_id": "DEVICE",
+                "sender_key": "sender-key",
+                "session_id": "session",
+                "m.relates_to": relation,
+            },
+        }
+
+        _grouped, unresolved_opaque = await _group_scanned_sources_by_thread(
+            room_id="!room:localhost",
+            thread_root_ids=("$root",),
+            edit_candidates_by_original_event_id={},
+            scanned_message_sources={
+                "$root": {
+                    "event_id": "$root",
+                    "origin_server_ts": 1000,
+                    "sender": "@user:localhost",
+                    "type": "m.room.message",
+                    "content": {"msgtype": "m.text", "body": "root"},
+                },
+                "$opaque_edit": opaque_edit,
+            },
+        )
+
+        assert unresolved_opaque == frozenset()
+
     def test_ordered_event_ids_from_scanned_event_sources_preserves_input_order_on_timestamp_ties(self) -> None:
         """Scanned-source ordering should preserve first-seen order before falling back to event IDs."""
         ordered_event_ids = ordered_event_ids_from_scanned_event_sources(
