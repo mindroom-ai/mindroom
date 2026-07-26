@@ -4203,8 +4203,14 @@ async def test_backlog_replay_skips_older_message_when_newer_exists(tmp_path: Pa
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("degraded", [False, True])
-async def test_backlog_replay_keeps_mixed_requester_coalesced_turn(tmp_path: Path, *, degraded: bool) -> None:
-    """A newer primary-requester message must not settle another requester's source."""
+@pytest.mark.parametrize("mixed_requesters", [False, True])
+async def test_backlog_replay_respects_coalesced_source_ownership(
+    tmp_path: Path,
+    *,
+    degraded: bool,
+    mixed_requesters: bool,
+) -> None:
+    """A newer requester turn supersedes a coalesced batch only when every source is theirs."""
     bot = _make_bot(tmp_path)
     room = _make_room()
     primary_event = PreparedTextEvent(
@@ -4214,14 +4220,19 @@ async def test_backlog_replay_keeps_mixed_requester_coalesced_turn(tmp_path: Pat
         source={"content": {"msgtype": "m.text", "body": "bob"}},
         server_timestamp=2000,
     )
-    dispatch = _prepared_dispatch(event_id="$bob", requester_user_id="@bob:localhost", body="bob")
+    dispatch = _prepared_dispatch(
+        event_id="$bob",
+        requester_user_id="@bob:localhost",
+        body="bob",
+        thread_id="$thread",
+    )
     newer_bob_message = ResolvedVisibleMessage(
         sender="@bob:localhost",
         body="newer bob",
         timestamp=3000,
         event_id="$newer-bob",
         content={"body": "newer bob"},
-        thread_id=None,
+        thread_id="$thread",
         latest_event_id="$newer-bob",
     )
     if degraded:
@@ -4235,12 +4246,24 @@ async def test_backlog_replay_keeps_mixed_requester_coalesced_turn(tmp_path: Pat
         )
         dispatch.context.thread_history = degraded_history
         dispatch.context.replay_guard_history = degraded_history
+        bot.event_cache.get_recent_room_events.return_value = [
+            _text_event(
+                event_id="$newer-bob",
+                body="newer bob",
+                sender="@bob:localhost",
+                server_timestamp=3000,
+                thread_id="$thread",
+            ).source,
+        ]
     else:
         _set_context_histories(dispatch, [newer_bob_message])
     handled_turn = TurnRecord.create(
         ["$alice", "$bob"],
         source_event_metadata={
-            "$alice": SourceEventMetadata(sender="@alice:localhost", timestamp_ms=1000),
+            "$alice": SourceEventMetadata(
+                sender="@alice:localhost" if mixed_requesters else "@bob:localhost",
+                timestamp_ms=1000,
+            ),
             "$bob": SourceEventMetadata(sender="@bob:localhost", timestamp_ms=2000),
         },
     )
@@ -4275,14 +4298,21 @@ async def test_backlog_replay_keeps_mixed_requester_coalesced_turn(tmp_path: Pat
             handled_turn=handled_turn,
         )
 
-    assert plan_calls == [dispatch]
+    assert plan_calls == ([dispatch] if mixed_requesters else [])
     assert not any(
         log.get("event") == "Thread replay guard degraded; proceeding without negative newer-message proof"
         for log in captured_logs
     )
-    bot.event_cache.get_recent_room_events.assert_not_awaited()
-    assert not bot._turn_store.is_handled("$alice")
-    assert not bot._turn_store.is_handled("$bob")
+    if degraded and not mixed_requesters:
+        bot.event_cache.get_recent_room_events.assert_awaited_once_with(
+            room.room_id,
+            event_type="m.room.message",
+            since_ts_ms=2000,
+        )
+    else:
+        bot.event_cache.get_recent_room_events.assert_not_awaited()
+    assert bot._turn_store.is_handled("$alice") is not mixed_requesters
+    assert bot._turn_store.is_handled("$bob") is not mixed_requesters
 
 
 @pytest.mark.asyncio
@@ -4882,6 +4912,7 @@ async def test_backlog_replay_degraded_thread_history_fails_open_without_positiv
     action_mock = AsyncMock(return_value=_DispatchPlan(kind="ignore"))
     history_guard = MagicMock(wraps=bot._turn_controller._has_newer_unresponded_in_thread)
     with (
+        capture_logs() as captured_logs,
         patch.object(
             bot._turn_controller,
             "_prepare_dispatch",
@@ -4900,6 +4931,10 @@ async def test_backlog_replay_degraded_thread_history_fails_open_without_positiv
     )
     action_mock.assert_awaited_once()
     assert not bot._turn_store.is_handled("$m1")
+    assert any(
+        log.get("event") == "Thread replay guard degraded; proceeding without negative newer-message proof"
+        for log in captured_logs
+    )
 
 
 @pytest.mark.asyncio
