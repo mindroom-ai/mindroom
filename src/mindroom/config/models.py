@@ -9,8 +9,8 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_serial
 
 from mindroom.config.validation import duplicate_items, validate_history_limit_choice
 from mindroom.constants import (
+    DEFAULT_COMPACTION_TIMEOUT_SECONDS,
     DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES,
-    MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS,
 )
 from mindroom.credential_policy import credential_service_policy
 from mindroom.credentials import validate_service_name
@@ -330,7 +330,7 @@ class CompactionConfig(BaseModel):
         ),
     )
     timeout_seconds: float = Field(
-        default=MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS,
+        default=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
         gt=0,
         description="Maximum seconds allowed for each compaction summary request",
     )

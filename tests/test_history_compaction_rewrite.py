@@ -19,7 +19,7 @@ from agno.session.summary import SessionSummary
 from mindroom.agent_storage import create_session_storage, get_agent_session
 from mindroom.config.models import CompactionOverrideConfig
 from mindroom.constants import (
-    MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS,
+    DEFAULT_COMPACTION_TIMEOUT_SECONDS,
 )
 from mindroom.error_handling import ModelSafeguardRefusalError
 from mindroom.history.compaction import (
@@ -98,6 +98,7 @@ async def _rewrite_single_run(
     progress_callback: Callable[[CompactionLifecycleProgress], Awaitable[None]] | None = None,
 ) -> _CompactionRewriteResult | None:
     return await _rewrite_working_session_for_compaction(
+        summary_timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
         storage=storage,
         persisted_session=working_session,
         working_session=working_session,
@@ -230,7 +231,7 @@ async def test_rewrite_retries_summary_with_smaller_chunk_after_timeout(tmp_path
     async def fake_summary(*, summary_input: str, **_kwargs: object) -> SessionSummary:
         summary_inputs.append(summary_input)
         if len(summary_inputs) == 1:
-            msg = f"compaction summary timed out after {MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS}s"
+            msg = f"compaction summary timed out after {DEFAULT_COMPACTION_TIMEOUT_SECONDS}s"
             raise RuntimeError(msg)
         return SessionSummary(summary="merged summary", updated_at=datetime.now(UTC))
 
@@ -801,6 +802,7 @@ async def test_compact_scope_history_emits_before_hook_for_each_persisted_chunk(
         ),
     ):
         outcome = await compact_scope_history(
+            summary_timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
             storage=storage,
             session=session,
             scope=scope,
@@ -1407,6 +1409,7 @@ async def test_rewrite_working_session_for_compaction_strips_stale_replay_fields
         new=AsyncMock(return_value=SessionSummary(summary=summary_text, updated_at=datetime.now(UTC))),
     ):
         rewrite_result = await _rewrite_working_session_for_compaction(
+            summary_timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
             storage=storage,
             persisted_session=working_session,
             working_session=working_session,
@@ -1465,6 +1468,7 @@ async def test_compact_scope_history_ignores_runs_without_stable_ids(
         new=AsyncMock(return_value=SessionSummary(summary="summary", updated_at=datetime.now(UTC))),
     ) as mock_generate:
         outcome = await compact_scope_history(
+            summary_timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
             storage=storage,
             session=working_session,
             summary_model=FakeModel(id="summary-model", provider="fake"),
@@ -1559,6 +1563,7 @@ async def test_compact_scope_history_persists_sanitized_remaining_runs(tmp_path:
         new=AsyncMock(return_value=SessionSummary(summary=summary_text, updated_at=datetime.now(UTC))),
     ):
         outcome = await compact_scope_history(
+            summary_timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
             storage=storage,
             session=session,
             scope=scope,
@@ -1656,6 +1661,7 @@ async def test_rewrite_working_session_emits_progress_after_persisted_chunks(tmp
         new=AsyncMock(return_value=SessionSummary(summary="merged summary", updated_at=datetime.now(UTC))),
     ):
         rewrite_result = await _rewrite_working_session_for_compaction(
+            summary_timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
             storage=storage,
             persisted_session=working_session,
             working_session=working_session,

@@ -3622,8 +3622,9 @@ expose = [
 from = ["mindroom.memory._backend"]
 
 # Public seam for compaction summary calls: one model-configuration path, one
-# replaceable request builder (future warm-prefix builder, PR #861), and the
-# explicit budget-shrink retry policy. Tested in tests/test_compaction_invariants.py.
+# replaceable request builder (future warm-prefix builder, PR #861), the single
+# resolved-timeout rule callers log, and the explicit budget-shrink retry policy.
+# Tested in tests/test_compaction_invariants.py.
 [[interfaces]]
 expose = [
     "CompactionSummaryOutputLimitError",
@@ -3631,6 +3632,7 @@ expose = [
     "SummaryRetryPolicy",
     "build_summary_request_messages",
     "configure_summary_model",
+    "effective_summary_timeout_seconds",
     "generate_compaction_summary",
 ]
 from = ["mindroom.history.summary_call"]

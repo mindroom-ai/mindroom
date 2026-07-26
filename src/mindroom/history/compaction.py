@@ -21,7 +21,6 @@ from pydantic import BaseModel
 from mindroom.claude_prompt_cache import as_anthropic_claude
 from mindroom.constants import (
     AI_RUN_METADATA_KEY,
-    MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS,
     MINDROOM_COMPACTION_METADATA_KEY,
     MINDROOM_MATRIX_HISTORY_METADATA_KEY,
     prompt_roles_for_history_storage,
@@ -37,7 +36,11 @@ from mindroom.history.storage import (
     update_scope_state_on_latest,
     write_scope_state,
 )
-from mindroom.history.summary_call import DEFAULT_SUMMARY_RETRY_POLICY, generate_compaction_summary
+from mindroom.history.summary_call import (
+    DEFAULT_SUMMARY_RETRY_POLICY,
+    effective_summary_timeout_seconds,
+    generate_compaction_summary,
+)
 from mindroom.history.types import (
     CompactionLifecycleProgress,
     CompactionOutcome,
@@ -200,7 +203,7 @@ async def compact_scope_history(
     replay_window_tokens: int | None,
     threshold_tokens: int | None,
     summary_prompt: str,
-    summary_timeout_seconds: float = MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS,
+    summary_timeout_seconds: float,
     fallback_summary_model: Model | None = None,
     fallback_summary_model_name: str | None = None,
     fallback_summary_input_budget: int | None = None,
@@ -376,7 +379,7 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901
     progress_callback: Callable[[CompactionLifecycleProgress], Awaitable[None]] | None,
     collect_compaction_hook_messages: bool,
     summary_prompt: str,
-    summary_timeout_seconds: float = MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS,
+    summary_timeout_seconds: float,
     fallback_summary_model: Model | None = None,
     fallback_summary_model_name: str | None = None,
     fallback_summary_input_budget: int | None = None,
@@ -572,14 +575,6 @@ def _sizing_log_fields(*, kind: CompactionEstimateKind, estimate: int, budget_to
     }
 
 
-def _effective_compaction_timeout_seconds(model: Model, configured_timeout_seconds: float) -> float:
-    """Return the timeout Claude provider tuning will enforce for one request."""
-    claude_model = as_anthropic_claude(model)
-    if claude_model is None or claude_model.timeout is None:
-        return configured_timeout_seconds
-    return min(float(claude_model.timeout), configured_timeout_seconds)
-
-
 async def _generate_compaction_summary_with_retry(  # noqa: PLR0915
     *,
     model: Model,
@@ -595,7 +590,7 @@ async def _generate_compaction_summary_with_retry(  # noqa: PLR0915
     summary_prompt: str,
     token_estimator: Callable[[str], int],
     estimate_kind: CompactionEstimateKind,
-    timeout_seconds: float = MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS,
+    timeout_seconds: float,
     fallback_model: Model | None = None,
     fallback_model_name: str | None = None,
     fallback_input_budget: int | None = None,
@@ -623,7 +618,7 @@ async def _generate_compaction_summary_with_retry(  # noqa: PLR0915
     attempt = 1
     while True:
         summary_input_estimate = token_estimator(summary_input)
-        effective_timeout_seconds = _effective_compaction_timeout_seconds(model, timeout_seconds)
+        effective_timeout_seconds = effective_summary_timeout_seconds(model, timeout_seconds=timeout_seconds)
         started = asyncio.get_running_loop().time()
         logger.info(
             "Compaction summary chunk request",

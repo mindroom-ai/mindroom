@@ -14,6 +14,7 @@ from agno.session.summary import SessionSummary
 from structlog.testing import capture_logs
 
 from mindroom.agent_storage import create_session_storage
+from mindroom.constants import DEFAULT_COMPACTION_TIMEOUT_SECONDS
 from mindroom.history.compaction import _rewrite_working_session_for_compaction
 from mindroom.history.types import HistoryScope, HistoryScopeState
 from mindroom.prompts import COMPACTION_SUMMARY_PROMPT
@@ -44,6 +45,7 @@ async def _rewrite_with_summary_model(
     summary_model: Model,
 ) -> _CompactionRewriteResult | None:
     return await _rewrite_working_session_for_compaction(
+        summary_timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
         storage=storage,
         persisted_session=working_session,
         working_session=working_session,
