@@ -48,25 +48,12 @@ TERMINAL_DELIVERY_SCHEMA_VERSION = 1
 _SCHEMA_VERSION_KEY = "schema_version"
 _ITEMS_KEY = "items"
 
-TerminalDeliveryState = Literal[
-    "pending",
-    "attempting",
-    "retry_wait",
-    "delivered",
-    "superseded",
-    "dead_letter",
-]
+TerminalDeliveryState = Literal["pending", "attempting", "retry_wait", "dead_letter"]
 TerminalDeliveryAttemptResult = Literal["delivered", "transient", "superseded"]
-
-_SETTLED_STATES: frozenset[str] = frozenset({"delivered", "superseded", "dead_letter"})
 
 # One process owns semantic ordering for an entity, so a lease only has to
 # outlive a single attempt; anything longer is a crash and must be recovered.
 DEFAULT_ATTEMPT_LEASE_SECONDS = 120.0
-# Settled rows are kept briefly so restart recovery and observability can still
-# see what happened, then compacted. Unsettled rows never expire by age.
-_SETTLED_RETENTION_SECONDS = 24 * 60 * 60
-_MAX_SETTLED_ITEMS = 500
 # A hard cap keeps a pathological outage from growing the file without bound.
 _MAX_UNSETTLED_ITEMS = 2000
 
@@ -161,8 +148,12 @@ class PendingTerminalDelivery:
 
     @property
     def is_settled(self) -> bool:
-        """Return whether this record has reached a terminal state."""
-        return self.state in _SETTLED_STATES
+        """Return whether this record has reached a terminal state.
+
+        A delivered or superseded row is deleted outright, so the only settled
+        state that survives on disk is the one an operator still needs to see.
+        """
+        return self.state == "dead_letter"
 
     @property
     def transaction_id(self) -> str:
@@ -314,7 +305,6 @@ class TerminalDeliveryStore:
             # Startup owns no leases yet, so every attempting row is leaked by
             # definition regardless of the lease deadline it was written with.
             recovered = self._recover_leaked_attempts_locked(reason="process_restart", force=True)
-            self._compact_locked()
             self._write_locked()
             return recovered
 
@@ -423,17 +413,12 @@ class TerminalDeliveryStore:
             return claimed
 
     def mark_delivered(self, delivery_id: str, *, revision: int, reason: str = "delivered") -> None:
-        """Settle one record as visibly delivered."""
-        self._settle(delivery_id, revision=revision, state="delivered", reason=reason)
+        """Drop one record whose outcome is now visible in Matrix."""
+        self._discard(delivery_id, revision=revision, reason=reason)
 
     def mark_superseded(self, delivery_id: str, *, revision: int, reason: str) -> None:
-        """Settle one record that newer valid state replaced."""
-        self._settle(delivery_id, revision=revision, state="superseded", reason=reason)
-
-    def mark_dead_letter(self, delivery_id: str, *, revision: int, reason: str) -> None:
-        """Settle one record that can never become visible."""
-        if self._settle(delivery_id, revision=revision, state="dead_letter", reason=reason):
-            logger.error("terminal_delivery_dead_letter", agent=self.agent_name, delivery_reason=reason)
+        """Drop one record that newer valid state replaced."""
+        self._discard(delivery_id, revision=revision, reason=reason)
 
     def defer(self, delivery_id: str, *, revision: int, reason: str, next_attempt_at: float) -> None:
         """Return one record to the retry queue after a transient failure."""
@@ -475,24 +460,16 @@ class TerminalDeliveryStore:
             self.mark_superseded(item.delivery_id, revision=item.revision, reason=reason)
         return tuple(item.delivery_id for item in matched)
 
-    def _settle(self, delivery_id: str, *, revision: int, state: TerminalDeliveryState, reason: str) -> bool:
-        """Move one record into a terminal state, ignoring outcomes of stale revisions."""
-        now = self.clock()
+    def _discard(self, delivery_id: str, *, revision: int, reason: str) -> None:
+        """Remove one finished record so the outbox only holds outstanding work."""
         with self._state.lock:
             self._ensure_loaded_locked()
             existing = self._state.items.get(delivery_id)
-            if not self._owns_outcome(existing, revision=revision, transition=state):
-                return False
-            assert existing is not None
-            self._state.items[delivery_id] = replace(
-                existing,
-                state=state,
-                updated_at=now,
-                settled_reason=reason,
-                lease_expires_at=None,
-            )
+            if not self._owns_outcome(existing, revision=revision, transition="discarded"):
+                return
+            del self._state.items[delivery_id]
             self._write_locked()
-            return True
+        logger.debug("terminal_delivery_discarded", agent=self.agent_name, delivery_reason=reason)
 
     def _requeue(
         self,
@@ -529,7 +506,7 @@ class TerminalDeliveryStore:
         existing: PendingTerminalDelivery | None,
         *,
         revision: int,
-        transition: TerminalDeliveryState,
+        transition: str,
     ) -> bool:
         """Return whether one attempt outcome still applies to the current record.
 
@@ -608,21 +585,6 @@ class TerminalDeliveryStore:
                 lease_expires_at=None,
             )
         logger.error("terminal_delivery_backlog_capacity_exceeded", agent=self.agent_name, dropped_count=overflow)
-
-    def _compact_locked(self) -> None:
-        """Remove settled records past retention or beyond the settled cap."""
-        now = self.clock()
-        settled = sorted(
-            (item for item in self._state.items.values() if item.is_settled),
-            key=lambda item: (item.updated_at, item.delivery_id),
-        )
-        expired = {item.delivery_id for item in settled if now - item.updated_at >= _SETTLED_RETENTION_SECONDS}
-        retained = [item for item in settled if item.delivery_id not in expired]
-        overflow = len(retained) - _MAX_SETTLED_ITEMS
-        if overflow > 0:
-            expired.update(item.delivery_id for item in retained[:overflow])
-        for delivery_id in expired:
-            self._state.items.pop(delivery_id, None)
 
     def _ensure_loaded_locked(self, *, force: bool = False) -> None:
         """Load durable records into shared memory while the state lock is held."""

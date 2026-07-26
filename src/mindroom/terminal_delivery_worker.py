@@ -33,7 +33,6 @@ DEFAULT_POLL_INTERVAL_SECONDS = 15.0
 DEFAULT_MAX_CONCURRENCY = 4
 _DEFAULT_INITIAL_BACKOFF_SECONDS = 1.0
 _DEFAULT_MAX_BACKOFF_SECONDS = 300.0
-DEFAULT_MAX_ATTEMPTS = 12
 # Claim in bounded rounds so a large backlog cannot pin one lease batch open.
 _CLAIM_BATCH_MULTIPLIER = 4
 # One drain never loops forever: anything still due afterwards waits for the
@@ -63,7 +62,6 @@ class TerminalDeliveryWorkerDeps:
     max_concurrency: int = DEFAULT_MAX_CONCURRENCY
     initial_backoff_seconds: float = _DEFAULT_INITIAL_BACKOFF_SECONDS
     max_backoff_seconds: float = _DEFAULT_MAX_BACKOFF_SECONDS
-    max_attempts: int = DEFAULT_MAX_ATTEMPTS
 
 
 @dataclass
@@ -131,9 +129,13 @@ class TerminalDeliveryWorker:
         rows are already due - the schedule is ignored and the loop parks on the
         wake event, so it cannot spin against work it is not allowed to run yet.
         """
-        # Reading the schedule only touches already-warmed in-memory state, so it
-        # stays on the loop; every mutating store call still runs off it.
-        timeout = self._seconds_until_next_attempt() if self.deps.is_ready() else self.deps.poll_interval_seconds
+        # The schedule read takes the store lock, which writer threads hold across
+        # fsync, so it must not run on the event loop.
+        timeout = (
+            await asyncio.to_thread(self._seconds_until_next_attempt)
+            if self.deps.is_ready()
+            else self.deps.poll_interval_seconds
+        )
         with contextlib.suppress(TimeoutError):
             await asyncio.wait_for(self._wake.wait(), timeout)
         self._wake.clear()
@@ -242,16 +244,10 @@ class TerminalDeliveryWorker:
                 **item.log_context,
             )
             return
-        next_attempts = item.attempts + 1
-        if next_attempts >= self.deps.max_attempts:
-            await asyncio.to_thread(
-                store.mark_dead_letter,
-                item.delivery_id,
-                revision=item.revision,
-                reason=f"retry_budget_exhausted:{attempt.reason}",
-            )
-            return
-        delay = self._backoff_seconds(next_attempts)
+        # A committed answer is never abandoned for taking too long: the visible
+        # placeholder already carries a delivery-failure note, so retrying at the
+        # capped backoff forever is strictly better than dropping the outcome.
+        delay = self._backoff_seconds(item.attempts + 1)
         await asyncio.to_thread(
             store.defer,
             item.delivery_id,
@@ -281,7 +277,6 @@ class TerminalDeliveryWorker:
 
 
 __all__ = [
-    "DEFAULT_MAX_ATTEMPTS",
     "DEFAULT_MAX_CONCURRENCY",
     "DEFAULT_POLL_INTERVAL_SECONDS",
     "TerminalDeliveryWorker",

@@ -898,6 +898,24 @@ class DeliveryGateway:
                 tool_trace=draft.tool_trace,
                 extra_content=draft.extra_content,
             )
+            # The visible repair still runs even once a durable row exists. Recording
+            # does not classify the failure, so a permanently rejected edit would
+            # otherwise leave the placeholder spinning forever; a later successful
+            # retry simply replaces the failure note with the real answer.
+            failure_reason = (
+                _DURABLE_TERMINAL_RETRY_FAILURE_REASON if pending_delivery is not None else "delivery_failed"
+            )
+            if request.existing_event_is_placeholder:
+                return await self._finish_placeholder_delivery_failure(
+                    _PlaceholderFailureUpdateRequest(
+                        target=request.target,
+                        event_id=request.existing_event_id,
+                        identity=request.identity,
+                        failure_reason=failure_reason,
+                        tool_trace=draft.tool_trace,
+                        extra_content=draft.extra_content,
+                    ),
+                )
             if pending_delivery is not None:
                 return FinalDeliveryOutcome(
                     terminal_status="error",
@@ -906,17 +924,6 @@ class DeliveryGateway:
                     failure_reason=_DURABLE_TERMINAL_RETRY_FAILURE_REASON,
                     tool_trace=tuple(draft.tool_trace or ()),
                     extra_content=draft.extra_content,
-                )
-            if request.existing_event_is_placeholder:
-                return await self._finish_placeholder_delivery_failure(
-                    _PlaceholderFailureUpdateRequest(
-                        target=request.target,
-                        event_id=request.existing_event_id,
-                        identity=request.identity,
-                        failure_reason="delivery_failed",
-                        tool_trace=draft.tool_trace,
-                        extra_content=draft.extra_content,
-                    ),
                 )
             return FinalDeliveryOutcome(
                 terminal_status="error",
@@ -1262,21 +1269,16 @@ class DeliveryGateway:
                 failure_reason=failure_reason,
                 target_event_id=placeholder_event_id,
             )
-            if pending_delivery is not None:
-                return FinalDeliveryOutcome(
-                    terminal_status="error",
-                    event_id=placeholder_event_id,
-                    is_visible_response=True,
-                    failure_reason=_DURABLE_TERMINAL_RETRY_FAILURE_REASON,
-                    tool_trace=tuple(request.tool_trace or ()),
-                    extra_content=request.extra_content,
-                )
+            # As in deliver_final, the placeholder is repaired even when a durable
+            # row exists, so an undeliverable payload cannot strand it.
             return await self._finish_placeholder_delivery_failure(
                 _PlaceholderFailureUpdateRequest(
                     target=request.target,
                     event_id=placeholder_event_id,
                     identity=request.identity,
-                    failure_reason=failure_reason,
+                    failure_reason=(
+                        _DURABLE_TERMINAL_RETRY_FAILURE_REASON if pending_delivery is not None else failure_reason
+                    ),
                     tool_trace=request.tool_trace,
                     extra_content=request.extra_content,
                 ),

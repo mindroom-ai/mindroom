@@ -28,14 +28,17 @@ A plain send that never landed leaves nothing visible, so it produces no stuck p
 ## State machine
 
 ```text
-record ---> pending ---> attempting ---> delivered
-              ^             |  |  |
-              |             |  |  +---> dead_letter   (retry budget, capacity)
-              |             |  +------> superseded    (newer turn, redacted or missing target)
-              +-- retry_wait <-+        (transient failure, exponential backoff with jitter)
+record ---> pending ---> attempting ---> deleted        (delivered, or superseded)
+              ^             |  |
+              |             |  +---------> dead_letter  (backlog capacity only)
+              +-- retry_wait <-            (transient failure, exponential backoff with jitter)
 ```
 
-`delivered`, `superseded`, and `dead_letter` are settled; nothing re-enters the queue from them.
+A delivered or superseded row is deleted outright rather than retained as history, so the file only ever holds outstanding work and cannot grow with uptime.
+`dead_letter` exists solely for the backlog-capacity guard and is the one state an operator still needs to see.
+
+A committed answer is never abandoned for taking too long: there is no retry budget, so a transient failure retries indefinitely at the capped backoff.
+That is safe because the visible placeholder already carries a delivery-failure note (see below), so a slow repair costs latency rather than the outcome.
 
 Every transition applies to shared in-memory state and is durably written under one advisory file lock before it becomes observable, so any crash leaves exactly one valid recoverable state.
 
@@ -70,8 +73,12 @@ The immediate bounded retry in `client_delivery` runs first and is unchanged.
 After it is exhausted, `DeliveryGateway` records the intent, and each later attempt either lands, supersedes, or defers.
 
 Before every attempt the worker checks the target with `room_get_event`: a missing or redacted event settles the row instead of resurrecting content.
-Otherwise the edit is retried with exponential backoff plus jitter, capped, under a bounded retry budget.
-Exhausting that budget dead-letters the row with a loud log rather than looping, so a permanently rejected room (forbidden, departed) converges on `dead_letter` instead of retrying forever.
+Otherwise the edit is retried with exponential backoff plus jitter, capped.
+
+Recording does not classify the failure, so a permanently undeliverable payload would retry forever.
+That is bounded in cost and, crucially, not silent: recording a durable row still runs the ordinary visible delivery-failure repair, so the placeholder shows `Response delivery failed. Please retry.` exactly as it did before this feature existed.
+A later successful retry simply replaces that note with the real answer.
+The durable layer is therefore purely additive: visible behaviour on failure is unchanged, plus an eventual repair.
 
 ## Worker lifecycle
 

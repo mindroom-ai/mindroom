@@ -196,9 +196,7 @@ class TestStore:
         by_source = store.record(_intent())
         assert by_source is not None
         assert store.supersede_sources((SOURCE_EVENT_ID,), reason="source_event_redacted") == (by_source.delivery_id,)
-        settled = store.get(by_source.delivery_id)
-        assert settled is not None
-        assert settled.state == "superseded"
+        assert store.get(by_source.delivery_id) is None
         assert store.pending_target_event_ids() == frozenset()
 
         by_target = store.record(_intent(correlation_id="corr-2"))
@@ -210,17 +208,14 @@ class TestStore:
         )
         assert store.unsettled_items() == ()
 
-    def test_settled_rows_are_not_resurrected(self, tmp_path: Path) -> None:
-        """Superseding never reopens an already delivered row."""
+    def test_delivered_rows_are_not_resurrected(self, tmp_path: Path) -> None:
+        """Superseding never reopens a row whose outcome already landed."""
         store = _store(tmp_path)
         recorded = store.record(_intent())
         assert recorded is not None
         store.mark_delivered(recorded.delivery_id, revision=recorded.revision)
 
         assert store.supersede_sources((SOURCE_EVENT_ID,), reason="source_event_redacted") == ()
-        stored = store.get(recorded.delivery_id)
-        assert stored is not None
-        assert stored.state == "delivered"
 
     def test_stale_revision_outcome_cannot_settle_a_regenerated_row(self, tmp_path: Path) -> None:
         """An in-flight older attempt must not settle content the newer turn never sent."""
@@ -248,8 +243,8 @@ class TestStore:
                 id="delivered",
             ),
             pytest.param(
-                lambda store, item: store.mark_dead_letter(item.delivery_id, revision=item.revision, reason="x"),
-                id="dead_letter",
+                lambda store, item: store.mark_superseded(item.delivery_id, revision=item.revision, reason="x"),
+                id="superseded",
             ),
             pytest.param(
                 lambda store, item: store.defer(
@@ -284,8 +279,8 @@ class TestStore:
         assert row is not None
         assert (row.state, row.revision, row.attempts) == ("pending", 1, 0)
 
-    def test_release_cannot_resurrect_a_settled_row(self, tmp_path: Path) -> None:
-        """Shutdown releasing a lease must not push an already delivered row back to retry."""
+    def test_release_cannot_resurrect_a_delivered_row(self, tmp_path: Path) -> None:
+        """Shutdown releasing a lease must not revive a row whose outcome already landed."""
         store = _store(tmp_path)
         recorded = store.record(_intent())
         assert recorded is not None
@@ -294,9 +289,7 @@ class TestStore:
 
         store.release(leased.delivery_id, revision=leased.revision, reason="worker_shutdown")
 
-        settled = store.get(recorded.delivery_id)
-        assert settled is not None
-        assert settled.state == "delivered"
+        assert store.get(recorded.delivery_id) is None
 
     def test_claim_due_leases_only_due_rows(self, tmp_path: Path) -> None:
         """Rows scheduled in the future stay out of the claimed batch."""
@@ -403,31 +396,55 @@ class TestStore:
 
         assert [item.delivery_id for item in reopened.items()] == [healthy.delivery_id]
 
-    def test_retention_keeps_pending_rows_and_drops_old_settled_rows(self, tmp_path: Path) -> None:
-        """Age compacts settled rows only; pending work never disappears because of age."""
+    def test_finished_rows_leave_the_outbox_immediately(self, tmp_path: Path) -> None:
+        """The file only ever holds outstanding work, so it cannot grow with uptime."""
         clock = _Clock()
         store = _store(tmp_path, clock)
-        settled = store.record(_intent(target_event_id="$settled", source_event_id="$settled-source"))
-        assert settled is not None
-        store.mark_delivered(settled.delivery_id, revision=settled.revision)
+        finished = store.record(_intent(target_event_id="$settled", source_event_id="$settled-source"))
+        assert finished is not None
+        store.mark_delivered(finished.delivery_id, revision=finished.revision)
         pending = store.record(_intent())
         assert pending is not None
 
-        clock.advance(48 * 60 * 60)
-        store.warm()
-
         assert [item.delivery_id for item in store.items()] == [pending.delivery_id]
+        persisted = json.loads(store.store_file.read_text(encoding="utf-8"))["items"]
+        assert list(persisted) == [pending.delivery_id]
 
-    def test_persisted_record_contains_no_transport_secrets(self, tmp_path: Path) -> None:
-        """The durable row never stores clients, tokens, or auth material."""
+    def test_persisted_record_carries_only_what_the_edit_needs(self, tmp_path: Path) -> None:
+        """Transport credentials reachable at record time never enter the durable row."""
         store = _store(tmp_path)
-        recorded = store.record(_intent())
+        recorded = store.record(_intent(body="answer referencing nothing secret"))
         assert recorded is not None
 
-        row = json.loads(store.store_file.read_text(encoding="utf-8"))["items"][recorded.delivery_id]
+        raw = store.store_file.read_text(encoding="utf-8")
 
-        assert set(row) == set(recorded.to_record())
-        assert not {key for key in row if "token" in key or "secret" in key or "client" in key}
+        # Values a caller could plausibly leak in: an access token, an auth header,
+        # and a live client repr. None are reachable from the persisted fields.
+        for secret in ("syt_", "Bearer ", "AsyncClient(", "access_token"):
+            assert secret not in raw
+        row = json.loads(raw)["items"][recorded.delivery_id]
+        assert set(row) <= {
+            "delivery_id",
+            "agent_name",
+            "target",
+            "target_event_id",
+            "anchor_event_id",
+            "source_event_ids",
+            "revision",
+            "body",
+            "correlation_id",
+            "tool_trace",
+            "extra_content",
+            "runtime_generation",
+            "state",
+            "attempts",
+            "created_at",
+            "updated_at",
+            "next_attempt_at",
+            "last_error",
+            "lease_expires_at",
+            "settled_reason",
+        }
 
 
 def _worker(
@@ -436,7 +453,6 @@ def _worker(
     *,
     clock: _Clock,
     max_concurrency: int = 4,
-    max_attempts: int = 12,
     is_ready: Callable[[], bool] | None = None,
     poll_interval_seconds: float = 600.0,
 ) -> TerminalDeliveryWorker:
@@ -452,18 +468,18 @@ def _worker(
             max_concurrency=max_concurrency,
             initial_backoff_seconds=1.0,
             max_backoff_seconds=8.0,
-            max_attempts=max_attempts,
         ),
     )
 
 
-async def _wait_for_state(store: TerminalDeliveryStore, delivery_id: str, state: str) -> None:
-    """Wait until one durable record reaches an expected state."""
+async def _wait_until_discarded(store: TerminalDeliveryStore, delivery_id: str) -> None:
+    """Wait until one durable record leaves the outbox, which means its outcome landed.
+
+    The store has no completion signal to await, so this polls it; the surrounding
+    timeout keeps a regression from hanging the suite.
+    """
     async with asyncio.timeout(_STATE_WAIT_TIMEOUT_SECONDS):
-        while True:
-            item = store.get(delivery_id)
-            if item is not None and item.state == state:
-                return
+        while store.get(delivery_id) is not None:  # noqa: ASYNC110
             await asyncio.sleep(0.01)
 
 
@@ -496,9 +512,8 @@ class TestWorker:
         clock.advance(blocked.next_attempt_at - clock.now)
         await worker.drain_once()
 
-        delivered = store.get(recorded.delivery_id)
-        assert delivered is not None
-        assert delivered.state == "delivered"
+        # A delivered row is dropped outright rather than retained as history.
+        assert store.get(recorded.delivery_id) is None
         # One revision reuses one Matrix transaction ID, so an at-least-once
         # transport still has an exactly-once visible effect.
         assert len(set(transactions)) == 1
@@ -526,8 +541,8 @@ class TestWorker:
         assert delays == [1.0, 2.0, 4.0, 8.0, 8.0]
 
     @pytest.mark.asyncio
-    async def test_retry_budget_exhaustion_dead_letters(self, tmp_path: Path) -> None:
-        """A row that can never land stops retrying and is loudly dead-lettered."""
+    async def test_a_committed_answer_is_never_abandoned_for_taking_too_long(self, tmp_path: Path) -> None:
+        """A long outage must not discard the outcome; retries continue at capped backoff."""
         clock = _Clock()
         store = _store(tmp_path, clock)
         recorded = store.record(_intent())
@@ -536,17 +551,18 @@ class TestWorker:
         async def attempt(_item: PendingTerminalDelivery) -> TerminalDeliveryAttempt:
             return TerminalDeliveryAttempt.transient("edit_failed")
 
-        worker = _worker(store, attempt, clock=clock, max_attempts=3)
-        for _round in range(3):
+        worker = _worker(store, attempt, clock=clock)
+        for _round in range(40):
             await worker.drain_once()
             item = store.get(recorded.delivery_id)
             assert item is not None
             clock.advance(max(0.0, item.next_attempt_at - clock.now))
 
-        settled = store.get(recorded.delivery_id)
-        assert settled is not None
-        assert settled.state == "dead_letter"
-        assert settled.settled_reason == "retry_budget_exhausted:edit_failed"
+        still_owed = store.get(recorded.delivery_id)
+        assert still_owed is not None
+        assert still_owed.state == "retry_wait"
+        assert still_owed.attempts == 40
+        assert store.pending_target_event_ids() == frozenset({PLACEHOLDER_EVENT_ID})
 
     @pytest.mark.asyncio
     async def test_superseded_attempt_is_not_retried(self, tmp_path: Path) -> None:
@@ -567,9 +583,7 @@ class TestWorker:
         clock.advance(600.0)
         await worker.drain_once()
 
-        settled = store.get(recorded.delivery_id)
-        assert settled is not None
-        assert settled.state == "superseded"
+        assert store.get(recorded.delivery_id) is None
         assert attempts == 1
 
     @pytest.mark.asyncio
@@ -680,7 +694,7 @@ class TestWorker:
         worker.start()
         try:
             worker.wake(reason="sync_response_applied")
-            await _wait_for_state(store, recorded.delivery_id, "delivered")
+            await _wait_until_discarded(store, recorded.delivery_id)
         finally:
             await worker.stop()
 
@@ -735,7 +749,7 @@ class TestWorker:
             assert attempted == 0
             readiness["ready"] = True
             worker.wake(reason="test_ready")
-            await _wait_for_state(store, recorded.delivery_id, "delivered")
+            await _wait_until_discarded(store, recorded.delivery_id)
         finally:
             await worker.stop()
 
@@ -923,6 +937,44 @@ class TestGatewaySeam:
         assert outcome.failure_reason == _DURABLE_TERMINAL_RETRY_FAILURE_REASON
         assert outcome.final_visible_body is None
         assert [item.body for item in store.unsettled_items()] == [FINAL_BODY]
+
+    @pytest.mark.asyncio
+    async def test_recording_still_repairs_the_visible_placeholder(self, tmp_path: Path) -> None:
+        """Recording does not classify, so the placeholder must never be left spinning."""
+        target = MessageTarget.resolve(ROOM_ID, None, SOURCE_EVENT_ID)
+        client = make_matrix_client_mock()
+        edits: list[str] = []
+
+        async def room_send(**kwargs: object) -> object:
+            content = kwargs["content"]
+            assert isinstance(content, dict)
+            new_content = content.get("m.new_content")
+            if isinstance(new_content, dict):
+                edits.append(str(new_content.get("body")))
+            # Permanent rejection: the payload can never be delivered as-is.
+            return nio.RoomSendError.from_dict({"errcode": "M_TOO_LARGE", "error": "too large"}, ROOM_ID)
+
+        client.room_send = AsyncMock(side_effect=room_send)
+        gateway, store = _gateway(tmp_path=tmp_path, client=client, target=target)
+        assert store is not None
+
+        outcome = await gateway.deliver_final(
+            FinalDeliveryRequest(
+                target=target,
+                existing_event_id=PLACEHOLDER_EVENT_ID,
+                response_text=FINAL_BODY,
+                identity=_identity(target),
+                tool_trace=None,
+                extra_content=None,
+                existing_event_is_placeholder=True,
+            ),
+        )
+
+        # The row is queued for repair, and the user still sees a failure note
+        # rather than a placeholder that spins forever.
+        assert len(store.unsettled_items()) == 1
+        assert outcome.failure_reason == _DURABLE_TERMINAL_RETRY_FAILURE_REASON
+        assert any("Response delivery failed" in body for body in edits)
 
     @pytest.mark.asyncio
     async def test_no_durable_store_keeps_the_previous_failure_behaviour(self, tmp_path: Path) -> None:
@@ -1126,7 +1178,7 @@ class TestRuntimeInteractions:
         )
 
         assert store.unsettled_items() == ()
-        assert store.items()[0].settled_reason == "source_event_redacted"
+        assert store.items() == ()
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("auto_resume", [False, True])
