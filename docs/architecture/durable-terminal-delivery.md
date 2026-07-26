@@ -45,6 +45,13 @@ Every attempt and settlement revalidates its exact revision, so stale work canno
 Source and target redactions are durable tombstones.
 A tombstoned source prevents a later record from recreating its answer.
 Redaction announces itself before waiting for an in-flight attempt, and the attempt revalidates immediately before transport.
+Before writing the authoritative TurnStore tombstone, redaction writes a source-keyed barrier row through the same atomic durable writer as terminal rows.
+Recording, selecting, and attempting terminal work all consult these barriers after startup loading.
+The barrier survives TurnStore failure and process restart, and background reconciliation retries the tombstone before removing matching terminal rows and then the barrier.
+The barrier is only a failure-window write-ahead fence and is deleted once TurnStore owns the tombstone.
+Malformed barrier siblings make terminal delivery not ready without hiding valid rows or barriers.
+Failure to persist a new barrier makes terminal delivery not ready for the rest of that process, while the process-local redaction announcement continues blocking sends.
+If neither the barrier store nor TurnStore can write, no redaction state reached durable storage and safety cannot be carried across process loss.
 The same authority lock gives the tombstone, regeneration, transport, and settlement one durable commit order.
 An attempt that already crossed its final check commits before the tombstone; every other attempt observes the redaction announcement or tombstone and stops.
 
@@ -64,6 +71,7 @@ Shutdown cancels the retry loop but awaits any shielded settlement batch already
 ## Recovery and cleanup
 
 Startup loads every valid pending row.
+A startup reconciliation retries every surviving redaction barrier before terminal delivery becomes eligible.
 A malformed individual row is dropped without discarding valid siblings.
 An unreadable row propagates its I/O failure instead of publishing an incomplete in-memory snapshot.
 Stale-stream cleanup skips visible events still owned by durable terminal delivery, so it cannot overwrite a committed answer with an interruption notice.

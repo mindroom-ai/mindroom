@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
@@ -555,6 +556,123 @@ async def test_failed_redaction_persistence_remains_fail_closed(tmp_path: Path) 
     with patch("mindroom.terminal_delivery.send_message_result", new=AsyncMock(return_value=_delivered())) as send:
         await coordinator._drain_item(item)
     send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_failed_redaction_barrier_survives_restart_until_reconciled(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    item = store.record(_intent())
+    assert item is not None
+    coordinator, _hooks = _coordinator(store)
+    coordinator.deps.turn_store.mark_source_redacted = MagicMock(side_effect=OSError("disk full"))  # type: ignore[method-assign]
+
+    with pytest.raises(OSError, match="disk full"):
+        await coordinator.redact(room_id=ROOM, event_id=SOURCE)
+
+    [barrier] = store.redaction_barriers()
+    assert barrier.room_id == ROOM
+    assert barrier.event_id == SOURCE
+    assert store.get(item.delivery_id) == item
+
+    restarted_store = _store(tmp_path)
+    restarted, _hooks = _coordinator(restarted_store)
+    restarted.deps.turn_store.mark_source_redacted = MagicMock(side_effect=OSError("still unavailable"))  # type: ignore[method-assign]
+    recovered = await restarted.warm()
+
+    assert recovered == (item,)
+    assert restarted_store.due() == ()
+    with patch("mindroom.terminal_delivery.send_message_result", new=AsyncMock(return_value=_delivered())) as send:
+        assert await restarted.drain_once() == 0
+    send.assert_not_awaited()
+
+    def persist_tombstone(event_id: str) -> None:
+        restarted.deps.turn_store.redacted.add(event_id)
+
+    restarted.deps.turn_store.mark_source_redacted = MagicMock(side_effect=persist_tombstone)  # type: ignore[method-assign]
+    await restarted.reconcile_redactions()
+
+    assert restarted.deps.turn_store.redacted == {SOURCE}
+    assert restarted_store.items() == ()
+    assert restarted_store.redaction_barriers() == ()
+    assert restarted.redaction_barriers_ready
+
+
+@pytest.mark.asyncio
+async def test_failed_redaction_barrier_rejects_later_new_target(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    coordinator, _hooks = _coordinator(store)
+    coordinator.deps.turn_store.mark_source_redacted = MagicMock(side_effect=OSError("disk full"))  # type: ignore[method-assign]
+
+    with pytest.raises(OSError, match="disk full"):
+        await coordinator.redact(room_id=ROOM, event_id=SOURCE)
+
+    later = replace(_intent(correlation_id="later"), target_event_id="$later-visible")
+    assert store.record(later) is None
+    commit = await coordinator.commit_and_attempt(later)
+    assert commit.status == "superseded"
+
+
+def test_malformed_redaction_barrier_sibling_fails_closed_without_losing_valid_rows(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    item = store.record(_intent())
+    assert item is not None
+    barrier = store.record_redaction(room_id=ROOM, event_id=SOURCE)
+    malformed = tmp_path / "tracking" / "code_pending_terminal_deliveries" / "redactions" / "malformed.json"
+    malformed.write_text("{not json")
+
+    restarted = _store(tmp_path)
+
+    assert restarted.warm() == (item,)
+    assert restarted.redaction_barriers() == (barrier,)
+    assert not restarted.redaction_barriers_valid
+    assert restarted.due() == ()
+
+
+@pytest.mark.asyncio
+async def test_redaction_barrier_write_failure_marks_coordinator_not_ready(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    item = store.record(_intent())
+    assert item is not None
+    coordinator, _hooks = _coordinator(store)
+
+    with (
+        patch("mindroom.terminal_delivery.write_json_file_durable", side_effect=OSError("disk full")),
+        pytest.raises(OSError, match="disk full"),
+    ):
+        await coordinator.redact(room_id=ROOM, event_id=SOURCE)
+
+    assert not coordinator.redaction_barriers_ready
+    assert SOURCE not in coordinator.deps.turn_store.redacted
+    with patch("mindroom.terminal_delivery.send_message_result", new=AsyncMock(return_value=_delivered())) as send:
+        await coordinator._drain_item(item)
+    send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_persisted_redaction_barrier_blocks_record_while_tombstone_is_in_flight(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    coordinator, _hooks = _coordinator(store)
+    tombstone_started = threading.Event()
+    release_tombstone = threading.Event()
+
+    def persist_tombstone(event_id: str) -> None:
+        tombstone_started.set()
+        release_tombstone.wait()
+        coordinator.deps.turn_store.redacted.add(event_id)
+
+    coordinator.deps.turn_store.mark_source_redacted = MagicMock(side_effect=persist_tombstone)  # type: ignore[method-assign]
+    redaction = asyncio.create_task(coordinator.redact(room_id=ROOM, event_id=SOURCE))
+    await asyncio.to_thread(tombstone_started.wait)
+    try:
+        [barrier] = store.redaction_barriers()
+        assert barrier.event_id == SOURCE
+        later = replace(_intent(correlation_id="later"), target_event_id="$later-visible")
+        commit = await coordinator.commit_and_attempt(later)
+        assert commit.status == "superseded"
+    finally:
+        release_tombstone.set()
+        await redaction
+    assert store.redaction_barriers() == ()
 
 
 @pytest.mark.asyncio

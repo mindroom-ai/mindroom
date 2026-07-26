@@ -41,6 +41,7 @@ logger = get_logger(__name__)
 TERMINAL_DELIVERY_SCHEMA_VERSION = 7
 DEFAULT_POLL_INTERVAL_SECONDS = 15.0
 _MAX_DRAIN_WORKERS = 8
+_TERMINAL_REDACTION_SCHEMA_VERSION = 1
 _ITEM_ADAPTER: TypeAdapter[PendingTerminalDelivery] | None = None
 
 TerminalDeliveryStatus = Literal["delivered", "deferred", "superseded"]
@@ -105,6 +106,14 @@ class PendingTerminalDelivery:
         return f"mindroom-terminal-{self.delivery_id}-{self.revision}"
 
 
+@dataclass(frozen=True, slots=True)
+class _TerminalRedactionBarrier:
+    """Temporary durable fence until TurnStore owns one redaction."""
+
+    room_id: str
+    event_id: str
+
+
 @dataclass
 class TerminalDeliveryStore:
     """One-file-per-row store for outstanding terminal work and settled receipts."""
@@ -113,7 +122,10 @@ class TerminalDeliveryStore:
     base_path: Path
     clock: Callable[[], float] = time.time
     _store_dir: Path = field(init=False)
+    _redaction_dir: Path = field(init=False)
     _items: dict[str, PendingTerminalDelivery] = field(default_factory=dict, init=False)
+    _redactions: dict[str, _TerminalRedactionBarrier] = field(default_factory=dict, init=False)
+    _redaction_barriers_valid: bool = field(default=True, init=False)
     _lock: threading.RLock = field(default_factory=threading.RLock, init=False)
     _loaded: bool = field(default=False, init=False)
 
@@ -123,6 +135,7 @@ class TerminalDeliveryStore:
             message = f"Invalid terminal delivery store agent name: {self.agent_name!r}"
             raise ValueError(message)
         self._store_dir = self.base_path / f"{self.agent_name}_pending_terminal_deliveries"
+        self._redaction_dir = self._store_dir / "redactions"
 
     def warm(self) -> tuple[PendingTerminalDelivery, ...]:
         """Reload outstanding work from independent row files."""
@@ -130,10 +143,23 @@ class TerminalDeliveryStore:
             self._load(force=True)
             return tuple(self._items.values())
 
-    def record(self, intent: TerminalDeliveryIntent) -> PendingTerminalDelivery:
+    @property
+    def redaction_barriers_valid(self) -> bool:
+        """Return whether every durable redaction barrier decoded safely."""
+        with self._lock:
+            self._load()
+            return self._redaction_barriers_valid
+
+    def record(self, intent: TerminalDeliveryIntent) -> PendingTerminalDelivery | None:
         """Atomically insert or supersede one frozen intent."""
         with self._lock:
             self._load()
+            if not self._redaction_barriers_valid:
+                message = "Terminal redaction barrier state is malformed"
+                raise RuntimeError(message)
+            event_ids = (*intent.identity.source_event_ids, intent.target_event_id)
+            if not self._redactions.keys().isdisjoint(event_ids):
+                return None
             existing = self._items.get(intent.delivery_id)
             if existing is not None and intent.identity.correlation_id == existing.identity.correlation_id:
                 return existing
@@ -179,12 +205,67 @@ class TerminalDeliveryStore:
             item.target_event_id for item in self.items() if room_id is None or item.target.room_id == room_id
         )
 
+    def redaction_barriers(self) -> tuple[_TerminalRedactionBarrier, ...]:
+        """Return every temporary redaction fence awaiting TurnStore."""
+        with self._lock:
+            self._load()
+            return tuple(self._redactions.values())
+
+    def record_redaction(self, *, room_id: str, event_id: str) -> _TerminalRedactionBarrier:
+        """Persist one redaction fence before attempting its TurnStore tombstone."""
+        if not room_id or not event_id:
+            message = "Terminal redaction barriers require room and event IDs"
+            raise ValueError(message)
+        with self._lock:
+            self._load()
+            existing = self._redactions.get(event_id)
+            if existing is not None:
+                return existing
+            barrier = _TerminalRedactionBarrier(room_id=room_id, event_id=event_id)
+            _write_record(
+                directory=self._redaction_dir,
+                path=self._redaction_file(event_id),
+                payload={
+                    "schema_version": _TERMINAL_REDACTION_SCHEMA_VERSION,
+                    "barrier": asdict(barrier),
+                },
+            )
+            self._redactions[event_id] = barrier
+            self._loaded = True
+            return barrier
+
+    def finish_redaction(self, barrier: _TerminalRedactionBarrier) -> None:
+        """Delete one temporary fence after TurnStore and row cleanup succeed."""
+        with self._lock:
+            self._load()
+            current = self._redactions.get(barrier.event_id)
+            if current != barrier:
+                return
+            self._redaction_file(barrier.event_id).unlink(missing_ok=True)
+            del self._redactions[barrier.event_id]
+
+    def any_redaction_barrier(self, event_ids: tuple[str, ...]) -> bool:
+        """Return whether malformed or matching redaction state blocks delivery."""
+        with self._lock:
+            self._load()
+            return not self._redaction_barriers_valid or not self._redactions.keys().isdisjoint(event_ids)
+
     def due(self, *, limit: int | None = None) -> tuple[PendingTerminalDelivery, ...]:
         """Read due work round-robin across rooms."""
-        due = sorted(
-            (item for item in self.items() if item.next_attempt_at <= self.clock()),
-            key=lambda item: (item.next_attempt_at, item.delivery_id),
-        )
+        with self._lock:
+            self._load()
+            if not self._redaction_barriers_valid:
+                return ()
+            blocked = self._redactions
+            due = sorted(
+                (
+                    item
+                    for item in self._items.values()
+                    if item.next_attempt_at <= self.clock()
+                    and blocked.keys().isdisjoint((*item.source_event_ids, item.target_event_id))
+                ),
+                key=lambda item: (item.next_attempt_at, item.delivery_id),
+            )
         by_room: dict[str, deque[PendingTerminalDelivery]] = {}
         for item in due:
             by_room.setdefault(item.target.room_id, deque()).append(item)
@@ -235,14 +316,13 @@ class TerminalDeliveryStore:
             del self._items[delivery_id]
 
     def _publish(self, item: PendingTerminalDelivery) -> None:
-        self._store_dir.mkdir(parents=True, exist_ok=True)
-        write_json_file_durable(
-            self._row_file(item.delivery_id),
-            {
+        _write_record(
+            directory=self._store_dir,
+            path=self._row_file(item.delivery_id),
+            payload={
                 "schema_version": TERMINAL_DELIVERY_SCHEMA_VERSION,
                 "item": asdict(item),
             },
-            temp_dir=self._store_dir,
         )
         self._items[item.delivery_id] = item
         self._loaded = True
@@ -250,6 +330,11 @@ class TerminalDeliveryStore:
     def _load(self, *, force: bool = False) -> None:
         if self._loaded and not force:
             return
+        self._items = self._load_items()
+        self._redactions, self._redaction_barriers_valid = self._load_redactions()
+        self._loaded = True
+
+    def _load_items(self) -> dict[str, PendingTerminalDelivery]:
         items: dict[str, PendingTerminalDelivery] = {}
         if self._store_dir.exists():
             for row_file in self._store_dir.glob("*.json"):
@@ -266,14 +351,44 @@ class TerminalDeliveryStore:
                     logger.warning("terminal_delivery_row_dropped", agent=self.agent_name, exc_info=True)
                     continue
                 items[item.delivery_id] = item
-        self._items = items
-        self._loaded = True
+        return items
+
+    def _load_redactions(self) -> tuple[dict[str, _TerminalRedactionBarrier], bool]:
+        redactions: dict[str, _TerminalRedactionBarrier] = {}
+        barriers_valid = True
+        if self._redaction_dir.exists():
+            for row_file in self._redaction_dir.glob("*.json"):
+                try:
+                    raw = json.loads(row_file.read_text())
+                    if not isinstance(raw, dict) or raw.get("schema_version") != _TERMINAL_REDACTION_SCHEMA_VERSION:
+                        message = "unsupported terminal redaction barrier schema"
+                        raise ValueError(message)  # noqa: TRY301
+                    barrier = _redaction_from_record(raw.get("barrier"))
+                    if row_file != self._redaction_file(barrier.event_id):
+                        message = "terminal redaction barrier filename mismatch"
+                        raise ValueError(message)  # noqa: TRY301
+                except (ValueError, TypeError, KeyError, AttributeError):
+                    barriers_valid = False
+                    logger.exception("terminal_redaction_barrier_invalid", agent=self.agent_name)
+                    continue
+                redactions[barrier.event_id] = barrier
+        return redactions, barriers_valid
 
     def _row_file(self, delivery_id: str) -> Path:
         if len(delivery_id) != 32 or any(character not in "0123456789abcdef" for character in delivery_id):
             message = f"Invalid terminal delivery ID: {delivery_id!r}"
             raise ValueError(message)
         return self._store_dir / f"{delivery_id}.json"
+
+    def _redaction_file(self, event_id: str) -> Path:
+        barrier_id = hashlib.sha256(event_id.encode()).hexdigest()[:32]
+        return self._redaction_dir / f"{barrier_id}.json"
+
+
+def _write_record(*, directory: Path, path: Path, payload: dict[str, object]) -> None:
+    """Durably replace one independent terminal-delivery record."""
+    directory.mkdir(parents=True, exist_ok=True)
+    write_json_file_durable(path, payload, temp_dir=directory)
 
 
 def _json_mapping(value: Mapping[str, Any]) -> dict[str, Any]:
@@ -296,6 +411,22 @@ def _item_from_record(raw: object) -> PendingTerminalDelivery:
         message = "terminal delivery row contains coerced field types"
         raise TypeError(message)
     return item
+
+
+def _redaction_from_record(raw: object) -> _TerminalRedactionBarrier:
+    if not isinstance(raw, dict) or raw.keys() != {"room_id", "event_id"}:
+        message = "terminal redaction barrier has invalid fields"
+        raise TypeError(message)
+    record = cast("dict[str, object]", raw)
+    room_id, event_id = record["room_id"], record["event_id"]
+    if not isinstance(room_id, str) or not isinstance(event_id, str):
+        message = "terminal redaction barrier contains non-string identity"
+        raise TypeError(message)
+    barrier = _TerminalRedactionBarrier(room_id=room_id, event_id=event_id)
+    if not barrier.room_id or not barrier.event_id:
+        message = "terminal redaction barrier contains an empty identity"
+        raise ValueError(message)
+    return barrier
 
 
 def _same_json_types(raw: object, normalized: object) -> bool:
@@ -367,6 +498,7 @@ class TerminalDeliveryCoordinator:
     _task: asyncio.Task[None] | None = field(default=None, init=False)
     _settlement: asyncio.Task[None] | None = field(default=None, init=False)
     _redacting: set[str] = field(default_factory=set, init=False)
+    _redaction_barrier_failed: bool = field(default=False, init=False)
 
     @property
     def store(self) -> TerminalDeliveryStore:
@@ -377,6 +509,17 @@ class TerminalDeliveryCoordinator:
     def running(self) -> bool:
         """Return whether retry polling is active."""
         return self._task is not None and not self._task.done()
+
+    @property
+    def redaction_barriers_ready(self) -> bool:
+        """Return whether durable redaction fencing can safely authorize sends."""
+        return not self._redaction_barrier_failed and self.store.redaction_barriers_valid
+
+    async def warm(self) -> tuple[PendingTerminalDelivery, ...]:
+        """Load durable work and reconcile temporary redaction barriers."""
+        recovered = await asyncio.to_thread(self.store.warm)
+        await self.reconcile_redactions()
+        return recovered
 
     def start(self) -> None:
         """Start retry polling."""
@@ -427,13 +570,44 @@ class TerminalDeliveryCoordinator:
     async def redact(self, *, room_id: str, event_id: str) -> None:
         """Announce redaction before durable authority and keep failures fail-closed."""
         self._redacting.add(event_id)
-        await asyncio.to_thread(self.deps.turn_store.mark_source_redacted, event_id)
-        for item in await asyncio.to_thread(self.store.matching, room_id=room_id, event_id=event_id):
+        try:
+            barrier = await asyncio.to_thread(
+                self.store.record_redaction,
+                room_id=room_id,
+                event_id=event_id,
+            )
+        except BaseException:
+            self._redaction_barrier_failed = True
+            raise
+        await self._reconcile_redaction(barrier)
+
+    async def reconcile_redactions(self) -> None:
+        """Retry temporary barriers into TurnStore without dropping failed work."""
+        for barrier in await asyncio.to_thread(self.store.redaction_barriers):
+            try:
+                await self._reconcile_redaction(barrier)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                self.deps.logger.exception(
+                    "terminal_redaction_reconciliation_failed",
+                    room_id=barrier.room_id,
+                    event_id=barrier.event_id,
+                )
+
+    async def _reconcile_redaction(self, barrier: _TerminalRedactionBarrier) -> None:
+        await asyncio.to_thread(self.deps.turn_store.mark_source_redacted, barrier.event_id)
+        for item in await asyncio.to_thread(
+            self.store.matching,
+            room_id=barrier.room_id,
+            event_id=barrier.event_id,
+        ):
             async with self._lock_for(item.delivery_id):
                 current = await asyncio.to_thread(self.store.get, item.delivery_id)
                 if current is not None and current.revision == item.revision:
                     await asyncio.to_thread(self.store.finish, item.delivery_id, revision=item.revision)
-        self._redacting.discard(event_id)
+        await asyncio.to_thread(self.store.finish_redaction, barrier)
+        self._redacting.discard(barrier.event_id)
 
     def pending_target_event_ids(self, room_id: str | None = None) -> frozenset[str]:
         """Return targets still durably owned."""
@@ -441,6 +615,8 @@ class TerminalDeliveryCoordinator:
 
     async def drain_once(self) -> int:
         """Drain all currently due rooms with bounded per-room workers."""
+        if not self.redaction_barriers_ready:
+            return 0
         due = await asyncio.to_thread(self.store.due)
         if not due:
             return 0
@@ -508,22 +684,32 @@ class TerminalDeliveryCoordinator:
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(self._wake.wait(), self.deps.poll_interval_seconds)
             self._wake.clear()
-            if self.deps.is_ready():
-                try:
+            try:
+                await self.reconcile_redactions()
+                if self.deps.is_ready():
                     while self.deps.is_ready() and await self.drain_once():
                         pass
-                except asyncio.CancelledError:
-                    raise
-                except Exception:
-                    self.deps.logger.exception("terminal_delivery_drain_failed")
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                self.deps.logger.exception("terminal_delivery_drain_failed")
 
     async def _record_locked(self, intent: TerminalDeliveryIntent) -> PendingTerminalDelivery | None:
         event_ids = (*intent.identity.source_event_ids, intent.target_event_id)
-        if self._redacting.intersection(event_ids) or self.deps.turn_store.any_source_redacted(event_ids):
+        if not self.redaction_barriers_ready:
+            message = "Terminal redaction barriers are unavailable"
+            raise RuntimeError(message)
+        if (
+            self._redacting.intersection(event_ids)
+            or await asyncio.to_thread(self.store.any_redaction_barrier, event_ids)
+            or self.deps.turn_store.any_source_redacted(event_ids)
+        ):
             return None
         return await asyncio.to_thread(self.store.record, intent)
 
     async def _attempt_locked(self, item: PendingTerminalDelivery) -> tuple[TerminalDeliveryStatus, str]:
+        if not self.redaction_barriers_ready:
+            return "deferred", "redaction_barrier_unavailable"
         if not await self._is_current_and_live(item):
             return "superseded", "stale_or_redacted"
         client = self.deps.runtime.client
@@ -732,7 +918,9 @@ class TerminalDeliveryCoordinator:
         return (
             current is not None
             and current.revision == item.revision
+            and self.redaction_barriers_ready
             and not self._redacting.intersection(event_ids)
+            and not await asyncio.to_thread(self.store.any_redaction_barrier, event_ids)
             and not self.deps.turn_store.any_source_redacted(event_ids)
         )
 

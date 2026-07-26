@@ -614,6 +614,7 @@ class AgentBot:
             and not self._sync_shutting_down
             and self._first_sync_done
             and self._runtime_view.client is not None
+            and self._terminal_delivery_coordinator.redaction_barriers_ready
         )
 
     def pending_terminal_delivery_event_ids(self, room_id: str | None = None) -> frozenset[str]:
@@ -1476,7 +1477,7 @@ class AgentBot:
             await self._set_avatar_if_available()
             # Keep durable tracking-state loading off the event loop at startup.
             await asyncio.to_thread(self._turn_store.warm)
-            recovered = await asyncio.to_thread(self._terminal_delivery_coordinator.store.warm)
+            recovered = await self._terminal_delivery_coordinator.warm()
             if recovered:
                 self.logger.warning("terminal_delivery_startup_recovery", recovered_count=len(recovered))
             self._terminal_delivery_coordinator.start()
