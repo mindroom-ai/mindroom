@@ -293,6 +293,20 @@ def _parsed_command_for_event(
     return command_parser.parse(event.body)
 
 
+def _turn_belongs_to_single_requester(handled_turn: TurnRecord, requester_user_id: str) -> bool:
+    """Return whether every physical source in one turn was sent by ``requester_user_id``.
+
+    Whole-turn suppression settles every source in a coalesced batch, so it is only safe when the
+    turn provably belongs to one requester. A coalesced record without per-source metadata cannot
+    prove that: records persisted before the metadata field existed still decode under the current
+    ledger schema version, so this fails closed rather than treating them as single-requester.
+    """
+    source_event_metadata = handled_turn.source_event_metadata
+    if source_event_metadata is None:
+        return not handled_turn.is_coalesced
+    return all(metadata.sender == requester_user_id for metadata in source_event_metadata.values())
+
+
 async def _blocked_before_plan(
     controller: TurnController,
     room: nio.MatrixRoom,
@@ -315,9 +329,9 @@ async def _blocked_before_plan(
     ):
         return True
 
-    may_be_superseded = prepared.dispatch.envelope.origin.may_be_superseded_by_newer_requester_turn and all(
-        metadata.sender == requester_user_id
-        for metadata in (prepared.handled_turn.source_event_metadata or {}).values()
+    may_be_superseded = (
+        prepared.dispatch.envelope.origin.may_be_superseded_by_newer_requester_turn
+        and _turn_belongs_to_single_requester(prepared.handled_turn, requester_user_id)
     )
     if prepared.replay_guard.degraded:
         skips_turn = await controller._has_newer_unresponded_cached_thread_event(

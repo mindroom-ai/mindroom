@@ -4316,6 +4316,77 @@ async def test_backlog_replay_respects_coalesced_source_ownership(
 
 
 @pytest.mark.asyncio
+async def test_backlog_replay_keeps_coalesced_turn_without_source_metadata(tmp_path: Path) -> None:
+    """A coalesced turn that cannot prove single-requester ownership must not be suppressed.
+
+    Records persisted before ``source_event_metadata`` existed still decode under the current
+    ledger schema version, so an empty metadata mapping must fail closed rather than read as
+    "every source belongs to this requester".
+    """
+    bot = _make_bot(tmp_path)
+    room = _make_room()
+    primary_event = PreparedTextEvent(
+        sender="@bob:localhost",
+        event_id="$bob",
+        body="bob",
+        source={"content": {"msgtype": "m.text", "body": "bob"}},
+        server_timestamp=2000,
+    )
+    dispatch = _prepared_dispatch(
+        event_id="$bob",
+        requester_user_id="@bob:localhost",
+        body="bob",
+        thread_id="$thread",
+    )
+    _set_context_histories(
+        dispatch,
+        [
+            ResolvedVisibleMessage(
+                sender="@bob:localhost",
+                body="newer bob",
+                timestamp=3000,
+                event_id="$newer-bob",
+                content={"body": "newer bob"},
+                thread_id="$thread",
+                latest_event_id="$newer-bob",
+            ),
+        ],
+    )
+    handled_turn = TurnRecord.create(["$alice", "$bob"])
+    assert handled_turn.is_coalesced
+    assert handled_turn.source_event_metadata is None
+
+    plan_calls: list[PreparedDispatch] = []
+
+    async def prepare_dispatch(*_args: object, **_kwargs: object) -> object:
+        return prepared_dispatch_result(dispatch)
+
+    async def plan_turn(
+        _room: object,
+        _event: object,
+        prepared_dispatch: PreparedDispatch,
+        **_kwargs: object,
+    ) -> _DispatchPlan:
+        plan_calls.append(prepared_dispatch)
+        return _DispatchPlan(kind="ignore")
+
+    with (
+        patch.object(bot._turn_controller, "_prepare_dispatch", new=prepare_dispatch),
+        patch.object(bot._turn_policy, "plan_turn", new=plan_turn),
+    ):
+        await bot._turn_controller._dispatch_text_message(
+            room,
+            primary_event,
+            "@bob:localhost",
+            handled_turn=handled_turn,
+        )
+
+    assert plan_calls == [dispatch]
+    assert not bot._turn_store.is_handled("$alice")
+    assert not bot._turn_store.is_handled("$bob")
+
+
+@pytest.mark.asyncio
 async def test_backlog_replay_degraded_thread_history_uses_cached_room_event_positive_proof(tmp_path: Path) -> None:
     """Degraded empty thread history must not prove that no newer thread message exists."""
     bot = _make_bot(tmp_path)
