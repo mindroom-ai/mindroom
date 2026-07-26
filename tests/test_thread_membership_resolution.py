@@ -26,6 +26,7 @@ from mindroom.matrix.thread_projection import resolve_thread_ids_for_event_infos
 from tests.conftest import (
     drain_coalescing,
 )
+from tests.event_cache_test_support import replace_thread_unconditionally
 from tests.threading_helpers import (
     ThreadingBehaviorTestBase,
     _matrix_room,
@@ -124,40 +125,39 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             background_task_owner=bot._runtime_view,
         )
         try:
-            await real_event_cache.store_event(
-                thread_reply_id,
+            await replace_thread_unconditionally(
+                real_event_cache,
                 room_id,
-                {
-                    "content": {
-                        "body": "Thread reply",
-                        "msgtype": "m.text",
-                        "m.relates_to": {
-                            "rel_type": "m.thread",
-                            "event_id": thread_root_id,
+                thread_root_id,
+                [
+                    {
+                        "content": {
+                            "body": "Thread reply",
+                            "msgtype": "m.text",
+                            "m.relates_to": {
+                                "rel_type": "m.thread",
+                                "event_id": thread_root_id,
+                            },
                         },
+                        "event_id": thread_reply_id,
+                        "sender": "@mindroom_general:localhost",
+                        "origin_server_ts": 1234567894,
+                        "room_id": room_id,
+                        "type": "m.room.message",
                     },
-                    "event_id": thread_reply_id,
-                    "sender": "@mindroom_general:localhost",
-                    "origin_server_ts": 1234567894,
-                    "room_id": room_id,
-                    "type": "m.room.message",
-                },
-            )
-            await real_event_cache.store_event(
-                plain_reply_id,
-                room_id,
-                {
-                    "content": {
-                        "body": "first bridge reply",
-                        "msgtype": "m.text",
-                        "m.relates_to": {"m.in_reply_to": {"event_id": thread_reply_id}},
+                    {
+                        "content": {
+                            "body": "first bridge reply",
+                            "msgtype": "m.text",
+                            "m.relates_to": {"m.in_reply_to": {"event_id": thread_reply_id}},
+                        },
+                        "event_id": plain_reply_id,
+                        "sender": "@user:localhost",
+                        "origin_server_ts": 1234567895,
+                        "room_id": room_id,
+                        "type": "m.room.message",
                     },
-                    "event_id": plain_reply_id,
-                    "sender": "@user:localhost",
-                    "origin_server_ts": 1234567895,
-                    "room_id": room_id,
-                    "type": "m.room.message",
-                },
+                ],
             )
 
             second_plain_reply_event = nio.RoomMessageText.from_dict(
@@ -187,11 +187,11 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             await real_event_cache.close()
 
     @pytest.mark.asyncio
-    async def test_media_ingress_primes_transitive_ancestors_before_persisting_membership(
+    async def test_media_ingress_does_not_guess_past_unproven_rich_reply_root(
         self,
         bot: AgentBot,
     ) -> None:
-        """Cold-start media ingress should persist the same transitive thread membership used at runtime."""
+        """Cold-start media ingress should not guess past an unproven rich-reply root."""
         room_id = "!test:localhost"
         thread_root_id = "$thread_root:localhost"
         thread_reply_id = "$thread_reply:localhost"
@@ -270,7 +270,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             await drain_coalescing(bot)
             await _wait_for_room_cache_idle(bot.event_cache_write_coordinator)
 
-            assert await real_event_cache.get_thread_id_for_event(room_id, audio_event_id) == thread_root_id
+            assert await real_event_cache.get_thread_id_for_event(room_id, audio_event_id) is None
         finally:
             await real_event_cache.close()
 
@@ -548,6 +548,48 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             rich_reply_info,
             event_id=rich_reply_id,
             allow_current_root=True,
+            access=ThreadMembershipAccess(
+                lookup_thread_id=lookup_thread_id,
+                fetch_event_info=fetch_event_info,
+                prove_thread_root=prove_thread_root,
+            ),
+        )
+
+        assert resolution.state is ThreadResolutionState.THREADED
+        assert resolution.thread_id == rich_reply_id
+
+    @pytest.mark.asyncio
+    async def test_related_rich_reply_root_proof_precedes_its_reply_ancestry(self) -> None:
+        """A proven rich-reply root reached through a relation owns its thread."""
+        room_id = "!test:localhost"
+        rich_reply_id = "$rich_reply:localhost"
+        parent_id = "$parent:localhost"
+        parent_thread_id = "$parent_thread:localhost"
+        rich_reply_info = EventInfo.from_event(
+            {
+                "type": "m.room.message",
+                "content": {
+                    "body": "Rich reply root",
+                    "msgtype": "m.text",
+                    "m.relates_to": {"m.in_reply_to": {"event_id": parent_id}},
+                },
+            },
+        )
+
+        async def lookup_thread_id(_room_id: str, event_id: str) -> str | None:
+            return parent_thread_id if event_id == parent_id else None
+
+        async def fetch_event_info(_room_id: str, event_id: str) -> EventInfo | None:
+            assert event_id == rich_reply_id
+            return rich_reply_info
+
+        async def prove_thread_root(_room_id: str, event_id: str) -> ThreadRootProof:
+            assert event_id == rich_reply_id
+            return ThreadRootProof.proven()
+
+        resolution = await resolve_related_event_thread_membership(
+            room_id,
+            rich_reply_id,
             access=ThreadMembershipAccess(
                 lookup_thread_id=lookup_thread_id,
                 fetch_event_info=fetch_event_info,

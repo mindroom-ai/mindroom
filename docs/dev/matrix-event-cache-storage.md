@@ -22,11 +22,11 @@ The public lookup combines the surviving explicit candidate with any bundled can
 
 SQLite uses `BINARY` event-ID ordering, and PostgreSQL uses bytewise `COLLATE "C"` ordering.
 
-PostgreSQL latest-edit and recent-event fallback scans use server-side cursors so malformed index-compatible JSON values cannot exhaust a client-side result set or hide later valid rows.
+PostgreSQL latest-edit lookup uses a server-side cursor so an invalid newer replacement can fall back to the next candidate without loading the full candidate set.
 
-Recent-event reads on both backends apply their limit while streaming instead of in SQL, so a payload that disagrees with its index cannot consume a limit slot and hide a later valid event.
+Recent-event reads on both backends apply the requested limit in SQL and eagerly decode only those bounded rows.
 
-`decode_cached_event` is the only statement of the payload-versus-index rule; backend SQL narrows by scope and type but never restates that rule.
+`decode_cached_event` only decodes stored JSON, while the shared write policy rejects explicit wrong-room payloads before either backend writes the normalized event and its derived indexes.
 
 Room-scoped tombstone lookups chunk their candidate IDs, because resolving one thread can present more candidates than SQLite accepts host parameters in a single statement.
 

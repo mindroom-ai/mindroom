@@ -307,6 +307,12 @@ async def resolve_related_event_thread_membership(
             resolution = ThreadResolution.threaded(thread_id)
             break
 
+        if related_event_info.can_be_thread_root:
+            proof = await access.prove_thread_root(room_id, current_event_id)
+            if proof.state is not _ThreadRootProofState.NOT_A_THREAD_ROOT:
+                resolution = _resolution_from_root_proof(current_event_id, proof)
+                break
+
         next_target = _next_related_event_target(
             related_event_info,
             current_event_id=current_event_id,
@@ -314,12 +320,6 @@ async def resolve_related_event_thread_membership(
         if next_target is not None:
             current_event_id = next_target
             continue
-
-        if related_event_info.can_be_thread_root:
-            resolution = _resolution_from_root_proof(
-                current_event_id,
-                await access.prove_thread_root(room_id, current_event_id),
-            )
         break
 
     return resolution

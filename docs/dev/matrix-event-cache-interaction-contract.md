@@ -49,7 +49,7 @@ Page-local, cached, and homeserver-scan root proof accepts only plaintext or enc
 
 Point-event payload quality is monotonic per event ID: clear normalized content may replace a retained opaque `m.room.encrypted` payload, but a later opaque payload never replaces already-clear content.
 
-Point, recent, snapshot, and latest-edit reads reject payloads whose event ID, timestamp, or explicit room evidence disagrees with the authoritative index.
+Point, recent, and snapshot reads consume normalized rows admitted by the shared write policy, which rejects explicit wrong-room payloads before writing the event and its derived indexes.
 
 Latest-edit reads validate the original and every candidate through the owning message or approval surface, then choose across bundled and cached candidates by canonical timestamp and event-ID ordering.
 

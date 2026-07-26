@@ -2526,7 +2526,7 @@ async def test_resolve_thread_root_event_id_for_client_walks_transitively_to_thr
     assert client.room_get_event.await_args_list[0].args == ("!room:localhost", "$plain-reply-2:localhost")
     assert client.room_get_event.await_args_list[1].args == ("!room:localhost", "$plain-reply-1:localhost")
     assert client.room_get_event.await_args_list[2].args == ("!room:localhost", "$thread-reply:localhost")
-    client.room_messages.assert_awaited_once()
+    assert client.room_messages.await_count == 2
 
 
 @pytest.mark.asyncio
@@ -2828,43 +2828,47 @@ async def test_resolve_thread_root_event_id_for_client_resolves_edit_of_promoted
 ):
     """Edits of promoted plain replies should reuse the same transitive thread inheritance."""
     client = AsyncMock()
-    client.room_get_event = AsyncMock(
-        side_effect=[
-            _message_event_response(
-                "$edit:localhost",
-                content={
-                    "body": "* edited",
-                    "msgtype": "m.text",
-                    "m.new_content": {
-                        "body": "edited",
-                        "msgtype": "m.text",
-                    },
-                    "m.relates_to": {
-                        "rel_type": "m.replace",
-                        "event_id": "$plain-reply:localhost",
-                    },
-                },
-            ),
-            _message_event_response(
-                "$plain-reply:localhost",
-                content={
-                    "body": "Bridge reply",
-                    "msgtype": "m.text",
-                    "m.relates_to": {"m.in_reply_to": {"event_id": "$thread-reply:localhost"}},
-                },
-            ),
-            _message_event_response(
-                "$thread-reply:localhost",
-                content={
-                    "body": "Reply",
-                    "msgtype": "m.text",
-                    "m.relates_to": {
-                        "rel_type": "m.thread",
-                        "event_id": "$thread-root:localhost",
-                    },
-                },
-            ),
-        ],
+    edit = _message_event_response(
+        "$edit:localhost",
+        content={
+            "body": "* edited",
+            "msgtype": "m.text",
+            "m.new_content": {
+                "body": "edited",
+                "msgtype": "m.text",
+            },
+            "m.relates_to": {
+                "rel_type": "m.replace",
+                "event_id": "$plain-reply:localhost",
+            },
+        },
+    )
+    plain_reply = _message_event_response(
+        "$plain-reply:localhost",
+        content={
+            "body": "Bridge reply",
+            "msgtype": "m.text",
+            "m.relates_to": {"m.in_reply_to": {"event_id": "$thread-reply:localhost"}},
+        },
+    )
+    thread_reply = _message_event_response(
+        "$thread-reply:localhost",
+        content={
+            "body": "Reply",
+            "msgtype": "m.text",
+            "m.relates_to": {
+                "rel_type": "m.thread",
+                "event_id": "$thread-root:localhost",
+            },
+        },
+    )
+    client.room_get_event = AsyncMock(side_effect=[edit, plain_reply, thread_reply])
+    client.room_messages = AsyncMock(
+        return_value=_room_messages_response(
+            edit,
+            plain_reply,
+            thread_reply,
+        ),
     )
 
     normalized = await resolve_thread_root_event_id_for_client(
@@ -2877,6 +2881,7 @@ async def test_resolve_thread_root_event_id_for_client_resolves_edit_of_promoted
     fetched_event_ids = [call.args[1] for call in client.room_get_event.await_args_list]
     assert fetched_event_ids[0] == "$edit:localhost"
     assert "$plain-reply:localhost" in fetched_event_ids
+    client.room_messages.assert_awaited_once()
 
 
 @pytest.mark.asyncio

@@ -1147,6 +1147,7 @@ class TestMatrixConversationCacheThreadReads:
                 else None
             ),
         )
+        event_cache.get_thread_events = AsyncMock(return_value=[])
         event_cache.redact_event = AsyncMock(return_value=True)
         client = AsyncMock(spec=nio.AsyncClient)
         client.user_id = "@agent:localhost"
@@ -1206,6 +1207,7 @@ class TestMatrixConversationCacheThreadReads:
             "$thread-root:localhost",
             reason="outbound_redaction",
         )
+        assert event_cache.get_thread_events.await_count == 2
         event_cache.redact_event.assert_awaited_once_with("!room:localhost", "$plain-two:localhost")
 
     @pytest.mark.asyncio

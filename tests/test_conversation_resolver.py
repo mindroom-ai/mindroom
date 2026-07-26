@@ -18,8 +18,13 @@ import pytest
 
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.constants import SKIP_MENTIONS_KEY
+from mindroom.constants import (
+    PER_FIRE_THREAD_ROOT_KEY,
+    SKIP_MENTIONS_KEY,
+    SOURCE_KIND_KEY,
+)
 from mindroom.conversation_resolver import ConversationResolver, ConversationResolverDeps
+from mindroom.dispatch_source import SCHEDULED_SOURCE_KIND
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.logging_config import get_logger
 from mindroom.matrix.cache.thread_history_result import thread_history_result
@@ -282,6 +287,34 @@ def test_build_message_target_starts_thread_at_rootable_rich_reply(config: Confi
 
     assert target.source_thread_id is None
     assert target.resolved_thread_id == _EVENT_ID
+
+
+def test_trusted_automation_rich_reply_starts_thread_in_room_mode(tmp_path: Path) -> None:
+    """A trusted automation rich reply retains its per-fire root in room mode."""
+    config = bind_runtime_paths(
+        Config(agents={"general": AgentConfig(display_name="General", thread_mode="room")}),
+        test_runtime_paths(tmp_path),
+    )
+    registry = entity_identity_registry(config, runtime_paths_for(config))
+    resolver = _resolver(config)
+    event = _reply_event()
+    event.source["sender"] = registry.current_id("general").full_id
+    event.source["content"].update(
+        {
+            SOURCE_KIND_KEY: SCHEDULED_SOURCE_KIND,
+            PER_FIRE_THREAD_ROOT_KEY: True,
+        },
+    )
+
+    target = resolver.build_message_target(
+        room_id=_ROOM_ID,
+        thread_id=None,
+        reply_to_event_id=_EVENT_ID,
+        event_source=event.source,
+    )
+
+    assert target.resolved_thread_id == _EVENT_ID
+    assert target.session_id == f"{_ROOM_ID}:{_EVENT_ID}"
 
 
 def test_build_message_target_room_mode_override_stays_room_level(config: Config) -> None:

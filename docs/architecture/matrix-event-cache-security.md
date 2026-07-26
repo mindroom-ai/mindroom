@@ -14,7 +14,7 @@ The default constructor principal exists for standalone cache consumers and test
 
 An event lookup is keyed by principal, room, and event ID.
 
-Every decoded cache row must match its authoritative event-ID, timestamp, and room indexes before the payload can be returned or used for replacement projection.
+The shared write policy rejects explicit wrong-room payloads before normalized event rows and their derived indexes enter either backend.
 
 A replacement is eligible only when the original and replacement are non-state events in the same room, use the same sender and event type, carry exact `m.replace` relation identity, and pass the owning surface validator.
 
@@ -44,7 +44,7 @@ Durable invalidation prevents reuse through the normal freshness gate, resolutio
 
 Hydration without complete principal, room, event, and MXC identity may return freshly downloaded content to the current call, but it cannot read or populate the durable cache.
 
-Every durable plaintext hit revalidates the requesting event's surviving room-scoped MXC reference, indexed payload identity, non-state status, explicit room scope, and current sidecar metadata.
+Every durable plaintext hit joins the requesting event to its surviving principal- and room-scoped MXC reference, then revalidates the decoded payload's non-state status, explicit room scope, and current sidecar metadata.
 
 Redaction runs in the same database transaction as event, dependent-edit, thread-index, edit-index, and reference removal.
 
