@@ -1,87 +1,83 @@
 # Durable terminal delivery
 
-MindRoom streams a response by sending a placeholder and editing it repeatedly.
-The final edit publishes the committed response body and terminal stream status.
+MindRoom streams a response by sending a visible placeholder and editing it as output arrives.
+The terminal edit publishes the committed response body and completed stream status.
 Matrix can temporarily reject that edit during limited-sync recovery or a transport outage.
 
-Durable terminal delivery makes a committed terminal edit eventual instead of leaving the user with a partial stream.
+Durable terminal delivery keeps that exact committed edit retryable without creating a second persistence authority.
 
-## Authority
+## Canonical authority
 
-`mindroom.terminal_delivery` is the single authority for record precedence, retry scheduling, transport, redaction ordering, and success-only lifecycle progress.
-`mindroom.delivery_gateway` builds and freezes the exact Matrix edit before asking that authority to commit it.
-`mindroom.bot` owns the authority's startup, sync wakeups, and shutdown.
+The existing `TurnRecord` is the only durable authority for a response turn.
+An optional `TerminalEditCheckpoint` on that record freezes the exact prepared Matrix content, stable transaction ID, response identity, target-placeholder fact, and retry-safe lifecycle progress.
+The same record's `response_event_id` identifies the visible event to edit.
 
-Only successful terminal edits of an existing visible event enter the durable path.
-Failed or cancelled model runs and first sends without a visible event keep their ordinary failure behavior.
+`mindroom.delivery_gateway` prepares the complete edit before committing it.
+`mindroom.turn_store` validates ownership and mutates the canonical turn through the handled-turn ledger.
+`mindroom.terminal_delivery` coordinates Matrix transport, lifecycle convergence, and retries for checkpoints already stored on those records.
+`mindroom.bot` starts and stops that coordinator and wakes it after Matrix sync state advances.
+
+Only a completed edit of an existing visible response enters this path.
+First sends, empty terminal bodies, unavailable-client failures, failed model runs, and cancelled model runs keep their ordinary behavior.
 
 ## Commit and retry
 
-The exact prepared Matrix payload is persisted before the first transport attempt.
-This preparation includes any large-message sidecar reference, so a retry never uploads the body again.
-Every revision has one deterministic Matrix transaction ID, and every retry reuses that ID and the persisted payload.
+The gateway prepares the complete Matrix edit before the first transport attempt.
+That prepared content already includes any large-message reference, so retries reuse the same content without uploading the body again.
+A deterministic transaction ID is derived from the response owner, source event, correlation, target event, and exact prepared content.
+Every attempt reuses that transaction ID and content.
 
-Each delivery row has an independent JSON file written with an fsynced temporary file, atomic replacement, and directory fsync.
-Store mutations persist only the affected row and publish it to process memory only after the write succeeds.
-A failed write therefore leaves both durable and in-memory state unchanged.
+Checkpoint commit atomically marks the canonical turn completed, records its visible response event, and stores the frozen checkpoint in the handled-turn ledger before Matrix transport begins.
+The ledger writes the transaction to disk before publishing it to shared process memory.
+A failed write therefore does not publish a new in-memory checkpoint.
+Disk mutations are allowed to finish before caller cancellation propagates.
 
-Rows have no durable attempt lease.
-One process owns one retry loop, and the stable transaction ID makes replay after a crash safe.
-Due rows are selected round-robin across rooms and assigned to at most eight workers.
-Each worker serializes one room at a time, while unrelated rooms continue independently and every row already due remains eligible for the same drain.
-The retry loop immediately scans again after productive drains, so work that became due during a drain does not wait for the poll interval.
-Deferred rows retry indefinitely with bounded exponential backoff.
-Wakeups after sync recovery reduce latency, while periodic polling preserves correctness when a wakeup is missed.
+The coordinator scans the unique canonical `TurnRecord` values that still contain checkpoints.
+It attempts up to eight checkpoints concurrently and serializes work that shares a canonical turn or visible target.
+Matrix readiness gates transport.
+Successful sync responses wake the worker, and periodic scans preserve progress when no wakeup arrives.
+There is no retry-count or age limit that silently abandons a committed terminal edit.
 
-## Identity and precedence
+## Identity and supersession
 
-The delivery ID is derived from the entity, room, source event, and response correlation, independently of the mutable visible target event.
-The original target event and whether it was a placeholder are frozen in the row.
-Before creating a replay placeholder, response execution looks up pending and settled durable ownership and returns the original target without rerunning model or delivery work.
-Re-entering the same response correlation therefore reuses the existing frozen row without rebuilding content or resetting attempts.
-A newer response correlation for the same visible target publishes the next revision and immediately supersedes the old in-memory authority.
-Target-scoped coordinator locks prevent old and new correlations from editing the same Matrix event out of order.
-Startup resolves crash-left same-target siblings to the highest durable revision before any retry.
-Every attempt and settlement revalidates its exact revision, so stale work cannot publish or delete its replacement.
+Replay lookup succeeds only when every candidate source ID resolves to the same canonical record with an actual terminal checkpoint.
+A completed turn without a checkpoint does not short-circuit response execution.
+When lookup succeeds, response execution reuses the checkpoint's original visible target and placeholder fact without rerunning model or delivery work.
+
+Committing the same transaction again is idempotent.
+A different checkpoint for the same turn is rejected while the current checkpoint remains authoritative.
+When a different turn claims the same visible target, one atomic ledger transaction clears all previous target owners and installs the new checkpoint.
+Attempts, lifecycle updates, and checkpoint clearing compare the expected transaction ID, so stale work cannot mutate a replacement.
 
 ## Redaction
 
-Source and target redactions are durable tombstones.
-A tombstoned source prevents a later record from recreating its answer.
-Redaction announces itself before waiting for an in-flight attempt, and the attempt revalidates immediately before transport.
-Before writing the authoritative TurnStore tombstone, redaction writes a source-keyed barrier row through the same atomic durable writer as terminal rows.
-Recording, selecting, and attempting terminal work all consult these barriers after startup loading.
-The barrier survives TurnStore failure and process restart, and background reconciliation retries the tombstone before removing matching terminal rows and then the barrier.
-The barrier is only a failure-window write-ahead fence and is deleted once TurnStore owns the tombstone.
-Malformed barrier siblings make terminal delivery not ready without hiding valid rows or barriers.
-Failure to persist a new barrier makes terminal delivery not ready for the rest of that process, while the process-local redaction announcement continues blocking sends.
-If neither the barrier store nor TurnStore can write, no redaction state reached durable storage and safety cannot be carried across process loss.
-The same authority lock gives the tombstone, regeneration, transport, and settlement one durable commit order.
-An attempt that already crossed its final check commits before the tombstone; every other attempt observes the redaction announcement or tombstone and stops.
+Source redactions and response-target redactions use the same canonical `TurnStore` transaction path as checkpoint updates.
+The coordinator holds the affected turn and event locks while the durable mutation runs.
+
+Redacting a source tombstones that source on its canonical record and clears the record's checkpoint in the same transaction.
+Redacting a visible response target clears that target and checkpoint from every canonical owner and creates a tombstone for the redacted event in the same transaction.
+This ordering prevents replay from recreating a redacted answer and prevents an outstanding checkpoint from editing a redacted target.
+Cached Matrix history is sanitized after the durable redaction attempt.
 
 ## Lifecycle progress
 
-Transport success is checkpointed separately from response lifecycle work.
-The after-response hook is claimed before invocation and is therefore explicitly at-most-once across a crash.
-Interactive registration and thread summaries use stable idempotency identities and are checkpointed only after their observable work succeeds.
-Interactive persistence failures and Matrix reaction failures raise back to the authority instead of being logged as success.
-Durable thread-summary execution is awaited, uses a deterministic Matrix transaction ID, and treats history, generation, or send failure as retryable.
-The exact frozen summary bypasses later volatile eligibility checks, and its delivered message count advances only after Matrix accepts the frozen payload.
-One outstanding frozen summary owns its thread until delivery succeeds or its row is removed, preventing concurrent responses from preparing competing summaries.
-Once transport and all lifecycle steps are settled, the row remains as a receipt until the outer handled-turn ledger is durably flushed for every source.
+After Matrix accepts the exact edit, the coordinator notifies the conversation cache and converges the checkpointed response effects.
+It durably claims the after-response hook before invocation, which makes that hook at most once across retries and restarts.
+Hook failures are logged after the claim and are not retried.
 
-Shutdown cancels the retry loop and its shielded settlement batch.
-Cancellation propagates through stalled transport and lifecycle hooks, while the durable row retains the progress needed for restart recovery.
+Interactive registration uses a deterministic idempotency key derived from the terminal transaction.
+The checkpoint records interactive completion only after registration succeeds.
+Registration failure leaves the checkpoint available for another attempt.
+The checkpoint is cleared only after Matrix delivery, the after-response claim, and any required interactive registration have converged.
+
+Thread summaries, run-metadata linkage, and memory persistence remain on the ordinary best-effort post-response path.
+They are not frozen into the terminal checkpoint and are not replayed by the terminal coordinator.
 
 ## Recovery and cleanup
 
-Startup loads every valid pending row.
-A startup reconciliation retries every surviving redaction barrier before terminal delivery becomes eligible.
-A malformed individual row is dropped without discarding valid siblings.
-An unreadable row propagates its I/O failure instead of publishing an incomplete in-memory snapshot.
-Stale-stream cleanup skips visible events still owned by durable terminal delivery, so it cannot overwrite a committed answer with an interruption notice.
+Startup warms the existing handled-turn ledger, then the coordinator scans its outstanding checkpoints.
+No terminal-specific store is loaded or reconciled.
+Stale-stream cleanup excludes visible targets still named by checkpoints, so it cannot overwrite a committed answer with an interruption notice.
 
-## Retention
-
-Rows remain until settled delivery is reflected in the handled-turn ledger, superseded by a newer response, or invalidated by source or target redaction.
-No retry or age budget silently abandons a committed answer.
+The checkpoint remains on its canonical turn until delivery and required checkpointed lifecycle progress converge, another turn supersedes its visible target, or source or target redaction invalidates it.
+Clearing the checkpoint leaves the ordinary handled `TurnRecord` as the durable response outcome.

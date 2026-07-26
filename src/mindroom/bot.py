@@ -603,7 +603,7 @@ class AgentBot:
         )
 
     def _terminal_delivery_ready(self) -> bool:
-        """Return whether durable terminal delivery may talk to Matrix right now."""
+        """Return whether TurnRecord checkpoint retries may talk to Matrix."""
         return (
             self.running
             and not self._sync_shutting_down
@@ -612,7 +612,7 @@ class AgentBot:
         )
 
     def pending_terminal_delivery_event_ids(self, room_id: str | None = None) -> frozenset[str]:
-        """Return visible event IDs a durable terminal delivery still owns for this bot."""
+        """Return visible event IDs owned by outstanding TurnRecord checkpoints."""
         return self._terminal_delivery_coordinator.pending_target_event_ids(room_id)
 
     async def _wait_until_coalesced_dispatch_allowed(self, key: CoalescingKey) -> None:
@@ -1199,7 +1199,7 @@ class AgentBot:
         if first_sync_response or has_deferred_overdue_tasks():
             self._maybe_start_deferred_overdue_task_drain()
 
-        # Applied sync state may unblock a previously deferred terminal edit.
+        # Applied sync state may unblock a deferred TurnRecord checkpoint.
         self._terminal_delivery_coordinator.wake(reason="sync_response_applied")
 
     async def _on_sync_response(self, _response: nio.SyncResponse | nio.SlidingSyncResponse) -> None:

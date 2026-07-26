@@ -352,7 +352,7 @@ class DeliveryGateway:
         self,
         identity: ResponseIdentity,
     ) -> PendingTerminalDelivery | None:
-        """Return durable target ownership for one canonical response identity."""
+        """Return target facts only when a TurnRecord checkpoint owns this identity."""
         return await self.deps.terminal_delivery_coordinator.owned_delivery(identity)
 
     @staticmethod
@@ -491,7 +491,7 @@ class DeliveryGateway:
         extra_content: dict[str, Any] | None,
         interactive_metadata: interactive.InteractiveMetadata | None,
     ) -> TerminalDeliveryCommit:
-        """Freeze, persist, and immediately attempt one terminal edit."""
+        """Freeze and commit one terminal edit on its canonical TurnRecord."""
         client = self.deps.runtime.client
         if client is None or not body.strip():
             return TerminalDeliveryCommit(
