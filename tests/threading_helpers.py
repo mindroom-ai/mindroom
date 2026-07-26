@@ -358,7 +358,7 @@ def _conversation_runtime_config() -> Config:
     )
 
 
-async def _assert_thread_read_guard_rejects_cache_when_unknown_live_mutation_races_fetch(  # noqa: PLR0915
+async def _assert_thread_read_guard_retries_when_unknown_live_mutation_races_fetch(  # noqa: PLR0915
     tmp_path: Path,
     *,
     read_thread: Callable[[MatrixConversationCache, str, str], Coroutine[Any, Any, ThreadHistoryResult]],

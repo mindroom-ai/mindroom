@@ -30,7 +30,7 @@ from mindroom.matrix.thread_diagnostics import (
 from tests.event_cache_test_support import replace_thread_unconditionally as _replace_thread
 from tests.threading_helpers import (
     ThreadingBehaviorTestBase,
-    _assert_thread_read_guard_rejects_cache_when_unknown_live_mutation_races_fetch,
+    _assert_thread_read_guard_retries_when_unknown_live_mutation_races_fetch,
     _bind_owned_runtime_support,
     _close_bound_runtime_support,
     _conversation_runtime,
@@ -1621,7 +1621,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         tmp_path: Path,
     ) -> None:
         """A thread history fetched before room invalidation must reconstruct again before validation."""
-        await _assert_thread_read_guard_rejects_cache_when_unknown_live_mutation_races_fetch(
+        await _assert_thread_read_guard_retries_when_unknown_live_mutation_races_fetch(
             tmp_path,
             read_thread=MatrixConversationCache.get_thread_history,
             force_refetch_reason="test_force_thread_history_refetch",
@@ -1629,12 +1629,12 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         )
 
     @pytest.mark.asyncio
-    async def test_dispatch_thread_history_guard_rejects_cache_when_unknown_live_mutation_races_fetch(
+    async def test_dispatch_thread_history_guard_retries_when_unknown_live_mutation_races_fetch(
         self,
         tmp_path: Path,
     ) -> None:
-        """A dispatch history fetched before room invalidation must not validate stale cache."""
-        await _assert_thread_read_guard_rejects_cache_when_unknown_live_mutation_races_fetch(
+        """A dispatch history fetched before room invalidation must reconstruct again before validation."""
+        await _assert_thread_read_guard_retries_when_unknown_live_mutation_races_fetch(
             tmp_path,
             read_thread=MatrixConversationCache.get_dispatch_thread_history,
             force_refetch_reason="test_force_dispatch_history_refetch",
