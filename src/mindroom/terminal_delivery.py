@@ -423,6 +423,7 @@ class TerminalDeliveryCoordinator:
                 response_text=checkpoint.response_text,
                 response_event_id=cast("str", claimed.response_event_id),
                 delivery_kind="edited",
+                continue_on_cancelled=True,
             )
         except asyncio.CancelledError:
             raise
@@ -507,7 +508,7 @@ async def _durable_call[ResultT](
         return await asyncio.shield(writer)
     except asyncio.CancelledError:
         while not writer.done():
-            with contextlib.suppress(asyncio.CancelledError):
+            with contextlib.suppress(asyncio.CancelledError, Exception):
                 await asyncio.shield(writer)
         with contextlib.suppress(Exception):
             writer.result()

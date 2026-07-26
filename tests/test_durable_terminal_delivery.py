@@ -370,6 +370,7 @@ async def test_accepted_edit_before_clear_reuses_tx_and_claims_hook_once(tmp_pat
     assert send.await_count == 2
     assert send.await_args_list[0].kwargs["transaction_id"] == send.await_args_list[1].kwargs["transaction_id"]
     assert hooks.emit_after_response.await_count == 1
+    assert hooks.emit_after_response.await_args.kwargs["continue_on_cancelled"] is True
     assert effects.keys[0] == effects.keys[1]
     assert store.terminal_checkpoint_records() == ()
 
@@ -408,6 +409,32 @@ async def test_cancelled_checkpoint_writer_drains_without_network_or_stale_write
 
     send.assert_not_awaited()
     assert len(store.terminal_checkpoint_records()) == 1
+
+
+@pytest.mark.asyncio
+async def test_cancelled_checkpoint_writer_failure_preserves_caller_cancellation(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    coordinator, _hooks, _effects = _coordinator(store)
+    writer_started = threading.Event()
+    writer_release = threading.Event()
+
+    def blocked_failure(*_args: object, **_kwargs: object) -> object:
+        writer_started.set()
+        assert writer_release.wait(timeout=5)
+        message = "disk full"
+        raise OSError(message)
+
+    with patch.object(store, "commit_terminal_checkpoint", side_effect=blocked_failure):
+        task = asyncio.create_task(coordinator.commit_and_attempt(_intent()))
+        assert await asyncio.to_thread(writer_started.wait, 5)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+        writer_release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
 
 
 @pytest.mark.asyncio
