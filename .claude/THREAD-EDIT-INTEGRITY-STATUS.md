@@ -1,17 +1,17 @@
 # Thread edit integrity gate status
 
-Updated 2026-07-26 after correcting malformed encrypted cache/scan ancestry, invalid point ancestry, and unsupported event-family membership.
+Updated 2026-07-26 after correcting invalid batch sources and forged cold-scan replacements.
 
 ## Exact target
 
 - PR: `mindroom-ai/mindroom#1641`
 - Branch: `fix/thread-edit-integrity`
-- Latest production commit: `aab24ab75fd7905e6f4f22ed673d3f9b32415076`
+- Latest production commit: `9dec1ba8b30a5d5f220965e9e15f3353d293d754`
 - Current base and merge base: `e95fbe9a4bc069340fd36f333f3d7424657e1056`
 - Latest integration commit: `6a7b3f473b089e283648cdc392df6e4fbf28b801`
-- Latest pushed code head: `aab24ab75fd7905e6f4f22ed673d3f9b32415076`.
+- Latest pushed code head: `9dec1ba8b30a5d5f220965e9e15f3353d293d754`.
 - This crash-handoff update will be the docs-only successor; resolve local, remote, and PR heads after it is pushed before counting a gate.
-- Commits `7a0c2f118`, `d0897e9a6`, `e1355eea8`, and `aab24ab75` are pushed and replace every earlier exact-head gate.
+- Commit `9dec1ba8b` is pushed and replaces every earlier exact-head gate.
 - The tracked tree is clean except three user-owned untracked task notes.
 - Resolve local, remote, and PR heads before counting any exact-head gate.
 - Resolve and compare local, origin, and GitHub heads before counting any gate.
@@ -68,6 +68,9 @@ Updated 2026-07-26 after correcting malformed encrypted cache/scan ancestry, inv
 - `aab24ab75` requires canonical valid-relation admission before durable thread indexing and opaque room-scan retention.
 - `aab24ab75` reuses the exact point-response validator in conversation ancestry and rejects unsupported non-message event families from canonical explicit membership.
 - Raw-only non-message rows remain cacheable and no longer poison otherwise valid thread snapshot certification.
+- `9dec1ba8b` requires canonical source validity before a supplied batch event can resolve membership or prove another event is a thread root.
+- `9dec1ba8b` filters cold-scan replacement candidates through the shared replacement validator before building a reusable snapshot.
+- Wrong-sender cold-scan edits remain non-visible and no longer force every later read back to the homeserver.
 
 ## Reconciled review status
 
@@ -125,7 +128,7 @@ Updated 2026-07-26 after correcting malformed encrypted cache/scan ancestry, inv
 - The latest malformed-relation correction adds `+10/-1` production lines, net `+9`.
 - The exact-lookup, explicit-thread, and incremental-reuse correction adds `+76/-25` production lines, net `+51`.
 - The exact-`fd48530f7` follow-up adds `+67/-24` production lines, net `+43`.
-- Production source against current `main` is now `+2085/-1190`, net `+895`.
+- Production source against current `main` is now `+2109/-1192`, net `+917`.
 
 ## Validation already completed
 
@@ -191,11 +194,16 @@ Updated 2026-07-26 after correcting malformed encrypted cache/scan ancestry, inv
 - Four new review claims failed before implementation; ten focused variants pass after `aab24ab75`, including SQLite and PostgreSQL.
 - The six-file event-cache, history, resolver, membership, and reaction owning selection passes `464` tests with zero skips.
 - Ruff, format, `ty`, Tach dependencies/interfaces, `git diff --check`, and normal commit hooks pass for `aab24ab75`.
+- Two fresh exact-`52cf2be07` reviewers found invalid supplied batch sources proving thread membership and wrong-sender cold-scan edits poisoning reusable snapshots.
+- All seven exact batch and scan variants failed before implementation and pass after `9dec1ba8b`.
+- The complete affected selection passes `509` tests across SQLite and PostgreSQL.
+- Ruff, format, `ty`, Tach dependencies/interfaces, all-file pre-commit, `git diff --check`, and commit hooks pass for `9dec1ba8b`.
+- Exact-`52cf2be07` full pytest passed `12188` tests with `54` skipped after normalizing terminal width; it is historical after the production correction.
 - Git author was verified as `Bas Nijholt <bas@nijho.lt>` before every new commit.
 
 ## Pending exact-head gates
 
-- Commit and push this crash-handoff successor after `aab24ab75`, then freeze its exact head.
+- Commit and push this crash-handoff successor after `9dec1ba8b`, then freeze its exact head.
 - Fresh CI must complete on the final exact head.
 - A fresh independent native Codex correctness review is required on the final exact head.
 - Exact-head PostgreSQL owning and stress selections are required.
