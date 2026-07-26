@@ -160,12 +160,21 @@ def test_stop_mindroom_targets_exact_process_group(
     process = FakeProcess()
     stack = object.__new__(ManagedTuwunelStack)
     stack._mindroom_process = process
-    signals: list[tuple[int, signal.Signals]] = []
-    monkeypatch.setattr("scripts.testing.fuzz_live_matrix.os.killpg", lambda pid, sig: signals.append((pid, sig)))
+    signals: list[tuple[int, signal.Signals | int]] = []
+
+    def killpg(pid: int, sent_signal: signal.Signals | int) -> None:
+        signals.append((pid, sent_signal))
+        if sent_signal == 0:
+            raise ProcessLookupError
+
+    monkeypatch.setattr("scripts.testing.fuzz_live_matrix.os.killpg", killpg)
 
     stack._stop_mindroom(kill=hard_kill)
 
-    assert signals == [(process.pid, expected_signal)]
+    expected_signals: list[tuple[int, signal.Signals | int]] = [(process.pid, expected_signal)]
+    if not hard_kill:
+        expected_signals.append((process.pid, 0))
+    assert signals == expected_signals
     assert process.waited
     assert stack._mindroom_process is None
 
@@ -250,7 +259,12 @@ def test_stop_mindroom_rejects_nonzero_graceful_exit(
 
     stack = object.__new__(ManagedTuwunelStack)
     stack._mindroom_process = FakeProcess()
-    monkeypatch.setattr(live_fuzz.os, "killpg", lambda _pid, _sig: None)
+
+    def killpg(_pid: int, sent_signal: signal.Signals | int) -> None:
+        if sent_signal == 0:
+            raise ProcessLookupError
+
+    monkeypatch.setattr(live_fuzz.os, "killpg", killpg)
 
     with pytest.raises(RuntimeError, match="graceful shutdown exited with status 3"):
         stack._stop_mindroom()
@@ -280,7 +294,12 @@ def test_stop_mindroom_accepts_sigint_exit_status(
 
     stack = object.__new__(ManagedTuwunelStack)
     stack._mindroom_process = FakeProcess()
-    monkeypatch.setattr(live_fuzz.os, "killpg", lambda _pid, _sig: None)
+
+    def killpg(_pid: int, sent_signal: signal.Signals | int) -> None:
+        if sent_signal == 0:
+            raise ProcessLookupError
+
+    monkeypatch.setattr(live_fuzz.os, "killpg", killpg)
 
     stack._stop_mindroom()
 
@@ -353,10 +372,61 @@ def test_stop_mindroom_rejects_exit_before_sigkill_delivery(
     assert stack._mindroom_process is None
 
 
-def test_stop_mindroom_rejects_non_sigkill_wait_status(
+def test_stop_mindroom_rejects_surviving_group_after_graceful_leader_exit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A delivered signal is not proof when wait reports a spontaneous exit."""
+    """A leader's SIGINT status cannot hide a surviving same-group child."""
+    group_alive = True
+    signals: list[signal.Signals | int] = []
+    monotonic_values = iter((0.0, 1.0, 1.0))
+
+    class FakeProcess:
+        pid = 4242
+
+        @staticmethod
+        def poll() -> None:
+            return None
+
+        @staticmethod
+        def wait(*, timeout: float) -> int:
+            assert timeout == 20
+            return 128 + signal.SIGINT
+
+    def killpg(_pid: int, sent_signal: signal.Signals | int) -> None:
+        nonlocal group_alive
+        signals.append(sent_signal)
+        if sent_signal == 0:
+            if group_alive:
+                return
+            raise ProcessLookupError
+        if sent_signal == signal.SIGKILL:
+            group_alive = False
+
+    stack = object.__new__(ManagedTuwunelStack)
+    stack._mindroom_process = FakeProcess()
+    monkeypatch.setattr(live_fuzz.os, "killpg", killpg)
+    monkeypatch.setattr(live_fuzz.time, "monotonic", lambda: next(monotonic_values))
+    monkeypatch.setattr(live_fuzz.time, "sleep", lambda _seconds: None)
+
+    with pytest.raises(RuntimeError, match="process group survived graceful SIGINT and required SIGKILL"):
+        stack._stop_mindroom()
+
+    assert signals == [
+        signal.SIGINT,
+        0,
+        signal.SIGKILL,
+        0,
+    ]
+    assert stack._mindroom_process is None
+
+
+@pytest.mark.parametrize("return_code", [7, 128 + signal.SIGKILL])
+def test_stop_mindroom_rejects_non_sigkill_wait_status(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    return_code: int,
+) -> None:
+    """Only direct-Popen SIGKILL status proves the managed hard-kill."""
 
     class FakeProcess:
         pid = 4242
@@ -368,13 +438,13 @@ def test_stop_mindroom_rejects_non_sigkill_wait_status(
         @staticmethod
         def wait(*, timeout: float) -> int:
             assert timeout == 10
-            return 7
+            return return_code
 
     stack = object.__new__(ManagedTuwunelStack)
     stack._mindroom_process = FakeProcess()
     monkeypatch.setattr(live_fuzz.os, "killpg", lambda _pid, _sig: None)
 
-    with pytest.raises(RuntimeError, match="hard kill exited with status 7"):
+    with pytest.raises(RuntimeError, match=f"hard kill exited with status {return_code}"):
         stack._stop_mindroom(kill=True)
 
     assert stack._mindroom_process is None

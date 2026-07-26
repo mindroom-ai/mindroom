@@ -63,6 +63,9 @@ MODEL_ID = "mindroom-live-fuzz"
 AGENT_NAME = "general"
 ROOM_KEY = "lobby"
 LIFECYCLE_COMMAND_TIMEOUT_SECONDS = 180.0
+_PROCESS_GROUP_GRACE_SECONDS = 1.0
+_PROCESS_GROUP_KILL_SECONDS = 10.0
+_PROCESS_GROUP_POLL_SECONDS = 0.05
 _STARTUP_MAINTENANCE_PHASES = frozenset(
     {
         "startup_maintenance.rooms_and_memberships",
@@ -1298,10 +1301,46 @@ def _hard_kill_mindroom_process(process: subprocess.Popen[str]) -> None:
         msg = f"MindRoom exited before managed SIGKILL delivery with status {return_code}"
         raise RuntimeError(msg) from exc
     return_code = process.wait(timeout=10)
-    expected_return_codes = {-int(signal.SIGKILL), 128 + int(signal.SIGKILL)}
-    if return_code not in expected_return_codes:
+    if return_code != -int(signal.SIGKILL):
         msg = f"MindRoom hard kill exited with status {return_code}"
         raise RuntimeError(msg)
+
+
+def _wait_for_process_group_exit(
+    process_group_id: int,
+    *,
+    timeout_seconds: float,
+) -> bool:
+    """Wait bounded time until no process remains in the managed group."""
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        try:
+            os.killpg(process_group_id, 0)
+        except ProcessLookupError:
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(_PROCESS_GROUP_POLL_SECONDS)
+
+
+def _cleanup_surviving_process_group(process_group_id: int) -> bool:
+    """Kill a group surviving graceful leader exit and report that cleanup was required."""
+    if _wait_for_process_group_exit(
+        process_group_id,
+        timeout_seconds=_PROCESS_GROUP_GRACE_SECONDS,
+    ):
+        return False
+    try:
+        os.killpg(process_group_id, signal.SIGKILL)
+    except ProcessLookupError:
+        return False
+    if not _wait_for_process_group_exit(
+        process_group_id,
+        timeout_seconds=_PROCESS_GROUP_KILL_SECONDS,
+    ):
+        msg = "MindRoom process group survived SIGKILL cleanup"
+        raise TimeoutError(msg)
+    return True
 
 
 def _attempt_cleanup(
@@ -2050,11 +2089,17 @@ class ManagedTuwunelStack:
                 self._mindroom_process = None
             msg = "MindRoom ignored SIGINT and required SIGKILL"
             raise TimeoutError(msg) from exc
-        self._mindroom_process = None
-        expected_return_codes = {0, -int(signal.SIGINT), 128 + int(signal.SIGINT)}
-        if return_code not in expected_return_codes:
-            msg = f"MindRoom graceful shutdown exited with status {return_code}"
-            raise RuntimeError(msg)
+        try:
+            required_group_kill = _cleanup_surviving_process_group(process.pid)
+            expected_return_codes = {0, -int(signal.SIGINT), 128 + int(signal.SIGINT)}
+            if return_code not in expected_return_codes:
+                msg = f"MindRoom graceful shutdown exited with status {return_code}"
+                raise RuntimeError(msg)
+            if required_group_kill:
+                msg = "MindRoom process group survived graceful SIGINT and required SIGKILL"
+                raise RuntimeError(msg)
+        finally:
+            self._mindroom_process = None
 
     def assert_mindroom_running(self) -> None:
         """Require the managed runtime to remain alive through final audit."""
