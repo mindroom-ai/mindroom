@@ -52,7 +52,15 @@ def _knowledge_search_tool_description(sources: tuple[KnowledgeSourceDescription
     for source in sources:
         description = source.description or "No description configured."
         lines.append(f"- {source.base_id}: {description}")
-    lines.append("Use this when the answer may depend on these sources.")
+    lines.extend(
+        [
+            "This list only describes sources available through search_knowledge_base.",
+            (
+                "Other tools may search other corpora; use search_memories for MindRoom memory "
+                "when that tool is available."
+            ),
+        ],
+    )
     return "\n".join(lines)
 
 

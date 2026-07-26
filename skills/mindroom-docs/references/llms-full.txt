@@ -9234,6 +9234,8 @@ For file-backed memory, `search_memories()` follows `memory.search.mode`.
 Keyword mode scans markdown files directly.
 Semantic mode searches the agent's file-memory scope through a lazy embedding index and falls back to keyword search when embeddings are unavailable.
 Result metadata includes `search_mode` so callers can tell which path produced the result.
+File memory is already searchable on demand through `search_memories()`.
+It is not currently listed as a source in `search_knowledge_base`, whose source list only describes the corpora available through that tool.
 
 ### Configuration
 
@@ -11185,6 +11187,8 @@ If you switch to `mem0`, add `MEMORY.md` back to `context_files` if you still wa
 The `openclaw_compat` preset already expands to native shell, coding, duckduckgo, website, browser, scheduler, sub-agent orchestration, and `matrix_message` tools (`attachments` is auto-implied by `matrix_message`), so listing those tools individually is not necessary.
 Copy or sync your OpenClaw files into `agents/openclaw/workspace/` before using this config so `context_files`, file memory, and `search_memories` read the same canonical workspace.
 Direct external edits to daily memory files are picked up lazily on the next semantic memory search.
+File memory is already searchable on demand through `search_memories`.
+It is not currently listed as a source in `search_knowledge_base`.
 Use `knowledge_bases` only for non-memory project documents that should be searchable as external knowledge.
 
 ## Recommended workspace layout
@@ -13501,6 +13505,8 @@ Set `include_entrypoint: true` only if you also want `MEMORY.md` returned by sea
 MindRoom already preloads `MEMORY.md` into the prompt, so the default avoids duplicate retrieval.
 Semantic mode applies to the agent's own file-memory scope.
 Team-visible file memory is still keyword searched.
+File memory is already searchable on demand through `search_memories`.
+It is not currently listed as a source in `search_knowledge_base`, whose source list only describes the corpora available through that tool.
 
 Per-agent override example:
 

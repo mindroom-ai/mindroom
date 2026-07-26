@@ -162,6 +162,8 @@ Set `include_entrypoint: true` only if you also want `MEMORY.md` returned by sea
 MindRoom already preloads `MEMORY.md` into the prompt, so the default avoids duplicate retrieval.
 Semantic mode applies to the agent's own file-memory scope.
 Team-visible file memory is still keyword searched.
+File memory is already searchable on demand through `search_memories`.
+It is not currently listed as a source in `search_knowledge_base`, whose source list only describes the corpora available through that tool.
 
 Per-agent override example:
 

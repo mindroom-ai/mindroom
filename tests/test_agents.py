@@ -3396,6 +3396,11 @@ def test_agent_knowledge_search_tool_description_lists_configured_sources(
         "- product: Product requirements, feature specs, roadmap notes, and user-facing behavior decisions."
         in description
     )
+    assert "This list only describes sources available through search_knowledge_base." in description
+    assert (
+        "Other tools may search other corpora; use search_memories for MindRoom memory when that tool is available."
+        in description
+    )
 
 
 def test_agent_knowledge_search_tool_description_preserves_colon_space_source_ids(

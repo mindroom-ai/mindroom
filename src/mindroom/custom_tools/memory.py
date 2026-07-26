@@ -149,13 +149,17 @@ class MemoryTools(Toolkit):
         """Search your memories for information relevant to a query.
 
         Use this when you need to recall previously stored facts, notes, or context.
+        For file memory, this searches configured Markdown paths
+        (default: memory/**/*.md) and falls back to keyword search when
+        semantic search is unavailable.
+        Returned memory IDs can be passed to get_memory, update_memory, or delete_memory.
 
         Args:
             query: What to search for in your memories.
             limit: Maximum number of results to return (default 5).
 
         Returns:
-            Formatted list of matching memories, or a message if none found.
+            Formatted list of matching memories and their IDs, or a message if none found.
 
         """
         try:

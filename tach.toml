@@ -3731,7 +3731,6 @@ expose = [
     "resolve_agent_execution",
     "resolve_agent_runtime",
     "resolve_knowledge_binding",
-    "resolve_knowledge_owner_bindings",
 ]
 from = ["mindroom.runtime_resolution"]
 

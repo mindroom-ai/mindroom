@@ -102,6 +102,8 @@ If you switch to `mem0`, add `MEMORY.md` back to `context_files` if you still wa
 The `openclaw_compat` preset already expands to native shell, coding, duckduckgo, website, browser, scheduler, sub-agent orchestration, and `matrix_message` tools (`attachments` is auto-implied by `matrix_message`), so listing those tools individually is not necessary.
 Copy or sync your OpenClaw files into `agents/openclaw/workspace/` before using this config so `context_files`, file memory, and `search_memories` read the same canonical workspace.
 Direct external edits to daily memory files are picked up lazily on the next semantic memory search.
+File memory is already searchable on demand through `search_memories`.
+It is not currently listed as a source in `search_knowledge_base`.
 Use `knowledge_bases` only for non-memory project documents that should be searchable as external knowledge.
 
 ## Recommended workspace layout
