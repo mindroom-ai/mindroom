@@ -541,6 +541,16 @@ class DockerProjectionManager:
                     ]
             config_data["agents"] = filtered_agents
 
+            raw_calls = config_data.get("calls")
+            if isinstance(raw_calls, dict):
+                calls = cast("dict[str, object]", raw_calls)
+                raw_call_agents = calls.get("agents")
+                if isinstance(raw_call_agents, dict):
+                    call_agents = cast("dict[str, object]", raw_call_agents)
+                    calls["agents"] = {
+                        name: profile for name, profile in call_agents.items() if name in filtered_agents
+                    }
+
         raw_knowledge_bases = config_data.get("knowledge_bases")
         if isinstance(raw_knowledge_bases, dict) and projected_knowledge_base_ids is not None:
             knowledge_bases = cast("dict[str, object]", raw_knowledge_bases)
