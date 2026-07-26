@@ -6,12 +6,13 @@ import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
+from mindroom.approval_events import valid_approval_replacement
 from mindroom.matrix.event_info import (
     EventInfo,
     event_source_is_timeline_in_room,
     event_source_matches_room,
 )
-from mindroom.matrix.media import event_source_supports_valid_thread_relations
+from mindroom.matrix.media import event_source_supports_valid_thread_relations, valid_room_message_replacement
 from mindroom.matrix.replacements import (
     ReplacementValidator,
     bundled_replacement_candidates,
@@ -29,6 +30,16 @@ _REDACTION_DEPENDENT_EDIT_TYPES = _EDITABLE_EVENT_TYPES | {"m.room.encrypted"}
 
 type _CachedEventValue = tuple[str, dict[str, Any]]
 type _CachedObservation = Literal["accept", "ignore", "conflict"]
+
+
+def _cached_bundled_replacement_validator(event: Mapping[str, Any]) -> ReplacementValidator | None:
+    """Return the exact visible-surface validator for one cached original."""
+    event_type = event.get("type")
+    if event_type == "m.room.message":
+        return valid_room_message_replacement
+    if event_type == "io.mindroom.tool_approval":
+        return valid_approval_replacement
+    return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,6 +132,7 @@ def _observe_cached_event(
         event,
         room_id=room_id,
         require_timeline=False,
+        bundled_validator=_cached_bundled_replacement_validator(event),
     )
 
 

@@ -453,7 +453,11 @@ async def _resolve_thread_history_from_event_sources_timed(
             if isinstance(candidate_id := candidate.get("event_id"), str)
         },
     )
-    room_event_sources, conflicting_event_ids = canonical_event_sources(event_sources, room_id=room_id)
+    room_event_sources, conflicting_event_ids = canonical_event_sources(
+        event_sources,
+        room_id=room_id,
+        replacement_validator=valid_room_message_replacement,
+    )
     redacted_event_ids |= conflicting_event_ids
     eligible_event_sources = [
         event_source
@@ -1921,6 +1925,7 @@ def _observe_scanned_room_message_identity(
         conflicting_event_ids,
         event_source,
         room_id=room_id,
+        bundled_validator=valid_room_message_replacement,
     )
     if transition == "conflict" and isinstance(event_id, str):
         scanned_message_sources.pop(event_id, None)
@@ -1988,6 +1993,7 @@ def _canonical_scanned_room_sources(
         scanned_message_sources.values(),
         room_id=room_id,
         known_conflicting_event_ids=conflicting_event_ids,
+        replacement_validator=valid_room_message_replacement,
     )
     canonical_by_event_id = {
         event_id: event_source

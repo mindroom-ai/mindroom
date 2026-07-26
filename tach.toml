@@ -349,7 +349,10 @@ depends_on = [
     "mindroom.matrix.event_info",
     "mindroom.matrix.visible_body",
 ]
-visibility = ["mindroom.approval_manager"]
+visibility = [
+    "mindroom.approval_manager",
+    "mindroom.matrix.cache.event_cache_events",
+]
 
 [[modules]]
 path = "mindroom.approval_transport"
@@ -1782,6 +1785,7 @@ depends_on = []
 [[modules]]
 path = "mindroom.matrix.cache.event_cache_events"
 depends_on = [
+    "mindroom.approval_events",
     "mindroom.matrix.event_info",
     "mindroom.matrix.media",
     "mindroom.matrix.replacements",

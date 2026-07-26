@@ -15,6 +15,7 @@ import pytest
 from nio.api import RelationshipType
 
 import mindroom.matrix.cache.sqlite_event_cache as event_cache_module
+from mindroom.approval_events import valid_approval_replacement
 from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -3537,6 +3538,163 @@ async def test_sparse_same_identity_refresh_preserves_cached_bundled_replacement
     )
     assert latest is not None
     assert latest["event_id"] == edit_id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("arrival_order", [("first", "second"), ("second", "first")])
+@pytest.mark.parametrize("scenario", ["event-id-tie", "timestamp", "malformed-newest"])
+async def test_duplicate_original_bundles_preserve_matrix_latest_valid_replacement(
+    event_cache: ConversationEventCache,
+    *,
+    scenario: str,
+    arrival_order: tuple[str, str],
+) -> None:
+    """Mutable aggregation refreshes must select the Matrix-latest valid replacement."""
+    room_id = "!room:localhost"
+    original_id = "$original:localhost"
+
+    def edit(event_id: str, body: str, timestamp: int, *, malformed: bool = False) -> dict[str, object]:
+        new_content = {"body": body} if malformed else {"body": body, "msgtype": "m.text"}
+        return {
+            "event_id": event_id,
+            "room_id": room_id,
+            "sender": "@user:localhost",
+            "origin_server_ts": timestamp,
+            "type": "m.room.message",
+            "content": {
+                "body": f"* {body}",
+                "msgtype": "m.text",
+                "m.new_content": new_content,
+                "m.relates_to": {"rel_type": "m.replace", "event_id": original_id},
+            },
+        }
+
+    if scenario == "event-id-tie":
+        first = edit("$z-edit:localhost", "Tie winner", 2000)
+        second = edit("$a-edit:localhost", "Tie loser", 2000)
+        expected_id, expected_body = "$z-edit:localhost", "Tie winner"
+    elif scenario == "timestamp":
+        first = edit("$newer-edit:localhost", "Timestamp winner", 3000)
+        second = edit("$older-edit:localhost", "Timestamp loser", 2000)
+        expected_id, expected_body = "$newer-edit:localhost", "Timestamp winner"
+    else:
+        first = edit("$valid-edit:localhost", "Valid fallback", 2000)
+        second = edit("$malformed-edit:localhost", "Malformed newest", 3000, malformed=True)
+        expected_id, expected_body = "$valid-edit:localhost", "Valid fallback"
+
+    payloads = {}
+    for name, bundled_edit in (("first", first), ("second", second)):
+        original = _clear_payload(original_id, body="Original", room_id=room_id)
+        original["unsigned"] = {"m.relations": {"m.replace": bundled_edit}}
+        payloads[name] = original
+
+    for name in arrival_order:
+        await event_cache.store_event(original_id, room_id, payloads[name])
+
+    cached = await event_cache.get_event(room_id, original_id)
+    assert cached is not None
+    latest = await event_cache.get_latest_edit(
+        room_id,
+        cached,
+        validator=valid_room_message_replacement,
+    )
+    assert latest is not None
+    assert (latest["event_id"], latest["content"]["m.new_content"]["body"]) == (
+        expected_id,
+        expected_body,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("arrival_order", [("first", "second"), ("second", "first")])
+async def test_duplicate_original_bundles_quarantine_conflicting_edit_identity(
+    event_cache: ConversationEventCache,
+    *,
+    arrival_order: tuple[str, str],
+) -> None:
+    """Mutable aggregation cannot let one edit event ID acquire two immutable payloads."""
+    room_id = "!room:localhost"
+    original_id = "$original:localhost"
+    edit_id = "$edit:localhost"
+    payloads = {}
+    for name, body in (("first", "First body"), ("second", "Conflicting body")):
+        original = _clear_payload(original_id, body="Original", room_id=room_id)
+        original["unsigned"] = {
+            "m.relations": {
+                "m.replace": _clear_payload(
+                    edit_id,
+                    body=body,
+                    room_id=room_id,
+                    edit_of=original_id,
+                    origin_server_ts=2000,
+                ),
+            },
+        }
+        payloads[name] = original
+
+    for name in arrival_order:
+        await event_cache.store_event(original_id, room_id, payloads[name])
+
+    cached = await event_cache.get_event(room_id, original_id)
+    assert cached is not None
+    assert (
+        await event_cache.get_latest_edit(
+            room_id,
+            cached,
+            validator=valid_room_message_replacement,
+        )
+        is None
+    )
+    assert await event_cache.redacted_event_ids(room_id, {edit_id}) == {edit_id}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("arrival_order", [("valid", "malformed"), ("malformed", "valid")])
+async def test_duplicate_approval_bundles_fall_back_from_malformed_newest(
+    event_cache: ConversationEventCache,
+    *,
+    arrival_order: tuple[str, str],
+) -> None:
+    """Approval aggregation refreshes must use the approval surface validator."""
+    room_id = "!room:localhost"
+    original_id = "$approval:localhost"
+    original = {
+        "event_id": original_id,
+        "room_id": room_id,
+        "sender": "@bot:localhost",
+        "origin_server_ts": 1000,
+        "type": "io.mindroom.tool_approval",
+        "content": {"status": "pending"},
+    }
+
+    def edit(event_id: str, status: str, timestamp: int) -> dict[str, object]:
+        return {
+            **original,
+            "event_id": event_id,
+            "origin_server_ts": timestamp,
+            "content": {
+                "m.new_content": {"status": status},
+                "m.relates_to": {"rel_type": "m.replace", "event_id": original_id},
+            },
+        }
+
+    edits = {
+        "valid": edit("$valid:localhost", "approved", 2000),
+        "malformed": edit("$malformed:localhost", "unknown", 3000),
+    }
+    for name in arrival_order:
+        payload = {**original, "unsigned": {"m.relations": {"m.replace": edits[name]}}}
+        await event_cache.store_event(original_id, room_id, payload)
+
+    cached = await event_cache.get_event(room_id, original_id)
+    assert cached is not None
+    latest = await event_cache.get_latest_edit(
+        room_id,
+        cached,
+        validator=valid_approval_replacement,
+    )
+    assert latest is not None
+    assert latest["event_id"] == "$valid:localhost"
 
 
 @pytest.mark.asyncio

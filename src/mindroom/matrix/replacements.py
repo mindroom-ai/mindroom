@@ -152,8 +152,10 @@ def _with_preserved_valid_bundle(
     candidate: Mapping[str, Any],
     *,
     room_id: str | None,
+    validator: ReplacementValidator | None,
+    conflicting_event_ids: set[str],
 ) -> dict[str, Any]:
-    """Preserve valid replacement aggregation when a duplicate view omits it."""
+    """Reconcile mutable replacement aggregation without weakening immutable identity."""
     if (
         existing.get(PROVISIONAL_OUTBOUND_KEY) is True
         or candidate.get(PROVISIONAL_OUTBOUND_KEY) is True
@@ -163,25 +165,60 @@ def _with_preserved_valid_bundle(
     existing_unsigned = existing.get("unsigned")
     existing_relations = existing_unsigned.get("m.relations") if isinstance(existing_unsigned, Mapping) else None
     existing_bundle = existing_relations.get("m.replace") if isinstance(existing_relations, Mapping) else None
-    if not isinstance(existing_bundle, Mapping) or not any(
-        _valid_bundled_identity_observation(existing, bundled, room_id=room_id)
+    existing_candidates = [
+        bundled
         for bundled in bundled_replacement_candidates(existing)
-    ):
+        if _valid_bundled_identity_observation(existing, bundled, room_id=room_id)
+    ]
+    if not isinstance(existing_bundle, Mapping) or not existing_candidates:
         return dict(candidate)
-    if any(
-        _valid_bundled_identity_observation(candidate, bundled, room_id=room_id)
+    candidate_candidates = [
+        bundled
         for bundled in bundled_replacement_candidates(candidate)
-    ):
+        if _valid_bundled_identity_observation(candidate, bundled, room_id=room_id)
+    ]
+    if validator is None and candidate_candidates:
         return dict(candidate)
+    if validator is None:
+        selected_bundle: Mapping[str, Any] | None = existing_bundle
+    else:
+        valid_candidates_by_id, bundled_conflicts = _replacement_candidates_by_identity(
+            [bundled for bundled in (*existing_candidates, *candidate_candidates) if validator(bundled)],
+            room_id=room_id,
+        )
+        conflicting_event_ids.update(bundled_conflicts)
+        valid_candidates = sorted(
+            (bundled for event_id, bundled in valid_candidates_by_id.items() if event_id not in bundled_conflicts),
+            key=itemgetter("origin_server_ts", "event_id"),
+            reverse=True,
+        )
+        selected_bundle = (
+            None
+            if not valid_candidates
+            else (
+                valid_candidates[0]
+                if len(valid_candidates) == 1
+                else {"latest_event": valid_candidates[0], "event": valid_candidates[1]}
+            )
+        )
 
     merged = deepcopy(dict(candidate))
     candidate_unsigned = merged.get("unsigned")
     unsigned = dict(candidate_unsigned) if isinstance(candidate_unsigned, Mapping) else {}
     candidate_relations = unsigned.get("m.relations")
     relations = dict(candidate_relations) if isinstance(candidate_relations, Mapping) else {}
-    relations["m.replace"] = deepcopy(existing_bundle)
-    unsigned["m.relations"] = relations
-    merged["unsigned"] = unsigned
+    if selected_bundle is None:
+        relations.pop("m.replace", None)
+    else:
+        relations["m.replace"] = deepcopy(selected_bundle)
+    if relations:
+        unsigned["m.relations"] = relations
+    else:
+        unsigned.pop("m.relations", None)
+    if unsigned:
+        merged["unsigned"] = unsigned
+    else:
+        merged.pop("unsigned", None)
     return merged
 
 
@@ -193,6 +230,7 @@ def observe_event_representation(
     room_id: str | None,
     container: Mapping[str, Any] | None = None,
     require_timeline: bool = True,
+    bundled_validator: ReplacementValidator | None = None,
 ) -> _EventRepresentationObservation:
     """Record one room-scoped immutable event view and reject true contradictions."""
     event_id = candidate.get("event_id")
@@ -217,7 +255,15 @@ def observe_event_representation(
         conflicting_event_ids.add(event_id)
     elif transition == "accept":
         observed[event_id] = (
-            dict(candidate) if existing is None else _with_preserved_valid_bundle(existing, candidate, room_id=room_id)
+            dict(candidate)
+            if existing is None
+            else _with_preserved_valid_bundle(
+                existing,
+                candidate,
+                room_id=room_id,
+                validator=bundled_validator,
+                conflicting_event_ids=conflicting_event_ids,
+            )
         )
     return transition
 
@@ -247,6 +293,7 @@ def canonical_event_sources(
     *,
     room_id: str | None,
     known_conflicting_event_ids: Collection[str] = (),
+    replacement_validator: ReplacementValidator | None = None,
 ) -> tuple[list[dict[str, Any]], frozenset[str]]:
     """Return one final room-scoped top-level view per event ID after observing bundles."""
     sources = list(event_sources)
@@ -260,6 +307,7 @@ def canonical_event_sources(
             conflicting_event_ids,
             event_source,
             room_id=room_id,
+            bundled_validator=replacement_validator,
         )
         event_id = event_source.get("event_id")
         if (

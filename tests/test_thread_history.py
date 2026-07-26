@@ -2077,6 +2077,124 @@ class TestThreadHistory:
         ]
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("arrival_order", [("first", "second"), ("second", "first")])
+    @pytest.mark.parametrize("scenario", ["event-id-tie", "timestamp", "malformed-newest"])
+    async def test_duplicate_original_bundles_select_matrix_latest_valid_replacement(
+        self,
+        scenario: str,
+        arrival_order: tuple[str, str],
+    ) -> None:
+        """Full resolution must reconcile mutable bundles independently of arrival order."""
+        room_id = "!room:localhost"
+        root_id = "$thread_root"
+        sender = "@alice:localhost"
+
+        def edit(event_id: str, body: str, timestamp: int, *, malformed: bool = False) -> dict[str, object]:
+            new_content = {"body": body} if malformed else {"body": body, "msgtype": "m.text"}
+            return {
+                "event_id": event_id,
+                "room_id": room_id,
+                "sender": sender,
+                "origin_server_ts": timestamp,
+                "type": "m.room.message",
+                "content": {
+                    "body": f"* {body}",
+                    "msgtype": "m.text",
+                    "m.new_content": new_content,
+                    "m.relates_to": {"rel_type": "m.replace", "event_id": root_id},
+                },
+            }
+
+        if scenario == "event-id-tie":
+            first = edit("$z-edit", "Tie winner", 2000)
+            second = edit("$a-edit", "Tie loser", 2000)
+            expected_id, expected_body = "$z-edit", "Tie winner"
+        elif scenario == "timestamp":
+            first = edit("$newer-edit", "Timestamp winner", 3000)
+            second = edit("$older-edit", "Timestamp loser", 2000)
+            expected_id, expected_body = "$newer-edit", "Timestamp winner"
+        else:
+            first = edit("$valid-edit", "Valid fallback", 2000)
+            second = edit("$malformed-edit", "Malformed newest", 3000, malformed=True)
+            expected_id, expected_body = "$valid-edit", "Valid fallback"
+
+        roots = {}
+        for name, bundled_edit in (("first", first), ("second", second)):
+            roots[name] = {
+                "event_id": root_id,
+                "room_id": room_id,
+                "sender": sender,
+                "origin_server_ts": 1000,
+                "type": "m.room.message",
+                "content": {"body": "Original", "msgtype": "m.text"},
+                "unsigned": {"m.relations": {"m.replace": bundled_edit}},
+            }
+
+        resolution = await _resolve_thread_history_from_event_sources_timed(
+            AsyncMock(),
+            room_id=room_id,
+            thread_id=root_id,
+            event_sources=[roots[name] for name in arrival_order],
+            hydrate_sidecars=False,
+            event_cache=_event_cache(),
+        )
+
+        assert [(message.event_id, message.body, message.latest_event_id) for message in resolution.messages] == [
+            (root_id, expected_body, expected_id),
+        ]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("arrival_order", [("first", "second"), ("second", "first")])
+    async def test_duplicate_original_bundles_reject_conflicting_edit_identity(
+        self,
+        arrival_order: tuple[str, str],
+    ) -> None:
+        """Full resolution cannot let one bundled event ID acquire two immutable payloads."""
+        room_id = "!room:localhost"
+        root_id = "$thread_root"
+        sender = "@alice:localhost"
+        roots = {}
+        for name, body in (("first", "First body"), ("second", "Conflicting body")):
+            roots[name] = {
+                "event_id": root_id,
+                "room_id": room_id,
+                "sender": sender,
+                "origin_server_ts": 1000,
+                "type": "m.room.message",
+                "content": {"body": "Original", "msgtype": "m.text"},
+                "unsigned": {
+                    "m.relations": {
+                        "m.replace": {
+                            "event_id": "$edit",
+                            "room_id": room_id,
+                            "sender": sender,
+                            "origin_server_ts": 2000,
+                            "type": "m.room.message",
+                            "content": {
+                                "body": f"* {body}",
+                                "msgtype": "m.text",
+                                "m.new_content": {"body": body, "msgtype": "m.text"},
+                                "m.relates_to": {"rel_type": "m.replace", "event_id": root_id},
+                            },
+                        },
+                    },
+                },
+            }
+
+        resolution = await _resolve_thread_history_from_event_sources_timed(
+            AsyncMock(),
+            room_id=room_id,
+            thread_id=root_id,
+            event_sources=[roots[name] for name in arrival_order],
+            hydrate_sidecars=False,
+            event_cache=_event_cache(),
+        )
+
+        assert [(message.event_id, message.body, message.latest_event_id) for message in resolution.messages] == [
+            (root_id, "Original", root_id),
+        ]
+
+    @pytest.mark.asyncio
     async def test_thread_resolution_ignores_durably_redacted_bundled_edit(
         self,
         event_cache: ConversationEventCache,

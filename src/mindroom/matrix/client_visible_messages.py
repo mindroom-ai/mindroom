@@ -458,6 +458,7 @@ async def resolve_latest_visible_messages(
     canonical_sources, _conflicting_event_ids = replacements.canonical_event_sources(
         (normalize_nio_event_for_cache(event) for event in events),
         room_id=room_id,
+        replacement_validator=valid_room_message_replacement,
     )
     for event_source in canonical_sources:
         event = parse_room_message_event_source(event_source)
