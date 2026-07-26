@@ -23,7 +23,7 @@ This change does not remove the bounded second reconstruction attempt after a gu
 This change does not make stale history acceptable to dispatch or strict reads.
 This change does not cache transient homeserver results outside the durable cache.
 This change does not add terminal repair suppression that can prevent recovery after a long outage.
-This change does not alter thread-candidate demotion in `conversation_resolver.py`.
+This change does not promote an unproven thread candidate without a successful strict proof.
 
 ## Read and Refill Boundary
 
@@ -53,11 +53,12 @@ Each cache hit, repair owner, and repair joiner emits exactly one `matrix_cache_
 The event uses the current caller's label and coordinator wait measurement.
 Caller-level code derives `cache_hit`, `cache_hit_after_repair_conflict`, or `full_scan` from existing result diagnostics without adding a second telemetry-only result type.
 Owner-side logging that would duplicate the caller-level event is removed.
+Direct source callers outside shared repair ownership report at the source boundary when they provide a caller label.
 
 ## Failure and Backoff Policy
 
 A usable cache result clears the repair contract's failure count and retry deadline.
-An exception, `HARD_FAILURE`, or exhausted retryable conflict increments a capped exponential backoff.
+An exception or `HARD_FAILURE` increments a capped exponential backoff.
 The first delay remains one second and later delays double to a 30-second default cap.
 The backoff stores no thread history.
 `WRITES_UNAVAILABLE` after a successful homeserver fetch is a normal uncached completion and does not arm failure backoff.
@@ -69,10 +70,11 @@ Successful repair resets the exponential sequence.
 
 ## Membership Departure
 
-`ThreadRepairRegistry` gains a principal-and-room delta-clear operation.
-`ConversationCache.purge_rooms` clears retained deltas synchronously when it marks each room departed.
+`ThreadRepairRegistry` gains a principal-and-room repair-state clear operation.
+`ConversationCache.purge_rooms` detaches active repair ownership and clears retained deltas and failure state synchronously when it marks each room departed.
 The subsequent durable purge remains queued behind the room fence.
 No pre-departure retained event may be merged into a post-rejoin snapshot.
+Late completion of detached work cannot mutate the post-departure failure state.
 
 ## Existing-Winner Fail-Open Behavior
 
@@ -98,7 +100,9 @@ Concurrent callers must each emit one completion event with their own label.
 `WRITES_UNAVAILABLE` must return homeserver history without backoff and must not start background repair while writes are disabled.
 Repeated permanent background failures must show capped exponential delay and reset after success.
 Departure followed by rejoin must not expose pre-departure retained deltas.
+Departure must detach active repair ownership so a post-rejoin caller cannot join pre-departure work.
 An `EXISTING_USABLE` winner-read failure must perform one homeserver scan and return that result.
+An unproven dispatch candidate degraded by repair backoff must retry strict proof before demotion.
 The unreachable guarded-store missing-root test is deleted while reachable existing-cache and bulk missing-root tests remain.
 Owning SQLite suites, Ruff, format, type checks, Tach, focused pre-commit hooks, and `git diff --check` run locally.
 Full pytest, PostgreSQL, Docker, and live Matrix validation wait for the shared resource gate.
