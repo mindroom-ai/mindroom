@@ -4,7 +4,8 @@
 
 - PR: `#1641`
 - Branch: `fix/thread-edit-integrity`
-- Current local, remote, and GitHub head: `e77d32752a33e41ef724f87e7f5efd077ea4c257`
+- Production and test correction head: `e77d32752a33e41ef724f87e7f5efd077ea4c257`
+- This tracked handoff is a status-only successor; resolve its exact self-referential head with `git rev-parse HEAD`.
 - Current base and merge-base: `858282afc77adb480fa06cd9e4057d511ff861d5`
 - Never amend, force-push, merge, or store durable evidence in a temporary directory.
 - Preserve the three untracked `.claude/TASK-*` files and `artifacts/`.
