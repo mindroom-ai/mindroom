@@ -202,17 +202,11 @@ Hosted evidence describes the deployed service as a production baseline.
 
 PR-specific classification remains proven by the SQLite and PostgreSQL owning-seam tests unless the PR itself has been deployed through a separately authorized release.
 
-## Known non-owned lifecycle and encryption gaps
-
-Membership-loss cleanup is not owned by this contract track.
-
-A deterministic reproduction is to cache a joined-room event, deliver the same room under `rooms.leave`, and observe that the point row remains while no new leave-timeline event is admitted.
+## Known storage and encryption gaps
 
 Opaque encrypted thread evidence is owned by this contract track and fails closed.
 
 An opaque `m.room.encrypted` child with a clear thread-affecting relation marks only its thread stale under a non-incremental reason, a later clear incremental event cannot weaken that reason, and thread-history refresh rejects reconstructions that still contain the opaque evidence.
-
-The remaining gap requires coordinated lifecycle changes rather than an overlapping cache-contract workaround.
 
 Thread snapshot replacement currently owns point-row deletion through the duplicated storage layout, which belongs to the storage normalization track.
 
