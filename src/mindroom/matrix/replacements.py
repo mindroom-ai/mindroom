@@ -6,6 +6,7 @@ from collections.abc import Callable, Collection, Iterable, Mapping
 from operator import itemgetter
 from typing import Any
 
+from mindroom.matrix.event_identity import event_representation_transition
 from mindroom.matrix.event_info import EventInfo, event_source_is_timeline_in_room
 
 type ReplacementValidator = Callable[[dict[str, Any]], bool]
@@ -44,17 +45,6 @@ def replacement_content(original: Mapping[str, object], new: Mapping[str, object
     return content
 
 
-def event_representations_conflict(first: Mapping[str, Any], second: Mapping[str, Any]) -> bool:
-    """Return whether two payloads disagree on one immutable Matrix event identity."""
-    identity_keys = ("event_id", "sender", "origin_server_ts", "type", "content")
-    same_timeline_identity = all(first.get(key) == second.get(key) for key in identity_keys) and (
-        "state_key" in first,
-        first.get("state_key"),
-    ) == ("state_key" in second, second.get("state_key"))
-    rooms_conflict = "room_id" in first and "room_id" in second and first.get("room_id") != second.get("room_id")
-    return not same_timeline_identity or rooms_conflict
-
-
 def _replacement_candidates_by_identity(
     candidates: Iterable[Mapping[str, Any]],
 ) -> tuple[dict[str, dict[str, Any]], set[str]]:
@@ -70,10 +60,11 @@ def _replacement_candidates_by_identity(
         if existing is None:
             candidates_by_event_id[event_id] = dict(candidate)
             continue
-        if event_representations_conflict(existing, candidate):
+        transition = event_representation_transition(existing, candidate)
+        if transition == "conflict":
             conflicting_event_ids.add(event_id)
             continue
-        if "room_id" in candidate and "room_id" not in existing:
+        if transition == "accept":
             candidates_by_event_id[event_id] = dict(candidate)
 
     return candidates_by_event_id, conflicting_event_ids
@@ -84,10 +75,8 @@ def conflicting_replacement_event_ids(event_sources: Iterable[Mapping[str, Any]]
     observations = [
         candidate
         for event_source in event_sources
-        for candidate in (
-            *bundled_replacement_candidates(event_source),
-            *((event_source,) if EventInfo.from_event(dict(event_source)).is_edit else ()),
-        )
+        for candidate in (event_source, *bundled_replacement_candidates(event_source))
+        if candidate is event_source or candidate.get("event_id") != event_source.get("event_id")
     ]
     _, conflicting_event_ids = _replacement_candidates_by_identity(observations)
     return frozenset(conflicting_event_ids)

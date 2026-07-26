@@ -442,6 +442,32 @@ async def test_conversation_cache_rejects_and_does_not_persist_mismatched_point_
 
 
 @pytest.mark.asyncio
+async def test_conversation_cache_rejects_explicit_wrong_room_point_lookup(
+    tmp_path: Path,
+    event_cache: ConversationEventCache,
+) -> None:
+    """A point response with contradictory room evidence must fail closed."""
+    room_id = "!room:localhost"
+    event_id = "$requested:localhost"
+    event = _make_text_event(
+        event_id=event_id,
+        sender="@attacker:localhost",
+        body="Wrong room",
+        server_timestamp=1000,
+        source_content={"body": "Wrong room", "msgtype": "m.text"},
+    )
+    event.source["room_id"] = "!other:localhost"
+    client = MagicMock()
+    client.room_get_event = AsyncMock(return_value=_make_room_get_event_response(event))
+    conversation_cache = _conversation_cache_for_thread_reads(tmp_path, event_cache, client=client)
+
+    response = await conversation_cache.get_event(room_id, event_id)
+
+    assert isinstance(response, nio.RoomGetEventError)
+    assert await event_cache.get_event(room_id, event_id) is None
+
+
+@pytest.mark.asyncio
 async def test_dispatch_thread_read_degrades_when_cache_coordinator_never_drains(
     tmp_path: Path,
 ) -> None:
@@ -2725,6 +2751,144 @@ async def test_unstored_bundled_original_accepts_cached_encrypted_representation
     assert latest is not None
     assert latest["event_id"] == edit_id
     assert latest["content"]["m.new_content"]["body"] == "Bundled clear"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cached_kind", ["encrypted", "provisional"])
+async def test_unstored_bundle_rejects_cached_upgrade_with_different_target(
+    event_cache: ConversationEventCache,
+    cached_kind: str,
+) -> None:
+    """A legal representation upgrade cannot change an exposed replacement target."""
+    room_id = "!room:localhost"
+    original_id = "$original:localhost"
+    other_target_id = "$other:localhost"
+    edit_id = "$edit:localhost"
+    original = _clear_payload(
+        original_id,
+        body="Original",
+        room_id=room_id,
+        origin_server_ts=1000,
+    )
+    bundled_clear = _clear_payload(
+        edit_id,
+        body="Bundled forged",
+        room_id=room_id,
+        edit_of=original_id,
+        origin_server_ts=3000,
+    )
+    original["unsigned"] = {"m.relations": {"m.replace": bundled_clear}}
+    if cached_kind == "encrypted":
+        cached = _opaque_payload(edit_id, origin_server_ts=3000)
+        cached["room_id"] = room_id
+        cached["content"]["m.relates_to"] = {
+            "rel_type": "m.replace",
+            "event_id": other_target_id,
+        }
+    else:
+        cached = event_normalization.mark_provisional_outbound_event(
+            _clear_payload(
+                edit_id,
+                body="Provisional other target",
+                room_id=room_id,
+                edit_of=other_target_id,
+                origin_server_ts=3000,
+            ),
+        )
+    await event_cache.store_event(edit_id, room_id, cached)
+
+    latest = await event_cache.get_latest_edit(
+        room_id,
+        original,
+        validator=valid_room_message_replacement,
+    )
+
+    assert latest is None
+
+
+@pytest.mark.asyncio
+async def test_unstored_encrypted_bundle_accepts_cached_clear_representation(
+    event_cache: ConversationEventCache,
+) -> None:
+    """A clear cached edit must supersede its same-target opaque bundled view."""
+    room_id = "!room:localhost"
+    original_id = "$original:localhost"
+    edit_id = "$edit:localhost"
+    original = _clear_payload(
+        original_id,
+        body="Original",
+        room_id=room_id,
+        origin_server_ts=1000,
+    )
+    opaque_bundle = _opaque_payload(edit_id, origin_server_ts=3000)
+    opaque_bundle["room_id"] = room_id
+    opaque_bundle["content"]["m.relates_to"] = {
+        "rel_type": "m.replace",
+        "event_id": original_id,
+    }
+    original["unsigned"] = {"m.relations": {"m.replace": opaque_bundle}}
+    clear_edit = _clear_payload(
+        edit_id,
+        body="Cached clear",
+        room_id=room_id,
+        edit_of=original_id,
+        origin_server_ts=3000,
+    )
+    await event_cache.store_event(edit_id, room_id, clear_edit)
+
+    latest = await event_cache.get_latest_edit(
+        room_id,
+        original,
+        validator=valid_room_message_replacement,
+    )
+
+    assert latest is not None
+    assert latest["event_id"] == edit_id
+    assert latest["content"]["m.new_content"]["body"] == "Cached clear"
+
+
+@pytest.mark.asyncio
+async def test_unstored_canonical_bundle_supersedes_cached_provisional_representation(
+    event_cache: ConversationEventCache,
+) -> None:
+    """A canonical bundle must supersede its same-target provisional cached view."""
+    room_id = "!room:localhost"
+    original_id = "$original:localhost"
+    edit_id = "$edit:localhost"
+    original = _clear_payload(
+        original_id,
+        body="Original",
+        room_id=room_id,
+        origin_server_ts=1000,
+    )
+    canonical_edit = _clear_payload(
+        edit_id,
+        body="Canonical",
+        room_id=room_id,
+        edit_of=original_id,
+        origin_server_ts=3000,
+    )
+    original["unsigned"] = {"m.relations": {"m.replace": canonical_edit}}
+    provisional_edit = event_normalization.mark_provisional_outbound_event(
+        _clear_payload(
+            edit_id,
+            body="Provisional",
+            room_id=room_id,
+            edit_of=original_id,
+            origin_server_ts=3000,
+        ),
+    )
+    await event_cache.store_event(edit_id, room_id, provisional_edit)
+
+    latest = await event_cache.get_latest_edit(
+        room_id,
+        original,
+        validator=valid_room_message_replacement,
+    )
+
+    assert latest is not None
+    assert latest["event_id"] == edit_id
+    assert latest["content"]["m.new_content"]["body"] == "Canonical"
 
 
 @pytest.mark.asyncio

@@ -178,6 +178,166 @@ class TestThreadHistory:
         ]
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "invalid_scope",
+        [{"room_id": "!other:localhost"}, {"state_key": ""}],
+        ids=("wrong-room", "state"),
+    )
+    async def test_invalid_duplicate_cannot_reorder_valid_thread_messages(
+        self,
+        invalid_scope: dict[str, str],
+    ) -> None:
+        """Rejected duplicate envelopes must not influence visible history order."""
+        room_id = "!room:localhost"
+        root_id = "$root:localhost"
+
+        def message(event_id: str, body: str, timestamp: int) -> dict[str, object]:
+            return {
+                "event_id": event_id,
+                "room_id": room_id,
+                "sender": "@alice:localhost",
+                "origin_server_ts": timestamp,
+                "type": "m.room.message",
+                "content": {
+                    "body": body,
+                    "msgtype": "m.text",
+                    **({} if event_id == root_id else {"m.relates_to": {"rel_type": "m.thread", "event_id": root_id}}),
+                },
+            }
+
+        root = message(root_id, "Root", 1000)
+        first = message("$a:localhost", "First", 2000)
+        second = message("$b:localhost", "Second", 2000)
+        invalid_duplicate = {**first, **invalid_scope}
+
+        resolution = await _resolve_thread_history_from_event_sources_timed(
+            AsyncMock(),
+            room_id=room_id,
+            thread_id=root_id,
+            event_sources=[root, first, second, invalid_duplicate],
+            hydrate_sidecars=False,
+            event_cache=_event_cache(),
+        )
+
+        assert [message.event_id for message in resolution.messages] == [
+            root_id,
+            "$a:localhost",
+            "$b:localhost",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_duplicate_identity_cannot_be_visible_message_and_edit(self) -> None:
+        """One immutable event identity cannot synthesize two visible roles."""
+        room_id = "!room:localhost"
+        root_id = "$root:localhost"
+        duplicate_id = "$duplicate:localhost"
+        sender = "@alice:localhost"
+        root = {
+            "event_id": root_id,
+            "room_id": room_id,
+            "sender": sender,
+            "origin_server_ts": 1000,
+            "type": "m.room.message",
+            "content": {"body": "Original", "msgtype": "m.text"},
+        }
+        standalone = {
+            "event_id": duplicate_id,
+            "room_id": room_id,
+            "sender": sender,
+            "origin_server_ts": 2000,
+            "type": "m.room.message",
+            "content": {
+                "body": "Standalone",
+                "msgtype": "m.text",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": root_id},
+            },
+        }
+        edit = {
+            "event_id": duplicate_id,
+            "room_id": room_id,
+            "sender": sender,
+            "origin_server_ts": 2000,
+            "type": "m.room.message",
+            "content": {
+                "body": "* Forged",
+                "msgtype": "m.text",
+                "m.new_content": {"body": "Forged", "msgtype": "m.text"},
+                "m.relates_to": {"rel_type": "m.replace", "event_id": root_id},
+            },
+        }
+
+        resolution = await _resolve_thread_history_from_event_sources_timed(
+            AsyncMock(),
+            room_id=room_id,
+            thread_id=root_id,
+            event_sources=[root, standalone, edit],
+            hydrate_sidecars=False,
+            event_cache=_event_cache(),
+        )
+
+        assert [(message.event_id, message.body) for message in resolution.messages] == [
+            (root_id, "Original"),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_decrypted_edit_supersedes_same_identity_encrypted_bundle(self) -> None:
+        """A decrypted replacement is the canonical view of its opaque bundled identity."""
+        room_id = "!room:localhost"
+        root_id = "$root:localhost"
+        edit_id = "$edit:localhost"
+        sender = "@alice:localhost"
+        opaque_edit = {
+            "event_id": edit_id,
+            "room_id": room_id,
+            "sender": sender,
+            "origin_server_ts": 2000,
+            "type": "m.room.encrypted",
+            "content": {
+                "algorithm": "m.megolm.v1.aes-sha2",
+                "ciphertext": "opaque",
+                "device_id": "DEVICE",
+                "sender_key": "sender-key",
+                "session_id": "session",
+                "m.relates_to": {"rel_type": "m.replace", "event_id": root_id},
+            },
+        }
+        root = {
+            "event_id": root_id,
+            "room_id": room_id,
+            "sender": sender,
+            "origin_server_ts": 1000,
+            "type": "m.room.message",
+            "content": {"body": "Original", "msgtype": "m.text"},
+            "unsigned": {"m.relations": {"m.replace": opaque_edit}},
+        }
+        clear_edit = {
+            "event_id": edit_id,
+            "room_id": room_id,
+            "sender": sender,
+            "origin_server_ts": 2000,
+            "type": "m.room.message",
+            "content": {
+                "body": "* Decrypted",
+                "msgtype": "m.text",
+                "m.new_content": {"body": "Decrypted", "msgtype": "m.text"},
+                "m.relates_to": {"rel_type": "m.replace", "event_id": root_id},
+            },
+        }
+
+        resolution = await _resolve_thread_history_from_event_sources_timed(
+            AsyncMock(),
+            room_id=room_id,
+            thread_id=root_id,
+            event_sources=[root, clear_edit],
+            hydrate_sidecars=False,
+            event_cache=_event_cache(),
+        )
+
+        assert [(message.event_id, message.body) for message in resolution.messages] == [
+            (root_id, "Decrypted"),
+        ]
+
+    @pytest.mark.asyncio
     async def test_conflicting_replacement_identity_across_originals_is_rejected(
         self,
         tmp_path: Path,

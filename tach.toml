@@ -1782,7 +1782,7 @@ depends_on = []
 [[modules]]
 path = "mindroom.matrix.cache.event_cache_events"
 depends_on = [
-    "mindroom.matrix.cache.event_normalization",
+    "mindroom.matrix.event_identity",
     "mindroom.matrix.event_info",
     "mindroom.matrix.media",
     "mindroom.matrix.replacements",
@@ -1798,7 +1798,7 @@ visibility = [
 
 [[modules]]
 path = "mindroom.matrix.cache.event_normalization"
-depends_on = []
+depends_on = ["mindroom.matrix.event_identity"]
 
 [[modules]]
 path = "mindroom.matrix.cache.event_batching"
@@ -2393,8 +2393,20 @@ path = "mindroom.matrix.event_info"
 depends_on = []
 
 [[modules]]
+path = "mindroom.matrix.event_identity"
+depends_on = []
+visibility = [
+    "mindroom.matrix.cache.event_cache_events",
+    "mindroom.matrix.cache.event_normalization",
+    "mindroom.matrix.replacements",
+]
+
+[[modules]]
 path = "mindroom.matrix.replacements"
-depends_on = ["mindroom.matrix.event_info"]
+depends_on = [
+    "mindroom.matrix.event_identity",
+    "mindroom.matrix.event_info",
+]
 visibility = [
     "mindroom.matrix.cache.agent_message_snapshot_semantics",
     "mindroom.matrix.cache.event_cache_events",
@@ -4004,10 +4016,16 @@ from = ["mindroom.matrix.event_info"]
 
 [[interfaces]]
 expose = [
+    "PROVISIONAL_OUTBOUND_KEY",
+    "event_representation_transition",
+]
+from = ["mindroom.matrix.event_identity"]
+
+[[interfaces]]
+expose = [
     "ReplacementValidator",
     "bundled_replacement_candidates",
     "conflicting_replacement_event_ids",
-    "event_representations_conflict",
     "is_valid_replacement",
     "ordered_replacements",
     "replacement_content",

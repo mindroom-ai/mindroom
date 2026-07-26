@@ -8,7 +8,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
-from mindroom.matrix.cache.event_normalization import is_provisional_outbound_event
+from mindroom.matrix.event_identity import event_representation_transition
 from mindroom.matrix.event_info import (
     EventInfo,
     event_source_is_timeline_in_room,
@@ -18,7 +18,6 @@ from mindroom.matrix.media import event_source_supports_valid_thread_relations
 from mindroom.matrix.replacements import (
     ReplacementValidator,
     bundled_replacement_candidates,
-    event_representations_conflict,
     ordered_replacements,
 )
 from mindroom.matrix.sidecar_content import sidecar_mxc_url
@@ -49,37 +48,6 @@ class CachedEventRow:
     cached_at: float | None
 
 
-def _cached_event_transition(
-    existing: Mapping[str, Any],
-    candidate: Mapping[str, Any],
-) -> Literal["accept", "ignore", "conflict"]:
-    """Classify one same-ID cache payload transition without weakening immutability."""
-    same_envelope = all(existing.get(key) == candidate.get(key) for key in ("event_id", "sender")) and (
-        "state_key" in existing,
-        existing.get("state_key"),
-    ) == ("state_key" in candidate, candidate.get("state_key"))
-    rooms_conflict = (
-        "room_id" in existing and "room_id" in candidate and existing.get("room_id") != candidate.get("room_id")
-    )
-    if not same_envelope or rooms_conflict:
-        return "conflict"
-    existing_is_provisional = is_provisional_outbound_event(existing)
-    candidate_is_provisional = is_provisional_outbound_event(candidate)
-    if existing_is_provisional or candidate_is_provisional:
-        same_type = existing.get("type") == candidate.get("type")
-        if existing_is_provisional:
-            compatible_content = not candidate_is_provisional or existing.get("content") == candidate.get("content")
-            return "accept" if same_type and compatible_content else "conflict"
-        return "ignore" if same_type else "conflict"
-    if existing.get("origin_server_ts") != candidate.get("origin_server_ts"):
-        return "conflict"
-    existing_is_encrypted = existing.get("type") == "m.room.encrypted"
-    candidate_is_encrypted = candidate.get("type") == "m.room.encrypted"
-    if existing_is_encrypted != candidate_is_encrypted:
-        return "accept" if existing_is_encrypted else "ignore"
-    return "conflict" if event_representations_conflict(existing, candidate) else "accept"
-
-
 def conflicting_cached_bundled_event_ids(
     original: Mapping[str, Any],
     cached_events: Iterable[Mapping[str, Any]],
@@ -96,7 +64,8 @@ def conflicting_cached_bundled_event_ids(
         if isinstance((event_id := cached_event.get("event_id")), str)
         if event_id in bundled_by_event_id
         if any(
-            _cached_event_transition(cached_event, bundled) == "conflict" for bundled in bundled_by_event_id[event_id]
+            event_representation_transition(cached_event, bundled) == "conflict"
+            for bundled in bundled_by_event_id[event_id]
         )
     )
 
@@ -111,7 +80,7 @@ def _observe_cached_event_identity(
     if not isinstance(event_id, str) or not event_id:
         return "ignore"
     previous = observed.get(event_id)
-    transition = "accept" if previous is None else _cached_event_transition(previous, candidate)
+    transition = "accept" if previous is None else event_representation_transition(previous, candidate)
     if transition == "conflict":
         conflicting_event_ids.add(event_id)
     elif transition == "accept":

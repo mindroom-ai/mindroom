@@ -442,20 +442,20 @@ async def _resolve_thread_history_from_event_sources_timed(
         event_source for event_source in event_sources if event_source_is_timeline_in_room(event_source, room_id)
     ]
     redacted_event_ids |= conflicting_replacement_event_ids(room_event_sources)
-    input_order_by_event_id: dict[str, int] = {}
-    related_event_id_by_event_id: dict[str, str] = {}
-    for index, event_source in enumerate(event_sources):
-        event_id = event_source.get("event_id")
-        if isinstance(event_id, str):
-            input_order_by_event_id[event_id] = index
-            related_event_id = EventInfo.from_event(event_source).next_related_event_id(event_id)
-            if isinstance(related_event_id, str):
-                related_event_id_by_event_id[event_id] = related_event_id
     eligible_event_sources = [
         event_source
         for event_source in room_event_sources
         if _event_id_from_source(event_source) not in redacted_event_ids
     ]
+    input_order_by_event_id: dict[str, int] = {}
+    related_event_id_by_event_id: dict[str, str] = {}
+    for index, event_source in enumerate(eligible_event_sources):
+        event_id = event_source.get("event_id")
+        if isinstance(event_id, str):
+            input_order_by_event_id.setdefault(event_id, index)
+            related_event_id = EventInfo.from_event(event_source).next_related_event_id(event_id)
+            if isinstance(related_event_id, str):
+                related_event_id_by_event_id.setdefault(event_id, related_event_id)
     parsed_events = [
         parsed_event
         for event_source in eligible_event_sources

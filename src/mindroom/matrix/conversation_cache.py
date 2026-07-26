@@ -429,6 +429,8 @@ async def _cached_room_get_event(
         event,
         event_id=normalized_event_id,
     )
+    if not event_source_matches_room(normalized_event_source, room_id):
+        return RoomGetEventError("Matrix event lookup returned an unexpected room ID"), None
     visible_response = await _cached_room_get_event_response(
         client,
         event_cache,

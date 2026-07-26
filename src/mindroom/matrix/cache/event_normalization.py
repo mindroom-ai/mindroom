@@ -4,14 +4,15 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from mindroom.matrix.event_identity import PROVISIONAL_OUTBOUND_KEY
+
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
     import nio
 
-_PROVISIONAL_OUTBOUND_KEY = "io.mindroom.provisional_outbound"
 _PROVISIONAL_OUTBOUND_MARKER = object()
-_RUNTIME_ONLY_EVENT_SOURCE_KEYS = frozenset({"com.mindroom.dispatch_pipeline_timing", _PROVISIONAL_OUTBOUND_KEY})
+_RUNTIME_ONLY_EVENT_SOURCE_KEYS = frozenset({"com.mindroom.dispatch_pipeline_timing", PROVISIONAL_OUTBOUND_KEY})
 _OPAQUE_ENCRYPTED_EVENT_TYPE = "m.room.encrypted"
 
 
@@ -20,14 +21,9 @@ def is_opaque_encrypted_event_source(event_source: Mapping[str, Any]) -> bool:
     return event_source.get("type") == _OPAQUE_ENCRYPTED_EVENT_TYPE
 
 
-def is_provisional_outbound_event(event_source: Mapping[str, Any]) -> bool:
-    """Return whether an event is a local post-send placeholder awaiting its sync echo."""
-    return event_source.get(_PROVISIONAL_OUTBOUND_KEY) is True
-
-
 def mark_provisional_outbound_event(event_source: Mapping[str, Any]) -> dict[str, Any]:
     """Mark a trusted local post-send event for provisional cache storage."""
-    return {**event_source, _PROVISIONAL_OUTBOUND_KEY: _PROVISIONAL_OUTBOUND_MARKER}
+    return {**event_source, PROVISIONAL_OUTBOUND_KEY: _PROVISIONAL_OUTBOUND_MARKER}
 
 
 def normalize_event_source_for_cache(
@@ -38,7 +34,7 @@ def normalize_event_source_for_cache(
     origin_server_ts: int | None = None,
 ) -> dict[str, Any]:
     """Normalize one raw Matrix event payload for persistent cache storage."""
-    provisional_outbound = event_source.get(_PROVISIONAL_OUTBOUND_KEY) is _PROVISIONAL_OUTBOUND_MARKER
+    provisional_outbound = event_source.get(PROVISIONAL_OUTBOUND_KEY) is _PROVISIONAL_OUTBOUND_MARKER
     source = {key: value for key, value in event_source.items() if key not in _RUNTIME_ONLY_EVENT_SOURCE_KEYS}
     if isinstance(event_id, str):
         source["event_id"] = event_id
@@ -51,7 +47,7 @@ def normalize_event_source_for_cache(
     ):
         source["origin_server_ts"] = origin_server_ts
     if provisional_outbound:
-        source[_PROVISIONAL_OUTBOUND_KEY] = True
+        source[PROVISIONAL_OUTBOUND_KEY] = True
     return source
 
 
