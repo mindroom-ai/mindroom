@@ -1193,6 +1193,99 @@ async def test_fresh_strict_history_bypasses_inherited_turn_memoization(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_strict_source_refresh_bypasses_usable_cache(
+    tmp_path: Path,
+) -> None:
+    """Explicit source refresh should serialize one Matrix fetch without accepting a cache hit."""
+    event_cache = SqliteEventCache(tmp_path / "event_cache.db")
+    await event_cache.initialize()
+    client = object()
+    conversation_cache = _conversation_cache_for_thread_reads(tmp_path, event_cache, client=client)
+    coordinator = EventCacheWriteCoordinator(logger=conversation_cache.logger)
+    conversation_cache.runtime.event_cache_write_coordinator = coordinator
+    barrier_entered = asyncio.Event()
+    release_write = asyncio.Event()
+    write_started = asyncio.Event()
+    wait_for_thread_idle = coordinator.wait_for_thread_idle
+
+    async def pending_cache_write() -> None:
+        write_started.set()
+        await release_write.wait()
+
+    async def observed_wait_for_thread_idle(
+        room_id: str,
+        thread_id: str,
+        *,
+        ignore_cancelled_room_fences: bool = False,
+        coordination_scope: str,
+    ) -> None:
+        barrier_entered.set()
+        await wait_for_thread_idle(
+            room_id,
+            thread_id,
+            ignore_cancelled_room_fences=ignore_cancelled_room_fences,
+            coordination_scope=coordination_scope,
+        )
+
+    pending_write_task = coordinator.queue_thread_update(
+        "!room:localhost",
+        "$thread:localhost",
+        pending_cache_write,
+        name="matrix_cache_pending_source_refresh_test_write",
+        coordination_scope=event_cache.principal_id,
+    )
+    fetched_history = thread_history_result(
+        [ResolvedVisibleMessage.synthetic(sender="@bot:localhost", body="Target", event_id="$target")],
+        is_full_history=True,
+    )
+
+    try:
+        await asyncio.wait_for(write_started.wait(), timeout=5.0)
+        with (
+            patch.object(
+                coordinator,
+                "wait_for_thread_idle",
+                side_effect=observed_wait_for_thread_idle,
+            ),
+            patch(
+                "mindroom.matrix.conversation_cache.fetch_dispatch_thread_history",
+                AsyncMock(side_effect=AssertionError("source refresh must bypass cache selection")),
+            ) as cache_thread_history,
+            patch(
+                "mindroom.matrix.conversation_cache.refresh_thread_history_from_source",
+                AsyncMock(return_value=fetched_history),
+            ) as refresh_thread_history,
+        ):
+            read_task = asyncio.create_task(
+                conversation_cache.refresh_strict_thread_history_from_source(
+                    "!room:localhost",
+                    "$thread:localhost",
+                    caller_label="startup_auto_resume_freshness",
+                ),
+            )
+            await asyncio.wait_for(barrier_entered.wait(), timeout=5.0)
+            refresh_thread_history.assert_not_awaited()
+            release_write.set()
+            result = await asyncio.wait_for(read_task, timeout=5.0)
+    finally:
+        release_write.set()
+        await pending_write_task
+        await event_cache.close()
+
+    assert [message.event_id for message in result] == ["$target"]
+    assert result.is_full_history is True
+    refresh_thread_history.assert_awaited_once()
+    assert refresh_thread_history.await_args.args[:4] == (
+        client,
+        "!room:localhost",
+        "$thread:localhost",
+        event_cache,
+    )
+    assert refresh_thread_history.await_args.kwargs["allow_stale_fallback"] is False
+    cache_thread_history.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_strict_thread_history_propagates_cache_coordinator_timeout(
     tmp_path: Path,
 ) -> None:

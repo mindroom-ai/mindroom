@@ -45,6 +45,7 @@ from mindroom.matrix.client_thread_history import (
     fetch_dispatch_thread_snapshot,
     fetch_thread_history,
     get_room_threads_page,
+    refresh_thread_history_from_source,
     untrusted_cached_thread_ids,
 )
 from mindroom.matrix.event_info import EventInfo
@@ -200,6 +201,15 @@ class ConversationCacheProtocol(Protocol):
         caller_label: str = "unknown",
     ) -> ThreadReadResult:
         """Resolve strict full history without reusing the current turn's memoized read."""
+
+    async def refresh_strict_thread_history_from_source(
+        self,
+        room_id: str,
+        thread_id: str,
+        *,
+        caller_label: str = "unknown",
+    ) -> ThreadReadResult:
+        """Refresh strict full history directly from Matrix."""
 
     async def get_thread_id_for_event(self, room_id: str, event_id: str) -> str | None:
         """Resolve the cached thread root for one event when known."""
@@ -424,6 +434,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
             fetch_thread_history_from_client=self._fetch_thread_history_from_client,
             fetch_dispatch_thread_history_from_client=self._fetch_dispatch_thread_history_from_client,
             fetch_dispatch_thread_snapshot_from_client=self._fetch_dispatch_thread_snapshot_from_client,
+            refresh_thread_history_from_source=self._refresh_thread_history_from_client,
         )
         resolver = ThreadMutationResolver(
             logger_getter=lambda: self.logger,
@@ -791,6 +802,27 @@ class MatrixConversationCache(ConversationCacheProtocol):
             coordination_scope=principal_id,
         )
 
+    async def _refresh_thread_history_from_client(
+        self,
+        room_id: str,
+        thread_id: str,
+        *,
+        caller_label: str,
+        coordinator_queue_wait_ms: float,
+    ) -> ThreadHistoryResult:
+        """Refresh one thread from Matrix without accepting a cache hit or stale fallback."""
+        return await refresh_thread_history_from_source(
+            self._require_client(),
+            room_id,
+            thread_id,
+            self.runtime.event_cache,
+            allow_stale_fallback=False,
+            cache_write_guard_started_at=time.time(),
+            trusted_sender_ids=self._trusted_sender_ids(),
+            caller_label=caller_label,
+            coordinator_queue_wait_ms=coordinator_queue_wait_ms,
+        )
+
     async def _fetch_thread_from_client(
         self,
         fetcher: Callable[..., Awaitable[ThreadHistoryResult]],
@@ -1141,6 +1173,21 @@ class MatrixConversationCache(ConversationCacheProtocol):
             room_id,
             thread_id,
             mode=ThreadReadMode.STRICT_FULL,
+            caller_label=caller_label,
+        )
+
+    async def refresh_strict_thread_history_from_source(
+        self,
+        room_id: str,
+        thread_id: str,
+        *,
+        caller_label: str = "unknown",
+    ) -> ThreadReadResult:
+        """Refresh strict full history directly from Matrix."""
+        return await self._reads.read_thread(
+            room_id,
+            thread_id,
+            mode=ThreadReadMode.STRICT_SOURCE_REFRESH,
             caller_label=caller_label,
         )
 

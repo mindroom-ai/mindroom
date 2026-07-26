@@ -25,6 +25,7 @@ from mindroom.knowledge.refresh_runner import (
     refresh_knowledge_binding,
 )
 from mindroom.knowledge.status import (
+    KnowledgeCandidateStatus,
     KnowledgeIndexStatus,
     get_knowledge_index_status,
     mark_knowledge_source_changed_async,
@@ -296,6 +297,28 @@ def _redacted_last_error(value: str | None) -> str | None:
     if value is None:
         return None
     return redact_credentials_in_text(value)
+
+
+def _candidate_payload(candidate: KnowledgeCandidateStatus | None) -> dict[str, Any] | None:
+    """Render in-progress candidate build state as an additive optional field.
+
+    Kept strictly separate from ``indexed_count``, which describes the
+    published, queryable index: candidate counts are work that no reader can
+    see yet. The key is omitted entirely when no candidate exists, so existing
+    clients keep parsing these responses unchanged.
+    """
+    if candidate is None:
+        return None
+    return {
+        "status": candidate.status,
+        "completed_count": candidate.completed_count,
+        "failed_count": candidate.failed_count,
+        "total_files": candidate.total_files,
+        "pending_count": candidate.pending_count,
+        "target_revision": candidate.target_revision,
+        "created_at": candidate.created_at,
+        "updated_at": candidate.updated_at,
+    }
 
 
 def _is_refreshing(
@@ -580,6 +603,9 @@ async def list_knowledge_bases(request: Request) -> dict[str, Any]:
             "refresh_state": index_status.refresh_state,
             "file_listing_degraded": file_info.degraded,
         }
+        candidate = _candidate_payload(index_status.candidate)
+        if candidate is not None:
+            base_entry["candidate"] = candidate
         if index_status.last_error is not None:
             base_entry["last_error"] = _redacted_last_error(index_status.last_error)
         if file_info.error is not None:
@@ -734,6 +760,9 @@ async def knowledge_status(base_id: str, request: Request) -> dict[str, Any]:
         "file_listing_degraded": file_info.degraded,
         "file_listing_error": file_info.error,
     }
+    candidate = _candidate_payload(index_status.candidate)
+    if candidate is not None:
+        payload["candidate"] = candidate
     if git_status is not None:
         payload["git"] = git_status
     return payload

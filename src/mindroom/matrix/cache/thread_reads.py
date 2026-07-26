@@ -14,8 +14,9 @@ Read-side invariants:
    as unusable for caching, memoization, and root proofs.
 
 3. Every cache-miss refill enters principal-scoped single-flight ownership on the same-thread barrier.
-   ``ADVISORY_FULL`` and ``STRICT_FULL`` have no dispatch timeout; ``STRICT_FULL`` is intentionally not
-   dispatch-safe because it may block for authoritative post-lock model context.
+   ``ADVISORY_FULL``, ``STRICT_FULL``, and ``STRICT_SOURCE_REFRESH`` have no dispatch timeout; strict
+   modes are intentionally not dispatch-safe because they may block for authoritative post-lock model
+   context or a direct source refresh.
 
 4. A stale-cache thread tail is never used for MSC3440 latest-event fallback:
    ``get_latest_thread_event_id_if_needed`` falls back to the thread root instead.
@@ -67,6 +68,7 @@ class ThreadReadMode(Enum):
     DISPATCH_SNAPSHOT = auto()
     DISPATCH_FULL = auto()
     STRICT_FULL = auto()
+    STRICT_SOURCE_REFRESH = auto()
 
     @property
     def full_history(self) -> bool:
@@ -75,6 +77,7 @@ class ThreadReadMode(Enum):
             ThreadReadMode.ADVISORY_FULL,
             ThreadReadMode.DISPATCH_FULL,
             ThreadReadMode.STRICT_FULL,
+            ThreadReadMode.STRICT_SOURCE_REFRESH,
         }
 
     @property
@@ -112,12 +115,14 @@ class ThreadReadPolicy:
         fetch_thread_history_from_client: _ThreadHistoryFetcher,
         fetch_dispatch_thread_history_from_client: _ThreadHistoryFetcher,
         fetch_dispatch_thread_snapshot_from_client: _ThreadHistoryFetcher,
+        refresh_thread_history_from_source: _ThreadHistoryFetcher,
     ) -> None:
         self._logger_getter = logger_getter
         self.runtime = runtime
         self.fetch_thread_history_from_client = fetch_thread_history_from_client
         self.fetch_dispatch_thread_history_from_client = fetch_dispatch_thread_history_from_client
         self.fetch_dispatch_thread_snapshot_from_client = fetch_dispatch_thread_snapshot_from_client
+        self.refresh_thread_history_from_source = refresh_thread_history_from_source
 
     @property
     def logger(self) -> structlog.stdlib.BoundLogger:
@@ -137,6 +142,7 @@ class ThreadReadPolicy:
             ThreadReadMode.DISPATCH_SNAPSHOT: self.fetch_dispatch_thread_snapshot_from_client,
             ThreadReadMode.DISPATCH_FULL: self.fetch_dispatch_thread_history_from_client,
             ThreadReadMode.STRICT_FULL: self.fetch_dispatch_thread_history_from_client,
+            ThreadReadMode.STRICT_SOURCE_REFRESH: self.refresh_thread_history_from_source,
         }[mode]
 
     async def _wait_for_pending_thread_cache_updates(self, room_id: str, thread_id: str) -> None:
