@@ -42,7 +42,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast
 
@@ -127,6 +127,10 @@ _OPAQUE_ENCRYPTED_EVENT_REJECTION = "opaque_encrypted_event"
 _MISSING_THREAD_ROOT_REJECTION = "missing_thread_root"
 _MAX_THREAD_REPAIR_ATTEMPTS = 2
 type _ThreadHistoryDiagnosticValue = str | int | float | bool | None
+type _ThreadHistoryRefill = Callable[
+    [Mapping[str, str | int | float | bool] | None],
+    Awaitable[ThreadHistoryResult],
+]
 
 
 @dataclass(slots=True)
@@ -1603,19 +1607,22 @@ async def _resolve_thread_history_message(
     return message
 
 
-async def fetch_thread_history(
+async def _fetch_thread_history_with_cache_policy(
     client: nio.AsyncClient,
     room_id: str,
     thread_id: str,
     event_cache: ConversationEventCache,
     *,
+    hydrate_sidecars: bool,
+    allow_stale_fallback: bool,
+    cache_read_failure_message: str,
     trusted_sender_ids: Collection[str] = (),
     caller_label: str = "unknown",
     coordinator_queue_wait_ms: float = 0.0,
     resolution_reuse: ThreadResolutionReuseCache | None = None,
-    retained_event_sources: RetainedThreadEventSourceProvider | None = None,
+    refill: _ThreadHistoryRefill | None = None,
 ) -> ThreadHistoryResult:
-    """Fetch all messages in a thread."""
+    """Serve one trusted cache hit or delegate only the required refill."""
     cache_reject_diagnostics: dict[str, str | int | float | bool] | None = None
     try:
         cached_history, cache_reject_diagnostics = await _load_cached_thread_history_if_usable(
@@ -1623,13 +1630,13 @@ async def fetch_thread_history(
             room_id=room_id,
             thread_id=thread_id,
             event_cache=event_cache,
-            hydrate_sidecars=True,
+            hydrate_sidecars=hydrate_sidecars,
             trusted_sender_ids=trusted_sender_ids,
             resolution_reuse=resolution_reuse,
         )
     except Exception as exc:
         logger.warning(
-            "Durable thread cache read failed; refetching from homeserver",
+            cache_read_failure_message,
             room_id=room_id,
             thread_id=thread_id,
             error=str(exc),
@@ -1645,17 +1652,48 @@ async def fetch_thread_history(
                 coordinator_queue_wait_ms=coordinator_queue_wait_ms,
             )
             return cached_history
+    if refill is not None:
+        return await refill(cache_reject_diagnostics)
     return await refresh_thread_history_from_source(
         client,
         room_id,
         thread_id,
         event_cache,
-        allow_stale_fallback=True,
+        hydrate_sidecars=hydrate_sidecars,
+        allow_stale_fallback=allow_stale_fallback,
         cache_reject_diagnostics=cache_reject_diagnostics,
         trusted_sender_ids=trusted_sender_ids,
         caller_label=caller_label,
         coordinator_queue_wait_ms=coordinator_queue_wait_ms,
-        retained_event_sources=retained_event_sources,
+    )
+
+
+async def fetch_thread_history(
+    client: nio.AsyncClient,
+    room_id: str,
+    thread_id: str,
+    event_cache: ConversationEventCache,
+    *,
+    trusted_sender_ids: Collection[str] = (),
+    caller_label: str = "unknown",
+    coordinator_queue_wait_ms: float = 0.0,
+    resolution_reuse: ThreadResolutionReuseCache | None = None,
+    refill: _ThreadHistoryRefill | None = None,
+) -> ThreadHistoryResult:
+    """Fetch all messages in a thread, allowing advisory stale fallback."""
+    return await _fetch_thread_history_with_cache_policy(
+        client,
+        room_id,
+        thread_id,
+        event_cache,
+        hydrate_sidecars=True,
+        allow_stale_fallback=True,
+        cache_read_failure_message="Durable thread cache read failed; refetching from homeserver",
+        trusted_sender_ids=trusted_sender_ids,
+        caller_label=caller_label,
+        coordinator_queue_wait_ms=coordinator_queue_wait_ms,
+        resolution_reuse=resolution_reuse,
+        refill=refill,
     )
 
 
@@ -1669,50 +1707,22 @@ async def fetch_dispatch_thread_history(
     caller_label: str = "unknown",
     coordinator_queue_wait_ms: float = 0.0,
     resolution_reuse: ThreadResolutionReuseCache | None = None,
-    retained_event_sources: RetainedThreadEventSourceProvider | None = None,
+    refill: _ThreadHistoryRefill | None = None,
 ) -> ThreadHistoryResult:
-    """Fetch strict full thread history for dispatch using only fresh cache data or a homeserver refill."""
-    cache_reject_diagnostics: dict[str, str | int | float | bool] | None = None
-    try:
-        cached_history, cache_reject_diagnostics = await _load_cached_thread_history_if_usable(
-            client,
-            room_id=room_id,
-            thread_id=thread_id,
-            event_cache=event_cache,
-            hydrate_sidecars=True,
-            trusted_sender_ids=trusted_sender_ids,
-            resolution_reuse=resolution_reuse,
-        )
-    except Exception as exc:
-        logger.warning(
-            "Durable dispatch thread cache read failed; refetching from homeserver",
-            room_id=room_id,
-            thread_id=thread_id,
-            error=str(exc),
-        )
-    else:
-        if cached_history is not None:
-            _log_thread_history_refresh(
-                room_id=room_id,
-                thread_id=thread_id,
-                caller_label=caller_label,
-                mode="cache_hit",
-                diagnostics=cached_history.diagnostics,
-                coordinator_queue_wait_ms=coordinator_queue_wait_ms,
-            )
-            return cached_history
-    return await refresh_thread_history_from_source(
+    """Fetch strict full thread history from trusted cache or a fresh refill."""
+    return await _fetch_thread_history_with_cache_policy(
         client,
         room_id,
         thread_id,
         event_cache,
         hydrate_sidecars=True,
         allow_stale_fallback=False,
-        cache_reject_diagnostics=cache_reject_diagnostics,
+        cache_read_failure_message="Durable dispatch thread cache read failed; refetching from homeserver",
         trusted_sender_ids=trusted_sender_ids,
         caller_label=caller_label,
         coordinator_queue_wait_ms=coordinator_queue_wait_ms,
-        retained_event_sources=retained_event_sources,
+        resolution_reuse=resolution_reuse,
+        refill=refill,
     )
 
 
@@ -1726,50 +1736,22 @@ async def fetch_dispatch_thread_snapshot(
     caller_label: str = "unknown",
     coordinator_queue_wait_ms: float = 0.0,
     resolution_reuse: ThreadResolutionReuseCache | None = None,
-    retained_event_sources: RetainedThreadEventSourceProvider | None = None,
+    refill: _ThreadHistoryRefill | None = None,
 ) -> ThreadHistoryResult:
-    """Fetch strict lightweight dispatch context using only fresh cache data or a homeserver refill."""
-    cache_reject_diagnostics: dict[str, str | int | float | bool] | None = None
-    try:
-        cached_history, cache_reject_diagnostics = await _load_cached_thread_history_if_usable(
-            client,
-            room_id=room_id,
-            thread_id=thread_id,
-            event_cache=event_cache,
-            hydrate_sidecars=False,
-            trusted_sender_ids=trusted_sender_ids,
-            resolution_reuse=resolution_reuse,
-        )
-    except Exception as exc:
-        logger.warning(
-            "Durable dispatch thread cache read failed; refetching snapshot from homeserver",
-            room_id=room_id,
-            thread_id=thread_id,
-            error=str(exc),
-        )
-    else:
-        if cached_history is not None:
-            _log_thread_history_refresh(
-                room_id=room_id,
-                thread_id=thread_id,
-                caller_label=caller_label,
-                mode="cache_hit",
-                diagnostics=cached_history.diagnostics,
-                coordinator_queue_wait_ms=coordinator_queue_wait_ms,
-            )
-            return cached_history
-    return await refresh_thread_history_from_source(
+    """Fetch strict lightweight dispatch context from trusted cache or a fresh refill."""
+    return await _fetch_thread_history_with_cache_policy(
         client,
         room_id,
         thread_id,
         event_cache,
         hydrate_sidecars=False,
         allow_stale_fallback=False,
-        cache_reject_diagnostics=cache_reject_diagnostics,
+        cache_read_failure_message="Durable dispatch thread cache read failed; refetching snapshot from homeserver",
         trusted_sender_ids=trusted_sender_ids,
         caller_label=caller_label,
         coordinator_queue_wait_ms=coordinator_queue_wait_ms,
-        retained_event_sources=retained_event_sources,
+        resolution_reuse=resolution_reuse,
+        refill=refill,
     )
 
 

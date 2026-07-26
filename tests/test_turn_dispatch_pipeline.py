@@ -409,7 +409,7 @@ class TestAgentBot(AgentBotTestBase):
             caller_label="dispatch_context",
             coordinator_queue_wait_ms=ANY,
             resolution_reuse=ANY,
-            retained_event_sources=ANY,
+            refill=ANY,
         )
 
     @pytest.mark.asyncio

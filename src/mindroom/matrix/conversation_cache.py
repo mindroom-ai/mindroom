@@ -59,7 +59,6 @@ from mindroom.matrix.thread_bookkeeping import ThreadMutationResolver
 from mindroom.matrix.thread_diagnostics import (
     THREAD_HISTORY_SOURCE_CACHE,
     THREAD_HISTORY_SOURCE_DIAGNOSTIC,
-    THREAD_HISTORY_SOURCE_STALE_CACHE,
     is_thread_history_degraded,
 )
 from mindroom.matrix.thread_membership import resolve_event_thread_membership
@@ -72,7 +71,7 @@ from mindroom.matrix.thread_room_scan import (
 from mindroom.timing import elapsed_ms_since
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable, Collection
+    from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Mapping
     from contextlib import AbstractAsyncContextManager
 
     import structlog
@@ -735,20 +734,13 @@ class MatrixConversationCache(ConversationCacheProtocol):
 
     async def _prepare_retained_thread_repair_deltas(
         self,
-        coordinator: EventCacheWriteCoordinator,
         room_id: str,
         thread_id: str,
         *,
-        principal_id: str,
+        retained_event_sources: Collection[dict[str, Any]],
     ) -> None:
         """Force a refill when certified retained deltas are not yet in raw cache."""
-        retained_event_ids = self._event_ids(
-            coordinator.pending_thread_repair_deltas(
-                room_id,
-                thread_id,
-                coordination_scope=principal_id,
-            ),
-        )
+        retained_event_ids = self._event_ids(retained_event_sources)
         if not retained_event_ids:
             return
         cached_event_ids = await self._cached_thread_event_ids_for_repair(
@@ -811,23 +803,36 @@ class MatrixConversationCache(ConversationCacheProtocol):
         coordinator_queue_wait_ms: float,
     ) -> ThreadHistoryResult:
         """Refresh one thread from Matrix without accepting a cache hit or stale fallback."""
-        return await refresh_thread_history_from_source(
-            self._require_client(),
+        coordinator = self.runtime.event_cache_write_coordinator
+        if coordinator is not None:
+            principal_id = self.runtime.event_cache.principal_id
+            retained_event_sources = coordinator.pending_thread_repair_deltas(
+                room_id,
+                thread_id,
+                coordination_scope=principal_id,
+            )
+            if retained_event_sources:
+                await self._prepare_retained_thread_repair_deltas(
+                    room_id,
+                    thread_id,
+                    retained_event_sources=retained_event_sources,
+                )
+        return await self._refill_thread_from_client(
             room_id,
             thread_id,
-            self.runtime.event_cache,
-            allow_stale_fallback=False,
-            trusted_sender_ids=self._trusted_sender_ids(),
+            cache_reject_diagnostics=None,
             caller_label=caller_label,
             coordinator_queue_wait_ms=coordinator_queue_wait_ms,
+            wants_full_history=True,
+            allows_stale_fallback=False,
         )
 
-    async def _fetch_thread_from_client(
+    async def _refill_thread_from_client(
         self,
-        fetcher: Callable[..., Awaitable[ThreadHistoryResult]],
         room_id: str,
         thread_id: str,
         *,
+        cache_reject_diagnostics: Mapping[str, str | int | float | bool] | None,
         caller_label: str,
         coordinator_queue_wait_ms: float,
         wants_full_history: bool,
@@ -835,15 +840,17 @@ class MatrixConversationCache(ConversationCacheProtocol):
     ) -> ThreadHistoryResult:
         coordinator = self.runtime.event_cache_write_coordinator
         if coordinator is None:
-            return await fetcher(
+            return await refresh_thread_history_from_source(
                 self._require_client(),
                 room_id,
                 thread_id,
-                event_cache=self.runtime.event_cache,
+                self.runtime.event_cache,
+                hydrate_sidecars=wants_full_history,
+                allow_stale_fallback=allows_stale_fallback,
+                cache_reject_diagnostics=cache_reject_diagnostics,
                 trusted_sender_ids=self._trusted_sender_ids(),
                 caller_label=caller_label,
                 coordinator_queue_wait_ms=coordinator_queue_wait_ms,
-                resolution_reuse=self._thread_resolution_reuse,
             )
 
         principal_id = self.runtime.event_cache.principal_id
@@ -857,21 +864,17 @@ class MatrixConversationCache(ConversationCacheProtocol):
                 )
 
             retained_event_source_provider = RetainedThreadEventSourceProvider(pending_event_sources)
-            await self._prepare_retained_thread_repair_deltas(
-                coordinator,
-                room_id,
-                thread_id,
-                principal_id=principal_id,
-            )
-            result = await fetcher(
+            result = await refresh_thread_history_from_source(
                 self._require_client(),
                 room_id,
                 thread_id,
-                event_cache=self.runtime.event_cache,
+                self.runtime.event_cache,
+                hydrate_sidecars=wants_full_history,
+                allow_stale_fallback=allows_stale_fallback,
+                cache_reject_diagnostics=cache_reject_diagnostics,
                 trusted_sender_ids=self._trusted_sender_ids(),
                 caller_label=caller_label,
                 coordinator_queue_wait_ms=coordinator_queue_wait_ms,
-                resolution_reuse=self._thread_resolution_reuse,
                 retained_event_sources=retained_event_source_provider,
             )
             if self._thread_repair_result_is_usable(result):
@@ -886,26 +889,67 @@ class MatrixConversationCache(ConversationCacheProtocol):
                 )
             return result
 
-        while True:
-            repair_run = await coordinator.run_thread_repair(
+        repair_run = await coordinator.run_thread_repair(
+            room_id,
+            thread_id,
+            repair,
+            coordination_scope=principal_id,
+            hydrate_sidecars=wants_full_history,
+            allow_stale_fallback=allows_stale_fallback,
+            result_arms_backoff=lambda result: not self._thread_repair_result_is_usable(result),
+        )
+        return repair_run.value
+
+    async def _fetch_thread_from_client(
+        self,
+        fetcher: Callable[..., Awaitable[ThreadHistoryResult]],
+        room_id: str,
+        thread_id: str,
+        *,
+        caller_label: str,
+        coordinator_queue_wait_ms: float,
+        wants_full_history: bool,
+        allows_stale_fallback: bool,
+    ) -> ThreadHistoryResult:
+        coordinator = self.runtime.event_cache_write_coordinator
+        if coordinator is not None:
+            principal_id = self.runtime.event_cache.principal_id
+            retained_event_sources = coordinator.pending_thread_repair_deltas(
                 room_id,
                 thread_id,
-                repair,
                 coordination_scope=principal_id,
-                hydrate_sidecars=wants_full_history,
-                allow_stale_fallback=allows_stale_fallback,
-                result_arms_backoff=lambda result: not self._thread_repair_result_is_usable(result),
             )
-            result = repair_run.value
-            if not repair_run.joined:
-                return result
-            # A joined flight must satisfy this caller's freshness and hydration contract.
-            # Every pass either returns or awaits one real repair, so these retries cannot spin.
-            source = result.diagnostics.get(THREAD_HISTORY_SOURCE_DIAGNOSTIC)
-            if not allows_stale_fallback and source == THREAD_HISTORY_SOURCE_STALE_CACHE:
-                continue
-            if result.is_full_history or not wants_full_history:
-                return result
+            if retained_event_sources:
+                await self._prepare_retained_thread_repair_deltas(
+                    room_id,
+                    thread_id,
+                    retained_event_sources=retained_event_sources,
+                )
+
+        async def refill(
+            cache_reject_diagnostics: Mapping[str, str | int | float | bool] | None,
+        ) -> ThreadHistoryResult:
+            return await self._refill_thread_from_client(
+                room_id,
+                thread_id,
+                cache_reject_diagnostics=cache_reject_diagnostics,
+                caller_label=caller_label,
+                coordinator_queue_wait_ms=coordinator_queue_wait_ms,
+                wants_full_history=wants_full_history,
+                allows_stale_fallback=allows_stale_fallback,
+            )
+
+        return await fetcher(
+            self._require_client(),
+            room_id,
+            thread_id,
+            event_cache=self.runtime.event_cache,
+            trusted_sender_ids=self._trusted_sender_ids(),
+            caller_label=caller_label,
+            coordinator_queue_wait_ms=coordinator_queue_wait_ms,
+            resolution_reuse=self._thread_resolution_reuse,
+            refill=refill if coordinator is not None else None,
+        )
 
     @staticmethod
     def _thread_repair_result_is_usable(result: ThreadHistoryResult) -> bool:
