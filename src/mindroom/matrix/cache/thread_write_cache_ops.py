@@ -53,6 +53,10 @@ class ThreadMutationCacheOps:
         """Return the facade-bound logger so collaborator rebinding stays visible."""
         return self._logger_getter()
 
+    def _schedule_repair_if_available(self, room_id: str, thread_id: str) -> None:
+        if self._schedule_thread_repair is not None:
+            self._schedule_thread_repair(room_id, thread_id)
+
     def cache_runtime_available(self) -> bool:
         """Return whether event-cache writes can safely proceed."""
         return (
@@ -305,6 +309,7 @@ class ThreadMutationCacheOps:
                 context=context,
                 error=str(exc),
             )
+            self._schedule_repair_if_available(room_id, thread_id)
             if raise_on_failure:
                 raise
             return False
@@ -316,8 +321,7 @@ class ThreadMutationCacheOps:
                 event_id=event_id,
                 context=context,
             )
-            if self._schedule_thread_repair is not None:
-                self._schedule_thread_repair(room_id, thread_id)
+            self._schedule_repair_if_available(room_id, thread_id)
             return False
         try:
             revalidated = await self.runtime.event_cache.revalidate_thread_after_incremental_update(
@@ -333,6 +337,7 @@ class ThreadMutationCacheOps:
                 context=context,
                 error=str(exc),
             )
+            self._schedule_repair_if_available(room_id, thread_id)
             if raise_on_failure:
                 raise
         else:
@@ -344,8 +349,8 @@ class ThreadMutationCacheOps:
                     (event_id,),
                     coordination_scope=self.runtime.event_cache.principal_id,
                 )
-            elif not revalidated and self._schedule_thread_repair is not None:
-                self._schedule_thread_repair(room_id, thread_id)
+            elif not revalidated:
+                self._schedule_repair_if_available(room_id, thread_id)
         return True
 
     def retain_thread_repair_delta(

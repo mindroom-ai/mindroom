@@ -51,10 +51,21 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
     """Threading behavior tests moved verbatim from tests/test_threading_error.py."""
 
     @pytest.mark.asyncio
-    async def test_append_that_cannot_revalidate_retains_delta_and_schedules_repair(self) -> None:
+    @pytest.mark.parametrize(
+        "revalidation_result",
+        [False, RuntimeError("cache unavailable")],
+        ids=["rejected", "failed"],
+    )
+    async def test_append_that_cannot_revalidate_retains_delta_and_schedules_repair(
+        self,
+        revalidation_result: bool | RuntimeError,
+    ) -> None:
         """A durable raw append is not converged until its snapshot becomes trusted."""
         original_ops, logger, event_cache = _thread_mutation_cache_ops()
-        event_cache.revalidate_thread_after_incremental_update.return_value = False
+        if isinstance(revalidation_result, RuntimeError):
+            event_cache.revalidate_thread_after_incremental_update.side_effect = revalidation_result
+        else:
+            event_cache.revalidate_thread_after_incremental_update.return_value = revalidation_result
         schedule_repair = Mock()
         cache_ops = ThreadMutationCacheOps(
             logger_getter=lambda: logger,
