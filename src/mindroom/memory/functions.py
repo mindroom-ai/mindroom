@@ -190,21 +190,27 @@ async def delete_agent_memory(
 
 
 def _render_entrypoint_preamble(entrypoint: MemoryEntrypointContext, config: Config) -> str:
-    """Frame the preloaded memory entrypoint as already-inlined, cap-aware context."""
+    """Frame the preloaded memory entrypoint as already-inlined, cap-aware context.
+
+    A file whose preloaded head is blank still reports its truncation, so the
+    cap never withholds lines silently.
+    """
     header = render_prompt_template(
         config.get_prompt("FILE_MEMORY_ENTRYPOINT_HEADER_TEMPLATE"),
         memory_path=entrypoint.source_path,
     )
-    if not entrypoint.omitted_lines:
-        return f"{header}\n{entrypoint.text}"
-    truncation_notice = render_prompt_template(
-        config.get_prompt("FILE_MEMORY_ENTRYPOINT_TRUNCATION_TEMPLATE"),
-        included_lines=entrypoint.included_lines,
-        total_lines=entrypoint.total_lines,
-        max_entrypoint_lines=config.memory.file.max_entrypoint_lines,
-        memory_path=entrypoint.source_path,
+    truncation_notice = (
+        render_prompt_template(
+            config.get_prompt("FILE_MEMORY_ENTRYPOINT_TRUNCATION_TEMPLATE"),
+            included_lines=entrypoint.included_lines,
+            total_lines=entrypoint.total_lines,
+            max_entrypoint_lines=config.memory.file.max_entrypoint_lines,
+            memory_path=entrypoint.source_path,
+        )
+        if entrypoint.omitted_lines
+        else ""
     )
-    return f"{header}\n{entrypoint.text}\n{truncation_notice}"
+    return "\n".join(part for part in (header, entrypoint.text, truncation_notice) if part)
 
 
 @timed("system_prompt_assembly.memory_enhancement")
@@ -243,7 +249,7 @@ async def build_memory_prompt_parts(
         config,
         execution_identity=execution_identity,
     )
-    if agent_entrypoint.text:
+    if agent_entrypoint.text or agent_entrypoint.omitted_lines:
         session_preamble = _render_entrypoint_preamble(agent_entrypoint, config)
 
     # The automatic per-turn path must not silently drop the degradation

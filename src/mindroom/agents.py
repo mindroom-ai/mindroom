@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 from weakref import WeakValueDictionary
@@ -269,9 +270,11 @@ def _load_context_files(
         if resolved_path.is_file():
             body = _read_context_file(resolved_path)
             loaded_parts.append(
+                # The title is the full path so the rendered prompt tells the
+                # model exactly which file on disk each part came from.
                 _AdditionalContextChunk(
                     kind="personality",
-                    title=resolved_path.name,
+                    title=str(resolved_path),
                     body=body,
                 ),
             )
@@ -285,30 +288,34 @@ def _read_context_file(resolved_path: Path) -> str:
     return resolved_path.read_text(encoding="utf-8").strip()
 
 
-@dataclass(frozen=True)
-class _PreloadContextRenderer:
-    """Render preload context chunks and mark per-file what the cap removed."""
+def _render_context_chunk(chunk: _AdditionalContextChunk, *, chunk_marker_template: str) -> str:
+    """Render one chunk under its source path, marking what the cap removed."""
+    body = chunk.body.strip()
+    if not chunk.omitted_chars:
+        return f"### {chunk.title}\n{body}" if body else ""
+    marker = render_prompt_template(
+        chunk_marker_template,
+        title=chunk.title,
+        omitted_chars=chunk.omitted_chars,
+    )
+    return f"### {chunk.title}\n{body}\n{marker}" if body else f"### {chunk.title}\n{marker}"
 
-    section_heading: str
-    chunk_marker_template: str
 
-    def render(self, chunks: list[_AdditionalContextChunk]) -> str:
-        """Render every chunk that still carries content or an omission marker."""
-        rendered = [block for chunk in chunks if (block := self._render_chunk(chunk))]
-        if not rendered:
-            return ""
-        return f"{self.section_heading}\n" + "\n\n".join(rendered) + "\n\n"
-
-    def _render_chunk(self, chunk: _AdditionalContextChunk) -> str:
-        body = chunk.body.strip()
-        if not chunk.omitted_chars:
-            return f"### {chunk.title}\n{body}" if body else ""
-        marker = render_prompt_template(
-            self.chunk_marker_template,
-            title=chunk.title,
-            omitted_chars=chunk.omitted_chars,
-        )
-        return f"### {chunk.title}\n{body}\n{marker}" if body else f"### {chunk.title}\n{marker}"
+def _render_context_chunks(
+    chunks: list[_AdditionalContextChunk],
+    *,
+    section_heading: str,
+    chunk_marker_template: str,
+) -> str:
+    """Render every chunk that still carries content or an omission marker."""
+    rendered = [
+        block
+        for chunk in chunks
+        if (block := _render_context_chunk(chunk, chunk_marker_template=chunk_marker_template))
+    ]
+    if not rendered:
+        return ""
+    return f"{section_heading}\n" + "\n\n".join(rendered) + "\n\n"
 
 
 def _build_preload_truncation_groups(
@@ -323,13 +330,13 @@ def _drop_whole_chunks(
     personality_chunks: list[_AdditionalContextChunk],
     max_preload_chars: int,
     *,
-    renderer: _PreloadContextRenderer,
+    render: Callable[[list[_AdditionalContextChunk]], str],
 ) -> int:
     """Drop entire chunk bodies (least critical first) until under the cap."""
     omitted = 0
     for group in groups:
         for chunk in group:
-            if len(renderer.render(personality_chunks)) <= max_preload_chars:
+            if len(render(personality_chunks)) <= max_preload_chars:
                 return omitted
             if not chunk.body:
                 continue
@@ -344,13 +351,13 @@ def _trim_chunk_tails(
     personality_chunks: list[_AdditionalContextChunk],
     max_preload_chars: int,
     *,
-    renderer: _PreloadContextRenderer,
+    render: Callable[[list[_AdditionalContextChunk]], str],
 ) -> int:
     """Trim from the *end* of chunks to preserve headers/identity at the top."""
     omitted = 0
     for group in groups:
         for chunk in group:
-            overflow = len(renderer.render(personality_chunks)) - max_preload_chars
+            overflow = len(render(personality_chunks)) - max_preload_chars
             if overflow <= 0:
                 return omitted
             if not chunk.body:
@@ -377,11 +384,12 @@ def _apply_preload_cap(
     Every touched file keeps a marker naming it and the chars it lost, so a
     dropped context file is visible to the model instead of silently missing.
     """
-    renderer = _PreloadContextRenderer(
+    render = partial(
+        _render_context_chunks,
         section_heading=section_heading,
         chunk_marker_template=chunk_marker_template,
     )
-    rendered = renderer.render(personality_chunks)
+    rendered = render(personality_chunks)
     if len(rendered) <= max_preload_chars:
         return rendered, 0
 
@@ -398,16 +406,16 @@ def _apply_preload_cap(
         groups,
         personality_chunks,
         trim_budget,
-        renderer=renderer,
+        render=render,
     )
     omitted_chars += _trim_chunk_tails(
         groups,
         personality_chunks,
         trim_budget,
-        renderer=renderer,
+        render=render,
     )
 
-    rendered = renderer.render(personality_chunks)
+    rendered = render(personality_chunks)
     if omitted_chars <= 0:
         return rendered, 0
 

@@ -164,16 +164,14 @@ Timezone: {timezone_str} ({timezone_abbrev})
 
 PERSONALITY_CONTEXT_SECTION_HEADING = (
     "## Personality Context\n"
-    "These workspace files are inlined here automatically every turn. "
-    "Do not re-read them to recall what they say; open one to edit it, or when a marker says content was omitted."
+    "Each section below is headed by the path of the file it was read from, inlined here automatically every turn. "
+    "Do not re-read a file to recall what it says; open it to edit it, or when a marker says content was omitted."
 )
 CONTEXT_TRUNCATION_MARKER_TEMPLATE = (
     "[Context files exceeded the preload budget - {omitted_chars} chars omitted in total. "
-    "Read the affected files from your workspace when you need the omitted parts.]"
+    "Read the paths marked above for the omitted parts.]"
 )
-CONTEXT_CHUNK_OMITTED_MARKER_TEMPLATE = (
-    "[{title} truncated here - {omitted_chars} chars omitted. Read {title} from your workspace for the rest.]"
-)
+CONTEXT_CHUNK_OMITTED_MARKER_TEMPLATE = "[Truncated - {omitted_chars} chars omitted. Read {title} for the rest.]"
 
 DYNAMIC_TOOLING_INSTRUCTION_TEMPLATE = """## Dynamic Tools
 Deferred tools are available by exact name and can be loaded for this session.
