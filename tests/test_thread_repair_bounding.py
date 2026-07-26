@@ -590,3 +590,74 @@ async def test_late_interactive_join_repairs_again_when_the_speculative_result_i
     assert len(recorder.scanned_thread_ids) > _SPECULATIVE_ATTEMPTS_FOR_TEST, (
         f"reader inherited the speculative one-attempt limit, saw {recorder.scanned_thread_ids}"
     )
+
+
+@pytest.mark.parametrize(
+    ("store_outcome", "expected_flights"),
+    [
+        (ThreadCacheReplaceOutcome.INVALIDATED, 2),
+        (ThreadCacheReplaceOutcome.HARD_FAILURE, 1),
+    ],
+    ids=["retryable", "terminal"],
+)
+@pytest.mark.asyncio
+async def test_only_a_retryable_shared_result_earns_the_joiner_its_own_flight(
+    store_outcome: ThreadCacheReplaceOutcome,
+    expected_flights: int,
+) -> None:
+    """A terminal outcome is settled, so rescanning it only meets the backoff it just armed."""
+    registry = ThreadRepairRegistry()
+    key = _flight_key("$thread", hydrate_sidecars=False)
+    gate = asyncio.Event()
+    flights = 0
+
+    def result() -> MagicMock:
+        return MagicMock(diagnostics={"cache_store_outcome": store_outcome.value})
+
+    async def scan() -> MagicMock:
+        nonlocal flights
+        flights += 1
+        return result()
+
+    def needs_own_flight(value: MagicMock) -> bool:
+        return value.diagnostics["cache_store_outcome"] in {
+            outcome.value for outcome in ThreadCacheReplaceOutcome if outcome.retryable
+        }
+
+    def arms_backoff(value: MagicMock) -> bool:
+        return value.diagnostics["cache_store_outcome"] == ThreadCacheReplaceOutcome.HARD_FAILURE.value
+
+    def delayed_schedule[T](repair_factory: Callable[[], Awaitable[T]]) -> asyncio.Task[T]:
+        async def runner() -> T:
+            await gate.wait()
+            return await repair_factory()
+
+        return asyncio.create_task(runner())
+
+    speculative = asyncio.create_task(
+        registry.run(
+            key,
+            schedule=delayed_schedule,
+            repair=scan,
+            result_arms_backoff=arms_backoff,
+            speculative=True,
+        ),
+    )
+    await asyncio.sleep(0)
+    interactive = asyncio.create_task(
+        registry.run(
+            key,
+            schedule=_schedule,
+            repair=scan,
+            result_arms_backoff=arms_backoff,
+            result_needs_own_flight=needs_own_flight,
+        ),
+    )
+    await asyncio.sleep(0)
+    gate.set()
+
+    # A terminal result must come back to the reader rather than raising the armed backoff at it.
+    assert await interactive is not None
+    await speculative
+
+    assert flights == expected_flights

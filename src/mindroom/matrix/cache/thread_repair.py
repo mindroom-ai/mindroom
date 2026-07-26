@@ -169,18 +169,13 @@ class ThreadRepairRegistry:
             self._speculative_suppression_depth = max(0, self._speculative_suppression_depth - 1)
 
     def _speculative_cooldown_active(self, key: _ThreadRepairDeltaKey) -> bool:
-        """Return whether this thread was scanned too recently, expiring its entry in passing.
+        """Return whether this thread was scanned too recently.
 
-        Checked once per append that finds a missing snapshot, so it stays O(1) rather than sweeping
-        every known thread on the hottest path in a replay storm.
+        A pure read: expired entries are dropped when the next cooldown is armed, which keeps this
+        O(1) on the hottest path and keeps the public suppression query free of side effects.
         """
         retry_after = self._speculative_cooldowns.get(key)
-        if retry_after is None:
-            return False
-        if retry_after > self.clock():
-            return True
-        del self._speculative_cooldowns[key]
-        return False
+        return retry_after is not None and retry_after > self.clock()
 
     def speculative_suppression_reason(
         self,
@@ -205,15 +200,6 @@ class ThreadRepairRegistry:
         if self._slot_waiters or self._running_repairs >= self.max_concurrent_repairs:
             return "repair_concurrency_limit"
         return None
-
-    def flight_is_speculative(self, key: _ThreadRepairFlightKey) -> bool:
-        """Return whether the flight a caller would join right now is speculative.
-
-        A joining caller inherits the running flight's contract, so an interactive reader needs to
-        know it is about to share work nobody is waiting on and that scans a lost guarded
-        replacement one fewer time than it is owed.
-        """
-        return self._active_task(key) is not None and key in self._speculative_flights
 
     @contextmanager
     def _joined_interactively(self, key: _ThreadRepairFlightKey) -> Iterator[None]:
@@ -336,6 +322,30 @@ class ThreadRepairRegistry:
             self._release_repair_slot(speculative=speculative)
             self._arm_speculative_cooldown(key)
 
+    async def _join_running_flight[T](
+        self,
+        key: _ThreadRepairFlightKey,
+        active_task: asyncio.Task[object],
+        *,
+        speculative: bool,
+        result_needs_own_flight: Callable[[T], bool] | None,
+    ) -> tuple[bool, T]:
+        """Await the flight this caller joins and report whether its result settles the call.
+
+        The joined flight's tier is read at the instant of the join, so no flight can slip in
+        between. An interactive caller that inherited a speculative flight's unusable result is
+        owed its own scan, unless another flight already owns the thread and can be joined on
+        equal terms.
+        """
+        if speculative:
+            return True, cast("T", await asyncio.shield(active_task))
+        joined_speculative_flight = key in self._speculative_flights
+        with self._joined_interactively(key):
+            value = cast("T", await asyncio.shield(active_task))
+        if not joined_speculative_flight or result_needs_own_flight is None or not result_needs_own_flight(value):
+            return True, value
+        return self._active_task(key) is not None, value
+
     async def run[T](
         self,
         key: _ThreadRepairFlightKey,
@@ -343,6 +353,7 @@ class ThreadRepairRegistry:
         schedule: Callable[[Callable[[], Awaitable[T]]], asyncio.Task[T]],
         repair: Callable[[], Awaitable[T]],
         result_arms_backoff: Callable[[T], bool],
+        result_needs_own_flight: Callable[[T], bool] | None = None,
         bypass_failure_backoff: bool = False,
         speculative: bool = False,
     ) -> T:
@@ -351,6 +362,11 @@ class ThreadRepairRegistry:
         Authoritative untimed reads may bypass an existing delay while preserving its failure count.
         A speculative caller raises ``ThreadRepairSuppressedError`` instead of adding a scan whenever
         the fan-out gate declines it.
+
+        Joining a flight means inheriting its contract, and a speculative flight rescans a lost
+        guarded replacement one fewer time than a waiting reader is owed. ``result_needs_own_flight``
+        lets an interactive caller that inherited such a result repair again under its own contract.
+        The tier is read at the instant of the join, so no flight can start in between.
         """
 
         async def run_repair() -> T:
@@ -369,10 +385,14 @@ class ThreadRepairRegistry:
 
         active_task = self._active_task(key)
         if active_task is not None:
-            if speculative:
-                return cast("T", await asyncio.shield(active_task))
-            with self._joined_interactively(key):
-                return cast("T", await asyncio.shield(active_task))
+            settled, joined_value = await self._join_running_flight(
+                key,
+                active_task,
+                speculative=speculative,
+                result_needs_own_flight=result_needs_own_flight,
+            )
+            if settled:
+                return joined_value
         admission_error = self._admission_error(
             key,
             speculative=speculative,

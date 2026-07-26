@@ -648,6 +648,7 @@ class EventCacheWriteCoordinator:
         hydrate_sidecars: bool,
         allow_stale_fallback: bool,
         result_arms_backoff: Callable[[T], bool],
+        result_needs_own_flight: Callable[[T], bool] | None = None,
         bypass_failure_backoff: bool = False,
         speculative: bool = False,
     ) -> T:
@@ -672,22 +673,9 @@ class EventCacheWriteCoordinator:
             ),
             repair=repair_coro_factory,
             result_arms_backoff=result_arms_backoff,
+            result_needs_own_flight=result_needs_own_flight,
             bypass_failure_backoff=bypass_failure_backoff,
             speculative=speculative,
-        )
-
-    def thread_repair_flight_is_speculative(
-        self,
-        room_id: str,
-        thread_id: str,
-        *,
-        coordination_scope: str,
-        hydrate_sidecars: bool,
-        allow_stale_fallback: bool,
-    ) -> bool:
-        """Return whether joining this thread's running flight would inherit a speculative contract."""
-        return self._thread_repairs.flight_is_speculative(
-            (coordination_scope, room_id, thread_id, hydrate_sidecars, allow_stale_fallback),
         )
 
     def speculative_thread_repair_suppression_reason(
