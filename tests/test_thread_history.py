@@ -2903,6 +2903,20 @@ class TestThreadHistory:
         assert [source["event_id"] for source in grouped["$root"]] == ["$root", "$child"]
         assert unresolved_opaque == frozenset({"$opaque_edit"})
 
+        opaque_edit["sender"] = "@mallory:localhost"
+        _grouped, wrong_sender_unresolved = await _group_scanned_sources_by_thread(
+            room_id="!room:localhost",
+            thread_root_ids=("$root",),
+            edit_candidates_by_original_event_id={},
+            scanned_message_sources={
+                "$root": root_source,
+                "$child": child_source,
+                "$opaque_edit": opaque_edit,
+            },
+        )
+
+        assert wrong_sender_unresolved == frozenset()
+
     def test_ordered_event_ids_from_scanned_event_sources_preserves_input_order_on_timestamp_ties(self) -> None:
         """Scanned-source ordering should preserve first-seen order before falling back to event IDs."""
         ordered_event_ids = ordered_event_ids_from_scanned_event_sources(

@@ -1,17 +1,17 @@
 # Thread edit integrity gate status
 
-Updated 2026-07-26 after correcting invalid batch sources and forged cold-scan replacements.
+Updated 2026-07-26 after correcting invalid transitive batch ancestry and opaque encrypted replacements.
 
 ## Exact target
 
 - PR: `mindroom-ai/mindroom#1641`
 - Branch: `fix/thread-edit-integrity`
-- Latest production commit: `9dec1ba8b30a5d5f220965e9e15f3353d293d754`
+- Latest production commit: `658e4766455f001a8c1066cb58ae0fdc8882c3be`
 - Current base and merge base: `e95fbe9a4bc069340fd36f333f3d7424657e1056`
 - Latest integration commit: `6a7b3f473b089e283648cdc392df6e4fbf28b801`
-- Latest pushed code head: `9dec1ba8b30a5d5f220965e9e15f3353d293d754`.
+- Latest pushed code head: `658e4766455f001a8c1066cb58ae0fdc8882c3be`.
 - This crash-handoff update will be the docs-only successor; resolve local, remote, and PR heads after it is pushed before counting a gate.
-- Commit `9dec1ba8b` is pushed and replaces every earlier exact-head gate.
+- Commit `658e47664` is pushed and replaces every earlier exact-head gate.
 - The tracked tree is clean except three user-owned untracked task notes.
 - Resolve local, remote, and PR heads before counting any exact-head gate.
 - Resolve and compare local, origin, and GitHub heads before counting any gate.
@@ -71,6 +71,9 @@ Updated 2026-07-26 after correcting invalid batch sources and forged cold-scan r
 - `9dec1ba8b` requires canonical source validity before a supplied batch event can resolve membership or prove another event is a thread root.
 - `9dec1ba8b` filters cold-scan replacement candidates through the shared replacement validator before building a reusable snapshot.
 - Wrong-sender cold-scan edits remain non-visible and no longer force every later read back to the homeserver.
+- `658e47664` validates every supplied map-backed ancestor before a descendant may inherit its thread membership.
+- `658e47664` keeps undecryptable replacements fail closed when their visible outer relation targets a known thread event.
+- Opaque replacements with a visibly different sender remain ignored.
 
 ## Reconciled review status
 
@@ -128,7 +131,7 @@ Updated 2026-07-26 after correcting invalid batch sources and forged cold-scan r
 - The latest malformed-relation correction adds `+10/-1` production lines, net `+9`.
 - The exact-lookup, explicit-thread, and incremental-reuse correction adds `+76/-25` production lines, net `+51`.
 - The exact-`fd48530f7` follow-up adds `+67/-24` production lines, net `+43`.
-- Production source against current `main` is now `+2109/-1192`, net `+917`.
+- Production source against current `main` is now `+2148/-1193`, net `+955`.
 
 ## Validation already completed
 
@@ -199,11 +202,18 @@ Updated 2026-07-26 after correcting invalid batch sources and forged cold-scan r
 - The complete affected selection passes `509` tests across SQLite and PostgreSQL.
 - Ruff, format, `ty`, Tach dependencies/interfaces, all-file pre-commit, `git diff --check`, and commit hooks pass for `9dec1ba8b`.
 - Exact-`52cf2be07` full pytest passed `12188` tests with `54` skipped after normalizing terminal width; it is historical after the production correction.
+- Two exact-`cd4c09767` reviewers independently reproduced invalid intermediate batch ancestry.
+- One reviewer also reproduced an opaque encrypted replacement disappearing from both the grouped snapshot and unresolved fail-closed evidence.
+- All four exact transitive and opaque variants failed before implementation and pass after `658e47664`.
+- The complete affected selection passes `513` tests across SQLite and PostgreSQL.
+- Ruff, format, `ty`, Tach dependencies/interfaces, all-file pre-commit, `git diff --check`, and commit hooks pass for `658e47664`.
+- Exact-`cd4c09767` full pytest completed `12195` tests with `54` skipped and one unrelated Rich terminal-wrap assertion.
+- The unchanged plugin assertion passes serially at width `240` and under xdist at width `500`; a fresh full rerun is required on the new exact head.
 - Git author was verified as `Bas Nijholt <bas@nijho.lt>` before every new commit.
 
 ## Pending exact-head gates
 
-- Commit and push this crash-handoff successor after `9dec1ba8b`, then freeze its exact head.
+- Commit and push this crash-handoff successor after `658e47664`, then freeze its exact head.
 - Fresh CI must complete on the final exact head.
 - A fresh independent native Codex correctness review is required on the final exact head.
 - Exact-head PostgreSQL owning and stress selections are required.
