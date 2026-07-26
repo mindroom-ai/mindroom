@@ -491,7 +491,6 @@ class _OffloadedAsyncStreamManager:
     async def __aenter__(self) -> object:
         current_task = asyncio.current_task()
         assert current_task is not None
-        baseline_cancel_count = current_task.cancelling()
         deferred_cancel_count = 0
         deferred_cancel: asyncio.CancelledError | None = None
         setup_task = asyncio.create_task(asyncio.to_thread(self._stream_factory))
@@ -500,12 +499,14 @@ class _OffloadedAsyncStreamManager:
             try:
                 await asyncio.shield(setup_task)
             except asyncio.CancelledError as exc:
-                new_cancel_count = current_task.cancelling() - baseline_cancel_count
-                if new_cancel_count <= 0:
+                if setup_task.cancelled():
                     raise
-                for _ in range(new_cancel_count):
+                caller_cancel_count = current_task.cancelling()
+                if caller_cancel_count <= 0:
+                    raise
+                for _ in range(caller_cancel_count):
                     current_task.uncancel()
-                deferred_cancel_count += new_cancel_count
+                deferred_cancel_count += caller_cancel_count
                 deferred_cancel = deferred_cancel or exc
 
         try:

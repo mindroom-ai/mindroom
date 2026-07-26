@@ -1543,11 +1543,13 @@ async def test_prompt_cache_hook_constructs_async_stream_off_event_loop(*, use_b
 
 
 @pytest.mark.parametrize("cancel_count", [1, 2])
+@pytest.mark.parametrize("cancel_before_setup", [False, True])
 @pytest.mark.parametrize("use_beta", [False, True])
 @pytest.mark.asyncio
-async def test_cancelled_async_stream_setup_does_not_orphan_sdk_request_coroutine(
+async def test_cancelled_async_stream_setup_does_not_orphan_sdk_request_coroutine(  # noqa: PLR0915
     monkeypatch: pytest.MonkeyPatch,
     *,
+    cancel_before_setup: bool,
     cancel_count: int,
     use_beta: bool,
 ) -> None:
@@ -1593,6 +1595,11 @@ async def test_cancelled_async_stream_setup_does_not_orphan_sdk_request_coroutin
     install_claude_prompt_cache_hook(model)
 
     async def consume_stream() -> list[ModelResponse]:
+        if cancel_before_setup:
+            current_task = asyncio.current_task()
+            assert current_task is not None
+            for _ in range(cancel_count):
+                current_task.cancel()
         return [
             response
             async for response in model.ainvoke_stream(
@@ -1606,8 +1613,9 @@ async def test_cancelled_async_stream_setup_does_not_orphan_sdk_request_coroutin
         warnings.simplefilter("always")
         try:
             assert await asyncio.to_thread(setup_started.wait, 2.0)
-            for _ in range(cancel_count):
-                setup_task.cancel()
+            if not cancel_before_setup:
+                for _ in range(cancel_count):
+                    setup_task.cancel()
             allow_setup.set()
             with pytest.raises(asyncio.CancelledError):
                 await setup_task
