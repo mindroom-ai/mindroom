@@ -1346,8 +1346,9 @@ async def test_stored_repair_releases_replayed_delta_filtered_by_redaction(tmp_p
         retained_event_sources: RetainedThreadEventSourceProvider,
         **_kwargs: object,
     ) -> ThreadHistoryResult:
-        assert [source["event_id"] for source in retained_event_sources.current_event_sources()] == ["$redacted"]
-        retained_event_sources.record_replayed_event_ids({"$redacted"})
+        sources = retained_event_sources.current_event_sources()
+        assert [source["event_id"] for source in sources] == ["$redacted"]
+        retained_event_sources.record_replayed_event_sources({"$redacted": sources[0]})
         return thread_history_result(
             [],
             is_full_history=True,
@@ -1382,6 +1383,120 @@ async def test_stored_repair_releases_replayed_delta_filtered_by_redaction(tmp_p
         coordination_scope="@agent:localhost",
     )
     event_cache.get_thread_events.assert_awaited_once()
+
+
+def test_retained_provider_replaces_replayed_evidence_each_attempt() -> None:
+    """A later repair attempt must replace, not union, replay authorization."""
+    current_sources = ({"event_id": "$event", "content": {"body": "first"}},)
+    provider = RetainedThreadEventSourceProvider(lambda: current_sources)
+    first_attempt = provider.current_event_sources()
+    provider.record_replayed_event_sources({"$event": first_attempt[0]})
+
+    current_sources = ({"event_id": "$event", "content": {"body": "conflict"}},)
+    provider.current_event_sources()
+
+    assert provider.replayed_event_sources == {}
+
+
+@pytest.mark.asyncio
+async def test_same_id_uncovered_retained_delta_invalidates_cached_thread(tmp_path: Path) -> None:
+    """A cached event ID alone must not hide a different retained representation."""
+    cached = {
+        "event_id": "$reply",
+        "sender": "@user:localhost",
+        "origin_server_ts": 2000,
+        "type": "m.room.message",
+        "content": {"body": "Cached", "msgtype": "m.text"},
+    }
+    retained = {
+        **cached,
+        "content": {"body": "Retained conflict", "msgtype": "m.text"},
+    }
+    event_cache = MagicMock()
+    event_cache.principal_id = "@agent:localhost"
+    event_cache.get_thread_events = AsyncMock(return_value=[cached])
+    conversation_cache = _conversation_cache_for_thread_reads(tmp_path, event_cache, client=MagicMock())
+    coordinator = MagicMock()
+    coordinator.pending_thread_repair_deltas.return_value = (retained,)
+    conversation_cache.runtime.event_cache_write_coordinator = coordinator
+    conversation_cache._write_cache_ops.invalidate_known_thread = AsyncMock()
+
+    await conversation_cache._prepare_pending_thread_repair_deltas(
+        "!room:localhost",
+        "$thread:localhost",
+    )
+
+    conversation_cache._write_cache_ops.invalidate_known_thread.assert_awaited_once_with(
+        "!room:localhost",
+        "$thread:localhost",
+        reason="retained_thread_delta_uncovered",
+    )
+
+
+@pytest.mark.asyncio
+async def test_existing_winner_does_not_acknowledge_quarantined_retained_conflict(tmp_path: Path) -> None:
+    """An existing same-ID cache row cannot acknowledge a rejected retained representation."""
+    cached = {
+        "event_id": "$reply",
+        "sender": "@user:localhost",
+        "origin_server_ts": 2000,
+        "type": "m.room.message",
+        "content": {"body": "Cached", "msgtype": "m.text"},
+    }
+    conflict = {
+        **cached,
+        "content": {"body": "Conflict", "msgtype": "m.text"},
+    }
+    event_cache = MagicMock()
+    event_cache.get_thread_events = AsyncMock(return_value=[cached])
+    conversation_cache = _conversation_cache_for_thread_reads(tmp_path, event_cache, client=MagicMock())
+    coordinator = MagicMock()
+    coordinator.pending_thread_repair_deltas.return_value = (conflict,)
+
+    await conversation_cache._acknowledge_repaired_thread_deltas(
+        coordinator,
+        "!room:localhost",
+        "$thread:localhost",
+        principal_id="@agent:localhost",
+        presented_event_sources={"$reply": conflict},
+        replayed_event_sources={},
+        snapshot_stored=False,
+    )
+
+    coordinator.acknowledge_thread_repair_deltas.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_late_same_id_retained_overwrite_is_not_acknowledged(tmp_path: Path) -> None:
+    """A same-ID overwrite after reconstruction must remain pending for another repair."""
+    replayed = {
+        "event_id": "$reply",
+        "sender": "@user:localhost",
+        "origin_server_ts": 2000,
+        "type": "m.room.message",
+        "content": {"body": "Replayed", "msgtype": "m.text"},
+    }
+    overwritten = {
+        **replayed,
+        "content": {"body": "Late overwrite", "msgtype": "m.text"},
+    }
+    event_cache = MagicMock()
+    event_cache.get_thread_events = AsyncMock(return_value=[replayed])
+    conversation_cache = _conversation_cache_for_thread_reads(tmp_path, event_cache, client=MagicMock())
+    coordinator = MagicMock()
+    coordinator.pending_thread_repair_deltas.return_value = (overwritten,)
+
+    await conversation_cache._acknowledge_repaired_thread_deltas(
+        coordinator,
+        "!room:localhost",
+        "$thread:localhost",
+        principal_id="@agent:localhost",
+        presented_event_sources={"$reply": replayed},
+        replayed_event_sources={"$reply": replayed},
+        snapshot_stored=True,
+    )
+
+    coordinator.acknowledge_thread_repair_deltas.assert_not_called()
 
 
 @pytest.mark.asyncio

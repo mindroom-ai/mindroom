@@ -63,7 +63,11 @@ from mindroom.matrix.media import (
 )
 from mindroom.matrix.membership_fence import UNCERTIFIED_MEMBERSHIP_EPOCH
 from mindroom.matrix.message_content import extract_edit_body
-from mindroom.matrix.replacements import bundled_replacement_candidates, replacement_content
+from mindroom.matrix.replacements import (
+    bundled_replacement_candidates,
+    event_representation_covers,
+    replacement_content,
+)
 from mindroom.matrix.thread_bookkeeping import ThreadMutationResolver
 from mindroom.matrix.thread_diagnostics import (
     THREAD_HISTORY_SOURCE_CACHE,
@@ -753,18 +757,20 @@ class MatrixConversationCache(ConversationCacheProtocol):
         )
 
     @staticmethod
-    def _event_ids(event_sources: Collection[dict[str, Any]]) -> set[str]:
-        """Return valid event IDs from raw cache or retained-journal sources."""
+    def _event_sources_by_id(event_sources: Collection[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+        """Return exact raw event representations keyed by valid event ID."""
         return {
-            event_id for event_source in event_sources if isinstance((event_id := event_source.get("event_id")), str)
+            event_id: event_source
+            for event_source in event_sources
+            if isinstance((event_id := event_source.get("event_id")), str) and event_id
         }
 
-    async def _cached_thread_event_ids_for_repair(
+    async def _cached_thread_event_sources_for_repair(
         self,
         room_id: str,
         thread_id: str,
-    ) -> set[str] | None:
-        """Read raw event IDs for repair bookkeeping without failing the user-facing read."""
+    ) -> dict[str, dict[str, Any]] | None:
+        """Read raw event representations for repair bookkeeping without failing the user-facing read."""
         try:
             event_sources = await self.runtime.event_cache.get_thread_events(room_id, thread_id)
         except Exception as exc:
@@ -776,7 +782,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
                 error=str(exc),
             )
             return None
-        return self._event_ids(event_sources or ())
+        return self._event_sources_by_id(event_sources or ())
 
     async def _prepare_pending_thread_repair_deltas(
         self,
@@ -792,18 +798,22 @@ class MatrixConversationCache(ConversationCacheProtocol):
             thread_id,
             coordination_scope=self.runtime.event_cache.principal_id,
         )
-        retained_event_ids = self._event_ids(retained_event_sources)
-        if not retained_event_ids:
+        retained_sources_by_id = self._event_sources_by_id(retained_event_sources)
+        if not retained_sources_by_id:
             return
-        cached_event_ids = await self._cached_thread_event_ids_for_repair(
+        cached_event_sources = await self._cached_thread_event_sources_for_repair(
             room_id,
             thread_id,
         )
-        if cached_event_ids is None or retained_event_ids - cached_event_ids:
+        if cached_event_sources is None or any(
+            (cached_source := cached_event_sources.get(event_id)) is None
+            or not event_representation_covers(cached_source, retained_source)
+            for event_id, retained_source in retained_sources_by_id.items()
+        ):
             await self._write_cache_ops.invalidate_known_thread(
                 room_id,
                 thread_id,
-                reason="retained_thread_delta_missing",
+                reason="retained_thread_delta_uncovered",
             )
 
     async def _acknowledge_repaired_thread_deltas(
@@ -813,28 +823,44 @@ class MatrixConversationCache(ConversationCacheProtocol):
         thread_id: str,
         *,
         principal_id: str,
-        replayed_event_ids: Collection[str],
+        presented_event_sources: Mapping[str, Mapping[str, Any]],
+        replayed_event_sources: Mapping[str, Mapping[str, Any]],
         snapshot_stored: bool,
     ) -> None:
         """Forget retained deltas persisted or terminally filtered by one usable repair."""
-        pending_event_ids = self._event_ids(
-            coordinator.pending_thread_repair_deltas(
-                room_id,
-                thread_id,
-                coordination_scope=principal_id,
+        pending_event_sources = self._event_sources_by_id(
+            tuple(
+                coordinator.pending_thread_repair_deltas(
+                    room_id,
+                    thread_id,
+                    coordination_scope=principal_id,
+                ),
             ),
         )
-        if not pending_event_ids:
+        if not pending_event_sources:
             return
-        acknowledged_event_ids = pending_event_ids & set(replayed_event_ids) if snapshot_stored else set()
-        remaining_event_ids = pending_event_ids - acknowledged_event_ids
+        acknowledged_event_ids = {
+            event_id
+            for event_id, pending_source in pending_event_sources.items()
+            if snapshot_stored and replayed_event_sources.get(event_id) == pending_source
+        }
+        remaining_event_ids = pending_event_sources.keys() - acknowledged_event_ids
         if remaining_event_ids:
-            repaired_event_ids = await self._cached_thread_event_ids_for_repair(
+            repaired_event_sources = await self._cached_thread_event_sources_for_repair(
                 room_id,
                 thread_id,
             )
-            if repaired_event_ids is not None:
-                acknowledged_event_ids.update(remaining_event_ids & repaired_event_ids)
+            if repaired_event_sources is not None:
+                for event_id in remaining_event_ids:
+                    pending_source = pending_event_sources[event_id]
+                    presented_source = presented_event_sources.get(event_id)
+                    if presented_source is not None and (
+                        presented_source != pending_source or event_id not in replayed_event_sources
+                    ):
+                        continue
+                    cached_source = repaired_event_sources.get(event_id)
+                    if cached_source is not None and event_representation_covers(cached_source, pending_source):
+                        acknowledged_event_ids.add(event_id)
         if not acknowledged_event_ids:
             return
         coordinator.acknowledge_thread_repair_deltas(
@@ -924,7 +950,8 @@ class MatrixConversationCache(ConversationCacheProtocol):
                     room_id,
                     thread_id,
                     principal_id=principal_id,
-                    replayed_event_ids=retained_event_source_provider.replayed_event_ids,
+                    presented_event_sources=retained_event_source_provider.presented_event_sources,
+                    replayed_event_sources=retained_event_source_provider.replayed_event_sources,
                     snapshot_stored=result.diagnostics.get("cache_store_outcome")
                     == ThreadCacheReplaceOutcome.STORED.value,
                 )

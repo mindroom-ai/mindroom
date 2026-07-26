@@ -600,14 +600,14 @@ class TestThreadHistory:
             },
         ]
 
-        merged, changed, replayed_event_ids = _merge_retained_thread_event_sources(
+        merged, changed, replayed_event_sources = _merge_retained_thread_event_sources(
             fetched_sources,
             retained_sources,
             thread_id="$thread_root",
         )
 
         assert changed is False
-        assert replayed_event_ids == frozenset({"$reply"})
+        assert replayed_event_sources == {"$reply": retained_sources[0]}
         assert merged[1]["content"] == {}
         assert merged[1]["unsigned"] == {"redacted_because": {"event_id": "$redaction"}}
 
@@ -639,14 +639,14 @@ class TestThreadHistory:
             },
         }
 
-        merged, changed, replayed_event_ids = _merge_retained_thread_event_sources(
+        merged, changed, replayed_event_sources = _merge_retained_thread_event_sources(
             [opaque_reply],
             [clear_reply],
             thread_id="$thread_root",
         )
 
         assert changed is True
-        assert replayed_event_ids == frozenset({"$reply"})
+        assert replayed_event_sources == {"$reply": clear_reply}
         assert merged == [clear_reply]
 
     def test_conflicting_retained_representation_is_quarantined(self) -> None:
@@ -664,14 +664,14 @@ class TestThreadHistory:
             "content": {"body": "Contradiction", "msgtype": "m.text"},
         }
 
-        merged, changed, replayed_event_ids = _merge_retained_thread_event_sources(
+        merged, changed, replayed_event_sources = _merge_retained_thread_event_sources(
             [fetched_reply],
             [retained_reply],
             thread_id="$thread_root",
         )
 
         assert changed is True
-        assert replayed_event_ids == frozenset()
+        assert replayed_event_sources == {}
         assert merged == []
 
     @pytest.mark.asyncio

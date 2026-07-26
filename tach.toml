@@ -4026,6 +4026,7 @@ expose = [
     "ReplacementValidator",
     "bundled_replacement_candidates",
     "canonical_event_sources",
+    "event_representation_covers",
     "is_valid_replacement",
     "observe_event_representation",
     "ordered_replacements",

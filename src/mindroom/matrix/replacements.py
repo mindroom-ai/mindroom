@@ -87,6 +87,18 @@ def replacement_content(original: Mapping[str, object], new: Mapping[str, object
     return content
 
 
+def event_representation_covers(
+    existing: Mapping[str, Any],
+    candidate: Mapping[str, Any],
+) -> bool:
+    """Return whether an existing canonical or redacted view fully covers a candidate."""
+    unsigned = existing.get("unsigned")
+    if isinstance(unsigned, Mapping) and isinstance(unsigned.get("redacted_because"), Mapping):
+        return True
+    transition = event_representation_transition(existing, candidate)
+    return transition == "ignore" or (transition == "accept" and existing == candidate)
+
+
 def _compatible_representation_types(original_type: object, candidate_type: object) -> bool:
     """Return whether two event types can be encrypted and clear views of one event."""
     return (

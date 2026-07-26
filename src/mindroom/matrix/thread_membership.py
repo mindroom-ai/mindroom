@@ -319,13 +319,12 @@ async def _advisory_index_remains_usable(
     *,
     indexed_thread_id: str | None,
     event_info: EventInfo,
-    definitively_not_a_root: bool,
     access: ThreadMembershipAccess,
 ) -> bool:
     """Keep an indexed membership unless current source evidence proves it stale."""
     if indexed_thread_id is None or event_info.is_edit:
         return False
-    if not definitively_not_a_root or access.fetch_event_source is None:
+    if access.fetch_event_source is None:
         return True
     try:
         event_source = await access.fetch_event_source(room_id, event_id)
@@ -429,14 +428,12 @@ async def resolve_related_event_thread_membership(  # noqa: C901
             resolution = ThreadResolution.threaded(thread_id)
             break
 
-        definitively_not_a_root = False
         if related_event_info.can_be_thread_root:
             proof = await access.prove_thread_root(room_id, current_event_id)
             if proof.state is not _ThreadRootProofState.NOT_A_THREAD_ROOT:
                 resolution = _resolution_from_root_proof(current_event_id, proof)
                 break
             resolution = ThreadResolution.room_level(thread_history=proof.thread_history)
-            definitively_not_a_root = True
 
         try:
             next_target = await _validated_next_related_event_target(
@@ -457,7 +454,6 @@ async def resolve_related_event_thread_membership(  # noqa: C901
             current_event_id,
             indexed_thread_id=indexed_thread_id,
             event_info=related_event_info,
-            definitively_not_a_root=definitively_not_a_root,
             access=access,
         ):
             assert indexed_thread_id is not None

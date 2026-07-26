@@ -995,6 +995,39 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         assert resolution.thread_id is None
 
     @pytest.mark.asyncio
+    async def test_malformed_self_thread_relation_overrides_stale_cached_index(self) -> None:
+        """A valid source with an unusable self-thread relation must beat its stale index."""
+        room_id = "!test:localhost"
+        event_id = "$self_thread:localhost"
+        event_source = {
+            "event_id": event_id,
+            "room_id": room_id,
+            "sender": "@user:localhost",
+            "origin_server_ts": 1000,
+            "type": "m.room.message",
+            "content": {
+                "body": "Malformed self-thread",
+                "msgtype": "m.text",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": event_id},
+            },
+        }
+        event_info = EventInfo.from_event(event_source)
+
+        resolution = await resolve_related_event_thread_membership(
+            room_id,
+            event_id,
+            access=ThreadMembershipAccess(
+                lookup_thread_id=AsyncMock(return_value="$stale_thread:localhost"),
+                fetch_event_info=AsyncMock(return_value=event_info),
+                prove_thread_root=AsyncMock(side_effect=AssertionError("self-thread cannot be a root")),
+                fetch_event_source=AsyncMock(return_value=event_source),
+            ),
+        )
+
+        assert resolution.state is ThreadResolutionState.ROOM_LEVEL
+        assert resolution.thread_id is None
+
+    @pytest.mark.asyncio
     async def test_related_rich_reply_root_proof_precedes_stale_cached_parent_membership(self) -> None:
         """A cached inherited membership cannot hide later proof that the reply is a root."""
         room_id = "!test:localhost"

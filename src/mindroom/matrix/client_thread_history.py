@@ -96,6 +96,7 @@ from mindroom.matrix.message_content import (
 from mindroom.matrix.replacements import (
     bundled_replacement_candidates,
     canonical_event_sources,
+    event_representation_covers,
     is_valid_replacement,
     observe_event_representation,
     ordered_replacements,
@@ -162,20 +163,35 @@ class RetainedThreadEventSourceProvider:
     """Late-bound retained deltas captured after the homeserver scan completes."""
 
     get_event_sources: Callable[[], Collection[dict[str, Any]]]
-    _replayed_event_ids: set[str] = field(default_factory=set, init=False)
+    _presented_event_sources: dict[str, dict[str, Any]] = field(default_factory=dict, init=False)
+    _replayed_event_sources: dict[str, dict[str, Any]] = field(default_factory=dict, init=False)
 
     def current_event_sources(self) -> tuple[dict[str, Any], ...]:
         """Return the current retained deltas."""
-        return tuple(dict(event_source) for event_source in self.get_event_sources())
+        event_sources = tuple(dict(event_source) for event_source in self.get_event_sources())
+        self._presented_event_sources = {
+            event_id: event_source
+            for event_source in event_sources
+            if isinstance((event_id := event_source.get("event_id")), str) and event_id
+        }
+        self._replayed_event_sources = {}
+        return event_sources
 
-    def record_replayed_event_ids(self, event_ids: Collection[str]) -> None:
-        """Remember retained IDs incorporated or terminally superseded by reconstruction."""
-        self._replayed_event_ids.update(event_ids)
+    def record_replayed_event_sources(self, event_sources: Mapping[str, Mapping[str, Any]]) -> None:
+        """Remember exact retained representations covered by the current repair attempt."""
+        self._replayed_event_sources = {
+            event_id: dict(event_source) for event_id, event_source in event_sources.items()
+        }
 
     @property
-    def replayed_event_ids(self) -> frozenset[str]:
-        """Return retained IDs safe to acknowledge after a usable repair."""
-        return frozenset(self._replayed_event_ids)
+    def presented_event_sources(self) -> Mapping[str, Mapping[str, Any]]:
+        """Return the exact retained representations presented to the current attempt."""
+        return self._presented_event_sources
+
+    @property
+    def replayed_event_sources(self) -> Mapping[str, Mapping[str, Any]]:
+        """Return exact retained representations covered by the current attempt."""
+        return self._replayed_event_sources
 
 
 class OpaqueEncryptedThreadHistoryError(RuntimeError):
@@ -1089,7 +1105,7 @@ def _merge_retained_thread_event_sources(
     retained_event_sources: Collection[dict[str, Any]],
     *,
     thread_id: str,
-) -> tuple[list[dict[str, Any]], bool, frozenset[str]]:
+) -> tuple[list[dict[str, Any]], bool, dict[str, dict[str, Any]]]:
     """Merge certified concurrent deltas exactly once in canonical event order."""
     merged_by_event_id = {
         event_id: dict(event_source)
@@ -1097,7 +1113,7 @@ def _merge_retained_thread_event_sources(
         if (event_id := _event_id_from_source(event_source)) is not None
     }
     changed = False
-    replayed_event_ids: set[str] = set()
+    replayed_event_sources: dict[str, dict[str, Any]] = {}
     conflicting_event_ids: set[str] = set()
     for event_source in retained_event_sources:
         event_id = _event_id_from_source(event_source)
@@ -1106,12 +1122,11 @@ def _merge_retained_thread_event_sources(
         existing = merged_by_event_id.get(event_id)
         if existing is None:
             merged_by_event_id[event_id] = dict(event_source)
-            replayed_event_ids.add(event_id)
+            replayed_event_sources[event_id] = dict(event_source)
             changed = True
             continue
-        unsigned = existing.get("unsigned")
-        if isinstance(unsigned, Mapping) and isinstance(unsigned.get("redacted_because"), Mapping):
-            replayed_event_ids.add(event_id)
+        if event_representation_covers(existing, event_source):
+            replayed_event_sources[event_id] = dict(event_source)
             continue
         observed = {event_id: existing}
         transition = observe_event_representation(
@@ -1122,9 +1137,10 @@ def _merge_retained_thread_event_sources(
         )
         if transition == "conflict":
             merged_by_event_id.pop(event_id)
+            replayed_event_sources.pop(event_id, None)
             changed = True
             continue
-        replayed_event_ids.add(event_id)
+        replayed_event_sources[event_id] = dict(event_source)
         if transition == "accept" and existing != event_source:
             merged_by_event_id[event_id] = observed[event_id]
             changed = True
@@ -1134,7 +1150,7 @@ def _merge_retained_thread_event_sources(
             thread_id=thread_id,
         ),
         changed,
-        frozenset(replayed_event_ids),
+        replayed_event_sources,
     )
 
 
@@ -1151,13 +1167,13 @@ async def _resolve_merged_thread_fetch_result(
     trusted_sender_ids: Collection[str],
 ) -> _ThreadHistoryFetchResult:
     """Replay retained deltas onto a fetched snapshot before installation and delivery."""
-    merged_event_sources, changed, replayed_event_ids = _merge_retained_thread_event_sources(
+    merged_event_sources, changed, replayed_event_sources = _merge_retained_thread_event_sources(
         fetch_result.event_sources,
         () if retained_event_sources is None else retained_event_sources.current_event_sources(),
         thread_id=thread_id,
     )
     if retained_event_sources is not None:
-        retained_event_sources.record_replayed_event_ids(replayed_event_ids)
+        retained_event_sources.record_replayed_event_sources(replayed_event_sources)
     if not changed:
         return fetch_result
     resolution_started = time.perf_counter()
