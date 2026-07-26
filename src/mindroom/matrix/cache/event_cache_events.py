@@ -8,7 +8,6 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
-from mindroom.matrix.event_identity import event_representation_transition
 from mindroom.matrix.event_info import (
     EventInfo,
     event_source_is_timeline_in_room,
@@ -18,6 +17,7 @@ from mindroom.matrix.media import event_source_supports_valid_thread_relations
 from mindroom.matrix.replacements import (
     ReplacementValidator,
     bundled_replacement_candidates,
+    observe_event_representation,
     ordered_replacements,
 )
 from mindroom.matrix.sidecar_content import sidecar_mxc_url
@@ -28,6 +28,7 @@ if TYPE_CHECKING:
 _EDITABLE_EVENT_TYPES = frozenset({"m.room.message", "io.mindroom.tool_approval"})
 
 type _CachedEventValue = tuple[str, dict[str, Any]]
+type _CachedObservation = Literal["accept", "ignore", "conflict"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,40 +52,57 @@ class CachedEventRow:
 def conflicting_cached_bundled_event_ids(
     original: Mapping[str, Any],
     cached_events: Iterable[Mapping[str, Any]],
+    *,
+    room_id: str,
 ) -> frozenset[str]:
     """Return bundled IDs contradicted by cached immutable event observations."""
-    bundled_by_event_id: dict[str, list[dict[str, Any]]] = {}
-    for bundled in bundled_replacement_candidates(original):
-        event_id = bundled.get("event_id")
-        if isinstance(event_id, str) and event_id:
-            bundled_by_event_id.setdefault(event_id, []).append(bundled)
-    return frozenset(
-        event_id
-        for cached_event in cached_events
-        if isinstance((event_id := cached_event.get("event_id")), str)
-        if event_id in bundled_by_event_id
-        if any(
-            event_representation_transition(cached_event, bundled) == "conflict"
-            for bundled in bundled_by_event_id[event_id]
+    if not event_source_is_timeline_in_room(original, room_id):
+        return frozenset()
+    observed: dict[str, dict[str, Any]] = {}
+    conflicting_event_ids: set[str] = set()
+    for cached_event in cached_events:
+        observe_event_representation(
+            observed,
+            conflicting_event_ids,
+            cached_event,
+            room_id=room_id,
         )
-    )
+    for bundled in bundled_replacement_candidates(original):
+        observe_event_representation(
+            observed,
+            conflicting_event_ids,
+            bundled,
+            room_id=room_id,
+            container=original,
+        )
+    return frozenset(conflicting_event_ids)
 
 
-def _observe_cached_event_identity(
+def _observe_cached_event_and_bundles(
     observed: dict[str, dict[str, Any]],
     conflicting_event_ids: set[str],
-    candidate: Mapping[str, Any],
-) -> Literal["accept", "ignore", "conflict"]:
-    """Record one top-level or bundled view of an immutable event."""
-    event_id = candidate.get("event_id")
-    if not isinstance(event_id, str) or not event_id:
-        return "ignore"
-    previous = observed.get(event_id)
-    transition = "accept" if previous is None else event_representation_transition(previous, candidate)
-    if transition == "conflict":
-        conflicting_event_ids.add(event_id)
-    elif transition == "accept":
-        observed[event_id] = dict(candidate)
+    event: Mapping[str, Any],
+    *,
+    room_id: str,
+) -> _CachedObservation | None:
+    """Observe one eligible cache row and every room-scoped non-self bundle."""
+    if not event_source_matches_room(event, room_id):
+        return None
+    transition = observe_event_representation(
+        observed,
+        conflicting_event_ids,
+        event,
+        room_id=room_id,
+        require_timeline=False,
+    )
+    for bundled in bundled_replacement_candidates(event):
+        observe_event_representation(
+            observed,
+            conflicting_event_ids,
+            bundled,
+            room_id=room_id,
+            container=event,
+        )
     return transition
 
 
@@ -120,18 +138,26 @@ async def safe_cached_event_transitions(
     conflicting_event_ids: set[str] = set()
 
     for existing_event in existing.values():
-        _observe_cached_event_identity(observed, conflicting_event_ids, existing_event)
-        for bundled in bundled_replacement_candidates(existing_event):
-            _observe_cached_event_identity(observed, conflicting_event_ids, bundled)
+        _observe_cached_event_and_bundles(
+            observed,
+            conflicting_event_ids,
+            existing_event,
+            room_id=room_id,
+        )
 
     for event in serialized_events:
-        transition = _observe_cached_event_identity(observed, conflicting_event_ids, event.event)
+        transition = _observe_cached_event_and_bundles(
+            observed,
+            conflicting_event_ids,
+            event.event,
+            room_id=room_id,
+        )
+        if transition is None:
+            continue
         if transition != "conflict" and event.event_id not in conflicting_event_ids:
             indexable.append(event)
             if transition == "accept":
                 writable.append(event)
-        for bundled in bundled_replacement_candidates(event.event):
-            _observe_cached_event_identity(observed, conflicting_event_ids, bundled)
     if not conflicting_event_ids:
         return writable, indexable
     for event_id in sorted(conflicting_event_ids):

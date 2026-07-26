@@ -247,6 +247,7 @@ async def _load_conflicting_bundled_event_ids(
         return conflicting_cached_bundled_event_ids(
             original,
             (decode_cached_event(event_json=row[0]).event for row in await cursor.fetchall()),
+            room_id=room_id,
         )
     finally:
         await cursor.close()

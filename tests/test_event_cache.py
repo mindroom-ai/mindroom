@@ -2531,6 +2531,110 @@ async def test_conflicting_duplicate_replacement_identity_is_rejected_by_cache(
 
 
 @pytest.mark.asyncio
+async def test_bundled_self_replacement_does_not_quarantine_original(
+    event_cache: ConversationEventCache,
+) -> None:
+    """A malformed bundle cannot reuse and tombstone its container's identity."""
+    room_id = "!room:localhost"
+    original_id = "$original:localhost"
+    original = _clear_payload(
+        original_id,
+        body="Original",
+        room_id=room_id,
+        origin_server_ts=1000,
+    )
+    original["unsigned"] = {
+        "m.relations": {
+            "m.replace": _clear_payload(
+                original_id,
+                body="Forged",
+                room_id=room_id,
+                edit_of=original_id,
+                origin_server_ts=2000,
+            ),
+        },
+    }
+
+    await event_cache.store_event(original_id, room_id, original)
+
+    cached = await event_cache.get_event(room_id, original_id)
+    assert cached is not None
+    assert cached["content"]["body"] == "Original"
+    assert await event_cache.redacted_event_ids(room_id, {original_id}) == set()
+    assert (
+        await event_cache.get_latest_edit(
+            room_id,
+            cached,
+            validator=valid_room_message_replacement,
+        )
+        is None
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalidity", ["state", "other-room", "sender", "type"])
+@pytest.mark.parametrize(
+    "representation_order",
+    [("bundled", "explicit"), ("explicit", "bundled")],
+)
+async def test_invalid_bundled_identity_does_not_quarantine_valid_explicit_edit(
+    event_cache: ConversationEventCache,
+    invalidity: str,
+    representation_order: tuple[str, str],
+) -> None:
+    """Out-of-scope bundled views cannot poison a valid immutable edit identity."""
+    room_id = "!room:localhost"
+    original_id = "$original:localhost"
+    edit_id = "$edit:localhost"
+    original = _clear_payload(
+        original_id,
+        body="Original",
+        room_id=room_id,
+        origin_server_ts=1000,
+    )
+    valid_edit = _clear_payload(
+        edit_id,
+        body="Valid",
+        room_id=room_id,
+        edit_of=original_id,
+        origin_server_ts=2000,
+    )
+    invalid_bundle = _clear_payload(
+        edit_id,
+        body="Forged",
+        room_id=room_id,
+        edit_of=original_id,
+        origin_server_ts=2000,
+    )
+    if invalidity == "state":
+        invalid_bundle["state_key"] = ""
+    elif invalidity == "other-room":
+        invalid_bundle["room_id"] = "!other:localhost"
+    elif invalidity == "sender":
+        invalid_bundle["sender"] = "@mallory:localhost"
+    else:
+        invalid_bundle["type"] = "m.reaction"
+    original["unsigned"] = {"m.relations": {"m.replace": invalid_bundle}}
+    batches = {
+        "bundled": [(original_id, room_id, original)],
+        "explicit": [(edit_id, room_id, valid_edit)],
+    }
+
+    for representation in representation_order:
+        await event_cache.store_events_batch(batches[representation])
+
+    assert await event_cache.redacted_event_ids(room_id, {edit_id}) == set()
+    latest = await event_cache.get_latest_edit(
+        room_id,
+        original,
+        validator=valid_room_message_replacement,
+    )
+    assert latest is not None
+    assert latest["event_id"] == edit_id
+    assert latest["content"]["m.new_content"]["body"] == "Valid"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "representation_order",
     [("bundled", "explicit"), ("explicit", "bundled")],

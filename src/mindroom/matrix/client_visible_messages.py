@@ -10,6 +10,7 @@ import nio
 from mindroom.constants import STREAM_STATUS_KEY
 from mindroom.entity_resolution import current_internal_sender_ids
 from mindroom.matrix import replacements
+from mindroom.matrix.cache.event_normalization import normalize_nio_event_for_cache
 from mindroom.matrix.event_info import (
     EventInfo,
     event_source_is_timeline_in_room,
@@ -451,17 +452,35 @@ async def resolve_latest_visible_messages(
     """Resolve the latest visible message state by original event ID for a set of message events."""
     messages_by_event_id: dict[str, ResolvedVisibleMessage] = {}
     edit_candidates_by_original_event_id: ThreadEditCandidatesByOriginalEventId = {}
+    observed_sources: dict[str, dict[str, Any]] = {}
+    conflicting_event_ids: set[str] = set()
+    canonical_events: dict[
+        str,
+        tuple[nio.RoomMessageText | nio.RoomMessageNotice, dict[str, Any]],
+    ] = {}
 
     for event in events:
+        event_source = normalize_nio_event_for_cache(event)
         if (sender is not None and event.sender != sender) or not event_source_is_timeline_in_room(
-            event.source,
+            event_source,
             room_id,
         ):
             continue
+        transition = replacements.observe_event_representation(
+            observed_sources,
+            conflicting_event_ids,
+            event_source,
+            room_id=room_id,
+        )
+        if transition == "accept":
+            canonical_events[event.event_id] = event, event_source
+        elif transition == "conflict":
+            canonical_events.pop(event.event_id, None)
 
-        event_info = EventInfo.from_event(event.source)
+    for event, event_source in canonical_events.values():
+        event_info = EventInfo.from_event(event_source)
         if record_thread_edit_candidate(
-            event.source,
+            event_source,
             edit_candidates_by_original_event_id=edit_candidates_by_original_event_id,
         ):
             continue
@@ -469,7 +488,7 @@ async def resolve_latest_visible_messages(
         if event.event_id in messages_by_event_id:
             continue
 
-        bundled_candidates = replacements.bundled_replacement_candidates(event.source)
+        bundled_candidates = replacements.bundled_replacement_candidates(event_source)
         if bundled_candidates:
             edit_candidates_by_original_event_id.setdefault(event.event_id, []).extend(bundled_candidates)
 

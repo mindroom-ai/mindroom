@@ -1899,6 +1899,66 @@ class TestThreadHistory:
         ]
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("invalidity", ["state", "other-room", "sender", "type"])
+    async def test_thread_resolution_ignores_invalid_duplicate_bundled_identity(
+        self,
+        invalidity: str,
+    ) -> None:
+        """An out-of-scope bundle cannot hide a valid explicit representation."""
+        room_id = "!room:localhost"
+        root_id = "$thread_root"
+        edit_id = "$edit"
+
+        def edit(body: str) -> dict[str, object]:
+            return {
+                "event_id": edit_id,
+                "room_id": room_id,
+                "sender": "@alice:localhost",
+                "origin_server_ts": 2000,
+                "type": "m.room.message",
+                "content": {
+                    "body": f"* {body}",
+                    "msgtype": "m.text",
+                    "m.new_content": {"body": body, "msgtype": "m.text"},
+                    "m.relates_to": {
+                        "rel_type": "m.replace",
+                        "event_id": root_id,
+                    },
+                },
+            }
+
+        invalid_bundle = edit("Forged")
+        if invalidity == "state":
+            invalid_bundle["state_key"] = ""
+        elif invalidity == "other-room":
+            invalid_bundle["room_id"] = "!other:localhost"
+        elif invalidity == "sender":
+            invalid_bundle["sender"] = "@mallory:localhost"
+        else:
+            invalid_bundle["type"] = "m.reaction"
+        root = {
+            "event_id": root_id,
+            "room_id": room_id,
+            "sender": "@alice:localhost",
+            "origin_server_ts": 1000,
+            "type": "m.room.message",
+            "content": {"body": "Root", "msgtype": "m.text"},
+            "unsigned": {"m.relations": {"m.replace": invalid_bundle}},
+        }
+
+        resolution = await _resolve_thread_history_from_event_sources_timed(
+            AsyncMock(),
+            room_id=room_id,
+            thread_id=root_id,
+            event_sources=[root, edit("Valid")],
+            event_cache=_event_cache(),
+        )
+
+        assert [(message.event_id, message.body, message.latest_event_id) for message in resolution.messages] == [
+            (root_id, "Valid", edit_id),
+        ]
+
+    @pytest.mark.asyncio
     async def test_thread_resolution_ignores_wrong_sender_edit_of_edit(self) -> None:
         """A wrong-sender replacement of an edit must not create or change visible content."""
         root_event = self._make_text_event(
@@ -2307,6 +2367,116 @@ class TestThreadHistory:
 
         assert list(resolved) == ["$original"]
         assert resolved["$original"].body == "Original"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("representation_order", ["visible-first", "edit-first"])
+    async def test_visible_resolution_rejects_one_identity_in_message_and_edit_roles(
+        self,
+        representation_order: str,
+    ) -> None:
+        """One immutable event ID cannot remain both visible and a replacement."""
+        root = self._make_text_event(
+            event_id="$root",
+            sender="@alice:localhost",
+            body="Root",
+            server_timestamp=1000,
+            source_content={"body": "Root"},
+        )
+        visible = self._make_text_event(
+            event_id="$same",
+            sender="@alice:localhost",
+            body="Visible",
+            server_timestamp=2000,
+            source_content={
+                "body": "Visible",
+                "m.relates_to": {
+                    "rel_type": "m.thread",
+                    "event_id": "$root",
+                },
+            },
+        )
+        edit = self._make_text_event(
+            event_id="$same",
+            sender="@alice:localhost",
+            body="* Forged",
+            server_timestamp=2000,
+            source_content={
+                "body": "* Forged",
+                "m.new_content": {"body": "Forged", "msgtype": "m.text"},
+                "m.relates_to": {
+                    "rel_type": "m.replace",
+                    "event_id": "$root",
+                },
+            },
+        )
+        duplicate_representations = [visible, edit] if representation_order == "visible-first" else [edit, visible]
+
+        resolved = await resolve_latest_visible_messages(
+            [root, *duplicate_representations],
+            AsyncMock(),
+            room_id="!room:localhost",
+        )
+
+        assert list(resolved) == ["$root"]
+        assert resolved["$root"].body == "Root"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("representation_order", ["visible-first", "edit-first"])
+    async def test_room_scan_rejects_one_identity_in_message_and_edit_roles(
+        self,
+        representation_order: str,
+    ) -> None:
+        """A room scan must fail closed when one ID has visible and edit payloads."""
+        client = AsyncMock()
+        root = self._make_text_event(
+            event_id="$root",
+            sender="@alice:localhost",
+            body="Root",
+            server_timestamp=1000,
+            source_content={"body": "Root"},
+        )
+        visible = self._make_text_event(
+            event_id="$same",
+            sender="@alice:localhost",
+            body="Visible",
+            server_timestamp=2000,
+            source_content={
+                "body": "Visible",
+                "m.relates_to": {
+                    "rel_type": "m.thread",
+                    "event_id": "$root",
+                },
+            },
+        )
+        edit = self._make_text_event(
+            event_id="$same",
+            sender="@alice:localhost",
+            body="* Forged",
+            server_timestamp=2000,
+            source_content={
+                "body": "* Forged",
+                "m.new_content": {"body": "Forged", "msgtype": "m.text"},
+                "m.relates_to": {
+                    "rel_type": "m.replace",
+                    "event_id": "$root",
+                },
+            },
+        )
+        duplicate_representations = [visible, edit] if representation_order == "visible-first" else [edit, visible]
+        response = MagicMock(spec=nio.RoomMessagesResponse)
+        response.chunk = [*duplicate_representations, root]
+        response.end = None
+        client.room_messages.return_value = response
+
+        history = await fetch_thread_history(
+            client,
+            "!room:localhost",
+            "$root",
+        )
+
+        assert [(message.event_id, message.body, message.latest_event_id) for message in history] == [
+            ("$root", "Root", "$root"),
+        ]
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("invalidity", ["state", "other-room"])
@@ -2835,6 +3005,7 @@ class TestThreadHistory:
             room_id="!room:localhost",
             edit_candidates_by_original_event_id=edit_candidates,
             scanned_message_sources=scanned_sources,
+            conflicting_event_ids=set(),
         )
         scanned_sources["$plain_reply"] = plain_reply.source
         grouped_sources, _unresolved = await _group_scanned_sources_by_thread(
@@ -2901,6 +3072,7 @@ class TestThreadHistory:
             room_id="!room:localhost",
             edit_candidates_by_original_event_id=edit_candidates,
             scanned_message_sources=scanned_sources,
+            conflicting_event_ids=set(),
         )
         scanned_sources["$plain_reply"] = plain_reply.source
         grouped_sources, _unresolved = await _group_scanned_sources_by_thread(

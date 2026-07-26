@@ -10,11 +10,32 @@
 
 Two fresh independent exact-head native Codex reviews returned `CHANGES REQUIRED`.
 
-Verified review claims awaiting RED coverage:
+Verified review claims:
 
 1. A bundled replacement whose event ID equals its container can conflict with and quarantine the original cache row, while full history rejects the self-edit.
 2. Invalid wrong-room or state bundled representations enter identity-conflict observation before scope validation and can quarantine or hide a valid same-ID explicit edit.
 3. Room-scan and generic visible-message collection can reconcile duplicate identities too late, allowing last-wins source loss or one event ID to remain both a visible message and a replacement.
+
+All `26/26` exact variants failed before the production correction.
+
+The correction routes full resolution, generic visible resolution, room scans, cache admission, and cached bundled conflict reads through one room-scoped identity observation contract.
+
+The contract:
+
+- ignores self bundles and invalid state, wrong-room, wrong-sender, and wrong-type bundled representations;
+- preserves encrypted-to-clear and trusted provisional-to-canonical identity upgrades;
+- excludes a truly conflicting event ID from visible and edit roles;
+- keeps state and non-message timeline events point-cached without allowing them to create replacement identity evidence.
+
+Current validation:
+
+- the `26` RED regressions pass across full resolution, room scans, visible projection, SQLite, and PostgreSQL;
+- the five owning files pass `627` tests;
+- eight additional snapshot, approval, media, message-content, tool, reuse, and cache-security files pass `510` tests;
+- Ruff, formatting, Tach dependencies/interfaces, and `git diff --check` pass.
+
+The implementation is not frozen.
+Full pytest, all-file pre-commit, fresh exact-head review/CI, and real-Tuwunel remain after commit and handoff removal.
 
 ## Evidence before rejection
 

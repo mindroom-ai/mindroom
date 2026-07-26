@@ -241,6 +241,7 @@ async def _load_conflicting_bundled_event_ids(
     return conflicting_cached_bundled_event_ids(
         original,
         (decode_cached_event(event_json=row[0]).event for row in rows),
+        room_id=room_id,
     )
 
 

@@ -97,6 +97,7 @@ from mindroom.matrix.replacements import (
     bundled_replacement_candidates,
     conflicting_replacement_event_ids,
     is_valid_replacement,
+    observe_event_representation,
     ordered_replacements,
 )
 from mindroom.matrix.thread_diagnostics import (
@@ -441,7 +442,7 @@ async def _resolve_thread_history_from_event_sources_timed(
     room_event_sources = [
         event_source for event_source in event_sources if event_source_is_timeline_in_room(event_source, room_id)
     ]
-    redacted_event_ids |= conflicting_replacement_event_ids(room_event_sources)
+    redacted_event_ids |= conflicting_replacement_event_ids(room_event_sources, room_id=room_id)
     eligible_event_sources = [
         event_source
         for event_source in room_event_sources
@@ -1851,12 +1852,54 @@ def _is_opaque_thread_affecting_event_source(
     return is_thread_affecting_relation(event_info, event_type=event_info.event_type)
 
 
+def _discard_scanned_edit_candidate_identity(
+    event_id: str,
+    edit_candidates_by_original_event_id: ThreadEditCandidatesByOriginalEventId,
+) -> None:
+    """Remove one event identity from every collected edit-candidate bucket."""
+    for original_event_id, candidates in list(edit_candidates_by_original_event_id.items()):
+        retained = [candidate for candidate in candidates if candidate.get("event_id") != event_id]
+        if retained:
+            edit_candidates_by_original_event_id[original_event_id] = retained
+        else:
+            del edit_candidates_by_original_event_id[original_event_id]
+
+
+def _observe_scanned_room_message_identity(
+    event_source: dict[str, Any],
+    *,
+    room_id: str,
+    edit_candidates_by_original_event_id: ThreadEditCandidatesByOriginalEventId,
+    scanned_message_sources: dict[str, dict[str, Any]],
+    conflicting_event_ids: set[str],
+) -> bool:
+    """Reconcile one scanned event identity before assigning visible or edit roles."""
+    event_id = event_source.get("event_id")
+    previous_exists = isinstance(event_id, str) and event_id in scanned_message_sources
+    transition = observe_event_representation(
+        scanned_message_sources,
+        conflicting_event_ids,
+        event_source,
+        room_id=room_id,
+    )
+    if transition == "conflict" and isinstance(event_id, str):
+        scanned_message_sources.pop(event_id, None)
+    if (
+        isinstance(event_id, str)
+        and transition in {"accept", "conflict"}
+        and (previous_exists or transition == "conflict")
+    ):
+        _discard_scanned_edit_candidate_identity(event_id, edit_candidates_by_original_event_id)
+    return transition == "accept"
+
+
 def _record_scanned_room_message_source(
     event: nio.Event,
     *,
     room_id: str,
     edit_candidates_by_original_event_id: ThreadEditCandidatesByOriginalEventId,
     scanned_message_sources: dict[str, dict[str, Any]],
+    conflicting_event_ids: set[str],
 ) -> str | None:
     """Record one scanned room-message source and return the recorded event ID."""
     event_source = event.source if isinstance(event.source, dict) else {}
@@ -1865,23 +1908,32 @@ def _record_scanned_room_message_source(
     if _is_opaque_thread_affecting_event_source(event_source, room_id=room_id):
         # Undecryptable relation-bearing ciphertext is recorded as fail-closed evidence: it resolves
         # thread membership through its exposed relation and poisons only that reconstruction.
-        scanned_message_sources[event.event_id] = _event_source_for_cache(event)
-        return event.event_id
+        accepted = _observe_scanned_room_message_identity(
+            _event_source_for_cache(event),
+            room_id=room_id,
+            edit_candidates_by_original_event_id=edit_candidates_by_original_event_id,
+            scanned_message_sources=scanned_message_sources,
+            conflicting_event_ids=conflicting_event_ids,
+        )
+        return event.event_id if accepted else None
     if isinstance(event, nio.BadEvent) or not _is_room_message_event(event):
         return None
 
-    event_info = EventInfo.from_event(event.source)
     normalized_event_source = _event_source_for_cache(event)
+    if not _observe_scanned_room_message_identity(
+        normalized_event_source,
+        room_id=room_id,
+        edit_candidates_by_original_event_id=edit_candidates_by_original_event_id,
+        scanned_message_sources=scanned_message_sources,
+        conflicting_event_ids=conflicting_event_ids,
+    ):
+        return None
     if record_thread_edit_candidate(
         normalized_event_source,
         edit_candidates_by_original_event_id=edit_candidates_by_original_event_id,
     ):
-        scanned_message_sources[event.event_id] = normalized_event_source
-        return None
-    if event_info.is_edit:
         return None
 
-    scanned_message_sources[event.event_id] = normalized_event_source
     return event.event_id
 
 
@@ -2085,6 +2137,7 @@ async def _bulk_scan_thread_event_sources(
         raise ValueError(msg)
     edit_candidates_by_original_event_id: ThreadEditCandidatesByOriginalEventId = {}
     scanned_message_sources: dict[str, dict[str, Any]] = {}
+    conflicting_event_ids: set[str] = set()
     remaining_root_ids = set(thread_root_ids)
     from_token: str | None = None
     page_count = 0
@@ -2118,6 +2171,7 @@ async def _bulk_scan_thread_event_sources(
                 room_id=room_id,
                 edit_candidates_by_original_event_id=edit_candidates_by_original_event_id,
                 scanned_message_sources=scanned_message_sources,
+                conflicting_event_ids=conflicting_event_ids,
             )
             if recorded_event_id is not None:
                 remaining_root_ids.discard(recorded_event_id)
@@ -2125,6 +2179,7 @@ async def _bulk_scan_thread_event_sources(
             break
         from_token = response.end
 
+    remaining_root_ids.update(root_id for root_id in thread_root_ids if root_id not in scanned_message_sources)
     thread_event_sources, unresolved_opaque_event_ids = await _group_scanned_sources_by_thread(
         room_id=room_id,
         thread_root_ids=thread_root_ids,
