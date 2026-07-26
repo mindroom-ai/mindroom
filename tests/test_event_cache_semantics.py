@@ -13,6 +13,7 @@ from mindroom.matrix.cache.thread_cache_state import thread_cache_state_row, thr
 from mindroom.matrix.media import valid_room_message_replacement
 from mindroom.matrix.replacements import (
     bundled_replacement_candidates,
+    event_representation_covers,
     is_valid_replacement,
     ordered_replacements,
 )
@@ -79,6 +80,39 @@ def test_cache_normalization_uses_authoritative_event_id() -> None:
         )["event_id"]
         == "$indexed"
     )
+
+
+@pytest.mark.parametrize(
+    "conflicting_fields",
+    [
+        {"sender": "@mallory:localhost"},
+        {"room_id": "!other:localhost"},
+        {"state_key": ""},
+        {"type": "io.mindroom.tool_approval"},
+        {"origin_server_ts": 2001},
+    ],
+    ids=("sender", "room", "state", "type", "timestamp"),
+)
+def test_redaction_covers_only_the_same_immutable_event_identity(
+    conflicting_fields: dict[str, object],
+) -> None:
+    """A redacted view is authoritative only for its matching immutable envelope."""
+    candidate = {
+        "event_id": "$event",
+        "room_id": "!room:localhost",
+        "sender": "@alice:localhost",
+        "origin_server_ts": 2000,
+        "type": "m.room.message",
+        "content": {"body": "Visible", "msgtype": "m.text"},
+    }
+    redacted = {
+        **candidate,
+        "content": {},
+        "unsigned": {"redacted_because": {"event_id": "$redaction"}},
+    }
+
+    assert event_representation_covers(redacted, candidate)
+    assert not event_representation_covers({**redacted, **conflicting_fields}, candidate)
 
 
 @pytest.mark.parametrize(

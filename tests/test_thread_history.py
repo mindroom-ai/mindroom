@@ -576,12 +576,16 @@ class TestThreadHistory:
         fetched_sources = [
             {
                 "event_id": "$thread_root",
+                "room_id": "!room:localhost",
+                "sender": "@user:localhost",
                 "origin_server_ts": 1000,
                 "type": "m.room.message",
-                "content": {"body": "Root"},
+                "content": {"body": "Root", "msgtype": "m.text"},
             },
             {
                 "event_id": "$reply",
+                "room_id": "!room:localhost",
+                "sender": "@user:localhost",
                 "origin_server_ts": 2000,
                 "type": "m.room.message",
                 "content": {},
@@ -591,10 +595,13 @@ class TestThreadHistory:
         retained_sources = [
             {
                 "event_id": "$reply",
+                "room_id": "!room:localhost",
+                "sender": "@user:localhost",
                 "origin_server_ts": 2000,
                 "type": "m.room.message",
                 "content": {
                     "body": "Pre-redaction reply",
+                    "msgtype": "m.text",
                     "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
                 },
             },
@@ -610,6 +617,51 @@ class TestThreadHistory:
         assert replayed_event_sources == {"$reply": retained_sources[0]}
         assert merged[1]["content"] == {}
         assert merged[1]["unsigned"] == {"redacted_because": {"event_id": "$redaction"}}
+
+    @pytest.mark.parametrize(
+        "conflicting_fields",
+        [
+            {"sender": "@mallory:localhost"},
+            {"room_id": "!other:localhost"},
+            {"state_key": ""},
+            {"type": "io.mindroom.tool_approval"},
+            {"origin_server_ts": 2001},
+        ],
+        ids=("sender", "room", "state", "type", "timestamp"),
+    )
+    def test_redacted_fetch_cannot_cover_a_different_retained_identity(
+        self,
+        conflicting_fields: dict[str, object],
+    ) -> None:
+        """A wrong immutable envelope must quarantine rather than authorize replay acknowledgement."""
+        retained = {
+            "event_id": "$reply",
+            "room_id": "!room:localhost",
+            "sender": "@user:localhost",
+            "origin_server_ts": 2000,
+            "type": "m.room.message",
+            "content": {
+                "body": "Reply",
+                "msgtype": "m.text",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
+            },
+        }
+        redacted = {
+            **retained,
+            **conflicting_fields,
+            "content": {},
+            "unsigned": {"redacted_because": {"event_id": "$redaction"}},
+        }
+
+        merged, changed, replayed_event_sources = _merge_retained_thread_event_sources(
+            [redacted],
+            [retained],
+            thread_id="$thread_root",
+        )
+
+        assert changed is True
+        assert replayed_event_sources == {}
+        assert merged == []
 
     def test_retained_clear_delta_supersedes_fetched_opaque_representation(self) -> None:
         """A certified decrypted delta must remain canonical over its same-event opaque fetch."""
@@ -673,6 +725,81 @@ class TestThreadHistory:
         assert changed is True
         assert replayed_event_sources == {}
         assert merged == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("fetched_has_bundle", [True, False], ids=("fetched-rich", "retained-rich"))
+    async def test_retained_merge_preserves_fetched_unsigned_aggregation(
+        self,
+        fetched_has_bundle: bool,
+    ) -> None:
+        """A retained duplicate cannot add or remove fetched server aggregation."""
+        room_id = "!room:localhost"
+        root_id = "$thread_root"
+        reply_id = "$reply"
+        root = {
+            "event_id": root_id,
+            "room_id": room_id,
+            "sender": "@user:localhost",
+            "origin_server_ts": 1000,
+            "type": "m.room.message",
+            "content": {"body": "Root", "msgtype": "m.text"},
+        }
+        reply = {
+            "event_id": reply_id,
+            "room_id": room_id,
+            "sender": "@user:localhost",
+            "origin_server_ts": 2000,
+            "type": "m.room.message",
+            "content": {
+                "body": "Reply",
+                "msgtype": "m.text",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": root_id},
+            },
+        }
+        edit = {
+            "event_id": "$edit",
+            "room_id": room_id,
+            "sender": "@user:localhost",
+            "origin_server_ts": 3000,
+            "type": "m.room.message",
+            "content": {
+                "body": "* Edited",
+                "msgtype": "m.text",
+                "m.new_content": {"body": "Edited", "msgtype": "m.text"},
+                "m.relates_to": {"rel_type": "m.replace", "event_id": reply_id},
+            },
+        }
+        rich_reply = {
+            **reply,
+            "unsigned": {"m.relations": {"m.replace": {"latest_event": edit}}},
+        }
+        fetched_reply, retained_reply = (rich_reply, reply) if fetched_has_bundle else (reply, rich_reply)
+
+        merged, changed, replayed_event_sources = _merge_retained_thread_event_sources(
+            [root, fetched_reply],
+            [retained_reply],
+            thread_id=root_id,
+        )
+        resolution = await _resolve_thread_history_from_event_sources_timed(
+            AsyncMock(),
+            room_id=room_id,
+            thread_id=root_id,
+            event_sources=merged,
+            hydrate_sidecars=False,
+            event_cache=_event_cache(),
+        )
+
+        assert changed is False
+        assert replayed_event_sources == {reply_id: retained_reply}
+        assert merged == [root, fetched_reply]
+        assert [(message.event_id, message.body, message.latest_event_id) for message in resolution.messages] == [
+            (root_id, "Root", root_id),
+            (
+                reply_id,
+                "Edited" if fetched_has_bundle else "Reply",
+                "$edit" if fetched_has_bundle else reply_id,
+            ),
+        ]
 
     @pytest.mark.asyncio
     async def test_long_cached_sidecar_thread_uses_one_bounded_cache_read(self) -> None:

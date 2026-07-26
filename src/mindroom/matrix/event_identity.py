@@ -35,11 +35,11 @@ def _provisional_transition(
     return "ignore"
 
 
-def event_representation_transition(
+def _same_scoped_event_identity(
     existing: Mapping[str, Any],
     candidate: Mapping[str, Any],
-) -> _EventRepresentationTransition:
-    """Choose a legal richer view of one immutable event or reject a contradiction."""
+) -> bool:
+    """Return whether two representations agree on event identity and available scope."""
     same_envelope = all(existing.get(key) == candidate.get(key) for key in ("event_id", "sender")) and (
         "state_key" in existing,
         existing.get("state_key"),
@@ -54,7 +54,51 @@ def event_representation_transition(
         and candidate_replacement_target is not None
         and existing_replacement_target != candidate_replacement_target
     )
-    if not same_envelope or rooms_conflict or replacement_targets_conflict:
+    return same_envelope and not rooms_conflict and not replacement_targets_conflict
+
+
+def event_representation_identity_matches(
+    existing: Mapping[str, Any],
+    candidate: Mapping[str, Any],
+) -> bool:
+    """Return whether immutable envelope metadata identifies one Matrix event."""
+    valid_required_strings = all(
+        isinstance(event.get(key), str) and bool(event.get(key))
+        for event in (existing, candidate)
+        for key in ("event_id", "sender", "type")
+    )
+    valid_optional_rooms = all(
+        key not in event or (isinstance(event.get(key), str) and bool(event.get(key)))
+        for event in (existing, candidate)
+        for key in ("room_id",)
+    )
+    valid_optional_state_keys = all(
+        "state_key" not in event or isinstance(event.get("state_key"), str) for event in (existing, candidate)
+    )
+    if not (
+        valid_required_strings
+        and valid_optional_rooms
+        and valid_optional_state_keys
+        and _same_scoped_event_identity(existing, candidate)
+    ):
+        return False
+    existing_timestamp = existing.get("origin_server_ts")
+    candidate_timestamp = candidate.get("origin_server_ts")
+    if type(existing_timestamp) is not int or type(candidate_timestamp) is not int:
+        return False
+    if existing_timestamp != candidate_timestamp:
+        return False
+    existing_type = existing["type"]
+    candidate_type = candidate["type"]
+    return existing_type == candidate_type or "m.room.encrypted" in {existing_type, candidate_type}
+
+
+def event_representation_transition(
+    existing: Mapping[str, Any],
+    candidate: Mapping[str, Any],
+) -> _EventRepresentationTransition:
+    """Choose a legal richer view of one immutable event or reject a contradiction."""
+    if not _same_scoped_event_identity(existing, candidate):
         return "conflict"
 
     existing_is_encrypted = existing.get("type") == "m.room.encrypted"

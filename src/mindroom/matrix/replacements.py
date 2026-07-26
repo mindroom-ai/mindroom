@@ -7,7 +7,11 @@ from copy import deepcopy
 from operator import itemgetter
 from typing import Any, Literal
 
-from mindroom.matrix.event_identity import event_representation_transition
+from mindroom.matrix.event_identity import (
+    PROVISIONAL_OUTBOUND_KEY,
+    event_representation_identity_matches,
+    event_representation_transition,
+)
 from mindroom.matrix.event_info import EventInfo, event_source_is_timeline_in_room, event_source_matches_room
 
 type ReplacementValidator = Callable[[dict[str, Any]], bool]
@@ -94,9 +98,15 @@ def event_representation_covers(
     """Return whether an existing canonical or redacted view fully covers a candidate."""
     unsigned = existing.get("unsigned")
     if isinstance(unsigned, Mapping) and isinstance(unsigned.get("redacted_because"), Mapping):
-        return True
+        return event_representation_identity_matches(existing, candidate)
     transition = event_representation_transition(existing, candidate)
-    return transition == "ignore" or (transition == "accept" and existing == candidate)
+    same_canonical_payload = (
+        existing.get(PROVISIONAL_OUTBOUND_KEY) is not True
+        and event_representation_identity_matches(existing, candidate)
+        and existing.get("type") == candidate.get("type")
+        and existing.get("content") == candidate.get("content")
+    )
+    return transition == "ignore" or (transition == "accept" and (existing == candidate or same_canonical_payload))
 
 
 def _compatible_representation_types(original_type: object, candidate_type: object) -> bool:

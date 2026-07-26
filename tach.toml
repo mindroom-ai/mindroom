@@ -4017,6 +4017,7 @@ from = ["mindroom.matrix.event_info"]
 [[interfaces]]
 expose = [
     "PROVISIONAL_OUTBOUND_KEY",
+    "event_representation_identity_matches",
     "event_representation_transition",
 ]
 from = ["mindroom.matrix.event_identity"]
