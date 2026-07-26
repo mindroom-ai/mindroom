@@ -924,7 +924,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
                     room_id,
                     thread_id,
                     principal_id=principal_id,
-                    replayed_event_ids=retained_event_source_provider.provided_event_ids,
+                    replayed_event_ids=retained_event_source_provider.replayed_event_ids,
                     snapshot_stored=result.diagnostics.get("cache_store_outcome")
                     == ThreadCacheReplaceOutcome.STORED.value,
                 )

@@ -600,15 +600,79 @@ class TestThreadHistory:
             },
         ]
 
-        merged, changed = _merge_retained_thread_event_sources(
+        merged, changed, replayed_event_ids = _merge_retained_thread_event_sources(
             fetched_sources,
             retained_sources,
             thread_id="$thread_root",
         )
 
         assert changed is False
+        assert replayed_event_ids == frozenset({"$reply"})
         assert merged[1]["content"] == {}
         assert merged[1]["unsigned"] == {"redacted_because": {"event_id": "$redaction"}}
+
+    def test_retained_clear_delta_supersedes_fetched_opaque_representation(self) -> None:
+        """A certified decrypted delta must remain canonical over its same-event opaque fetch."""
+        opaque_reply = {
+            "event_id": "$reply",
+            "room_id": "!room:localhost",
+            "sender": "@user:localhost",
+            "origin_server_ts": 2000,
+            "type": "m.room.encrypted",
+            "content": {
+                "algorithm": "m.megolm.v1.aes-sha2",
+                "ciphertext": "opaque",
+                "device_id": "DEVICE",
+                "session_id": "SESSION",
+            },
+        }
+        clear_reply = {
+            "event_id": "$reply",
+            "room_id": "!room:localhost",
+            "sender": "@user:localhost",
+            "origin_server_ts": 2000,
+            "type": "m.room.message",
+            "content": {
+                "body": "Reply",
+                "msgtype": "m.text",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
+            },
+        }
+
+        merged, changed, replayed_event_ids = _merge_retained_thread_event_sources(
+            [opaque_reply],
+            [clear_reply],
+            thread_id="$thread_root",
+        )
+
+        assert changed is True
+        assert replayed_event_ids == frozenset({"$reply"})
+        assert merged == [clear_reply]
+
+    def test_conflicting_retained_representation_is_quarantined(self) -> None:
+        """A contradictory retained view must be neither stored nor acknowledged."""
+        fetched_reply = {
+            "event_id": "$reply",
+            "room_id": "!room:localhost",
+            "sender": "@user:localhost",
+            "origin_server_ts": 2000,
+            "type": "m.room.message",
+            "content": {"body": "Fetched", "msgtype": "m.text"},
+        }
+        retained_reply = {
+            **fetched_reply,
+            "content": {"body": "Contradiction", "msgtype": "m.text"},
+        }
+
+        merged, changed, replayed_event_ids = _merge_retained_thread_event_sources(
+            [fetched_reply],
+            [retained_reply],
+            thread_id="$thread_root",
+        )
+
+        assert changed is True
+        assert replayed_event_ids == frozenset()
+        assert merged == []
 
     @pytest.mark.asyncio
     async def test_long_cached_sidecar_thread_uses_one_bounded_cache_read(self) -> None:

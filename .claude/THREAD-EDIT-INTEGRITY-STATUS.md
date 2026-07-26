@@ -9,7 +9,10 @@
 - Four stale tests represented known threaded parents as relation-free events while supplying a contradictory cached index.
 - Those fixtures now carry the actual explicit `m.thread` relation; the exact 16 full-suite failures plus the stale-index regression pass 17/17.
 - Fresh exact-`a684eb2b5` review also reproduced a separate retained-source bug: an opaque fetched duplicate can replace a certified clear retained representation before canonical identity reconciliation.
-- Add a strict failing regression at `_merge_retained_thread_event_sources`, then make the smallest canonical same-ID merge correction without weakening fetched-redaction authority.
+- Strict RED reproduced that exact opaque/clear pair.
+- `_merge_retained_thread_event_sources` now applies the shared immutable-representation transition, preserves authoritative fetched redactions, removes true conflicts, and reports only incorporated or terminally superseded retained IDs.
+- Repair-delta acknowledgement now consumes that reported set rather than every ID merely presented to reconstruction.
+- Focused clear/opaque, redaction, conflict-quarantine, and acknowledgement tests pass.
 - Rerun all 16 exact failed tests, the membership owning suite, full pytest, fresh reviews, CI, PostgreSQL, hooks, and live Tuwunel.
 - Remove this file before the next exact-head freeze.
 - Never amend, force-push, merge, or use temporary storage for durable evidence.

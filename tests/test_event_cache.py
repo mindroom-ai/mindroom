@@ -1347,6 +1347,7 @@ async def test_stored_repair_releases_replayed_delta_filtered_by_redaction(tmp_p
         **_kwargs: object,
     ) -> ThreadHistoryResult:
         assert [source["event_id"] for source in retained_event_sources.current_event_sources()] == ["$redacted"]
+        retained_event_sources.record_replayed_event_ids({"$redacted"})
         return thread_history_result(
             [],
             is_full_history=True,
