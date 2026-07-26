@@ -380,6 +380,11 @@ def _write_corpus(docs_path: Path, count: int, *, body: str = "content") -> list
     return names
 
 
+def _overlapping_body(tokens: int) -> str:
+    """Return text whose chunks all differ, so batched requests cannot dedupe them away."""
+    return " ".join(f"token{index:04d}" for index in range(tokens))
+
+
 def _candidate_collections() -> list[str]:
     return sorted(name for name in _FakeVectorDb.store if "_candidate_" in name)
 
@@ -2814,19 +2819,100 @@ async def test_oversized_file_still_indexes_and_publishes(
     assert "huge.md" in stored
 
 
-@pytest.mark.asyncio
-async def test_overlapping_chunks_still_index_and_publish(tmp_path: Path, embedder: _RecordingEmbedder) -> None:
-    """Skipping prefetch for overlapping chunks must not skip indexing."""
+def test_moderate_overlap_is_still_batch_prefetched(tmp_path: Path) -> None:
+    """Ordinary overlap expands predictably, so it must not disable prefetch."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
-    (docs_path / "overlapped.md").write_text("y" * 600, encoding="utf-8")
-    config = _config(tmp_path, docs_path, chunk_size=128, chunk_overlap=64)
+    source = docs_path / "overlapped.md"
+    source.write_text(_overlapping_body(500), encoding="utf-8")
+    config = _config(tmp_path, docs_path, chunk_size=1_000, chunk_overlap=100)
+
+    texts = _manager(config)._chunk_texts_for_batch([source])
+
+    assert len(texts) > 1, "overlapping chunks were not prefetched at all"
+
+
+def test_prefetch_skips_overlap_expansion_that_outgrows_the_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Admission is decided by worst-case expansion, not by the size on disk.
+
+    The oversized file here is smaller than the whole budget; only its overlap
+    expansion is not, so a check against the raw file size would read it.
+    """
+    monkeypatch.setattr(knowledge_manager_module, "_MAX_PREFETCH_TEXT_BYTES", 4_000)
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    expanding = docs_path / "expanding.md"
+    expanding.write_text("x" * 2_500, encoding="utf-8")
+    small = docs_path / "small.md"
+    small.write_text(_overlapping_body(50), encoding="utf-8")
+    config = _config(tmp_path, docs_path, chunk_size=1_000, chunk_overlap=100)
+    read_files: list[str] = []
+    original_chunk = KnowledgeManager._chunk_texts_for_prefetch
+
+    def _record_read(self: KnowledgeManager, resolved_path: Path) -> tuple[str, ...]:
+        read_files.append(resolved_path.name)
+        return original_chunk(self, resolved_path)
+
+    monkeypatch.setattr(KnowledgeManager, "_chunk_texts_for_prefetch", _record_read)
+
+    texts = _manager(config)._chunk_texts_for_batch([expanding, small])
+
+    assert expanding.stat().st_size < 4_000, "the oversized file no longer fits the budget by raw size"
+    assert read_files == ["small.md"], "the expanding file was materialized before prefetch declined it"
+    assert texts, "the smaller file behind the skipped one was never prefetched"
+    assert sum(len(text.encode("utf-8")) for text in texts) <= 4_000
+
+
+@pytest.mark.asyncio
+async def test_overlapping_chunks_are_batch_prefetched_and_published(
+    tmp_path: Path,
+    embedder: _RecordingEmbedder,
+) -> None:
+    """Overlapping chunks embed in real multi-input requests and stay searchable."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    (docs_path / "overlapped.md").write_text(_overlapping_body(500), encoding="utf-8")
+    config = _config(tmp_path, docs_path, chunk_size=1_000, chunk_overlap=100)
     runtime_paths = runtime_paths_for(config)
 
     assert await _manager(config).reindex_all() == 1
 
-    assert [batch for batch in embedder.batch_requests if len(batch) > 1] == [], "prefetch ran despite overlap"
+    assert [batch for batch in embedder.batch_requests if len(batch) > 1], "no multi-input request was issued"
+    assert embedder.single_requests == [], "every overlapping chunk was served from the batch prefetch"
     state = _published_state(config, runtime_paths)
     assert state is not None
     assert state.status == "complete"
     assert state.indexed_count == 1
+    lookup = get_published_index("docs", config=config, runtime_paths=runtime_paths)
+    assert lookup.index is not None
+    hits = lookup.index.knowledge.search("token0000", max_results=5)
+    assert hits, "the published overlapping index returned nothing"
+    assert all("token" in document.content for document in hits)
+
+
+@pytest.mark.asyncio
+async def test_file_skipped_by_overlap_expansion_still_indexes_and_publishes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A file prefetch declines must still be indexed by the per-file path."""
+    monkeypatch.setattr(knowledge_manager_module, "_MAX_PREFETCH_TEXT_BYTES", 4_000)
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    (docs_path / "expanding.md").write_text("x" * 2_500, encoding="utf-8")
+    for index in range(3):
+        (docs_path / f"small{index}.md").write_text(f"small body {index}", encoding="utf-8")
+    config = _config(tmp_path, docs_path, chunk_size=1_000, chunk_overlap=100)
+    runtime_paths = runtime_paths_for(config)
+
+    assert await _manager(config).reindex_all() == 4
+
+    state = _published_state(config, runtime_paths)
+    assert state is not None
+    assert state.status == "complete"
+    assert state.indexed_count == 4
+    stored = sorted(record.metadata["source_path"] for record in _FakeVectorDb.store[state.collection])
+    assert "expanding.md" in stored

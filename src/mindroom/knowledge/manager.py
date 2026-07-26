@@ -991,22 +991,27 @@ class KnowledgeManager:
                 return True
         return False
 
+    def _chunking_strategy(self) -> SafeFixedSizeChunking:
+        """Build the chunking strategy every text-like read of this base uses."""
+        base_config = self.config.get_knowledge_base_config(self.base_id)
+        return SafeFixedSizeChunking(
+            chunk_size=base_config.chunk_size,
+            overlap=base_config.chunk_overlap,
+        )
+
     def _build_reader(self, file_path: Path) -> Reader:
         """Build a per-file reader with conservative chunking for text-like content."""
-        base_config = self.config.get_knowledge_base_config(self.base_id)
         reader = ReaderFactory.get_reader_for_extension(file_path.suffix.lower())
 
         # Large markdown/plain-text files are the common source of oversized embed requests.
         if not isinstance(reader, (TextReader, MarkdownReader)):
             return reader
 
+        chunking_strategy = self._chunking_strategy()
         configured_reader = deepcopy(reader)
         configured_reader.chunk = True
-        configured_reader.chunk_size = base_config.chunk_size
-        configured_reader.chunking_strategy = SafeFixedSizeChunking(
-            chunk_size=base_config.chunk_size,
-            overlap=base_config.chunk_overlap,
-        )
+        configured_reader.chunk_size = chunking_strategy.chunk_size
+        configured_reader.chunking_strategy = chunking_strategy
         return configured_reader
 
     def _default_collection_name(self) -> str:
@@ -1370,27 +1375,23 @@ class KnowledgeManager:
     def _chunk_texts_for_batch(self, files: Sequence[Path]) -> list[str]:
         """Return chunk texts to prefetch, stopping at the memory budget.
 
-        Overlapping chunks duplicate source text, so their fully materialized
-        size cannot be bounded from the source-file size alone. Those bases use
-        the normal per-file embedding path instead.
-
         The size check has to precede the read: chunking materializes a file's
         entire content, so a budget consulted afterwards cannot stop a single
         oversized file from blowing the bound. A file that cannot fit the
         remaining budget is skipped rather than ending the pass, so smaller
         files behind it still benefit.
 
+        Overlapping chunks re-emit the same characters many times over, so a
+        file's size on disk stops bounding the text its chunks occupy: 4 KB at
+        chunk_size=128/overlap=127 materializes ~484 KB. The admission test is
+        therefore the chunker's own worst-case expansion of that size, never
+        the size itself.
+
         Skipped files are simply not prefetched; their chunks are embedded by
         the normal per-file path, so the only cost of the bound is speed,
         never correctness.
         """
-        if self.config.get_knowledge_base_config(self.base_id).chunk_overlap:
-            # Overlapping chunks re-emit the same bytes many times over, so a
-            # file's size on disk stops bounding the text its chunks occupy:
-            # 4 KB at chunk_size=128/overlap=127 materializes ~484 KB. There is
-            # no cheap pre-read bound for that, so prefetch is skipped entirely
-            # and the per-file path indexes normally.
-            return []
+        chunking_strategy = self._chunking_strategy()
         chunk_texts: list[str] = []
         remaining = _MAX_PREFETCH_TEXT_BYTES
         skipped = 0
@@ -1401,7 +1402,7 @@ class KnowledgeManager:
                 source_size = resolved_path.stat().st_size
             except OSError:
                 continue
-            if source_size > remaining:
+            if chunking_strategy.max_chunk_text_bytes(source_size) > remaining:
                 skipped += 1
                 continue
             for text in self._chunk_texts_for_prefetch(resolved_path):
