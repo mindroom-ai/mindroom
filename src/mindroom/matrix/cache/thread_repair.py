@@ -322,13 +322,19 @@ class ThreadRepairRegistry:
     ) -> T:
         """Run one admitted repair while holding exactly one global slot.
 
-        Reached only once same-thread predecessors have drained, so a held slot always measures a
-        scan in progress. Capacity is re-checked for speculative work because that queue wait can be
+        Reached only once same-thread predecessors and the coordinator barrier have drained, so a
+        held slot always measures a scan in progress. Capacity is re-checked for speculative work because that queue wait can be
         long enough for the runtime to have filled up, or for another flight to have fixed a thread.
 
         A flight an interactive caller has joined stops being speculative: declining it would raise
         into a read that is waiting on this exact result, and that caller is owed the scan.
         """
+        if speculative:
+            # Registering the flight is not the end of the claim: `schedule` only queues the body,
+            # which then waits behind the coordinator barrier without holding a slot or counting
+            # against the speculative budget. Releasing at registration would leave that whole wait
+            # unbounded, so the claim is carried until here, where the scan gates below take over.
+            self._reserved_speculative.pop(self._thread_key(key), None)
         if speculative and self._interactive_joins.get(key):
             speculative = False
         if speculative:
@@ -408,10 +414,6 @@ class ThreadRepairRegistry:
 
         task = schedule(lambda: self._run_in_repair_slot(key, run_repair, speculative=speculative))
         self._tasks[key] = task
-        if speculative:
-            # Ownership transferred: `_tasks` now suppresses this thread, so the scheduling claim
-            # that stood in for it until admission is spent.
-            self._reserved_speculative.pop(self._thread_key(key), None)
         task.add_done_callback(lambda done_task: self._clear_task(key, done_task))
         return await asyncio.shield(task)
 

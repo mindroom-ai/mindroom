@@ -744,3 +744,61 @@ async def test_a_stale_release_cannot_drop_a_later_claim_on_the_same_thread() ->
     assert registry.speculative_suppression_reason(key) is None
     registry.clear()
     assert registry._reserved_speculative == {}
+
+
+@pytest.mark.asyncio
+async def test_flights_queued_behind_the_barrier_stay_globally_bounded() -> None:
+    """Registering a flight is not admission: the queued body still has to reach the scan gates.
+
+    ``schedule`` only queues the repair behind the coordinator barrier. Until that body starts it
+    holds no slot and counts against no budget, so releasing the scheduling claim at registration
+    would leave the whole wait unbounded and let every wave add another flight.
+    """
+    registry = ThreadRepairRegistry()
+    budget = registry.max_concurrent_speculative_repairs
+    barrier = asyncio.Event()
+    bodies_started = 0
+
+    def queued_behind_barrier[T](repair_factory: Callable[[], Awaitable[T]]) -> asyncio.Task[T]:
+        async def runner() -> T:
+            await barrier.wait()
+            nonlocal bodies_started
+            bodies_started += 1
+            return await repair_factory()
+
+        return asyncio.create_task(runner())
+
+    async def scan() -> str:
+        return "scanned"
+
+    flights: list[asyncio.Task[str]] = []
+    try:
+        for wave in range(20):
+            for slot in range(budget):
+                thread_id = f"$w{wave}-t{slot}"
+                if registry.reserve_speculative_repair(("@agent:localhost", ROOM_ID, thread_id)) is None:
+                    continue
+                flights.append(
+                    asyncio.create_task(
+                        registry.run(
+                            _flight_key(thread_id, hydrate_sidecars=False),
+                            schedule=queued_behind_barrier,
+                            repair=scan,
+                            result_arms_backoff=lambda _r: False,
+                            speculative=True,
+                        ),
+                    ),
+                )
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+
+        queued_flights = len(registry._tasks)
+        started_before_release = bodies_started
+    finally:
+        barrier.set()
+        await asyncio.gather(*flights, return_exceptions=True)
+
+    assert started_before_release == 0, "the barrier did not hold, so this proves nothing"
+    assert queued_flights <= budget, (
+        f"{queued_flights} flights queued behind the barrier against a speculative budget of {budget}"
+    )
