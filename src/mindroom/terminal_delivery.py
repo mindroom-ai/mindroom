@@ -371,12 +371,14 @@ class TerminalDeliveryCoordinator:
         if record is not None:
             keys.add(f"turn:{json.dumps(record.indexed_event_ids, separators=(',', ':'))}")
         locks = [self._locks.setdefault(key, asyncio.Lock()) for key in sorted(keys)]
-        for lock in locks:
-            await lock.acquire()
+        acquired: list[asyncio.Lock] = []
         try:
+            for lock in locks:
+                await lock.acquire()
+                acquired.append(lock)
             yield
         finally:
-            for lock in reversed(locks):
+            for lock in reversed(acquired):
                 lock.release()
 
     async def _run(self) -> None:
@@ -405,8 +407,11 @@ async def _durable_call[ResultT](
     try:
         return await asyncio.shield(writer)
     except asyncio.CancelledError:
-        with contextlib.suppress(asyncio.CancelledError):
-            await asyncio.shield(writer)
+        while not writer.done():
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.shield(writer)
+        with contextlib.suppress(Exception):
+            writer.result()
         raise
 
 

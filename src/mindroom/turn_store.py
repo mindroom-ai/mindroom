@@ -182,7 +182,10 @@ class TurnStore:
         if not turn_record.source_event_ids or not response_event_id:
             return None
 
-        def committed_records(existing_records: Mapping[str, TurnRecord]) -> tuple[TurnRecord, ...]:
+        def committed_records(
+            existing_records: Mapping[str, TurnRecord],
+            target_owners: tuple[TurnRecord, ...],
+        ) -> tuple[TurnRecord, ...]:
             target_record = existing_records.get(response_event_id)
             if (
                 target_record is not None
@@ -213,7 +216,18 @@ class TurnStore:
                 raise _TerminalCheckpointConflictError
             if authority.completed:
                 raise _TerminalCheckpointConflictError
+            superseded_owners = tuple(
+                replace(
+                    owner,
+                    response_event_id=None,
+                    terminal_edit_checkpoint=None,
+                    timestamp=0.0,
+                )
+                for owner in target_owners
+                if not same_turn_identity(owner, authority)
+            )
             return (
+                *superseded_owners,
                 replace(
                     authority,
                     completed=True,
@@ -224,13 +238,17 @@ class TurnStore:
             )
 
         try:
-            committed = self._ledger.transact_handled_turns(
-                (*turn_record.indexed_event_ids, response_event_id),
+            committed = self._ledger.transact_terminal_checkpoint(
+                turn_record.indexed_event_ids,
+                response_event_id,
                 committed_records,
             )
         except _TerminalCheckpointConflictError:
             return None
-        return committed[0] if committed else None
+        return next(
+            (record for record in committed if same_turn_identity(record, turn_record)),
+            None,
+        )
 
     def terminal_checkpoint_records(self) -> tuple[TurnRecord, ...]:
         """Return unique canonical turns still owning terminal checkpoint work."""
@@ -408,16 +426,19 @@ class TurnStore:
 
         def redacted_records(
             existing_records: Mapping[str, TurnRecord],
-            response_owner: TurnRecord | None,
+            response_owners: tuple[TurnRecord, ...],
         ) -> tuple[TurnRecord, ...]:
-            if response_owner is not None:
-                current_owner = next(
-                    (
-                        existing
-                        for existing in existing_records.values()
-                        if same_turn_identity(existing, response_owner)
-                    ),
-                    response_owner,
+            if response_owners:
+                current_owners = tuple(
+                    next(
+                        (
+                            existing
+                            for existing in existing_records.values()
+                            if same_turn_identity(existing, response_owner)
+                        ),
+                        response_owner,
+                    )
+                    for response_owner in response_owners
                 )
                 target_tombstone = TurnRecord.create(
                     [source_event_id],
@@ -425,7 +446,15 @@ class TurnStore:
                     completed=False,
                 )
                 return (
-                    replace(current_owner, terminal_edit_checkpoint=None, timestamp=0.0),
+                    *(
+                        replace(
+                            current_owner,
+                            response_event_id=None,
+                            terminal_edit_checkpoint=None,
+                            timestamp=0.0,
+                        )
+                        for current_owner in current_owners
+                    ),
                     target_tombstone,
                 )
             existing_record = existing_records.get(source_event_id)

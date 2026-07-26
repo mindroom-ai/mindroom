@@ -850,9 +850,6 @@ class StreamingResponse:
                 canonical_final_body_candidate=canonical_final_body_candidate,
                 failure_reason=cancellation_failure_reason or "terminal_update_failed",
                 interactive_metadata=self._last_committed_interactive_metadata,
-                deferred_terminal_delivery=(
-                    self._terminal_delivery is not None and self._terminal_delivery.commit.pending is not None
-                ),
                 durable_lifecycle_managed=(
                     self._terminal_delivery is not None and self._terminal_delivery.commit.lifecycle_managed
                 ),
@@ -869,9 +866,6 @@ class StreamingResponse:
             canonical_final_body_candidate=canonical_final_body_candidate,
             failure_reason=cancellation_failure_reason,
             interactive_metadata=terminal_interactive_metadata,
-            deferred_terminal_delivery=(
-                self._terminal_delivery is not None and self._terminal_delivery.commit.pending is not None
-            ),
             durable_lifecycle_managed=(
                 self._terminal_delivery is not None and self._terminal_delivery.commit.lifecycle_managed
             ),
@@ -945,7 +939,10 @@ class StreamingResponse:
                     prepared_delivery.committed_state.tool_trace,
                     prepared_delivery.committed_state.interactive_metadata,
                 )
-                send_succeeded = self._terminal_delivery.commit.status == "delivered"
+                send_succeeded = (
+                    self._terminal_delivery.commit.status == "delivered"
+                    or self._terminal_delivery.commit.pending is not None
+                )
             else:
                 send_succeeded = await self._send_content(
                     client,

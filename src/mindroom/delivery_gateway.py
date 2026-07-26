@@ -25,6 +25,7 @@ from mindroom.hooks import (
     FinalResponseDraft,
     FinalResponseTransformContext,
     HookContextSupport,
+    MessageEnvelope,
     ResponseDraft,
     ResponseResult,
     emit,
@@ -40,6 +41,7 @@ from mindroom.matrix.client_delivery import (
 )
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import build_message_content
+from mindroom.response_identity import ResponseIdentity
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
 from mindroom.streaming import (
     StreamingResponse,
@@ -71,7 +73,6 @@ if TYPE_CHECKING:
         CompactionOutcome,
     )
     from mindroom.message_target import MessageTarget
-    from mindroom.response_identity import ResponseIdentity
     from mindroom.streaming import StreamInputChunk
     from mindroom.timing import DispatchPipelineTiming
     from mindroom.tool_system.events import ToolTraceEntry
@@ -84,11 +85,6 @@ _PLACEHOLDER_DELIVERY_FAILURE_REASONS = frozenset(
         "terminal_update_failed",
     },
 )
-
-
-# A terminal outcome whose only failure was Matrix transport is durably retried
-# instead of being overwritten with a user-visible delivery-failure note.
-_DURABLE_TERMINAL_RETRY_FAILURE_REASON = "delivery_failed_pending_durable_retry"
 
 
 def _is_placeholder_delivery_failure(failure_reason: str) -> bool:
@@ -355,7 +351,30 @@ class DeliveryGateway:
 
     async def owned_terminal_delivery(self, identity: ResponseIdentity) -> PendingTerminalDelivery | None:
         """Return durable target ownership for a replayed response."""
-        return await self.deps.terminal_delivery_coordinator.owned_delivery(identity)
+        return await self.owned_terminal_delivery_for_turn(
+            response_kind=identity.response_kind,
+            response_envelope=identity.response_envelope,
+            correlation_id=identity.correlation_id,
+            source_event_ids=identity.source_event_ids,
+        )
+
+    async def owned_terminal_delivery_for_turn(
+        self,
+        *,
+        response_kind: str,
+        response_envelope: MessageEnvelope,
+        correlation_id: str,
+        source_event_ids: tuple[str, ...],
+    ) -> PendingTerminalDelivery | None:
+        """Build the canonical response identity at the delivery boundary."""
+        return await self.deps.terminal_delivery_coordinator.owned_delivery(
+            ResponseIdentity(
+                response_kind=response_kind,
+                response_envelope=response_envelope,
+                correlation_id=correlation_id,
+                source_event_ids=source_event_ids,
+            ),
+        )
 
     @staticmethod
     def _cancelled_error_failure_reason(error: asyncio.CancelledError) -> str:
@@ -460,7 +479,6 @@ class DeliveryGateway:
                 final_visible_body=_PLACEHOLDER_DELIVERY_FAILURE_TEXT,
                 delivery_kind="edited",
                 failure_reason=request.failure_reason,
-                deferred_terminal_delivery=request.failure_reason == _DURABLE_TERMINAL_RETRY_FAILURE_REASON,
                 tool_trace=tuple(request.tool_trace or ()),
                 extra_content=failure_extra_content,
             )
@@ -478,7 +496,6 @@ class DeliveryGateway:
             terminal_status="error",
             event_id=None,
             failure_reason=request.failure_reason,
-            deferred_terminal_delivery=request.failure_reason == _DURABLE_TERMINAL_RETRY_FAILURE_REASON,
             tool_trace=tuple(request.tool_trace or ()),
             extra_content=failure_extra_content,
         )
@@ -852,7 +869,7 @@ class DeliveryGateway:
                     tool_trace=tuple(draft.tool_trace or ()),
                     extra_content=draft.extra_content,
                 )
-            if commit.status == "delivered":
+            if commit.status == "delivered" or commit.pending is not None:
                 return FinalDeliveryOutcome(
                     terminal_status="completed",
                     event_id=request.existing_event_id,
@@ -865,21 +882,26 @@ class DeliveryGateway:
                     interactive_metadata=interactive_response.interactive_metadata,
                 )
             if commit.status == "superseded":
+                if request.existing_event_is_placeholder:
+                    cleanup_failure = await self._redact_visible_response_event(
+                        room_id=request.target.room_id,
+                        event_id=request.existing_event_id,
+                        identity=request.identity,
+                        redaction_reason="Superseded terminal placeholder",
+                        failure_reason=commit.reason,
+                    )
+                    return FinalDeliveryOutcome(
+                        terminal_status="error" if cleanup_failure is not None else "cancelled",
+                        event_id=None,
+                        failure_reason=cleanup_failure or commit.reason,
+                        tool_trace=tuple(draft.tool_trace or ()),
+                        extra_content=draft.extra_content,
+                    )
                 return FinalDeliveryOutcome(
                     terminal_status="error",
                     event_id=request.existing_event_id,
                     is_visible_response=True,
                     failure_reason=commit.reason,
-                    tool_trace=tuple(draft.tool_trace or ()),
-                    extra_content=draft.extra_content,
-                )
-            if commit.pending is not None:
-                return FinalDeliveryOutcome(
-                    terminal_status="error",
-                    event_id=request.existing_event_id,
-                    is_visible_response=True,
-                    failure_reason=_DURABLE_TERMINAL_RETRY_FAILURE_REASON,
-                    deferred_terminal_delivery=True,
                     tool_trace=tuple(draft.tool_trace or ()),
                     extra_content=draft.extra_content,
                 )
@@ -1282,17 +1304,6 @@ class DeliveryGateway:
             )
 
         if _is_placeholder_delivery_failure(failure_reason):
-            if stream_outcome.deferred_terminal_delivery:
-                return FinalDeliveryOutcome(
-                    terminal_status="error",
-                    event_id=placeholder_event_id,
-                    is_visible_response=True,
-                    failure_reason=_DURABLE_TERMINAL_RETRY_FAILURE_REASON,
-                    deferred_terminal_delivery=True,
-                    durable_lifecycle_managed=stream_outcome.durable_lifecycle_managed,
-                    tool_trace=tuple(request.tool_trace or ()),
-                    extra_content=request.extra_content,
-                )
             return await self._finish_placeholder_delivery_failure(
                 _PlaceholderFailureUpdateRequest(
                     target=request.target,
@@ -1440,20 +1451,6 @@ class DeliveryGateway:
                     extra_content=request.extra_content,
                 )
 
-            if stream_outcome.deferred_terminal_delivery and stream_outcome.visible_body_state == "none":
-                return FinalDeliveryOutcome(
-                    terminal_status="error",
-                    event_id=streamed_event_id,
-                    is_visible_response=(
-                        request.existing_event_id is not None and not request.existing_event_is_placeholder
-                    ),
-                    failure_reason=_DURABLE_TERMINAL_RETRY_FAILURE_REASON,
-                    deferred_terminal_delivery=True,
-                    durable_lifecycle_managed=stream_outcome.durable_lifecycle_managed,
-                    tool_trace=tuple(request.tool_trace or ()),
-                    extra_content=request.extra_content,
-                )
-
             if stream_outcome.canonical_final_body_candidate is not None and stream_outcome.visible_body_state in {
                 "none",
                 "placeholder_only",
@@ -1568,12 +1565,7 @@ class DeliveryGateway:
                         event_id=visible_stream_event_id,
                         is_visible_response=True,
                         final_visible_body=streamed_text,
-                        failure_reason=(
-                            _DURABLE_TERMINAL_RETRY_FAILURE_REASON
-                            if stream_outcome.deferred_terminal_delivery
-                            else failure_reason
-                        ),
-                        deferred_terminal_delivery=stream_outcome.deferred_terminal_delivery,
+                        failure_reason=failure_reason,
                         durable_lifecycle_managed=stream_outcome.durable_lifecycle_managed,
                         tool_trace=tuple(request.tool_trace or ()),
                         extra_content=request.extra_content,
@@ -1648,7 +1640,6 @@ class DeliveryGateway:
                 final_visible_body=streamed_text or interactive_response.formatted_text,
                 delivery_kind=request.initial_delivery_kind,
                 failure_reason=stream_outcome.failure_reason,
-                deferred_terminal_delivery=stream_outcome.deferred_terminal_delivery,
                 durable_lifecycle_managed=stream_outcome.durable_lifecycle_managed,
                 tool_trace=tuple(request.tool_trace or ()),
                 extra_content=request.extra_content,

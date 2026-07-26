@@ -18,7 +18,6 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import STREAM_STATUS_ERROR, STREAM_STATUS_KEY
 from mindroom.delivery_gateway import (
-    _DURABLE_TERMINAL_RETRY_FAILURE_REASON,
     DeliveryGateway,
     DeliveryGatewayDeps,
     FinalDeliveryRequest,
@@ -238,8 +237,8 @@ async def test_completed_terminal_edit_uses_durable_first_attempt(tmp_path: Path
         "complete answer",
         [],
     )
-    assert outcome.failure_reason == "terminal_update_failed"
-    assert outcome.deferred_terminal_delivery is True
+    assert outcome.terminal_status == "completed"
+    assert outcome.failure_reason is None
     assert outcome.durable_lifecycle_managed is True
 
 
@@ -479,7 +478,7 @@ async def test_transport_failed_terminal_update_drops_committed_interactive_meta
 async def test_transport_failed_terminal_update_ignores_hidden_canonical_interactive_metadata(
     tmp_path: Path,
 ) -> None:
-    """The currently visible partial body does not expose deferred interactive metadata."""
+    """Preserved visible streamed replies must not register interactive metadata from hidden canonical content."""
     config = _config(tmp_path)
     response_hooks = SimpleNamespace(
         apply_before_response=AsyncMock(),
@@ -509,7 +508,6 @@ async def test_transport_failed_terminal_update_ignores_hidden_canonical_interac
                 visible_body_state="visible_body",
                 canonical_final_body_candidate="yes\n\n- ✅ approve",
                 failure_reason="terminal_update_failed",
-                deferred_terminal_delivery=True,
                 durable_lifecycle_managed=True,
             ),
             initial_delivery_kind="sent",
@@ -524,46 +522,10 @@ async def test_transport_failed_terminal_update_ignores_hidden_canonical_interac
     )
 
     assert outcome.terminal_status == "error"
-    assert outcome.failure_reason == _DURABLE_TERMINAL_RETRY_FAILURE_REASON
-    assert outcome.deferred_terminal_delivery
+    assert outcome.failure_reason == "terminal_update_failed"
     assert outcome.final_visible_body == "visible plain text"
     assert dict(outcome.option_map or {}) == {}
     assert list(outcome.options_list or ()) == []
-
-
-@pytest.mark.asyncio
-async def test_durable_stream_failure_does_not_rebuild_terminal_payload(tmp_path: Path) -> None:
-    """Finalization must reuse the row created before the stream's first edit attempt."""
-    gateway = _delivery_gateway(tmp_path)
-
-    outcome = await gateway.finalize_streamed_response(
-        FinalizeStreamedResponseRequest(
-            target=MessageTarget.resolve("!room:localhost", None, "$reply"),
-            stream_transport_outcome=StreamTransportOutcome(
-                last_physical_stream_event_id="$visible",
-                terminal_status="completed",
-                rendered_body="visible partial",
-                visible_body_state="visible_body",
-                canonical_final_body_candidate="complete answer",
-                failure_reason="terminal_update_failed",
-                deferred_terminal_delivery=True,
-                durable_lifecycle_managed=True,
-            ),
-            initial_delivery_kind="sent",
-            identity=ResponseIdentity(
-                response_kind="ai",
-                response_envelope=_envelope(),
-                correlation_id="corr-stream-first-attempt",
-            ),
-            tool_trace=None,
-            extra_content=None,
-        ),
-    )
-
-    gateway.deps.response_hooks.apply_final_response_transform.assert_not_awaited()
-    assert outcome.failure_reason == _DURABLE_TERMINAL_RETRY_FAILURE_REASON
-    assert outcome.deferred_terminal_delivery is True
-    assert outcome.durable_lifecycle_managed is True
 
 
 @pytest.mark.asyncio
@@ -737,6 +699,42 @@ async def test_terminal_owner_gateway_builds_canonical_identity(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("cleanup_succeeds", [True, False])
+async def test_redaction_supersession_cleans_placeholder_without_marking_it_handled(
+    tmp_path: Path,
+    cleanup_succeeds: bool,
+) -> None:
+    """A redacted checkpoint never turns its unchanged thinking placeholder into a handled reply."""
+    gateway = _delivery_gateway(tmp_path)
+    gateway.deps.terminal_delivery_coordinator.commit_and_attempt.return_value = TerminalDeliveryCommit(
+        status="superseded",
+        reason="checkpoint_redacted",
+    )
+    gateway.deps.redact_message_event.return_value = cleanup_succeeds
+
+    outcome = await gateway.deliver_final(
+        FinalDeliveryRequest(
+            target=MessageTarget.resolve("!room:localhost", None, "$reply"),
+            existing_event_id="$placeholder",
+            existing_event_is_placeholder=True,
+            response_text="final answer",
+            identity=ResponseIdentity(
+                response_kind="ai",
+                response_envelope=_envelope(),
+                correlation_id="corr-redacted-checkpoint",
+            ),
+            tool_trace=None,
+            extra_content=None,
+        ),
+    )
+
+    gateway.deps.redact_message_event.assert_awaited_once()
+    assert outcome.terminal_status == ("cancelled" if cleanup_succeeds else "error")
+    assert outcome.final_visible_event_id is None
+    assert not outcome.mark_handled
+
+
+@pytest.mark.asyncio
 async def test_durable_pending_edit_never_competes_with_placeholder_failure_update(tmp_path: Path) -> None:
     """A frozen stable transaction must remain the only edit after an ambiguous failure."""
     gateway = _delivery_gateway(tmp_path)
@@ -764,10 +762,10 @@ async def test_durable_pending_edit_never_competes_with_placeholder_failure_upda
 
     coordinator.commit_and_attempt.assert_awaited_once()
     gateway.edit_text.assert_not_awaited()
-    assert outcome.terminal_status == "error"
+    assert outcome.terminal_status == "completed"
     assert outcome.final_visible_event_id == "$placeholder"
-    assert outcome.failure_reason == "delivery_failed_pending_durable_retry"
-    assert outcome.deferred_terminal_delivery
+    assert outcome.final_visible_body == "final answer"
+    assert outcome.durable_lifecycle_managed
 
 
 @pytest.mark.asyncio

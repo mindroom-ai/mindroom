@@ -784,20 +784,44 @@ class HandledTurnLedger:
         self,
         event_id: str,
         update: Callable[
-            [Mapping[str, TurnRecord], TurnRecord | None],
+            [Mapping[str, TurnRecord], tuple[TurnRecord, ...]],
             Sequence[TurnRecord],
         ],
     ) -> tuple[TurnRecord, ...]:
         """Discover response ownership and persist tombstones in one transaction."""
         with self._state.lock:
             self._ensure_loaded_locked()
-            response_owner = self._turn_record_for_response_event_locked(event_id)
+            response_owners = self._turn_records_for_response_event_locked(event_id)
             lookup_event_ids = (
-                (*response_owner.indexed_event_ids, event_id) if response_owner is not None else (event_id,)
+                event_id,
+                *(source_id for owner in response_owners for source_id in owner.indexed_event_ids),
             )
             return self.transact_handled_turns(
                 lookup_event_ids,
-                lambda existing_records: update(existing_records, response_owner),
+                lambda existing_records: update(existing_records, response_owners),
+            )
+
+    def transact_terminal_checkpoint(
+        self,
+        source_event_ids: Sequence[str],
+        response_event_id: str,
+        update: Callable[
+            [Mapping[str, TurnRecord], tuple[TurnRecord, ...]],
+            Sequence[TurnRecord],
+        ],
+    ) -> tuple[TurnRecord, ...]:
+        """Discover every target owner and replace it with one checkpoint atomically."""
+        with self._state.lock:
+            self._ensure_loaded_locked()
+            target_owners = self._turn_records_for_response_event_locked(response_event_id)
+            lookup_event_ids = (
+                *source_event_ids,
+                response_event_id,
+                *(event_id for owner in target_owners for event_id in owner.indexed_event_ids),
+            )
+            return self.transact_handled_turns(
+                lookup_event_ids,
+                lambda existing_records: update(existing_records, target_owners),
             )
 
     def transact_handled_turns(
@@ -854,12 +878,17 @@ class HandledTurnLedger:
         self._state.loaded = True
 
     def _turn_record_for_response_event_locked(self, response_event_id: str) -> TurnRecord | None:
+        matches = self._turn_records_for_response_event_locked(response_event_id)
+        return matches[0] if len(matches) == 1 else None
+
+    def _turn_records_for_response_event_locked(self, response_event_id: str) -> tuple[TurnRecord, ...]:
+        """Return every canonical record currently naming one visible response."""
         matches = {
             record.indexed_event_ids: record
             for record in self._responses.values()
             if record.response_event_id == response_event_id
         }
-        return next(iter(matches.values()), None) if len(matches) == 1 else None
+        return tuple(matches.values())
 
     def _wait_for_pending_persists_locked(self) -> None:
         """Wait for the exact FIFO prefix queued before this barrier."""

@@ -381,3 +381,97 @@ def test_target_redaction_and_checkpoint_commit_have_one_atomic_order(tmp_path: 
     assert tombstone is not None
     assert tombstone.redacted_source_event_ids == ("$visible",)
     assert len(result) == 1
+
+
+def test_same_target_checkpoint_commit_supersedes_old_owner_before_redaction(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    first = store.record_pending_turn(_pending_turn())
+    second = store.record_pending_turn(
+        replace(
+            _pending_turn(),
+            source_event_ids=("$second",),
+            anchor_event_id="$second",
+            correlation_id="corr-2",
+        ),
+    )
+    assert first is not None
+    assert second is not None
+    first_committed = store.commit_terminal_checkpoint(
+        first,
+        response_event_id="$visible",
+        checkpoint=_checkpoint(),
+    )
+    second_checkpoint = replace(
+        _checkpoint(),
+        transaction_id="mindroom-terminal-checkpoint-2",
+        correlation_id="corr-2",
+    )
+    second_committed = store.commit_terminal_checkpoint(
+        second,
+        response_event_id="$visible",
+        checkpoint=second_checkpoint,
+    )
+
+    assert first_committed is not None
+    assert second_committed is not None
+    first_after = store.get_turn_record("$source")
+    assert first_after is not None
+    assert first_after.response_event_id is None
+    assert first_after.terminal_edit_checkpoint is None
+    assert store.turn_for_event("$visible") == second_committed
+    assert store.terminal_checkpoint_records() == (second_committed,)
+
+    store.mark_source_redacted("$visible")
+
+    winner_after = store.get_turn_record("$second")
+    assert winner_after is not None
+    assert winner_after.terminal_edit_checkpoint is None
+    tombstone = store.get_turn_record("$visible")
+    assert tombstone is not None
+    assert tombstone.redacted_source_event_ids == ("$visible",)
+
+
+def test_concurrent_same_target_checkpoint_commits_leave_one_owner(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    first = store.record_pending_turn(_pending_turn())
+    second = store.record_pending_turn(
+        replace(
+            _pending_turn(),
+            source_event_ids=("$second",),
+            anchor_event_id="$second",
+            correlation_id="corr-2",
+        ),
+    )
+    assert first is not None
+    assert second is not None
+    barrier = threading.Barrier(2)
+    results: list[TurnRecord | None] = []
+
+    def commit(turn: TurnRecord, transaction_id: str) -> None:
+        barrier.wait()
+        results.append(
+            store.commit_terminal_checkpoint(
+                turn,
+                response_event_id="$visible",
+                checkpoint=replace(_checkpoint(), transaction_id=transaction_id),
+            ),
+        )
+
+    threads = [
+        threading.Thread(target=commit, args=(first, "mindroom-terminal-checkpoint-1")),
+        threading.Thread(target=commit, args=(second, "mindroom-terminal-checkpoint-2")),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    [winner] = store.terminal_checkpoint_records()
+    assert all(result is not None for result in results)
+    assert store.turn_for_event("$visible") == winner
+    losers = [record for source in ("$source", "$second") if (record := store.get_turn_record(source)) != winner]
+    assert len(losers) == 1
+    assert losers[0].response_event_id is None
+    assert losers[0].terminal_edit_checkpoint is None

@@ -24,7 +24,6 @@ class StreamTransportOutcome:  # noqa: D101
     canonical_final_body_candidate: str | None = None
     failure_reason: str | None = None
     interactive_metadata: InteractiveMetadata | None = None
-    deferred_terminal_delivery: bool = False
     durable_lifecycle_managed: bool = False
 
     @property
@@ -57,7 +56,6 @@ class FinalDeliveryOutcome:  # noqa: D101
     final_visible_body: str | None = None
     delivery_kind: _VisibleDeliveryKind | None = None
     failure_reason: str | None = None
-    deferred_terminal_delivery: bool = False
     durable_lifecycle_managed: bool = False
     suppressed: bool = False
     tool_trace: tuple[ToolTraceEntry, ...] = ()

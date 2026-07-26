@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
@@ -243,8 +244,10 @@ async def test_accepted_edit_before_clear_reuses_tx_and_claims_hook_once(tmp_pat
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_count", [1, 2, 3])
 async def test_cancelled_checkpoint_writer_drains_without_network_or_stale_write(
     tmp_path: Path,
+    cancel_count: int,
 ) -> None:
     store = _store(tmp_path)
     coordinator, _hooks, _effects = _coordinator(store)
@@ -264,13 +267,45 @@ async def test_cancelled_checkpoint_writer_drains_without_network_or_stale_write
     ):
         task = asyncio.create_task(coordinator.commit_and_attempt(_intent()))
         assert await asyncio.to_thread(writer_started.wait, 5)
-        task.cancel()
+        for _ in range(cancel_count):
+            task.cancel()
+            await asyncio.sleep(0)
+            assert not task.done()
         writer_release.set()
         with pytest.raises(asyncio.CancelledError):
             await task
 
     send.assert_not_awaited()
     assert len(store.terminal_checkpoint_records()) == 1
+
+
+@pytest.mark.asyncio
+async def test_cancelled_multi_lock_acquisition_releases_acquired_subset(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    coordinator, _hooks, _effects = _coordinator(store)
+    record = store.get_turn_record(SOURCE)
+    assert record is not None
+    event_lock = asyncio.Lock()
+    turn_lock = asyncio.Lock()
+    event_key = f"event:{TARGET}"
+    turn_key = f"turn:{json.dumps(record.indexed_event_ids, separators=(',', ':'))}"
+    coordinator._locks[event_key] = event_lock
+    coordinator._locks[turn_key] = turn_lock
+    await turn_lock.acquire()
+
+    async def acquire_both() -> None:
+        async with coordinator._locked(record, TARGET):
+            raise AssertionError
+
+    task = asyncio.create_task(acquire_both())
+    await asyncio.sleep(0)
+    assert event_lock.locked()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert not event_lock.locked()
+    turn_lock.release()
 
 
 @pytest.mark.asyncio
@@ -327,3 +362,79 @@ async def test_after_response_identity_excludes_discovery_aliases(tmp_path: Path
     assert result.status == "delivered"
     identity = hooks.emit_after_response.await_args.kwargs["identity"]
     assert identity.source_event_ids == (SOURCE,)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("redacted_event_id", [SOURCE, TARGET], ids=["source", "target"])
+async def test_redaction_before_commit_prevents_network_and_effects(
+    tmp_path: Path,
+    redacted_event_id: str,
+) -> None:
+    store = _store(tmp_path)
+    coordinator, hooks, effects = _coordinator(store)
+    send = AsyncMock()
+
+    await coordinator.redact(room_id=ROOM, event_id=redacted_event_id)
+    with patch("mindroom.terminal_delivery.send_message_result", send):
+        result = await coordinator.commit_and_attempt(_intent())
+
+    assert result.status == "superseded"
+    send.assert_not_awaited()
+    hooks.emit_after_response.assert_not_awaited()
+    assert effects.keys == []
+
+
+@pytest.mark.asyncio
+async def test_target_redaction_waits_for_accepted_delivery_lifecycle(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    coordinator, hooks, _effects = _coordinator(store)
+    send_started = asyncio.Event()
+    release_send = asyncio.Event()
+
+    async def blocked_send(*_args: object, **_kwargs: object) -> DeliveredMatrixEvent:
+        send_started.set()
+        await release_send.wait()
+        return _delivered()
+
+    with patch("mindroom.terminal_delivery.send_message_result", side_effect=blocked_send):
+        delivery = asyncio.create_task(coordinator.commit_and_attempt(_intent()))
+        await send_started.wait()
+        redaction = asyncio.create_task(coordinator.redact(room_id=ROOM, event_id=TARGET))
+        await asyncio.sleep(0)
+        assert not redaction.done()
+        release_send.set()
+        result = await delivery
+        await redaction
+
+    assert result.status == "delivered"
+    hooks.emit_after_response.assert_awaited_once()
+    target_record = store.get_turn_record(TARGET)
+    assert target_record is not None
+    assert target_record.redacted_source_event_ids == (TARGET,)
+    assert store.terminal_checkpoint_records() == ()
+
+
+@pytest.mark.asyncio
+async def test_stop_cancels_inflight_network_before_effects_and_keeps_checkpoint(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    blocked, _hooks, _effects = _coordinator(store, ready=False)
+    assert (await blocked.commit_and_attempt(_intent())).status == "deferred"
+
+    active, hooks, effects = _coordinator(store)
+    send_started = asyncio.Event()
+
+    async def blocked_send(*_args: object, **_kwargs: object) -> DeliveredMatrixEvent:
+        send_started.set()
+        await asyncio.Event().wait()
+        raise AssertionError
+
+    with patch("mindroom.terminal_delivery.send_message_result", side_effect=blocked_send):
+        active.start()
+        await send_started.wait()
+        await active.stop()
+        active.wake(reason="after-stop")
+        await asyncio.sleep(0)
+
+    hooks.emit_after_response.assert_not_awaited()
+    assert effects.keys == []
+    assert len(store.terminal_checkpoint_records()) == 1
