@@ -972,6 +972,7 @@ class TestMatrixConversationCacheThreadReads:
         assert cached_event is not None
         assert cached_event["content"]["body"] == "canonical echo"
         assert cached_event["origin_server_ts"] == 1234567890
+        assert cached_event.get("io.mindroom.provisional_outbound") is not True
         assert [event["event_id"] for event in recent_events].count(event_id) == 1
 
     @pytest.mark.asyncio

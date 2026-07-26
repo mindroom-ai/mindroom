@@ -4850,7 +4850,7 @@ class TestThreadHistoryCache:
             },
         )
         fresh_reply = self._make_text_event(
-            event_id="$reply",
+            event_id="$fresh_reply",
             sender="@agent:localhost",
             body="Fresh reply",
             server_timestamp=3000,

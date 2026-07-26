@@ -67,6 +67,7 @@ from mindroom.timing import elapsed_ms_since, emit_timing_event, timing_enabled
 
 from .event_normalization import (
     is_opaque_encrypted_event_source,
+    mark_provisional_outbound_event,
     normalize_event_source_for_cache,
     normalize_nio_event_for_cache,
 )
@@ -662,14 +663,16 @@ class ThreadOutboundWritePolicy:
         sender = client.user_id if isinstance(client.user_id, str) else None
         return typing.cast(
             "dict[str, object]",
-            normalize_event_source_for_cache(
-                {
-                    **event_source,
-                    "room_id": room_id,
-                },
-                event_id=event_id,
-                sender=sender,
-                origin_server_ts=int(time.time() * 1000),
+            mark_provisional_outbound_event(
+                normalize_event_source_for_cache(
+                    {
+                        **event_source,
+                        "room_id": room_id,
+                    },
+                    event_id=event_id,
+                    sender=sender,
+                    origin_server_ts=int(time.time() * 1000),
+                ),
             ),
         )
 

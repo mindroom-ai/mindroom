@@ -44,11 +44,21 @@ def replacement_content(original: Mapping[str, object], new: Mapping[str, object
     return content
 
 
+def event_representations_conflict(first: Mapping[str, Any], second: Mapping[str, Any]) -> bool:
+    """Return whether two payloads disagree on one immutable Matrix event identity."""
+    identity_keys = ("event_id", "sender", "origin_server_ts", "type", "content")
+    same_timeline_identity = all(first.get(key) == second.get(key) for key in identity_keys) and (
+        "state_key" in first,
+        first.get("state_key"),
+    ) == ("state_key" in second, second.get("state_key"))
+    rooms_conflict = "room_id" in first and "room_id" in second and first.get("room_id") != second.get("room_id")
+    return not same_timeline_identity or rooms_conflict
+
+
 def _deduplicated_replacement_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Deduplicate one immutable event identity and reject conflicting representations."""
     candidates_by_event_id: dict[str, dict[str, Any]] = {}
     conflicting_event_ids: set[str] = set()
-    identity_keys = ("sender", "origin_server_ts", "type", "content")
 
     for candidate in candidates:
         event_id = candidate.get("event_id")
@@ -58,14 +68,7 @@ def _deduplicated_replacement_candidates(candidates: list[dict[str, Any]]) -> li
         if existing is None:
             candidates_by_event_id[event_id] = candidate
             continue
-        same_timeline_identity = all(existing.get(key) == candidate.get(key) for key in identity_keys) and (
-            "state_key" in existing,
-            existing.get("state_key"),
-        ) == ("state_key" in candidate, candidate.get("state_key"))
-        existing_room = existing.get("room_id")
-        candidate_room = candidate.get("room_id")
-        rooms_conflict = "room_id" in existing and "room_id" in candidate and existing_room != candidate_room
-        if not same_timeline_identity or rooms_conflict:
+        if event_representations_conflict(existing, candidate):
             conflicting_event_ids.add(event_id)
             continue
         if "room_id" in candidate and "room_id" not in existing:

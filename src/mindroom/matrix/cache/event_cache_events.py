@@ -3,18 +3,24 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
+from mindroom.matrix.cache.event_normalization import is_provisional_outbound_event
 from mindroom.matrix.event_info import (
     EventInfo,
     event_source_is_timeline_in_room,
     event_source_matches_room,
 )
 from mindroom.matrix.media import event_source_supports_valid_thread_relations
-from mindroom.matrix.replacements import bundled_replacement_candidates
+from mindroom.matrix.replacements import (
+    ReplacementValidator,
+    bundled_replacement_candidates,
+    event_representations_conflict,
+    ordered_replacements,
+)
 from mindroom.matrix.sidecar_content import sidecar_mxc_url
 
 if TYPE_CHECKING:
@@ -41,6 +47,116 @@ class CachedEventRow:
 
     event: dict[str, Any]
     cached_at: float | None
+
+
+def _cached_event_transition(
+    existing: Mapping[str, Any],
+    candidate: Mapping[str, Any],
+) -> Literal["accept", "ignore", "conflict"]:
+    """Classify one same-ID cache payload transition without weakening immutability."""
+    same_envelope = all(existing.get(key) == candidate.get(key) for key in ("event_id", "sender")) and (
+        "state_key" in existing,
+        existing.get("state_key"),
+    ) == ("state_key" in candidate, candidate.get("state_key"))
+    rooms_conflict = (
+        "room_id" in existing and "room_id" in candidate and existing.get("room_id") != candidate.get("room_id")
+    )
+    if not same_envelope or rooms_conflict:
+        return "conflict"
+    if is_provisional_outbound_event(existing):
+        same_type_and_content = (existing.get("type"), existing.get("content")) == (
+            candidate.get("type"),
+            candidate.get("content"),
+        )
+        if is_provisional_outbound_event(candidate):
+            return "accept" if same_type_and_content else "conflict"
+        return "accept" if existing.get("type") == candidate.get("type") else "conflict"
+    if existing.get("origin_server_ts") != candidate.get("origin_server_ts"):
+        return "conflict"
+    existing_is_encrypted = existing.get("type") == "m.room.encrypted"
+    candidate_is_encrypted = candidate.get("type") == "m.room.encrypted"
+    if existing_is_encrypted != candidate_is_encrypted:
+        return "accept" if existing_is_encrypted else "ignore"
+    return "conflict" if event_representations_conflict(existing, candidate) else "accept"
+
+
+def _without_tombstoned_serialized_events(
+    events: list[SerializedCachedEvent],
+    room_id: str,
+    redacted_event_ids: frozenset[str],
+) -> list[SerializedCachedEvent]:
+    """Filter and sanitize serialized events through the durable exclusion policy."""
+    retained: list[SerializedCachedEvent] = []
+    for event in events:
+        for event_id, source in filter_redacted_events(
+            [(event.event_id, event.event)],
+            room_id=room_id,
+            redacted_event_ids=redacted_event_ids,
+        ):
+            retained.append(event if source is event.event else serialize_cached_event(event_id, source))
+    return retained
+
+
+async def safe_cached_event_transitions(
+    existing: Mapping[str, dict[str, Any]],
+    serialized_events: list[SerializedCachedEvent],
+    *,
+    room_id: str,
+    quarantine: Callable[[str], Awaitable[object]],
+    load_tombstones: Callable[[frozenset[str]], Awaitable[frozenset[str]]],
+) -> tuple[list[SerializedCachedEvent], list[SerializedCachedEvent]]:
+    """Return payload-writable and thread-indexable events after durable quarantine."""
+    observed = dict(existing)
+    writable: list[SerializedCachedEvent] = []
+    indexable: list[SerializedCachedEvent] = []
+    conflicting_event_ids: set[str] = set()
+    for event in serialized_events:
+        previous = observed.get(event.event_id)
+        transition = "accept" if previous is None else _cached_event_transition(previous, event.event)
+        if transition == "conflict":
+            conflicting_event_ids.add(event.event_id)
+        else:
+            indexable.append(event)
+            if transition == "accept":
+                writable.append(event)
+                observed[event.event_id] = event.event
+    if not conflicting_event_ids:
+        return writable, indexable
+    for event_id in sorted(conflicting_event_ids):
+        await quarantine(event_id)
+    event_values = [(event.event_id, event.event) for event in serialized_events]
+    tombstoned_event_ids = await load_tombstones(batch_redaction_candidate_ids(event_values, room_id))
+
+    def retained(events: list[SerializedCachedEvent]) -> list[SerializedCachedEvent]:
+        return _without_tombstoned_serialized_events(
+            [event for event in events if event.event_id not in conflicting_event_ids],
+            room_id,
+            tombstoned_event_ids,
+        )
+
+    return retained(writable), retained(indexable)
+
+
+def select_latest_cached_edit(
+    original: dict[str, Any],
+    rows: list[CachedEventRow],
+    *,
+    room_id: str,
+    validator: ReplacementValidator,
+    excluded_event_ids: Iterable[str] = (),
+) -> CachedEventRow | None:
+    """Select once across every explicit cache row and bundled representation."""
+    replacements = ordered_replacements(
+        original,
+        (row.event for row in rows),
+        room_id=room_id,
+        validator=validator,
+        excluded_event_ids=frozenset(excluded_event_ids),
+    )
+    if not replacements:
+        return None
+    latest = replacements[0]
+    return CachedEventRow(event=latest, cached_at=next((row.cached_at for row in rows if row.event == latest), None))
 
 
 def decode_cached_event(
@@ -193,23 +309,21 @@ def _without_tombstoned_bundled_replacements(
     event: dict[str, Any],
     redacted_event_ids: frozenset[str],
 ) -> dict[str, Any]:
-    """Return one event whose bundled aggregation keeps only its untombstoned shapes.
-
-    ``bundled_replacement_candidates`` treats the nested ``latest_event`` and ``event`` shapes and
-    the aggregation itself as candidates that compete on their own identity, so redaction has to
-    tombstone them the same way. Dropping the whole aggregation because one shape died would hide
-    a surviving replacement that selection would otherwise have chosen.
-    """
+    """Return one event whose bundled aggregation keeps only untombstoned canonical shapes."""
     sanitized = deepcopy(event)
     relations = sanitized["unsigned"]["m.relations"]
     bundled = relations["m.replace"]
-    for key in ("latest_event", "event"):
+    nested_keys = ("latest_event", "event")
+    had_nested_candidate = any(isinstance(bundled.get(key), Mapping) for key in nested_keys)
+    for key in nested_keys:
         nested = bundled.get(key)
         if isinstance(nested, Mapping) and nested.get("event_id") in redacted_event_ids:
             del bundled[key]
+    if had_nested_candidate and not any(isinstance(bundled.get(key), Mapping) for key in nested_keys):
+        del relations["m.replace"]
+        return sanitized
     if bundled.get("event_id") in redacted_event_ids:
-        # Strip only the dead wrapper identity. Rewriting the aggregation to one surviving nested
-        # shape would silently pick a winner instead of letting the survivors compete on timestamp.
+        # The wrapper identity matters only for direct replacement shapes without nested events.
         del bundled["event_id"]
     if not _bundled_replacement_event_ids(sanitized):
         del relations["m.replace"]

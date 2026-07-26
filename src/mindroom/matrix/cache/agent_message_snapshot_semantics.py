@@ -8,8 +8,8 @@ from typing import TYPE_CHECKING, Any
 import nio
 
 from mindroom.matrix.event_info import EventInfo, event_source_is_timeline_in_room
-from mindroom.matrix.media import parse_room_message_event_source, valid_room_message_replacement
-from mindroom.matrix.replacements import ordered_replacements, replacement_content
+from mindroom.matrix.media import parse_room_message_event_source
+from mindroom.matrix.replacements import replacement_content
 from mindroom.matrix.thread_membership import local_events_prove_thread_root
 from mindroom.matrix.thread_projection import resolve_thread_ids_for_event_infos
 
@@ -115,7 +115,6 @@ async def _snapshot_result_for_event(
     return _snapshot_lookup_result(
         event,
         latest_edit=await latest_edit_lookup(event),
-        room_id=room_id,
         thread_id=thread_id,
         cached_at=cached_at,
         runtime_started_at=runtime_started_at,
@@ -241,20 +240,13 @@ def _snapshot_lookup_result(
     event: dict[str, Any],
     *,
     latest_edit: CachedEventRow | None,
-    room_id: str,
     thread_id: str | None,
     cached_at: float | None,
     runtime_started_at: float | None,
 ) -> _SnapshotLookupResult:
     """Resolve one cached event and optional edit into a visible snapshot outcome."""
-    replacements = ordered_replacements(
-        event,
-        () if latest_edit is None else (latest_edit.event,),
-        room_id=room_id,
-        validator=valid_room_message_replacement,
-    )
-    latest_replacement = next(iter(replacements), None)
-    visible_cached_at = latest_edit.cached_at if latest_edit and latest_replacement == latest_edit.event else cached_at
+    latest_replacement = None if latest_edit is None else latest_edit.event
+    visible_cached_at = latest_edit.cached_at if latest_edit and latest_edit.cached_at is not None else cached_at
     if (
         thread_id is None
         and runtime_started_at is not None

@@ -879,6 +879,55 @@ class TestResolvedMessageExtraction:
             await preview_without_redaction_context()
 
     @pytest.mark.asyncio
+    async def test_thread_root_body_preview_rejects_bundled_edit_of_malformed_original(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A valid bundled edit cannot synthesize a body for an invalid original message."""
+        room_id = "!room:example.com"
+        config = bind_runtime_paths(Config(), test_runtime_paths(tmp_path))
+        event_source = {
+            "event_id": "$thread-root",
+            "room_id": room_id,
+            "sender": "@alice:example.com",
+            "origin_server_ts": 1000,
+            "type": "m.room.message",
+            "content": {"msgtype": "m.text"},
+            "unsigned": {
+                "m.relations": {
+                    "m.replace": {
+                        "event_id": "$thread-root-edit",
+                        "sender": "@alice:example.com",
+                        "origin_server_ts": 2000,
+                        "type": "m.room.message",
+                        "content": {
+                            "body": "* Forged",
+                            "msgtype": "m.text",
+                            "m.new_content": {"body": "Forged", "msgtype": "m.text"},
+                            "m.relates_to": {
+                                "rel_type": "m.replace",
+                                "event_id": "$thread-root",
+                            },
+                        },
+                    },
+                },
+            },
+        }
+        event = nio.RoomMessage.parse_event(event_source)
+        assert isinstance(event, nio.BadEvent)
+
+        preview = await thread_root_body_preview(
+            event,
+            client=_make_client(),
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            event_cache=make_event_cache_mock(),
+            room_id=room_id,
+        )
+
+        assert preview == ""
+
+    @pytest.mark.asyncio
     async def test_thread_root_body_preview_ignores_tombstoned_bundled_replacement(
         self,
         tmp_path: Path,

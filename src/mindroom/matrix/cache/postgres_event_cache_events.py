@@ -5,8 +5,6 @@ from __future__ import annotations
 import time
 from typing import TYPE_CHECKING, Any
 
-from mindroom.matrix.replacements import ReplacementValidator, is_valid_replacement, ordered_replacements
-
 from .event_cache_events import (
     CachedEventRow,
     SerializedCachedEvent,
@@ -20,7 +18,9 @@ from .event_cache_events import (
     filter_redacted_events,
     redaction_removal_event_ids,
     room_scoped_cache_events,
+    safe_cached_event_transitions,
     scrub_bundled_replacement_json,
+    select_latest_cached_edit,
     serialize_cacheable_events,
     validated_mxc_text_rows,
 )
@@ -30,6 +30,8 @@ if TYPE_CHECKING:
     from collections.abc import Collection
 
     from psycopg import AsyncConnection
+
+    from mindroom.matrix.replacements import ReplacementValidator
 
 _ROOM_CONTENT_TABLES = (
     "mindroom_event_cache_thread_events",
@@ -147,7 +149,7 @@ async def load_latest_edit(
     excluded_event_ids: Collection[str] = (),
 ) -> dict[str, Any] | None:
     """Return the Matrix-latest replacement across the cached edit index and bundled metadata."""
-    row = await load_latest_edit_row(
+    selection = await load_latest_edit_row(
         db,
         namespace=namespace,
         room_id=room_id,
@@ -155,19 +157,7 @@ async def load_latest_edit(
         validator=validator,
         excluded_event_ids=excluded_event_ids,
     )
-    candidates = () if row is None else (row.event,)
-    return next(
-        iter(
-            ordered_replacements(
-                original,
-                candidates,
-                room_id=room_id,
-                validator=validator,
-                excluded_event_ids=excluded_event_ids,
-            ),
-        ),
-        None,
-    )
+    return None if selection is None else selection.event
 
 
 async def load_latest_edit_row(
@@ -179,7 +169,7 @@ async def load_latest_edit_row(
     validator: ReplacementValidator,
     excluded_event_ids: Collection[str] = (),
 ) -> CachedEventRow | None:
-    """Return the latest cached edit event plus its lookup-row write time."""
+    """Select the latest edit across explicit rows and bundled metadata."""
     original_event_id = original.get("event_id")
     cursor = db.cursor(name="mindroom_latest_edit")
     await cursor.execute(
@@ -200,20 +190,14 @@ async def load_latest_edit_row(
         (namespace, room_id, original_event_id),
     )
     try:
-        while (row := await cursor.fetchone()) is not None:
-            decoded = decode_cached_event(
-                event_json=row[0],
-                cached_at=row[1],
-            )
-            if is_valid_replacement(
-                original,
-                decoded.event,
-                room_id=room_id,
-                validator=validator,
-                excluded_event_ids=excluded_event_ids,
-            ):
-                return decoded
-        return None
+        rows = [decode_cached_event(event_json=row[0], cached_at=row[1]) async for row in cursor]
+        return select_latest_cached_edit(
+            original,
+            rows,
+            room_id=room_id,
+            validator=validator,
+            excluded_event_ids=excluded_event_ids,
+        )
     finally:
         await cursor.close()
 
@@ -550,6 +534,45 @@ async def _reconcile_thread_root_self_rows(
         )
 
 
+async def _safe_event_transitions(
+    db: AsyncConnection,
+    namespace: str,
+    room_id: str,
+    *,
+    serialized_events: list[SerializedCachedEvent],
+) -> tuple[list[SerializedCachedEvent], list[SerializedCachedEvent]]:
+    """Return payload-writable and thread-indexable events after quarantining conflicts."""
+    event_ids = list(dict.fromkeys(event.event_id for event in serialized_events))
+    rows = await fetchall(
+        db,
+        """
+        SELECT event_id, event_json
+        FROM mindroom_event_cache_events
+        WHERE namespace = %s AND room_id = %s AND event_id = ANY(%s)
+        FOR UPDATE
+        """,
+        (namespace, room_id, event_ids),
+    )
+    existing = {str(event_id): decode_cached_event(event_json=event_json).event for event_id, event_json in rows}
+    return await safe_cached_event_transitions(
+        existing,
+        serialized_events,
+        room_id=room_id,
+        quarantine=lambda event_id: redact_event_locked(
+            db,
+            namespace=namespace,
+            room_id=room_id,
+            event_id=event_id,
+        ),
+        load_tombstones=lambda event_ids: redacted_event_ids(
+            db,
+            namespace,
+            room_id,
+            event_ids=event_ids,
+        ),
+    )
+
+
 async def write_lookup_index_rows(
     db: AsyncConnection,
     *,
@@ -558,7 +581,7 @@ async def write_lookup_index_rows(
     serialized_events: list[SerializedCachedEvent],
     cached_at: float,
     thread_id: str | None = None,
-) -> None:
+) -> list[SerializedCachedEvent]:
     """Persist point-lookup, edit-index, and thread-index rows for cached events.
 
     Point payload quality is monotonic per event ID: clear content may replace a stored opaque
@@ -567,9 +590,15 @@ async def write_lookup_index_rows(
     authoritative event-to-thread membership.
     """
     if not serialized_events:
-        return
+        return []
+    writable_events, indexable_events = await _safe_event_transitions(
+        db,
+        namespace,
+        room_id,
+        serialized_events=serialized_events,
+    )
     accepted_events: list[SerializedCachedEvent] = []
-    for event in serialized_events:
+    for event in writable_events:
         accepted_row = await fetchone(
             db,
             """
@@ -644,7 +673,7 @@ async def write_lookup_index_rows(
             (namespace, row.edit_event_id, row.room_id, row.original_event_id, row.origin_server_ts),
         )
 
-    thread_index_events = serialized_events if thread_id is not None else accepted_events
+    thread_index_events = indexable_events if thread_id is not None else accepted_events
     thread_index_event_ids = [event.event_id for event in thread_index_events]
     thread_rows = event_thread_rows(room_id, thread_index_events, thread_id=thread_id)
     current_self_root_ids = {row.thread_id for row in thread_rows if row.event_id == row.thread_id}
@@ -685,6 +714,7 @@ async def write_lookup_index_rows(
         candidate_root_ids=previous_thread_ids | displaced_thread_ids | {row.thread_id for row in thread_rows},
         current_self_root_ids=current_self_root_ids,
     )
+    return thread_index_events
 
 
 async def _dependent_edit_event_ids(

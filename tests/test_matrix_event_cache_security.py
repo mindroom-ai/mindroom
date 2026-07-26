@@ -231,7 +231,13 @@ async def test_principal_isolation_survives_asymmetric_decryption_and_leave(
     event_id = "$encrypted-sidecar"
     mxc_url = "mxc://server/encrypted"
     alice_event = _event(event_id, 1, sidecar_url=mxc_url, encrypted=True)
-    bob_opaque_event = _event(event_id, 1, body="unable to decrypt")
+    bob_opaque_event = {
+        "event_id": event_id,
+        "sender": "@agent:localhost",
+        "origin_server_ts": 1,
+        "type": "m.room.encrypted",
+        "content": {"algorithm": "m.megolm.v1.aes-sha2", "ciphertext": "opaque"},
+    }
     ordered_writes = (
         ((alice, alice_event), (bob, bob_opaque_event))
         if decrypted_principal_first
@@ -244,7 +250,7 @@ async def test_principal_isolation_survives_asymmetric_decryption_and_leave(
         assert await bob.get_mxc_text(room_id, event_id, mxc_url) is None
         assert await bob.store_mxc_text(room_id, event_id, mxc_url, "stolen") is False
 
-        bob_event = _event(event_id, 2, sidecar_url=mxc_url, encrypted=True)
+        bob_event = _event(event_id, 1, sidecar_url=mxc_url, encrypted=True)
         await bob.store_event(event_id, room_id, bob_event)
         assert await bob.get_mxc_text(room_id, event_id, mxc_url) is None
         assert await bob.store_mxc_text(room_id, event_id, mxc_url, "bob plaintext")

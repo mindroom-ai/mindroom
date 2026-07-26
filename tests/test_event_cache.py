@@ -2467,6 +2467,167 @@ async def test_conflicting_duplicate_replacement_identity_is_rejected_by_cache(
 
 
 @pytest.mark.asyncio
+async def test_conflicting_cached_and_bundled_newest_edit_falls_back_to_older(
+    event_cache: ConversationEventCache,
+) -> None:
+    """A conflicting newest identity must not hide an older valid replacement."""
+    room_id = "!room:localhost"
+    original_id = "$original:localhost"
+    newest_id = "$newest:localhost"
+
+    def edit(event_id: str, body: str, timestamp: int) -> dict[str, object]:
+        return {
+            "event_id": event_id,
+            "room_id": room_id,
+            "sender": "@user:localhost",
+            "origin_server_ts": timestamp,
+            "type": "m.room.message",
+            "content": {
+                "body": f"* {body}",
+                "msgtype": "m.text",
+                "m.new_content": {"body": body, "msgtype": "m.text"},
+                "m.relates_to": {"rel_type": "m.replace", "event_id": original_id},
+            },
+        }
+
+    original = _clear_payload(original_id, body="Original")
+    original["unsigned"] = {
+        "m.relations": {
+            "m.replace": edit(newest_id, "Bundled conflict", 3000),
+        },
+    }
+    await event_cache.store_events_batch(
+        [
+            (original_id, room_id, original),
+            ("$older:localhost", room_id, edit("$older:localhost", "Older valid", 2000)),
+            (newest_id, room_id, edit(newest_id, "Explicit conflict", 3000)),
+        ],
+    )
+
+    latest = await event_cache.get_latest_edit(
+        room_id,
+        original,
+        validator=valid_room_message_replacement,
+    )
+
+    assert latest is not None
+    assert latest["event_id"] == "$older:localhost"
+    assert latest["content"]["m.new_content"]["body"] == "Older valid"
+    snapshot = await event_cache.get_latest_agent_message_snapshot(
+        room_id,
+        None,
+        "@user:localhost",
+        runtime_started_at=None,
+    )
+    assert snapshot is not None
+    assert snapshot.content["body"] == "Older valid"
+
+
+@pytest.mark.asyncio
+async def test_sequential_conflicting_clear_payloads_for_one_edit_fail_closed(
+    event_cache_factory: Callable[[], ConversationEventCache],
+) -> None:
+    """A conflicting immutable identity stays quarantined across snapshots and restart."""
+    room_id = "!room:localhost"
+    original_id = "$original:localhost"
+    edit_id = "$same-edit:localhost"
+
+    def edit(body: str) -> dict[str, object]:
+        return {
+            "event_id": edit_id,
+            "room_id": room_id,
+            "sender": "@user:localhost",
+            "origin_server_ts": 2000,
+            "type": "m.room.message",
+            "content": {
+                "body": f"* {body}",
+                "msgtype": "m.text",
+                "m.new_content": {"body": body, "msgtype": "m.text"},
+                "m.relates_to": {"rel_type": "m.replace", "event_id": original_id},
+            },
+        }
+
+    original = _clear_payload(original_id, body="Original")
+    event_cache = event_cache_factory()
+    await event_cache.initialize()
+    try:
+        first_edit = edit("First")
+        first_edit["io.mindroom.provisional_outbound"] = True
+        await event_cache.store_events_batch(
+            [
+                (original_id, room_id, original),
+                (edit_id, room_id, first_edit),
+            ],
+        )
+        original_with_bundle = json.loads(json.dumps(original))
+        original_with_bundle["unsigned"] = {"m.relations": {"m.replace": edit("Second")}}
+        await event_cache.store_events_batch(
+            [
+                (original_id, room_id, original_with_bundle),
+                (edit_id, room_id, edit("Second")),
+            ],
+        )
+        assert (
+            await event_cache.get_latest_edit(
+                room_id,
+                original,
+                validator=valid_room_message_replacement,
+            )
+            is None
+        )
+        assert await event_cache.get_event(room_id, edit_id) is None
+        assert await event_cache.redacted_event_ids(room_id, {edit_id}) == {edit_id}
+        cached_original = await event_cache.get_event(room_id, original_id)
+        assert cached_original is not None
+        assert "m.replace" not in cached_original["unsigned"]["m.relations"]
+
+        await _replace_thread(
+            event_cache,
+            room_id,
+            original_id,
+            [original, edit("Snapshot retry")],
+        )
+        assert await event_cache.get_event(room_id, edit_id) is None
+        assert await event_cache.get_thread_id_for_event(room_id, edit_id) is None
+    finally:
+        await event_cache.close()
+
+    reopened_cache = event_cache_factory()
+    await reopened_cache.initialize()
+    try:
+        await reopened_cache.store_event(edit_id, room_id, edit("Restart retry"))
+        assert await reopened_cache.get_event(room_id, edit_id) is None
+        assert (
+            await reopened_cache.get_latest_edit(
+                room_id,
+                original,
+                validator=valid_room_message_replacement,
+            )
+            is None
+        )
+    finally:
+        await reopened_cache.close()
+
+
+@pytest.mark.asyncio
+async def test_same_event_identity_accepts_unsigned_metadata_refresh(
+    event_cache: ConversationEventCache,
+) -> None:
+    """Mutable unsigned aggregation metadata may refresh one immutable event payload."""
+    room_id = "!room:localhost"
+    event_id = "$event:localhost"
+    original = _clear_payload(event_id, body="Original")
+    refreshed = json.loads(json.dumps(original))
+    refreshed["unsigned"] = {"m.relations": {"m.thread": {"count": 2}}}
+
+    await event_cache.store_event(event_id, room_id, original)
+    await event_cache.store_event(event_id, room_id, refreshed)
+
+    assert await event_cache.get_event(room_id, event_id) == refreshed
+    assert await event_cache.redacted_event_ids(room_id, {event_id}) == set()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("arrival_order", [("clear", "opaque"), ("opaque", "clear")])
 async def test_separate_cache_clients_cannot_downgrade_decrypted_payload(
     event_cache_factory: Callable[[], ConversationEventCache],
@@ -2678,10 +2839,10 @@ async def test_redaction_tombstone_survives_clear_and_opaque_rewrites(
 
 
 @pytest.mark.asyncio
-async def test_accepted_clear_rewrite_still_moves_thread_index_row(
+async def test_conflicting_clear_rewrite_quarantines_thread_index_row(
     event_cache: ConversationEventCache,
 ) -> None:
-    """Accepted clear rewrites must keep last-wins thread index moves working."""
+    """A conflicting clear rewrite must remove payload and derived membership."""
     room_id = "!room:localhost"
     event_id = "$moved:localhost"
     await event_cache.store_events_batch(
@@ -2693,7 +2854,9 @@ async def test_accepted_clear_rewrite_still_moves_thread_index_row(
         [(event_id, room_id, _clear_payload(event_id, thread_root_id="$root-b:localhost"))],
     )
 
-    assert await event_cache.get_thread_id_for_event(room_id, event_id) == "$root-b:localhost"
+    assert await event_cache.get_event(room_id, event_id) is None
+    assert await event_cache.get_thread_id_for_event(room_id, event_id) is None
+    assert await event_cache.redacted_event_ids(room_id, {event_id}) == {event_id}
 
 
 @pytest.mark.asyncio
@@ -3505,6 +3668,55 @@ async def test_redacting_bundled_replacement_preserves_older_candidate(
 
 
 @pytest.mark.asyncio
+async def test_redacting_only_nested_bundled_edit_does_not_promote_wrapper(
+    event_cache: ConversationEventCache,
+) -> None:
+    """Removing the canonical nested edit must not turn aggregation metadata into an edit."""
+    room_id = "!room:localhost"
+    original_id = "$reply"
+
+    def edit(event_id: str, body: str, timestamp: int) -> dict[str, object]:
+        return {
+            "event_id": event_id,
+            "sender": "@user:localhost",
+            "origin_server_ts": timestamp,
+            "type": "m.room.message",
+            "content": {
+                "body": f"* {body}",
+                "msgtype": "m.text",
+                "m.new_content": {"body": body, "msgtype": "m.text"},
+                "m.relates_to": {"rel_type": "m.replace", "event_id": original_id},
+            },
+        }
+
+    original = _clear_payload(original_id, body="Original")
+    wrapper = edit("$wrapper", "Wrapper metadata", 3000)
+    wrapper["latest_event"] = edit("$nested", "Nested canonical", 2000)
+    original["unsigned"] = {"m.relations": {"m.replace": wrapper}}
+    await _replace_thread(event_cache, room_id, original_id, [original])
+
+    latest = await event_cache.get_latest_edit(
+        room_id,
+        original,
+        validator=valid_room_message_replacement,
+    )
+    assert latest is not None
+    assert latest["event_id"] == "$nested"
+
+    assert await event_cache.redact_event(room_id, "$nested")
+    cached_original = await event_cache.get_event(room_id, original_id)
+    assert cached_original is not None
+    assert (
+        await event_cache.get_latest_edit(
+            room_id,
+            cached_original,
+            validator=valid_room_message_replacement,
+        )
+        is None
+    )
+
+
+@pytest.mark.asyncio
 async def test_thread_append_sanitizes_tombstoned_bundled_replacement(
     event_cache: ConversationEventCache,
 ) -> None:
@@ -3625,15 +3837,16 @@ async def test_invalid_relation_events_do_not_create_thread_or_edit_indexes(
     assert await event_cache.get_thread_id_for_event("!room:localhost", "$invalid_reply") is None
     assert (await event_cache.get_event("!room:localhost", "$invalid_reply") is not None) is point_cached
     assert await event_cache.redact_event("!room:localhost", "$original")
+    replacement_point_id = "$replacement_point"
     replacement_point = {
-        "event_id": "$invalid_edit",
+        "event_id": replacement_point_id,
         "sender": "@alice:localhost",
         "origin_server_ts": 4000,
         "type": "m.room.message",
         "content": {"body": "Independent", "msgtype": "m.text"},
     }
-    await event_cache.store_event("$invalid_edit", "!room:localhost", replacement_point)
-    assert await event_cache.get_event("!room:localhost", "$invalid_edit") == replacement_point
+    await event_cache.store_event(replacement_point_id, "!room:localhost", replacement_point)
+    assert await event_cache.get_event("!room:localhost", replacement_point_id) == replacement_point
 
 
 @pytest.mark.asyncio
@@ -5214,20 +5427,23 @@ async def test_mxc_text_cache_round_trips_across_event_cache_reopen(
 async def test_thread_revision_tracks_point_payload_updates(
     event_cache_factory: Callable[[], ConversationEventCache],
 ) -> None:
-    """Thread revisions and delta reads include changed lookup payloads."""
+    """Thread revisions and delta reads include accepted encrypted-to-clear upgrades."""
     cache = event_cache_factory()
     await cache.initialize()
-    root = {
-        "event_id": "$thread_root",
-        "origin_server_ts": 1000,
-        "type": "m.room.message",
-        "sender": "@user:localhost",
-        "content": {"msgtype": "m.text", "body": "original"},
-    }
+    root = _opaque_payload(
+        "$thread_root",
+        thread_root_id="$thread_root",
+        origin_server_ts=1000,
+    )
     try:
         await _replace_thread(cache, "!room:localhost", "$thread_root", [root])
         before = await cache.get_thread_revision("!room:localhost", "$thread_root")
-        updated = {**root, "content": {"msgtype": "m.text", "body": "updated"}}
+        updated = _clear_payload(
+            "$thread_root",
+            body="updated",
+            thread_root_id="$thread_root",
+            origin_server_ts=1000,
+        )
         await cache.store_event("$thread_root", "!room:localhost", updated)
         after = await cache.get_thread_revision("!room:localhost", "$thread_root")
         assert before is not None

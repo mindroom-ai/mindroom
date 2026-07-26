@@ -1782,6 +1782,7 @@ depends_on = []
 [[modules]]
 path = "mindroom.matrix.cache.event_cache_events"
 depends_on = [
+    "mindroom.matrix.cache.event_normalization",
     "mindroom.matrix.event_info",
     "mindroom.matrix.media",
     "mindroom.matrix.replacements",
@@ -4005,6 +4006,7 @@ from = ["mindroom.matrix.event_info"]
 expose = [
     "ReplacementValidator",
     "bundled_replacement_candidates",
+    "event_representations_conflict",
     "is_valid_replacement",
     "ordered_replacements",
     "replacement_content",

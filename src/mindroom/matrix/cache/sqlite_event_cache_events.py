@@ -5,8 +5,6 @@ from __future__ import annotations
 import time
 from typing import TYPE_CHECKING, Any
 
-from mindroom.matrix.replacements import ReplacementValidator, is_valid_replacement, ordered_replacements
-
 from .event_cache_events import (
     CachedEventRow,
     SerializedCachedEvent,
@@ -20,7 +18,9 @@ from .event_cache_events import (
     filter_redacted_events,
     redaction_removal_event_ids,
     room_scoped_cache_events,
+    safe_cached_event_transitions,
     scrub_bundled_replacement_json,
+    select_latest_cached_edit,
     serialize_cacheable_events,
     validated_mxc_text_rows,
 )
@@ -29,6 +29,8 @@ if TYPE_CHECKING:
     from collections.abc import Collection
 
     import aiosqlite
+
+    from mindroom.matrix.replacements import ReplacementValidator
 
 # SQLite refuses a statement with more than SQLITE_MAX_VARIABLE_NUMBER host parameters (999 before
 # SQLite 3.32, 32766 after). Stay well under the older bound so the chunk size holds on any host.
@@ -153,7 +155,7 @@ async def load_latest_edit(
     excluded_event_ids: Collection[str] = (),
 ) -> dict[str, Any] | None:
     """Return the Matrix-latest replacement across the cached edit index and bundled metadata."""
-    row = await load_latest_edit_row(
+    selection = await load_latest_edit_row(
         db,
         principal_id=principal_id,
         room_id=room_id,
@@ -161,19 +163,7 @@ async def load_latest_edit(
         validator=validator,
         excluded_event_ids=excluded_event_ids,
     )
-    candidates = () if row is None else (row.event,)
-    return next(
-        iter(
-            ordered_replacements(
-                original,
-                candidates,
-                room_id=room_id,
-                validator=validator,
-                excluded_event_ids=excluded_event_ids,
-            ),
-        ),
-        None,
-    )
+    return None if selection is None else selection.event
 
 
 async def load_latest_edit_row(
@@ -185,7 +175,7 @@ async def load_latest_edit_row(
     validator: ReplacementValidator,
     excluded_event_ids: Collection[str] = (),
 ) -> CachedEventRow | None:
-    """Return the latest edit and its write time within one ownership scope."""
+    """Select the latest edit across explicit rows and bundled metadata."""
     original_event_id = original.get("event_id")
     cursor = await db.execute(
         """
@@ -205,20 +195,14 @@ async def load_latest_edit_row(
         (principal_id, room_id, original_event_id),
     )
     try:
-        while (row := await cursor.fetchone()) is not None:
-            decoded = decode_cached_event(
-                event_json=row[0],
-                cached_at=row[1],
-            )
-            if is_valid_replacement(
-                original,
-                decoded.event,
-                room_id=room_id,
-                validator=validator,
-                excluded_event_ids=excluded_event_ids,
-            ):
-                return decoded
-        return None
+        rows = [decode_cached_event(event_json=row[0], cached_at=row[1]) for row in await cursor.fetchall()]
+        return select_latest_cached_edit(
+            original,
+            rows,
+            room_id=room_id,
+            validator=validator,
+            excluded_event_ids=excluded_event_ids,
+        )
     finally:
         await cursor.close()
 
@@ -580,6 +564,49 @@ async def _reconcile_thread_root_self_rows(
         )
 
 
+async def _safe_event_transitions(
+    db: aiosqlite.Connection,
+    principal_id: str,
+    room_id: str,
+    *,
+    serialized_events: list[SerializedCachedEvent],
+) -> tuple[list[SerializedCachedEvent], list[SerializedCachedEvent]]:
+    """Return payload-writable and thread-indexable events after quarantining conflicts."""
+    existing: dict[str, dict[str, Any]] = {}
+    event_ids = list(dict.fromkeys(event.event_id for event in serialized_events))
+    for start in range(0, len(event_ids), _MAX_SQLITE_QUERY_IDS):
+        chunk = event_ids[start : start + _MAX_SQLITE_QUERY_IDS]
+        placeholders = ",".join("?" for _ in chunk)
+        cursor = await db.execute(
+            f"""
+            SELECT event_id, event_json
+            FROM events
+            WHERE principal_id = ? AND room_id = ? AND event_id IN ({placeholders})
+            """,  # noqa: S608
+            (principal_id, room_id, *chunk),
+        )
+        rows = await cursor.fetchall()
+        await cursor.close()
+        existing.update((str(row[0]), decode_cached_event(event_json=row[1]).event) for row in rows)
+    return await safe_cached_event_transitions(
+        existing,
+        serialized_events,
+        room_id=room_id,
+        quarantine=lambda event_id: redact_event_locked(
+            db,
+            principal_id=principal_id,
+            room_id=room_id,
+            event_id=event_id,
+        ),
+        load_tombstones=lambda event_ids: redacted_event_ids(
+            db,
+            principal_id,
+            room_id,
+            event_ids=event_ids,
+        ),
+    )
+
+
 async def write_lookup_index_rows(
     db: aiosqlite.Connection,
     *,
@@ -588,7 +615,7 @@ async def write_lookup_index_rows(
     serialized_events: list[SerializedCachedEvent],
     cached_at: float,
     thread_id: str | None = None,
-) -> None:
+) -> list[SerializedCachedEvent]:
     """Persist point-lookup, edit-index, and thread-index rows for cached events.
 
     Point payload quality is monotonic per event ID: clear content may replace a stored opaque
@@ -597,10 +624,16 @@ async def write_lookup_index_rows(
     authoritative event-to-thread membership.
     """
     if not serialized_events:
-        return
-    write_sequences = await allocate_write_sequences(db, len(serialized_events))
+        return []
+    writable_events, indexable_events = await _safe_event_transitions(
+        db,
+        principal_id,
+        room_id,
+        serialized_events=serialized_events,
+    )
+    write_sequences = await allocate_write_sequences(db, len(writable_events))
     accepted_events: list[SerializedCachedEvent] = []
-    for event, write_sequence in zip(serialized_events, write_sequences, strict=True):
+    for event, write_sequence in zip(writable_events, write_sequences, strict=True):
         cursor = await db.execute(
             """
             INSERT INTO events(
@@ -694,7 +727,7 @@ async def write_lookup_index_rows(
                 for row in edit_rows
             ],
         )
-    thread_index_events = serialized_events if thread_id is not None else accepted_events
+    thread_index_events = indexable_events if thread_id is not None else accepted_events
     thread_index_event_ids = [event.event_id for event in thread_index_events]
     thread_rows = event_thread_rows(room_id, thread_index_events, thread_id=thread_id)
     current_self_root_ids = {row.thread_id for row in thread_rows if row.event_id == row.thread_id}
@@ -738,6 +771,7 @@ async def write_lookup_index_rows(
         candidate_root_ids=previous_thread_ids | displaced_thread_ids | {row.thread_id for row in thread_rows},
         current_self_root_ids=current_self_root_ids,
     )
+    return thread_index_events
 
 
 async def delete_cached_events(

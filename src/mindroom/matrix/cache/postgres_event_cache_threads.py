@@ -303,7 +303,7 @@ async def _store_thread_events_locked(
         [(event_id_for_cache(event), event) for event in normalized_events],
     )
     serialized_events = serialize_cacheable_events(cacheable_events)
-    await write_lookup_index_rows(
+    serialized_events = await write_lookup_index_rows(
         db,
         namespace=namespace,
         room_id=room_id,
@@ -687,7 +687,7 @@ async def append_existing_thread_event(
         (namespace, room_id, thread_id),
     )
     thread_exists = row is not None
-    await write_lookup_index_rows(
+    indexable_events = await write_lookup_index_rows(
         db,
         namespace=namespace,
         room_id=room_id,
@@ -695,6 +695,9 @@ async def append_existing_thread_event(
         cached_at=time.time(),
         thread_id=thread_id,
     )
+    if not indexable_events:
+        return False
+    serialized_event = indexable_events[0]
     if thread_exists:
         await db.execute(
             """

@@ -16,7 +16,7 @@ from mindroom.matrix.event_info import (
     origin_server_ts_from_event_source,
     reply_to_event_id_from_content,
 )
-from mindroom.matrix.media import valid_room_message_replacement
+from mindroom.matrix.media import valid_room_message_event_source, valid_room_message_replacement
 from mindroom.matrix.message_content import extract_and_resolve_message, extract_edit_body, resolve_event_source_content
 from mindroom.matrix.visible_body import visible_body_from_event_source
 
@@ -254,6 +254,8 @@ async def bundled_replacement_body(
     trusted_sender_ids: Collection[str] | None = None,
 ) -> str | None:
     """Return one canonical bundled replacement body using runtime-derived sender trust."""
+    if event_source.get("type") == "m.room.message" and not valid_room_message_event_source(event_source):
+        return None
     trusted_sender_ids = _resolved_trusted_sender_ids(config, runtime_paths, trusted_sender_ids)
     bundled_event_ids = {
         event_id
