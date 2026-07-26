@@ -4867,6 +4867,49 @@ async def test_degraded_replay_guard_ignores_point_cached_state_relation(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_degraded_replay_guard_ignores_malformed_cached_relation() -> None:
+    """A malformed cached message's raw relation cannot suppress a real thread turn."""
+    get_thread_id_for_event = AsyncMock(return_value="$thread")
+    suppressed = await has_newer_unresponded_cached_thread_event(
+        room_id="!room:localhost",
+        event=PreparedTextEvent(
+            sender="@user:localhost",
+            event_id="$older",
+            body="real turn",
+            source={"content": {"body": "real turn", "msgtype": "m.text"}},
+            server_timestamp=1000,
+        ),
+        requester_user_id="@user:localhost",
+        thread_id="$thread",
+        may_be_superseded_by_newer_requester_turn=True,
+        get_recent_room_events=AsyncMock(
+            return_value=[
+                {
+                    "event_id": "$malformed",
+                    "sender": "@user:localhost",
+                    "origin_server_ts": 2000,
+                    "room_id": "!room:localhost",
+                    "type": "m.room.message",
+                    "content": {
+                        "body": "missing msgtype",
+                        "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread"},
+                    },
+                },
+            ],
+        ),
+        get_thread_id_for_event=get_thread_id_for_event,
+        requester_user_id_for_event=lambda sender, _source: sender,
+        is_visible_router_voice_echo=lambda _sender, _content: False,
+        sender_is_trusted_for_ingress_metadata=lambda _sender: False,
+        is_handled=lambda _event_id: False,
+        logger=MagicMock(),
+    )
+
+    assert suppressed is False
+    get_thread_id_for_event.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_degraded_replay_guard_ignores_legacy_wrong_room_cache_index() -> None:
     """A stale room index cannot authorize an explicitly foreign-room payload."""
     get_thread_id_for_event = AsyncMock(return_value="$thread")
