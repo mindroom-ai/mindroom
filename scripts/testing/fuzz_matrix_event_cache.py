@@ -1269,7 +1269,6 @@ class CacheFuzzRunner:
                         operation,
                         thread_count=self.thread_count,
                     )
-            started = time.perf_counter()
             batch_run = self._apply_batch(batch)
             if self.max_batch_seconds is None:
                 await batch_run
@@ -1280,11 +1279,6 @@ class CacheFuzzRunner:
                 except TimeoutError as exc:
                     msg = f"cache fuzz batch timed out after {self.max_batch_seconds:.3f}s"
                     raise AssertionError(msg) from exc
-            batch_seconds = time.perf_counter() - started
-            if self.max_batch_seconds is not None:
-                assert batch_seconds <= self.max_batch_seconds, (
-                    f"cache fuzz batch exceeded latency bound: {batch_seconds:.3f}s > {self.max_batch_seconds:.3f}s"
-                )
             await self._assert_concurrent_batch_postconditions(batch, inferred_thread_ids=inferred_thread_ids)
             await self.assert_invariants()
             await self._assert_reference_model()

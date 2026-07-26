@@ -6,6 +6,7 @@ import asyncio
 import tempfile
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -14,6 +15,7 @@ from hypothesis import strategies as st
 
 from mindroom.matrix.cache.postgres_event_cache import PostgresEventCache
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
+from scripts.testing import fuzz_matrix_event_cache
 from scripts.testing.fuzz_matrix_event_cache import (
     FUZZ_PRINCIPAL,
     CacheFuzzRunner,
@@ -439,6 +441,35 @@ async def test_batch_timeout_emits_replayable_trace(
             verify_restart=False,
             max_batch_seconds=0.01,
         )
+
+
+@pytest.mark.asyncio
+async def test_completed_batch_is_not_rejected_by_post_hoc_wall_clock(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Only the timeout context may decide whether a completed batch exceeded its bound."""
+    perf_counter_values = iter((0.0, 2.0))
+    monkeypatch.setattr(
+        fuzz_matrix_event_cache,
+        "time",
+        SimpleNamespace(
+            perf_counter=lambda: next(perf_counter_values),
+            time=fuzz_matrix_event_cache.time.time,
+        ),
+    )
+    scenario = FuzzScenario(
+        batches=((FuzzOperation(OperationKind.THREADED_MESSAGE, 0, 0, 0, 0, 0),),),
+        room_count=1,
+        thread_count=1,
+    )
+
+    await run_scenario(
+        lambda: SqliteEventCache(tmp_path / "completed-before-timeout.db"),
+        scenario,
+        verify_restart=False,
+        max_batch_seconds=1,
+    )
 
 
 @pytest.mark.asyncio
