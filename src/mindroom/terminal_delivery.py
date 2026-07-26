@@ -643,6 +643,8 @@ class TerminalDeliveryCoordinator:
             if updated is None:
                 return None
             item = updated
+        if not await self._is_current_and_live(item):
+            return None
         await self.deps.post_response_effects.deliver_thread_summary(
             item.target.room_id,
             thread_id,

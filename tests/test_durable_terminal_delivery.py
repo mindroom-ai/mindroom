@@ -358,6 +358,33 @@ async def test_redaction_and_transport_have_one_linearized_commit_order(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_summary_delivery_rechecks_redaction_after_freeze_persistence(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    effects = _Effects()
+    coordinator, _hooks = _coordinator(store, effects=effects)
+    original_update = store.update
+
+    def announce_redaction_after_update(
+        delivery_id: str,
+        *,
+        revision: int,
+        **changes: object,
+    ) -> object:
+        updated = original_update(delivery_id, revision=revision, **changes)
+        if "thread_summary" in changes:
+            coordinator._redacting.add(SOURCE)
+        return updated
+
+    store.update = MagicMock(side_effect=announce_redaction_after_update)  # type: ignore[method-assign]
+
+    with patch("mindroom.terminal_delivery.send_message_result", new=AsyncMock(return_value=_delivered())):
+        await coordinator.commit_and_attempt(_intent())
+
+    assert effects.summary_prepares == 1
+    assert effects.summary_payloads == []
+
+
+@pytest.mark.asyncio
 async def test_immediate_success_checkpoints_all_lifecycle_steps_once(tmp_path: Path) -> None:
     store = _store(tmp_path)
     effects = _Effects()
