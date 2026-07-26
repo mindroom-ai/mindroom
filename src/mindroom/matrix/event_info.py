@@ -11,10 +11,9 @@ _THREAD_RELATION_EVENT_TYPES = frozenset({"m.room.encrypted", "m.room.message"})
 
 def _normalized_event_id(value: object) -> str | None:
     """Return one non-empty Matrix event ID string."""
-    if not isinstance(value, str):
+    if not isinstance(value, str) or not value or value != value.strip():
         return None
-    normalized = value.strip()
-    return normalized or None
+    return value
 
 
 def event_type_supports_thread_relations(event_type: object) -> bool:
@@ -136,10 +135,8 @@ class EventInfo:
             self.relates_to_event_id if self.relation_type == "m.reference" else None,
             self.reply_to_event_id,
         ):
-            if not isinstance(related_event_id, str):
-                continue
-            normalized_related_event_id = related_event_id.strip()
-            if not normalized_related_event_id or normalized_related_event_id == current_event_id:
+            normalized_related_event_id = _normalized_event_id(related_event_id)
+            if normalized_related_event_id is None or normalized_related_event_id == current_event_id:
                 continue
             return normalized_related_event_id
         return None

@@ -42,6 +42,42 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
     """Threading behavior tests moved verbatim from tests/test_threading_error.py."""
 
     @pytest.mark.asyncio
+    async def test_padded_reply_target_does_not_enter_thread_membership_resolution(self) -> None:
+        """A malformed padded reply ID cannot be normalized into another event's identity."""
+        room_id = "!test:localhost"
+        event_id = "$reply:localhost"
+        event_source = {
+            "event_id": event_id,
+            "room_id": room_id,
+            "sender": "@user:localhost",
+            "origin_server_ts": 1000,
+            "type": "m.room.message",
+            "content": {
+                "body": "Malformed reply",
+                "msgtype": "m.text",
+                "m.relates_to": {
+                    "m.in_reply_to": {"event_id": "  $victim:localhost  "},
+                },
+            },
+        }
+        fail_if_called = AsyncMock(side_effect=AssertionError("invalid relation target must be ignored"))
+
+        resolution = await resolve_event_thread_membership(
+            room_id,
+            EventInfo.from_event(event_source),
+            event_id=event_id,
+            event_source=event_source,
+            access=ThreadMembershipAccess(
+                lookup_thread_id=fail_if_called,
+                fetch_event_info=fail_if_called,
+                prove_thread_root=fail_if_called,
+            ),
+        )
+
+        assert resolution.state is ThreadResolutionState.ROOM_LEVEL
+        assert resolution.thread_id is None
+
+    @pytest.mark.asyncio
     async def test_live_plain_reply_to_threaded_event_persists_event_thread_membership(
         self,
         bot: AgentBot,

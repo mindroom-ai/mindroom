@@ -3495,6 +3495,71 @@ async def test_same_event_identity_accepts_unsigned_metadata_refresh(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("refreshes_other_relation", [False, True])
+@pytest.mark.parametrize("arrival_order", [("rich", "sparse"), ("sparse", "rich")])
+async def test_sparse_same_identity_refresh_preserves_cached_bundled_replacement(
+    event_cache: ConversationEventCache,
+    *,
+    refreshes_other_relation: bool,
+    arrival_order: tuple[str, str],
+) -> None:
+    """A sparse endpoint view cannot erase richer cached replacement aggregation."""
+    room_id = "!room:localhost"
+    original_id = "$original:localhost"
+    edit_id = "$edit:localhost"
+    original = _clear_payload(original_id, body="Original", room_id=room_id)
+    bundled_edit = _clear_payload(
+        edit_id,
+        body="Edited",
+        room_id=room_id,
+        edit_of=original_id,
+        origin_server_ts=2000,
+    )
+    original["unsigned"] = {"m.relations": {"m.replace": bundled_edit}}
+    sparse = json.loads(json.dumps(original))
+    sparse.pop("unsigned")
+    if refreshes_other_relation:
+        sparse["unsigned"] = {"m.relations": {"m.thread": {"count": 2}}}
+
+    payloads = {"rich": original, "sparse": sparse}
+    for payload_kind in arrival_order:
+        await event_cache.store_event(original_id, room_id, payloads[payload_kind])
+
+    cached = await event_cache.get_event(room_id, original_id)
+    assert cached is not None
+    assert cached["unsigned"]["m.relations"]["m.replace"] == bundled_edit
+    if arrival_order[-1] == "sparse" and refreshes_other_relation:
+        assert cached["unsigned"]["m.relations"]["m.thread"] == {"count": 2}
+    latest = await event_cache.get_latest_edit(
+        room_id,
+        cached,
+        validator=valid_room_message_replacement,
+    )
+    assert latest is not None
+    assert latest["event_id"] == edit_id
+
+
+@pytest.mark.asyncio
+async def test_padded_explicit_thread_target_does_not_create_cache_index_rows(
+    event_cache: ConversationEventCache,
+) -> None:
+    """Malformed padded event IDs cannot alias a valid durable thread root."""
+    room_id = "!room:localhost"
+    child_id = "$child:localhost"
+    victim_root_id = "$victim-root:localhost"
+    child = _clear_payload(child_id, room_id=room_id)
+    child["content"]["m.relates_to"] = {
+        "rel_type": "m.thread",
+        "event_id": f"  {victim_root_id}  ",
+    }
+
+    await event_cache.store_event(child_id, room_id, child)
+
+    assert await event_cache.get_thread_id_for_event(room_id, child_id) is None
+    assert await event_cache.get_thread_id_for_event(room_id, victim_root_id) is None
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("arrival_order", [("clear", "opaque"), ("opaque", "clear")])
 async def test_separate_cache_clients_cannot_downgrade_decrypted_payload(
     event_cache_factory: Callable[[], ConversationEventCache],

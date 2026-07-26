@@ -1,5 +1,7 @@
 """Tests for comprehensive event relation analysis."""
 
+import pytest
+
 from mindroom.matrix.event_info import EventInfo, origin_server_ts_from_event_source, reply_to_event_id_from_content
 
 
@@ -185,6 +187,34 @@ class TestEventRelations:
 
             assert info.is_reply is False
             assert info.reply_to_event_id is None
+
+    @pytest.mark.parametrize(
+        ("relates_to", "attribute"),
+        [
+            ({"rel_type": "m.thread", "event_id": "  $thread:localhost  "}, "thread_id"),
+            ({"rel_type": "m.replace", "event_id": "  $original:localhost  "}, "original_event_id"),
+            (
+                {"rel_type": "m.annotation", "event_id": "  $reaction:localhost  ", "key": "👍"},
+                "reaction_target_event_id",
+            ),
+            ({"m.in_reply_to": {"event_id": "  $reply:localhost  "}}, "reply_to_event_id"),
+        ],
+    )
+    def test_padded_relation_event_ids_are_ignored(
+        self,
+        relates_to: dict[str, object],
+        attribute: str,
+    ) -> None:
+        """Matrix event IDs are opaque and cannot be normalized into valid relations."""
+        info = EventInfo.from_event(
+            {
+                "type": "m.room.message",
+                "content": {"m.relates_to": relates_to},
+            },
+        )
+
+        assert getattr(info, attribute) is None
+        assert info.relates_to_event_id is None
 
     def test_reply_to_event_id_from_content_extracts_only_string_reply_targets(self) -> None:
         """Reply target extraction should share the Matrix relation traversal."""

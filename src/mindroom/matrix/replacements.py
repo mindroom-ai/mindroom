@@ -147,6 +147,44 @@ def _valid_bundled_identity_observation(
     )
 
 
+def _with_preserved_valid_bundle(
+    existing: Mapping[str, Any],
+    candidate: Mapping[str, Any],
+    *,
+    room_id: str | None,
+) -> dict[str, Any]:
+    """Preserve valid replacement aggregation when a duplicate view omits it."""
+    if (
+        existing.get(PROVISIONAL_OUTBOUND_KEY) is True
+        or candidate.get(PROVISIONAL_OUTBOUND_KEY) is True
+        or (existing.get("type"), existing.get("content")) != (candidate.get("type"), candidate.get("content"))
+    ):
+        return dict(candidate)
+    existing_unsigned = existing.get("unsigned")
+    existing_relations = existing_unsigned.get("m.relations") if isinstance(existing_unsigned, Mapping) else None
+    existing_bundle = existing_relations.get("m.replace") if isinstance(existing_relations, Mapping) else None
+    if not isinstance(existing_bundle, Mapping) or not any(
+        _valid_bundled_identity_observation(existing, bundled, room_id=room_id)
+        for bundled in bundled_replacement_candidates(existing)
+    ):
+        return dict(candidate)
+    if any(
+        _valid_bundled_identity_observation(candidate, bundled, room_id=room_id)
+        for bundled in bundled_replacement_candidates(candidate)
+    ):
+        return dict(candidate)
+
+    merged = deepcopy(dict(candidate))
+    candidate_unsigned = merged.get("unsigned")
+    unsigned = dict(candidate_unsigned) if isinstance(candidate_unsigned, Mapping) else {}
+    candidate_relations = unsigned.get("m.relations")
+    relations = dict(candidate_relations) if isinstance(candidate_relations, Mapping) else {}
+    relations["m.replace"] = deepcopy(existing_bundle)
+    unsigned["m.relations"] = relations
+    merged["unsigned"] = unsigned
+    return merged
+
+
 def observe_event_representation(
     observed: dict[str, dict[str, Any]],
     conflicting_event_ids: set[str],
@@ -178,7 +216,9 @@ def observe_event_representation(
     if transition == "conflict":
         conflicting_event_ids.add(event_id)
     elif transition == "accept":
-        observed[event_id] = dict(candidate)
+        observed[event_id] = (
+            dict(candidate) if existing is None else _with_preserved_valid_bundle(existing, candidate, room_id=room_id)
+        )
     return transition
 
 
