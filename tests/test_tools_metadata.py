@@ -401,15 +401,48 @@ def test_module_origin_within_root_caches_path_resolution(
             resolve_calls += 1
         return original_resolve(self, *args, **kwargs)
 
-    metadata_module._resolved_module_file.cache_clear()
+    metadata_module._clear_module_origin_caches()
     monkeypatch.setattr(metadata_module.Path, "resolve", counted_resolve)
     try:
         assert metadata_module._module_origin_within_root(module, plugin_root)
         assert metadata_module._module_origin_within_root(module, plugin_root)
     finally:
-        metadata_module._resolved_module_file.cache_clear()
+        metadata_module._clear_module_origin_caches()
 
     assert resolve_calls == 1
+
+
+def test_module_origin_within_root_caches_containment_checks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Plugin validation rescans all of sys.modules, so containment must resolve once."""
+    plugin_root = tmp_path / "plugins" / "demo"
+    plugin_root.mkdir(parents=True)
+    module_path = plugin_root / "helper.py"
+    module_path.write_text("VALUE = 1\n", encoding="utf-8")
+    module = ModuleType("demo.helper")
+    module.__file__ = str(module_path)
+    outside_module = ModuleType("outside.helper")
+    outside_module.__file__ = str(tmp_path / "outside.py")
+    containment_calls = 0
+    original_is_relative_to = Path.is_relative_to
+
+    def counted_is_relative_to(self: Path, *args: object, **kwargs: object) -> bool:
+        nonlocal containment_calls
+        containment_calls += 1
+        return original_is_relative_to(self, *args, **kwargs)
+
+    metadata_module._clear_module_origin_caches()
+    monkeypatch.setattr(metadata_module.Path, "is_relative_to", counted_is_relative_to)
+    try:
+        for _ in range(5):
+            assert metadata_module._module_origin_within_root(module, plugin_root)
+            assert not metadata_module._module_origin_within_root(outside_module, plugin_root)
+    finally:
+        metadata_module._clear_module_origin_caches()
+
+    assert containment_calls == 2
 
 
 def test_restore_tool_registry_snapshot_uses_sys_modules_snapshot(
