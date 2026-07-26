@@ -274,6 +274,55 @@ async def test_persist_failure_leaves_thinking_and_never_calls_matrix(tmp_path: 
 
 
 @pytest.mark.asyncio
+async def test_edit_regeneration_retries_initial_checkpoint_persist_failure(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    pending = store.get_turn_record(SOURCE)
+    assert pending is not None
+    store.record_turn(replace(pending, completed=True, response_event_id=TARGET))
+    completed = store.get_turn_record(SOURCE)
+    assert completed is not None
+    candidate = replace(
+        completed,
+        correlation_id="$edit",
+        source_event_revisions={SOURCE: (2, "$edit")},
+    )
+    intent = replace(
+        _intent(correlation_id="$edit"),
+        target_was_placeholder=False,
+        identity=replace(
+            _intent(correlation_id="$edit").identity,
+            regeneration_turn_record=candidate,
+        ),
+    )
+    coordinator, _hooks, _effects = _coordinator(store)
+    original_commit = store.commit_terminal_checkpoint
+    attempts = 0
+
+    def fail_once(*args: object, **kwargs: object) -> TurnRecord | None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            message = "transient disk failure"
+            raise OSError(message)
+        return original_commit(*args, **kwargs)  # type: ignore[arg-type]
+
+    with (
+        patch.object(store, "commit_terminal_checkpoint", side_effect=fail_once),
+        patch("mindroom.terminal_delivery.send_message_result", return_value=_delivered()) as send,
+    ):
+        result = await coordinator.commit_and_attempt(intent)
+
+    assert result.status == "delivered"
+    assert attempts == 2
+    send.assert_awaited_once()
+    settled = store.get_turn_record(SOURCE)
+    assert settled is not None
+    assert settled.source_event_revisions == {SOURCE: (2, "$edit")}
+
+
+@pytest.mark.asyncio
 async def test_post_transport_persist_failure_stays_lifecycle_managed(tmp_path: Path) -> None:
     store = _store(tmp_path)
     coordinator, hooks, _effects = _coordinator(store)

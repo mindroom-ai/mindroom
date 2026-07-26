@@ -187,9 +187,6 @@ class TerminalDeliveryCoordinator:
     async def commit_and_attempt(self, intent: TerminalDeliveryIntent) -> TerminalDeliveryCommit:
         """Commit exact content durably before the first Matrix edit."""
         source_event_ids = intent.identity.source_event_ids or (intent.identity.response_envelope.source_event_id,)
-        authority = await asyncio.to_thread(self._turn_for_sources, source_event_ids)
-        if authority is None:
-            return TerminalDeliveryCommit("superseded", "turn_authority_missing")
         checkpoint = TerminalEditCheckpoint(
             transaction_id=intent.transaction_id,
             wire_content=intent.wire_content,
@@ -204,17 +201,31 @@ class TerminalDeliveryCoordinator:
                 else None
             ),
         )
-        async with self._locked(authority, intent.target_event_id):
-            committed = await _durable_call(
-                self.deps.turn_store.commit_terminal_checkpoint,
-                authority,
-                response_event_id=intent.target_event_id,
-                checkpoint=checkpoint,
-                regeneration_turn_record=intent.identity.regeneration_turn_record,
-            )
-            if committed is None:
-                return TerminalDeliveryCommit("superseded", "checkpoint_rejected")
-            return await self._attempt_locked(committed)
+        while True:
+            authority = await asyncio.to_thread(self._turn_for_sources, source_event_ids)
+            if authority is None:
+                return TerminalDeliveryCommit("superseded", "turn_authority_missing")
+            async with self._locked(authority, intent.target_event_id):
+                try:
+                    committed = await _durable_call(
+                        self.deps.turn_store.commit_terminal_checkpoint,
+                        authority,
+                        response_event_id=intent.target_event_id,
+                        checkpoint=checkpoint,
+                        regeneration_turn_record=intent.identity.regeneration_turn_record,
+                    )
+                except OSError:
+                    if intent.identity.regeneration_turn_record is None:
+                        raise
+                    self.deps.logger.exception(
+                        "terminal_checkpoint_initial_persist_failed",
+                        transaction_id=checkpoint.transaction_id,
+                    )
+                else:
+                    if committed is None:
+                        return TerminalDeliveryCommit("superseded", "checkpoint_rejected")
+                    return await self._attempt_locked(committed)
+            await asyncio.sleep(self.deps.poll_interval_seconds)
 
     async def retry_pending(self) -> None:
         """Attempt every unique checkpoint once."""
