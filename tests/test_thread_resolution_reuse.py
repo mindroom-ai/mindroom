@@ -561,6 +561,29 @@ class TestSuffixSafetyGuards:
         assert _guard_suffix(snapshot, [poisoned]) is None
 
     @pytest.mark.asyncio
+    async def test_rejects_malformed_message_suffix_row(self) -> None:
+        """Incremental reuse must enforce the full resolver's room-message envelope validation."""
+        snapshot = await self._snapshot([_message_row(THREAD, 1000, "root")])
+        malformed = _message_row("$m1", 2000, "missing msgtype")
+        del malformed["content"]["msgtype"]
+
+        assert _guard_suffix(snapshot, [malformed]) is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("invalidity", ["wrong-sender", "malformed"])
+    async def test_rejects_invalid_replacement_suffix_row(self, invalidity: str) -> None:
+        """Incremental edits must satisfy the same replacement rules as full resolution."""
+        snapshot = await self._snapshot([_message_row(THREAD, 1000, "root")])
+        original = _message_row("$m1", 2000, "draft")
+        edit = _edit_row("$edit", 3000, target="$m1", body="edited")
+        if invalidity == "wrong-sender":
+            edit["sender"] = "@mallory:localhost"
+        else:
+            del edit["content"]["m.new_content"]["msgtype"]
+
+        assert _guard_suffix(snapshot, [original, edit]) is None
+
+    @pytest.mark.asyncio
     async def test_rejects_suffix_row_from_another_thread(self) -> None:
         """Incremental reuse must match full-history thread membership."""
         snapshot = await self._snapshot([_message_row(THREAD, 1000, "root")])

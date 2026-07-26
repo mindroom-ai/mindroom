@@ -4171,6 +4171,7 @@ expose = [
     "fetch_event_info_from_conversation_cache",
     "lookup_thread_id_from_conversation_cache",
     "room_scan_membership_access_for_client",
+    "validated_event_source_from_lookup_response",
 ]
 from = ["mindroom.matrix.thread_room_scan"]
 visibility = ["mindroom.matrix.conversation_cache", "mindroom.matrix.thread_bookkeeping"]

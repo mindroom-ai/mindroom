@@ -377,9 +377,6 @@ class ThreadMutationResolver:
             )
         if event_id is not None and event_source is not None:
             resolution_context.page_event_sources[event_id] = dict(event_source)
-        explicit_thread_id = event_info.thread_id
-        if explicit_thread_id is not None:
-            return MutationThreadImpact.threaded(explicit_thread_id)
         try:
             resolution = await resolve_event_thread_membership(
                 room_id,

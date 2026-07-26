@@ -78,6 +78,7 @@ from mindroom.matrix.thread_room_scan import (
     fetch_event_info_for_client,
     lookup_thread_id_from_conversation_cache,
     room_scan_membership_access_for_client,
+    validated_event_source_from_lookup_response,
 )
 from mindroom.timing import elapsed_ms_since
 
@@ -128,11 +129,12 @@ async def resolve_thread_root_event_id_for_client(
 
     response = await client.room_get_event(room_id, normalized_event_id)
     if isinstance(response, nio.RoomGetEventResponse):
-        event_source = response.event.source
-        if not event_source_is_timeline_in_room(event_source, room_id) or (
-            event_source.get("type") == "m.room.message"
-            and not isinstance(parse_room_message_event_source(event_source), nio.RoomMessage)
-        ):
+        event_source = validated_event_source_from_lookup_response(
+            response,
+            room_id=room_id,
+            event_id=normalized_event_id,
+        )
+        if event_source is None:
             return None
         event_info = EventInfo.from_event(event_source)
     else:

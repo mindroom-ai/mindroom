@@ -275,6 +275,53 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         finally:
             await real_event_cache.close()
 
+    @pytest.mark.parametrize("invalidity", ["state", "wrong-room", "malformed"])
+    @pytest.mark.asyncio
+    async def test_invalid_current_source_cannot_supply_explicit_thread_membership(
+        self,
+        invalidity: str,
+    ) -> None:
+        """Explicit thread metadata is proof only on valid current-room timeline events."""
+        room_id = "!room:localhost"
+        source: dict[str, object] = {
+            "event_id": "$child:localhost",
+            "room_id": room_id,
+            "sender": "@user:localhost",
+            "origin_server_ts": 1,
+            "type": "m.room.message",
+            "content": {
+                "body": "child",
+                "msgtype": "m.text",
+                "m.relates_to": {
+                    "rel_type": "m.thread",
+                    "event_id": "$foreign-root:localhost",
+                },
+            },
+        }
+        if invalidity == "state":
+            source["state_key"] = ""
+        elif invalidity == "wrong-room":
+            source["room_id"] = "!other:localhost"
+        else:
+            content = source["content"]
+            assert isinstance(content, dict)
+            del content["msgtype"]
+        access = ThreadMembershipAccess(
+            lookup_thread_id=AsyncMock(return_value=None),
+            fetch_event_info=AsyncMock(return_value=None),
+            prove_thread_root=AsyncMock(return_value=ThreadRootProof.not_a_thread_root()),
+        )
+
+        resolution = await resolve_event_thread_membership(
+            room_id,
+            EventInfo.from_event(source),
+            event_id="$child:localhost",
+            event_source=source,
+            access=access,
+        )
+
+        assert resolution.state is ThreadResolutionState.ROOM_LEVEL
+
     @pytest.mark.asyncio
     async def test_transitive_thread_membership_handles_long_reply_chains(
         self,

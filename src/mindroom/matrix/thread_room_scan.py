@@ -55,13 +55,15 @@ def _event_info_from_lookup_response(
     strict: bool,
 ) -> EventInfo | None:
     """Normalize one room-get-event style response into EventInfo when available."""
-    if isinstance(response, nio.RoomGetEventResponse):
-        event_source = response.event.source
-        if not event_source_is_timeline_in_room(event_source, room_id) or (
-            event_source.get("type") == "m.room.message" and not valid_room_message_event_source(event_source)
-        ):
-            return None
+    event_source = validated_event_source_from_lookup_response(
+        response,
+        room_id=room_id,
+        event_id=event_id,
+    )
+    if event_source is not None:
         return EventInfo.from_event(event_source)
+    if isinstance(response, nio.RoomGetEventResponse):
+        return None
     if not strict:
         return None
     if isinstance(response, nio.RoomGetEventError) and response.status_code == "M_NOT_FOUND":
@@ -69,6 +71,25 @@ def _event_info_from_lookup_response(
     detail = response.message if isinstance(response, nio.RoomGetEventError) else "unknown error"
     msg = f"Failed to resolve Matrix event {event_id}: {detail}"
     raise RuntimeError(msg)
+
+
+def validated_event_source_from_lookup_response(
+    response: _EventLookupResult,
+    *,
+    room_id: str,
+    event_id: str,
+) -> dict[str, object] | None:
+    """Return one exact, room-scoped event lookup result with a valid plaintext envelope."""
+    if not isinstance(response, nio.RoomGetEventResponse):
+        return None
+    event_source = response.event.source
+    if (
+        event_source.get("event_id") != event_id
+        or not event_source_is_timeline_in_room(event_source, room_id)
+        or (event_source.get("type") == "m.room.message" and not valid_room_message_event_source(event_source))
+    ):
+        return None
+    return {key: value for key, value in event_source.items() if isinstance(key, str)}
 
 
 async def lookup_thread_id_from_conversation_cache(
@@ -159,10 +180,13 @@ def room_scan_membership_access_for_client(
         )
         if not isinstance(response, nio.RoomGetEventResponse):
             return None
-        event_source = response.event.source
-        if not event_source_is_timeline_in_room(event_source, lookup_room_id):
+        normalized_source = validated_event_source_from_lookup_response(
+            response,
+            room_id=lookup_room_id,
+            event_id=lookup_event_id,
+        )
+        if normalized_source is None:
             return None
-        normalized_source = {key: value for key, value in event_source.items() if isinstance(key, str)}
         event_sources[lookup_event_id] = normalized_source
         return normalized_source
 
@@ -184,4 +208,5 @@ __all__ = [
     "fetch_event_info_from_conversation_cache",
     "lookup_thread_id_from_conversation_cache",
     "room_scan_membership_access_for_client",
+    "validated_event_source_from_lookup_response",
 ]

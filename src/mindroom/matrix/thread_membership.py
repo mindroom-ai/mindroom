@@ -316,7 +316,12 @@ async def resolve_event_thread_membership(
     """Return canonical thread membership for one event."""
     explicit_thread_id = event_info.thread_id
     if explicit_thread_id is not None:
-        return ThreadResolution.threaded(explicit_thread_id)
+        explicit_thread_is_valid = event_type_supports_thread_relations(event_info.event_type) and (
+            event_source is None or event_source_supports_valid_thread_relations(event_source, room_id)
+        )
+        return (
+            ThreadResolution.threaded(explicit_thread_id) if explicit_thread_is_valid else ThreadResolution.room_level()
+        )
     if allow_current_root and event_id is not None and event_info.can_be_thread_root:
         proof = await access.prove_thread_root(room_id, event_id)
         if proof.state is not _ThreadRootProofState.NOT_A_THREAD_ROOT:

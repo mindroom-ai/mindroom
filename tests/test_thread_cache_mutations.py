@@ -1620,6 +1620,53 @@ class TestMatrixConversationCacheThreadReads:
             )
             assert impact == MutationThreadImpact.room_level()
 
+    @pytest.mark.parametrize("invalidity", ["state", "wrong-room", "malformed"])
+    @pytest.mark.asyncio
+    async def test_live_mutation_ignores_invalid_current_source_explicit_thread(
+        self,
+        invalidity: str,
+    ) -> None:
+        """Live bookkeeping must not route invalid current events through explicit thread metadata."""
+        room_id = "!test:localhost"
+        source: dict[str, object] = {
+            "event_id": "$child",
+            "room_id": room_id,
+            "sender": "@user:localhost",
+            "origin_server_ts": 1,
+            "type": "m.room.message",
+            "content": {
+                "body": "child",
+                "msgtype": "m.text",
+                "m.relates_to": {
+                    "rel_type": "m.thread",
+                    "event_id": "$foreign-root",
+                },
+            },
+        }
+        if invalidity == "state":
+            source["state_key"] = ""
+        elif invalidity == "wrong-room":
+            source["room_id"] = "!other:localhost"
+        else:
+            content = source["content"]
+            assert isinstance(content, dict)
+            del content["msgtype"]
+        resolver = thread_bookkeeping.ThreadMutationResolver(
+            logger_getter=MagicMock,
+            runtime=MagicMock(),
+            fetch_event_info_for_thread_resolution=AsyncMock(),
+        )
+
+        impact = await resolver.resolve_thread_impact_for_mutation(
+            room_id,
+            event_info=EventInfo.from_event(source),
+            event_id="$child",
+            event_source=source,
+            context="live",
+        )
+
+        assert impact == MutationThreadImpact.room_level()
+
     @pytest.mark.asyncio
     async def test_sync_resolution_context_does_not_reparse_malformed_ancestor(self) -> None:
         """Replacement source reads cannot bypass the page's relation-free invalid placeholder."""

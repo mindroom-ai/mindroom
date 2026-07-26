@@ -10,7 +10,8 @@ from mindroom.matrix.event_info import (
     EventInfo,
     event_source_is_timeline_in_room,
 )
-from mindroom.matrix.replacements import bundled_replacement_candidates
+from mindroom.matrix.media import valid_room_message_event_source, valid_room_message_replacement
+from mindroom.matrix.replacements import bundled_replacement_candidates, is_valid_replacement
 from mindroom.matrix.thread_membership import event_info_proves_thread_membership
 
 if TYPE_CHECKING:
@@ -160,10 +161,15 @@ def _suffix_is_safely_appendable(
 ) -> bool:
     """Return whether suffix rows can only introduce new messages or edits to new messages."""
     suffix_event_ids: set[str] = set()
+    suffix_sources_by_event_id: dict[str, dict[str, Any]] = {}
     for event_source in suffix:
-        if event_source.get("type") != "m.room.message" or not event_source_is_timeline_in_room(
-            event_source,
-            room_id,
+        if (
+            event_source.get("type") != "m.room.message"
+            or not event_source_is_timeline_in_room(
+                event_source,
+                room_id,
+            )
+            or not valid_room_message_event_source(event_source)
         ):
             return False
         event_id = event_source.get("event_id")
@@ -177,13 +183,29 @@ def _suffix_is_safely_appendable(
         ):
             return False
         suffix_event_ids.add(event_id)
+        suffix_sources_by_event_id[event_id] = event_source
     for event_source in suffix:
         event_info = EventInfo.from_event(event_source)
-        if event_info.is_edit and event_info.original_event_id not in suffix_event_ids:
-            return False
+        if event_info.is_edit:
+            original = suffix_sources_by_event_id.get(event_info.original_event_id or "")
+            if original is None or not is_valid_replacement(
+                original,
+                event_source,
+                room_id=room_id,
+                validator=valid_room_message_replacement,
+            ):
+                return False
         for candidate in bundled_replacement_candidates(event_source):
             target = EventInfo.from_event(candidate).original_event_id
-            if target is not None and target not in suffix_event_ids:
+            if target is None:
+                continue
+            original = suffix_sources_by_event_id.get(target)
+            if original is None or not is_valid_replacement(
+                original,
+                candidate,
+                room_id=room_id,
+                validator=valid_room_message_replacement,
+            ):
                 return False
     return True
 

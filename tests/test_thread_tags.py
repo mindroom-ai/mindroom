@@ -13,6 +13,7 @@ import pytest
 
 from mindroom.matrix.client_thread_history import RoomThreadsPageError, enumerate_room_thread_root_ids
 from mindroom.matrix.conversation_cache import resolve_thread_root_event_id_for_client
+from mindroom.matrix.thread_room_scan import room_scan_membership_access_for_client
 from mindroom.thread_tags import (
     COERCED_TAG_MAX_LENGTH,
     THREAD_TAGS_EVENT_TYPE,
@@ -2726,7 +2727,7 @@ async def test_resolve_thread_root_event_id_for_client_uses_cache_when_event_loo
     )
 
 
-@pytest.mark.parametrize("invalid_kind", ["state", "wrong-room", "bad-event"])
+@pytest.mark.parametrize("invalid_kind", ["state", "wrong-room", "bad-event", "wrong-event-id"])
 @pytest.mark.asyncio
 async def test_resolve_thread_root_event_id_for_client_rejects_invalid_success_before_cache_fallback(
     invalid_kind: str,
@@ -2744,6 +2745,16 @@ async def test_resolve_thread_root_event_id_for_client_rejects_invalid_success_b
         event_source["state_key"] = ""
     elif invalid_kind == "wrong-room":
         event_source["room_id"] = "!other:localhost"
+    elif invalid_kind == "wrong-event-id":
+        event_source["event_id"] = "$different:localhost"
+        event_source["content"] = {
+            "body": "forged",
+            "msgtype": "m.text",
+            "m.relates_to": {
+                "rel_type": "m.thread",
+                "event_id": "$forged-root:localhost",
+            },
+        }
     else:
         event_source["content"] = {
             "body": "forged",
@@ -2766,6 +2777,67 @@ async def test_resolve_thread_root_event_id_for_client_rejects_invalid_success_b
 
     assert normalized is None
     conversation_cache.get_thread_id_for_event.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_resolve_thread_root_event_id_for_client_rejects_mismatched_ancestor_lookup() -> None:
+    """A relation walk must not trust a different event returned for its requested ancestor."""
+    client = AsyncMock()
+    client.room_get_event = AsyncMock(
+        side_effect=[
+            _message_event_response(
+                "$reference:localhost",
+                content={
+                    "body": "reference",
+                    "msgtype": "m.text",
+                    "m.relates_to": {
+                        "rel_type": "m.reference",
+                        "event_id": "$requested-ancestor:localhost",
+                    },
+                },
+            ),
+            _message_event_response(
+                "$different-ancestor:localhost",
+                content={
+                    "body": "different",
+                    "msgtype": "m.text",
+                    "m.relates_to": {
+                        "rel_type": "m.thread",
+                        "event_id": "$unrelated-root:localhost",
+                    },
+                },
+            ),
+        ],
+    )
+
+    normalized = await resolve_thread_root_event_id_for_client(
+        client,
+        "!room:localhost",
+        "$reference:localhost",
+    )
+
+    assert normalized is None
+
+
+@pytest.mark.asyncio
+async def test_room_scan_membership_access_rejects_mismatched_source_lookup() -> None:
+    """Raw ancestry lookup must not memoize a different event under the requested ID."""
+    client = AsyncMock()
+    client.room_get_event = AsyncMock(
+        return_value=_message_event_response(
+            "$different:localhost",
+            content={"body": "different", "msgtype": "m.text"},
+        ),
+    )
+    access = room_scan_membership_access_for_client(client, conversation_cache=None)
+    assert access.fetch_event_source is not None
+
+    source = await access.fetch_event_source(
+        "!room:localhost",
+        "$requested:localhost",
+    )
+
+    assert source is None
 
 
 @pytest.mark.asyncio
