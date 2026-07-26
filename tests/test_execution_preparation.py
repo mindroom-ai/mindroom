@@ -378,6 +378,42 @@ async def test_scheduled_history_limit_does_not_count_current_event_as_history()
 
 
 @pytest.mark.asyncio
+async def test_scheduled_history_limit_ignores_events_after_current() -> None:
+    """Newer thread events cannot displace prior context from a scheduled turn's budget."""
+
+    async def prepare_scope_history(_prepared_prompt: str) -> PreparedScopeHistory:
+        return _prepared_scope_with_persisted_replay()
+
+    prepared = await _prepare_execution_context_common(
+        make_turn_context(
+            reply_to_event_id="$current",
+            scheduled_history_budget=ScheduledHistoryBudget(limit=2, source_event_id="$current"),
+        ),
+        scope_context=None,
+        prompt="Current request",
+        thread_history=[
+            make_visible_message(sender="@alice:localhost", body="older one", event_id="$older-1"),
+            make_visible_message(sender="@alice:localhost", body="older two", event_id="$older-2"),
+            make_visible_message(sender="@alice:localhost", body="Current request", event_id="$current"),
+            make_visible_message(sender="@alice:localhost", body="newer one", event_id="$newer-1"),
+            make_visible_message(sender="@alice:localhost", body="newer two", event_id="$newer-2"),
+        ],
+        response_sender_id="@mindroom_code:localhost",
+        current_sender_id="@alice:localhost",
+        config=_config(),
+        prepare_scope_history_fn=prepare_scope_history,
+        estimate_static_tokens_fn=lambda text: len(text.split()),
+        render_messages_text_fn=render_prepared_messages_text,
+        fallback_static_token_budget=100,
+    )
+
+    assert [message.content for message in prepared.context_messages] == [
+        render_msg_tag(sender="@alice:localhost", body="older one", event_id="$older-1"),
+        render_msg_tag(sender="@alice:localhost", body="older two", event_id="$older-2"),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_scheduled_history_limit_zero_yields_prompt_only_context() -> None:
     """With history_limit=0 the scheduled turn sees no persisted replay and no thread fallback."""
 
