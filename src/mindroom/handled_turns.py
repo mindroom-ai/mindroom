@@ -79,6 +79,91 @@ class SourceEventMetadata:
 SourceEventRevision = tuple[int, str]
 
 
+@dataclass(frozen=True)
+class TerminalEditCheckpoint:
+    """Frozen terminal Matrix edit plus the minimal retry-safe lifecycle state."""
+
+    transaction_id: str
+    wire_content: Mapping[str, object]
+    response_text: str
+    response_kind: str
+    target_was_placeholder: bool
+    response_envelope: Mapping[str, object]
+    correlation_id: str
+    interactive_metadata: Mapping[str, object] | None = None
+    after_response_claimed: bool = False
+    interactive_completed: bool = False
+
+    def __post_init__(self) -> None:
+        """Freeze JSON payloads so later retries cannot observe caller mutation."""
+        object.__setattr__(self, "wire_content", _immutable_json_mapping(self.wire_content))
+        object.__setattr__(self, "response_envelope", _immutable_json_mapping(self.response_envelope))
+        object.__setattr__(
+            self,
+            "interactive_metadata",
+            _immutable_json_mapping(self.interactive_metadata) if self.interactive_metadata is not None else None,
+        )
+
+    def to_record(self) -> dict[str, object]:
+        """Return the JSON-safe checkpoint stored inside one TurnRecord."""
+        record: dict[str, object] = {
+            "transaction_id": self.transaction_id,
+            "wire_content": _thaw_json_value(self.wire_content),
+            "response_text": self.response_text,
+            "response_kind": self.response_kind,
+            "target_was_placeholder": self.target_was_placeholder,
+            "response_envelope": _thaw_json_value(self.response_envelope),
+            "correlation_id": self.correlation_id,
+            "after_response_claimed": self.after_response_claimed,
+            "interactive_completed": self.interactive_completed,
+        }
+        if self.interactive_metadata is not None:
+            record["interactive_metadata"] = _thaw_json_value(self.interactive_metadata)
+        return record
+
+    @classmethod
+    def from_raw(cls, raw_checkpoint: object) -> TerminalEditCheckpoint | None:
+        """Decode one current checkpoint without accepting partial lifecycle facts."""
+        if not isinstance(raw_checkpoint, Mapping):
+            return None
+        checkpoint = typing.cast("Mapping[str, object]", raw_checkpoint)
+        transaction_id = _normalize_string(checkpoint.get("transaction_id"))
+        response_text = _normalize_string(checkpoint.get("response_text"))
+        response_kind = _normalize_string(checkpoint.get("response_kind"))
+        target_was_placeholder = checkpoint.get("target_was_placeholder")
+        correlation_id = _normalize_string(checkpoint.get("correlation_id"))
+        wire_content = checkpoint.get("wire_content")
+        response_envelope = checkpoint.get("response_envelope")
+        interactive_metadata = checkpoint.get("interactive_metadata")
+        after_response_claimed = checkpoint.get("after_response_claimed", False)
+        interactive_completed = checkpoint.get("interactive_completed", False)
+        if (
+            transaction_id is None
+            or response_text is None
+            or response_kind is None
+            or not isinstance(target_was_placeholder, bool)
+            or correlation_id is None
+            or not isinstance(wire_content, Mapping)
+            or not isinstance(response_envelope, Mapping)
+            or (interactive_metadata is not None and not isinstance(interactive_metadata, Mapping))
+            or not isinstance(after_response_claimed, bool)
+            or not isinstance(interactive_completed, bool)
+        ):
+            return None
+        return cls(
+            transaction_id=transaction_id,
+            wire_content=typing.cast("Mapping[str, object]", wire_content),
+            response_text=response_text,
+            response_kind=response_kind,
+            target_was_placeholder=target_was_placeholder,
+            response_envelope=typing.cast("Mapping[str, object]", response_envelope),
+            correlation_id=correlation_id,
+            interactive_metadata=typing.cast("Mapping[str, object] | None", interactive_metadata),
+            after_response_claimed=after_response_claimed,
+            interactive_completed=interactive_completed,
+        )
+
+
 def _prompt_source_event_id(source_event_metadata: Mapping[str, SourceEventMetadata] | None, event_id: str) -> str:
     """Return the physical prompt owner for a source or discovery alias."""
     for source_id, metadata in (source_event_metadata or {}).items():
@@ -108,6 +193,7 @@ class TurnRecord:
     correlation_id: str | None = None
     history_scope: HistoryScope | None = None
     conversation_target: MessageTarget | None = None
+    terminal_edit_checkpoint: TerminalEditCheckpoint | None = None
     timestamp: float = 0.0
 
     def __post_init__(self) -> None:
@@ -178,6 +264,13 @@ class TurnRecord:
         object.__setattr__(self, "correlation_id", _normalize_string(self.correlation_id))
         object.__setattr__(self, "history_scope", history_scope)
         object.__setattr__(self, "conversation_target", conversation_target)
+        object.__setattr__(
+            self,
+            "terminal_edit_checkpoint",
+            self.terminal_edit_checkpoint
+            if isinstance(self.terminal_edit_checkpoint, TerminalEditCheckpoint)
+            else None,
+        )
         object.__setattr__(self, "timestamp", normalized_timestamp)
 
     @classmethod
@@ -201,6 +294,7 @@ class TurnRecord:
         correlation_id: str | None = None,
         history_scope: HistoryScope | None = None,
         conversation_target: MessageTarget | None = None,
+        terminal_edit_checkpoint: TerminalEditCheckpoint | None = None,
         timestamp: float = 0.0,
     ) -> TurnRecord:
         """Create a record while accepting sequence and mapping inputs from runtime flows."""
@@ -225,6 +319,7 @@ class TurnRecord:
             correlation_id=correlation_id,
             history_scope=history_scope,
             conversation_target=conversation_target,
+            terminal_edit_checkpoint=terminal_edit_checkpoint,
             timestamp=timestamp,
         )
 
@@ -297,6 +392,8 @@ class TurnRecordCodec:
             payload["history_scope"] = record.history_scope.to_metadata()
         if record.conversation_target is not None:
             payload["conversation_target"] = record.conversation_target.to_metadata()
+        if record.terminal_edit_checkpoint is not None:
+            payload["terminal_edit_checkpoint"] = record.terminal_edit_checkpoint.to_record()
         return payload
 
     @staticmethod
@@ -313,6 +410,12 @@ class TurnRecordCodec:
         completed = record.get("completed")
         timestamp = record.get("timestamp")
         response_event_id = record.get("response_event_id")
+        raw_terminal_edit_checkpoint = record.get("terminal_edit_checkpoint")
+        terminal_edit_checkpoint = (
+            TerminalEditCheckpoint.from_raw(raw_terminal_edit_checkpoint)
+            if raw_terminal_edit_checkpoint is not None
+            else None
+        )
         if (
             not isinstance(raw_source_event_ids, list)
             or not isinstance(raw_discovery_event_ids, list)
@@ -324,6 +427,7 @@ class TurnRecordCodec:
             or not isinstance(timestamp, int | float)
             or isinstance(timestamp, bool)
             or (response_event_id is not None and not isinstance(response_event_id, str))
+            or (raw_terminal_edit_checkpoint is not None and terminal_edit_checkpoint is None)
         ):
             return None
         source_event_ids = _normalize_source_event_ids(raw_source_event_ids)
@@ -351,6 +455,7 @@ class TurnRecordCodec:
             correlation_id=_normalize_string(record.get("correlation_id")),
             history_scope=HistoryScope.from_metadata(record.get("history_scope")),
             conversation_target=MessageTarget.from_metadata(record.get("conversation_target")),
+            terminal_edit_checkpoint=terminal_edit_checkpoint,
             timestamp=float(timestamp),
         )
         if event_id not in turn_record.indexed_event_ids:
@@ -637,6 +742,72 @@ class HandledTurnLedger:
                     continue
                 unique_records[record.indexed_event_ids] = record
             return tuple(unique_records.values())
+
+    def terminal_checkpoint_records(self) -> tuple[TurnRecord, ...]:
+        """Return each canonical turn with outstanding terminal work once."""
+        with self._state.lock:
+            self._ensure_loaded_locked()
+            unique_records = {
+                record.indexed_event_ids: record
+                for record in self._responses.values()
+                if record.terminal_edit_checkpoint is not None
+            }
+            return tuple(unique_records.values())
+
+    def get_turn_record_for_response_event(self, response_event_id: str) -> TurnRecord | None:
+        """Return the unique canonical owner of one visible response event."""
+        with self._state.lock:
+            self._ensure_loaded_locked()
+            matches = {
+                record.indexed_event_ids: record
+                for record in self._responses.values()
+                if record.response_event_id == response_event_id
+            }
+            return next(iter(matches.values()), None) if len(matches) == 1 else None
+
+    def transact_handled_turns(
+        self,
+        lookup_event_ids: Sequence[str],
+        update: Callable[[Mapping[str, TurnRecord]], Sequence[TurnRecord]],
+    ) -> tuple[TurnRecord, ...]:
+        """Persist an exact multi-record mutation before publishing it in memory."""
+        normalized_lookup_event_ids = _normalize_source_event_ids(lookup_event_ids)
+        if not normalized_lookup_event_ids:
+            return ()
+        with self._state.lock:
+            self._ensure_loaded_locked()
+            self._wait_for_pending_persists_locked()
+            existing_records = MappingProxyType(
+                {
+                    event_id: record
+                    for event_id in normalized_lookup_event_ids
+                    if (record := self._responses.get(event_id)) is not None
+                },
+            )
+            raw_candidates = tuple(
+                record if record.timestamp != 0.0 else replace(record, timestamp=time.time())
+                for record in update(existing_records)
+                if record.source_event_ids
+            )
+            if not raw_candidates:
+                return ()
+            working_records = dict(self._responses)
+            candidates: list[TurnRecord] = []
+            for candidate in raw_candidates:
+                resolved = _resolve_turn_record(candidate, working_records)
+                if resolved is None:
+                    continue
+                candidates.append(resolved)
+                for event_id in resolved.indexed_event_ids:
+                    working_records[event_id] = resolved
+            if not candidates:
+                return ()
+            self._persist_records(tuple(candidates))
+            for record in candidates:
+                for event_id in record.indexed_event_ids:
+                    self._responses[event_id] = record
+        logger.debug("handled_turn_transaction_committed", record_count=len(candidates))
+        return tuple(candidates)
 
     def _ensure_loaded_locked(self) -> None:
         """Load persisted records into shared memory once while the state lock is held."""
@@ -968,6 +1139,31 @@ def _normalize_string(value: object) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
+def _immutable_json_mapping(value: Mapping[str, object]) -> Mapping[str, object]:
+    """Recursively freeze one JSON-like mapping."""
+    return MappingProxyType(
+        {key: _immutable_json_value(item) for key, item in value.items() if isinstance(key, str)},
+    )
+
+
+def _immutable_json_value(value: object) -> object:
+    """Recursively freeze mappings and arrays while retaining JSON scalars."""
+    if isinstance(value, Mapping):
+        return _immutable_json_mapping(typing.cast("Mapping[str, object]", value))
+    if isinstance(value, list | tuple):
+        return tuple(_immutable_json_value(item) for item in value)
+    return value
+
+
+def _thaw_json_value(value: object) -> object:
+    """Return mutable JSON containers for persistence."""
+    if isinstance(value, Mapping):
+        return {key: _thaw_json_value(item) for key, item in value.items()}
+    if isinstance(value, tuple | list):
+        return [_thaw_json_value(item) for item in value]
+    return value
+
+
 def _mapping_or_none(value: object) -> Mapping[str, Any] | None:
     """Return a typed mapping for codec input."""
     return typing.cast("Mapping[str, Any]", value) if isinstance(value, Mapping) else None
@@ -1081,6 +1277,7 @@ def _cleaned_responses(
         group
         for group in _response_groups(responses)
         if any(record.pending_redaction_cleanup_event_ids for record in group.records.values())
+        or any(record.terminal_edit_checkpoint is not None for record in group.records.values())
         or current_time - group.timestamp < max_age_seconds
     ]
     if len(fresh_groups) > max_events:
@@ -1088,6 +1285,7 @@ def _cleaned_responses(
             group
             for group in fresh_groups
             if any(record.pending_redaction_cleanup_event_ids for record in group.records.values())
+            or any(record.terminal_edit_checkpoint is not None for record in group.records.values())
         ]
         pending_group_ids = {id(group) for group in pending_groups}
         ordinary_groups = [group for group in fresh_groups if id(group) not in pending_group_ids]

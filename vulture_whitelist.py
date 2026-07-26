@@ -190,6 +190,10 @@ _.query_room_state  # unused method (src/mindroom/hooks/context.py)
 _openclaw_compat_tools  # unused function (src/mindroom/tools/__init__.py)
 _reset_credentials_manager_cache  # unused function (src/mindroom/credentials.py)
 _reset_handled_turn_ledger_runtime  # unused function (src/mindroom/handled_turns.py)
+_.commit_terminal_checkpoint  # terminal coordinator integration follows checkpoint primitives
+_.terminal_checkpoint_for_sources  # terminal coordinator integration follows checkpoint primitives
+_.update_terminal_checkpoint  # terminal coordinator integration follows checkpoint primitives
+_.clear_terminal_checkpoint  # terminal coordinator integration follows checkpoint primitives
 _reset_terminal_delivery_store_runtime  # unused function (src/mindroom/terminal_delivery.py)
 _reset_primary_worker_manager  # unused function (src/mindroom/workers/runtime.py)
 _.read_file_chunk  # unused method (src/mindroom/tools/file.py)
