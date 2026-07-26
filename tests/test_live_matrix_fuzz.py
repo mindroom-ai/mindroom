@@ -2190,7 +2190,16 @@ def test_strict_ledger_read_accepts_clean_redaction_tombstone(tmp_path: Path) ->
     )
     _write_ledger(ledger_path, {"$stop-reaction": tombstone})
 
-    assert live_fuzz.read_ledger_records(ledger_path, strict=True) == {}
+    assert live_fuzz.read_ledger_records(ledger_path, strict=True) == {
+        "$stop-reaction": tombstone,
+    }
+    oracle = ExactReplyOracle(
+        AsyncMock(),
+        "@agent:example",
+        ledger_path=ledger_path,
+    )
+    oracle.refresh_ledger_attributions(min_interval=0)
+    assert oracle.source_tombstoned("$stop-reaction")
 
     pending_cleanup = replace(
         tombstone,

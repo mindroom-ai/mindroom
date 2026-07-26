@@ -2307,7 +2307,7 @@ def read_ledger_records(
     *,
     strict: bool = False,
 ) -> dict[str, TurnRecord]:
-    """Read every completed handled-turn record keyed by its source event.
+    """Read every terminal handled-turn record keyed by its source event.
 
     A completed record with a visible ``response_event_id`` proves that source
     was answered. A completed record with ``response_event_id`` set to ``None``
@@ -2366,7 +2366,7 @@ def _decode_ledger_rows(
     *,
     strict: bool,
 ) -> dict[str, TurnRecord]:
-    """Decode rows, retaining only completed records for oracle use."""
+    """Decode rows, retaining completed records and clean redaction tombstones."""
     records: dict[str, TurnRecord] = {}
     decoded_records: dict[str, TurnRecord] = {}
     for event_id, raw_record in raw_records.items():
@@ -2379,8 +2379,6 @@ def _decode_ledger_rows(
         cleanup_complete = not record.pending_redaction_cleanup_event_ids
         if not record.completed and not (fully_redacted and cleanup_complete):
             _invalid_ledger(ledger_path, f"record {event_id!r} is incomplete", strict=strict)
-            continue
-        if not record.completed:
             continue
         records[event_id] = record
     if strict:
