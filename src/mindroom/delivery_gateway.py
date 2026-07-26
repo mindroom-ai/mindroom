@@ -51,6 +51,7 @@ from mindroom.streaming import (
     send_streaming_response,
 )
 from mindroom.terminal_delivery import (
+    PendingTerminalDelivery,
     TerminalDeliveryCommit,
     TerminalDeliveryCoordinator,
     TerminalDeliveryIntent,
@@ -352,6 +353,10 @@ class DeliveryGateway:
             raise RuntimeError(msg)
         return client
 
+    async def owned_terminal_delivery(self, identity: ResponseIdentity) -> PendingTerminalDelivery | None:
+        """Return durable target ownership for a replayed response."""
+        return await self.deps.terminal_delivery_coordinator.owned_delivery(identity)
+
     @staticmethod
     def _cancelled_error_failure_reason(error: asyncio.CancelledError) -> str:
         """Normalize CancelledError values to the canonical cancellation reason strings."""
@@ -484,6 +489,7 @@ class DeliveryGateway:
         *,
         target: MessageTarget,
         target_event_id: str,
+        target_was_placeholder: bool,
         identity: ResponseIdentity,
         body: str,
         tool_trace: list[ToolTraceEntry] | None,
@@ -517,6 +523,7 @@ class DeliveryGateway:
         )
         return TerminalDeliveryIntent(
             target_event_id=target_event_id,
+            target_was_placeholder=target_was_placeholder,
             identity=identity,
             interactive_metadata=interactive_metadata,
             body=body,
@@ -528,6 +535,7 @@ class DeliveryGateway:
         *,
         target: MessageTarget,
         target_event_id: str,
+        target_was_placeholder: bool,
         identity: ResponseIdentity,
         body: str,
         tool_trace: list[ToolTraceEntry] | None,
@@ -538,6 +546,7 @@ class DeliveryGateway:
         intent = await self._prepare_terminal_delivery_intent(
             target=target,
             target_event_id=target_event_id,
+            target_was_placeholder=target_was_placeholder,
             identity=identity,
             body=body,
             tool_trace=tool_trace,
@@ -814,6 +823,7 @@ class DeliveryGateway:
                 commit = await self._commit_terminal_edit(
                     target=request.target,
                     target_event_id=request.existing_event_id,
+                    target_was_placeholder=request.existing_event_is_placeholder,
                     identity=request.identity,
                     body=display_text,
                     tool_trace=draft.tool_trace,
@@ -1167,6 +1177,7 @@ class DeliveryGateway:
             commit = await self._commit_terminal_edit(
                 target=request.target,
                 target_event_id=event_id,
+                target_was_placeholder=(request.existing_event_id is None or request.adopt_existing_placeholder),
                 identity=request.identity,
                 body=transformed_body,
                 tool_trace=tool_trace if request.show_tool_calls else None,

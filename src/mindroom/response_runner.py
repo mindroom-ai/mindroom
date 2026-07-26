@@ -334,6 +334,7 @@ class ResponseRequest:
     on_sync_restart_cancelled: Callable[[], None] | None = None
     sync_restart_retry_source_event_id: str | None = None
     on_deferred_outcome_handled: Callable[[str], None] | None = None
+    recovered_terminal_delivery: bool = False
 
     @property
     def room_id(self) -> str:
@@ -1214,7 +1215,24 @@ class ResponseRunner:
                     ),
                 )
             return None
-        placeholder_event_id = None
+        if request.existing_event_id is None:
+            owned_delivery = await self.deps.delivery_gateway.owned_terminal_delivery(
+                self._response_identity(
+                    request,
+                    response_kind="team" if history_scope.kind == "team" else "agent",
+                ),
+            )
+            if owned_delivery is not None:
+                request = replace(
+                    request,
+                    existing_event_id=owned_delivery.target_event_id,
+                    existing_event_is_placeholder=(
+                        owned_delivery.target_was_placeholder and not owned_delivery.transport_delivered
+                    ),
+                    recovered_terminal_delivery=True,
+                )
+                return self._request_with_locked_target(request, resolved_target)
+        excluded_history_event_id = None
         if (
             placeholder_message is not None
             and request.existing_event_id is None
@@ -1232,6 +1250,7 @@ class ResponseRunner:
                 ),
             )
             if placeholder_event_id is not None:
+                excluded_history_event_id = placeholder_event_id
                 placeholder_state.placeholder_event_id = placeholder_event_id
                 placeholder_state.request = request
                 request = replace(
@@ -1244,7 +1263,7 @@ class ResponseRunner:
                     request.pipeline_timing.mark_first_visible_reply("placeholder")
         request = await self._prepare_request_after_lock(
             request,
-            exclude_history_event_id=placeholder_event_id,
+            exclude_history_event_id=excluded_history_event_id,
         )
         return self._request_with_locked_target(request, resolved_target)
 
@@ -1547,6 +1566,9 @@ class ResponseRunner:
         if prepared_request is None:
             return None
         request = prepared_request
+        if request.recovered_terminal_delivery:
+            assert request.existing_event_id is not None
+            return request.existing_event_id
         lifecycle = self._build_lifecycle(
             identity=self._response_identity(request, response_kind=response_kind),
             request=request,
@@ -1642,6 +1664,9 @@ class ResponseRunner:
         if prepared_request is None:
             return None
         request = prepared_request
+        if request.recovered_terminal_delivery:
+            assert request.existing_event_id is not None
+            return request.existing_event_id
         team_request = replace(team_request, request=request)
         reason = team_request.resolution_reason
         if reason is not None:
@@ -2822,6 +2847,9 @@ class ResponseRunner:
         if prepared_request is None:
             return None
         request = prepared_request
+        if request.recovered_terminal_delivery:
+            assert request.existing_event_id is not None
+            return request.existing_event_id
         memory_prompt, memory_thread_history, model_prompt_text, model_thread_history = (
             prepare_memory_and_model_context(
                 request.prompt,

@@ -26,6 +26,7 @@ from mindroom.terminal_delivery import (
     TerminalDeliveryCoordinatorDeps,
     TerminalDeliveryIntent,
     TerminalDeliveryStore,
+    terminal_delivery_id,
 )
 from tests.conftest import message_origin
 
@@ -156,6 +157,7 @@ def _intent(
     target = target or _target()
     return TerminalDeliveryIntent(
         target_event_id=TARGET,
+        target_was_placeholder=True,
         identity=ResponseIdentity(
             response_kind="ai",
             response_envelope=_envelope(target),
@@ -212,17 +214,93 @@ def test_restart_restores_exact_frozen_payload_and_transaction(tmp_path: Path) -
     assert restarted.transaction_id == item.transaction_id
 
 
-def test_same_turn_reentry_reuses_frozen_revision_and_new_regeneration_replaces_it(tmp_path: Path) -> None:
+def test_owner_identity_encoding_is_unambiguous_for_opaque_ids() -> None:
+    identity = _intent().identity
+    left = replace(
+        identity,
+        response_envelope=replace(identity.response_envelope, source_event_id="a\x1fb"),
+        correlation_id="c",
+    )
+    right = replace(
+        identity,
+        response_envelope=replace(identity.response_envelope, source_event_id="a"),
+        correlation_id="b\x1fc",
+    )
+
+    assert terminal_delivery_id(left) != terminal_delivery_id(right)
+
+
+def test_restart_keeps_highest_revision_when_crash_leaves_same_target_rows(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    old = store.record(_intent())
+    assert old is not None
+    old_path = store._row_file(old.delivery_id)
+    old_record = old_path.read_text()
+    newer = store.record(_intent(correlation_id="corr-2"))
+    assert newer is not None
+    old_path.write_text(old_record)
+
+    recovered = _store(tmp_path).warm()
+
+    assert recovered == (newer,)
+    assert not old_path.exists()
+
+
+def test_same_turn_reentry_reuses_original_target_and_new_regeneration_is_distinct(tmp_path: Path) -> None:
     store = _store(tmp_path)
     original = store.record(_intent(wire_content={"body": "original"}))
-    repeated = store.record(_intent(wire_content={"body": "drifted"}))
+    repeated = store.record(
+        replace(
+            _intent(wire_content={"body": "drifted"}),
+            target_event_id="$replayed-placeholder",
+        ),
+    )
     newer = store.record(_intent(correlation_id="corr-2", wire_content={"body": "new"}))
 
     assert original is not None
     assert repeated == original
     assert newer is not None
+    assert newer.delivery_id != original.delivery_id
     assert newer.revision == original.revision + 1
     assert store.items() == (newer,)
+
+
+@pytest.mark.asyncio
+async def test_owner_lookup_restores_settled_and_pending_targets(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    pending = store.record(_intent())
+    settled = store.record(
+        replace(
+            _intent(correlation_id="settled", target=_target("!settled:localhost")),
+            target_event_id="$settled-visible",
+        ),
+    )
+    assert pending is not None
+    assert settled is not None
+    settled = store.update(
+        settled.delivery_id,
+        revision=settled.revision,
+        transport_delivered=True,
+        settled=True,
+    )
+    assert settled is not None
+    coordinator, _hooks = _coordinator(store)
+
+    assert await coordinator.owned_delivery(pending.identity) == pending
+    assert await coordinator.owned_delivery(settled.identity) == settled
+
+
+@pytest.mark.asyncio
+async def test_pending_non_placeholder_owner_preserves_target_kind(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    pending = store.record(replace(_intent(), target_was_placeholder=False))
+    assert pending is not None
+    coordinator, _hooks = _coordinator(store)
+
+    owned = await coordinator.owned_delivery(pending.identity)
+
+    assert owned is not None
+    assert not owned.target_was_placeholder
 
 
 @pytest.mark.asyncio
@@ -248,12 +326,25 @@ def test_failed_write_never_publishes_candidate_to_memory(tmp_path: Path) -> Non
     assert store.items() == (original,)
 
 
+def test_failed_stale_row_cleanup_keeps_new_in_memory_authority(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    original = store.record(_intent())
+    assert original is not None
+
+    with patch("pathlib.Path.unlink", side_effect=OSError("busy")):
+        newer = store.record(_intent(correlation_id="corr-2"))
+
+    assert newer is not None
+    assert store.items() == (newer,)
+    assert _store(tmp_path).warm() == (newer,)
+
+
 def test_malformed_row_does_not_discard_valid_sibling(tmp_path: Path) -> None:
     store = _store(tmp_path)
     valid = store.record(_intent())
     assert valid is not None
     path = tmp_path / "tracking" / "code_pending_terminal_deliveries" / "broken.json"
-    path.write_text(json.dumps({"schema_version": 7, "item": {"delivery_id": "broken"}}))
+    path.write_text(json.dumps({"schema_version": 8, "item": {"delivery_id": "broken"}}))
 
     assert _store(tmp_path).warm() == (valid,)
 
@@ -281,7 +372,7 @@ def test_malformed_retry_timestamp_does_not_poison_valid_sibling(tmp_path: Path)
     malformed["target_event_id"] = "$malformed"
     malformed["next_attempt_at"] = "tomorrow"
     path = tmp_path / "tracking" / "code_pending_terminal_deliveries" / "malformed.json"
-    path.write_text(json.dumps({"schema_version": 7, "item": malformed}))
+    path.write_text(json.dumps({"schema_version": 8, "item": malformed}))
 
     restarted = _store(tmp_path)
 
@@ -379,17 +470,25 @@ async def test_redaction_and_transport_have_one_linearized_commit_order(tmp_path
     coordinator, _hooks = _coordinator(store)
     send_started = asyncio.Event()
     release_send = asyncio.Event()
+    tombstone_recorded = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    original_mark_source_redacted = coordinator.deps.turn_store.mark_source_redacted
+
+    def mark_source_redacted(event_id: str) -> None:
+        original_mark_source_redacted(event_id)
+        loop.call_soon_threadsafe(tombstone_recorded.set)
 
     async def send(*_args: object, **_kwargs: object) -> DeliveredMatrixEvent:
         send_started.set()
         await release_send.wait()
         return _delivered()
 
+    coordinator.deps.turn_store.mark_source_redacted = mark_source_redacted  # type: ignore[method-assign]
     with patch("mindroom.terminal_delivery.send_message_result", new=send):
         attempt_task = asyncio.create_task(coordinator._drain_item(item))
         await send_started.wait()
         redaction_task = asyncio.create_task(coordinator.redact(room_id=ROOM, event_id=SOURCE))
-        await asyncio.sleep(0.05)
+        await tombstone_recorded.wait()
 
         assert not redaction_task.done()
         assert SOURCE in coordinator.deps.turn_store.redacted
@@ -869,6 +968,36 @@ async def test_first_attempt_cancellation_after_transport_returns_managed_pendin
 
 
 @pytest.mark.asyncio
+async def test_cancellation_during_record_returns_durable_managed_ownership(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    coordinator, _hooks = _coordinator(store)
+    record_started = threading.Event()
+    release_record = threading.Event()
+    original_record = store.record
+
+    def blocked_record(intent: TerminalDeliveryIntent) -> PendingTerminalDelivery | None:
+        record_started.set()
+        release_record.wait()
+        return original_record(intent)
+
+    store.record = MagicMock(side_effect=blocked_record)  # type: ignore[method-assign]
+    attempt = asyncio.create_task(coordinator.commit_and_attempt(_intent()))
+    await asyncio.to_thread(record_started.wait)
+    attempt.cancel()
+    await asyncio.sleep(0)
+    attempt.cancel()
+    await asyncio.sleep(0)
+    release_record.set()
+
+    commit = await asyncio.wait_for(attempt, 1)
+
+    assert not attempt.cancelled()
+    assert commit.reason == "cancelled"
+    assert commit.pending is not None
+    assert store.get(commit.pending.delivery_id) == commit.pending
+
+
+@pytest.mark.asyncio
 async def test_stale_settlement_cannot_delete_newer_regeneration(tmp_path: Path) -> None:
     store = _store(tmp_path)
     old = store.record(_intent())
@@ -883,24 +1012,104 @@ async def test_stale_settlement_cannot_delete_newer_regeneration(tmp_path: Path)
 
 
 @pytest.mark.asyncio
-async def test_stop_awaits_shielded_settlement(tmp_path: Path) -> None:
+async def test_captured_old_due_row_cannot_overwrite_new_same_target_owner(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    old = store.record(_intent())
+    assert old is not None
+    coordinator, _hooks = _coordinator(store)
+    coordinator.owned_delivery = AsyncMock(return_value=None)  # type: ignore[method-assign]
+    target_lock = coordinator._lock_for(old.target.room_id, old.target_event_id)
+
+    await target_lock.acquire()
+    try:
+        newer_attempt = asyncio.create_task(coordinator.commit_and_attempt(_intent(correlation_id="corr-2")))
+        await asyncio.sleep(0)
+        stale_drain = asyncio.create_task(coordinator._drain_item(old))
+        await asyncio.sleep(0)
+    finally:
+        target_lock.release()
+
+    with patch("mindroom.terminal_delivery.send_message_result", new=AsyncMock(return_value=_delivered())) as send:
+        await stale_drain
+        newer = await newer_attempt
+
+    assert newer.item is not None
+    assert store.items() == (newer.item,)
+    send.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_stop_cancels_stalled_transport_and_restart_retries(tmp_path: Path) -> None:
     store = _store(tmp_path)
     coordinator, _hooks = _coordinator(store)
-    entered = asyncio.Event()
-    finish = asyncio.Event()
+    item = store.record(_intent())
+    assert item is not None
+    transport_started = asyncio.Event()
 
-    async def settle() -> None:
-        entered.set()
-        await finish.wait()
+    async def stalled_transport(*_args: object, **_kwargs: object) -> DeliveredMatrixEvent:
+        transport_started.set()
+        await asyncio.Event().wait()
+        raise AssertionError
 
-    coordinator._settlement = asyncio.create_task(settle())
-    await entered.wait()
-    stopping = asyncio.create_task(coordinator.stop())
-    await asyncio.sleep(0)
+    with patch("mindroom.terminal_delivery.send_message_result", new=stalled_transport):
+        draining = asyncio.create_task(coordinator.drain_once())
+        await transport_started.wait()
+        await asyncio.wait_for(coordinator.stop(), 0.5)
+        with pytest.raises(asyncio.CancelledError):
+            await draining
 
-    assert not stopping.done()
-    finish.set()
-    await stopping
+    assert coordinator._settlement is None
+    current = store.get(item.delivery_id)
+    assert current is not None
+    assert not current.transport_delivered
+
+    restarted_store = _store(tmp_path)
+    restarted, restarted_hooks = _coordinator(restarted_store)
+    await restarted.warm()
+    with patch("mindroom.terminal_delivery.send_message_result", new=AsyncMock(return_value=_delivered())):
+        assert await restarted.drain_once() == 1
+
+    [receipt] = restarted_store.items()
+    assert receipt.settled
+    restarted_hooks.emit_after_response.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_stop_cancels_stalled_hook_and_restart_retries_it(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    item = store.record(_intent())
+    assert item is not None
+    coordinator, hooks = _coordinator(store)
+    hook_started = asyncio.Event()
+
+    async def stalled_hook(**_kwargs: object) -> None:
+        hook_started.set()
+        await asyncio.Event().wait()
+
+    hooks.emit_after_response = AsyncMock(side_effect=stalled_hook)
+    with patch("mindroom.terminal_delivery.send_message_result", new=AsyncMock(return_value=_delivered())):
+        draining = asyncio.create_task(coordinator.drain_once())
+        await hook_started.wait()
+        await asyncio.wait_for(coordinator.stop(), 0.5)
+        with pytest.raises(asyncio.CancelledError):
+            await draining
+
+    assert coordinator._settlement is None
+    current = store.get(item.delivery_id)
+    assert current is not None
+    assert current.transport_delivered
+    assert current.after_response_claimed
+
+    restarted_store = _store(tmp_path)
+    restarted, restarted_hooks = _coordinator(restarted_store)
+    await restarted.warm()
+    with patch("mindroom.terminal_delivery.send_message_result", new=AsyncMock(return_value=_delivered())) as send:
+        assert await restarted.drain_once() == 1
+
+    send.assert_not_awaited()
+    restarted_hooks.emit_after_response.assert_not_awaited()
+    [receipt] = restarted_store.items()
+    assert receipt.settled
 
 
 @pytest.mark.asyncio

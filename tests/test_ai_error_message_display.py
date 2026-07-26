@@ -132,6 +132,7 @@ def _response_request(
     thread_id: str | None = None,
     prompt: str = "Help me with something",
     existing_event_id: str | None = None,
+    correlation_id: str | None = None,
 ) -> ResponseRequest:
     """Build one response request for direct bot seam tests."""
     return ResponseRequest(
@@ -144,6 +145,7 @@ def _response_request(
             prompt=prompt,
         ),
         existing_event_id=existing_event_id,
+        correlation_id=correlation_id,
     )
 
 
@@ -551,7 +553,7 @@ class TestAIErrorDisplay:
             "[test_agent] 🔴 Error: Invalid model specified. Please check your configuration.",
         ]
 
-        for error_msg in error_messages:
+        for index, error_msg in enumerate(error_messages):
             edited_messages.clear()
 
             with (
@@ -567,7 +569,8 @@ class TestAIErrorDisplay:
                 await bot._response_runner.process_and_respond(
                     _response_request(
                         prompt="Help me",
-                        existing_event_id=f"$thinking_{error_messages.index(error_msg)}",
+                        existing_event_id=f"$thinking_{index}",
+                        correlation_id=f"error-{index}",
                     ),
                 )
 

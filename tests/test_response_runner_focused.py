@@ -45,6 +45,7 @@ from mindroom.response_runner import (
 )
 from mindroom.stop import StopManager
 from mindroom.streaming import StreamingDeliveryError
+from mindroom.terminal_delivery import PendingTerminalDelivery
 from mindroom.thread_summary import thread_summary_message_count_hint
 from mindroom.turn_policy import PreparedDispatch
 from tests.conftest import (
@@ -111,6 +112,14 @@ def _completed_outcome(event_id: str = "$response", body: str = "ok") -> FinalDe
         final_visible_body=body,
         delivery_kind="sent",
     )
+
+
+def _terminal_owner(*, target_was_placeholder: bool, transport_delivered: bool) -> PendingTerminalDelivery:
+    owner = MagicMock(spec=PendingTerminalDelivery)
+    owner.target_event_id = "$original-placeholder"
+    owner.target_was_placeholder = target_was_placeholder
+    owner.transport_delivered = transport_delivered
+    return owner
 
 
 class RecordingStopManager(StopManager):
@@ -427,6 +436,7 @@ async def test_begin_locked_turn_excludes_early_placeholder_from_refreshed_histo
     request_preparer = MagicMock(spec=ResponsePayloadPreparer)
     request_preparer.prepare = AsyncMock(side_effect=lambda request: replace(request, payload_preparation=None))
     delivery_gateway = MagicMock(spec=DeliveryGateway)
+    delivery_gateway.owned_terminal_delivery = AsyncMock(return_value=None)
     delivery_gateway.send_text = AsyncMock(return_value="$placeholder")
     runner = ResponseRunner(
         replace(
@@ -462,6 +472,101 @@ async def test_begin_locked_turn_excludes_early_placeholder_from_refreshed_histo
     assert prepared_request.thread_history.diagnostics == {"cache_status": "fresh"}
     assert prepared_request.existing_event_id == "$placeholder"
     assert prepared_request.existing_event_is_placeholder is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("target_was_placeholder", "transport_delivered", "existing_event_is_placeholder"),
+    [(True, False, True), (False, False, False), (True, True, False)],
+    ids=["pending-placeholder", "pending-visible-edit", "terminal-visible"],
+)
+async def test_begin_locked_turn_adopts_durable_target_before_new_placeholder(
+    tmp_path: Path,
+    *,
+    target_was_placeholder: bool,
+    transport_delivered: bool,
+    existing_event_is_placeholder: bool,
+) -> None:
+    """Restart replay must reuse durable ownership instead of creating a changed placeholder target."""
+    bot = _bot(tmp_path)
+    target = _target(thread_id="$thread", reply_to_event_id="$event")
+    envelope = _envelope(target, source_event_id="$event")
+    delivery_gateway = MagicMock()
+    delivery_gateway.owned_terminal_delivery = AsyncMock(
+        return_value=_terminal_owner(
+            target_was_placeholder=target_was_placeholder,
+            transport_delivered=transport_delivered,
+        ),
+    )
+    delivery_gateway.send_text = AsyncMock(return_value="$replayed-placeholder")
+    runner = ResponseRunner(
+        replace(
+            unwrap_extracted_collaborator(bot._response_runner).deps,
+            delivery_gateway=delivery_gateway,
+        ),
+    )
+    request = ResponseRequest(
+        thread_history=[],
+        prompt="hello",
+        user_id="@user:localhost",
+        response_envelope=envelope,
+    )
+
+    prepared_request = await runner._begin_locked_turn(
+        request,
+        resolved_target=target,
+        history_scope=runner.deps.state_writer.history_scope(),
+        execution_identity=runner.deps.tool_runtime.build_execution_identity(
+            target=target,
+            user_id=request.user_id,
+        ),
+        placeholder_message="Thinking...",
+    )
+
+    assert prepared_request is not None
+    assert prepared_request.existing_event_id == "$original-placeholder"
+    assert prepared_request.existing_event_is_placeholder is existing_event_is_placeholder
+    assert prepared_request.recovered_terminal_delivery
+    delivery_gateway.send_text.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_generate_response_replay_returns_frozen_target_without_generation_or_delivery(tmp_path: Path) -> None:
+    """A durable replay owner must return its exact target for handled recording without competing work."""
+    bot = _bot(tmp_path)
+    target = _target(thread_id="$thread", reply_to_event_id="$event")
+    envelope = _envelope(target, source_event_id="$event")
+    delivery_gateway = MagicMock()
+    delivery_gateway.owned_terminal_delivery = AsyncMock(
+        return_value=_terminal_owner(
+            target_was_placeholder=True,
+            transport_delivered=True,
+        ),
+    )
+    delivery_gateway.send_text = AsyncMock(side_effect=AssertionError("must not create a placeholder"))
+    delivery_gateway.deliver_final = AsyncMock(side_effect=AssertionError("must not edit the frozen target"))
+    delivery_gateway.deliver_stream = AsyncMock(side_effect=AssertionError("must not stream into the frozen target"))
+    runner = ResponseRunner(
+        replace(
+            unwrap_extracted_collaborator(bot._response_runner).deps,
+            delivery_gateway=delivery_gateway,
+        ),
+    )
+    runner.process_and_respond = AsyncMock(side_effect=AssertionError("must not run the model"))  # type: ignore[method-assign]
+    request = ResponseRequest(
+        thread_history=[],
+        prompt="hello",
+        user_id="@user:localhost",
+        response_envelope=envelope,
+    )
+
+    result = await runner.generate_response_locked(request, resolved_target=target)
+
+    assert result == "$original-placeholder"
+    delivery_gateway.send_text.assert_not_awaited()
+    delivery_gateway.deliver_final.assert_not_awaited()
+    delivery_gateway.deliver_stream.assert_not_awaited()
+    runner.process_and_respond.assert_not_awaited()
 
 
 @pytest.mark.asyncio

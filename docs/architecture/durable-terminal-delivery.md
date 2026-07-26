@@ -35,9 +35,13 @@ Wakeups after sync recovery reduce latency, while periodic polling preserves cor
 
 ## Identity and precedence
 
-The delivery ID is derived from the entity, room, visible target event, and source event.
-Re-entering the same response correlation reuses the existing frozen revision without rebuilding content or resetting attempts.
-A newer response correlation atomically replaces the old row and increments the revision.
+The delivery ID is derived from the entity, room, source event, and response correlation, independently of the mutable visible target event.
+The original target event and whether it was a placeholder are frozen in the row.
+Before creating a replay placeholder, response execution looks up pending and settled durable ownership and returns the original target without rerunning model or delivery work.
+Re-entering the same response correlation therefore reuses the existing frozen row without rebuilding content or resetting attempts.
+A newer response correlation for the same visible target publishes the next revision and immediately supersedes the old in-memory authority.
+Target-scoped coordinator locks prevent old and new correlations from editing the same Matrix event out of order.
+Startup resolves crash-left same-target siblings to the highest durable revision before any retry.
 Every attempt and settlement revalidates its exact revision, so stale work cannot publish or delete its replacement.
 
 ## Redaction
@@ -66,7 +70,8 @@ The exact frozen summary bypasses later volatile eligibility checks, and its del
 One outstanding frozen summary owns its thread until delivery succeeds or its row is removed, preventing concurrent responses from preparing competing summaries.
 Once transport and all lifecycle steps are settled, the row remains as a receipt until the outer handled-turn ledger is durably flushed for every source.
 
-Shutdown cancels the retry loop but awaits any shielded settlement batch already in progress.
+Shutdown cancels the retry loop and its shielded settlement batch.
+Cancellation propagates through stalled transport and lifecycle hooks, while the durable row retains the progress needed for restart recovery.
 
 ## Recovery and cleanup
 
@@ -78,5 +83,5 @@ Stale-stream cleanup skips visible events still owned by durable terminal delive
 
 ## Retention
 
-Rows remain until delivered, superseded by a newer response, or invalidated by source or target redaction.
+Rows remain until settled delivery is reflected in the handled-turn ledger, superseded by a newer response, or invalidated by source or target redaction.
 No retry or age budget silently abandons a committed answer.

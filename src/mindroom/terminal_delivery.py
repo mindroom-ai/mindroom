@@ -38,7 +38,7 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-TERMINAL_DELIVERY_SCHEMA_VERSION = 7
+TERMINAL_DELIVERY_SCHEMA_VERSION = 8
 DEFAULT_POLL_INTERVAL_SECONDS = 15.0
 _MAX_DRAIN_WORKERS = 8
 _TERMINAL_REDACTION_SCHEMA_VERSION = 1
@@ -48,11 +48,23 @@ TerminalDeliveryStatus = Literal["delivered", "deferred", "superseded"]
 TerminalDeliveryLifecycleStep = Literal["interactive", "thread_summary"]
 
 
+def terminal_delivery_id(identity: ResponseIdentity) -> str:
+    """Return stable ownership for one source-turn correlation."""
+    envelope = identity.response_envelope
+    raw = json.dumps(
+        [envelope.agent_name, envelope.room_id, envelope.source_event_id, identity.correlation_id],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(raw.encode()).hexdigest()[:32]
+
+
 @dataclass(frozen=True, slots=True)
 class TerminalDeliveryIntent:
     """One frozen terminal payload committed before its first transport attempt."""
 
     target_event_id: str
+    target_was_placeholder: bool
     identity: ResponseIdentity
     interactive_metadata: InteractiveMetadata | None
     body: str
@@ -60,10 +72,8 @@ class TerminalDeliveryIntent:
 
     @property
     def delivery_id(self) -> str:
-        """Return stable identity for one visible target and source turn."""
-        envelope = self.identity.response_envelope
-        raw = f"{envelope.agent_name}\x1f{envelope.room_id}\x1f{self.target_event_id}\x1f{envelope.source_event_id}"
-        return hashlib.sha256(raw.encode()).hexdigest()[:32]
+        """Return stable ownership independent of a replay-created target."""
+        return terminal_delivery_id(self.identity)
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,6 +82,7 @@ class PendingTerminalDelivery:
 
     delivery_id: str
     target_event_id: str
+    target_was_placeholder: bool
     identity: ResponseIdentity
     interactive_metadata: InteractiveMetadata | None
     revision: int
@@ -161,12 +172,19 @@ class TerminalDeliveryStore:
             if not self._redactions.keys().isdisjoint(event_ids):
                 return None
             existing = self._items.get(intent.delivery_id)
-            if existing is not None and intent.identity.correlation_id == existing.identity.correlation_id:
+            if existing is not None:
                 return existing
-            revision = 0 if existing is None else existing.revision + 1
+            superseded = tuple(
+                item
+                for item in self._items.values()
+                if item.target.room_id == intent.identity.response_envelope.room_id
+                and item.target_event_id == intent.target_event_id
+            )
+            revision = max((item.revision for item in superseded), default=-1) + 1
             item = PendingTerminalDelivery(
                 delivery_id=intent.delivery_id,
                 target_event_id=intent.target_event_id,
+                target_was_placeholder=intent.target_was_placeholder,
                 identity=intent.identity,
                 interactive_metadata=intent.interactive_metadata,
                 revision=revision,
@@ -176,6 +194,9 @@ class TerminalDeliveryStore:
                 next_attempt_at=self.clock(),
             )
             self._publish(item)
+            for stale in superseded:
+                self._items.pop(stale.delivery_id, None)
+                self._unlink_superseded_row(stale.delivery_id)
             return item
 
     def get(self, delivery_id: str) -> PendingTerminalDelivery | None:
@@ -183,6 +204,10 @@ class TerminalDeliveryStore:
         with self._lock:
             self._load()
             return self._items.get(delivery_id)
+
+    def owned_delivery(self, identity: ResponseIdentity) -> PendingTerminalDelivery | None:
+        """Return durable work owned by one source-turn correlation."""
+        return self.get(terminal_delivery_id(identity))
 
     def items(self) -> tuple[PendingTerminalDelivery, ...]:
         """Return all rows."""
@@ -351,7 +376,26 @@ class TerminalDeliveryStore:
                     logger.warning("terminal_delivery_row_dropped", agent=self.agent_name, exc_info=True)
                     continue
                 items[item.delivery_id] = item
-        return items
+        winners: dict[tuple[str, str], PendingTerminalDelivery] = {}
+        for item in items.values():
+            target_key = (item.target.room_id, item.target_event_id)
+            current = winners.get(target_key)
+            if current is None or (item.revision, item.delivery_id) > (current.revision, current.delivery_id):
+                winners[target_key] = item
+        recovered = {item.delivery_id: item for item in winners.values()}
+        for delivery_id in items.keys() - recovered.keys():
+            self._unlink_superseded_row(delivery_id)
+        return recovered
+
+    def _unlink_superseded_row(self, delivery_id: str) -> None:
+        try:
+            self._row_file(delivery_id).unlink(missing_ok=True)
+        except OSError:
+            logger.warning(
+                "terminal_delivery_superseded_row_cleanup_failed",
+                agent=self.agent_name,
+                exc_info=True,
+            )
 
     def _load_redactions(self) -> tuple[dict[str, _TerminalRedactionBarrier], bool]:
         redactions: dict[str, _TerminalRedactionBarrier] = {}
@@ -492,7 +536,10 @@ class TerminalDeliveryCoordinator:
     """Single authority for durable terminal transport and retryable success effects."""
 
     deps: TerminalDeliveryCoordinatorDeps
-    _locks: WeakValueDictionary[str, asyncio.Lock] = field(default_factory=WeakValueDictionary, init=False)
+    _locks: WeakValueDictionary[tuple[str, str], asyncio.Lock] = field(
+        default_factory=WeakValueDictionary,
+        init=False,
+    )
     _summary_locks: WeakValueDictionary[str, asyncio.Lock] = field(default_factory=WeakValueDictionary, init=False)
     _wake: asyncio.Event = field(default_factory=asyncio.Event, init=False)
     _task: asyncio.Task[None] | None = field(default=None, init=False)
@@ -528,25 +575,41 @@ class TerminalDeliveryCoordinator:
             self._task = asyncio.create_task(self._run(), name="terminal_delivery")
 
     async def stop(self) -> None:
-        """Stop polling after any shielded durable settlement completes."""
+        """Stop polling and cancel any coordinator-owned settlement."""
         task, self._task = self._task, None
         if task is not None:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
-        if self._settlement is not None:
-            await asyncio.gather(self._settlement, return_exceptions=True)
+        settlement, self._settlement = self._settlement, None
+        if settlement is not None:
+            settlement.cancel()
+            await asyncio.gather(settlement, return_exceptions=True)
 
     def wake(self, *, reason: str = "recovery_ready") -> None:
         """Wake the retry loop."""
         del reason
         self._wake.set()
 
+    async def owned_delivery(self, identity: ResponseIdentity) -> PendingTerminalDelivery | None:
+        """Return pending or settled ownership for a replayed turn."""
+        item = await asyncio.to_thread(self.store.owned_delivery, identity)
+        if item is not None and not item.settled:
+            self.wake(reason="replayed_owner")
+        return item
+
     async def commit_and_attempt(self, intent: TerminalDeliveryIntent) -> TerminalDeliveryCommit:
         """Persist before first transport, then converge this delivery revision."""
-        async with self._lock_for(intent.delivery_id):
-            item = await self._record_locked(intent)
+        owned = await self.owned_delivery(intent.identity)
+        lock_target = owned.target_event_id if owned is not None else intent.target_event_id
+        room_id = intent.identity.response_envelope.room_id
+        async with self._lock_for(room_id, lock_target):
+            item, record_cancelled = await self._record_locked(intent)
             if item is None:
                 return TerminalDeliveryCommit(None, "superseded", "redacted")
+            if record_cancelled or item.target_event_id != lock_target:
+                reason = "cancelled" if record_cancelled else "owner_target_changed"
+                self.wake(reason=reason)
+                return TerminalDeliveryCommit(item, "deferred", reason)
             if item.settled:
                 return TerminalDeliveryCommit(item, "delivered", "settled_receipt")
             status: TerminalDeliveryStatus = "deferred"
@@ -602,7 +665,7 @@ class TerminalDeliveryCoordinator:
             room_id=barrier.room_id,
             event_id=barrier.event_id,
         ):
-            async with self._lock_for(item.delivery_id):
+            async with self._lock_for(item.target.room_id, item.target_event_id):
                 current = await asyncio.to_thread(self.store.get, item.delivery_id)
                 if current is not None and current.revision == item.revision:
                     await asyncio.to_thread(self.store.finish, item.delivery_id, revision=item.revision)
@@ -628,7 +691,7 @@ class TerminalDeliveryCoordinator:
         try:
             await asyncio.shield(self._settlement)
         finally:
-            if settlement.done():
+            if self._settlement is settlement and settlement.done():
                 self._settlement = None
         return len(due)
 
@@ -654,7 +717,7 @@ class TerminalDeliveryCoordinator:
                 workers.create_task(drain_rooms())
 
     async def _drain_item(self, item: PendingTerminalDelivery) -> None:
-        async with self._lock_for(item.delivery_id):
+        async with self._lock_for(item.target.room_id, item.target_event_id):
             current = await asyncio.to_thread(self.store.get, item.delivery_id)
             if current is None or current.revision != item.revision:
                 return
@@ -694,7 +757,10 @@ class TerminalDeliveryCoordinator:
             except Exception:
                 self.deps.logger.exception("terminal_delivery_drain_failed")
 
-    async def _record_locked(self, intent: TerminalDeliveryIntent) -> PendingTerminalDelivery | None:
+    async def _record_locked(
+        self,
+        intent: TerminalDeliveryIntent,
+    ) -> tuple[PendingTerminalDelivery | None, bool]:
         event_ids = (*intent.identity.source_event_ids, intent.target_event_id)
         if not self.redaction_barriers_ready:
             message = "Terminal redaction barriers are unavailable"
@@ -704,8 +770,20 @@ class TerminalDeliveryCoordinator:
             or await asyncio.to_thread(self.store.any_redaction_barrier, event_ids)
             or self.deps.turn_store.any_source_redacted(event_ids)
         ):
-            return None
-        return await asyncio.to_thread(self.store.record, intent)
+            return None, False
+        record = asyncio.create_task(
+            asyncio.to_thread(self.store.record, intent),
+            name="terminal_delivery_record",
+        )
+        cancelled = False
+        while not record.done():
+            try:
+                await asyncio.shield(record)
+            except asyncio.CancelledError:
+                if record.cancelled():
+                    raise
+                cancelled = True
+        return record.result(), cancelled
 
     async def _attempt_locked(self, item: PendingTerminalDelivery) -> tuple[TerminalDeliveryStatus, str]:
         if not self.redaction_barriers_ready:
@@ -790,7 +868,6 @@ class TerminalDeliveryCoordinator:
                 response_text=item.body,
                 response_event_id=item.target_event_id,
                 delivery_kind="edited",
-                continue_on_cancelled=True,
             )
         except asyncio.CancelledError:
             raise
@@ -933,11 +1010,12 @@ class TerminalDeliveryCoordinator:
             next_attempt_at=next_attempt_at,
         )
 
-    def _lock_for(self, delivery_id: str) -> asyncio.Lock:
-        lock = self._locks.get(delivery_id)
+    def _lock_for(self, room_id: str, target_event_id: str) -> asyncio.Lock:
+        lock_key = (room_id, target_event_id)
+        lock = self._locks.get(lock_key)
         if lock is None:
             lock = asyncio.Lock()
-            self._locks[delivery_id] = lock
+            self._locks[lock_key] = lock
         return lock
 
     def _summary_lock_for(self, summary_key: str) -> asyncio.Lock:
@@ -959,4 +1037,5 @@ __all__ = [
     "TerminalDeliveryLifecycleStep",
     "TerminalDeliveryStatus",
     "TerminalDeliveryStore",
+    "terminal_delivery_id",
 ]

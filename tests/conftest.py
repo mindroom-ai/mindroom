@@ -1111,6 +1111,7 @@ def terminal_delivery_coordinator_for(
         ),
     )
     coordinator.redact = AsyncMock()
+    coordinator.owned_delivery = AsyncMock(return_value=None)
     coordinator.pending_target_event_ids = MagicMock(return_value=frozenset())
     return coordinator
 
