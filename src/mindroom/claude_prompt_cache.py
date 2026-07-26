@@ -489,7 +489,36 @@ class _OffloadedAsyncStreamManager:
         self._stream_manager: Any = None
 
     async def __aenter__(self) -> object:
-        self._stream_manager = await asyncio.to_thread(self._stream_factory)
+        current_task = asyncio.current_task()
+        assert current_task is not None
+        baseline_cancel_count = current_task.cancelling()
+        deferred_cancel_count = 0
+        deferred_cancel: asyncio.CancelledError | None = None
+        setup_task = asyncio.create_task(asyncio.to_thread(self._stream_factory))
+
+        while not setup_task.done():
+            try:
+                await asyncio.shield(setup_task)
+            except asyncio.CancelledError as exc:
+                new_cancel_count = current_task.cancelling() - baseline_cancel_count
+                if new_cancel_count <= 0:
+                    raise
+                for _ in range(new_cancel_count):
+                    current_task.uncancel()
+                deferred_cancel_count += new_cancel_count
+                deferred_cancel = deferred_cancel or exc
+
+        try:
+            self._stream_manager = setup_task.result()
+        except BaseException as setup_error:
+            if deferred_cancel is None:
+                raise
+            for _ in range(deferred_cancel_count):
+                current_task.cancel()
+            raise deferred_cancel from setup_error
+
+        for _ in range(deferred_cancel_count):
+            current_task.cancel()
         return await self._stream_manager.__aenter__()
 
     async def __aexit__(self, exc_type: object, exc_value: object, traceback: object) -> bool | None:
