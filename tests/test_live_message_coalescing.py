@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 from pydantic import ValidationError
+from structlog.testing import capture_logs
 
 from mindroom.attachments import _attachment_id_for_event, load_attachment, register_local_attachment
 from mindroom.bot import AgentBot
@@ -53,7 +54,7 @@ from mindroom.dispatch_source import (
     TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
     VOICE_SOURCE_KIND,
 )
-from mindroom.handled_turns import TurnRecord
+from mindroom.handled_turns import SourceEventMetadata, TurnRecord
 from mindroom.hooks import MessageEnvelope
 from mindroom.inbound_turn_normalizer import (
     BatchMediaAttachmentRequest,
@@ -4201,6 +4202,120 @@ async def test_backlog_replay_skips_older_message_when_newer_exists(tmp_path: Pa
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("degraded", [False, True])
+@pytest.mark.parametrize("mixed_requesters", [False, True])
+async def test_backlog_replay_respects_coalesced_source_ownership(
+    tmp_path: Path,
+    *,
+    degraded: bool,
+    mixed_requesters: bool,
+) -> None:
+    """A newer requester turn supersedes a coalesced batch only when every source is theirs."""
+    bot = _make_bot(tmp_path)
+    room = _make_room()
+    primary_event = PreparedTextEvent(
+        sender="@bob:localhost",
+        event_id="$bob",
+        body="bob",
+        source={"content": {"msgtype": "m.text", "body": "bob"}},
+        server_timestamp=2000,
+    )
+    dispatch = _prepared_dispatch(
+        event_id="$bob",
+        requester_user_id="@bob:localhost",
+        body="bob",
+        thread_id="$thread",
+    )
+    newer_bob_message = ResolvedVisibleMessage(
+        sender="@bob:localhost",
+        body="newer bob",
+        timestamp=3000,
+        event_id="$newer-bob",
+        content={"body": "newer bob"},
+        thread_id="$thread",
+        latest_event_id="$newer-bob",
+    )
+    if degraded:
+        degraded_history = ThreadHistoryResult(
+            [newer_bob_message],
+            is_full_history=False,
+            diagnostics={
+                THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_DEGRADED,
+                THREAD_HISTORY_DEGRADED_DIAGNOSTIC: True,
+            },
+        )
+        dispatch.context.thread_history = degraded_history
+        dispatch.context.replay_guard_history = degraded_history
+        bot.event_cache.get_recent_room_events.return_value = [
+            _text_event(
+                event_id="$newer-bob",
+                body="newer bob",
+                sender="@bob:localhost",
+                server_timestamp=3000,
+                thread_id="$thread",
+            ).source,
+        ]
+    else:
+        _set_context_histories(dispatch, [newer_bob_message])
+    handled_turn = TurnRecord.create(
+        ["$alice", "$bob"],
+        source_event_metadata={
+            "$alice": SourceEventMetadata(
+                sender="@alice:localhost" if mixed_requesters else "@bob:localhost",
+                timestamp_ms=1000,
+            ),
+            "$bob": SourceEventMetadata(sender="@bob:localhost", timestamp_ms=2000),
+        },
+    )
+
+    plan_calls: list[PreparedDispatch] = []
+
+    async def prepare_dispatch(*_args: object, **_kwargs: object) -> object:
+        return prepared_dispatch_result(dispatch)
+
+    async def plan_turn(
+        _room: object,
+        _event: object,
+        prepared_dispatch: PreparedDispatch,
+        **_kwargs: object,
+    ) -> _DispatchPlan:
+        plan_calls.append(prepared_dispatch)
+        return _DispatchPlan(kind="ignore")
+
+    with (
+        capture_logs() as captured_logs,
+        patch.object(
+            bot._turn_controller,
+            "_prepare_dispatch",
+            new=prepare_dispatch,
+        ),
+        patch.object(bot._turn_policy, "plan_turn", new=plan_turn),
+    ):
+        await bot._turn_controller._dispatch_text_message(
+            room,
+            primary_event,
+            "@bob:localhost",
+            handled_turn=handled_turn,
+        )
+
+    assert plan_calls == ([dispatch] if mixed_requesters else [])
+    assert not any(
+        log.get("event") == "Thread replay guard degraded; proceeding without negative newer-message proof"
+        for log in captured_logs
+    )
+    if degraded and not mixed_requesters:
+        bot.event_cache.get_recent_room_events.assert_awaited_once_with(
+            room.room_id,
+            event_type="m.room.message",
+            since_ts_ms=2000,
+        )
+    else:
+        bot.event_cache.get_recent_room_events.assert_not_awaited()
+    assert bot._turn_store.is_handled("$alice") is not mixed_requesters
+    assert bot._turn_store.is_handled("$bob") is not mixed_requesters
+
+
+@pytest.mark.asyncio
 async def test_backlog_replay_degraded_thread_history_uses_cached_room_event_positive_proof(tmp_path: Path) -> None:
     """Degraded empty thread history must not prove that no newer thread message exists."""
     bot = _make_bot(tmp_path)
@@ -4797,6 +4912,7 @@ async def test_backlog_replay_degraded_thread_history_fails_open_without_positiv
     action_mock = AsyncMock(return_value=_DispatchPlan(kind="ignore"))
     history_guard = MagicMock(wraps=bot._turn_controller._has_newer_unresponded_in_thread)
     with (
+        capture_logs() as captured_logs,
         patch.object(
             bot._turn_controller,
             "_prepare_dispatch",
@@ -4815,6 +4931,10 @@ async def test_backlog_replay_degraded_thread_history_fails_open_without_positiv
     )
     action_mock.assert_awaited_once()
     assert not bot._turn_store.is_handled("$m1")
+    assert any(
+        log.get("event") == "Thread replay guard degraded; proceeding without negative newer-message proof"
+        for log in captured_logs
+    )
 
 
 @pytest.mark.asyncio
