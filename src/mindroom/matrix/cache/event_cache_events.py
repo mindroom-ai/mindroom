@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 
 _EDITABLE_EVENT_TYPES = frozenset({"m.room.message", "io.mindroom.tool_approval"})
+_REDACTION_DEPENDENT_EDIT_TYPES = _EDITABLE_EVENT_TYPES | {"m.room.encrypted"}
 
 type _CachedEventValue = tuple[str, dict[str, Any]]
 type _CachedObservation = Literal["accept", "ignore", "conflict"]
@@ -393,7 +394,7 @@ def _direct_redaction_candidate_ids(event_id: str, event: dict[str, Any], room_i
     """Return tombstones that suppress this event rather than only its bundled preview."""
     original_event_id = EventInfo.from_event(event).original_event_id
     if (
-        event.get("type") in _EDITABLE_EVENT_TYPES
+        event.get("type") in _REDACTION_DEPENDENT_EDIT_TYPES
         and event_source_is_timeline_in_room(event, room_id)
         and isinstance(original_event_id, str)
     ):

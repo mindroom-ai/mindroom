@@ -6057,6 +6057,30 @@ async def test_redaction_removes_event_thread_rows_and_blocks_late_edit_resurrec
 
 
 @pytest.mark.asyncio
+async def test_redacted_original_blocks_late_encrypted_edit(
+    event_cache: ConversationEventCache,
+) -> None:
+    """An encrypted edit's cleartext relation must respect its original's tombstone."""
+    room_id = "!room:localhost"
+    original_id = "$original:localhost"
+    edit_id = "$encrypted-edit:localhost"
+    original = _clear_payload(original_id, room_id=room_id)
+    encrypted_edit = _opaque_payload(edit_id, origin_server_ts=2000)
+    encrypted_edit["room_id"] = room_id
+    encrypted_edit["content"]["m.relates_to"] = {
+        "rel_type": "m.replace",
+        "event_id": original_id,
+    }
+
+    await event_cache.store_event(original_id, room_id, original)
+    await event_cache.redact_event(room_id, original_id)
+    await event_cache.store_event(edit_id, room_id, encrypted_edit)
+
+    assert await event_cache.get_event(room_id, edit_id) is None
+    assert await event_cache.get_thread_id_for_event(room_id, edit_id) is None
+
+
+@pytest.mark.asyncio
 async def test_store_events_batch_records_thread_root_self_mapping_from_explicit_thread_child(
     event_cache: ConversationEventCache,
 ) -> None:
