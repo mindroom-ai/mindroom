@@ -7,6 +7,8 @@ from datetime import UTC, datetime
 from threading import Lock
 from typing import TYPE_CHECKING
 
+from mindroom.matrix.sync_cache_write_progress import MATRIX_SYNC_CACHE_WRITE_GRACE_SECONDS
+
 if TYPE_CHECKING:
     import httpx
 
@@ -24,6 +26,7 @@ class _MatrixSyncState:
     running: bool = False
     loop_started_time: datetime | None = None
     last_sync_time: datetime | None = None
+    cache_write_started_time: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,29 +99,65 @@ def mark_matrix_sync_success(entity_name: str, sync_time: datetime | None = None
     return resolved_sync_time
 
 
+def mark_matrix_sync_cache_write_started(entity_name: str, started_time: datetime | None = None) -> None:
+    """Record that one entity's sync response is waiting on its durable cache write.
+
+    The sync loop is sequential, so no sync response can refresh this entity's
+    clock until the write finishes. Reporting the write keeps liveness from
+    restarting a runtime that is busy making the very writes a sync token needs.
+    """
+    resolved_started_time = _normalize_sync_time(started_time or datetime.now(UTC))
+    with _matrix_sync_lock:
+        state = _matrix_sync_state.setdefault(entity_name, _MatrixSyncState())
+        state.cache_write_started_time = resolved_started_time
+
+
+def mark_matrix_sync_cache_write_finished(entity_name: str) -> None:
+    """Record that one entity's durable sync cache write is no longer in flight."""
+    with _matrix_sync_lock:
+        state = _matrix_sync_state.get(entity_name)
+        if state is not None:
+            state.cache_write_started_time = None
+
+
 def clear_matrix_sync_state(entity_name: str) -> None:
     """Remove one entity from the shared Matrix sync-health registry."""
     with _matrix_sync_lock:
         _matrix_sync_state.pop(entity_name, None)
 
 
+def _sync_cache_write_still_within_grace(
+    cache_write_started_time: datetime | None,
+    *,
+    current_time: datetime,
+    cache_write_grace_seconds: float,
+) -> bool:
+    """Return whether an in-flight durable cache write still explains a quiet sync clock."""
+    if cache_write_started_time is None:
+        return False
+    return (current_time - cache_write_started_time).total_seconds() <= cache_write_grace_seconds
+
+
 def get_matrix_sync_health_snapshot(
     *,
     stale_after_seconds: float = _MATRIX_SYNC_HEALTH_STALE_SECONDS,
     startup_grace_seconds: float = MATRIX_SYNC_STARTUP_GRACE_SECONDS,
+    cache_write_grace_seconds: float = MATRIX_SYNC_CACHE_WRITE_GRACE_SECONDS,
     now: datetime | None = None,
 ) -> _MatrixSyncHealthSnapshot:
     """Return the current Matrix sync-health snapshot.
 
     The reported `last_sync_time` is the oldest successful sync among active
-    entities, because any stale entity should surface as unhealthy.
+    entities, because any stale entity should surface as unhealthy. An entity
+    still inside the grace window of a durable sync cache write is busy rather
+    than stale: its sync loop cannot report activity until that write lands.
     """
     current_time = _normalize_sync_time(now or datetime.now(UTC))
     with _matrix_sync_lock:
         active_states = tuple(
             sorted(
                 (
-                    (entity_name, state.last_sync_time, state.loop_started_time)
+                    (entity_name, state.last_sync_time, state.loop_started_time, state.cache_write_started_time)
                     for entity_name, state in _matrix_sync_state.items()
                     if state.running
                 ),
@@ -133,11 +172,16 @@ def get_matrix_sync_health_snapshot(
             last_sync_time=None,
         )
 
-    active_entities = tuple(entity_name for entity_name, _, _ in active_states)
+    active_entities = tuple(entity_name for entity_name, _, _, _ in active_states)
     stale_entities = tuple(
         entity_name
-        for entity_name, last_sync_time, loop_started_time in active_states
-        if (
+        for entity_name, last_sync_time, loop_started_time, cache_write_started_time in active_states
+        if not _sync_cache_write_still_within_grace(
+            cache_write_started_time,
+            current_time=current_time,
+            cache_write_grace_seconds=cache_write_grace_seconds,
+        )
+        and (
             (last_sync_time is not None and (current_time - last_sync_time).total_seconds() > stale_after_seconds)
             or (
                 last_sync_time is None
@@ -146,11 +190,11 @@ def get_matrix_sync_health_snapshot(
             )
         )
     )
-    if any(last_sync_time is None for _, last_sync_time, _ in active_states):
+    if any(last_sync_time is None for _, last_sync_time, _, _ in active_states):
         oldest_last_sync_time = None
     else:
         oldest_last_sync_time = min(
-            last_sync_time for _, last_sync_time, _ in active_states if last_sync_time is not None
+            last_sync_time for _, last_sync_time, _, _ in active_states if last_sync_time is not None
         )
     return _MatrixSyncHealthSnapshot(
         active_entities=active_entities,

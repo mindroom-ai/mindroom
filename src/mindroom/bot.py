@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from functools import cached_property
 from typing import TYPE_CHECKING, Any, cast
@@ -39,13 +40,20 @@ from mindroom.hooks import (
 from mindroom.matrix.conversation_cache import MatrixConversationCache
 from mindroom.matrix.decrypt_failure import handle_decrypt_failure, raise_notice_floor
 from mindroom.matrix.event_info import EventInfo, origin_server_ts_from_event_source
-from mindroom.matrix.health import clear_matrix_sync_state, mark_matrix_sync_loop_started, mark_matrix_sync_success
+from mindroom.matrix.health import (
+    clear_matrix_sync_state,
+    mark_matrix_sync_cache_write_finished,
+    mark_matrix_sync_cache_write_started,
+    mark_matrix_sync_loop_started,
+    mark_matrix_sync_success,
+)
 from mindroom.matrix.media import MATRIX_MEDIA_EVENT_TYPES
 from mindroom.matrix.presence import build_agent_status_message, set_presence_status
 from mindroom.matrix.room_cleanup import cleanup_all_orphaned_bots
 from mindroom.matrix.rooms import leave_non_dm_rooms
 from mindroom.matrix.state import resolve_room_aliases
 from mindroom.matrix.sync_cache_trust import SyncCacheTrust
+from mindroom.matrix.sync_cache_write_progress import SyncCacheWriteProgress, SyncCacheWriteTracker
 from mindroom.matrix.sync_certification import (
     SyncCacheWriteResult,
     SyncCertificationDecision,
@@ -120,7 +128,7 @@ from .turn_policy import IngressHookRunner, TurnPolicy, TurnPolicyDeps
 from .turn_store import TurnStore, TurnStoreDeps
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Iterator
     from datetime import datetime
     from pathlib import Path
 
@@ -316,6 +324,7 @@ class AgentBot:
     _room_lifecycle: BotRoomLifecycle
     _local_departures_awaiting_sync: set[str]
     _sync_cache_trust: SyncCacheTrust
+    _sync_cache_write: SyncCacheWriteTracker
 
     def __init__(
         self,
@@ -361,6 +370,7 @@ class AgentBot:
             runtime=self._runtime_view,
             logger=self.logger,
         )
+        self._sync_cache_write = SyncCacheWriteTracker()
         self._deferred_overdue_task_drain_task = None
         self._startup_thread_prewarm_task = None
         self._call_manager: CallManager | None = None
@@ -1086,6 +1096,20 @@ class AgentBot:
             return None
         return time.monotonic() - self._last_sync_monotonic
 
+    def sync_cache_write_progress(self) -> SyncCacheWriteProgress | None:
+        """Return the durable cache write the current sync response is waiting on."""
+        return self._sync_cache_write.snapshot()
+
+    @contextmanager
+    def _track_sync_cache_write(self) -> Iterator[None]:
+        """Publish one in-flight durable cache write to the watchdog and to liveness."""
+        with self._sync_cache_write.track():
+            mark_matrix_sync_cache_write_started(self.agent_name)
+            try:
+                yield
+            finally:
+                mark_matrix_sync_cache_write_finished(self.agent_name)
+
     def _register_room_member_callback_after_initial_sync(self) -> None:
         """Start listening for live member joins after startup history is drained."""
         if self.agent_name != ROUTER_AGENT_NAME or self._room_member_callback_registered:
@@ -1189,7 +1213,10 @@ class AgentBot:
                 first_sync_response and self._sync_cache_trust.state is SyncTrustState.PENDING
             )
             try:
-                cache_result = await self._conversation_cache.cache_sync_timeline_for_certification(_response)
+                # The sync loop cannot report activity while this write runs, so
+                # publish it for the watchdog instead of looking stalled to it.
+                with self._track_sync_cache_write():
+                    cache_result = await self._conversation_cache.cache_sync_timeline_for_certification(_response)
             except asyncio.CancelledError as exc:
                 cache_result = SyncCacheWriteResult(complete=False, errors=(exc,))
                 self._certify_sync_response(
@@ -1198,6 +1225,10 @@ class AgentBot:
                     first_sync=first_sync_response,
                 )
                 raise
+            # Draining the write set is sync-loop progress, so the watchdog must time
+            # the callback tail from here rather than from the response that arrived
+            # before the write started.
+            self._last_sync_monotonic = time.monotonic()
             decision = self._certify_sync_response(
                 next_batch=_response.next_batch,
                 cache_result=cache_result,

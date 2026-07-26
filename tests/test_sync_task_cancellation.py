@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import time
-from contextlib import suppress
+from contextlib import AbstractContextManager, suppress
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -23,6 +24,19 @@ from mindroom.cancellation import (
 from mindroom.config.main import Config
 from mindroom.config.matrix import MatrixSyncConfig
 from mindroom.constants import RuntimePaths
+from mindroom.matrix.health import (
+    get_matrix_sync_health_snapshot,
+    mark_matrix_sync_cache_write_finished,
+    mark_matrix_sync_cache_write_started,
+    mark_matrix_sync_success,
+    reset_matrix_sync_health,
+)
+from mindroom.matrix.sync_cache_write_progress import (
+    MATRIX_SYNC_CACHE_WRITE_GRACE_SECONDS,
+    SyncCacheWriteProgress,
+    SyncCacheWriteTracker,
+    sync_cache_write_watchdog_verdict,
+)
 from mindroom.matrix.sync_loop import _sliding_sync_lists, _sliding_sync_room_subscriptions, sliding_own_membership_sets
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestration import runtime as runtime_helpers
@@ -37,6 +51,7 @@ from mindroom.orchestration.runtime import (
     is_sync_restart_cancel,
     log_cancelled_response,
     log_cancelled_response_source,
+    matrix_sync_cache_write_grace_seconds,
     matrix_sync_startup_timeout_seconds,
     stop_entities,
     sync_forever_with_restart,
@@ -87,12 +102,20 @@ class _FakeBot:
         self.prepare_for_sync_shutdown_calls = 0
         self.prepare_for_sync_shutdown_cancel_messages: list[str | None] = []
         self.runtime_paths = _fake_runtime_paths(**env_overrides)
+        self._sync_cache_write = SyncCacheWriteTracker()
 
     def mark_sync_loop_started(self) -> None:
         self._sync_shutting_down = False
 
     def reset_watchdog_clock(self) -> None:
         self._last_sync_monotonic = None
+
+    def track_sync_cache_write(self) -> AbstractContextManager[None]:
+        """Publish one in-flight durable cache write, exactly as the real callback does."""
+        return self._sync_cache_write.track()
+
+    def sync_cache_write_progress(self) -> SyncCacheWriteProgress | None:
+        return self._sync_cache_write.snapshot()
 
     def seconds_since_last_sync_activity(self) -> float | None:
         if self._last_sync_monotonic is None:
@@ -980,6 +1003,222 @@ async def test_sync_error_updates_watchdog_clock(monkeypatch: pytest.MonkeyPatch
 
     assert error_callback_fired
     assert bot.first_call_cancelled is False
+
+
+@pytest.mark.asyncio
+async def test_watchdog_defers_to_in_flight_sync_cache_write(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A sync response still writing its durable cache must not be cancelled as stalled.
+
+    The sync loop is sequential: no further sync response can arrive while the
+    response callback waits for its cache write, so the watchdog clock cannot be
+    refreshed by sync traffic. Cancelling here fails the write, fails cache
+    certification, and drops the durable sync token.
+    """
+    bot = _FakeBot()
+    cache_write_finished = asyncio.Event()
+
+    async def sync_with_slow_cache_write() -> None:
+        bot.sync_calls += 1
+        try:
+            # A sync response arrived and armed the watchdog clock.
+            bot._last_sync_monotonic = time.monotonic()
+            with bot.track_sync_cache_write():
+                # The durable cache write outlives the steady-state timeout.
+                await asyncio.sleep(0.2)
+            bot._last_sync_monotonic = time.monotonic()
+        except asyncio.CancelledError:
+            bot.first_call_cancelled = True
+            raise
+        cache_write_finished.set()
+        bot.running = False
+
+    bot.sync_forever = sync_with_slow_cache_write
+
+    monkeypatch.setattr(runtime_helpers, "MATRIX_SYNC_WATCHDOG_TIMEOUT_SECONDS", 0.03)
+    monkeypatch.setattr(runtime_helpers, "MATRIX_SYNC_STARTUP_GRACE_SECONDS", 0.5)
+    monkeypatch.setattr(runtime_helpers, "MATRIX_SYNC_CACHE_WRITE_GRACE_SECONDS", 5.0)
+    monkeypatch.setattr(runtime_helpers, "_MATRIX_SYNC_WATCHDOG_POLL_INTERVAL_SECONDS", 0.01)
+    monkeypatch.setattr(runtime_helpers, "retry_delay_seconds", lambda *_args, **_kwargs: 0.0)
+    monkeypatch.setattr(runtime_helpers, "_stalled_restart_jitter_seconds", lambda: 0.0)
+
+    await sync_forever_with_restart(bot, max_retries=1)
+
+    assert cache_write_finished.is_set()
+    assert bot.first_call_cancelled is False
+    assert bot.sync_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_watchdog_kills_sync_cache_write_past_grace(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A durable cache write that never finishes must still be caught by the watchdog."""
+    bot = _FakeBot()
+
+    async def sync_with_stuck_cache_write() -> None:
+        bot.sync_calls += 1
+        bot._last_sync_monotonic = time.monotonic()
+        try:
+            with bot.track_sync_cache_write():
+                await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            bot.first_call_cancelled = True
+            raise
+
+    bot.sync_forever = sync_with_stuck_cache_write
+
+    monkeypatch.setattr(runtime_helpers, "MATRIX_SYNC_WATCHDOG_TIMEOUT_SECONDS", 0.03)
+    monkeypatch.setattr(runtime_helpers, "MATRIX_SYNC_STARTUP_GRACE_SECONDS", 0.5)
+    monkeypatch.setattr(runtime_helpers, "MATRIX_SYNC_CACHE_WRITE_GRACE_SECONDS", 0.1)
+    monkeypatch.setattr(runtime_helpers, "_MATRIX_SYNC_WATCHDOG_POLL_INTERVAL_SECONDS", 0.01)
+    monkeypatch.setattr(runtime_helpers, "retry_delay_seconds", lambda *_args, **_kwargs: 0.0)
+    monkeypatch.setattr(runtime_helpers, "_stalled_restart_jitter_seconds", lambda: 0.0)
+
+    with capture_logs() as logs:
+        await sync_forever_with_restart(bot, max_retries=1)
+
+    assert bot.first_call_cancelled is True
+    stall_logs = [entry for entry in logs if entry["event"] == "matrix_sync_watchdog_stalled"]
+    assert [entry["restart_reason_category"] for entry in stall_logs] == ["cache_write_grace_exhausted"]
+
+
+@pytest.mark.asyncio
+async def test_watchdog_kills_stalled_sync_without_cache_write(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Without an in-flight cache write a stale sync clock still cancels immediately."""
+    bot = _FakeBot()
+
+    async def sync_that_goes_quiet() -> None:
+        bot.sync_calls += 1
+        bot._last_sync_monotonic = time.monotonic()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            bot.first_call_cancelled = True
+            raise
+
+    bot.sync_forever = sync_that_goes_quiet
+
+    monkeypatch.setattr(runtime_helpers, "MATRIX_SYNC_WATCHDOG_TIMEOUT_SECONDS", 0.03)
+    monkeypatch.setattr(runtime_helpers, "MATRIX_SYNC_STARTUP_GRACE_SECONDS", 0.5)
+    monkeypatch.setattr(runtime_helpers, "MATRIX_SYNC_CACHE_WRITE_GRACE_SECONDS", 30.0)
+    monkeypatch.setattr(runtime_helpers, "_MATRIX_SYNC_WATCHDOG_POLL_INTERVAL_SECONDS", 0.01)
+    monkeypatch.setattr(runtime_helpers, "retry_delay_seconds", lambda *_args, **_kwargs: 0.0)
+    monkeypatch.setattr(runtime_helpers, "_stalled_restart_jitter_seconds", lambda: 0.0)
+
+    with capture_logs() as logs:
+        await sync_forever_with_restart(bot, max_retries=1)
+
+    assert bot.first_call_cancelled is True
+    stall_logs = [entry for entry in logs if entry["event"] == "matrix_sync_watchdog_stalled"]
+    assert [entry["restart_reason_category"] for entry in stall_logs] == ["sync_activity_timeout"]
+
+
+def test_health_snapshot_waits_for_in_flight_sync_cache_write() -> None:
+    """Liveness must not condemn a bot that is draining its durable cache write.
+
+    The sync clock cannot advance during the write, so a liveness restart would
+    kill the write the sync watchdog deliberately waited for.
+    """
+    reset_matrix_sync_health()
+    write_started = datetime.now(UTC) - timedelta(seconds=400)
+    try:
+        mark_matrix_sync_success("agent_with_slow_write", write_started)
+        mark_matrix_sync_cache_write_started("agent_with_slow_write", write_started)
+
+        snapshot = get_matrix_sync_health_snapshot(cache_write_grace_seconds=600.0)
+
+        assert snapshot.stale_entities == ()
+        assert snapshot.is_healthy
+    finally:
+        reset_matrix_sync_health()
+
+
+def test_health_snapshot_reports_sync_cache_write_past_grace() -> None:
+    """A cache write beyond its grace window is a stall, and liveness must say so."""
+    reset_matrix_sync_health()
+    write_started = datetime.now(UTC) - timedelta(seconds=700)
+    try:
+        mark_matrix_sync_success("agent_with_wedged_write", write_started)
+        mark_matrix_sync_cache_write_started("agent_with_wedged_write", write_started)
+
+        snapshot = get_matrix_sync_health_snapshot(cache_write_grace_seconds=600.0)
+
+        assert snapshot.stale_entities == ("agent_with_wedged_write",)
+    finally:
+        reset_matrix_sync_health()
+
+
+def test_health_snapshot_stops_waiting_once_cache_write_finished() -> None:
+    """A finished cache write must not keep excusing an otherwise stale sync clock."""
+    reset_matrix_sync_health()
+    write_started = datetime.now(UTC) - timedelta(seconds=400)
+    try:
+        mark_matrix_sync_success("agent_after_write", write_started)
+        mark_matrix_sync_cache_write_started("agent_after_write", write_started)
+        mark_matrix_sync_cache_write_finished("agent_after_write")
+
+        snapshot = get_matrix_sync_health_snapshot(cache_write_grace_seconds=600.0)
+
+        assert snapshot.stale_entities == ("agent_after_write",)
+    finally:
+        reset_matrix_sync_health()
+
+
+def test_sync_cache_write_verdict_reports_no_write_in_flight() -> None:
+    """An idle tracker must not exempt a stale sync clock from cancellation."""
+    assert (
+        sync_cache_write_watchdog_verdict(None, now_monotonic=100.0, grace_seconds=10.0) == "no_cache_write_in_flight"
+    )
+
+
+def test_sync_cache_write_verdict_defers_within_grace() -> None:
+    """A cache write inside its grace window keeps the sync loop alive."""
+    progress = SyncCacheWriteProgress(started_monotonic=100.0)
+    verdict = sync_cache_write_watchdog_verdict(progress, now_monotonic=105.0, grace_seconds=10.0)
+    assert verdict == "cache_write_in_flight"
+
+
+def test_sync_cache_write_verdict_expires_at_grace() -> None:
+    """A cache write past its grace window stops protecting the sync loop."""
+    progress = SyncCacheWriteProgress(started_monotonic=100.0)
+    verdict = sync_cache_write_watchdog_verdict(progress, now_monotonic=111.0, grace_seconds=10.0)
+    assert verdict == "cache_write_grace_exhausted"
+
+
+def test_sync_cache_write_tracker_publishes_only_while_tracking() -> None:
+    """The tracker must expose an in-flight write only for the duration of the write."""
+    tracker = SyncCacheWriteTracker()
+    assert tracker.snapshot() is None
+    with tracker.track():
+        in_flight = tracker.snapshot()
+        assert in_flight is not None
+        assert in_flight.seconds_in_flight(in_flight.started_monotonic + 3.0) == 3.0
+    assert tracker.snapshot() is None
+
+
+def test_sync_cache_write_tracker_clears_after_failure() -> None:
+    """A failed cache write must not leave a permanent watchdog exemption behind."""
+    tracker = SyncCacheWriteTracker()
+    with suppress(RuntimeError), tracker.track():
+        msg = "cache write failed"
+        raise RuntimeError(msg)
+    assert tracker.snapshot() is None
+
+
+def test_sync_cache_write_grace_uses_runtime_paths() -> None:
+    """The cache-write grace must resolve via RuntimePaths, not os.environ."""
+    rp = _fake_runtime_paths(MINDROOM_MATRIX_SYNC_CACHE_WRITE_GRACE_SECONDS="42")
+    assert matrix_sync_cache_write_grace_seconds(rp) == 42.0
+
+
+def test_sync_cache_write_grace_default() -> None:
+    """Without the env var the shared default grace is used."""
+    assert matrix_sync_cache_write_grace_seconds(_fake_runtime_paths()) == MATRIX_SYNC_CACHE_WRITE_GRACE_SECONDS
+
+
+def test_sync_cache_write_grace_rejects_negative() -> None:
+    """A non-positive grace is a configuration error, not an infinite exemption."""
+    rp = _fake_runtime_paths(MINDROOM_MATRIX_SYNC_CACHE_WRITE_GRACE_SECONDS="-1")
+    with pytest.raises(ValueError, match="must be a positive number"):
+        matrix_sync_cache_write_grace_seconds(rp)
 
 
 @pytest.mark.asyncio

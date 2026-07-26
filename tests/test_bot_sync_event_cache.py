@@ -18,6 +18,8 @@ from mindroom.matrix.cache.event_cache import EventCacheBackendUnavailableError
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
 from mindroom.matrix.client import PermanentMatrixStartupError
+from mindroom.matrix.health import get_matrix_sync_health_snapshot
+from mindroom.matrix.sync_cache_write_progress import SyncCacheWriteProgress
 from mindroom.matrix.sync_certification import SyncCacheWriteResult, SyncCheckpoint, SyncTrustState
 from mindroom.matrix.sync_tokens import load_sync_checkpoint
 from mindroom.matrix.users import AgentMatrixUser
@@ -369,6 +371,98 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 await asyncio.gather(response_task, return_exceptions=True)
 
         assert _load_sync_token_value(bot.storage_path, bot.agent_name) == "s_after_delayed_cache"
+
+    @pytest.mark.asyncio
+    async def test_sync_response_publishes_its_durable_cache_write(self, bot: AgentBot) -> None:
+        """The watchdog must see the durable cache write that is holding the sync loop.
+
+        The sync loop cannot report activity while the response callback waits for
+        this write, so the write itself is the only evidence that the loop is busy
+        rather than wedged.
+        """
+        cache_started = asyncio.Event()
+        allow_cache_finish = asyncio.Event()
+        in_flight_during_write: object = "not sampled"
+
+        async def delayed_cache_result(_response: nio.SyncResponse) -> SyncCacheWriteResult:
+            cache_started.set()
+            await allow_cache_finish.wait()
+            return SyncCacheWriteResult(complete=True)
+
+        bot._first_sync_done = True
+        bot.client.next_batch = "s_watchdog_visible_write"
+        bot._coalescing_gate.drain_all = AsyncMock()
+        sync_response = self._sync_response({})
+
+        assert bot.sync_cache_write_progress() is None
+
+        with patch.object(
+            bot._conversation_cache,
+            "cache_sync_timeline_for_certification",
+            AsyncMock(side_effect=delayed_cache_result),
+        ):
+            response_task = asyncio.create_task(
+                self._run_sync_response_without_startup_side_effects(bot, sync_response),
+            )
+            try:
+                await asyncio.wait_for(cache_started.wait(), timeout=1.0)
+                in_flight_during_write = bot.sync_cache_write_progress()
+                clock_before_write_finished = bot._last_sync_monotonic
+                stale_during_write = get_matrix_sync_health_snapshot(
+                    stale_after_seconds=0.0,
+                    cache_write_grace_seconds=600.0,
+                ).stale_entities
+
+                allow_cache_finish.set()
+                await asyncio.wait_for(response_task, timeout=1.0)
+            finally:
+                allow_cache_finish.set()
+                await asyncio.gather(response_task, return_exceptions=True)
+
+        assert isinstance(in_flight_during_write, SyncCacheWriteProgress)
+        assert bot.sync_cache_write_progress() is None
+        # Liveness must not restart the runtime out from under the write either.
+        assert bot.agent_name not in stale_during_write
+        stale_after_write = get_matrix_sync_health_snapshot(
+            stale_after_seconds=0.0,
+            cache_write_grace_seconds=600.0,
+        ).stale_entities
+        assert bot.agent_name in stale_after_write
+        # Finishing the write is sync-loop progress, so the watchdog clock must not
+        # still be pointing at the response that arrived before the write started.
+        assert clock_before_write_finished is not None
+        assert bot._last_sync_monotonic is not None
+        assert bot._last_sync_monotonic > clock_before_write_finished
+
+    @pytest.mark.asyncio
+    async def test_cancelled_sync_cache_write_clears_watchdog_exemption(self, bot: AgentBot) -> None:
+        """A cancelled cache write must not leave the watchdog permanently disarmed."""
+        cache_started = asyncio.Event()
+
+        async def never_finishing_cache_result(_response: nio.SyncResponse) -> SyncCacheWriteResult:
+            cache_started.set()
+            await asyncio.Event().wait()
+            raise AssertionError
+
+        bot._first_sync_done = True
+        bot.client.next_batch = "s_cancelled_write"
+        bot._coalescing_gate.drain_all = AsyncMock()
+
+        with patch.object(
+            bot._conversation_cache,
+            "cache_sync_timeline_for_certification",
+            AsyncMock(side_effect=never_finishing_cache_result),
+        ):
+            response_task = asyncio.create_task(
+                self._run_sync_response_without_startup_side_effects(bot, self._sync_response({})),
+            )
+            await asyncio.wait_for(cache_started.wait(), timeout=1.0)
+            assert bot.sync_cache_write_progress() is not None
+
+            response_task.cancel(msg=SYNC_RESTART_CANCEL_MSG)
+            await asyncio.gather(response_task, return_exceptions=True)
+
+        assert bot.sync_cache_write_progress() is None
 
     @pytest.mark.asyncio
     async def test_restored_first_sync_success_updates_checkpoint(self, bot: AgentBot) -> None:
