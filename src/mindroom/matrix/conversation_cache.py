@@ -54,6 +54,7 @@ from mindroom.matrix.media import (
     is_encrypted_media_event_source,
     parse_matrix_media_event_source,
     parse_room_message_event_source,
+    valid_room_message_event_source,
     valid_room_message_replacement,
 )
 from mindroom.matrix.membership_fence import UNCERTIFIED_MEMBERSHIP_EPOCH
@@ -669,7 +670,9 @@ class MatrixConversationCache(ConversationCacheProtocol):
         if not isinstance(response, nio.RoomGetEventResponse):
             return None
         event_source = response.event.source
-        if not event_source_is_timeline_in_room(event_source, room_id):
+        if not event_source_is_timeline_in_room(event_source, room_id) or (
+            event_source.get("type") == "m.room.message" and not valid_room_message_event_source(event_source)
+        ):
             return None
         return EventInfo.from_event(event_source)
 

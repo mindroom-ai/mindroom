@@ -1538,6 +1538,35 @@ class TestMatrixConversationCacheThreadReads:
         assert room_threaded_events == {}
         assert room_plain_events["!test:localhost"] == [source]
 
+    def test_collect_sync_timeline_cache_updates_keeps_malformed_message_room_level(self) -> None:
+        """Malformed room messages must not enter threaded mutation handling."""
+        source = {
+            "content": {
+                "body": "missing msgtype",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread:localhost"},
+            },
+            "event_id": "$malformed:localhost",
+            "sender": "@user:localhost",
+            "origin_server_ts": 1234567890,
+            "room_id": "!test:localhost",
+            "type": "m.room.message",
+        }
+        event = nio.RoomGetEventResponse.from_dict(source).event
+        assert isinstance(event, nio.BadEvent)
+        room_threaded_events: dict[str, list[dict[str, object]]] = {}
+        room_plain_events: dict[str, list[dict[str, object]]] = {}
+
+        _collect_sync_timeline_cache_updates(
+            "!test:localhost",
+            event,
+            room_threaded_events=room_threaded_events,
+            room_plain_events=room_plain_events,
+            room_redactions={},
+        )
+
+        assert room_threaded_events == {}
+        assert room_plain_events["!test:localhost"] == [source]
+
     @pytest.mark.asyncio
     async def test_sync_resolution_context_excludes_invalid_relation_sources(self) -> None:
         """Page-local relation resolution must retain invalid points without resolving them as threads."""
@@ -1560,6 +1589,17 @@ class TestMatrixConversationCacheThreadReads:
                 "type": "m.room.message",
                 "content": {"m.relates_to": {"rel_type": "m.thread", "event_id": "$thread"}},
             },
+            {
+                "event_id": "$malformed",
+                "room_id": "!test:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1,
+                "type": "m.room.message",
+                "content": {
+                    "body": "missing msgtype",
+                    "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread"},
+                },
+            },
         ]
 
         context = await resolver.build_sync_mutation_resolution_context(
@@ -1568,7 +1608,7 @@ class TestMatrixConversationCacheThreadReads:
             threaded_events=[],
         )
 
-        assert set(context.page_event_infos) == {"$state", "$wrong-room"}
+        assert set(context.page_event_infos) == {"$state", "$wrong-room", "$malformed"}
         assert all(not event_info.has_relations for event_info in context.page_event_infos.values())
         assert context.page_resolved_thread_ids == {}
         for event_id in context.page_event_infos:
@@ -1580,17 +1620,76 @@ class TestMatrixConversationCacheThreadReads:
             )
             assert impact == MutationThreadImpact.room_level()
 
+    @pytest.mark.asyncio
+    async def test_point_mutation_ignores_malformed_room_message_ancestor_relations(self) -> None:
+        """A malformed point-read ancestor must not steer a valid reply into a forged thread."""
+        room_id = "!test:localhost"
+        malformed_source = {
+            "event_id": "$malformed",
+            "room_id": room_id,
+            "sender": "@user:localhost",
+            "origin_server_ts": 1,
+            "type": "m.room.message",
+            "content": {
+                "body": "missing msgtype",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": "$victim"},
+            },
+        }
+        response = nio.RoomGetEventResponse.from_dict(malformed_source)
+        assert isinstance(response.event, nio.BadEvent)
+        event_cache = _runtime_event_cache()
+        event_cache.get_thread_id_for_event = AsyncMock(return_value=None)
+        runtime = _conversation_runtime(client=_make_client_mock(), event_cache=event_cache)
+        access = MatrixConversationCache(logger=MagicMock(), runtime=runtime)
+        resolver = thread_bookkeeping.ThreadMutationResolver(
+            logger_getter=MagicMock,
+            runtime=runtime,
+            fetch_event_info_for_thread_resolution=access._event_info_for_thread_resolution,
+        )
+        reply_info = EventInfo.from_event(
+            {
+                "type": "m.room.message",
+                "content": {
+                    "body": "reply",
+                    "msgtype": "m.text",
+                    "m.relates_to": {"m.in_reply_to": {"event_id": "$malformed"}},
+                },
+            },
+        )
+
+        with patch(
+            "mindroom.matrix.conversation_cache._cached_room_get_event",
+            new=AsyncMock(return_value=(response, malformed_source)),
+        ):
+            impact = await resolver.resolve_thread_impact_for_mutation(
+                room_id,
+                event_info=reply_info,
+                event_id="$reply",
+                context="live",
+            )
+
+        assert impact == MutationThreadImpact.unknown()
+
     @pytest.mark.parametrize(
         "invalid_scope",
-        [{"state_key": ""}, {"room_id": "!other:localhost"}],
-        ids=["state", "wrong-room"],
+        [
+            {"state_key": ""},
+            {"room_id": "!other:localhost"},
+            {
+                "content": {
+                    "body": "missing msgtype",
+                    "m.relates_to": {"rel_type": "m.thread", "event_id": "$rich-reply"},
+                },
+            },
+        ],
+        ids=["state", "wrong-room", "malformed"],
     )
     @pytest.mark.asyncio
     async def test_cached_invalid_child_cannot_promote_rich_reply_to_thread_root(
         self,
-        invalid_scope: dict[str, str],
+        invalid_scope: dict[str, object],
     ) -> None:
-        """Legacy state and wrong-room rows must not prove a cached rich reply is a root."""
+        """Legacy invalid rows must not prove a cached rich reply is a root."""
         room_id = "!test:localhost"
         rich_reply_id = "$rich-reply"
         parent_thread_id = "$parent-thread"

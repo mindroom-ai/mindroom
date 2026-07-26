@@ -60,6 +60,7 @@ from mindroom.matrix.event_info import (
     event_source_supports_thread_relations,
     event_type_supports_thread_relations,
 )
+from mindroom.matrix.media import valid_room_message_event_source
 from mindroom.matrix.thread_membership import (
     ThreadMembershipAccess,
     ThreadMembershipLookupError,
@@ -89,6 +90,13 @@ if TYPE_CHECKING:
 
 
 MutationWriteContext = Literal["outbound", "live", "sync"]
+
+
+def _event_source_supports_valid_thread_relations(event_source: Mapping[str, object], room_id: str) -> bool:
+    """Return whether one valid room timeline event may supply mutation relations."""
+    return event_source_supports_thread_relations(event_source, room_id) and (
+        event_source.get("type") != "m.room.message" or valid_room_message_event_source(event_source)
+    )
 
 
 def _redaction_can_affect_thread_cache(event_info: EventInfo) -> bool:
@@ -247,7 +255,8 @@ class ThreadMutationResolver:
             event_info = EventInfo.from_event(event_source)
             page_event_sources[event_id] = event_source
             supports_relations = event_type_supports_thread_relations(event_info.event_type)
-            if supports_relations and not event_source_supports_thread_relations(event_source, room_id):
+            valid_relation_source = _event_source_supports_valid_thread_relations(event_source, room_id)
+            if supports_relations and not valid_relation_source:
                 # A state or wrong-room event claiming a message type must never contribute
                 # relations, but its ID still has to occupy the page so later resolution cannot
                 # fall through to an authoritative fetch and trust it. The relation-free
@@ -482,7 +491,7 @@ class ThreadMutationResolver:
             )
         else:
             if any(
-                not event_source_supports_thread_relations(
+                not _event_source_supports_valid_thread_relations(
                     cast("dict[str, object]", event_source),
                     room_id,
                 )

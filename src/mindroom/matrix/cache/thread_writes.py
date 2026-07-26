@@ -55,6 +55,7 @@ from mindroom.matrix.event_info import (
     event_source_supports_thread_relations,
     is_thread_affecting_relation,
 )
+from mindroom.matrix.media import valid_room_message_event_source
 from mindroom.matrix.sync_certification import SyncCacheWriteResult
 from mindroom.matrix.thread_bookkeeping import (
     MutationResolutionContext,
@@ -111,7 +112,10 @@ def _collect_sync_timeline_cache_updates(
 
     event_info = EventInfo.from_event(event_source)
     event_type = event_source.get("type")
-    if event_source_supports_thread_relations(event_source, room_id) and is_thread_affecting_relation(
+    supports_relations = event_source_supports_thread_relations(event_source, room_id) and (
+        event_type != "m.room.message" or valid_room_message_event_source(event_source)
+    )
+    if supports_relations and is_thread_affecting_relation(
         event_info,
         event_type=event_type if isinstance(event_type, str) else None,
     ):
