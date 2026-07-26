@@ -426,13 +426,12 @@ async def resolve_related_event_thread_membership(  # noqa: C901
             resolution = ThreadResolution.indeterminate(exc, candidate_thread_root_id=current_event_id)
             break
 
-        if indexed_thread_id is not None and not related_event_info.is_edit:
-            resolution = ThreadResolution.threaded(indexed_thread_id)
-            break
-
         if next_target is not None:
             current_event_id = next_target
             continue
+        if indexed_thread_id is not None and not related_event_info.is_edit:
+            resolution = ThreadResolution.threaded(indexed_thread_id)
+            break
         break
 
     return resolution

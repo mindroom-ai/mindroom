@@ -53,6 +53,13 @@ from mindroom.matrix.thread_diagnostics import (
     THREAD_HISTORY_SOURCE_STALE_CACHE,
     is_thread_history_degraded,
 )
+from mindroom.matrix.thread_membership import (
+    ThreadMembershipAccess,
+    ThreadResolutionState,
+    ThreadRootProof,
+    conversation_relation_thread_membership_access,
+    resolve_event_thread_membership,
+)
 from mindroom.timing import DispatchPipelineTiming
 from tests.conftest import (
     agent_response_should_respond,
@@ -2338,6 +2345,125 @@ async def test_promoting_indexed_rich_reply_root_invalidates_old_parent_snapshot
     assert await event_cache.get_thread_id_for_event(room_id, rich_reply_id) == rich_reply_id
     parent_state = await event_cache.get_thread_cache_state(room_id, parent_id)
     assert thread_cache_rejection_reason(parent_state) == "thread_invalidated_after_validation"
+
+
+@pytest.mark.asyncio
+async def test_edit_follows_promoted_ancestor_before_stale_descendant_index(
+    event_cache: ConversationEventCache,
+) -> None:
+    """Current reply ancestry must outrank a stale inherited membership index."""
+    room_id = "!room:localhost"
+    old_root_id = "$old-root:localhost"
+    promoted_id = "$promoted:localhost"
+    descendant_id = "$descendant:localhost"
+    edit_id = "$edit:localhost"
+
+    def plain_reply(event_id: str, target_id: str, timestamp: int) -> dict[str, object]:
+        source = _clear_payload(event_id, origin_server_ts=timestamp)
+        source["content"]["m.relates_to"] = {"m.in_reply_to": {"event_id": target_id}}
+        return source
+
+    await _replace_thread(
+        event_cache,
+        room_id,
+        old_root_id,
+        [
+            _clear_payload(old_root_id, body="Old root", origin_server_ts=1000),
+            plain_reply(promoted_id, old_root_id, 2000),
+            plain_reply(descendant_id, promoted_id, 3000),
+        ],
+    )
+    await event_cache.store_event(
+        "$promoted-child:localhost",
+        room_id,
+        _clear_payload(
+            "$promoted-child:localhost",
+            thread_root_id=promoted_id,
+            origin_server_ts=4000,
+        ),
+    )
+    edit_source = _clear_payload(
+        edit_id,
+        body="Edited descendant",
+        edit_of=descendant_id,
+        origin_server_ts=5000,
+    )
+
+    assert await event_cache.get_thread_id_for_event(room_id, promoted_id) == promoted_id
+    assert await event_cache.get_thread_id_for_event(room_id, descendant_id) == old_root_id
+
+    async def fetch_event_source(fetch_room_id: str, event_id: str) -> dict[str, object] | None:
+        assert fetch_room_id == room_id
+        return await event_cache.get_event(fetch_room_id, event_id)
+
+    async def fetch_event_info(fetch_room_id: str, event_id: str) -> EventInfo | None:
+        source = await fetch_event_source(fetch_room_id, event_id)
+        return None if source is None else EventInfo.from_event(source)
+
+    async def prove_thread_root(_room_id: str, event_id: str) -> ThreadRootProof:
+        return ThreadRootProof.proven() if event_id == promoted_id else ThreadRootProof.not_a_thread_root()
+
+    resolution = await resolve_event_thread_membership(
+        room_id,
+        EventInfo.from_event(edit_source),
+        event_id=edit_id,
+        event_source=edit_source,
+        access=conversation_relation_thread_membership_access(
+            ThreadMembershipAccess(
+                lookup_thread_id=event_cache.get_thread_id_for_event,
+                fetch_event_info=fetch_event_info,
+                prove_thread_root=prove_thread_root,
+                fetch_event_source=fetch_event_source,
+            ),
+        ),
+    )
+
+    assert resolution.state is ThreadResolutionState.THREADED
+    assert resolution.thread_id == promoted_id
+
+
+@pytest.mark.asyncio
+async def test_conflicting_duplicate_replacement_identity_is_rejected_by_cache(
+    event_cache: ConversationEventCache,
+) -> None:
+    """SQLite and PostgreSQL reject conflicting payloads sharing one edit event ID."""
+    room_id = "!room:localhost"
+    original_id = "$original:localhost"
+    edit_id = "$same-edit:localhost"
+
+    def edit(body: str) -> dict[str, object]:
+        return {
+            "event_id": edit_id,
+            "sender": "@user:localhost",
+            "origin_server_ts": 2000,
+            "type": "m.room.message",
+            "content": {
+                "body": f"* {body}",
+                "msgtype": "m.text",
+                "m.new_content": {"body": body, "msgtype": "m.text"},
+                "m.relates_to": {"rel_type": "m.replace", "event_id": original_id},
+            },
+        }
+
+    bundled = edit("Bundled")
+    explicit = edit("Explicit")
+    original = _clear_payload(original_id, body="Original")
+    original["unsigned"] = {"m.relations": {"m.replace": bundled}}
+    await event_cache.store_events_batch(
+        [
+            (original_id, room_id, original),
+            (edit_id, room_id, explicit),
+        ],
+    )
+
+    assert (
+        await event_cache.get_latest_edit(
+            room_id,
+            original,
+            validator=valid_room_message_replacement,
+        )
+        is None
+    )
 
 
 @pytest.mark.asyncio

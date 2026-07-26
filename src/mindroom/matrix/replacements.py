@@ -41,6 +41,38 @@ def replacement_content(original: Mapping[str, object], new: Mapping[str, object
     return content
 
 
+def _deduplicated_replacement_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Deduplicate one immutable event identity and reject conflicting representations."""
+    candidates_by_event_id: dict[str, dict[str, Any]] = {}
+    conflicting_event_ids: set[str] = set()
+    identity_keys = ("sender", "origin_server_ts", "type", "content")
+
+    for candidate in candidates:
+        event_id = candidate.get("event_id")
+        if not isinstance(event_id, str) or not event_id:
+            continue
+        existing = candidates_by_event_id.get(event_id)
+        if existing is None:
+            candidates_by_event_id[event_id] = candidate
+            continue
+        same_timeline_identity = all(existing.get(key) == candidate.get(key) for key in identity_keys) and (
+            "state_key" in existing,
+            existing.get("state_key"),
+        ) == ("state_key" in candidate, candidate.get("state_key"))
+        existing_room = existing.get("room_id")
+        candidate_room = candidate.get("room_id")
+        rooms_conflict = "room_id" in existing and "room_id" in candidate and existing_room != candidate_room
+        if not same_timeline_identity or rooms_conflict:
+            conflicting_event_ids.add(event_id)
+            continue
+        if "room_id" in candidate and "room_id" not in existing:
+            candidates_by_event_id[event_id] = candidate
+
+    return [
+        candidate for event_id, candidate in candidates_by_event_id.items() if event_id not in conflicting_event_ids
+    ]
+
+
 def _ordered_valid_replacements(
     original: Mapping[str, Any],
     candidates: list[dict[str, Any]],
@@ -76,7 +108,11 @@ def _ordered_valid_replacements(
             and validator(candidate)
         )
 
-    return sorted(filter(valid, candidates), key=itemgetter("origin_server_ts", "event_id"), reverse=True)
+    return sorted(
+        filter(valid, _deduplicated_replacement_candidates(candidates)),
+        key=itemgetter("origin_server_ts", "event_id"),
+        reverse=True,
+    )
 
 
 def ordered_replacements(

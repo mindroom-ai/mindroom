@@ -115,6 +115,68 @@ def build_threaded_edit_content(*args: object, **kwargs: object) -> dict[str, ob
 class TestThreadHistory:
     """Test thread history fetching functionality."""
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("explicit_body", "expected_body"),
+        [("Bundled", "Bundled"), ("Explicit", "Original")],
+        ids=("identical", "conflicting"),
+    )
+    async def test_duplicate_replacement_identity_is_consistent(
+        self,
+        tmp_path: Path,
+        explicit_body: str,
+        expected_body: str,
+    ) -> None:
+        """Duplicate event IDs deduplicate identical payloads and reject conflicts."""
+        room_id = "!room:localhost"
+        root_id = "$root:localhost"
+        edit_id = "$same-edit:localhost"
+        sender = "@alice:localhost"
+
+        def edit(body: str) -> dict[str, object]:
+            return {
+                "event_id": edit_id,
+                "room_id": room_id,
+                "sender": sender,
+                "origin_server_ts": 2000,
+                "type": "m.room.message",
+                "content": {
+                    "body": f"* {body}",
+                    "msgtype": "m.text",
+                    "m.new_content": {"body": body, "msgtype": "m.text"},
+                    "m.relates_to": {"rel_type": "m.replace", "event_id": root_id},
+                },
+            }
+
+        bundled = edit("Bundled")
+        explicit = edit(explicit_body)
+        root = {
+            "event_id": root_id,
+            "room_id": room_id,
+            "sender": sender,
+            "origin_server_ts": 1000,
+            "type": "m.room.message",
+            "content": {"body": "Original", "msgtype": "m.text"},
+            "unsigned": {"m.relations": {"m.replace": bundled}},
+        }
+        cache = SqliteEventCache(tmp_path / "duplicate-edit.db")
+        await cache.initialize()
+        try:
+            resolution = await _resolve_thread_history_from_event_sources_timed(
+                AsyncMock(),
+                room_id=room_id,
+                thread_id=root_id,
+                event_sources=[root, explicit],
+                hydrate_sidecars=False,
+                event_cache=cache,
+            )
+        finally:
+            await cache.close()
+
+        assert [(message.event_id, message.body) for message in resolution.messages] == [
+            (root_id, expected_body),
+        ]
+
     def test_retained_delta_does_not_resurrect_redacted_fetched_event(self) -> None:
         """Authoritative fetched state must win when the retained journal has the same event ID."""
         fetched_sources = [
