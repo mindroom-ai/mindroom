@@ -304,19 +304,19 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 live_event,
                 event_info=EventInfo.from_event(live_event.source),
             )
-            await fetch_started.wait()
+            await asyncio.wait_for(fetch_started.wait(), timeout=1.0)
             concurrent_reads = [
                 asyncio.create_task(access.get_dispatch_thread_history(room_id, thread_id)) for _index in range(10)
             ]
             release_fetch.set()
             histories = await asyncio.gather(*concurrent_reads)
-            await wait_for_background_tasks(owner=coordinator.background_task_owner)
+            await wait_for_background_tasks(timeout=1.0, owner=coordinator.background_task_owner)
             final_history = await access.get_dispatch_thread_history(room_id, thread_id)
             cached_rows = await event_cache.get_thread_events(room_id, thread_id)
             cache_state = await event_cache.get_thread_cache_state(room_id, thread_id)
         finally:
             release_fetch.set()
-            await wait_for_background_tasks(owner=coordinator.background_task_owner)
+            await wait_for_background_tasks(timeout=1.0, owner=coordinator.background_task_owner)
             await event_cache.close()
 
         expected_event_ids = [thread_id, "$live:localhost"]
@@ -395,7 +395,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         append_task: asyncio.Task[None] | None = None
 
         try:
-            await fetch_started.wait()
+            await asyncio.wait_for(fetch_started.wait(), timeout=1.0)
             append_task = asyncio.create_task(
                 access.append_live_event(
                     room_id,
@@ -403,11 +403,11 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                     event_info=EventInfo.from_event(live_event.source),
                 ),
             )
-            await delta_retained.wait()
+            await asyncio.wait_for(delta_retained.wait(), timeout=1.0)
             release_fetch.set()
             history = await read_task
             await append_task
-            await wait_for_background_tasks(owner=coordinator.background_task_owner)
+            await wait_for_background_tasks(timeout=1.0, owner=coordinator.background_task_owner)
             cached_rows = await event_cache.get_thread_events(room_id, thread_id)
         finally:
             release_fetch.set()
@@ -416,7 +416,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 *(task for task in [append_task] if task is not None),
                 return_exceptions=True,
             )
-            await wait_for_background_tasks(owner=coordinator.background_task_owner)
+            await wait_for_background_tasks(timeout=1.0, owner=coordinator.background_task_owner)
             await event_cache.close()
 
         expected_event_ids = [thread_id, "$live:localhost"]
@@ -987,11 +987,11 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             prewarm_task = asyncio.create_task(
                 bot._conversation_cache._bulk_refresh_startup_threads(room_id, [thread_id]),
             )
-            await prewarm_started.wait()
+            await asyncio.wait_for(prewarm_started.wait(), timeout=1.0)
             dispatch_task = asyncio.create_task(
                 bot._conversation_cache.get_dispatch_thread_history(room_id, thread_id),
             )
-            await live_scan_started.wait()
+            await asyncio.wait_for(live_scan_started.wait(), timeout=1.0)
             history = await asyncio.wait_for(dispatch_task, timeout=1.0)
             assert prewarm_task.done() is False
             release_prewarm.set()
