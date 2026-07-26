@@ -1761,18 +1761,19 @@ async def test_postgres_initialization_does_not_deadlock_with_namespace_operatio
     operation_task: asyncio.Task[None] | None = None
     initialization_task: asyncio.Task[None] | None = None
     try:
-        await seeded.initialize()
-        await seeded.close()
-        await operation_cache.initialize()
+        async with asyncio.timeout(15):
+            await seeded.initialize()
+            await seeded.close()
+            await operation_cache.initialize()
 
-        operation_task = asyncio.create_task(run_namespace_operation())
-        await operation_holds_namespace.wait()
-        initialization_task = asyncio.create_task(initializing_cache.initialize())
-        await wait_for_initializer_namespace_lock()
-        initializer_waits_for_namespace.set()
+            operation_task = asyncio.create_task(run_namespace_operation())
+            await operation_holds_namespace.wait()
+            initialization_task = asyncio.create_task(initializing_cache.initialize())
+            await wait_for_initializer_namespace_lock()
+            initializer_waits_for_namespace.set()
 
-        await operation_task
-        await initialization_task
+            await operation_task
+            await initialization_task
     finally:
         initializer_waits_for_namespace.set()
         tasks = tuple(task for task in (operation_task, initialization_task) if task is not None)
