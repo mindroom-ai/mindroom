@@ -1715,6 +1715,34 @@ class _ExpectedSaturationReply:
     history_fingerprint: str
 
 
+class _ObservedEvents:
+    """Retain first-seen events and assign one canonical observation sequence."""
+
+    def __init__(self) -> None:
+        self.events: dict[str, dict[str, Any]] = {}
+        self.sequence_by_event_id: dict[str, int] = {}
+
+    def ingest(self, events: Collection[object]) -> tuple[tuple[dict[str, Any], int], ...]:
+        """Store unseen events in canonical oldest-to-newest input order."""
+        accepted: list[tuple[dict[str, Any], int]] = []
+        for raw_event in events:
+            if not isinstance(raw_event, dict):
+                continue
+            event = cast("dict[str, Any]", raw_event)
+            event_id = event.get("event_id")
+            if not isinstance(event_id, str) or event_id in self.sequence_by_event_id:
+                continue
+            sequence = len(self.sequence_by_event_id) + 1
+            self.events[event_id] = event
+            self.sequence_by_event_id[event_id] = sequence
+            accepted.append((event, sequence))
+        return tuple(accepted)
+
+    def sequence(self, event_id: str) -> int:
+        """Return one accepted event's canonical observation sequence."""
+        return self.sequence_by_event_id[event_id]
+
+
 class LiveMatrixClient:
     """Minimal real Matrix client used by the live fuzzer."""
 
@@ -1733,7 +1761,8 @@ class LiveMatrixClient:
         self.http = httpx.AsyncClient(timeout=30)
         self.access_token = ""
         self.next_batch: str | None = None
-        self.seen_events: dict[str, dict[str, Any]] = {}
+        self._observed_events = _ObservedEvents()
+        self.seen_events = self._observed_events.events
         self.pagination_page_count = 0
 
     async def close(self) -> None:
@@ -1856,13 +1885,7 @@ class LiveMatrixClient:
 
     def _ingest_events(self, events: Collection[object]) -> None:
         """Retain event-id-addressable timeline events."""
-        for raw_event in events:
-            if not isinstance(raw_event, dict):
-                continue
-            event = cast("dict[str, Any]", raw_event)
-            event_id = event.get("event_id")
-            if isinstance(event_id, str):
-                self.seen_events[event_id] = event
+        self._observed_events.ingest(events)
 
     async def _hydrate_limited_gap(
         self,
@@ -1874,19 +1897,35 @@ class LiveMatrixClient:
         if not isinstance(token, str):
             msg = "limited Matrix timeline omitted prev_batch"
             raise TypeError(msg)
+        events, page_count = await self._messages_between_oldest_first(
+            token,
+            to_token=since,
+        )
+        self.pagination_page_count += page_count
+        self._ingest_events(events)
+
+    async def _messages_between_oldest_first(
+        self,
+        from_token: str,
+        *,
+        to_token: str,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Buffer one backward range and normalize it globally oldest-to-newest."""
+        pages: list[list[dict[str, Any]]] = []
+        token = from_token
         seen_tokens: set[str] = set()
         for _ in range(20):
             if token in seen_tokens:
                 msg = f"bounded Matrix pagination repeated token {token!r}"
                 raise AssertionError(msg)
             seen_tokens.add(token)
-            events, next_token = await self.messages_before(token, to_token=since)
-            self.pagination_page_count += 1
-            self._ingest_events(events)
+            events, next_token = await self.messages_before(token, to_token=to_token)
+            pages.append(events)
             if next_token is None:
-                return
+                oldest_first = [event for page in reversed(pages) for event in reversed(page)]
+                return oldest_first, len(pages)
             token = next_token
-        msg = "bounded Matrix client pagination exceeded 20 pages"
+        msg = "bounded Matrix pagination exceeded 20 pages"
         raise AssertionError(msg)
 
     async def messages_before(
@@ -1963,18 +2002,17 @@ class ExactReplyOracle:
         self.expected_thread_roots: dict[str, str] = {}
         self.expected_model_identity: dict[str, tuple[str, str]] = {}
         self.response_ids: dict[str, set[str]] = defaultdict(set)
-        self.response_event_order: dict[str, tuple[int, str]] = {}
+        self.response_event_order: dict[str, tuple[int, int]] = {}
         self.wrong_thread_roots: dict[str, set[tuple[str, str | None]]] = defaultdict(set)
         self.malformed_response_ids: set[str] = set()
         self.response_event_by_ref: dict[str, str] = {}
         self.latest_reply_bodies: dict[str, tuple[int, int, str]] = {}
-        self._reply_body_write_sequence = 0
         self.reply_events_with_edits: set[str] = set()
         self.response_edit_targets: dict[str, str] = {}
         self.response_edit_bodies: dict[str, str] = {}
         self.router_edit_targets: dict[str, str] = {}
         self.unexpected_responder_ids: dict[str, str] = {}
-        self.seen_event_ids: set[str] = set()
+        self._observed_events = _ObservedEvents()
         self.limited_timeline_count = 0
         self.pagination_page_count = 0
         self.gap_audit_page_count = 0
@@ -2099,7 +2137,12 @@ class ExactReplyOracle:
             return None
         return _assistant_identity(*expected_identity)
 
-    def response_order(self, source_event_id: str) -> tuple[int, str] | None:
+    @property
+    def seen_event_ids(self) -> set[str]:
+        """Return event IDs accepted into the canonical observation sequence."""
+        return set(self._observed_events.sequence_by_event_id)
+
+    def response_order(self, source_event_id: str) -> tuple[int, int] | None:
         """Return the deterministic Matrix order of one canonical response."""
         response_event_ids = self.response_ids[source_event_id]
         if len(response_event_ids) != 1:
@@ -2157,41 +2200,29 @@ class ExactReplyOracle:
             for event in timeline_events
             if isinstance(event, dict) and isinstance((event_id := event.get("event_id")), str)
         }
-        token = prev_batch
-        seen_tokens: set[str] = set()
-        for _ in range(20):
-            if token in seen_tokens:
-                msg = f"bounded Matrix pagination repeated token {token!r}"
-                raise AssertionError(msg)
-            seen_tokens.add(token)
-            events, next_token = await self.client.messages_before(
-                token,
-                to_token=since,
-            )
-            self.pagination_page_count += 1
-            if self._gap_audit_sources is not None and not self._gap_audit_completed:
-                self.gap_audit_page_count += 1
-            observed_ids.update(event_id for event in events if isinstance((event_id := event.get("event_id")), str))
-            for event in reversed(events):
-                self._ingest_event(event)
-            if next_token is None:
-                break
-            token = next_token
-        else:
-            msg = "bounded Matrix oracle pagination exceeded 20 pages"
-            raise AssertionError(msg)
+        events, page_count = await self.client._messages_between_oldest_first(
+            prev_batch,
+            to_token=since,
+        )
+        self.pagination_page_count += page_count
+        if self._gap_audit_sources is not None and not self._gap_audit_completed:
+            self.gap_audit_page_count += page_count
+        observed_ids.update(event_id for event in events if isinstance((event_id := event.get("event_id")), str))
+        for event in events:
+            self._ingest_event(event)
         if self._gap_audit_sources is not None and not self._gap_audit_completed:
             self.gap_audit_missing_sources.update(self._gap_audit_sources - observed_ids)
             self._gap_audit_completed = True
 
     def _ingest_event(self, event: Mapping[str, Any]) -> None:
-        event_id = event.get("event_id")
-        if not isinstance(event_id, str) or event_id in self.seen_event_ids:
+        accepted = self._observed_events.ingest((dict(event),))
+        if not accepted:
             return
-        self.seen_event_ids.add(event_id)
-        if event.get("type") != "m.room.message":
+        accepted_event, _sequence = accepted[0]
+        event_id = cast("str", accepted_event["event_id"])
+        if accepted_event.get("type") != "m.room.message":
             return
-        self._ingest_message_event(event_id, event)
+        self._ingest_message_event(event_id, accepted_event)
 
     def _ingest_message_event(
         self,
@@ -2243,7 +2274,7 @@ class ExactReplyOracle:
         raw_timestamp = event.get("origin_server_ts")
         self.response_event_order[event_id] = (
             raw_timestamp if isinstance(raw_timestamp, int) else 0,
-            event_id,
+            self._observed_events.sequence(event_id),
         )
         logical_ref = self.expected_sources.get(source_event_id)
         if logical_ref is not None:
@@ -2312,8 +2343,7 @@ class ExactReplyOracle:
             return
         raw_timestamp = event.get("origin_server_ts")
         timestamp = raw_timestamp if isinstance(raw_timestamp, int) else 0
-        self._reply_body_write_sequence += 1
-        candidate = (timestamp, self._reply_body_write_sequence, body)
+        candidate = (timestamp, self._observed_events.sequence(event_id), body)
         current = self.latest_reply_bodies.get(response_event_id)
         if is_edit:
             if response_event_id not in self.reply_events_with_edits or current is None or candidate[:2] >= current[:2]:
@@ -2543,7 +2573,7 @@ class LiveFuzzRunner:
 
     def _capture_completed_assistants(self, lane: tuple[int, int]) -> None:
         """Append newly completed assistants in deterministic Matrix order."""
-        pending: list[tuple[tuple[int, str], str, str]] = []
+        pending: list[tuple[tuple[int, int], str, str]] = []
         for source_ref, source_lane in self._source_lanes.items():
             if source_lane != lane:
                 continue
@@ -3416,10 +3446,11 @@ class LiveFuzzRunner:
         """Return the newest original or edit body for one response."""
         original_body = ""
         edit_candidates: list[tuple[int, int, str]] = []
-        for write_sequence, event in enumerate(events):
-            event_id = event.get("event_id")
+        observed_events = _ObservedEvents()
+        observed_events.ingest(events)
+        for event_id, event in observed_events.events.items():
             content = event.get("content")
-            if not isinstance(event_id, str) or not isinstance(content, dict):
+            if not isinstance(content, dict):
                 continue
             relation = content.get("m.relates_to")
             is_original = event_id == response_event_id
@@ -3436,7 +3467,13 @@ class LiveFuzzRunner:
             if isinstance(body, str):
                 timestamp = event.get("origin_server_ts")
                 if is_edit:
-                    edit_candidates.append((timestamp if isinstance(timestamp, int) else 0, write_sequence, body))
+                    edit_candidates.append(
+                        (
+                            timestamp if isinstance(timestamp, int) else 0,
+                            observed_events.sequence(event_id),
+                            body,
+                        ),
+                    )
                 else:
                     original_body = body
         return max(edit_candidates, default=(0, 0, original_body))[2]

@@ -1351,6 +1351,118 @@ def test_live_fuzz_runner_equal_timestamp_edits_use_write_order() -> None:
 
 
 @pytest.mark.asyncio
+async def test_exact_reply_oracle_normalizes_equal_timestamp_edits_across_backward_pages(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Older pagination pages must not outrank newer equal-timestamp edits."""
+    client = LiveMatrixClient("http://matrix.invalid", "!room:example")
+    oracle = ExactReplyOracle(client, "@agent:example")
+    oracle.next_batch = "since"
+    oracle.expect("root:0", "$source")
+    original = _agent_reply_event("$source", "$response", "Thinking...")
+    older_edit = _agent_edit_event("$response", "older", event_id="$edit-z", timestamp=101)
+    newer_edit = _agent_edit_event("$response", "newer", event_id="$edit-a", timestamp=101)
+
+    async def sync(
+        _since: str | None,
+        *,
+        timeout_ms: int,
+        timeline_limit: int = 2000,
+    ) -> dict[str, Any]:
+        assert (timeout_ms, timeline_limit) == (0, 2000)
+        return {
+            "next_batch": "next",
+            "rooms": {
+                "join": {
+                    "!room:example": {
+                        "timeline": {
+                            "limited": True,
+                            "prev_batch": "newer-page",
+                            "events": [],
+                        },
+                    },
+                },
+            },
+        }
+
+    async def messages_before(
+        from_token: str,
+        *,
+        to_token: str | None = None,
+        limit: int = 1000,
+    ) -> tuple[list[dict[str, Any]], str | None]:
+        assert (to_token, limit) == ("since", 1000)
+        if from_token == "newer-page":  # noqa: S105 - opaque pagination token
+            return [newer_edit], "older-page"
+        assert from_token == "older-page"  # noqa: S105 - opaque pagination token
+        return [older_edit, original], None
+
+    monkeypatch.setattr(client, "sync", sync)
+    monkeypatch.setattr(client, "messages_before", messages_before)
+    try:
+        await oracle._sync_once(timeout_ms=0, allow_limited=True)
+    finally:
+        await client.close()
+
+    assert oracle.latest_reply_bodies["$response"][2] == "newer"
+
+
+@pytest.mark.asyncio
+async def test_saturation_oracle_normalizes_equal_timestamp_edits_across_backward_pages(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Saturation history must expose the later equal-timestamp edit across pages."""
+    client = LiveMatrixClient("http://matrix.invalid", "!room:example")
+    client.next_batch = "since"
+    original = _agent_reply_event("$source", "$response", "Thinking...")
+    older_edit = _agent_edit_event("$response", "older", event_id="$edit-z", timestamp=101)
+    newer_edit = _agent_edit_event("$response", "newer", event_id="$edit-a", timestamp=101)
+
+    async def sync(
+        _since: str | None,
+        *,
+        timeout_ms: int,
+        timeline_limit: int = 2000,
+    ) -> dict[str, Any]:
+        assert (timeout_ms, timeline_limit) == (0, 2000)
+        return {
+            "next_batch": "next",
+            "rooms": {
+                "join": {
+                    "!room:example": {
+                        "timeline": {
+                            "limited": True,
+                            "prev_batch": "newer-page",
+                            "events": [],
+                        },
+                    },
+                },
+            },
+        }
+
+    async def messages_before(
+        from_token: str,
+        *,
+        to_token: str | None = None,
+        limit: int = 1000,
+    ) -> tuple[list[dict[str, Any]], str | None]:
+        assert (to_token, limit) == ("since", 1000)
+        if from_token == "newer-page":  # noqa: S105 - opaque pagination token
+            return [newer_edit], "older-page"
+        assert from_token == "older-page"  # noqa: S105 - opaque pagination token
+        return [older_edit, original], None
+
+    monkeypatch.setattr(client, "sync", sync)
+    monkeypatch.setattr(client, "messages_before", messages_before)
+    try:
+        await client.sync_incremental(timeout_ms=0, allow_limited=True)
+    finally:
+        await client.close()
+
+    assert fuzz_live_matrix.LiveFuzzRunner._latest_event_body(client.seen_events.values(), "$response") == "newer"
+
+
+@pytest.mark.asyncio
 async def test_exact_reply_oracle_rejects_wrong_thread_root() -> None:
     """A direct reply match cannot conceal attachment to another thread."""
     client = LiveMatrixClient("http://matrix.invalid", "!room:example")
@@ -1509,6 +1621,60 @@ def test_live_history_includes_completed_assistant_before_next_source() -> None:
                 next_identity,
             ),
         ),
+    )
+
+
+def test_live_history_preserves_observation_order_for_equal_timestamp_assistants() -> None:
+    """Equal-timestamp assistants must follow canonical observation order, not event IDs."""
+
+    class Stack:
+        agent_id = "@agent:example"
+        router_id = "@router:example"
+
+    runner = fuzz_live_matrix.LiveFuzzRunner(
+        cast("fuzz_live_matrix.ManagedTuwunelStack", Stack()),
+        (cast("LiveMatrixClient", object()),),
+        LiveFuzzScenario(thread_count=1, batches=()),
+        reply_timeout=1,
+        settle_seconds=0,
+    )
+    source_identities: list[str] = []
+    for source_ref, source_event_id in (("op:z", "$source-z"), ("op:a", "$source-a")):
+        source_content = runner._message_content(source_ref, source_marker=source_ref)
+        source_identities.append(fuzz_live_matrix._source_marker_from_content(source_content))
+        runner.event_ids[source_ref] = source_event_id
+        runner._expect_source(
+            runner.oracle,
+            source_ref,
+            source_event_id,
+            root_event_id="$root",
+            room=0,
+            thread=0,
+            source_content=source_content,
+        )
+
+    assistant_identities: list[str] = []
+    for call_id, _source_ref, source_event_id, response_event_id in (
+        (1, "op:z", "$source-z", "$response-z"),
+        (2, "op:a", "$source-a", "$response-a"),
+    ):
+        source_marker, history_fingerprint = runner.oracle.expected_model_identity[source_event_id]
+        response = _agent_reply_event(
+            source_event_id,
+            response_event_id,
+            fuzz_live_matrix._ModelHandler.response_text_for(
+                call_id,
+                source_marker=source_marker,
+                history_fingerprint=history_fingerprint,
+            ),
+        )
+        response["origin_server_ts"] = 101
+        runner.oracle._ingest_event(response)
+        assistant_identities.append(fuzz_live_matrix._assistant_identity(source_marker, history_fingerprint))
+
+    assert runner._history_identities((0, 0)) == (
+        *source_identities,
+        *assistant_identities,
     )
 
 
