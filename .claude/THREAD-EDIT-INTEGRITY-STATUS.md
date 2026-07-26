@@ -6,8 +6,9 @@ Updated 2026-07-25 after correcting the exact-`3e0575aa7` review and CI blockers
 
 - PR: `mindroom-ai/mindroom#1641`
 - Branch: `fix/thread-edit-integrity`
-- Latest production commit and current head: `0f439bd2a9a9d2d8fa7e3a30ef42f4c8b4e38766`
+- Latest production commit: `0f439bd2a9a9d2d8fa7e3a30ef42f4c8b4e38766`
 - Current base and merge base: `c1f812a1e15b3c6be05f0cf2720b44431d844087`
+- Current branch and PR head contain only the crash-handoff successor after the latest production commit.
 - The production, test, and documentation corrections are pushed.
 - Tracked working tree is clean.
 - Resolve local, remote, and PR heads before counting any exact-head gate.
@@ -63,7 +64,7 @@ Updated 2026-07-25 after correcting the exact-`3e0575aa7` review and CI blockers
 ## Pending exact-head gates
 
 - GitHub pytest is red only on stale head `3e0575aa7`; every other completed check there was green.
-- Fresh CI is active on exact `0f439bd2a`.
+- Fresh CI must complete on the live crash-handoff successor head.
 - A fresh independent native Codex correctness review is required on that exact head.
 - Exact-head PostgreSQL owning and stress selections are required.
 - Exact-head full pytest is required.
