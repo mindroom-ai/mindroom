@@ -946,10 +946,10 @@ depends_on = [
     "mindroom.constants",
     "mindroom.hooks",
     "mindroom.matrix.client_delivery",
+    "mindroom.response_identity",
     "mindroom.runtime_protocols",
     "mindroom.streaming",
     "mindroom.terminal_delivery",
-    "mindroom.terminal_delivery_lifecycle",
 ]
 
 [[modules]]
@@ -957,33 +957,18 @@ path = "mindroom.terminal_delivery"
 depends_on = [
     "mindroom.durable_write",
     "mindroom.file_locks",
+    "mindroom.hooks",
+    "mindroom.interactive",
     "mindroom.logging_config",
+    "mindroom.matrix.client_delivery",
     "mindroom.message_target",
-    "mindroom.terminal_delivery_lifecycle",
-    "mindroom.tool_system.events",
+    "mindroom.response_identity",
+    "mindroom.turn_origin",
 ]
 
 [[modules]]
-path = "mindroom.terminal_delivery_lifecycle"
+path = "mindroom.response_identity"
 depends_on = ["mindroom.hooks"]
-
-[[modules]]
-path = "mindroom.terminal_delivery_replay"
-depends_on = [
-    "mindroom.delivery_gateway",
-    "mindroom.post_response_effects",
-    "mindroom.response_lifecycle",
-    "mindroom.terminal_delivery",
-]
-visibility = ["mindroom.bot"]
-
-[[modules]]
-path = "mindroom.terminal_delivery_worker"
-depends_on = [
-    "mindroom.logging_config",
-    "mindroom.terminal_delivery",
-]
-visibility = ["mindroom.bot"]
 
 [[modules]]
 path = "mindroom.edit_regenerator"
@@ -1392,7 +1377,6 @@ depends_on = [
 ]
 visibility = [
     "mindroom.response_runner",
-    "mindroom.terminal_delivery_replay",
     "mindroom.text_ingress_dispatch",
     "mindroom.turn_controller",
 ]
@@ -2144,6 +2128,7 @@ visibility = [
     "mindroom.matrix.stale_stream_cleanup",
     "mindroom.scheduling",
     "mindroom.streaming",
+    "mindroom.terminal_delivery",
     "mindroom.thread_summary",
 ]
 
@@ -2802,8 +2787,6 @@ depends_on = [
     "mindroom.turn_controller",
     "mindroom.turn_policy",
     "mindroom.terminal_delivery",
-    "mindroom.terminal_delivery_replay",
-    "mindroom.terminal_delivery_worker",
     "mindroom.turn_store",
 ]
 

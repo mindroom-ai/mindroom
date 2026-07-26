@@ -38,7 +38,7 @@ from tests.conftest import (
     message_origin,
     runtime_paths_for,
     sync_bot_runtime_state,
-    terminal_delivery_store_for,
+    terminal_delivery_coordinator_for,
     test_runtime_paths,
 )
 from tests.identity_helpers import entity_ids, persist_entity_accounts
@@ -310,7 +310,7 @@ def _gateway_with_mocks(tmp_path: Path) -> tuple[DeliveryGateway, AsyncMock, Asy
                 deps=SimpleNamespace(conversation_cache=conversation_cache),
             ),
             response_hooks=response_hooks,
-            terminal_delivery_store=terminal_delivery_store_for(runtime_paths, "email_agent"),
+            terminal_delivery_coordinator=terminal_delivery_coordinator_for(runtime_paths, "email_agent"),
         ),
     )
     return gateway, before_hooks, after_hooks
@@ -465,6 +465,11 @@ async def test_delivery_gateway_deliver_stream_labels_latest_thread_lookup(tmp_p
         await gateway.deliver_stream(
             StreamingDeliveryRequest(
                 target=target,
+                identity=ResponseIdentity(
+                    response_kind="ai",
+                    response_envelope=_delivery_envelope(),
+                    correlation_id="corr-stream",
+                ),
                 response_stream=stream(),
                 existing_event_id="$existing",
             ),
@@ -559,9 +564,10 @@ async def test_delivery_gateway_deliver_final_uses_send_text_for_new_messages(tm
 
 
 @pytest.mark.asyncio
-async def test_delivery_gateway_deliver_final_uses_edit_text_for_existing_messages(tmp_path: Path) -> None:
-    """Final delivery should route edits through the gateway helper only."""
+async def test_delivery_gateway_deliver_final_commits_existing_messages(tmp_path: Path) -> None:
+    """Final edits should pass through the durable terminal authority."""
     gateway, before_hooks, after_hooks = _gateway_with_mocks(tmp_path)
+    gateway.deps.resolver.deps.conversation_cache.get_latest_thread_event_id_if_needed.return_value = "$thread"
     before_hooks.return_value = ResponseDraft(
         response_text="raw response",
         response_kind="ai",
@@ -575,10 +581,7 @@ async def test_delivery_gateway_deliver_final_uses_edit_text_for_existing_messag
     parsed.option_map = None
     parsed.options_list = None
 
-    with (
-        patch.object(DeliveryGateway, "edit_text", new=AsyncMock(return_value=True)) as mock_edit_text,
-        patch("mindroom.delivery_gateway.interactive.parse_and_format_interactive", return_value=parsed),
-    ):
+    with patch("mindroom.delivery_gateway.interactive.parse_and_format_interactive", return_value=parsed):
         result = await gateway.deliver_final(
             FinalDeliveryRequest(
                 target=_delivery_envelope().target,
@@ -594,8 +597,7 @@ async def test_delivery_gateway_deliver_final_uses_edit_text_for_existing_messag
             ),
         )
 
-    mock_edit_text.assert_awaited_once()
-    assert mock_edit_text.await_args.args[0].retry_sync_recovery is True
+    gateway.deps.terminal_delivery_coordinator.commit_and_attempt.assert_awaited_once()
     after_hooks.assert_not_awaited()
     assert result.event_id == "$existing"
     assert result.delivery_kind == "edited"

@@ -150,10 +150,8 @@ Matrix sync callback
 | `shell_execution.py` | Shell command execution core: spawning, output buffering, background handle registry |
 | `shell_supervisor.py` | Worker-local shell supervisor process owning background shell handles across sandbox request subprocesses |
 | `streaming.py` | Streaming state machine: placeholder, progressive edits, tool traces, cancellation |
-| `terminal_delivery.py` | Durable pending terminal Matrix deliveries: state machine, precedence, store |
-| `terminal_delivery_lifecycle.py` | Typed persisted response-lifecycle facts for durable repair |
-| `terminal_delivery_replay.py` | Success-only response-lifecycle replay after durable repair |
-| `terminal_delivery_worker.py` | Background retry worker draining durable terminal deliveries |
+| `terminal_delivery.py` | Single authority for durable terminal edit persistence, transport, redaction, lifecycle, and retries |
+| `response_identity.py` | Leaf identity shared by response delivery and lifecycle |
 | `prompts.py` | Built-in prompt defaults and prompt override registry |
 | `attachments.py` | Attachment persistence, registration, and context-scoped resolution |
 | `attachment_ids.py` | Leaf attachment-ID helpers kept free of matrix-client imports |

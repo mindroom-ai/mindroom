@@ -53,6 +53,7 @@ from tests.conftest import bind_runtime_paths as _bind_runtime_paths
 from tests.conftest import (
     make_event_cache_mock,
     request_envelope,
+    terminal_delivery_coordinator_for,
 )
 from tests.identity_helpers import persist_entity_accounts
 
@@ -410,6 +411,7 @@ def _build_response_runner(
     response_hook_service = ResponseHookService(hook_context=hook_context)
     response_hook_service.emit_cancelled_response = AsyncMock(wraps=response_hook_service.emit_cancelled_response)
     response_hook_service.emit_after_response = AsyncMock(wraps=response_hook_service.emit_after_response)
+    bot._terminal_delivery_coordinator = terminal_delivery_coordinator_for(runtime_paths, bot.agent_name)
     delivery_gateway = DeliveryGateway(
         DeliveryGatewayDeps(
             runtime=runtime,
@@ -419,7 +421,7 @@ def _build_response_runner(
             redact_message_event=AsyncMock(return_value=True),
             resolver=bot._conversation_resolver,
             response_hooks=response_hook_service,
-            terminal_delivery_store=bot._terminal_delivery_store,
+            terminal_delivery_coordinator=bot._terminal_delivery_coordinator,
         ),
     )
     _set_gateway_method(
@@ -451,7 +453,6 @@ def _build_response_runner(
         runtime=runtime,
         logger=bot.logger,
         runtime_paths=runtime_paths,
-        delivery_gateway=delivery_gateway,
         conversation_cache=bot._conversation_resolver.deps.conversation_cache,
     )
     bot._knowledge_access_support = knowledge_access_support or _knowledge_access_support()
@@ -540,7 +541,6 @@ def _install_inert_post_response_effects(coordinator: ResponseRunner) -> None:
             runtime=support.runtime,
             logger=support.logger,
             runtime_paths=support.runtime_paths,
-            delivery_gateway=support.delivery_gateway,
             conversation_cache=support.conversation_cache,
         ),
     )

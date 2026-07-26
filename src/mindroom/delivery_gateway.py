@@ -3,18 +3,16 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import asynccontextmanager
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, replace
 from html import escape as html_escape
 from typing import TYPE_CHECKING, Any, Literal
 
-import nio as nio_runtime
 from nio.exceptions import SendRetryError
 
 from mindroom import constants, interactive
 from mindroom.constants import SKIP_MENTIONS_KEY
-from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
+from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome, TerminalStreamDelivery
 from mindroom.hooks import (
     EVENT_MESSAGE_AFTER_RESPONSE,
     EVENT_MESSAGE_BEFORE_RESPONSE,
@@ -39,10 +37,10 @@ from mindroom.matrix.client_delivery import (
     edit_message_result,
     prepare_message_content,
     send_message_result,
-    send_prepared_message_result,
 )
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import build_message_content
+from mindroom.response_identity import ResponseIdentity  # noqa: TC001
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
 from mindroom.streaming import (
     StreamingResponse,
@@ -55,10 +53,10 @@ from mindroom.streaming import (
 from mindroom.terminal_delivery import (
     PendingTerminalDelivery,
     TerminalDeliveryAttempt,
+    TerminalDeliveryCommit,
+    TerminalDeliveryCoordinator,
     TerminalDeliveryIntent,
-    TerminalDeliveryStore,
 )
-from mindroom.terminal_delivery_lifecycle import TerminalDeliveryLifecycleFacts
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
@@ -74,7 +72,6 @@ if TYPE_CHECKING:
         CompactionLifecycleStart,
         CompactionOutcome,
     )
-    from mindroom.hooks import MessageEnvelope
     from mindroom.message_target import MessageTarget
     from mindroom.streaming import StreamInputChunk
     from mindroom.timing import DispatchPipelineTiming
@@ -100,17 +97,6 @@ def _is_placeholder_delivery_failure(failure_reason: str) -> bool:
     return failure_reason in _PLACEHOLDER_DELIVERY_FAILURE_REASONS or failure_reason.startswith(
         "terminal_update_exception:",
     )
-
-
-@dataclass(frozen=True)
-class ResponseIdentity:
-    """Identify which visible response a delivery or hook call belongs to."""
-
-    response_kind: str
-    response_envelope: MessageEnvelope
-    correlation_id: str
-    source_event_ids: tuple[str, ...] = ()
-    thread_summary_message_count_hint: int | None = None
 
 
 @dataclass
@@ -313,6 +299,7 @@ class StreamingDeliveryRequest:
     """Parameters for streamed Matrix delivery."""
 
     target: MessageTarget
+    identity: ResponseIdentity
     response_stream: AsyncIterator[StreamInputChunk]
     existing_event_id: str | None = None
     adopt_existing_placeholder: bool = False
@@ -337,35 +324,7 @@ class DeliveryGatewayDeps:
     redact_message_event: Callable[..., Awaitable[bool]]
     resolver: ConversationResolver
     response_hooks: ResponseHookService
-    terminal_delivery_store: TerminalDeliveryStore
-
-
-@dataclass
-class _TerminalDeliveryLock:
-    """Serialize one target's replacement recording and delivery."""
-
-    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    holders: int = 0
-
-
-@dataclass
-class _TerminalDeliveryLocks:
-    """Own short-lived per-delivery locks without retaining completed targets."""
-
-    entries: dict[str, _TerminalDeliveryLock] = field(default_factory=dict)
-
-    @asynccontextmanager
-    async def hold(self, delivery_id: str) -> AsyncIterator[None]:
-        """Hold one delivery lock, including time spent queued for it."""
-        entry = self.entries.setdefault(delivery_id, _TerminalDeliveryLock())
-        entry.holders += 1
-        try:
-            async with entry.lock:
-                yield
-        finally:
-            entry.holders -= 1
-            if entry.holders == 0 and self.entries.get(delivery_id) is entry:
-                del self.entries[delivery_id]
+    terminal_delivery_coordinator: TerminalDeliveryCoordinator
 
 
 @dataclass(frozen=True)
@@ -387,11 +346,6 @@ class DeliveryGateway:
     """Send, edit, redact, and finalize visible Matrix responses."""
 
     deps: DeliveryGatewayDeps
-    _terminal_delivery_locks: _TerminalDeliveryLocks = field(
-        default_factory=_TerminalDeliveryLocks,
-        compare=False,
-        repr=False,
-    )
 
     def _client(self) -> nio.AsyncClient:
         """Return the current Matrix client required for delivery."""
@@ -528,7 +482,7 @@ class DeliveryGateway:
             extra_content=failure_extra_content,
         )
 
-    async def record_pending_terminal_delivery(
+    async def _prepare_terminal_delivery_intent(
         self,
         *,
         target: MessageTarget,
@@ -538,13 +492,8 @@ class DeliveryGateway:
         tool_trace: list[ToolTraceEntry] | None,
         extra_content: dict[str, Any] | None,
         interactive_metadata: interactive.InteractiveMetadata | None,
-    ) -> PendingTerminalDelivery | None:
-        """Persist one committed terminal outcome that Matrix transport could not deliver.
-
-        Returns the durable record only when it is actually schedulable, so callers
-        can fall back to their previous visible failure handling otherwise.
-        """
-        store = self.deps.terminal_delivery_store
+    ) -> TerminalDeliveryIntent | None:
+        """Freeze one exact terminal edit payload before any Matrix attempt."""
         client = self.deps.runtime.client
         if client is None or not body.strip():
             return None
@@ -569,109 +518,44 @@ class DeliveryGateway:
                 new_text=body,
             ),
         )
-        intent = TerminalDeliveryIntent(
-            agent_name=self.deps.agent_name,
-            target=target,
+        return TerminalDeliveryIntent(
             target_event_id=target_event_id,
-            anchor_event_id=identity.response_envelope.source_event_id,
-            source_event_ids=tuple(
-                dict.fromkeys(identity.source_event_ids or (identity.response_envelope.source_event_id,)),
-            ),
-            lifecycle=TerminalDeliveryLifecycleFacts(
-                response_kind=identity.response_kind,
-                correlation_id=identity.correlation_id,
-                response_envelope=identity.response_envelope,
-                interactive_metadata=interactive_metadata,
-                thread_summary_message_count_hint=identity.thread_summary_message_count_hint,
-                thread_summary_entity_name=self.deps.agent_name,
-            ),
+            identity=identity,
+            interactive_metadata=interactive_metadata,
+            thread_summary_entity_name=self.deps.agent_name,
             body=body,
             wire_content=wire_content,
-            correlation_id=identity.correlation_id,
-            tool_trace=tuple(tool_trace or ()),
-            extra_content=durable_extra_content,
-        )
-        async with self._terminal_delivery_locks.hold(intent.delivery_id):
-            recorded = await asyncio.to_thread(store.record, intent)
-        if recorded is None:
-            return None
-        self.deps.logger.warning(
-            "Persisted terminal delivery for durable retry",
-            correlation_id=identity.correlation_id,
-            **recorded.log_context,
-            **target.log_context,
-        )
-        return recorded
-
-    async def attempt_pending_terminal_delivery(self, item: PendingTerminalDelivery) -> TerminalDeliveryAttempt:
-        """Try once to make one durable terminal outcome visible, and classify the result."""
-        store = self.deps.terminal_delivery_store
-        async with self._terminal_delivery_locks.hold(item.delivery_id):
-            current = await asyncio.to_thread(store.get, item.delivery_id)
-            if current is None or current.revision != item.revision:
-                return TerminalDeliveryAttempt.superseded("stale_revision")
-            if self.deps.runtime.client is None:
-                return TerminalDeliveryAttempt.transient("matrix_client_unavailable")
-            target_state = await self._inspect_terminal_target(item.target.room_id, item.target_event_id)
-            if target_state in {"missing", "redacted"}:
-                return TerminalDeliveryAttempt.superseded(f"target_event_{target_state}")
-            client = self._client()
-            delivered = await send_prepared_message_result(
-                client,
-                item.target.room_id,
-                dict(item.wire_content),
-                operation="edit_message",
-                transaction_id=item.transaction_id,
-            )
-            if delivered is not None:
-                self.deps.resolver.deps.conversation_cache.notify_outbound_message(
-                    item.target.room_id,
-                    delivered.event_id,
-                    delivered.content_sent,
-                )
-                self.deps.logger.info(
-                    "Edited message",
-                    event_id=item.target_event_id,
-                    **item.target.log_context,
-                )
-        return (
-            TerminalDeliveryAttempt.delivered_now()
-            if delivered is not None
-            else TerminalDeliveryAttempt.transient("edit_failed")
         )
 
-    async def _inspect_terminal_target(  # noqa: PLR0911
+    async def _commit_terminal_edit(
         self,
-        room_id: str,
-        event_id: str,
-    ) -> Literal["ok", "missing", "redacted", "unknown"]:
-        """Return whether one durable delivery target still exists and is not redacted."""
-        client = self.deps.runtime.client
-        if client is None:
-            return "unknown"
-        try:
-            response = await client.room_get_event(room_id, event_id)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            self.deps.logger.warning(
-                "Failed to inspect durable terminal delivery target",
-                room_id=room_id,
-                event_id=event_id,
-                exc_info=True,
+        *,
+        target: MessageTarget,
+        target_event_id: str,
+        identity: ResponseIdentity,
+        body: str,
+        tool_trace: list[ToolTraceEntry] | None,
+        extra_content: dict[str, Any] | None,
+        interactive_metadata: interactive.InteractiveMetadata | None,
+    ) -> TerminalDeliveryCommit:
+        """Freeze, persist, and immediately attempt one terminal edit."""
+        intent = await self._prepare_terminal_delivery_intent(
+            target=target,
+            target_event_id=target_event_id,
+            identity=identity,
+            body=body,
+            tool_trace=tool_trace,
+            extra_content=extra_content,
+            interactive_metadata=interactive_metadata,
+        )
+        if intent is None:
+            return TerminalDeliveryCommit(
+                item=None,
+                attempt=TerminalDeliveryAttempt.transient("terminal_intent_unavailable"),
+                settled=False,
+                lifecycle_managed=False,
             )
-            return "unknown"
-        if isinstance(response, nio_runtime.RoomGetEventError):
-            return "missing" if response.status_code == "M_NOT_FOUND" else "unknown"
-        if not isinstance(response, nio_runtime.RoomGetEventResponse):
-            return "unknown"
-        if isinstance(response.event, nio_runtime.RedactedEvent):
-            return "redacted"
-        source = response.event.source if isinstance(response.event.source, dict) else {}
-        unsigned = source.get("unsigned")
-        if isinstance(unsigned, dict) and unsigned.get("redacted_because") is not None:
-            return "redacted"
-        return "ok"
+        return await self.deps.terminal_delivery_coordinator.commit_and_attempt(intent)
 
     async def _record_stream_terminal_delivery(
         self,
@@ -698,7 +582,7 @@ class DeliveryGateway:
         ):
             return None
         interactive_response = interactive.parse_and_format_interactive(canonical_body, extract_mapping=True)
-        return await self.record_pending_terminal_delivery(
+        intent = await self._prepare_terminal_delivery_intent(
             target=request.target,
             target_event_id=target_event_id,
             identity=request.identity,
@@ -707,6 +591,17 @@ class DeliveryGateway:
             extra_content=request.extra_content,
             interactive_metadata=interactive_response.interactive_metadata,
         )
+        if intent is None:
+            return None
+        recorded = await self.deps.terminal_delivery_coordinator.record(intent)
+        if recorded is not None:
+            self.deps.logger.warning(
+                "Persisted terminal delivery for durable retry",
+                correlation_id=request.identity.correlation_id,
+                **recorded.log_context,
+                **request.target.log_context,
+            )
+        return recorded
 
     async def send_text(self, request: SendTextRequest) -> str | None:
         """Send one response message to a room."""
@@ -966,44 +861,55 @@ class DeliveryGateway:
         display_text = interactive_response.formatted_text
 
         if request.existing_event_id is not None:
-            edited = await self.edit_text(
-                EditTextRequest(
+            try:
+                commit = await self._commit_terminal_edit(
                     target=request.target,
-                    event_id=request.existing_event_id,
-                    new_text=display_text,
+                    target_event_id=request.existing_event_id,
+                    identity=request.identity,
+                    body=display_text,
                     tool_trace=draft.tool_trace,
                     extra_content=draft.extra_content,
-                    retry_sync_recovery=True,
-                ),
-            )
-            if edited:
+                    interactive_metadata=interactive_response.interactive_metadata,
+                )
+            except OSError:
+                self.deps.logger.exception(
+                    "Failed to persist terminal delivery before Matrix transport",
+                    correlation_id=request.identity.correlation_id,
+                )
+                return FinalDeliveryOutcome(
+                    terminal_status="error",
+                    event_id=request.existing_event_id,
+                    is_visible_response=True,
+                    failure_reason="terminal_delivery_persist_failed",
+                    tool_trace=tuple(draft.tool_trace or ()),
+                    extra_content=draft.extra_content,
+                )
+            if commit.attempt.result == "delivered":
                 return FinalDeliveryOutcome(
                     terminal_status="completed",
                     event_id=request.existing_event_id,
                     is_visible_response=True,
                     final_visible_body=display_text,
                     delivery_kind="edited",
+                    durable_lifecycle_managed=commit.lifecycle_managed,
                     tool_trace=tuple(draft.tool_trace or ()),
                     extra_content=draft.extra_content,
                     interactive_metadata=interactive_response.interactive_metadata,
                 )
-
-            pending_delivery = await self.record_pending_terminal_delivery(
-                target=request.target,
-                target_event_id=request.existing_event_id,
-                identity=request.identity,
-                body=display_text,
-                tool_trace=draft.tool_trace,
-                extra_content=draft.extra_content,
-                interactive_metadata=interactive_response.interactive_metadata,
-            )
+            if commit.attempt.result == "superseded":
+                return FinalDeliveryOutcome(
+                    terminal_status="error",
+                    event_id=request.existing_event_id,
+                    is_visible_response=True,
+                    failure_reason=commit.attempt.reason,
+                    tool_trace=tuple(draft.tool_trace or ()),
+                    extra_content=draft.extra_content,
+                )
             # The visible repair still runs even once a durable row exists. Recording
             # does not classify the failure, so a permanently rejected edit would
             # otherwise leave the placeholder spinning forever; a later successful
             # retry simply replaces the failure note with the real answer.
-            failure_reason = (
-                _DURABLE_TERMINAL_RETRY_FAILURE_REASON if pending_delivery is not None else "delivery_failed"
-            )
+            failure_reason = _DURABLE_TERMINAL_RETRY_FAILURE_REASON if commit.pending is not None else "delivery_failed"
             if request.existing_event_is_placeholder:
                 return await self._finish_placeholder_delivery_failure(
                     _PlaceholderFailureUpdateRequest(
@@ -1015,7 +921,7 @@ class DeliveryGateway:
                         extra_content=draft.extra_content,
                     ),
                 )
-            if pending_delivery is not None:
+            if commit.pending is not None:
                 return FinalDeliveryOutcome(
                     terminal_status="error",
                     event_id=request.existing_event_id,
@@ -1281,6 +1187,54 @@ class DeliveryGateway:
             request.existing_event_id,
             caller_label="delivery_stream",
         )
+
+        async def commit_terminal_edit(
+            event_id: str,
+            body: str,
+            canonical_body: str,
+            tool_trace: list[ToolTraceEntry],
+            interactive_metadata: interactive.InteractiveMetadata | None,
+        ) -> TerminalStreamDelivery:
+            transformed_body = body
+            transformed_metadata = interactive_metadata
+            try:
+                draft = await self.deps.response_hooks.apply_final_response_transform(
+                    identity=request.identity,
+                    response_text=canonical_body,
+                )
+            except asyncio.CancelledError:
+                self.deps.logger.warning(
+                    "Final streamed-response transform cancelled; preserving streamed body",
+                    correlation_id=request.identity.correlation_id,
+                )
+            except Exception:
+                self.deps.logger.exception(
+                    "Final streamed-response transform failed; preserving streamed body",
+                    correlation_id=request.identity.correlation_id,
+                )
+            else:
+                if draft.response_text != canonical_body and draft.response_text.strip():
+                    transformed = interactive.parse_and_format_interactive(
+                        draft.response_text,
+                        extract_mapping=True,
+                    )
+                    transformed_body = transformed.formatted_text
+                    transformed_metadata = transformed.interactive_metadata
+            commit = await self._commit_terminal_edit(
+                target=request.target,
+                target_event_id=event_id,
+                identity=request.identity,
+                body=transformed_body,
+                tool_trace=tool_trace if request.show_tool_calls else None,
+                extra_content=request.extra_content,
+                interactive_metadata=transformed_metadata,
+            )
+            return TerminalStreamDelivery(
+                commit=commit,
+                rendered_body=transformed_body,
+                interactive_metadata=transformed_metadata,
+            )
+
         return await send_streaming_response(
             client,
             request.target,
@@ -1298,6 +1252,7 @@ class DeliveryGateway:
             visible_event_id_callback=request.visible_event_id_callback,
             latest_thread_event_id=latest_thread_event_id,
             conversation_cache=self.deps.resolver.deps.conversation_cache,
+            terminal_edit_callback=commit_terminal_edit,
             preserve_existing_visible_on_empty_terminal=(
                 request.preserve_existing_visible_on_empty_terminal
                 or (request.existing_event_id is not None and not request.adopt_existing_placeholder)
@@ -1363,26 +1318,37 @@ class DeliveryGateway:
             )
 
         if _is_placeholder_delivery_failure(failure_reason):
-            pending_delivery = await self._record_stream_terminal_delivery(
-                request,
-                stream_outcome=stream_outcome,
-                failure_reason=failure_reason,
-                target_event_id=placeholder_event_id,
-            )
+            pending_delivery = None
+            if not stream_outcome.deferred_terminal_delivery:
+                pending_delivery = await self._record_stream_terminal_delivery(
+                    request,
+                    stream_outcome=stream_outcome,
+                    failure_reason=failure_reason,
+                    target_event_id=placeholder_event_id,
+                )
             # As in deliver_final, the placeholder is repaired even when a durable
             # row exists, so an undeliverable payload cannot strand it.
-            return await self._finish_placeholder_delivery_failure(
+            outcome = await self._finish_placeholder_delivery_failure(
                 _PlaceholderFailureUpdateRequest(
                     target=request.target,
                     event_id=placeholder_event_id,
                     identity=request.identity,
                     failure_reason=(
-                        _DURABLE_TERMINAL_RETRY_FAILURE_REASON if pending_delivery is not None else failure_reason
+                        _DURABLE_TERMINAL_RETRY_FAILURE_REASON
+                        if pending_delivery is not None or stream_outcome.deferred_terminal_delivery
+                        else failure_reason
                     ),
                     tool_trace=request.tool_trace,
                     extra_content=request.extra_content,
                 ),
             )
+            if stream_outcome.durable_lifecycle_managed:
+                return replace(
+                    outcome,
+                    deferred_terminal_delivery=stream_outcome.deferred_terminal_delivery,
+                    durable_lifecycle_managed=True,
+                )
+            return outcome
 
         return await self._cleanup_completed_placeholder_only_stream(
             room_id=request.target.room_id,
@@ -1520,6 +1486,20 @@ class DeliveryGateway:
                     extra_content=request.extra_content,
                 )
 
+            if stream_outcome.deferred_terminal_delivery and stream_outcome.visible_body_state == "none":
+                return FinalDeliveryOutcome(
+                    terminal_status="error",
+                    event_id=streamed_event_id,
+                    is_visible_response=(
+                        request.existing_event_id is not None and not request.existing_event_is_placeholder
+                    ),
+                    failure_reason=_DURABLE_TERMINAL_RETRY_FAILURE_REASON,
+                    deferred_terminal_delivery=True,
+                    durable_lifecycle_managed=stream_outcome.durable_lifecycle_managed,
+                    tool_trace=tuple(request.tool_trace or ()),
+                    extra_content=request.extra_content,
+                )
+
             if stream_outcome.canonical_final_body_candidate is not None and stream_outcome.visible_body_state in {
                 "none",
                 "placeholder_only",
@@ -1629,55 +1609,74 @@ class DeliveryGateway:
             try:
                 if stream_outcome.failure_reason is not None:
                     failure_reason = stream_outcome.failure_reason or "terminal_update_failed"
-                    pending_delivery = await self._record_stream_terminal_delivery(
-                        request,
-                        stream_outcome=stream_outcome,
-                        failure_reason=failure_reason,
-                        target_event_id=streamed_event_id,
-                    )
+                    pending_delivery = None
+                    if not stream_outcome.deferred_terminal_delivery:
+                        pending_delivery = await self._record_stream_terminal_delivery(
+                            request,
+                            stream_outcome=stream_outcome,
+                            failure_reason=failure_reason,
+                            target_event_id=streamed_event_id,
+                        )
+                    has_pending_delivery = pending_delivery is not None or stream_outcome.deferred_terminal_delivery
                     return FinalDeliveryOutcome(
                         terminal_status="error",
                         event_id=visible_stream_event_id,
                         is_visible_response=True,
                         final_visible_body=streamed_text,
                         failure_reason=(
-                            _DURABLE_TERMINAL_RETRY_FAILURE_REASON if pending_delivery is not None else failure_reason
+                            _DURABLE_TERMINAL_RETRY_FAILURE_REASON if has_pending_delivery else failure_reason
                         ),
-                        deferred_terminal_delivery=pending_delivery is not None,
+                        deferred_terminal_delivery=has_pending_delivery,
+                        durable_lifecycle_managed=stream_outcome.durable_lifecycle_managed,
                         tool_trace=tuple(request.tool_trace or ()),
                         extra_content=request.extra_content,
                     )
-                final_transform_draft = await self.deps.response_hooks.apply_final_response_transform(
-                    identity=request.identity,
-                    response_text=final_body_candidate,
+                if not stream_outcome.durable_lifecycle_managed:
+                    final_transform_draft = await self.deps.response_hooks.apply_final_response_transform(
+                        identity=request.identity,
+                        response_text=final_body_candidate,
+                    )
+                    if (
+                        final_transform_draft.response_text != final_body_candidate
+                        and final_transform_draft.response_text.strip()
+                    ):
+                        try:
+                            final_outcome = await self._finalize_visible_replacement_edit(
+                                target=request.target,
+                                event_id=streamed_event_id,
+                                response_text=final_transform_draft.response_text,
+                                canonical_body_candidate=final_body_candidate,
+                                tool_trace=request.tool_trace,
+                                extra_content=request.extra_content,
+                                failure_reason=stream_outcome.failure_reason,
+                            )
+                        except asyncio.CancelledError:
+                            self.deps.logger.warning(
+                                "Final streamed-response transform edit cancelled; preserving streamed success",
+                                correlation_id=request.identity.correlation_id,
+                            )
+                        except Exception:
+                            self.deps.logger.exception(
+                                "Final streamed-response transform edit failed; preserving streamed success",
+                                correlation_id=request.identity.correlation_id,
+                            )
+                        else:
+                            if final_outcome is not None:
+                                return final_outcome
+            except OSError:
+                self.deps.logger.exception(
+                    "Failed to persist streamed terminal delivery",
+                    correlation_id=request.identity.correlation_id,
                 )
-                if (
-                    final_transform_draft.response_text != final_body_candidate
-                    and final_transform_draft.response_text.strip()
-                ):
-                    try:
-                        final_outcome = await self._finalize_visible_replacement_edit(
-                            target=request.target,
-                            event_id=streamed_event_id,
-                            response_text=final_transform_draft.response_text,
-                            canonical_body_candidate=final_body_candidate,
-                            tool_trace=request.tool_trace,
-                            extra_content=request.extra_content,
-                            failure_reason=stream_outcome.failure_reason,
-                        )
-                    except asyncio.CancelledError:
-                        self.deps.logger.warning(
-                            "Final streamed-response transform edit cancelled; preserving streamed success",
-                            correlation_id=request.identity.correlation_id,
-                        )
-                    except Exception:
-                        self.deps.logger.exception(
-                            "Final streamed-response transform edit failed; preserving streamed success",
-                            correlation_id=request.identity.correlation_id,
-                        )
-                    else:
-                        if final_outcome is not None:
-                            return final_outcome
+                return FinalDeliveryOutcome(
+                    terminal_status="error",
+                    event_id=streamed_event_id,
+                    is_visible_response=streamed_event_id is not None,
+                    final_visible_body=streamed_text or None,
+                    failure_reason="terminal_delivery_persist_failed",
+                    tool_trace=tuple(request.tool_trace or ()),
+                    extra_content=request.extra_content,
+                )
             except asyncio.CancelledError:
                 self.deps.logger.warning(
                     "Final streamed-response transform cancelled; preserving streamed success",
@@ -1702,6 +1701,8 @@ class DeliveryGateway:
                 final_visible_body=streamed_text or interactive_response.formatted_text,
                 delivery_kind=request.initial_delivery_kind,
                 failure_reason=stream_outcome.failure_reason,
+                deferred_terminal_delivery=stream_outcome.deferred_terminal_delivery,
+                durable_lifecycle_managed=stream_outcome.durable_lifecycle_managed,
                 tool_trace=tuple(request.tool_trace or ()),
                 extra_content=request.extra_content,
                 interactive_metadata=interactive_response.interactive_metadata,

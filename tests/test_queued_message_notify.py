@@ -785,7 +785,6 @@ async def test_post_response_effects_queues_summary_with_stale_hint_inside_margi
         runtime=runtime,
         logger=MagicMock(),
         runtime_paths=runtime_paths,
-        delivery_gateway=MagicMock(),
         conversation_cache=conversation_cache,
     )
     deps = support.build_deps(
@@ -886,7 +885,6 @@ async def test_post_response_effects_queues_summary_with_entity_model_for_adhoc_
         runtime=runtime,
         logger=MagicMock(),
         runtime_paths=runtime_paths,
-        delivery_gateway=MagicMock(),
         conversation_cache=conversation_cache,
     )
     deps = support.build_deps(

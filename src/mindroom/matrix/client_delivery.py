@@ -380,30 +380,6 @@ async def _deliver_prepared_message_result(
     return None
 
 
-async def send_prepared_message_result(
-    client: nio.AsyncClient,
-    room_id: str,
-    content_sent: dict[str, Any],
-    *,
-    operation: str = "send_message",
-    retry_sync_recovery: bool = False,
-    transaction_id: str | None = None,
-) -> DeliveredMatrixEvent | None:
-    """Send a previously frozen payload without preparing or uploading it again."""
-    can_send, cache_bypass = await _delivery_cache_route(client, room_id, operation=operation)
-    if not can_send:
-        return None
-    return await _deliver_prepared_message_result(
-        client,
-        room_id,
-        content_sent,
-        operation=operation,
-        cache_bypass=cache_bypass,
-        retry_sync_recovery=retry_sync_recovery,
-        transaction_id=transaction_id,
-    )
-
-
 async def send_message_result(
     client: nio.AsyncClient,
     room_id: str,
@@ -412,12 +388,13 @@ async def send_message_result(
     operation: str = "send_message",
     retry_sync_recovery: bool = False,
     transaction_id: str | None = None,
+    content_is_prepared: bool = False,
 ) -> DeliveredMatrixEvent | None:
     """Send a message to a Matrix room and return the exact delivered payload."""
     can_send, cache_bypass = await _delivery_cache_route(client, room_id, operation=operation)
     if not can_send:
         return None
-    content_sent = await prepare_message_content(client, room_id, content)
+    content_sent = content if content_is_prepared else await prepare_message_content(client, room_id, content)
     return await _deliver_prepared_message_result(
         client,
         room_id,
@@ -815,6 +792,5 @@ __all__ = [
     "send_audio_message",
     "send_file_message",
     "send_message_result",
-    "send_prepared_message_result",
     "send_runtime_encrypted_media_message",
 ]

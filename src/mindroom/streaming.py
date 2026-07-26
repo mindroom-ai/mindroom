@@ -24,7 +24,7 @@ from mindroom.constants import (
     STREAM_VISIBLE_BODY_KEY,
     STREAM_WARMUP_SUFFIX_KEY,
 )
-from mindroom.final_delivery import StreamTransportOutcome
+from mindroom.final_delivery import StreamTransportOutcome, TerminalStreamDelivery
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import build_edit_event_content, edit_message_result, send_message_result
 from mindroom.matrix.large_messages import should_send_oversized_nonterminal_streaming_edit
@@ -47,7 +47,7 @@ from mindroom.tool_system.events import (
 from mindroom.tool_system.runtime_context import worker_progress_pump_scope
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable
+    from collections.abc import AsyncIterator, Awaitable, Callable
 
     import nio
 
@@ -58,6 +58,11 @@ if TYPE_CHECKING:
     from mindroom.timing import DispatchPipelineTiming
     from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.runtime_context import WorkerProgressEvent, WorkerProgressPump
+
+    TerminalEditCallback = Callable[
+        [str, str, str, list[ToolTraceEntry], interactive.InteractiveMetadata | None],
+        Awaitable[TerminalStreamDelivery],
+    ]
 
 logger = get_logger(__name__)
 
@@ -448,6 +453,7 @@ class StreamingResponse:
     pipeline_timing: DispatchPipelineTiming | None = None
     conversation_cache: ConversationCacheProtocol | None = None
     visible_event_id_callback: Callable[[str], None] | None = None
+    terminal_edit_callback: TerminalEditCallback | None = None
     preserve_existing_visible_on_empty_terminal: bool = False
     canonical_final_body_candidate: str | None = None
     _warmup_state: WorkerWarmupState = field(default_factory=WorkerWarmupState, init=False, repr=False)
@@ -467,6 +473,7 @@ class StreamingResponse:
     )
     _inflight_nonterminal_capture: asyncio.Future[None] | None = field(default=None, init=False, repr=False)
     _inflight_nonterminal_capture_state: _CommittedDeliveryState | None = field(default=None, init=False, repr=False)
+    _terminal_delivery: TerminalStreamDelivery | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Derive Matrix delivery fields from the canonical target."""
@@ -843,7 +850,17 @@ class StreamingResponse:
                 canonical_final_body_candidate=canonical_final_body_candidate,
                 failure_reason=cancellation_failure_reason or "terminal_update_failed",
                 interactive_metadata=self._last_committed_interactive_metadata,
+                deferred_terminal_delivery=(
+                    self._terminal_delivery is not None and self._terminal_delivery.commit.pending is not None
+                ),
+                durable_lifecycle_managed=(
+                    self._terminal_delivery is not None and self._terminal_delivery.commit.lifecycle_managed
+                ),
             )
+        terminal_interactive_metadata = response.interactive_metadata
+        if self._terminal_delivery is not None:
+            attempted_rendered_body = self._terminal_delivery.rendered_body
+            terminal_interactive_metadata = self._terminal_delivery.interactive_metadata
         return StreamTransportOutcome(
             last_physical_stream_event_id=self.event_id,
             terminal_status=terminal_status,
@@ -851,7 +868,13 @@ class StreamingResponse:
             visible_body_state=attempted_visible_body_state,
             canonical_final_body_candidate=canonical_final_body_candidate,
             failure_reason=cancellation_failure_reason,
-            interactive_metadata=response.interactive_metadata,
+            interactive_metadata=terminal_interactive_metadata,
+            deferred_terminal_delivery=(
+                self._terminal_delivery is not None and self._terminal_delivery.commit.pending is not None
+            ),
+            durable_lifecycle_managed=(
+                self._terminal_delivery is not None and self._terminal_delivery.commit.lifecycle_managed
+            ),
         )
 
     async def _send_or_edit_message(
@@ -909,14 +932,29 @@ class StreamingResponse:
             capture.set_result(None)
             _complete_capture_completions(capture_completions)
         try:
-            send_succeeded = await self._send_content(
-                client,
-                content=prepared_delivery.content,
-                display_text=prepared_delivery.display_text,
-                retry_on_failure=retry_on_failure,
-                retry_without_backoff=retry_without_backoff,
-                retry_sync_recovery=not is_final or retry_on_failure,
-            )
+            if (
+                is_final
+                and self.event_id is not None
+                and self.terminal_edit_callback is not None
+                and prepared_delivery.content.get(STREAM_STATUS_KEY) == STREAM_STATUS_COMPLETED
+            ):
+                self._terminal_delivery = await self.terminal_edit_callback(
+                    self.event_id,
+                    prepared_delivery.display_text,
+                    prepared_delivery.committed_state.accumulated_text,
+                    prepared_delivery.committed_state.tool_trace,
+                    prepared_delivery.committed_state.interactive_metadata,
+                )
+                send_succeeded = self._terminal_delivery.commit.attempt.result == "delivered"
+            else:
+                send_succeeded = await self._send_content(
+                    client,
+                    content=prepared_delivery.content,
+                    display_text=prepared_delivery.display_text,
+                    retry_on_failure=retry_on_failure,
+                    retry_without_backoff=retry_without_backoff,
+                    retry_sync_recovery=not is_final or retry_on_failure,
+                )
         finally:
             if self._inflight_nonterminal_capture is capture:
                 self._inflight_nonterminal_capture = None
@@ -1802,6 +1840,7 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
     visible_event_id_callback: Callable[[str], None] | None = None,
     latest_thread_event_id: str | None = None,
     conversation_cache: ConversationCacheProtocol | None = None,
+    terminal_edit_callback: TerminalEditCallback | None = None,
     preserve_existing_visible_on_empty_terminal: bool = False,
 ) -> StreamTransportOutcome:
     """Stream chunks to a Matrix room and return the canonical transport outcome."""
@@ -1820,6 +1859,7 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
         pipeline_timing=pipeline_timing,
         conversation_cache=conversation_cache,
         visible_event_id_callback=visible_event_id_callback,
+        terminal_edit_callback=terminal_edit_callback,
         preserve_existing_visible_on_empty_terminal=preserve_existing_visible_on_empty_terminal,
     )
 

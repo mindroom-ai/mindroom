@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -295,13 +296,13 @@ def _refresh_active_questions_locked() -> None:
     _set_active_questions_locked(_apply_local_changes_locked(persisted_questions))
 
 
-def _save_active_questions_locked() -> None:
+def _save_active_questions_locked() -> bool:
     """Persist active questions when persistence is enabled.
 
     This method must be called while holding ``_thread_lock``.
     """
     if _persistence_file is None or _persistence_lock_file is None:
-        return
+        return True
 
     try:
         _persistence_file.parent.mkdir(parents=True, exist_ok=True)
@@ -323,6 +324,9 @@ def _save_active_questions_locked() -> None:
             path=str(_persistence_file),
             error=str(exc),
         )
+        return False
+    else:
+        return True
 
 
 def init_persistence(storage_root: Path) -> None:
@@ -787,7 +791,7 @@ def register_interactive_question(
     *,
     question_text: str = "",
     option_labels: dict[str, str] | None = None,
-) -> None:
+) -> bool:
     """Register an interactive question for tracking.
 
     Args:
@@ -812,9 +816,10 @@ def register_interactive_question(
                 option_labels=dict(option_labels or {}),
             ),
         )
-        _save_active_questions_locked()
+        persisted = _save_active_questions_locked()
     with bound_log_context(room_id=room_id, thread_id=thread_id):
         logger.info("Registered interactive question", event_id=event_id, options=len(option_map))
+    return persisted
 
 
 def clear_interactive_question(event_id: str) -> None:
@@ -836,6 +841,8 @@ async def add_reaction_buttons(
     room_id: str,
     event_id: str,
     options: list[dict[str, str]],
+    *,
+    idempotency_key: str | None = None,
 ) -> None:
     """Add reaction buttons to a message.
 
@@ -844,18 +851,30 @@ async def add_reaction_buttons(
         room_id: The room ID
         event_id: The event ID of the message to add reactions to
         options: List of option dictionaries with 'emoji' keys
+        idempotency_key: Stable delivery identity used for Matrix transaction IDs
 
     """
     for opt in options:
         emoji_char = opt.get("emoji", "❓")
+        transaction = (
+            {
+                "tx_id": "mindroom-interactive-"
+                + hashlib.sha256(f"{idempotency_key}\x1f{emoji_char}".encode()).hexdigest()[:32],
+            }
+            if idempotency_key is not None
+            else {}
+        )
         reaction_response = await client.room_send(
             room_id=room_id,
             message_type="m.reaction",
             content=build_reaction_content(event_id, emoji_char),
             ignore_unverified_devices=True,
+            **transaction,
         )
         if not isinstance(reaction_response, nio.RoomSendResponse):
             logger.warning("Failed to add reaction", emoji=emoji_char, error=str(reaction_response))
+            message = f"Failed to add reaction {emoji_char}"
+            raise RuntimeError(message)  # noqa: TRY004
 
 
 def _cleanup() -> None:

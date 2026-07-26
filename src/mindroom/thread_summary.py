@@ -543,7 +543,9 @@ async def _deliver_generated_summary(
     message_count: int,
     model_name: str,
     conversation_cache: ConversationCacheProtocol,
-) -> None:
+    *,
+    transaction_id: str | None = None,
+) -> bool:
     """Apply initial tags, then independently deliver the generated summary."""
     initial_enrichment_complete: bool | None = None
     if isinstance(generated, _ThreadEnrichment):
@@ -554,8 +556,9 @@ async def _deliver_generated_summary(
             generated.tags,
         )
 
+    transaction = {"transaction_id": transaction_id} if transaction_id is not None else {}
     try:
-        await send_thread_summary_event(
+        delivered_event_id = await send_thread_summary_event(
             client,
             room_id,
             thread_id,
@@ -564,9 +567,12 @@ async def _deliver_generated_summary(
             model_name,
             conversation_cache,
             initial_enrichment_complete=initial_enrichment_complete,
+            **transaction,
         )
     except Exception:
         logger.exception("Thread summary send failed", room_id=room_id, thread_id=thread_id)
+        return False
+    return delivered_event_id is not None
 
 
 async def send_thread_summary_event(
@@ -579,6 +585,7 @@ async def send_thread_summary_event(
     conversation_cache: ConversationCacheProtocol,
     *,
     initial_enrichment_complete: bool | None = None,
+    transaction_id: str | None = None,
 ) -> str | None:
     """Send a thread summary as a standard Matrix notice event."""
     normalized_summary = normalize_thread_summary_text(summary)
@@ -629,7 +636,7 @@ async def send_thread_summary_event(
             "io.mindroom.thread_summary": summary_metadata,
         },
     )
-    delivered = await send_message_result(client, room_id, content)
+    delivered = await send_message_result(client, room_id, content, transaction_id=transaction_id)
     if delivered is not None:
         conversation_cache.notify_outbound_message(
             room_id,
@@ -710,7 +717,7 @@ async def set_manual_thread_summary(
         )
 
 
-async def maybe_generate_thread_summary(
+async def maybe_generate_thread_summary(  # noqa: C901
     client: nio.AsyncClient,
     room_id: str,
     thread_id: str,
@@ -719,6 +726,8 @@ async def maybe_generate_thread_summary(
     *,
     conversation_cache: ConversationCacheProtocol,
     entity_name: str | None = None,
+    transaction_id: str | None = None,
+    raise_on_failure: bool = False,
 ) -> None:
     """Generate an early summary, then one-shot initial tags on its first refresh."""
     refreshed_tag_vocabulary = await _refresh_tag_vocabulary(client, room_id, config, runtime_paths)
@@ -733,6 +742,8 @@ async def maybe_generate_thread_summary(
                 room_id=room_id,
                 thread_id=thread_id,
             )
+            if raise_on_failure:
+                raise
             return
         trusted_sender_ids = current_internal_sender_ids(config, runtime_paths)
         recovered_summary_count = _recover_last_summary_count(
@@ -777,11 +788,16 @@ async def maybe_generate_thread_summary(
         except Exception:
             logger.exception("Thread summary generation failed", room_id=room_id, thread_id=thread_id)
             # Record current count to prevent retry storms until next threshold
+            if raise_on_failure:
+                raise
             update_last_summary_count(room_id, thread_id, message_count)
             return
 
         if generated is None:
             logger.warning("Thread summary generation returned None", room_id=room_id, thread_id=thread_id)
+            if raise_on_failure:
+                msg = "Thread summary generation returned None"
+                raise RuntimeError(msg)
             # Record current count to prevent retry storms until next threshold
             update_last_summary_count(room_id, thread_id, message_count)
             return
@@ -794,10 +810,13 @@ async def maybe_generate_thread_summary(
                 room_id=room_id,
                 thread_id=thread_id,
             )
+            if raise_on_failure:
+                msg = "Thread summary generation returned no plain-text content"
+                raise RuntimeError(msg)
             update_last_summary_count(room_id, thread_id, message_count)
             return
 
-        await _deliver_generated_summary(
+        delivered = await _deliver_generated_summary(
             client,
             room_id,
             thread_id,
@@ -806,7 +825,11 @@ async def maybe_generate_thread_summary(
             message_count,
             model_name,
             conversation_cache,
+            transaction_id=transaction_id,
         )
+        if not delivered and raise_on_failure:
+            msg = "Thread summary delivery failed"
+            raise RuntimeError(msg)
         # Record after the delivery attempt so cancellation cannot leave a
         # partially delivered initial enrichment marked complete.
         update_last_summary_count(room_id, thread_id, message_count)

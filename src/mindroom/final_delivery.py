@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
     from mindroom.interactive import InteractiveMetadata
+    from mindroom.terminal_delivery import TerminalDeliveryCommit
     from mindroom.tool_system.events import ToolTraceEntry
 
 _TerminalStatus = Literal["completed", "cancelled", "error"]
@@ -23,6 +24,8 @@ class StreamTransportOutcome:  # noqa: D101
     canonical_final_body_candidate: str | None = None
     failure_reason: str | None = None
     interactive_metadata: InteractiveMetadata | None = None
+    deferred_terminal_delivery: bool = False
+    durable_lifecycle_managed: bool = False
 
     @property
     def visible_event_id(self) -> str | None:
@@ -38,6 +41,15 @@ class StreamTransportOutcome:  # noqa: D101
 
 
 @dataclass(frozen=True)
+class TerminalStreamDelivery:
+    """Durable result for one completed stream edit."""
+
+    commit: TerminalDeliveryCommit
+    rendered_body: str
+    interactive_metadata: InteractiveMetadata | None
+
+
+@dataclass(frozen=True)
 class FinalDeliveryOutcome:  # noqa: D101
     terminal_status: _TerminalStatus
     event_id: str | None
@@ -46,6 +58,7 @@ class FinalDeliveryOutcome:  # noqa: D101
     delivery_kind: _VisibleDeliveryKind | None = None
     failure_reason: str | None = None
     deferred_terminal_delivery: bool = False
+    durable_lifecycle_managed: bool = False
     suppressed: bool = False
     tool_trace: tuple[ToolTraceEntry, ...] = ()
     extra_content: dict[str, Any] | None = None

@@ -54,7 +54,7 @@ from tests.conftest import (
     message_origin,
     request_envelope,
     runtime_paths_for,
-    terminal_delivery_store_for,
+    terminal_delivery_coordinator_for,
     test_runtime_paths,
     wrap_extracted_collaborators,
 )
@@ -515,7 +515,7 @@ async def test_suppressed_final_delivery_emits_cancelled_hook(
             redact_message_event=AsyncMock(return_value=True),
             resolver=MagicMock(),
             response_hooks=response_hooks,
-            terminal_delivery_store=terminal_delivery_store_for(runtime_paths_for(config), "code"),
+            terminal_delivery_coordinator=terminal_delivery_coordinator_for(runtime_paths_for(config), "code"),
         ),
     )
 
@@ -647,7 +647,7 @@ async def test_deliver_final_delivery_failure_emits_cancelled_hook(
             redact_message_event=AsyncMock(return_value=True),
             resolver=MagicMock(),
             response_hooks=response_hooks,
-            terminal_delivery_store=terminal_delivery_store_for(runtime_paths_for(config), "code"),
+            terminal_delivery_coordinator=terminal_delivery_coordinator_for(runtime_paths_for(config), "code"),
         ),
     )
 
@@ -720,6 +720,7 @@ async def test_final_only_provider_runs_before_response_then_after_response_once
 
     registry = HookRegistry.from_plugins([_plugin("test-final-only-provider", [before, after, on_cancelled])])
     config, response_hooks = _response_hook_service(tmp_path, registry)
+    response_hooks.hook_context.runtime.client = make_matrix_client_mock(user_id="@mindroom_code:localhost")
     gateway = DeliveryGateway(
         DeliveryGatewayDeps(
             runtime=response_hooks.hook_context.runtime,
@@ -729,10 +730,10 @@ async def test_final_only_provider_runs_before_response_then_after_response_once
             redact_message_event=AsyncMock(return_value=True),
             resolver=MagicMock(),
             response_hooks=response_hooks,
-            terminal_delivery_store=terminal_delivery_store_for(runtime_paths_for(config), "code"),
+            terminal_delivery_coordinator=terminal_delivery_coordinator_for(runtime_paths_for(config), "code"),
         ),
     )
-    object.__setattr__(gateway, "edit_text", AsyncMock(return_value=True))
+    object.__setattr__(gateway, "_prepare_terminal_delivery_intent", AsyncMock(return_value=MagicMock()))
 
     outcome = await gateway.finalize_streamed_response(
         FinalizeStreamedResponseRequest(
@@ -773,9 +774,7 @@ async def test_final_only_provider_runs_before_response_then_after_response_once
     assert after_seen == [("hooked final body", "edited")]
     assert cancelled_seen == []
     assert finalized.final_visible_body == "hooked final body"
-    gateway.edit_text.assert_awaited_once()
-    assert gateway.edit_text.await_args.args[0].event_id == "$thinking"
-    assert gateway.edit_text.await_args.args[0].new_text == "hooked final body"
+    gateway.deps.terminal_delivery_coordinator.commit_and_attempt.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -812,7 +811,7 @@ async def test_suppressed_placeholder_cleanup_failure_returns_typed_outcome_afte
             redact_message_event=AsyncMock(side_effect=redact_message_event),
             resolver=MagicMock(),
             response_hooks=response_hooks,
-            terminal_delivery_store=terminal_delivery_store_for(runtime_paths_for(config), "code"),
+            terminal_delivery_coordinator=terminal_delivery_coordinator_for(runtime_paths_for(config), "code"),
         ),
     )
 
@@ -885,7 +884,7 @@ async def test_suppressed_placeholder_cleanup_exception_returns_typed_outcome_af
             redact_message_event=AsyncMock(side_effect=redact_message_event),
             resolver=MagicMock(),
             response_hooks=response_hooks,
-            terminal_delivery_store=terminal_delivery_store_for(runtime_paths_for(config), "code"),
+            terminal_delivery_coordinator=terminal_delivery_coordinator_for(runtime_paths_for(config), "code"),
         ),
     )
 

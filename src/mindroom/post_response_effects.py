@@ -20,7 +20,6 @@ if TYPE_CHECKING:
     from agno.db.base import SessionType
 
     from mindroom.constants import RuntimePaths
-    from mindroom.delivery_gateway import DeliveryGateway
     from mindroom.final_delivery import FinalDeliveryOutcome
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.conversation_cache import ConversationCacheProtocol
@@ -71,7 +70,6 @@ class PostResponseEffectsSupport:
     runtime: SupportsClientConfig
     logger: structlog.stdlib.BoundLogger
     runtime_paths: RuntimePaths
-    delivery_gateway: DeliveryGateway
     conversation_cache: ConversationCacheProtocol
 
     def _client(self) -> nio.AsyncClient:
@@ -106,7 +104,7 @@ class PostResponseEffectsSupport:
         """Run thread-summary generation with duration logging."""
         await summary_coro
 
-    async def _register_interactive_delivery(
+    async def register_interactive_delivery(
         self,
         *,
         event_id: str,
@@ -114,9 +112,10 @@ class PostResponseEffectsSupport:
         target: MessageTarget,
         interactive_metadata: interactive.InteractiveMetadata,
         agent_name: str,
+        idempotency_key: str,
     ) -> None:
-        """Persist one interactive response and add its reaction buttons."""
-        interactive.register_interactive_question(
+        """Persist one interactive response and idempotently add its reactions."""
+        persisted = interactive.register_interactive_question(
             event_id,
             room_id,
             target.resolved_thread_id,
@@ -125,11 +124,15 @@ class PostResponseEffectsSupport:
             question_text=interactive_metadata.question_text,
             option_labels=interactive_metadata.option_labels,
         )
+        if not persisted:
+            msg = "Interactive question persistence failed"
+            raise OSError(msg)
         await interactive.add_reaction_buttons(
             self._client(),
             room_id,
             event_id,
             interactive_metadata.options_as_list(),
+            idempotency_key=idempotency_key,
         )
 
     def queue_thread_summary(
@@ -137,6 +140,8 @@ class PostResponseEffectsSupport:
         room_id: str,
         thread_id: str,
         entity_name: str | None,
+        *,
+        idempotency_key: str | None = None,
     ) -> None:
         """Queue background thread summarization with timing instrumentation."""
         summary_coro = maybe_generate_thread_summary(
@@ -152,8 +157,31 @@ class PostResponseEffectsSupport:
             self._timed_thread_summary(
                 summary_coro=summary_coro,
             ),
-            name=f"thread_summary_{room_id}_{thread_id}",
+            name=f"thread_summary_{idempotency_key or f'{room_id}_{thread_id}'}",
             owner=self.runtime,
+        )
+
+    async def complete_thread_summary(
+        self,
+        room_id: str,
+        thread_id: str,
+        entity_name: str | None,
+        *,
+        idempotency_key: str,
+    ) -> None:
+        """Await one retryable summary check with stable Matrix identity."""
+        await self._timed_thread_summary(
+            summary_coro=maybe_generate_thread_summary(
+                client=self._client(),
+                room_id=room_id,
+                thread_id=thread_id,
+                config=self.runtime.config,
+                runtime_paths=self.runtime_paths,
+                conversation_cache=self.conversation_cache,
+                entity_name=entity_name,
+                transaction_id=f"mindroom-summary-{idempotency_key}",
+                raise_on_failure=True,
+            ),
         )
 
     def build_deps(
@@ -171,12 +199,13 @@ class PostResponseEffectsSupport:
             target: MessageTarget,
             interactive_metadata: interactive.InteractiveMetadata,
         ) -> None:
-            await self._register_interactive_delivery(
+            await self.register_interactive_delivery(
                 event_id=event_id,
                 room_id=room_id,
                 target=target,
                 interactive_metadata=interactive_metadata,
                 agent_name=interactive_agent_name,
+                idempotency_key=f"response:{event_id}",
             )
 
         return PostResponseEffectsDeps(
@@ -198,6 +227,7 @@ async def apply_post_response_effects(
     response_event_id = final_delivery_outcome.final_visible_event_id
     if (
         response_event_id is not None
+        and not final_delivery_outcome.durable_lifecycle_managed
         and deps.register_interactive is not None
         and final_delivery_outcome.terminal_status == "completed"
         and final_delivery_outcome.final_visible_body is not None
@@ -257,6 +287,7 @@ async def apply_post_response_effects(
 
     if (
         outcome.run_succeeded
+        and not final_delivery_outcome.durable_lifecycle_managed
         and final_delivery_outcome.terminal_status == "completed"
         and response_event_id is not None
         and not final_delivery_outcome.suppressed

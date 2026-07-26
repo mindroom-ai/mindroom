@@ -33,6 +33,7 @@ async def test_redaction_tombstones_before_updating_advisory_cache() -> None:
         RedactedTurnCleanupDeps(
             conversation_cache=conversation_cache,
             turn_store=turn_store,
+            terminal_delivery_coordinator=MagicMock(redact=AsyncMock()),
         ),
     )
     room = nio.MatrixRoom(room_id=ROOM_ID, own_user_id="@agent:example.org")
@@ -56,6 +57,7 @@ async def test_failed_tombstone_does_not_apply_redaction_to_cache() -> None:
         RedactedTurnCleanupDeps(
             conversation_cache=conversation_cache,
             turn_store=turn_store,
+            terminal_delivery_coordinator=MagicMock(redact=AsyncMock()),
         ),
     )
     room = nio.MatrixRoom(room_id=ROOM_ID, own_user_id="@agent:example.org")

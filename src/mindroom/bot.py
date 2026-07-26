@@ -115,12 +115,7 @@ from .scheduling import (
 )
 from .startup_errors import PermanentStartupError
 from .sync_restart_retry import InterruptedTurnRooms
-from .terminal_delivery import TerminalDeliveryStore
-from .terminal_delivery_replay import (
-    TerminalDeliveryLifecycleReplayer,
-    TerminalDeliveryLifecycleReplayerDeps,
-)
-from .terminal_delivery_worker import TerminalDeliveryWorker, TerminalDeliveryWorkerDeps
+from .terminal_delivery import TerminalDeliveryCoordinator, TerminalDeliveryCoordinatorDeps, TerminalDeliveryStore
 from .turn_controller import TurnController, TurnControllerDeps
 from .turn_policy import IngressHookRunner, TurnPolicy, TurnPolicyDeps
 from .turn_store import TurnStore, TurnStoreDeps
@@ -302,8 +297,7 @@ class AgentBot:
     _conversation_state_writer: ConversationStateWriter
     _conversation_cache: MatrixConversationCache
     _delivery_gateway: DeliveryGateway
-    _terminal_delivery_store: TerminalDeliveryStore
-    _terminal_delivery_worker: TerminalDeliveryWorker
+    _terminal_delivery_coordinator: TerminalDeliveryCoordinator
     _response_runner: ResponseRunner
     _redacted_turn_cleanup: RedactedTurnCleanup
     _turn_store: TurnStore
@@ -466,23 +460,9 @@ class AgentBot:
                 runtime_paths=self.runtime_paths,
             ),
         )
-        self._terminal_delivery_store = TerminalDeliveryStore(
+        terminal_delivery_store = TerminalDeliveryStore(
             agent_name=self.agent_name,
             base_path=self.storage_path / "tracking",
-        )
-        self._delivery_gateway = DeliveryGateway(
-            DeliveryGatewayDeps(
-                runtime=self._runtime_view,
-                runtime_paths=self.runtime_paths,
-                agent_name=self.agent_name,
-                logger=self.logger,
-                resolver=self._conversation_resolver,
-                redact_message_event=self._redact_message_event,
-                response_hooks=ResponseHookService(
-                    hook_context=self._hook_context_support,
-                ),
-                terminal_delivery_store=self._terminal_delivery_store,
-            ),
         )
         self._tool_runtime_support = ToolRuntimeSupport(
             runtime=self._runtime_view,
@@ -507,23 +487,32 @@ class AgentBot:
             runtime=self._runtime_view,
             logger=self.logger,
             runtime_paths=self.runtime_paths,
-            delivery_gateway=self._delivery_gateway,
             conversation_cache=self._conversation_cache,
         )
-        terminal_delivery_lifecycle = TerminalDeliveryLifecycleReplayer(
-            TerminalDeliveryLifecycleReplayerDeps(
-                response_hooks=self._delivery_gateway.deps.response_hooks,
+        response_hooks = ResponseHookService(
+            hook_context=self._hook_context_support,
+        )
+        self._terminal_delivery_coordinator = TerminalDeliveryCoordinator(
+            TerminalDeliveryCoordinatorDeps(
+                runtime=self._runtime_view,
+                store=terminal_delivery_store,
+                conversation_cache=self._conversation_cache,
+                response_hooks=response_hooks,
                 post_response_effects=self._post_response_effects_support,
+                is_ready=self._terminal_delivery_ready,
                 logger=self.logger,
             ),
         )
-        self._terminal_delivery_worker = TerminalDeliveryWorker(
-            TerminalDeliveryWorkerDeps(
-                store=self._terminal_delivery_store,
-                attempt=self._delivery_gateway.attempt_pending_terminal_delivery,
-                complete_lifecycle=terminal_delivery_lifecycle.complete,
-                is_ready=self._terminal_delivery_ready,
+        self._delivery_gateway = DeliveryGateway(
+            DeliveryGatewayDeps(
+                runtime=self._runtime_view,
+                runtime_paths=self.runtime_paths,
+                agent_name=self.agent_name,
                 logger=self.logger,
+                resolver=self._conversation_resolver,
+                redact_message_event=self._redact_message_event,
+                response_hooks=response_hooks,
+                terminal_delivery_coordinator=self._terminal_delivery_coordinator,
             ),
         )
         self._ingress_hook_runner = IngressHookRunner(
@@ -592,7 +581,7 @@ class AgentBot:
             RedactedTurnCleanupDeps(
                 conversation_cache=self._conversation_cache,
                 turn_store=self._turn_store,
-                terminal_delivery_store=self._terminal_delivery_store,
+                terminal_delivery_coordinator=self._terminal_delivery_coordinator,
             ),
         )
         self._turn_controller = TurnController(
@@ -624,10 +613,10 @@ class AgentBot:
         The worker is safe to start before the first sync: ``_terminal_delivery_ready``
         keeps it idle until this bot is running with a live, synced Matrix client.
         """
-        recovered = await asyncio.to_thread(self._terminal_delivery_store.warm)
+        recovered = await asyncio.to_thread(self._terminal_delivery_coordinator.store.warm)
         if recovered:
             self.logger.warning("terminal_delivery_startup_recovery", recovered_count=len(recovered))
-        self._terminal_delivery_worker.start()
+        self._terminal_delivery_coordinator.start()
 
     def _terminal_delivery_ready(self) -> bool:
         """Return whether durable terminal delivery may talk to Matrix right now."""
@@ -640,7 +629,7 @@ class AgentBot:
 
     def pending_terminal_delivery_event_ids(self, room_id: str | None = None) -> frozenset[str]:
         """Return visible event IDs a durable terminal delivery still owns for this bot."""
-        return self._terminal_delivery_store.pending_target_event_ids(room_id)
+        return self._terminal_delivery_coordinator.pending_target_event_ids(room_id)
 
     async def _wait_until_coalesced_dispatch_allowed(self, key: CoalescingKey) -> None:
         """Hold active follow-up dispatch until the response lock for its target is idle."""
@@ -1229,7 +1218,7 @@ class AgentBot:
         # Limited-sync timeline recovery closes its gaps while a sync response is
         # applied, so every applied sync is the practical recovery-ready signal for
         # durable terminal delivery. Missing one only delays the periodic scan.
-        self._terminal_delivery_worker.wake(reason="sync_response_applied")
+        self._terminal_delivery_coordinator.wake(reason="sync_response_applied")
 
     async def _on_sync_response(self, _response: nio.SyncResponse | nio.SlidingSyncResponse) -> None:
         """Track successful sync responses for health checks and watchdogs."""
@@ -1586,7 +1575,7 @@ class AgentBot:
         client = self.client
         self.running = False
         self.client = None
-        await self._terminal_delivery_worker.stop()
+        await self._terminal_delivery_coordinator.stop()
         if client is None:
             return
         try:
@@ -1765,7 +1754,7 @@ class AgentBot:
             )
         self._sync_shutting_down = True
         self._response_runner.refuse_pending_admissions()
-        await self._terminal_delivery_worker.stop()
+        await self._terminal_delivery_coordinator.stop()
         await self._cancel_startup_thread_prewarm()
         if self.agent_name == ROUTER_AGENT_NAME:
             await self._cancel_deferred_overdue_task_drain()

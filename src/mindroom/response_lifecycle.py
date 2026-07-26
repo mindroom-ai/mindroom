@@ -501,7 +501,8 @@ class ResponseLifecycle:
         try:
             if final_delivery_outcome.terminal_status == "completed":
                 if (
-                    response_event_id is not None
+                    not final_delivery_outcome.durable_lifecycle_managed
+                    and response_event_id is not None
                     and final_delivery_outcome.final_visible_body is not None
                     and final_delivery_outcome.delivery_kind is not None
                 ):
