@@ -362,6 +362,11 @@ class ThreadMutationResolver:
         resolution_context: MutationResolutionContext | None = None,
     ) -> MutationThreadImpact:
         """Resolve how one message mutation should affect thread cache state."""
+        if resolution_context is None:
+            resolution_context = MutationResolutionContext(
+                page_event_infos={},
+                page_resolved_thread_ids={},
+            )
         explicit_thread_id = event_info.thread_id
         if explicit_thread_id is not None:
             return MutationThreadImpact.threaded(explicit_thread_id)
@@ -466,6 +471,21 @@ class ThreadMutationResolver:
                 )
             )
         else:
+            if any(
+                not event_source_supports_thread_relations(
+                    cast("dict[str, object]", event_source),
+                    room_id,
+                )
+                for event_source in thread_events
+            ):
+                proof = ThreadRootProof.proof_unavailable(
+                    ThreadMembershipLookupError(
+                        f"Cached thread root proof contains invalid room timeline events for {thread_root_id}",
+                    ),
+                )
+                if resolution_context is not None:
+                    resolution_context.cached_thread_root_proofs[thread_root_id] = proof
+                return proof
             has_children = any(
                 _event_source_counts_as_thread_child_proof(
                     thread_root_id,

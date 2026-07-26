@@ -2387,6 +2387,7 @@ visibility = [
     "mindroom.matrix.client_thread_history",
     "mindroom.matrix.client_visible_messages",
     "mindroom.matrix.conversation_cache",
+    "mindroom.matrix.stale_stream_cleanup",
     "mindroom.matrix.thread_resolution_reuse",
 ]
 
@@ -2614,6 +2615,7 @@ depends_on = [
     "mindroom.matrix.client_visible_messages",
     "mindroom.matrix.event_info",
     "mindroom.matrix.message_content",
+    "mindroom.matrix.replacements",
     "mindroom.matrix.thread_projection",
     "mindroom.matrix.visible_body",
     "mindroom.streaming",

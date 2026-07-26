@@ -24,6 +24,7 @@ from mindroom.matrix.cache.thread_writes import (
     _collect_sync_timeline_cache_updates,
 )
 from mindroom.matrix.conversation_cache import MatrixConversationCache
+from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.thread_bookkeeping import MutationThreadImpact
 from mindroom.matrix.thread_diagnostics import (
     THREAD_HISTORY_DEGRADED_DIAGNOSTIC,
@@ -1578,6 +1579,77 @@ class TestMatrixConversationCacheThreadReads:
                 resolution_context=context,
             )
             assert impact == MutationThreadImpact.room_level()
+
+    @pytest.mark.parametrize(
+        "invalid_scope",
+        [{"state_key": ""}, {"room_id": "!other:localhost"}],
+        ids=["state", "wrong-room"],
+    )
+    @pytest.mark.asyncio
+    async def test_cached_invalid_child_cannot_promote_rich_reply_to_thread_root(
+        self,
+        invalid_scope: dict[str, str],
+    ) -> None:
+        """Legacy state and wrong-room rows must not prove a cached rich reply is a root."""
+        room_id = "!test:localhost"
+        rich_reply_id = "$rich-reply"
+        parent_thread_id = "$parent-thread"
+        rich_reply = {
+            "event_id": rich_reply_id,
+            "room_id": room_id,
+            "sender": "@user:localhost",
+            "origin_server_ts": 1,
+            "type": "m.room.message",
+            "content": {
+                "body": "rich reply",
+                "msgtype": "m.text",
+                "m.relates_to": {"m.in_reply_to": {"event_id": parent_thread_id}},
+            },
+        }
+        invalid_child = {
+            "event_id": "$invalid-child",
+            "room_id": room_id,
+            "sender": "@user:localhost",
+            "origin_server_ts": 2,
+            "type": "m.room.message",
+            "content": {
+                "body": "invalid child",
+                "msgtype": "m.text",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": rich_reply_id},
+            },
+            **invalid_scope,
+        }
+        event_cache = _runtime_event_cache()
+        event_cache.get_thread_id_for_event = AsyncMock(return_value=parent_thread_id)
+        event_cache.get_thread_events = AsyncMock(return_value=[rich_reply, invalid_child])
+        runtime = MagicMock()
+        runtime.event_cache = event_cache
+        resolver = thread_bookkeeping.ThreadMutationResolver(
+            logger_getter=MagicMock,
+            runtime=runtime,
+            fetch_event_info_for_thread_resolution=AsyncMock(
+                return_value=EventInfo.from_event(rich_reply),
+            ),
+        )
+        child_info = EventInfo.from_event(
+            {
+                "type": "m.room.message",
+                "content": {
+                    "body": "reply to rich reply",
+                    "msgtype": "m.text",
+                    "m.relates_to": {"m.in_reply_to": {"event_id": rich_reply_id}},
+                },
+            },
+        )
+
+        impact = await resolver.resolve_thread_impact_for_mutation(
+            room_id,
+            event_info=child_info,
+            event_id="$reply-to-rich",
+            context="live",
+        )
+
+        assert impact == MutationThreadImpact.unknown()
 
     @pytest.mark.asyncio
     async def test_get_latest_thread_event_id_fails_open_without_write_coordinator(self) -> None:
