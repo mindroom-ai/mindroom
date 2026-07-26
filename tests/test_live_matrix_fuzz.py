@@ -128,14 +128,18 @@ def test_lifecycle_command_interrupt_kills_and_drains_process_group(
 
 
 @pytest.mark.parametrize(
-    ("hard_kill", "expected_signal"),
-    [(False, signal.SIGINT), (True, signal.SIGKILL)],
+    ("hard_kill", "expected_signal", "return_code"),
+    [
+        (False, signal.SIGINT, 0),
+        (True, signal.SIGKILL, -signal.SIGKILL),
+    ],
 )
 def test_stop_mindroom_targets_exact_process_group(
     monkeypatch: pytest.MonkeyPatch,
     *,
     hard_kill: bool,
     expected_signal: signal.Signals,
+    return_code: int,
 ) -> None:
     """Graceful and hard stops signal the owned child group, then reap it."""
 
@@ -151,7 +155,7 @@ def test_stop_mindroom_targets_exact_process_group(
         def wait(self, *, timeout: float) -> int:
             assert timeout in {10, 20}
             self.waited = True
-            return 0
+            return return_code
 
     process = FakeProcess()
     stack = object.__new__(ManagedTuwunelStack)
@@ -313,6 +317,66 @@ def test_stop_mindroom_rejects_exit_before_sigint_delivery(
         stack._stop_mindroom()
 
     assert wait_calls == [10]
+    assert stack._mindroom_process is None
+
+
+def test_stop_mindroom_rejects_exit_before_sigkill_delivery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A spontaneous exit cannot count as a successful hard-kill injection."""
+    wait_calls: list[float] = []
+
+    class FakeProcess:
+        pid = 4242
+
+        @staticmethod
+        def poll() -> None:
+            return None
+
+        @staticmethod
+        def wait(*, timeout: float) -> int:
+            wait_calls.append(timeout)
+            return 7
+
+    stack = object.__new__(ManagedTuwunelStack)
+    stack._mindroom_process = FakeProcess()
+
+    def missing_group(_pid: int, _sig: signal.Signals) -> None:
+        raise ProcessLookupError
+
+    monkeypatch.setattr(live_fuzz.os, "killpg", missing_group)
+
+    with pytest.raises(RuntimeError, match="exited before managed SIGKILL delivery with status 7"):
+        stack._stop_mindroom(kill=True)
+
+    assert wait_calls == [10]
+    assert stack._mindroom_process is None
+
+
+def test_stop_mindroom_rejects_non_sigkill_wait_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A delivered signal is not proof when wait reports a spontaneous exit."""
+
+    class FakeProcess:
+        pid = 4242
+
+        @staticmethod
+        def poll() -> None:
+            return None
+
+        @staticmethod
+        def wait(*, timeout: float) -> int:
+            assert timeout == 10
+            return 7
+
+    stack = object.__new__(ManagedTuwunelStack)
+    stack._mindroom_process = FakeProcess()
+    monkeypatch.setattr(live_fuzz.os, "killpg", lambda _pid, _sig: None)
+
+    with pytest.raises(RuntimeError, match="hard kill exited with status 7"):
+        stack._stop_mindroom(kill=True)
+
     assert stack._mindroom_process is None
 
 

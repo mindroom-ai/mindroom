@@ -1289,6 +1289,21 @@ def _run_command(
     return stdout
 
 
+def _hard_kill_mindroom_process(process: subprocess.Popen[str]) -> None:
+    """Require proof that SIGKILL reached the managed process group."""
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError as exc:
+        return_code = process.wait(timeout=10)
+        msg = f"MindRoom exited before managed SIGKILL delivery with status {return_code}"
+        raise RuntimeError(msg) from exc
+    return_code = process.wait(timeout=10)
+    expected_return_codes = {-int(signal.SIGKILL), 128 + int(signal.SIGKILL)}
+    if return_code not in expected_return_codes:
+        msg = f"MindRoom hard kill exited with status {return_code}"
+        raise RuntimeError(msg)
+
+
 def _attempt_cleanup(
     errors: list[tuple[str, BaseException]],
     label: str,
@@ -2010,10 +2025,10 @@ class ManagedTuwunelStack:
             msg = f"MindRoom exited before managed shutdown with status {return_code}"
             raise RuntimeError(msg)
         if kill:
-            with suppress(ProcessLookupError):
-                os.killpg(process.pid, signal.SIGKILL)
-            process.wait(timeout=10)
-            self._mindroom_process = None
+            try:
+                _hard_kill_mindroom_process(process)
+            finally:
+                self._mindroom_process = None
             return
         try:
             os.killpg(process.pid, signal.SIGINT)
