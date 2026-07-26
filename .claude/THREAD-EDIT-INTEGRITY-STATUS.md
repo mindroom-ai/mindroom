@@ -229,3 +229,23 @@ Updated 2026-07-26 after correcting invalid transitive batch ancestry and opaque
 - Remove this living handoff in a final non-production commit only after all exact-head gates pass.
 - That removal changes the exact head, so rerun the required lightweight exact-head checks and confirm no production diff changed.
 - Never merge.
+
+## Exact-0ec0 opaque replacement correction
+
+- Local and pushed code head is `0ec0b3007a7d1d45aad33d9327497938d049a237`.
+- Two exact-`6b10f81e2` native Codex reviews independently reproduced same-sender opaque encrypted replacements failing to stale their known target thread.
+- The reviews also reproduced opaque replacements with missing, empty, or non-string targets poisoning every requested thread.
+- All five claims failed deterministic regressions before implementation.
+- Commit `0ec0b3007` validates visible encrypted replacement ancestry through the target source and sender before resolving its thread impact.
+- Malformed targets remain ignored, while wrong-sender opaque replacements remain a thread-state no-op.
+- The focused correction passes `16` variants across SQLite and PostgreSQL.
+- The complete affected selection passes `520` tests with zero failures, errors, or skips across SQLite and PostgreSQL.
+- Evidence is preserved in `artifacts/pr1641-round5/owning.xml`.
+- Ruff, formatting, `ty`, Tach dependencies/interfaces, `git diff --check`, all-file pre-commit, and commit hooks pass.
+- Production source against current `main` is `+2165/-1200`, net `+965`.
+- Exact-`6b10f81e2` full pytest completed with twelve unrelated timing/resource failures while many independent full and PostgreSQL jobs saturated the host.
+- Eleven of those failures passed an isolated serial rerun before the final PostgreSQL fanout was intentionally stopped after this production correction made that run stale.
+- Every predecessor review, CI, full-suite, static, PostgreSQL, and live claim is historical after `0ec0b3007`.
+- Fresh exact-head CI, independent native Codex review, PostgreSQL/full/Tach/all-file validation, and real-Tuwunel validation remain mandatory.
+- The living handoff remains tracked until every exact-head gate passes.
+- Merge gate remains closed.
