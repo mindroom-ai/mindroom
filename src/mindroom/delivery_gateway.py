@@ -349,15 +349,6 @@ class DeliveryGateway:
             raise RuntimeError(msg)
         return client
 
-    async def owned_terminal_delivery(self, identity: ResponseIdentity) -> PendingTerminalDelivery | None:
-        """Return durable target ownership for a replayed response."""
-        return await self.owned_terminal_delivery_for_turn(
-            response_kind=identity.response_kind,
-            response_envelope=identity.response_envelope,
-            correlation_id=identity.correlation_id,
-            source_event_ids=identity.source_event_ids,
-        )
-
     async def owned_terminal_delivery_for_turn(
         self,
         *,
@@ -500,52 +491,6 @@ class DeliveryGateway:
             extra_content=failure_extra_content,
         )
 
-    async def _prepare_terminal_delivery_intent(
-        self,
-        *,
-        target: MessageTarget,
-        target_event_id: str,
-        target_was_placeholder: bool,
-        identity: ResponseIdentity,
-        body: str,
-        tool_trace: list[ToolTraceEntry] | None,
-        extra_content: dict[str, Any] | None,
-        interactive_metadata: interactive.InteractiveMetadata | None,
-    ) -> TerminalDeliveryIntent | None:
-        """Freeze one exact terminal edit payload before any Matrix attempt."""
-        client = self.deps.runtime.client
-        if client is None or not body.strip():
-            return None
-        # The repaired edit must publish the terminal status even when the
-        # carried content still describes an in-progress stream.
-        durable_extra_content = dict(extra_content or {})
-        durable_extra_content[constants.STREAM_STATUS_KEY] = constants.STREAM_STATUS_COMPLETED
-        edit_request = EditTextRequest(
-            target=target,
-            event_id=target_event_id,
-            new_text=body,
-            tool_trace=tool_trace,
-            extra_content=durable_extra_content,
-        )
-        new_content = await self._build_edit_content(edit_request)
-        wire_content = await prepare_message_content(
-            client,
-            target.room_id,
-            build_edit_event_content(
-                event_id=target_event_id,
-                new_content=new_content,
-                new_text=body,
-            ),
-        )
-        return TerminalDeliveryIntent(
-            target_event_id=target_event_id,
-            target_was_placeholder=target_was_placeholder,
-            identity=identity,
-            interactive_metadata=interactive_metadata,
-            body=body,
-            wire_content=wire_content,
-        )
-
     async def _commit_terminal_edit(
         self,
         *,
@@ -559,23 +504,43 @@ class DeliveryGateway:
         interactive_metadata: interactive.InteractiveMetadata | None,
     ) -> TerminalDeliveryCommit:
         """Freeze, persist, and immediately attempt one terminal edit."""
-        intent = await self._prepare_terminal_delivery_intent(
-            target=target,
-            target_event_id=target_event_id,
-            target_was_placeholder=target_was_placeholder,
-            identity=identity,
-            body=body,
-            tool_trace=tool_trace,
-            extra_content=extra_content,
-            interactive_metadata=interactive_metadata,
-        )
-        if intent is None:
+        client = self.deps.runtime.client
+        if client is None or not body.strip():
             return TerminalDeliveryCommit(
                 status="deferred",
                 reason="terminal_intent_unavailable",
                 lifecycle_managed=False,
             )
-        return await self.deps.terminal_delivery_coordinator.commit_and_attempt(intent)
+        durable_extra_content = dict(extra_content or {})
+        durable_extra_content[constants.STREAM_STATUS_KEY] = constants.STREAM_STATUS_COMPLETED
+        new_content = await self._build_edit_content(
+            EditTextRequest(
+                target=target,
+                event_id=target_event_id,
+                new_text=body,
+                tool_trace=tool_trace,
+                extra_content=durable_extra_content,
+            ),
+        )
+        wire_content = await prepare_message_content(
+            client,
+            target.room_id,
+            build_edit_event_content(
+                event_id=target_event_id,
+                new_content=new_content,
+                new_text=body,
+            ),
+        )
+        return await self.deps.terminal_delivery_coordinator.commit_and_attempt(
+            TerminalDeliveryIntent(
+                target_event_id=target_event_id,
+                target_was_placeholder=target_was_placeholder,
+                identity=identity,
+                interactive_metadata=interactive_metadata,
+                body=body,
+                wire_content=wire_content,
+            ),
+        )
 
     async def send_text(self, request: SendTextRequest) -> str | None:
         """Send one response message to a room."""
@@ -869,7 +834,7 @@ class DeliveryGateway:
                     tool_trace=tuple(draft.tool_trace or ()),
                     extra_content=draft.extra_content,
                 )
-            if commit.status == "delivered" or commit.pending is not None:
+            if commit.status == "delivered" or (commit.status == "deferred" and commit.lifecycle_managed):
                 return FinalDeliveryOutcome(
                     terminal_status="completed",
                     event_id=request.existing_event_id,

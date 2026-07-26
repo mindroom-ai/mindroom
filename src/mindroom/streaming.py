@@ -939,9 +939,9 @@ class StreamingResponse:
                     prepared_delivery.committed_state.tool_trace,
                     prepared_delivery.committed_state.interactive_metadata,
                 )
-                send_succeeded = (
-                    self._terminal_delivery.commit.status == "delivered"
-                    or self._terminal_delivery.commit.pending is not None
+                send_succeeded = self._terminal_delivery.commit.status == "delivered" or (
+                    self._terminal_delivery.commit.status == "deferred"
+                    and self._terminal_delivery.commit.lifecycle_managed
                 )
             else:
                 send_succeeded = await self._send_content(

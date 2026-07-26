@@ -238,10 +238,10 @@ class TurnStore:
             )
 
         try:
-            committed = self._ledger.transact_terminal_checkpoint(
+            committed = self._ledger.transact_handled_turns(
                 turn_record.indexed_event_ids,
-                response_event_id,
                 committed_records,
+                response_event_id=response_event_id,
             )
         except _TerminalCheckpointConflictError:
             return None
@@ -277,30 +277,11 @@ class TurnStore:
         update: Callable[[TerminalEditCheckpoint], TerminalEditCheckpoint],
     ) -> TurnRecord | None:
         """Durably replace one exact checkpoint without permitting stale writers."""
-
-        def updated_records(existing_records: Mapping[str, TurnRecord]) -> tuple[TurnRecord, ...]:
-            authority = next(
-                (existing for existing in existing_records.values() if same_turn_identity(existing, turn_record)),
-                None,
-            )
-            if authority is None:
-                raise _TerminalCheckpointConflictError
-            checkpoint = authority.terminal_edit_checkpoint
-            if checkpoint is None or checkpoint.transaction_id != expected_transaction_id:
-                raise _TerminalCheckpointConflictError
-            updated_checkpoint = update(checkpoint)
-            if updated_checkpoint.transaction_id != expected_transaction_id:
-                raise _TerminalCheckpointConflictError
-            return (replace(authority, terminal_edit_checkpoint=updated_checkpoint, timestamp=0.0),)
-
-        try:
-            updated = self._ledger.transact_handled_turns(
-                turn_record.indexed_event_ids,
-                updated_records,
-            )
-        except _TerminalCheckpointConflictError:
-            return None
-        return updated[0] if updated else None
+        return self._mutate_terminal_checkpoint(
+            turn_record,
+            expected_transaction_id=expected_transaction_id,
+            update=update,
+        )
 
     def clear_terminal_checkpoint(
         self,
@@ -310,31 +291,53 @@ class TurnStore:
     ) -> TurnRecord | None:
         """Clear one checkpoint only after its required lifecycle state converges."""
 
-        def cleared_records(existing_records: Mapping[str, TurnRecord]) -> tuple[TurnRecord, ...]:
+        def clear(checkpoint: TerminalEditCheckpoint) -> None:
+            if not checkpoint.after_response_claimed or (
+                checkpoint.interactive_metadata is not None and not checkpoint.interactive_completed
+            ):
+                raise _TerminalCheckpointConflictError
+
+        return self._mutate_terminal_checkpoint(
+            turn_record,
+            expected_transaction_id=expected_transaction_id,
+            update=clear,
+        )
+
+    def _mutate_terminal_checkpoint(
+        self,
+        turn_record: TurnRecord,
+        *,
+        expected_transaction_id: str,
+        update: Callable[[TerminalEditCheckpoint], TerminalEditCheckpoint | None],
+    ) -> TurnRecord | None:
+        """Apply one transaction-fenced checkpoint mutation."""
+
+        def updated_records(
+            existing_records: Mapping[str, TurnRecord],
+            _response_owners: tuple[TurnRecord, ...],
+        ) -> tuple[TurnRecord, ...]:
             authority = next(
-                (existing for existing in existing_records.values() if same_turn_identity(existing, turn_record)),
+                (record for record in existing_records.values() if same_turn_identity(record, turn_record)),
                 None,
             )
             if authority is None:
                 raise _TerminalCheckpointConflictError
             checkpoint = authority.terminal_edit_checkpoint
-            if (
-                checkpoint is None
-                or checkpoint.transaction_id != expected_transaction_id
-                or not checkpoint.after_response_claimed
-                or (checkpoint.interactive_metadata is not None and not checkpoint.interactive_completed)
-            ):
+            if checkpoint is None or checkpoint.transaction_id != expected_transaction_id:
                 raise _TerminalCheckpointConflictError
-            return (replace(authority, terminal_edit_checkpoint=None, timestamp=0.0),)
+            updated = update(checkpoint)
+            if updated is not None and updated.transaction_id != expected_transaction_id:
+                raise _TerminalCheckpointConflictError
+            return (replace(authority, terminal_edit_checkpoint=updated, timestamp=0.0),)
 
         try:
-            cleared = self._ledger.transact_handled_turns(
+            records = self._ledger.transact_handled_turns(
                 turn_record.indexed_event_ids,
-                cleared_records,
+                updated_records,
             )
         except _TerminalCheckpointConflictError:
             return None
-        return cleared[0] if cleared else None
+        return records[0] if records else None
 
     def record_pending_turn(self, turn_record: TurnRecord) -> TurnRecord | None:
         """Persist exact response context before generation reaches session storage."""
@@ -475,7 +478,11 @@ class TurnStore:
                 ),
             )
 
-        redacted = self._ledger.transact_redaction(source_event_id, redacted_records)
+        redacted = self._ledger.transact_handled_turns(
+            (source_event_id,),
+            redacted_records,
+            response_event_id=source_event_id,
+        )
         return redacted[0] if redacted else None
 
     def any_source_redacted(self, source_event_ids: tuple[str, ...]) -> bool:

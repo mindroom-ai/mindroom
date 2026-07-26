@@ -97,36 +97,32 @@ class TerminalEditCheckpoint:
 
     def __post_init__(self) -> None:
         """Validate and freeze state so every constructed checkpoint can reload."""
-        required_strings = (
-            self.transaction_id,
-            self.response_text,
-            self.response_kind,
-            self.correlation_id,
-        )
-        if any(not isinstance(value, str) or not value for value in required_strings):
+        if not all(
+            isinstance(value, str) and value
+            for value in (self.transaction_id, self.response_text, self.response_kind, self.correlation_id)
+        ):
             message = "Terminal checkpoint identity and response strings must be non-empty"
             raise ValueError(message)
-        if (
-            not isinstance(self.target_was_placeholder, bool)
-            or not isinstance(self.after_response_claimed, bool)
-            or not isinstance(self.interactive_completed, bool)
+        if not all(
+            isinstance(value, bool)
+            for value in (self.target_was_placeholder, self.after_response_claimed, self.interactive_completed)
         ):
             message = "Terminal checkpoint state flags must be booleans"
             raise TypeError(message)
         if not self.wire_content or not self.response_envelope:
             message = "Terminal checkpoint wire content and response envelope must be non-empty"
             raise ValueError(message)
-        object.__setattr__(self, "wire_content", _immutable_json_mapping(self.wire_content))
-        object.__setattr__(self, "response_envelope", _immutable_json_mapping(self.response_envelope))
+        object.__setattr__(self, "wire_content", _freeze_json_mapping(self.wire_content))
+        object.__setattr__(self, "response_envelope", _freeze_json_mapping(self.response_envelope))
         object.__setattr__(
             self,
             "interactive_metadata",
-            _immutable_json_mapping(self.interactive_metadata) if self.interactive_metadata is not None else None,
+            _freeze_json_mapping(self.interactive_metadata) if self.interactive_metadata is not None else None,
         )
 
     def to_record(self) -> dict[str, object]:
         """Return the JSON-safe checkpoint stored inside one TurnRecord."""
-        record: dict[str, object] = {
+        return {
             "transaction_id": self.transaction_id,
             "wire_content": _thaw_json_value(self.wire_content),
             "response_text": self.response_text,
@@ -134,54 +130,32 @@ class TerminalEditCheckpoint:
             "target_was_placeholder": self.target_was_placeholder,
             "response_envelope": _thaw_json_value(self.response_envelope),
             "correlation_id": self.correlation_id,
+            "interactive_metadata": _thaw_json_value(self.interactive_metadata),
             "after_response_claimed": self.after_response_claimed,
             "interactive_completed": self.interactive_completed,
         }
-        if self.interactive_metadata is not None:
-            record["interactive_metadata"] = _thaw_json_value(self.interactive_metadata)
-        return record
 
     @classmethod
     def from_raw(cls, raw_checkpoint: object) -> TerminalEditCheckpoint | None:
         """Decode one current checkpoint without accepting partial lifecycle facts."""
         if not isinstance(raw_checkpoint, Mapping):
             return None
-        checkpoint = typing.cast("Mapping[str, object]", raw_checkpoint)
-        transaction_id = _normalize_string(checkpoint.get("transaction_id"))
-        response_text = _normalize_string(checkpoint.get("response_text"))
-        response_kind = _normalize_string(checkpoint.get("response_kind"))
-        target_was_placeholder = checkpoint.get("target_was_placeholder")
-        correlation_id = _normalize_string(checkpoint.get("correlation_id"))
-        wire_content = checkpoint.get("wire_content")
-        response_envelope = checkpoint.get("response_envelope")
-        interactive_metadata = checkpoint.get("interactive_metadata")
-        after_response_claimed = checkpoint.get("after_response_claimed", False)
-        interactive_completed = checkpoint.get("interactive_completed", False)
-        if (
-            transaction_id is None
-            or response_text is None
-            or response_kind is None
-            or not isinstance(target_was_placeholder, bool)
-            or correlation_id is None
-            or not isinstance(wire_content, Mapping)
-            or not isinstance(response_envelope, Mapping)
-            or (interactive_metadata is not None and not isinstance(interactive_metadata, Mapping))
-            or not isinstance(after_response_claimed, bool)
-            or not isinstance(interactive_completed, bool)
-        ):
+        checkpoint = typing.cast("Mapping[str, Any]", raw_checkpoint)
+        try:
+            return cls(
+                transaction_id=checkpoint["transaction_id"],
+                wire_content=checkpoint["wire_content"],
+                response_text=checkpoint["response_text"],
+                response_kind=checkpoint["response_kind"],
+                target_was_placeholder=checkpoint["target_was_placeholder"],
+                response_envelope=checkpoint["response_envelope"],
+                correlation_id=checkpoint["correlation_id"],
+                interactive_metadata=checkpoint.get("interactive_metadata"),
+                after_response_claimed=checkpoint.get("after_response_claimed", False),
+                interactive_completed=checkpoint.get("interactive_completed", False),
+            )
+        except (KeyError, TypeError, ValueError):
             return None
-        return cls(
-            transaction_id=transaction_id,
-            wire_content=typing.cast("Mapping[str, object]", wire_content),
-            response_text=response_text,
-            response_kind=response_kind,
-            target_was_placeholder=target_was_placeholder,
-            response_envelope=typing.cast("Mapping[str, object]", response_envelope),
-            correlation_id=correlation_id,
-            interactive_metadata=typing.cast("Mapping[str, object] | None", interactive_metadata),
-            after_response_claimed=after_response_claimed,
-            interactive_completed=interactive_completed,
-        )
 
 
 def _prompt_source_event_id(source_event_metadata: Mapping[str, SourceEventMetadata] | None, event_id: str) -> str:
@@ -780,61 +754,29 @@ class HandledTurnLedger:
             self._ensure_loaded_locked()
             return self._turn_record_for_response_event_locked(response_event_id)
 
-    def transact_redaction(
-        self,
-        event_id: str,
-        update: Callable[
-            [Mapping[str, TurnRecord], tuple[TurnRecord, ...]],
-            Sequence[TurnRecord],
-        ],
-    ) -> tuple[TurnRecord, ...]:
-        """Discover response ownership and persist tombstones in one transaction."""
-        with self._state.lock:
-            self._ensure_loaded_locked()
-            response_owners = self._turn_records_for_response_event_locked(event_id)
-            lookup_event_ids = (
-                event_id,
-                *(source_id for owner in response_owners for source_id in owner.indexed_event_ids),
-            )
-            return self.transact_handled_turns(
-                lookup_event_ids,
-                lambda existing_records: update(existing_records, response_owners),
-            )
-
-    def transact_terminal_checkpoint(
-        self,
-        source_event_ids: Sequence[str],
-        response_event_id: str,
-        update: Callable[
-            [Mapping[str, TurnRecord], tuple[TurnRecord, ...]],
-            Sequence[TurnRecord],
-        ],
-    ) -> tuple[TurnRecord, ...]:
-        """Discover every target owner and replace it with one checkpoint atomically."""
-        with self._state.lock:
-            self._ensure_loaded_locked()
-            target_owners = self._turn_records_for_response_event_locked(response_event_id)
-            lookup_event_ids = (
-                *source_event_ids,
-                response_event_id,
-                *(event_id for owner in target_owners for event_id in owner.indexed_event_ids),
-            )
-            return self.transact_handled_turns(
-                lookup_event_ids,
-                lambda existing_records: update(existing_records, target_owners),
-            )
-
     def transact_handled_turns(
         self,
         lookup_event_ids: Sequence[str],
-        update: Callable[[Mapping[str, TurnRecord]], Sequence[TurnRecord]],
+        update: Callable[
+            [Mapping[str, TurnRecord], tuple[TurnRecord, ...]],
+            Sequence[TurnRecord],
+        ],
+        *,
+        response_event_id: str | None = None,
     ) -> tuple[TurnRecord, ...]:
-        """Persist an exact multi-record mutation before publishing it in memory."""
-        normalized_lookup_event_ids = _normalize_source_event_ids(lookup_event_ids)
-        if not normalized_lookup_event_ids:
-            return ()
+        """Discover response owners and publish one exact disk-first transaction."""
         with self._state.lock:
             self._ensure_loaded_locked()
+            response_owners = (
+                self._turn_records_for_response_event_locked(response_event_id) if response_event_id is not None else ()
+            )
+            normalized_lookup_event_ids = _normalize_source_event_ids(
+                (
+                    *lookup_event_ids,
+                    response_event_id,
+                    *(event_id for owner in response_owners for event_id in owner.indexed_event_ids),
+                ),
+            )
             self._wait_for_pending_persists_locked()
             existing_records = MappingProxyType(
                 {
@@ -845,7 +787,7 @@ class HandledTurnLedger:
             )
             raw_candidates = tuple(
                 record if record.timestamp != 0.0 else replace(record, timestamp=time.time())
-                for record in update(existing_records)
+                for record in update(existing_records, response_owners)
                 if record.source_event_ids
             )
             if not raw_candidates:
@@ -1211,22 +1153,20 @@ def _normalize_string(value: object) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
-def _immutable_json_mapping(value: Mapping[str, object]) -> Mapping[str, object]:
+def _freeze_json_mapping(value: Mapping[str, object]) -> Mapping[str, object]:
     """Recursively freeze one JSON-like mapping."""
     if any(not isinstance(key, str) for key in value):
         message = "Terminal checkpoint JSON object keys must be strings"
         raise TypeError(message)
-    return MappingProxyType(
-        {key: _immutable_json_value(item) for key, item in value.items()},
-    )
+    return MappingProxyType({key: _freeze_json_value(item) for key, item in value.items()})
 
 
-def _immutable_json_value(value: object) -> object:
+def _freeze_json_value(value: object) -> object:
     """Recursively freeze mappings and arrays while retaining JSON scalars."""
     if isinstance(value, Mapping):
-        return _immutable_json_mapping(typing.cast("Mapping[str, object]", value))
+        return _freeze_json_mapping(typing.cast("Mapping[str, object]", value))
     if isinstance(value, list | tuple):
-        return tuple(_immutable_json_value(item) for item in value)
+        return tuple(_freeze_json_value(item) for item in value)
     if value is None or isinstance(value, str | bool | int):
         return value
     if isinstance(value, float) and math.isfinite(value):

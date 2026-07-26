@@ -118,7 +118,6 @@ def _terminal_owner() -> PendingTerminalDelivery:
     owner = MagicMock(spec=PendingTerminalDelivery)
     owner.target_event_id = "$original-placeholder"
     owner.target_was_placeholder = True
-    owner.transport_delivered = False
     return owner
 
 
@@ -436,7 +435,7 @@ async def test_begin_locked_turn_excludes_early_placeholder_from_refreshed_histo
     request_preparer = MagicMock(spec=ResponsePayloadPreparer)
     request_preparer.prepare = AsyncMock(side_effect=lambda request: replace(request, payload_preparation=None))
     delivery_gateway = MagicMock(spec=DeliveryGateway)
-    delivery_gateway.owned_terminal_delivery = AsyncMock(return_value=None)
+    delivery_gateway.owned_terminal_delivery_for_turn = AsyncMock(return_value=None)
     delivery_gateway.send_text = AsyncMock(return_value="$placeholder")
     runner = ResponseRunner(
         replace(
@@ -481,7 +480,7 @@ async def test_generate_response_replay_returns_frozen_target_without_generation
     target = _target(thread_id="$thread", reply_to_event_id="$event")
     envelope = _envelope(target, source_event_id="$event")
     delivery_gateway = MagicMock()
-    delivery_gateway.owned_terminal_delivery = AsyncMock(
+    delivery_gateway.owned_terminal_delivery_for_turn = AsyncMock(
         return_value=_terminal_owner(),
     )
     delivery_gateway.send_text = AsyncMock(side_effect=AssertionError("must not create a placeholder"))

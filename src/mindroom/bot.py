@@ -1473,7 +1473,7 @@ class AgentBot:
             await asyncio.to_thread(self._turn_store.warm)
             recovered = await self._terminal_delivery_coordinator.warm()
             if recovered:
-                self.logger.warning("terminal_delivery_startup_recovery", recovered_count=len(recovered))
+                self.logger.warning("terminal_delivery_startup_recovery", recovered_count=recovered)
             self._terminal_delivery_coordinator.start()
             await asyncio.to_thread(interactive.init_persistence, self.runtime_paths.storage_root)
             client = self.client

@@ -217,7 +217,6 @@ async def test_completed_terminal_edit_uses_durable_first_attempt(tmp_path: Path
         return_value=TerminalStreamDelivery(
             commit=SimpleNamespace(
                 status="deferred",
-                pending=object(),
                 lifecycle_managed=True,
             ),
             rendered_body="complete answer",

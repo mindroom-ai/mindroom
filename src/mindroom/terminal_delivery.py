@@ -39,17 +39,6 @@ _ENVELOPE_ADAPTER: TypeAdapter[MessageEnvelope] | None = None
 _INTERACTIVE_ADAPTER = TypeAdapter(InteractiveMetadata)
 
 
-def terminal_delivery_id(identity: ResponseIdentity) -> str:
-    """Return the stable source-turn owner key."""
-    envelope = identity.response_envelope
-    raw = json.dumps(
-        [envelope.agent_name, envelope.room_id, envelope.source_event_id, identity.correlation_id],
-        ensure_ascii=False,
-        separators=(",", ":"),
-    )
-    return hashlib.sha256(raw.encode()).hexdigest()[:32]
-
-
 @dataclass(frozen=True, slots=True)
 class TerminalDeliveryIntent:
     """One exact terminal edit ready for durable checkpoint commit."""
@@ -64,9 +53,13 @@ class TerminalDeliveryIntent:
     @property
     def transaction_id(self) -> str:
         """Derive one stable transaction from the owner, target, and exact payload."""
+        envelope = self.identity.response_envelope
         raw = json.dumps(
             [
-                terminal_delivery_id(self.identity),
+                envelope.agent_name,
+                envelope.room_id,
+                envelope.source_event_id,
+                self.identity.correlation_id,
                 self.target_event_id,
                 dict(self.wire_content),
             ],
@@ -102,11 +95,6 @@ class PendingTerminalDelivery:
         """Return whether the terminal edit replaces a thinking placeholder."""
         return self.checkpoint.target_was_placeholder
 
-    @property
-    def transport_delivered(self) -> bool:
-        """Retain the old view contract until replay callers are simplified."""
-        return False
-
 
 @dataclass(frozen=True, slots=True)
 class TerminalDeliveryCommit:
@@ -115,11 +103,6 @@ class TerminalDeliveryCommit:
     status: _TerminalDeliveryStatus
     reason: str
     lifecycle_managed: bool = True
-
-    @property
-    def pending(self) -> TerminalDeliveryCommit | None:
-        """Expose durable deferred work to existing transport outcome callers."""
-        return self if self.lifecycle_managed and self.status == "deferred" else None
 
 
 @dataclass(frozen=True, slots=True)
@@ -146,10 +129,9 @@ class TerminalDeliveryCoordinator:
     _worker: asyncio.Task[None] | None = field(default=None, init=False)
     _stopping: bool = field(default=False, init=False)
 
-    async def warm(self) -> tuple[PendingTerminalDelivery, ...]:
-        """Return checkpoint work already loaded by TurnStore startup."""
-        records = await asyncio.to_thread(self.deps.turn_store.terminal_checkpoint_records)
-        return tuple(PendingTerminalDelivery(record) for record in records)
+    async def warm(self) -> int:
+        """Return the number of checkpoints loaded by TurnStore startup."""
+        return len(await asyncio.to_thread(self.deps.turn_store.terminal_checkpoint_records))
 
     def start(self) -> None:
         """Start the small periodic checkpoint retry loop."""
@@ -456,5 +438,4 @@ __all__ = [
     "TerminalDeliveryCoordinator",
     "TerminalDeliveryCoordinatorDeps",
     "TerminalDeliveryIntent",
-    "terminal_delivery_id",
 ]

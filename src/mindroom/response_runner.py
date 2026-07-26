@@ -1206,19 +1206,17 @@ class ResponseRunner:
                     ),
                 )
             return None
-        owned_delivery = await self.deps.delivery_gateway.owned_terminal_delivery(
-            self._response_identity(
-                request,
-                response_kind="team" if history_scope.kind == "team" else "agent",
-            ),
+        owned_delivery = await self.deps.delivery_gateway.owned_terminal_delivery_for_turn(
+            response_kind="team" if history_scope.kind == "team" else "agent",
+            response_envelope=request.response_envelope,
+            correlation_id=self._correlation_id_for_request(request),
+            source_event_ids=request.source_event_ids or (request.response_envelope.source_event_id,),
         )
         if owned_delivery is not None:
             request = replace(
                 request,
                 existing_event_id=owned_delivery.target_event_id,
-                existing_event_is_placeholder=(
-                    owned_delivery.target_was_placeholder and not owned_delivery.transport_delivered
-                ),
+                existing_event_is_placeholder=owned_delivery.target_was_placeholder,
                 recovered_terminal_delivery=True,
             )
             return self._request_with_locked_target(request, resolved_target)
