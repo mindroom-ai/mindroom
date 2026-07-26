@@ -1567,20 +1567,6 @@ class DeliveryGateway:
                         else:
                             if final_outcome is not None:
                                 return final_outcome
-            except OSError:
-                self.deps.logger.exception(
-                    "Failed to persist streamed terminal delivery",
-                    correlation_id=request.identity.correlation_id,
-                )
-                return FinalDeliveryOutcome(
-                    terminal_status="error",
-                    event_id=streamed_event_id,
-                    is_visible_response=streamed_event_id is not None,
-                    final_visible_body=streamed_text or None,
-                    failure_reason="terminal_delivery_persist_failed",
-                    tool_trace=tuple(request.tool_trace or ()),
-                    extra_content=request.extra_content,
-                )
             except asyncio.CancelledError:
                 self.deps.logger.warning(
                     "Final streamed-response transform cancelled; preserving streamed success",

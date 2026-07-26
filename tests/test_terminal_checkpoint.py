@@ -346,6 +346,47 @@ def test_checkpoint_commit_rejects_stale_subset_or_reordered_caller(
     assert store.get_turn_record("$second") == authority
 
 
+@pytest.mark.parametrize("conflicting_event_id", ["$second", "$alias"])
+def test_checkpoint_commit_rejects_fragmented_physical_or_alias_mapping(
+    tmp_path: Path,
+    conflicting_event_id: str,
+) -> None:
+    store = _store(tmp_path)
+    authority = store.record_pending_turn(
+        TurnRecord.create(
+            ["$first", "$second"],
+            discovery_event_ids=("$alias",),
+            completed=False,
+            response_owner="agent",
+            correlation_id="corr-1",
+        ),
+    )
+    assert authority is not None
+    incompatible = store.record_pending_turn(
+        TurnRecord.create(
+            [conflicting_event_id],
+            completed=False,
+            response_owner="agent",
+            correlation_id="corr-other",
+        ),
+    )
+    assert incompatible is not None
+    assert store.get_turn_record("$first") == authority
+    assert store.get_turn_record(conflicting_event_id) == incompatible
+
+    assert (
+        store.commit_terminal_checkpoint(
+            authority,
+            response_event_id="$visible",
+            checkpoint=_checkpoint(),
+        )
+        is None
+    )
+    assert store.get_turn_record("$first") == authority
+    assert store.get_turn_record(conflicting_event_id) == incompatible
+    assert store.terminal_checkpoint_records() == ()
+
+
 def test_target_redaction_and_checkpoint_commit_have_one_atomic_order(tmp_path: Path) -> None:
     store = _store(tmp_path)
     pending = store.record_pending_turn(_pending_turn())

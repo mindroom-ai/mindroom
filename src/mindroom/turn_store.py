@@ -171,7 +171,7 @@ class TurnStore:
         """Resolve a canonical turn by source, alias, or visible response ID."""
         return self._ledger.get_turn_record(event_id) or self._ledger.get_turn_record_for_response_event(event_id)
 
-    def commit_terminal_checkpoint(  # noqa: C901
+    def commit_terminal_checkpoint(
         self,
         turn_record: TurnRecord,
         *,
@@ -187,27 +187,16 @@ class TurnStore:
             target_owners: tuple[TurnRecord, ...],
         ) -> tuple[TurnRecord, ...]:
             target_record = existing_records.get(response_event_id)
+            if target_record is not None and response_event_id in target_record.redacted_source_event_ids:
+                raise _TerminalCheckpointConflictError
+            authority = existing_records.get(turn_record.source_event_ids[0])
             if (
-                target_record is not None
-                and response_event_id in target_record.redacted_source_event_ids
-                and not same_turn_identity(target_record, turn_record)
+                authority is None
+                or any(existing_records.get(event_id) != authority for event_id in turn_record.indexed_event_ids)
+                or authority.indexed_event_ids != turn_record.indexed_event_ids
+                or not same_turn_identity(authority, turn_record)
+                or any(event_id in authority.redacted_source_event_ids for event_id in turn_record.indexed_event_ids)
             ):
-                raise _TerminalCheckpointConflictError
-            indexed_records = tuple(existing_records.get(event_id) for event_id in turn_record.indexed_event_ids)
-            if any(existing is None for existing in indexed_records):
-                raise _TerminalCheckpointConflictError
-            unique_records = {
-                existing.indexed_event_ids: existing for existing in indexed_records if existing is not None
-            }
-            if len(unique_records) != 1:
-                raise _TerminalCheckpointConflictError
-            authority = next(iter(unique_records.values()))
-            if authority.indexed_event_ids != turn_record.indexed_event_ids or not same_turn_identity(
-                authority,
-                turn_record,
-            ):
-                raise _TerminalCheckpointConflictError
-            if any(event_id in authority.redacted_source_event_ids for event_id in turn_record.indexed_event_ids):
                 raise _TerminalCheckpointConflictError
             existing_checkpoint = authority.terminal_edit_checkpoint
             if existing_checkpoint is not None:
@@ -258,16 +247,15 @@ class TurnStore:
         """Return one checkpoint only when every candidate ID belongs to its owner."""
         if not source_event_ids:
             return None
-        records = tuple(self._ledger.get_turn_record(event_id) for event_id in source_event_ids)
-        owners = {
-            record.indexed_event_ids: record
-            for record in records
-            if record is not None and record.terminal_edit_checkpoint is not None
-        }
-        if len(owners) != 1:
+        owner = self._ledger.get_turn_record(source_event_ids[0])
+        if (
+            owner is None
+            or owner.terminal_edit_checkpoint is None
+            or any(self._ledger.get_turn_record(event_id) != owner for event_id in source_event_ids)
+            or not set(source_event_ids).issubset(owner.indexed_event_ids)
+        ):
             return None
-        owner = next(iter(owners.values()))
-        return owner if set(source_event_ids).issubset(owner.indexed_event_ids) else None
+        return owner
 
     def update_terminal_checkpoint(
         self,
@@ -432,17 +420,6 @@ class TurnStore:
             response_owners: tuple[TurnRecord, ...],
         ) -> tuple[TurnRecord, ...]:
             if response_owners:
-                current_owners = tuple(
-                    next(
-                        (
-                            existing
-                            for existing in existing_records.values()
-                            if same_turn_identity(existing, response_owner)
-                        ),
-                        response_owner,
-                    )
-                    for response_owner in response_owners
-                )
                 target_tombstone = TurnRecord.create(
                     [source_event_id],
                     redacted_source_event_ids=[source_event_id],
@@ -451,12 +428,12 @@ class TurnStore:
                 return (
                     *(
                         replace(
-                            current_owner,
+                            existing_records[owner.source_event_ids[0]],
                             response_event_id=None,
                             terminal_edit_checkpoint=None,
                             timestamp=0.0,
                         )
-                        for current_owner in current_owners
+                        for owner in response_owners
                     ),
                     target_tombstone,
                 )
