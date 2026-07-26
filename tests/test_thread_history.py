@@ -36,6 +36,7 @@ from mindroom.matrix.client_thread_history import (
     _fetch_thread_history_via_room_messages_with_events,
     _group_scanned_sources_by_thread,
     _merge_retained_thread_event_sources,
+    _record_scanned_room_message_source,
     _resolve_thread_history_from_event_sources_timed,
 )
 from mindroom.matrix.client_visible_messages import resolve_latest_visible_messages
@@ -2467,6 +2468,69 @@ class TestThreadHistory:
             ("$thread_reply", "edited"),
             ("$plain_reply", "reply to edit"),
         ]
+
+    @pytest.mark.asyncio
+    async def test_room_scan_ignores_malformed_message_as_reply_ancestry(self) -> None:
+        """A malformed relation source cannot pull its valid reply into a thread."""
+        root_event = self._make_text_event(
+            event_id="$thread_root",
+            sender="@user:localhost",
+            body="root",
+            server_timestamp=1000,
+            source_content={"msgtype": "m.text", "body": "root"},
+        )
+        malformed_source = {
+            "event_id": "$malformed",
+            "room_id": "!room:localhost",
+            "sender": "@user:localhost",
+            "origin_server_ts": 2000,
+            "type": "m.room.message",
+            "content": {
+                "body": "missing msgtype",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
+            },
+        }
+        malformed_event = nio.RoomGetEventResponse.from_dict(malformed_source).event
+        assert isinstance(malformed_event, nio.BadEvent)
+        plain_reply = self._make_text_event(
+            event_id="$plain_reply",
+            sender="@bridge:localhost",
+            body="reply to malformed",
+            server_timestamp=3000,
+            source_content={
+                "msgtype": "m.text",
+                "body": "reply to malformed",
+                "m.relates_to": {"m.in_reply_to": {"event_id": "$malformed"}},
+            },
+        )
+        scanned_sources = {"$thread_root": root_event.source}
+        edit_candidates = {}
+
+        recorded_event_id = _record_scanned_room_message_source(
+            malformed_event,
+            room_id="!room:localhost",
+            edit_candidates_by_original_event_id=edit_candidates,
+            scanned_message_sources=scanned_sources,
+        )
+        scanned_sources["$plain_reply"] = plain_reply.source
+        grouped_sources, _unresolved = await _group_scanned_sources_by_thread(
+            room_id="!room:localhost",
+            thread_root_ids=("$thread_root",),
+            scanned_message_sources=scanned_sources,
+            edit_candidates_by_original_event_id=edit_candidates,
+        )
+        resolution = await _resolve_thread_history_from_event_sources_timed(
+            AsyncMock(),
+            room_id="!room:localhost",
+            thread_id="$thread_root",
+            event_sources=grouped_sources["$thread_root"],
+            hydrate_sidecars=False,
+            event_cache=_event_cache(),
+        )
+
+        assert recorded_event_id is None
+        assert "$malformed" not in scanned_sources
+        assert resolution.messages == []
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(

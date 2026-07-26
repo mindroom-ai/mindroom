@@ -448,6 +448,85 @@ async def test_state_thread_child_cannot_authorize_indirect_snapshot_member(
 
 
 @pytest.mark.asyncio
+async def test_malformed_original_edit_cannot_authorize_indirect_snapshot_member(
+    event_cache_factory: Callable[[], ConversationEventCache],
+) -> None:
+    """A raw-source lookup must not re-admit a filtered malformed relation ancestor."""
+    cache = event_cache_factory()
+    await cache.initialize()
+    try:
+        room_id = "!room:localhost"
+        thread_id = "$thread-root"
+        ancestor = _message_event(
+            event_id="$ancestor",
+            sender="@user:localhost",
+            body="Ancestor",
+            origin_server_ts=2000,
+            relates_to={"rel_type": "m.thread", "event_id": thread_id},
+        )
+        await _replace_thread(
+            cache,
+            room_id,
+            thread_id,
+            [
+                _message_event(
+                    event_id=thread_id,
+                    sender="@user:localhost",
+                    body="Question",
+                    origin_server_ts=1000,
+                ),
+                _message_event(
+                    event_id="$thread-child",
+                    sender="@user:localhost",
+                    body="Valid child",
+                    origin_server_ts=1500,
+                    relates_to={"rel_type": "m.thread", "event_id": thread_id},
+                ),
+                ancestor,
+                _message_event(
+                    event_id="$ancestor-edit",
+                    sender="@user:localhost",
+                    body="* Ancestor",
+                    origin_server_ts=2500,
+                    relates_to={"rel_type": "m.replace", "event_id": "$ancestor"},
+                    new_content={"body": "Edited ancestor"},
+                ),
+                _message_event(
+                    event_id="$indirect-agent-message",
+                    sender="@agent:localhost",
+                    body="Forged membership",
+                    origin_server_ts=3000,
+                    relates_to={"m.in_reply_to": {"event_id": "$ancestor"}},
+                ),
+            ],
+        )
+        malformed_ancestor = {
+            **ancestor,
+            "room_id": room_id,
+            "content": {
+                "body": "missing msgtype",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": thread_id},
+            },
+        }
+        await _overwrite_cached_event_payload(
+            cache,
+            room_id=room_id,
+            event_id="$ancestor",
+            event=malformed_ancestor,
+        )
+        snapshot = await cache.get_latest_agent_message_snapshot(
+            room_id,
+            thread_id,
+            "@agent:localhost",
+            runtime_started_at=None,
+        )
+    finally:
+        await cache.close()
+
+    assert snapshot is None
+
+
+@pytest.mark.asyncio
 async def test_get_latest_agent_message_snapshot_rejects_legacy_wrong_room_payload(
     event_cache_factory: Callable[[], ConversationEventCache],
 ) -> None:

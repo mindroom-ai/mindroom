@@ -1621,6 +1621,60 @@ class TestMatrixConversationCacheThreadReads:
             assert impact == MutationThreadImpact.room_level()
 
     @pytest.mark.asyncio
+    async def test_sync_resolution_context_does_not_reparse_malformed_ancestor(self) -> None:
+        """Replacement source reads cannot bypass the page's relation-free invalid placeholder."""
+        resolver = thread_bookkeeping.ThreadMutationResolver(
+            logger_getter=MagicMock,
+            runtime=MagicMock(),
+            fetch_event_info_for_thread_resolution=AsyncMock(),
+        )
+        malformed_source = {
+            "event_id": "$malformed",
+            "room_id": "!test:localhost",
+            "sender": "@user:localhost",
+            "origin_server_ts": 1,
+            "type": "m.room.message",
+            "content": {
+                "body": "missing msgtype",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread"},
+            },
+        }
+        edit_source = {
+            "event_id": "$edit",
+            "room_id": "!test:localhost",
+            "sender": "@user:localhost",
+            "origin_server_ts": 2,
+            "type": "m.room.message",
+            "content": {
+                "body": "* edit",
+                "msgtype": "m.text",
+                "m.new_content": {"body": "edit", "msgtype": "m.text"},
+                "m.relates_to": {"rel_type": "m.replace", "event_id": "$malformed"},
+            },
+        }
+        reply_source = {
+            "event_id": "$reply",
+            "room_id": "!test:localhost",
+            "sender": "@agent:localhost",
+            "origin_server_ts": 3,
+            "type": "m.room.message",
+            "content": {
+                "body": "reply",
+                "msgtype": "m.text",
+                "m.relates_to": {"m.in_reply_to": {"event_id": "$malformed"}},
+            },
+        }
+
+        context = await resolver.build_sync_mutation_resolution_context(
+            "!test:localhost",
+            plain_events=[malformed_source, edit_source, reply_source],
+            threaded_events=[],
+        )
+
+        assert not context.page_event_infos["$malformed"].has_relations
+        assert "$reply" not in context.page_resolved_thread_ids
+
+    @pytest.mark.asyncio
     async def test_point_mutation_ignores_malformed_room_message_ancestor_relations(self) -> None:
         """A malformed point-read ancestor must not steer a valid reply into a forged thread."""
         room_id = "!test:localhost"

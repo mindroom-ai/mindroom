@@ -55,7 +55,11 @@ from enum import Enum, auto
 from typing import Any, Protocol
 
 from mindroom.matrix.event_info import EventInfo, event_type_supports_thread_relations
-from mindroom.matrix.media import valid_room_message_event_source, valid_room_message_replacement
+from mindroom.matrix.media import (
+    event_source_supports_valid_thread_relations,
+    valid_room_message_event_source,
+    valid_room_message_replacement,
+)
 from mindroom.matrix.replacements import is_valid_replacement
 from mindroom.matrix.thread_diagnostics import is_thread_history_source_degraded
 
@@ -255,7 +259,11 @@ def conversation_relation_thread_membership_access(
         source_key = (room_id, event_id)
         if source_key in event_sources:
             event_source = event_sources[source_key]
-            event_info = EventInfo.from_event(dict(event_source)) if event_source is not None else None
+            event_info = (
+                EventInfo.from_event(dict(event_source))
+                if event_source is not None and event_source_supports_valid_thread_relations(event_source, room_id)
+                else None
+            )
         else:
             event_info = await access.fetch_event_info(room_id, event_id)
         if event_info is not None and not event_type_supports_thread_relations(event_info.event_type):

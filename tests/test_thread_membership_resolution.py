@@ -738,6 +738,45 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         assert resolution.thread_id == rich_reply_id
 
     @pytest.mark.asyncio
+    async def test_negative_candidate_root_proof_preserves_history(self) -> None:
+        """A definitive negative proof keeps its strict history for replay safety."""
+        room_id = "!test:localhost"
+        candidate_root_id = "$candidate_root:localhost"
+        strict_history: list[object] = []
+        candidate_root_info = EventInfo.from_event(
+            {
+                "type": "m.room.message",
+                "content": {
+                    "body": "Candidate root",
+                    "msgtype": "m.text",
+                },
+            },
+        )
+
+        async def lookup_thread_id(_room_id: str, _event_id: str) -> str | None:
+            return None
+
+        async def fetch_event_info(_room_id: str, event_id: str) -> EventInfo | None:
+            return candidate_root_info if event_id == candidate_root_id else None
+
+        async def prove_thread_root(_room_id: str, event_id: str) -> ThreadRootProof:
+            assert event_id == candidate_root_id
+            return ThreadRootProof.not_a_thread_root(thread_history=strict_history)
+
+        resolution = await resolve_related_event_thread_membership(
+            room_id,
+            candidate_root_id,
+            access=ThreadMembershipAccess(
+                lookup_thread_id=lookup_thread_id,
+                fetch_event_info=fetch_event_info,
+                prove_thread_root=prove_thread_root,
+            ),
+        )
+
+        assert resolution.state is ThreadResolutionState.ROOM_LEVEL
+        assert resolution.thread_history is strict_history
+
+    @pytest.mark.asyncio
     async def test_related_rich_reply_root_proof_precedes_stale_cached_parent_membership(self) -> None:
         """A cached inherited membership cannot hide later proof that the reply is a root."""
         room_id = "!test:localhost"

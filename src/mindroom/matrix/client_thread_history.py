@@ -1846,7 +1846,7 @@ def _record_scanned_room_message_source(
         # thread membership through its exposed relation and poisons only that reconstruction.
         scanned_message_sources[event.event_id] = _event_source_for_cache(event)
         return event.event_id
-    if not _is_room_message_event(event):
+    if isinstance(event, nio.BadEvent) or not _is_room_message_event(event):
         return None
 
     event_info = EventInfo.from_event(event.source)
