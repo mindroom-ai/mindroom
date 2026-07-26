@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-import json
 from typing import TYPE_CHECKING
 
 import pytest
 
 from mindroom.matrix.cache import ThreadRevision
-from mindroom.matrix.cache.event_cache_events import decode_cached_event, filter_redacted_events
+from mindroom.matrix.cache.event_cache_events import filter_redacted_events
 from mindroom.matrix.cache.event_normalization import normalize_event_source_for_cache
 from mindroom.matrix.cache.thread_cache_state import thread_cache_state_row, thread_revision_row
 from mindroom.matrix.media import valid_room_message_replacement
@@ -68,32 +67,6 @@ def test_thread_revision_row_normalizes_backend_values() -> None:
         max_write_seq=7,
         max_thread_write_seq=9,
         max_origin_server_ts=1000,
-    )
-
-
-def test_decode_cached_event_rejects_index_timestamp_mismatch() -> None:
-    """Latest-edit ordering must not trust an index timestamp that disagrees with its event."""
-    event = {
-        "event_id": "$edit",
-        "origin_server_ts": 2000,
-        "sender": "@alice:localhost",
-        "type": "m.room.message",
-        "content": {
-            "body": "* Edited",
-            "msgtype": "m.text",
-            "m.new_content": {"body": "Edited", "msgtype": "m.text"},
-            "m.relates_to": {"rel_type": "m.replace", "event_id": "$original"},
-        },
-    }
-
-    assert (
-        decode_cached_event(
-            event_json=json.dumps(event),
-            event_id="$edit",
-            origin_server_ts=3000,
-            room_id="!room:localhost",
-        )
-        is None
     )
 
 

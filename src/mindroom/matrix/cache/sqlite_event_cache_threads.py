@@ -29,7 +29,7 @@ import time
 from typing import TYPE_CHECKING, Any, Literal
 
 from .event_cache_events import (
-    decode_cached_events,
+    decode_cached_event,
     event_id_for_cache,
     serialize_cacheable_events,
     serialize_cached_event,
@@ -69,7 +69,7 @@ async def load_thread_events(
     """Return cached events for one thread sorted by timestamp."""
     cursor = await db.execute(
         """
-        SELECT events.event_json, events.event_id, events.origin_server_ts
+        SELECT events.event_json
         FROM thread_events
         JOIN events
             ON events.principal_id = thread_events.principal_id
@@ -86,7 +86,7 @@ async def load_thread_events(
     await cursor.close()
     if not rows:
         return None
-    return decode_cached_events(rows, room_id=room_id)
+    return [decode_cached_event(event_json=row[0]).event for row in rows]
 
 
 async def load_thread_events_written_between(
@@ -103,7 +103,7 @@ async def load_thread_events_written_between(
     """Return cached thread events changed in bounded durable revision intervals."""
     cursor = await db.execute(
         """
-        SELECT events.event_json, events.event_id, events.origin_server_ts
+        SELECT events.event_json
         FROM thread_events
         JOIN events
             ON events.principal_id = thread_events.principal_id
@@ -130,7 +130,7 @@ async def load_thread_events_written_between(
     )
     rows = await cursor.fetchall()
     await cursor.close()
-    return decode_cached_events(rows, room_id=room_id)
+    return [decode_cached_event(event_json=row[0]).event for row in rows]
 
 
 async def load_thread_revision(

@@ -18,6 +18,7 @@ from .event_cache_events import (
     event_thread_rows,
     filter_redacted_events,
     redaction_removal_event_ids,
+    room_scoped_cache_events,
     scrub_bundled_replacement_json,
     serialize_cacheable_events,
     validated_mxc_text_rows,
@@ -97,18 +98,13 @@ async def load_event(
     row = await fetchone(
         db,
         """
-        SELECT event_json, origin_server_ts
+        SELECT event_json
         FROM mindroom_event_cache_events
         WHERE namespace = %s AND room_id = %s AND event_id = %s
         """,
         (namespace, room_id, event_id),
     )
-    decoded = (
-        None
-        if row is None
-        else decode_cached_event(event_json=row[0], event_id=event_id, origin_server_ts=row[1], room_id=room_id)
-    )
-    return None if decoded is None else decoded.event
+    return None if row is None else decode_cached_event(event_json=row[0]).event
 
 
 async def load_recent_room_events(
@@ -123,36 +119,21 @@ async def load_recent_room_events(
     """Return recent cached room events of one type, newest first."""
     if limit <= 0:
         return []
-    # The limit is applied while streaming a server-side cursor rather than in SQL so a payload
-    # that disagrees with its index cannot consume a limit slot and hide a later valid event.
-    # `decode_cached_event` stays the only place that states the payload-versus-index rule.
-    cursor = db.cursor(name="mindroom_recent_room_events")
-    await cursor.execute(
+    rows = await fetchall(
+        db,
         """
-        SELECT event_json, event_id, origin_server_ts
+        SELECT event_json
         FROM mindroom_event_cache_events
         WHERE namespace = %s
             AND room_id = %s
             AND origin_server_ts >= %s
             AND event_json::jsonb ->> 'type' = %s
         ORDER BY origin_server_ts DESC, write_seq DESC
+        LIMIT %s
         """,
-        (namespace, room_id, since_ts_ms, event_type),
+        (namespace, room_id, since_ts_ms, event_type, limit),
     )
-    events: list[dict[str, Any]] = []
-    try:
-        while len(events) < limit and (row := await cursor.fetchone()) is not None:
-            decoded = decode_cached_event(
-                event_json=row[0],
-                event_id=row[1],
-                origin_server_ts=row[2],
-                room_id=room_id,
-            )
-            if decoded is not None:
-                events.append(decoded.event)
-        return events
-    finally:
-        await cursor.close()
+    return [decode_cached_event(event_json=row[0]).event for row in rows]
 
 
 async def load_latest_edit(
@@ -204,9 +185,7 @@ async def load_latest_edit_row(
         """
         SELECT
             events.event_json,
-            events.cached_at,
-            edits.edit_event_id,
-            edits.origin_server_ts
+            events.cached_at
         FROM mindroom_event_cache_event_edits AS edits
         JOIN mindroom_event_cache_events AS events
             ON events.namespace = edits.namespace
@@ -224,11 +203,8 @@ async def load_latest_edit_row(
             decoded = decode_cached_event(
                 event_json=row[0],
                 cached_at=row[1],
-                event_id=row[2],
-                origin_server_ts=row[3],
-                room_id=room_id,
             )
-            if decoded is not None and is_valid_replacement(
+            if is_valid_replacement(
                 original,
                 decoded.event,
                 room_id=room_id,
@@ -278,7 +254,7 @@ async def load_mxc_texts(
             FROM unnest(%s::text[], %s::text[])
         )
         SELECT reference.event_id, plaintext.mxc_url, plaintext.text_content,
-               events.event_json, events.origin_server_ts
+               events.event_json
         FROM requested
         JOIN mindroom_event_cache_event_mxc_references AS reference
           ON reference.event_id = requested.event_id
@@ -318,7 +294,7 @@ async def persist_mxc_text(
     owns_plaintext = await fetchone(
         db,
         """
-        SELECT events.event_json, events.origin_server_ts
+        SELECT events.event_json
         FROM mindroom_event_cache_events AS events
         JOIN mindroom_event_cache_event_mxc_references AS reference
           ON reference.namespace = events.namespace
@@ -333,8 +309,6 @@ async def persist_mxc_text(
     )
     if owns_plaintext is None or not cached_event_owns_mxc(
         event_json=owns_plaintext[0],
-        event_id=event_id,
-        origin_server_ts=owns_plaintext[1],
         room_id=room_id,
         mxc_url=mxc_url,
     ):
@@ -476,6 +450,7 @@ async def filter_cacheable_events(
     room_events: list[tuple[str, dict[str, Any]]],
 ) -> list[tuple[str, dict[str, Any]]]:
     """Drop events that target durable redaction tombstones before persisting them."""
+    room_events = room_scoped_cache_events(room_events, room_id)
     tombstoned_event_ids = await redacted_event_ids(
         db,
         namespace,

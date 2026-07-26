@@ -43,7 +43,7 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import nio
 from aiohttp import ClientError
@@ -1180,11 +1180,8 @@ async def _thread_history_cache_rejection_reason(
     event_ids = [_event_id_from_source(event_source) for event_source in event_sources]
     if any(not event_id for event_id in event_ids) or len(set(event_ids)) != len(event_ids):
         return _INVALID_THREAD_EVENT_REJECTION
-    sources_by_event_id = {
-        event_id: event_source
-        for event_id, event_source in zip(event_ids, event_sources, strict=True)
-        if event_id is not None
-    }
+    validated_event_ids = cast("list[str]", event_ids)
+    sources_by_event_id = dict(zip(validated_event_ids, event_sources, strict=True))
     root_source = sources_by_event_id.get(thread_id)
     if (
         root_source is None

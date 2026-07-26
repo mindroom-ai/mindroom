@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import sqlite3
 import uuid
 from contextlib import asynccontextmanager
@@ -109,122 +108,6 @@ def _edit_event(
             },
         },
     }
-
-
-async def _seed_payload_identity_rows(
-    cache: ConversationEventCache,
-    *,
-    room_id: str,
-    thread_id: str,
-) -> tuple[
-    dict[str, object],
-    dict[str, object],
-    dict[str, object],
-    dict[str, object],
-    dict[str, object],
-]:
-    """Seed thread, point, recent, and edit rows for raw corruption tests."""
-    root = _message_event(
-        event_id=thread_id,
-        sender="@user:localhost",
-        body="root",
-        origin_server_ts=1000,
-    )
-    reply = _message_event(
-        event_id="$reply",
-        sender="@agent:localhost",
-        body="reply",
-        origin_server_ts=2000,
-        thread_id=thread_id,
-    )
-    poisoned_point = _message_event(
-        event_id="$poisoned-point",
-        sender="@user:localhost",
-        body="point",
-        origin_server_ts=2500,
-    )
-    valid_recent = _message_event(
-        event_id="$valid-recent",
-        sender="@agent:localhost",
-        body="valid",
-        origin_server_ts=7000,
-    )
-    poisoned_recent = _message_event(
-        event_id="$poisoned-recent",
-        sender="@agent:localhost",
-        body="poisoned",
-        origin_server_ts=8000,
-    )
-    numeric_poison = _message_event(
-        event_id="$numeric-poison",
-        sender="@agent:localhost",
-        body="numeric poison",
-        origin_server_ts=9000,
-    )
-    older_edit = _edit_event(
-        event_id="$older-edit",
-        sender="@agent:localhost",
-        original_event_id="$valid-recent",
-        body="older",
-        origin_server_ts=5000,
-    )
-    poisoned_edit = _edit_event(
-        event_id="$poisoned-edit",
-        sender="@agent:localhost",
-        original_event_id="$valid-recent",
-        body="poisoned",
-        origin_server_ts=6000,
-    )
-    await _replace_thread(cache, room_id, thread_id, [root, reply])
-    await cache.store_events_batch(
-        [
-            ("$poisoned-point", room_id, poisoned_point),
-            ("$valid-recent", room_id, valid_recent),
-            ("$poisoned-recent", room_id, poisoned_recent),
-            ("$numeric-poison", room_id, numeric_poison),
-            ("$older-edit", room_id, older_edit),
-            ("$poisoned-edit", room_id, poisoned_edit),
-        ],
-    )
-    return root, poisoned_point, poisoned_recent, poisoned_edit, numeric_poison
-
-
-async def _assert_payload_identity_poison_is_rejected(
-    cache: ConversationEventCache,
-    *,
-    room_id: str,
-    thread_id: str,
-) -> None:
-    """Assert every cached read shape rejects raw scope or identity poison."""
-    with pytest.raises(ValueError, match="does not match its authoritative index"):
-        await cache.get_thread_events(room_id, thread_id)
-
-    assert await cache.get_event(room_id, "$poisoned-point") is None
-    recent = await cache.get_recent_room_events(
-        room_id,
-        event_type="m.room.message",
-        since_ts_ms=0,
-        limit=1,
-    )
-
-    assert [event["event_id"] for event in recent] == ["$valid-recent"]
-    snapshot = await cache.get_latest_agent_message_snapshot(
-        room_id,
-        None,
-        "@agent:localhost",
-        runtime_started_at=None,
-    )
-    assert snapshot is not None
-    assert snapshot.content["body"] == "older"
-    latest_edit = await get_latest_edit(
-        cache,
-        room_id,
-        "$valid-recent",
-        sender="@agent:localhost",
-        event_type="m.room.message",
-    )
-    assert latest_edit is not None
-    assert latest_edit["event_id"] == "$older-edit"
 
 
 async def _assert_bundled_and_cached_edits_share_validation(
@@ -387,6 +270,11 @@ async def _assert_invalid_sidecar_owners_are_rejected(
             },
         }
         await cache.store_event(event_id, room_id, event)
+        if "room_id" in invalid_scope and invalid_scope["room_id"] != room_id:
+            assert await cache.get_event(room_id, event_id) is None
+            assert not await cache.store_mxc_text(room_id, event_id, mxc_url, "plaintext")
+            assert await cache.get_mxc_text(room_id, event_id, mxc_url) is None
+            continue
         assert not await cache.store_mxc_text(room_id, event_id, mxc_url, "plaintext")
         assert await cache.get_mxc_text(room_id, event_id, mxc_url) is None
         await seed_legacy_owner(event_id, mxc_url)
@@ -2127,69 +2015,6 @@ async def test_postgres_latest_edit_query_uses_bytewise_event_id_collation(
 
 
 @pytest.mark.asyncio
-async def test_sqlite_cache_rejects_raw_payload_identity_poison(tmp_path: Path) -> None:
-    """SQLite must reject thread poison and filter recent poison before LIMIT."""
-    room_id = "!room:localhost"
-    thread_id = "$thread"
-    cache = SqliteEventCache(tmp_path / "event-cache.db")
-    await cache.initialize()
-    try:
-        root, poisoned_point, poisoned_recent, poisoned_edit, numeric_poison = await _seed_payload_identity_rows(
-            cache,
-            room_id=room_id,
-            thread_id=thread_id,
-        )
-        assert cache._runtime.db is not None
-        await cache._runtime.db.executemany(
-            """
-            UPDATE events
-            SET event_json = ?
-            WHERE principal_id = ? AND room_id = ? AND event_id = ?
-            """,
-            [
-                (
-                    json.dumps({**root, "room_id": "!other:localhost"}),
-                    cache.principal_id,
-                    room_id,
-                    thread_id,
-                ),
-                (
-                    json.dumps({**poisoned_point, "event_id": "$forged-point"}),
-                    cache.principal_id,
-                    room_id,
-                    "$poisoned-point",
-                ),
-                (
-                    json.dumps({**poisoned_recent, "event_id": "$forged-recent"}),
-                    cache.principal_id,
-                    room_id,
-                    "$poisoned-recent",
-                ),
-                (
-                    json.dumps({**poisoned_edit, "event_id": "$forged-edit"}),
-                    cache.principal_id,
-                    room_id,
-                    "$poisoned-edit",
-                ),
-                (
-                    json.dumps({**numeric_poison, "origin_server_ts": 9000.0}),
-                    cache.principal_id,
-                    room_id,
-                    "$numeric-poison",
-                ),
-            ],
-        )
-        await cache._runtime.db.commit()
-        await _assert_payload_identity_poison_is_rejected(
-            cache,
-            room_id=room_id,
-            thread_id=thread_id,
-        )
-    finally:
-        await cache.close()
-
-
-@pytest.mark.asyncio
 async def test_sqlite_cache_validates_bundled_edits_and_sidecar_owners(tmp_path: Path) -> None:
     """SQLite must share replacement validity and reject non-timeline plaintext owners."""
     room_id = "!room:localhost"
@@ -2220,51 +2045,6 @@ async def test_sqlite_cache_validates_bundled_edits_and_sidecar_owners(tmp_path:
             cache,
             room_id=room_id,
             seed_legacy_owner=seed_legacy_owner,
-        )
-    finally:
-        await cache.close()
-
-
-@pytest.mark.asyncio
-async def test_postgres_cache_rejects_raw_payload_identity_poison(
-    postgres_event_cache_url: str,
-) -> None:
-    """PostgreSQL must reject thread poison and filter recent poison before LIMIT."""
-    room_id = "!room:localhost"
-    thread_id = "$thread"
-    namespace = f"tenant_{uuid.uuid4().hex}"
-    cache = PostgresEventCache(
-        database_url=postgres_event_cache_url,
-        namespace=namespace,
-    )
-    await cache.initialize()
-    try:
-        root, poisoned_point, poisoned_recent, poisoned_edit, numeric_poison = await _seed_payload_identity_rows(
-            cache,
-            room_id=room_id,
-            thread_id=thread_id,
-        )
-        assert cache._runtime.db is not None
-        for event_id, poisoned_payload in (
-            (thread_id, {**root, "room_id": "!other:localhost"}),
-            ("$poisoned-point", {**poisoned_point, "event_id": "$forged-point"}),
-            ("$poisoned-recent", {**poisoned_recent, "event_id": "$forged-recent"}),
-            ("$poisoned-edit", {**poisoned_edit, "event_id": "$forged-edit"}),
-            ("$numeric-poison", {**numeric_poison, "origin_server_ts": 9000.0}),
-        ):
-            await cache._runtime.db.execute(
-                """
-                UPDATE mindroom_event_cache_events
-                SET event_json = %s
-                WHERE namespace = %s AND room_id = %s AND event_id = %s
-                """,
-                (json.dumps(poisoned_payload), namespace, room_id, event_id),
-            )
-        await cache._runtime.db.commit()
-        await _assert_payload_identity_poison_is_rejected(
-            cache,
-            room_id=room_id,
-            thread_id=thread_id,
         )
     finally:
         await cache.close()

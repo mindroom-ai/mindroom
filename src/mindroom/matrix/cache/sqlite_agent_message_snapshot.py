@@ -26,7 +26,7 @@ async def _iter_scope_events(
     if thread_id is not None:
         return await db.execute(
             """
-            SELECT events.event_json, events.cached_at, events.event_id, events.origin_server_ts
+            SELECT events.event_json, events.cached_at
             FROM thread_events
             JOIN events
                 ON events.principal_id = thread_events.principal_id
@@ -41,7 +41,7 @@ async def _iter_scope_events(
         )
     return await db.execute(
         """
-        SELECT event_json, cached_at, event_id, origin_server_ts
+        SELECT event_json, cached_at
         FROM events
         WHERE principal_id = ? AND room_id = ?
         ORDER BY origin_server_ts DESC, write_seq DESC

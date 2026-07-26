@@ -2795,15 +2795,16 @@ async def test_thread_append_sanitizes_tombstoned_bundled_replacement(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "invalid_scope",
-    [{"state_key": ""}, {"room_id": "!other:localhost"}],
+    ("invalid_scope", "point_cached"),
+    [({"state_key": ""}, True), ({"room_id": "!other:localhost"}, False)],
     ids=["state", "wrong-room"],
 )
 async def test_invalid_relation_events_do_not_create_thread_or_edit_indexes(
     event_cache: ConversationEventCache,
     invalid_scope: dict[str, str],
+    point_cached: bool,
 ) -> None:
-    """Invalid relation envelopes stay point-only and cannot create dependent tombstones."""
+    """State events stay point-only, while explicit wrong-room events are not cached."""
     original = _cache_source(
         _make_text_event(
             event_id="$original",
@@ -2851,6 +2852,7 @@ async def test_invalid_relation_events_do_not_create_thread_or_edit_indexes(
     )
 
     assert await event_cache.get_thread_id_for_event("!room:localhost", "$invalid_reply") is None
+    assert (await event_cache.get_event("!room:localhost", "$invalid_reply") is not None) is point_cached
     assert await event_cache.redact_event("!room:localhost", "$original")
     replacement_point = {
         "event_id": "$invalid_edit",

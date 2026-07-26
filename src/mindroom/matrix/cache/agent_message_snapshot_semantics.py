@@ -25,7 +25,7 @@ if TYPE_CHECKING:
     from .event_cache_events import CachedEventRow
 
     type _LatestEditLookup = Callable[[dict[str, Any]], Awaitable[CachedEventRow | None]]
-    type _SnapshotScopeRow = tuple[str, float | None, str, int] | sqlite3.Row
+    type _SnapshotScopeRow = tuple[str, float | None] | sqlite3.Row
     type _SnapshotScopeRowLookup = Callable[[], Awaitable[_SnapshotScopeRow | None]]
 
 
@@ -120,20 +120,10 @@ async def _snapshot_result_for_event(
 async def _next_decoded_snapshot_row(
     *,
     next_row: _SnapshotScopeRowLookup,
-    room_id: str,
 ) -> CachedEventRow | None:
-    """Return the next cache row whose payload matches its authoritative indexes."""
-    while (row := await next_row()) is not None:
-        decoded = decode_cached_event(
-            event_json=row[0],
-            cached_at=row[1],
-            event_id=row[2],
-            origin_server_ts=row[3],
-            room_id=room_id,
-        )
-        if decoded is not None:
-            return decoded
-    return None
+    """Decode the next cache row."""
+    row = await next_row()
+    return None if row is None else decode_cached_event(event_json=row[0], cached_at=row[1])
 
 
 async def _load_room_agent_message_snapshot(
@@ -145,7 +135,7 @@ async def _load_room_agent_message_snapshot(
     runtime_started_at: float | None,
 ) -> AgentMessageSnapshot | None:
     """Stream one room-scoped query until its latest visible message is known."""
-    while (decoded := await _next_decoded_snapshot_row(next_row=next_row, room_id=room_id)) is not None:
+    while (decoded := await _next_decoded_snapshot_row(next_row=next_row)) is not None:
         result = await _snapshot_result_for_event(
             decoded.event,
             cached_at=decoded.cached_at,
@@ -182,7 +172,7 @@ async def _load_thread_agent_message_snapshot(
     resolved first and the newest proven member wins.
     """
     decoded_rows: list[CachedEventRow] = []
-    while (decoded := await _next_decoded_snapshot_row(next_row=next_row, room_id=room_id)) is not None:
+    while (decoded := await _next_decoded_snapshot_row(next_row=next_row)) is not None:
         decoded_rows.append(decoded)
     resolved_thread_event_ids = await _resolved_snapshot_thread_event_ids(
         [decoded.event for decoded in decoded_rows],

@@ -46,45 +46,13 @@ class CachedEventRow:
 def decode_cached_event(
     *,
     event_json: str,
-    event_id: str,
-    origin_server_ts: int,
-    room_id: str,
     cached_at: float | None = None,
-) -> CachedEventRow | None:
-    """Decode one cached event only when its payload matches its authoritative index.
-
-    ``event_id`` and ``origin_server_ts`` are the indexed column values, not payload values:
-    a payload that disagrees with either, or with its room, is refused rather than trusted.
-    """
-    event = json.loads(event_json)
-    if not isinstance(event, dict):
-        return None
-    timestamp = event.get("origin_server_ts")
-    if (
-        not event_id
-        or type(timestamp) is not int
-        or (event.get("event_id"), timestamp) != (event_id, origin_server_ts)
-        or not event_source_matches_room(event, room_id)
-    ):
-        return None
-    return CachedEventRow(event=event, cached_at=None if cached_at is None else float(cached_at))
-
-
-def decode_cached_events(rows: Iterable[Sequence[Any]], *, room_id: str) -> list[dict[str, Any]]:
-    """Decode ``(event_json, event_id, origin_server_ts)`` rows, rejecting any index mismatch."""
-    decoded: list[dict[str, Any]] = []
-    for event_json, event_id, origin_server_ts in rows:
-        row = decode_cached_event(
-            event_json=event_json,
-            event_id=event_id,
-            origin_server_ts=origin_server_ts,
-            room_id=room_id,
-        )
-        if row is None:
-            msg = "Cached event payload does not match its authoritative index"
-            raise ValueError(msg)
-        decoded.append(row.event)
-    return decoded
+) -> CachedEventRow:
+    """Decode one cached event row."""
+    return CachedEventRow(
+        event=json.loads(event_json),
+        cached_at=None if cached_at is None else float(cached_at),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -159,33 +127,23 @@ def event_mxc_urls(event: dict[str, Any], *, room_id: str) -> frozenset[str]:
 def cached_event_owns_mxc(
     *,
     event_json: str,
-    event_id: str,
-    origin_server_ts: int,
     room_id: str,
     mxc_url: str,
 ) -> bool:
-    """Return whether one index-valid visible event owns an MXC reference."""
-    decoded = decode_cached_event(
-        event_json=event_json,
-        event_id=event_id,
-        origin_server_ts=origin_server_ts,
-        room_id=room_id,
-    )
-    return decoded is not None and mxc_url in event_mxc_urls(decoded.event, room_id=room_id)
+    """Return whether one visible event owns an MXC reference."""
+    return mxc_url in event_mxc_urls(decode_cached_event(event_json=event_json).event, room_id=room_id)
 
 
 def validated_mxc_text_rows(rows: Iterable[Sequence[Any]], *, room_id: str) -> dict[tuple[str, str], str]:
     """Return plaintext rows whose event payload still owns the requested MXC.
 
-    Rows are ``(event_id, mxc_url, text_content, event_json, origin_server_ts)`` in that order.
+    Rows are ``(event_id, mxc_url, text_content, event_json)`` in that order.
     """
     return {
         (event_id, mxc_url): text_content
-        for event_id, mxc_url, text_content, event_json, origin_server_ts in rows
+        for event_id, mxc_url, text_content, event_json in rows
         if cached_event_owns_mxc(
             event_json=event_json,
-            event_id=event_id,
-            origin_server_ts=origin_server_ts,
             room_id=room_id,
             mxc_url=mxc_url,
         )
@@ -221,6 +179,14 @@ def batch_redaction_candidate_ids(events: list[_CachedEventValue], room_id: str)
             for event_id, event in events
         ),
     )
+
+
+def room_scoped_cache_events(
+    events: list[_CachedEventValue],
+    room_id: str,
+) -> list[_CachedEventValue]:
+    """Keep events whose explicit room agrees with their authoritative cache scope."""
+    return [(event_id, event) for event_id, event in events if event_source_matches_room(event, room_id)]
 
 
 def _without_tombstoned_bundled_replacements(
