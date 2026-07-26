@@ -1937,6 +1937,9 @@ async def test_matrix_api_cross_room_access_allowed_uses_target_room_id(
     tool = MatrixApiTools()
     ctx = _make_context()
     getattr(ctx.client, client_attr).return_value = response
+    if action == "redact":
+        ctx.client.room_get_event.return_value = _event_response(room_id="!other:localhost")
+        ctx.conversation_cache.get_event.return_value = _event_response(room_id="!other:localhost")
 
     with (
         patch("mindroom.custom_tools.matrix_api.room_access_allowed", return_value=True),

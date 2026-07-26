@@ -2725,6 +2725,40 @@ async def test_resolve_thread_root_event_id_for_client_uses_cache_when_event_loo
     )
 
 
+@pytest.mark.parametrize("invalid_kind", ["state", "wrong-room"])
+@pytest.mark.asyncio
+async def test_resolve_thread_root_event_id_for_client_rejects_invalid_success_before_cache_fallback(
+    invalid_kind: str,
+) -> None:
+    """A successful invalid event lookup is authoritative and cannot fall through to the cache."""
+    event_source: dict[str, object] = {
+        "content": {"body": "forged", "msgtype": "m.text"},
+        "event_id": "$forged:localhost",
+        "sender": "@attacker:localhost",
+        "origin_server_ts": 1,
+        "room_id": "!room:localhost",
+        "type": "m.room.message",
+    }
+    if invalid_kind == "state":
+        event_source["state_key"] = ""
+    else:
+        event_source["room_id"] = "!other:localhost"
+    client = AsyncMock()
+    client.room_get_event = AsyncMock(return_value=nio.RoomGetEventResponse.from_dict(event_source))
+    conversation_cache = MagicMock()
+    conversation_cache.get_thread_id_for_event = AsyncMock(return_value="$forged-root:localhost")
+
+    normalized = await resolve_thread_root_event_id_for_client(
+        client,
+        "!room:localhost",
+        "$forged:localhost",
+        conversation_cache=conversation_cache,
+    )
+
+    assert normalized is None
+    conversation_cache.get_thread_id_for_event.assert_not_awaited()
+
+
 @pytest.mark.asyncio
 async def test_resolve_thread_root_event_id_for_client_resolves_thread_edit_via_original_event() -> None:
     """Thread edits must follow the original event instead of forged replacement metadata."""

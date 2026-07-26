@@ -114,12 +114,14 @@ async def resolve_thread_root_event_id_for_client(
     if not normalized_event_id:
         return None
 
-    event_info = await fetch_event_info_for_client(
-        client,
-        room_id,
-        normalized_event_id,
-        strict=False,
-    )
+    response = await client.room_get_event(room_id, normalized_event_id)
+    if isinstance(response, nio.RoomGetEventResponse):
+        event_source = response.event.source
+        if not event_source_is_timeline_in_room(event_source, room_id):
+            return None
+        event_info = EventInfo.from_event(event_source)
+    else:
+        event_info = None
     if event_info is None:
         return await lookup_thread_id_from_conversation_cache(
             conversation_cache,

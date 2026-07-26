@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 from typing import TYPE_CHECKING, Any
 
@@ -9,6 +10,8 @@ import pytest
 
 from mindroom.matrix.cache import AgentMessageSnapshot, ConversationEventCache
 from mindroom.matrix.cache.agent_message_snapshot import AgentMessageSnapshotUnavailable
+from mindroom.matrix.cache.postgres_event_cache import PostgresEventCache
+from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from tests.event_cache_test_support import replace_thread_unconditionally as _replace_thread
 
 if TYPE_CHECKING:
@@ -63,6 +66,40 @@ async def _read_snapshot(
         )
     finally:
         await cache.close()
+
+
+async def _overwrite_cached_event_payload(
+    cache: ConversationEventCache,
+    *,
+    room_id: str,
+    event_id: str,
+    event: dict[str, Any],
+) -> None:
+    """Model one legacy row whose indexed room disagrees with its stored payload."""
+    event_json = json.dumps(event, separators=(",", ":"))
+    if isinstance(cache, SqliteEventCache):
+        async with cache._runtime.acquire_db_operation() as db:
+            await db.execute(
+                """
+                UPDATE events
+                SET event_json = ?
+                WHERE principal_id = ? AND room_id = ? AND event_id = ?
+                """,
+                (event_json, cache.principal_id, room_id, event_id),
+            )
+            await db.commit()
+        return
+    assert isinstance(cache, PostgresEventCache)
+    async with cache._runtime.acquire_db_operation(operation="test_overwrite_cached_event_payload") as db:
+        await db.execute(
+            """
+            UPDATE mindroom_event_cache_events
+            SET event_json = %s
+            WHERE namespace = %s AND room_id = %s AND event_id = %s
+            """,
+            (event_json, cache.namespace, room_id, event_id),
+        )
+        await db.commit()
 
 
 @pytest.mark.asyncio
@@ -302,6 +339,64 @@ async def test_get_latest_agent_message_snapshot_resolves_indexed_indirect_threa
 
 
 @pytest.mark.asyncio
+async def test_get_latest_agent_message_snapshot_follows_reply_to_thread_child_edit(
+    event_cache_factory: Callable[[], ConversationEventCache],
+) -> None:
+    """An edit remains an ancestry node even though it is not a visible snapshot candidate."""
+    cache = event_cache_factory()
+    await cache.initialize()
+    try:
+        room_id = "!room:localhost"
+        thread_id = "$thread-root"
+        await _replace_thread(
+            cache,
+            room_id,
+            thread_id,
+            [
+                _message_event(
+                    event_id=thread_id,
+                    sender="@user:localhost",
+                    body="Question",
+                    origin_server_ts=1000,
+                ),
+                _message_event(
+                    event_id="$thread-child",
+                    sender="@user:localhost",
+                    body="Detail",
+                    origin_server_ts=1500,
+                    relates_to={"rel_type": "m.thread", "event_id": thread_id},
+                ),
+                _message_event(
+                    event_id="$thread-child-edit",
+                    sender="@user:localhost",
+                    body="* Updated detail",
+                    origin_server_ts=2000,
+                    relates_to={"rel_type": "m.replace", "event_id": "$thread-child"},
+                    new_content={"body": "Updated detail"},
+                ),
+                _message_event(
+                    event_id="$agent-reply",
+                    sender="@agent:localhost",
+                    body="Answer",
+                    origin_server_ts=2500,
+                    relates_to={"m.in_reply_to": {"event_id": "$thread-child-edit"}},
+                ),
+            ],
+        )
+        snapshot = await cache.get_latest_agent_message_snapshot(
+            room_id,
+            thread_id,
+            "@agent:localhost",
+            runtime_started_at=None,
+        )
+    finally:
+        await cache.close()
+
+    assert snapshot is not None
+    assert snapshot.content["body"] == "Answer"
+
+
+@pytest.mark.asyncio
 async def test_state_thread_child_cannot_authorize_indirect_snapshot_member(
     event_cache_factory: Callable[[], ConversationEventCache],
 ) -> None:
@@ -345,6 +440,41 @@ async def test_state_thread_child_cannot_authorize_indirect_snapshot_member(
             thread_id,
             "@agent:localhost",
             runtime_started_at=None,
+        )
+    finally:
+        await cache.close()
+
+    assert snapshot is None
+
+
+@pytest.mark.asyncio
+async def test_get_latest_agent_message_snapshot_rejects_legacy_wrong_room_payload(
+    event_cache_factory: Callable[[], ConversationEventCache],
+) -> None:
+    """A legacy row's indexed room cannot override explicit foreign-room evidence."""
+    cache = event_cache_factory()
+    await cache.initialize()
+    try:
+        room_id = "!room:localhost"
+        event_id = "$wrong-room"
+        event = _message_event(
+            event_id=event_id,
+            sender="@agent:localhost",
+            body="Forged",
+            origin_server_ts=2000,
+        )
+        await cache.store_event(event_id, room_id, event)
+        await _overwrite_cached_event_payload(
+            cache,
+            room_id=room_id,
+            event_id=event_id,
+            event={**event, "room_id": "!other:localhost"},
+        )
+        snapshot = await cache.get_latest_agent_message_snapshot(
+            room_id,
+            None,
+            "@agent:localhost",
+            runtime_started_at=0.0,
         )
     finally:
         await cache.close()

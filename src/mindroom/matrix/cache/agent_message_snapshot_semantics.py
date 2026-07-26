@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 import nio
 
-from mindroom.matrix.event_info import EventInfo, event_source_is_state_event
+from mindroom.matrix.event_info import EventInfo, event_source_is_timeline_in_room
 from mindroom.matrix.media import parse_room_message_event_source, valid_room_message_replacement
 from mindroom.matrix.replacements import ordered_replacements, replacement_content
 from mindroom.matrix.thread_membership import local_events_prove_thread_root
@@ -51,23 +51,23 @@ def _thread_cache_has_no_snapshot(cache_state: ThreadCacheState | None) -> bool:
 def _event_matches_snapshot_scope(
     event: dict[str, Any],
     *,
+    room_id: str,
     thread_id: str | None,
     sender: str,
 ) -> bool:
     """Return whether one indexed event is a visible message candidate for a snapshot scope."""
-    if event.get("sender") != sender or not _event_is_snapshot_graph_member(event):
+    if event.get("sender") != sender or not _event_is_snapshot_graph_member(event, room_id=room_id):
         return False
     relation_type = EventInfo.from_event(event).relation_type
     return relation_type != "m.replace" and not (thread_id is None and relation_type == "m.thread")
 
 
-def _event_is_snapshot_graph_member(event: dict[str, Any]) -> bool:
+def _event_is_snapshot_graph_member(event: dict[str, Any], *, room_id: str) -> bool:
     """Return whether one cached event may contribute timeline thread relations."""
     return (
-        event.get("type") == "m.room.message"
-        and not event_source_is_state_event(event)
+        event_source_is_timeline_in_room(event, room_id)
+        and event.get("type") == "m.room.message"
         and isinstance(parse_room_message_event_source(event), nio.RoomMessage)
-        and EventInfo.from_event(event).relation_type != "m.replace"
     )
 
 
@@ -81,7 +81,9 @@ async def _resolved_snapshot_thread_event_ids(
     event_infos = {
         event_id: EventInfo.from_event(event)
         for event in events
-        if _event_is_snapshot_graph_member(event) and isinstance(event_id := event.get("event_id"), str) and event_id
+        if _event_is_snapshot_graph_member(event, room_id=room_id)
+        and isinstance(event_id := event.get("event_id"), str)
+        and event_id
     }
     resolved = await resolve_thread_ids_for_event_infos(
         room_id,
@@ -105,7 +107,7 @@ async def _snapshot_result_for_event(
     runtime_started_at: float | None,
 ) -> _SnapshotLookupResult | None:
     """Return one matching event's snapshot outcome, or no scope match."""
-    if not _event_matches_snapshot_scope(event, thread_id=thread_id, sender=sender):
+    if not _event_matches_snapshot_scope(event, room_id=room_id, thread_id=thread_id, sender=sender):
         return None
     return _snapshot_lookup_result(
         event,
