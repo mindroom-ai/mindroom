@@ -1539,6 +1539,7 @@ def _record_scanned_room_message_source(
         normalized_event_source,
         edit_candidates_by_original_event_id=edit_candidates_by_original_event_id,
     ):
+        scanned_message_sources[event.event_id] = normalized_event_source
         return None
     if event_info.is_edit:
         return None
@@ -1659,7 +1660,7 @@ async def _group_scanned_sources_by_thread(
         if root_id is None or root_id == event_id:
             continue
         bucket = grouped.get(root_id)
-        if bucket is None or event_id in bucket:
+        if bucket is None or event_id in bucket or event_infos[event_id].is_edit:
             continue
         bucket[event_id] = scanned_message_sources[event_id]
 

@@ -2436,6 +2436,73 @@ class TestThreadHistory:
         ]
 
     @pytest.mark.asyncio
+    async def test_room_scan_keeps_plain_reply_to_thread_message_edit(self) -> None:
+        """Cold room scans keep edit rows as non-visible membership ancestry."""
+        client = AsyncMock()
+        root_event = self._make_text_event(
+            event_id="$thread_root",
+            sender="@user:localhost",
+            body="root",
+            server_timestamp=1000,
+            source_content={"msgtype": "m.text", "body": "root"},
+        )
+        thread_reply = self._make_text_event(
+            event_id="$thread_reply",
+            sender="@agent:localhost",
+            body="original",
+            server_timestamp=2000,
+            source_content={
+                "msgtype": "m.text",
+                "body": "original",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
+            },
+        )
+        edit = self._make_text_event(
+            event_id="$thread_reply_edit",
+            sender="@agent:localhost",
+            body="* edited",
+            server_timestamp=3000,
+            source_content={
+                "msgtype": "m.text",
+                "body": "* edited",
+                "m.new_content": {"msgtype": "m.text", "body": "edited"},
+                "m.relates_to": {"rel_type": "m.replace", "event_id": "$thread_reply"},
+            },
+        )
+        plain_reply = self._make_text_event(
+            event_id="$plain_reply",
+            sender="@bridge:localhost",
+            body="reply to edit",
+            server_timestamp=4000,
+            source_content={
+                "msgtype": "m.text",
+                "body": "reply to edit",
+                "m.relates_to": {"m.in_reply_to": {"event_id": "$thread_reply_edit"}},
+            },
+        )
+        response = MagicMock(spec=nio.RoomMessagesResponse)
+        response.chunk = [plain_reply, edit, thread_reply, root_event]
+        response.end = None
+        client.room_messages.return_value = response
+
+        history = (
+            await _fetch_thread_history_via_room_messages_with_events(
+                client,
+                "!room:localhost",
+                "$thread_root",
+                hydrate_sidecars=True,
+                event_cache=_event_cache(),
+                expected_membership_epoch=0,
+            )
+        ).history
+
+        assert [(message.event_id, message.body) for message in history] == [
+            ("$thread_root", "root"),
+            ("$thread_reply", "edited"),
+            ("$plain_reply", "reply to edit"),
+        ]
+
+    @pytest.mark.asyncio
     async def test_room_scan_does_not_promote_plain_reply_to_non_thread_root(self) -> None:
         """Cold room scans must not treat arbitrary room replies as threaded."""
         grouped, _unresolved_opaque = await _group_scanned_sources_by_thread(

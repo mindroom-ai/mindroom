@@ -572,6 +572,54 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         assert resolution.thread_id == thread_root_id
 
     @pytest.mark.asyncio
+    async def test_related_edit_membership_ignores_legacy_cached_edit_index(self) -> None:
+        """A related replacement follows its original instead of a stale edit index."""
+        room_id = "!test:localhost"
+        thread_root_id = "$thread_root:localhost"
+        original_id = "$thread_reply:localhost"
+        edit_id = "$thread_reply_edit:localhost"
+        edit_info = EventInfo.from_event(
+            {
+                "type": "m.room.message",
+                "content": {
+                    "body": "* edited",
+                    "msgtype": "m.text",
+                    "m.new_content": {"body": "edited", "msgtype": "m.text"},
+                    "m.relates_to": {"rel_type": "m.replace", "event_id": original_id},
+                },
+            },
+        )
+        original_info = EventInfo.from_event(
+            {
+                "type": "m.room.message",
+                "content": {
+                    "body": "Thread reply",
+                    "msgtype": "m.text",
+                    "m.relates_to": {"rel_type": "m.thread", "event_id": thread_root_id},
+                },
+            },
+        )
+
+        async def lookup_thread_id(_room_id: str, event_id: str) -> str | None:
+            return "$forged:localhost" if event_id == edit_id else None
+
+        async def fetch_event_info(_room_id: str, event_id: str) -> EventInfo | None:
+            return {edit_id: edit_info, original_id: original_info}.get(event_id)
+
+        resolution = await resolve_related_event_thread_membership(
+            room_id,
+            edit_id,
+            access=ThreadMembershipAccess(
+                lookup_thread_id=lookup_thread_id,
+                fetch_event_info=fetch_event_info,
+                prove_thread_root=AsyncMock(side_effect=AssertionError("edits cannot be roots")),
+            ),
+        )
+
+        assert resolution.state is ThreadResolutionState.THREADED
+        assert resolution.thread_id == thread_root_id
+
+    @pytest.mark.asyncio
     async def test_rich_reply_root_proof_precedes_its_reply_ancestry(self) -> None:
         """A proven rich-reply root owns its thread instead of inheriting its parent's."""
         room_id = "!test:localhost"

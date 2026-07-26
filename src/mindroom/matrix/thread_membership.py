@@ -300,14 +300,15 @@ async def resolve_related_event_thread_membership(
                 resolution = _resolution_from_root_proof(current_event_id, proof)
                 break
 
-        if indexed_thread_id is not None:
-            resolution = ThreadResolution.threaded(indexed_thread_id)
-            break
-
         next_target = _next_related_event_target(
             related_event_info,
             current_event_id=current_event_id,
         )
+
+        if indexed_thread_id is not None and not related_event_info.is_edit:
+            resolution = ThreadResolution.threaded(indexed_thread_id)
+            break
+
         if next_target is not None:
             current_event_id = next_target
             continue
