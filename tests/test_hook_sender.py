@@ -1180,7 +1180,11 @@ async def test_dispatch_text_message_runs_message_received_before_command_parsin
     assert hook_calls == ["called"]
     bot._turn_controller._execute_command.assert_not_awaited()
     turn_store.record_turn.assert_called_once_with(
-        TurnRecord.create([event.event_id]),
+        TurnRecord.create(
+            [event.event_id],
+            completed=False,
+            source_event_prompts={event.event_id: event.body},
+        ),
     )
 
 

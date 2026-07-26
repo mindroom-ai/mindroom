@@ -1100,12 +1100,12 @@ class TestAgentBot(AgentBotTestBase):
         )
 
     @pytest.mark.asyncio
-    async def test_router_relay_dispatch_does_not_index_alias_before_response(
+    async def test_router_relay_dispatch_claims_alias_before_response(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """A relay that never reaches RESPOND must not persist the routed-human alias."""
+        """A routed-human alias must join the relay claim before dispatch settles."""
         config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         _wrap_extracted_collaborators(bot)
@@ -1133,7 +1133,7 @@ class TestAgentBot(AgentBotTestBase):
 
         handled_turn = mock_prepare.await_args.kwargs["handled_turn"]
         assert handled_turn.source_event_ids == ("$relay:localhost",)
-        assert handled_turn.discovery_event_ids == ()
+        assert handled_turn.discovery_event_ids == ("$user_msg:localhost",)
 
     @pytest.mark.asyncio
     async def test_router_relay_original_event_requires_explicit_router_reply(
@@ -1498,7 +1498,7 @@ class TestAgentBot(AgentBotTestBase):
         assert key == CoalescingKey(room.room_id, "$thread_root", "@user:localhost")
         assert isinstance(pending_event, PendingEvent)
         assert pending_event.requester_user_id == "@user:localhost"
-        assert pending_event.event is event
+        assert pending_event.event is prepared_event
         assert pending_event.source_kind == MESSAGE_SOURCE_KIND
         assert pending_event.dispatch_policy_source_kind is None
         assert {item.kind for item in pending_event.dispatch_metadata} == {
@@ -1576,7 +1576,7 @@ class TestAgentBot(AgentBotTestBase):
         assert isinstance(ready_result, ReadyPendingEvent)
         pending_event = ready_result.pending_event
         assert isinstance(pending_event, PendingEvent)
-        assert pending_event.event is event
+        assert pending_event.event is prepared_event
         assert pending_event.source_kind == source_kind
 
     @pytest.mark.asyncio
