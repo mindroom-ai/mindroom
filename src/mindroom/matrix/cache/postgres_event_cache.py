@@ -24,6 +24,7 @@ from .postgres_redaction import redact_postgres_connection_info
 from .thread_cache_state import (
     THREAD_HISTORY_TRUST_METADATA_KEY,
     THREAD_HISTORY_TRUST_VERSION,
+    ThreadAppendOutcome,
     ThreadCacheReplaceOutcome,
     incoming_thread_invalidation_takes_precedence,
     replacement_validated_at,
@@ -1646,6 +1647,31 @@ class PostgresEventCache:
                 ),
             ),
         )
+
+    async def apply_thread_mutation_append(
+        self,
+        room_id: str,
+        thread_id: str,
+        event: dict[str, Any],
+        *,
+        append_failed_reason: str,
+    ) -> ThreadAppendOutcome:
+        """Append one threaded mutation and settle this thread's trust atomically."""
+        normalized_event = normalize_event_source_for_cache(event)
+        result = await self._operation(
+            room_id,
+            operation="apply_thread_mutation_append",
+            disabled_result=ThreadAppendOutcome.WRITES_UNAVAILABLE,
+            callback=lambda db: postgres_event_cache_threads.apply_thread_mutation_append_locked(
+                db,
+                namespace=self._runtime.namespace,
+                room_id=room_id,
+                thread_id=thread_id,
+                normalized_event=normalized_event,
+                append_failed_reason=append_failed_reason,
+            ),
+        )
+        return ThreadAppendOutcome(result)
 
     async def revalidate_thread_after_incremental_update(
         self,

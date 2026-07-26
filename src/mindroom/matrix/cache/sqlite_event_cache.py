@@ -26,6 +26,7 @@ from .sqlite_cache_maintenance import (
 from .thread_cache_state import (
     THREAD_HISTORY_TRUST_METADATA_KEY,
     THREAD_HISTORY_TRUST_VERSION,
+    ThreadAppendOutcome,
     ThreadCacheReplaceOutcome,
     replacement_validated_at,
 )
@@ -1242,6 +1243,31 @@ class SqliteEventCache:
                 ),
             ),
         )
+
+    async def apply_thread_mutation_append(
+        self,
+        room_id: str,
+        thread_id: str,
+        event: dict[str, Any],
+        *,
+        append_failed_reason: str,
+    ) -> ThreadAppendOutcome:
+        """Append one threaded mutation and settle this thread's trust atomically."""
+        normalized_event = normalize_event_source_for_cache(event)
+        result = await self._write_operation(
+            room_id,
+            operation="apply_thread_mutation_append",
+            disabled_result=ThreadAppendOutcome.WRITES_UNAVAILABLE,
+            writer=lambda db: sqlite_event_cache_threads.apply_thread_mutation_append_locked(
+                db,
+                principal_id=self.principal_id,
+                room_id=room_id,
+                thread_id=thread_id,
+                normalized_event=normalized_event,
+                append_failed_reason=append_failed_reason,
+            ),
+        )
+        return ThreadAppendOutcome(result)
 
     async def revalidate_thread_after_incremental_update(
         self,

@@ -7,14 +7,15 @@ This is the application layer below the write policies in ``thread_writes``; it 
    are deleted instead, and when even deletion fails (and the backend is not just temporarily
    unavailable) the cache is disabled for the rest of the runtime.
 
-2. Appends are incremental-only: ``append_event`` refuses when the thread has no cached snapshot rows
-   (it then only records lookup-index rows), and a failed append re-invalidates the thread so a partial
-   snapshot is never trusted.
+2. Appends are incremental-only and atomic: ``apply_thread_mutation_append`` appends the event and
+   settles the thread's trust in one transaction. It refuses when the thread has no cached snapshot
+   rows (then only recording lookup-index rows) and marks the thread stale, so a partial snapshot is
+   never trusted, and a mutation that succeeds is never observably stale in between.
 
-3. After a successful append the thread is revalidated only under the conditions enforced by
-   ``revalidate_thread_after_incremental_update`` (see ``sqlite_event_cache_threads``): the prior
-   invalidation must come from an incremental mutation reason and the room must not have been
-   invalidated at or after the last validation.
+3. A successful append leaves the thread trusted only under the conditions enforced by
+   ``append_keeps_thread_valid`` (see ``thread_cache_state``): a thread that was already valid stays
+   valid, a thread invalidated by an incremental mutation reason is cleared, and a room invalidated
+   at or after the last validation still outranks the append.
 """
 
 from __future__ import annotations
@@ -24,6 +25,7 @@ from typing import TYPE_CHECKING, Any
 from mindroom.matrix.thread_bookkeeping import MutationThreadImpact, MutationThreadImpactState
 
 from .thread_cache_invalidation import mark_room_threads_stale_fail_closed, mark_thread_stale_fail_closed
+from .thread_cache_state import ThreadAppendOutcome
 
 if TYPE_CHECKING:
     import asyncio
@@ -294,12 +296,24 @@ class ThreadMutationCacheOps:
         event_source: dict[str, Any],
         *,
         context: str,
+        append_failed_reason: str,
         raise_on_failure: bool = False,
     ) -> bool:
-        """Append one event into a cached thread fail-open and report whether a row changed."""
+        """Append one event into a cached thread fail-open and report whether a row changed.
+
+        Appending, and deciding whether the thread stays trusted afterwards, happen in one durable
+        operation. Splitting them used to leave a valid thread observably stale for the duration of
+        the append, so any read arriving in between rejected the snapshot and paid for a full
+        history scan even though the mutation was about to succeed.
+        """
         event_id = event_source.get("event_id")
         try:
-            appended = await self.runtime.event_cache.append_event(room_id, thread_id, event_source)
+            outcome = await self.runtime.event_cache.apply_thread_mutation_append(
+                room_id,
+                thread_id,
+                event_source,
+                append_failed_reason=append_failed_reason,
+            )
         except Exception as exc:
             self.logger.warning(
                 "Failed to append thread event to cache",
@@ -313,7 +327,8 @@ class ThreadMutationCacheOps:
             if raise_on_failure:
                 raise
             return False
-        if not appended:
+
+        if outcome.needs_full_repair:
             self.logger.debug(
                 "Skipping thread event append because raw thread cache is missing",
                 room_id=room_id,
@@ -323,34 +338,24 @@ class ThreadMutationCacheOps:
             )
             self._schedule_repair_if_available(room_id, thread_id)
             return False
-        try:
-            revalidated = await self.runtime.event_cache.revalidate_thread_after_incremental_update(
+        if not outcome.wrote_event:
+            self._schedule_repair_if_available(room_id, thread_id)
+            return False
+
+        if outcome is not ThreadAppendOutcome.APPENDED:
+            # The event landed but a marker outside the incremental allowlist still outranks it, so
+            # the snapshot is not converged and its retained delta must survive until a scan runs.
+            self._schedule_repair_if_available(room_id, thread_id)
+            return True
+
+        coordinator = self.runtime.event_cache_write_coordinator
+        if coordinator is not None and isinstance(event_id, str):
+            coordinator.acknowledge_thread_repair_deltas(
                 room_id,
                 thread_id,
+                (event_id,),
+                coordination_scope=self.runtime.event_cache.principal_id,
             )
-        except Exception as exc:
-            self.logger.warning(
-                "Failed to refresh thread cache validation after incremental update",
-                room_id=room_id,
-                thread_id=thread_id,
-                event_id=event_id,
-                context=context,
-                error=str(exc),
-            )
-            self._schedule_repair_if_available(room_id, thread_id)
-            if raise_on_failure:
-                raise
-        else:
-            coordinator = self.runtime.event_cache_write_coordinator
-            if revalidated and coordinator is not None and isinstance(event_id, str):
-                coordinator.acknowledge_thread_repair_deltas(
-                    room_id,
-                    thread_id,
-                    (event_id,),
-                    coordination_scope=self.runtime.event_cache.principal_id,
-                )
-            elif not revalidated:
-                self._schedule_repair_if_available(room_id, thread_id)
         return True
 
     def retain_thread_repair_delta(

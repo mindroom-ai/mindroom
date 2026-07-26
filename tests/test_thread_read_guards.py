@@ -16,6 +16,7 @@ from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.matrix.cache import ThreadCacheReplaceOutcome
 from mindroom.matrix.cache.event_cache import ThreadCacheState
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
+from mindroom.matrix.cache.thread_cache_state import ThreadAppendOutcome
 from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
 from mindroom.matrix.conversation_cache import MatrixConversationCache
 from mindroom.matrix.event_info import EventInfo
@@ -60,7 +61,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         """Live edit caching should degrade cleanly when SQLite lookup fails."""
         event_cache = _runtime_event_cache()
         event_cache.get_thread_id_for_event = AsyncMock(side_effect=RuntimeError("database is locked"))
-        event_cache.append_event = AsyncMock()
+        event_cache.apply_thread_mutation_append = AsyncMock()
         bot.event_cache = event_cache
 
         edit_event = nio.RoomMessageText.from_dict(
@@ -86,7 +87,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         )
 
         event_cache.get_thread_id_for_event.assert_awaited_once_with("!test:localhost", "$thread_msg:localhost")
-        event_cache.append_event.assert_not_awaited()
+        event_cache.apply_thread_mutation_append.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_live_plain_edit_lookup_miss_invalidates_room_threads(self, bot: AgentBot) -> None:
@@ -102,7 +103,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 "content": {"body": "Room message", "msgtype": "m.text"},
             },
         )
-        event_cache.append_event = AsyncMock()
+        event_cache.apply_thread_mutation_append = AsyncMock()
         bot.event_cache = event_cache
         bot.event_cache_write_coordinator = EventCacheWriteCoordinator(
             logger=MagicMock(),
@@ -137,7 +138,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             "!test:localhost",
             reason="live_thread_lookup_unavailable",
         )
-        event_cache.append_event.assert_not_awaited()
+        event_cache.apply_thread_mutation_append.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_live_plain_edit_missing_original_invalidates_room_threads(self, bot: AgentBot) -> None:
@@ -145,7 +146,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         event_cache = _runtime_event_cache()
         event_cache.get_thread_id_for_event = AsyncMock(return_value=None)
         event_cache.get_event = AsyncMock(return_value=None)
-        event_cache.append_event = AsyncMock()
+        event_cache.apply_thread_mutation_append = AsyncMock()
         bot.event_cache = event_cache
         bot.event_cache_write_coordinator = EventCacheWriteCoordinator(
             logger=MagicMock(),
@@ -181,7 +182,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             "!test:localhost",
             reason="live_thread_lookup_unavailable",
         )
-        event_cache.append_event.assert_not_awaited()
+        event_cache.apply_thread_mutation_append.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_live_message_resolution_does_not_block_same_room_read(self) -> None:
@@ -732,22 +733,23 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             sibling_update_started.set()
             await release_sibling_update.wait()
 
-        async def mark_thread_stale(
+        async def apply_thread_mutation_append(
             marked_room_id: str,
             marked_thread_id: str,
+            _event_source: dict[str, object],
             *,
-            reason: str,
-        ) -> None:
+            append_failed_reason: str,
+        ) -> ThreadAppendOutcome:
             assert marked_room_id == room_id
             assert marked_thread_id == thread_a_id
-            assert reason == "live_thread_mutation"
+            assert append_failed_reason == "live_append_failed"
             append_started.set()
+            return ThreadAppendOutcome.APPENDED
 
         access._live._resolver.resolve_thread_impact_for_mutation = AsyncMock(
             return_value=MutationThreadImpact.threaded(thread_a_id),
         )
-        event_cache.mark_thread_stale = AsyncMock(side_effect=mark_thread_stale)
-        event_cache.append_event = AsyncMock(return_value=True)
+        event_cache.apply_thread_mutation_append = AsyncMock(side_effect=apply_thread_mutation_append)
         sibling_task = coordinator.queue_thread_update(
             room_id,
             thread_b_id,
@@ -793,16 +795,13 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             )
             await coordinator.close()
 
-        event_cache.mark_thread_stale.assert_awaited_once_with(
-            room_id,
-            thread_a_id,
-            reason="live_thread_mutation",
-        )
-        event_cache.append_event.assert_awaited_once_with(
+        event_cache.apply_thread_mutation_append.assert_awaited_once_with(
             room_id,
             thread_a_id,
             event.source,
+            append_failed_reason="live_append_failed",
         )
+        event_cache.mark_thread_stale.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_sync_edit_marks_cached_thread_stale_and_next_read_refetches(
@@ -1405,14 +1404,16 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 room_invalidation_reason=None,
             )
 
-        async def append_event(
+        async def apply_thread_mutation_append(
             _room_id: str,
             _thread_id: str,
             event: dict[str, object],
-        ) -> bool:
+            *,
+            append_failed_reason: str,  # noqa: ARG001  # keyword must match the runtime call
+        ) -> ThreadAppendOutcome:
             raw_events.append(event)
             raw_append_committed.set()
-            return True
+            return ThreadAppendOutcome.APPENDED
 
         async def fetch_fresh_history(
             _room_id: str,
@@ -1440,7 +1441,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         event_cache.get_thread_events = AsyncMock(side_effect=lambda *_args, **_kwargs: list(raw_events))
         event_cache.get_thread_id_for_event = AsyncMock(return_value="$thread:localhost")
         event_cache.mark_thread_stale = AsyncMock(side_effect=mark_thread_stale)
-        event_cache.append_event = AsyncMock(side_effect=append_event)
+        event_cache.apply_thread_mutation_append = AsyncMock(side_effect=apply_thread_mutation_append)
         access._reads._wait_for_pending_thread_cache_updates = AsyncMock(side_effect=pause_reader)
         access._reads.fetch_thread_history_from_client = AsyncMock(side_effect=fetch_fresh_history)
         new_event_source = {

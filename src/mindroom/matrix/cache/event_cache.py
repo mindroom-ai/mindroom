@@ -9,7 +9,7 @@ if TYPE_CHECKING:
     from collections.abc import Collection
 
     from .agent_message_snapshot import AgentMessageSnapshot
-    from .thread_cache_state import ThreadCacheReplaceOutcome
+    from .thread_cache_state import ThreadAppendOutcome, ThreadCacheReplaceOutcome
 
 
 @dataclass(frozen=True, slots=True)
@@ -209,6 +209,16 @@ class ConversationEventCache(Protocol):
 
     async def append_event(self, room_id: str, thread_id: str, event: dict[str, Any]) -> bool:
         """Append one event when the thread already has cached data."""
+
+    async def apply_thread_mutation_append(
+        self,
+        room_id: str,
+        thread_id: str,
+        event: dict[str, Any],
+        *,
+        append_failed_reason: str,
+    ) -> ThreadAppendOutcome:
+        """Append one threaded mutation and settle this thread's trust in one transaction."""
 
     async def revalidate_thread_after_incremental_update(
         self,

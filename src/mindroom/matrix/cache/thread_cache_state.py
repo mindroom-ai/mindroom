@@ -20,6 +20,30 @@ THREAD_HISTORY_TRUST_METADATA_KEY = "thread_history_trust_version"
 THREAD_HISTORY_TRUST_VERSION = "opaque_encrypted_relations_v1"
 
 
+class ThreadAppendOutcome(StrEnum):
+    """Describe what one atomic threaded-mutation append did to a cached thread."""
+
+    APPENDED = "appended"
+    APPENDED_STALE = "appended_stale"
+    SNAPSHOT_MISSING = "snapshot_missing"
+    APPEND_REFUSED = "append_refused"
+    WRITES_UNAVAILABLE = "writes_unavailable"
+
+    @property
+    def wrote_event(self) -> bool:
+        """Return whether the mutation landed in the cached snapshot."""
+        return self in {ThreadAppendOutcome.APPENDED, ThreadAppendOutcome.APPENDED_STALE}
+
+    @property
+    def needs_full_repair(self) -> bool:
+        """Return whether only a full history scan can make this thread readable again.
+
+        Only a thread with no rows to append into qualifies. A refused append leaves the existing
+        snapshot in place under a durable marker, and a stale append already has its own reason.
+        """
+        return self is ThreadAppendOutcome.SNAPSHOT_MISSING
+
+
 class ThreadCacheReplaceOutcome(StrEnum):
     """Describe whether one guarded thread snapshot became usable."""
 
@@ -185,6 +209,24 @@ def can_revalidate_after_incremental_update(cache_state: ThreadCacheStateRow | N
             cache_state.room_invalidated_at is not None and cache_state.room_invalidated_at >= cache_state.validated_at
         )
     )
+
+
+def append_keeps_thread_valid(cache_state: ThreadCacheStateRow | None) -> bool:
+    """Return whether one appended mutation may leave this thread trusted.
+
+    This generalizes :func:`can_revalidate_after_incremental_update` to the case the atomic append
+    introduces: a thread that was still valid when the mutation began. Such a thread was never
+    invalidated, so there is nothing to clear and nothing to expose. Everything else is unchanged --
+    a room-wide marker at or after the last validation still outranks an append, and a thread marker
+    is only cleared when an incremental mutation wrote it.
+    """
+    if cache_state is None or cache_state.validated_at is None:
+        return False
+    if cache_state.room_invalidated_at is not None and cache_state.room_invalidated_at >= cache_state.validated_at:
+        return False
+    if cache_state.invalidated_at is None:
+        return True
+    return is_incremental_thread_revalidation_reason(cache_state.invalidation_reason)
 
 
 def replacement_validated_at(*, fetch_started_at: float, validated_at: float | None) -> float:

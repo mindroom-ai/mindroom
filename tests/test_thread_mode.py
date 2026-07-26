@@ -1567,7 +1567,7 @@ class TestExtractedModuleLoggerRebinding:
         bot.logger = rebound_logger
 
         event_cache = AsyncMock()
-        event_cache.append_event.side_effect = RuntimeError("cache write failed")
+        event_cache.apply_thread_mutation_append.side_effect = RuntimeError("cache write failed")
         bot.event_cache = event_cache
         bot.event_cache_write_coordinator = EventCacheWriteCoordinator(
             logger=MagicMock(),

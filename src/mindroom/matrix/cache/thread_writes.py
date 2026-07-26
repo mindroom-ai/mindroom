@@ -29,6 +29,10 @@ These three policies are the only writers of durable thread-cache state:
 7. A still-opaque ``m.room.encrypted`` mutation with a known thread never appends into the snapshot or
    revalidates it; it only marks that thread stale under a non-incremental reason, so the snapshot
    stays rejected until a decryption-capable refresh replaces it.
+
+8. Every other threaded mutation appends through one atomic cache operation that also settles the
+   thread's trust. Marking stale up front and revalidating afterwards left the snapshot observably
+   rejected for the duration of an append that was going to succeed.
    Point rows and explicit relation indexes are still persisted by the batch store, and unknown-impact
    opaque mutations fail closed through the standard room-scope invalidation.
 """
@@ -229,26 +233,22 @@ async def _apply_thread_message_mutation(
         impact.thread_id,
         event_source,
     )
-    await cache_ops.invalidate_known_thread(
-        room_id,
-        impact.thread_id,
-        reason=_mutation_reason(context, "thread_mutation"),
-        raise_on_failure=raise_on_cache_write_failure,
-    )
-    appended = await cache_ops.append_event_to_cache(
+    # No pre-invalidation: `append_event_to_cache` appends and settles this thread's trust in one
+    # durable operation, so a mutation that succeeds never makes the snapshot observably stale, and
+    # one that cannot append leaves the same durable marker this sequence used to write up front.
+    # Callers that did not add a second marker on append failure keep the plain mutation reason, so
+    # a later append can still clear it exactly as it could before.
+    await cache_ops.append_event_to_cache(
         room_id,
         impact.thread_id,
         event_source,
         context=context,
+        append_failed_reason=_mutation_reason(
+            context,
+            "append_failed" if invalidate_on_append_failure else "thread_mutation",
+        ),
         raise_on_failure=raise_on_cache_write_failure,
     )
-    if invalidate_on_append_failure and not appended:
-        await cache_ops.invalidate_known_thread(
-            room_id,
-            impact.thread_id,
-            reason=_mutation_reason(context, "append_failed"),
-            raise_on_failure=raise_on_cache_write_failure,
-        )
     return False
 
 
@@ -946,33 +946,18 @@ class ThreadLiveWritePolicy:
         append_metrics: dict[str, str | int | float | bool] = {}
 
         async def append_and_invalidate() -> bool:
-            invalidate_started = time.perf_counter()
-            await self._cache_ops.invalidate_known_thread(
-                room_id,
-                thread_id,
-                reason="live_thread_mutation",
-            )
-            append_metrics["invalidate_ms"] = elapsed_ms_since(invalidate_started, clock=time.perf_counter)
+            # One durable operation now covers what used to be invalidate, append, and revalidate,
+            # so there is no separate invalidation to time and no window for a reader to reject.
             append_started = time.perf_counter()
             appended = await self._cache_ops.append_event_to_cache(
                 room_id,
                 thread_id,
                 event_source,
                 context="live",
+                append_failed_reason="live_append_failed",
             )
             append_metrics["append_ms"] = elapsed_ms_since(append_started, clock=time.perf_counter)
             append_metrics["appended"] = appended
-            if not appended:
-                fallback_invalidate_started = time.perf_counter()
-                await self._cache_ops.invalidate_known_thread(
-                    room_id,
-                    thread_id,
-                    reason="live_append_failed",
-                )
-                append_metrics["append_failure_invalidate_ms"] = elapsed_ms_since(
-                    fallback_invalidate_started,
-                    clock=time.perf_counter,
-                )
             return appended
 
         outcome = "ok"

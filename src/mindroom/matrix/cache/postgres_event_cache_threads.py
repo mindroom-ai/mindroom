@@ -22,8 +22,10 @@ from .postgres_event_cache_events import (
     write_lookup_index_rows,
 )
 from .thread_cache_state import (
+    ThreadAppendOutcome,
     ThreadCacheReplaceOutcome,
     ThreadCacheStateRow,
+    append_keeps_thread_valid,
     can_revalidate_after_incremental_update,
     guarded_thread_replacement_conflict,
     incremental_thread_revalidation_reasons,
@@ -615,6 +617,115 @@ async def revalidate_thread_after_incremental_update_locked(
         (time.time(), namespace, room_id, thread_id),
     )
     return True
+
+
+async def _thread_has_appendable_snapshot_rows(
+    db: AsyncConnection,
+    *,
+    namespace: str,
+    room_id: str,
+    thread_id: str,
+) -> bool:
+    """Return whether this thread has snapshot rows an incremental append can extend.
+
+    Mirrors the join ``append_existing_thread_event`` performs, so it predicts that call exactly.
+    """
+    row = await fetchone(
+        db,
+        """
+        SELECT 1
+        FROM mindroom_event_cache_thread_events AS membership
+        JOIN mindroom_event_cache_events AS events
+            ON events.namespace = membership.namespace
+            AND events.event_id = membership.event_id
+            AND events.room_id = membership.room_id
+        WHERE membership.namespace = %s
+            AND membership.room_id = %s
+            AND membership.thread_id = %s
+        LIMIT 1
+        """,
+        (namespace, room_id, thread_id),
+    )
+    return row is not None
+
+
+async def apply_thread_mutation_append_locked(
+    db: AsyncConnection,
+    *,
+    namespace: str,
+    room_id: str,
+    thread_id: str,
+    normalized_event: dict[str, Any],
+    append_failed_reason: str,
+) -> ThreadAppendOutcome:
+    """Append one threaded mutation and settle this thread's trust in the same transaction.
+
+    The caller used to mark the thread stale, append, and revalidate as three separate operations,
+    each taking the write lock on its own. A reader between the first and last saw a thread that was
+    about to be perfectly appendable reported as invalid, and rejected it. Holding all three steps in
+    one transaction means a reader observes either the state before the mutation or the state after
+    it, and a crash rolls the whole thing back rather than leaving a half-applied snapshot trusted.
+    """
+    state_row = await _load_thread_cache_state_row(
+        db,
+        namespace=namespace,
+        room_id=room_id,
+        thread_id=thread_id,
+    )
+    if not await _thread_has_appendable_snapshot_rows(
+        db,
+        namespace=namespace,
+        room_id=room_id,
+        thread_id=thread_id,
+    ):
+        # There is no snapshot to extend, so only a full history scan can make this thread readable.
+        # The lookup-index rows are still worth recording for later thread resolution.
+        await write_lookup_index_rows(
+            db,
+            namespace=namespace,
+            room_id=room_id,
+            serialized_events=[serialize_cached_event(event_id_for_cache(normalized_event), normalized_event)],
+            cached_at=time.time(),
+            thread_id=thread_id,
+        )
+        await mark_thread_stale_locked(
+            db,
+            namespace=namespace,
+            room_id=room_id,
+            thread_id=thread_id,
+            reason=append_failed_reason,
+        )
+        return ThreadAppendOutcome.SNAPSHOT_MISSING
+
+    appended = await append_existing_thread_event(
+        db,
+        namespace=namespace,
+        room_id=room_id,
+        thread_id=thread_id,
+        normalized_event=normalized_event,
+    )
+    if not appended:
+        await mark_thread_stale_locked(
+            db,
+            namespace=namespace,
+            room_id=room_id,
+            thread_id=thread_id,
+            reason=append_failed_reason,
+        )
+        return ThreadAppendOutcome.APPEND_REFUSED
+
+    if not append_keeps_thread_valid(state_row):
+        return ThreadAppendOutcome.APPENDED_STALE
+
+    await db.execute(
+        """
+        UPDATE mindroom_event_cache_thread_state
+        SET validated_at = %s, invalidated_at = NULL, invalidation_reason = NULL
+        WHERE namespace = %s AND room_id = %s AND thread_id = %s
+        """,
+        (time.time(), namespace, room_id, thread_id),
+    )
+    return ThreadAppendOutcome.APPENDED
 
 
 async def mark_room_stale_locked(
