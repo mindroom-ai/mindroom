@@ -1,14 +1,14 @@
 # Thread edit integrity gate status
 
-Updated 2026-07-26 after scoping room-snapshot freshness to visible edit evidence.
+Updated 2026-07-26 after making room-snapshot freshness total on malformed bundled identities.
 
 ## Exact target
 
 - PR: `mindroom-ai/mindroom#1641`
 - Branch: `fix/thread-edit-integrity`
-- Latest production commit: `7859046770ebeaebcf0b1de6c499c93aa44f6e8b`
+- Latest production commit: `e2eb2753042908ea88537a51c2a1f2e2e59263eb`
 - Current base and merge base: `858282afc77adb480fa06cd9e4057d511ff861d5`
-- Latest integration commit before the next handoff-only successor: `7859046770ebeaebcf0b1de6c499c93aa44f6e8b`
+- Latest integration commit before the next handoff-only successor: `e2eb2753042908ea88537a51c2a1f2e2e59263eb`
 - A commit cannot contain its own SHA, so this file does not claim that its stored parent is the exact gate head.
 - Resolve local `HEAD`, `origin/fix/thread-edit-integrity`, and GitHub PR `headRefOid` live and require all three values to match before counting any gate.
 - The tracked tree is clean; three user-owned task notes and preserved test artifacts are untracked.
@@ -47,6 +47,7 @@ Updated 2026-07-26 after scoping room-snapshot freshness to visible edit evidenc
 - `3c6a1d2a0` carries selected-edit cache provenance by immutable event ID and uses the freshest equivalent explicit or bundled observation for room-snapshot freshness.
 - `785904677` prevents a fresh plain-original observation from reviving an explicit edit that was observed only before the current runtime.
 - `785904677` lets original cache time refresh an edited snapshot only when the selected edit identity is actually present in the original's bundled aggregation.
+- `e2eb27530` compares bundled edit identities without hashing untrusted JSON values, so list and mapping IDs are ignored instead of crashing snapshot reads.
 - The current correction requires canonical replacement validity before an edit may supply thread ancestry in point, scan, cache-certification, snapshot, cleanup, or mutation paths.
 - The current correction rejects malformed `m.room.message` point events and cache rows before their raw relations can create durable thread indexes.
 - Known invalid edits resolve room-level; unavailable replacement ancestry remains indeterminate so mutation writes fail closed.
@@ -344,6 +345,24 @@ Updated 2026-07-26 after scoping room-snapshot freshness to visible edit evidenc
 - This correction changes production by `+22/-10`, net `+12`.
 - Total production source against current main is `+2437/-1226`, net `+1211`.
 - Every predecessor review, CI, PostgreSQL, full-suite, all-file, and real-Tuwunel result is historical after `3c6a1d2a0`.
+- Fresh exact-head Codex review and CI are required.
+- Exact-head PostgreSQL stress, full pytest, Tach, all-file pre-commit, and isolated real-Tuwunel remain mandatory.
+- Merge gate remains closed; never merge from this task.
+
+## Production-e2eb malformed bundled identity correction
+
+- Production correction commit is `e2eb2753042908ea88537a51c2a1f2e2e59263eb`.
+- Resolve the handoff successor live; this tracked file deliberately does not claim its own commit SHA.
+- Base and merge base remain current `main` `858282afc77adb480fa06cd9e4057d511ff861d5`.
+- One exact-`11f5c86ca` reviewer approved; the independent reviewer found one additional blocker and found no other blocker in the complete production diff.
+- The snapshot freshness helper hashed raw bundled event IDs, so valid originals with list or mapping edit IDs raised `TypeError`.
+- The claim failed four deterministic list/mapping by SQLite/PostgreSQL regressions before implementation.
+- Freshness now compares raw identities without hashing them; malformed identities remain ignored by canonical replacement selection.
+- The final nine-file owning selection passes `789` tests with zero failures, errors, or skips across SQLite and PostgreSQL.
+- Changed-file pre-commit, Tach dependencies/interfaces, Ruff, formatting, `ty`, Vulture, module privacy, commit hooks, and diff checks pass.
+- This correction changes production by `+3/-3`, net `0`.
+- Total production source against current main remains `+2444/-1226`, net `+1218`.
+- Every predecessor review, CI, PostgreSQL, full-suite, all-file, and real-Tuwunel result is historical after `e2eb27530`.
 - Fresh exact-head Codex review and CI are required.
 - Exact-head PostgreSQL stress, full pytest, Tach, all-file pre-commit, and isolated real-Tuwunel remain mandatory.
 - Merge gate remains closed; never merge from this task.
