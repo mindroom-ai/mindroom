@@ -6,9 +6,10 @@ Updated 2026-07-25 after the exact-`845b12e1d` full-suite follow-up.
 
 - PR: `mindroom-ai/mindroom#1641`
 - Branch: `fix/thread-edit-integrity`
-- Latest published production commit before this follow-up: `b7efe325d`
+- Latest production commit: `71c1ac07c`
 - Current base and merge base: `f6190d4c2457381e63f40f99fb27e794ae8667b8`
-- The full-suite follow-up and corrected intended-valid fixtures are being committed with this handoff.
+- The full-suite follow-up and corrected intended-valid fixtures are pushed.
+- The tracked tree is clean apart from this crash-handoff successor.
 - Resolve local, remote, and PR heads before counting any exact-head gate.
 - Resolve and compare local, origin, and GitHub heads before counting any gate.
 - Three pre-existing untracked `.claude/TASK-*.md` notes are user-owned and must remain untouched.
@@ -70,8 +71,8 @@ Updated 2026-07-25 after the exact-`845b12e1d` full-suite follow-up.
 - The exact failed files were corrected without weakening production validation.
 - The withdrawn edit-index timestamp-poison claim remains excluded because it required direct inconsistent SQL writes outside production paths.
 - This correction adds `+196/-15` production lines, net `+181`.
-- Production source against current `main` is `+1899/-1178`, net `+721`.
-- The current full-suite follow-up adds `+28/-4` production lines, net `+24`; exact total counts must be refreshed after commit.
+- Production source against current `main` is `+1924/-1179`, net `+745`.
+- The full-suite follow-up adds `+28/-4` production lines, net `+24`.
 
 ## Validation already completed
 
@@ -114,7 +115,7 @@ Updated 2026-07-25 after the exact-`845b12e1d` full-suite follow-up.
 
 ## Pending exact-head gates
 
-- Commit and push the full-suite follow-up and crash-handoff successor, then freeze its exact head.
+- Commit and push this crash-handoff successor, then freeze its exact head.
 - Fresh CI must complete on that exact head.
 - A fresh independent native Codex correctness review is required on that exact head.
 - Exact-head PostgreSQL owning and stress selections are required.
