@@ -207,18 +207,8 @@ def conversation_relation_thread_membership_access(
             raise ThreadMembershipLookupError(msg)
         return event_info
 
-    async def lookup_thread_id(room_id: str, event_id: str) -> str | None:
-        thread_id = await access.lookup_thread_id(room_id, event_id)
-        if thread_id is None:
-            return None
-        event_info = await fetch_event_info(room_id, event_id)
-        if event_info is None:
-            msg = f"Indexed event {event_id} is unavailable for conversation thread validation"
-            raise ThreadMembershipLookupError(msg)
-        return thread_id
-
     return ThreadMembershipAccess(
-        lookup_thread_id=lookup_thread_id,
+        lookup_thread_id=access.lookup_thread_id,
         fetch_event_info=fetch_event_info,
         prove_thread_root=access.prove_thread_root,
     )
@@ -283,10 +273,7 @@ async def resolve_related_event_thread_membership(
             break
         visited_event_ids.add(current_event_id)
 
-        thread_id = await access.lookup_thread_id(room_id, current_event_id)
-        if thread_id is not None:
-            resolution = ThreadResolution.threaded(thread_id)
-            break
+        indexed_thread_id = await access.lookup_thread_id(room_id, current_event_id)
 
         try:
             related_event_info = await access.fetch_event_info(room_id, current_event_id)
@@ -312,6 +299,10 @@ async def resolve_related_event_thread_membership(
             if proof.state is not _ThreadRootProofState.NOT_A_THREAD_ROOT:
                 resolution = _resolution_from_root_proof(current_event_id, proof)
                 break
+
+        if indexed_thread_id is not None:
+            resolution = ThreadResolution.threaded(indexed_thread_id)
+            break
 
         next_target = _next_related_event_target(
             related_event_info,

@@ -453,8 +453,17 @@ class ThreadMutationResolver:
         except Exception as exc:
             return ThreadRootProof.proof_unavailable(exc)
         if thread_events is None:
-            proof = ThreadRootProof.proof_unavailable(
-                ThreadMembershipLookupError(f"Thread root proof unavailable for {thread_root_id}"),
+            indexed_thread_id = await self._lookup_thread_id_for_mutation_context(
+                room_id,
+                thread_root_id,
+                resolution_context=resolution_context,
+            )
+            proof = (
+                ThreadRootProof.not_a_thread_root()
+                if indexed_thread_id is not None and indexed_thread_id != thread_root_id
+                else ThreadRootProof.proof_unavailable(
+                    ThreadMembershipLookupError(f"Thread root proof unavailable for {thread_root_id}"),
+                )
             )
         else:
             has_children = any(

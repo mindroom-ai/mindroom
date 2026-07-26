@@ -280,8 +280,7 @@ async def test_resolve_related_event_thread_membership_terminates_on_relation_cy
         return event_infos[event_id]
 
     async def prove_thread_root(_room_id: str, _thread_root_id: str) -> ThreadRootProof:
-        msg = "events with relations can never become thread roots"
-        raise AssertionError(msg)
+        return ThreadRootProof.not_a_thread_root()
 
     resolution = await resolve_related_event_thread_membership(
         "!room:localhost",

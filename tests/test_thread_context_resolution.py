@@ -41,7 +41,23 @@ from tests.threading_helpers import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from mindroom.bot import AgentBot
+    from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
+
+
+def _thread_history_lookup(
+    root_id: str,
+    root_history: Sequence[ResolvedVisibleMessage],
+) -> AsyncMock:
+    """Return root history while giving other root candidates deterministic negative proof."""
+
+    def lookup(_room_id: str, candidate_id: str, **_kwargs: object) -> ThreadHistoryResult:
+        history = list(root_history) if candidate_id == root_id else [_message(event_id=candidate_id, body="Candidate")]
+        return thread_history_result(history, is_full_history=True)
+
+    return AsyncMock(side_effect=lookup)
 
 
 def test_plain_reply_event_info_has_no_thread_routing_root() -> None:
@@ -284,7 +300,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             patch.object(
                 bot._conversation_cache,
                 "get_thread_history",
-                AsyncMock(return_value=thread_history_result(expected_history, is_full_history=True)),
+                _thread_history_lookup("$thread_root:localhost", expected_history),
             ) as mock_fetch,
         ):
             context = await bot._conversation_resolver.extract_message_context(room, event)
@@ -293,8 +309,10 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         assert context.thread_id == "$thread_root:localhost"
         assert context.thread_history == expected_history
         mock_lookup.assert_awaited_once_with(room.room_id, "$thread_msg:localhost")
-        mock_fetch.assert_awaited_once()
-        assert mock_fetch.await_args.args == (room.room_id, "$thread_root:localhost")
+        assert [history_call.args for history_call in mock_fetch.await_args_list] == [
+            (room.room_id, "$thread_msg:localhost"),
+            (room.room_id, "$thread_root:localhost"),
+        ]
 
     @pytest.mark.asyncio
     async def test_extract_context_plain_reply_to_thread_root_inherits_existing_thread(
@@ -413,6 +431,11 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             ],
         )
 
+        expected_history = [
+            _message(event_id="$thread_root:localhost", body="Root message"),
+            _message(event_id="$thread_msg:localhost", body="Thread reply"),
+            _message(event_id="$plain_reply_1:localhost", body="first bridge reply"),
+        ]
         with (
             patch.object(
                 bot._conversation_cache,
@@ -422,16 +445,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             patch.object(
                 bot._conversation_cache,
                 "get_thread_history",
-                AsyncMock(
-                    return_value=thread_history_result(
-                        [
-                            _message(event_id="$thread_root:localhost", body="Root message"),
-                            _message(event_id="$thread_msg:localhost", body="Thread reply"),
-                            _message(event_id="$plain_reply_1:localhost", body="first bridge reply"),
-                        ],
-                        is_full_history=True,
-                    ),
-                ),
+                _thread_history_lookup("$thread_root:localhost", expected_history),
             ) as mock_fetch,
         ):
             context = await bot._conversation_resolver.extract_message_context(room, event)
@@ -451,8 +465,10 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             call(room.room_id, "$plain_reply_1:localhost"),
             call(room.room_id, "$thread_msg:localhost"),
         ]
-        mock_fetch.assert_awaited_once()
-        assert mock_fetch.await_args.args == (room.room_id, "$thread_root:localhost")
+        assert [history_call.args for history_call in mock_fetch.await_args_list] == [
+            (room.room_id, "$plain_reply_1:localhost"),
+            (room.room_id, "$thread_root:localhost"),
+        ]
 
     @pytest.mark.asyncio
     async def test_extract_context_plain_reply_to_promoted_plain_reply_stays_threaded(
@@ -494,6 +510,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             ),
         )
 
+        expected_history = [_message(event_id="$thread_root:localhost", body="root")]
         with (
             patch.object(
                 bot._conversation_cache,
@@ -503,22 +520,19 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             patch.object(
                 bot._conversation_cache,
                 "get_thread_history",
-                AsyncMock(
-                    return_value=thread_history_result(
-                        [_message(event_id="$thread_root:localhost", body="root")],
-                        is_full_history=True,
-                    ),
-                ),
+                _thread_history_lookup("$thread_root:localhost", expected_history),
             ) as mock_fetch,
         ):
             context = await bot._conversation_resolver.extract_message_context(room, event)
 
         assert context.is_thread is True
         assert context.thread_id == "$thread_root:localhost"
-        assert context.thread_history == [_message(event_id="$thread_root:localhost", body="root")]
+        assert context.thread_history == expected_history
         mock_lookup.assert_awaited_once_with(room.room_id, "$plain_reply_1:localhost")
-        mock_fetch.assert_awaited_once()
-        assert mock_fetch.await_args.args == (room.room_id, "$thread_root:localhost")
+        assert [history_call.args for history_call in mock_fetch.await_args_list] == [
+            (room.room_id, "$plain_reply_1:localhost"),
+            (room.room_id, "$thread_root:localhost"),
+        ]
         bot.client.room_get_event.assert_awaited_once_with(room.room_id, "$plain_reply_1:localhost")
 
     @pytest.mark.asyncio
@@ -736,7 +750,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         with patch.object(
             bot._conversation_cache,
             "get_thread_history",
-            AsyncMock(return_value=thread_history_result(expected_history, is_full_history=True)),
+            _thread_history_lookup("$thread-root:localhost", expected_history),
         ) as mock_fetch:
             context = await bot._conversation_resolver.extract_message_context(room, event)
 
@@ -745,8 +759,10 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         assert context.thread_history == expected_history
         assert bot.client.room_get_event.await_args_list[0].args == (room.room_id, "$plain-reply:localhost")
         assert bot.client.room_get_event.await_args_list[1].args == (room.room_id, "$thread-reply:localhost")
-        mock_fetch.assert_awaited_once()
-        assert mock_fetch.await_args.args == (room.room_id, "$thread-root:localhost")
+        assert [history_call.args for history_call in mock_fetch.await_args_list] == [
+            (room.room_id, "$plain-reply:localhost"),
+            (room.room_id, "$thread-root:localhost"),
+        ]
 
     @pytest.mark.asyncio
     async def test_extract_context_edit_of_plain_root_message_stays_room_level_when_history_has_only_root(
@@ -960,15 +976,18 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         with patch.object(
             bot._conversation_cache,
             "get_thread_history",
-            AsyncMock(return_value=thread_history_result(expected_history, is_full_history=True)),
+            _thread_history_lookup("$thread_root:localhost", expected_history),
         ) as mock_fetch:
             context = await bot._conversation_resolver.extract_message_context(room, event)
 
         assert context.is_thread is True
         assert context.thread_id == "$thread_root:localhost"
         assert context.thread_history == expected_history
-        mock_fetch.assert_awaited_once()
-        assert mock_fetch.await_args.args == (room.room_id, "$thread_root:localhost")
+        assert [history_call.args for history_call in mock_fetch.await_args_list] == [
+            (room.room_id, "$plain2:localhost"),
+            (room.room_id, "$plain1:localhost"),
+            (room.room_id, "$thread_root:localhost"),
+        ]
 
     @pytest.mark.asyncio
     async def test_explicit_thread_id_returns_none_for_cyclic_edit_chain(self, bot: AgentBot) -> None:
@@ -1103,7 +1122,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             patch.object(
                 bot._conversation_cache,
                 "get_dispatch_thread_history",
-                new=AsyncMock(return_value=dispatch_history),
+                new=_thread_history_lookup("$thread_root:localhost", dispatch_history),
             ) as mock_history,
             patch.object(
                 bot._conversation_cache,
@@ -1125,8 +1144,10 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             bot.client.download.assert_not_awaited()
             bot.client.room_get_event.assert_awaited_once_with(room.room_id, "$plain1:localhost")
             mock_lookup.assert_awaited_once_with(room.room_id, "$plain1:localhost")
-            mock_history.assert_awaited_once()
-            assert mock_history.await_args.args == (room.room_id, "$thread_root:localhost")
+            assert [history_call.args for history_call in mock_history.await_args_list] == [
+                (room.room_id, "$plain1:localhost"),
+                (room.room_id, "$thread_root:localhost"),
+            ]
             mock_fetch.assert_not_called()
 
     @pytest.mark.asyncio
@@ -1167,7 +1188,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             patch.object(
                 bot._conversation_cache,
                 "get_dispatch_thread_history",
-                AsyncMock(return_value=dispatch_history),
+                _thread_history_lookup("$thread_root:localhost", dispatch_history),
             ) as mock_read,
         ):
             context_result = await bot._conversation_resolver.extract_dispatch_context(room, event)
@@ -1176,11 +1197,10 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         assert context.is_thread is True
         assert context.thread_id == "$thread_root:localhost"
         assert context.requires_model_history_refresh is False
-        mock_read.assert_awaited_once_with(
-            room.room_id,
-            "$thread_root:localhost",
-            caller_label="dispatch_context",
-        )
+        assert [history_call.args for history_call in mock_read.await_args_list] == [
+            (room.room_id, "$plain1:localhost"),
+            (room.room_id, "$thread_root:localhost"),
+        ]
 
     @pytest.mark.asyncio
     async def test_dispatch_room_demotion_clears_source_and_resolved_thread_ids(

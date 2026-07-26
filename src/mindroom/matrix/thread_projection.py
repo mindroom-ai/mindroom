@@ -402,6 +402,8 @@ async def resolve_thread_ids_for_event_infos(
             resolution = await resolve_event_thread_membership(
                 room_id,
                 event_info,
+                event_id=event_id,
+                allow_current_root=True,
                 access=access,
             )
             if not resolution.is_threaded:
