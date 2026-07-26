@@ -307,7 +307,7 @@ class TerminalDeliveryCoordinator:
         if self._stopping or client is None or not self.deps.is_ready():
             return TerminalDeliveryCommit("deferred", "matrix_not_ready")
         target = _load_envelope(checkpoint.response_envelope).target
-        if current.redacted_source_event_ids:
+        if current.redacted_source_event_ids != checkpoint.accepted_redacted_source_event_ids:
             return await self._cleanup_redacted_checkpoint(current, checkpoint, target)
         delivered = await send_message_result(
             client,

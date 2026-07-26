@@ -199,19 +199,28 @@ class TurnStore:
                 or any(existing_records.get(event_id) != authority for event_id in turn_record.indexed_event_ids)
                 or authority.indexed_event_ids != turn_record.indexed_event_ids
                 or not same_turn_identity(authority, turn_record)
-                or any(event_id in authority.redacted_source_event_ids for event_id in turn_record.indexed_event_ids)
+                or (
+                    regeneration_turn_record is None
+                    and any(
+                        event_id in authority.redacted_source_event_ids for event_id in turn_record.indexed_event_ids
+                    )
+                )
             ):
                 raise _TerminalCheckpointConflictError
             existing_checkpoint = authority.terminal_edit_checkpoint
-            if existing_checkpoint is not None:
-                if existing_checkpoint.transaction_id == checkpoint.transaction_id:
-                    return (authority,)
-                raise _TerminalCheckpointConflictError
+            if existing_checkpoint is not None and existing_checkpoint.transaction_id == checkpoint.transaction_id:
+                return (authority,)
+            committed_checkpoint = replace(
+                checkpoint,
+                accepted_redacted_source_event_ids=(
+                    authority.redacted_source_event_ids if regeneration_turn_record is not None else ()
+                ),
+            )
             committed_authority = _terminal_checkpoint_authority(
                 authority,
                 target_owners,
                 response_event_id=response_event_id,
-                checkpoint=checkpoint,
+                checkpoint=committed_checkpoint,
                 regeneration_turn_record=regeneration_turn_record,
             )
             superseded_owners = tuple(
@@ -230,7 +239,7 @@ class TurnStore:
                     committed_authority,
                     completed=True,
                     response_event_id=response_event_id,
-                    terminal_edit_checkpoint=checkpoint,
+                    terminal_edit_checkpoint=committed_checkpoint,
                     settled_terminal_delivery_correlation_id=None,
                     timestamp=0.0,
                 ),
@@ -978,9 +987,14 @@ def _terminal_checkpoint_authority(
 ) -> TurnRecord:
     """Validate a fresh response or edit-regeneration checkpoint authority."""
     if regeneration_turn_record is None:
-        if authority.completed:
+        if authority.completed or authority.redacted_source_event_ids:
             raise _TerminalCheckpointConflictError
         return authority
+    redacted_prompt_source_ids = {
+        authority.prompt_source_event_id(event_id) for event_id in authority.redacted_source_event_ids
+    }
+    authority_revisions = authority.source_event_revisions or {}
+    regeneration_revisions = regeneration_turn_record.source_event_revisions or {}
     if (
         not authority.completed
         or checkpoint.target_was_placeholder
@@ -988,6 +1002,11 @@ def _terminal_checkpoint_authority(
         or regeneration_turn_record.response_event_id != response_event_id
         or regeneration_turn_record.indexed_event_ids != authority.indexed_event_ids
         or not same_turn_identity(regeneration_turn_record, authority)
+        or regeneration_turn_record.redacted_source_event_ids != authority.redacted_source_event_ids
+        or any(
+            regeneration_revisions.get(event_id) != authority_revisions.get(event_id)
+            for event_id in redacted_prompt_source_ids
+        )
         or regeneration_turn_record.correlation_id != checkpoint.correlation_id
         or not _strictly_newer_source_revisions(regeneration_turn_record, authority)
         or any(owner != authority for owner in target_owners)
@@ -1043,6 +1062,9 @@ def _backfill_missing_turn_facts(authority: TurnRecord, recovery: TurnRecord) ->
         history_scope=authority.history_scope or recovery.history_scope,
         conversation_target=authority.conversation_target or recovery.conversation_target,
         terminal_edit_checkpoint=authority.terminal_edit_checkpoint or recovery.terminal_edit_checkpoint,
+        settled_terminal_delivery_correlation_id=(
+            authority.settled_terminal_delivery_correlation_id or recovery.settled_terminal_delivery_correlation_id
+        ),
     )
 
 

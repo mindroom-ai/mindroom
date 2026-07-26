@@ -645,6 +645,83 @@ async def test_source_redaction_cleanup_network_error_keeps_debt_without_escapin
 
 
 @pytest.mark.asyncio
+async def test_deferred_surviving_edit_retains_accepted_redactions_and_retries_edit(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    redacted_source = "$redacted-source"
+    surviving_source = "$surviving-source"
+    target_event_id = "$coalesced-visible"
+    target = _target(source_event_id=surviving_source)
+    pending = store.record_pending_turn(
+        TurnRecord.create(
+            [redacted_source, surviving_source],
+            redacted_source_event_ids=(redacted_source,),
+            completed=False,
+            response_owner="code",
+            requester_id="@user:localhost",
+            correlation_id="corr-original",
+            conversation_target=target,
+        ),
+    )
+    assert pending is not None
+    store.record_turn(
+        replace(
+            pending,
+            completed=True,
+            response_event_id=target_event_id,
+        ),
+    )
+    completed = store.get_turn_record(surviving_source)
+    assert completed is not None
+    candidate = replace(
+        completed,
+        correlation_id="$surviving-edit",
+        source_event_revisions={
+            surviving_source: (2, "$surviving-edit"),
+        },
+    )
+    identity = ResponseIdentity(
+        response_kind="ai",
+        response_envelope=_envelope(source_event_id=surviving_source),
+        correlation_id="$surviving-edit",
+        source_event_ids=(surviving_source,),
+        regeneration_turn_record=candidate,
+    )
+    intent = TerminalDeliveryIntent(
+        target_event_id=target_event_id,
+        target_was_placeholder=False,
+        identity=identity,
+        interactive_metadata=None,
+        body="newest answer",
+        wire_content={
+            "body": "* newest answer",
+            "m.new_content": {"body": "newest answer"},
+        },
+    )
+    blocked, _hooks, _effects = _coordinator(store, ready=False)
+
+    assert (await blocked.commit_and_attempt(intent)).status == "deferred"
+    debt = store.get_turn_record(surviving_source)
+    assert debt is not None
+    assert debt.terminal_edit_checkpoint is not None
+    assert debt.terminal_edit_checkpoint.accepted_redacted_source_event_ids == (redacted_source,)
+
+    active, _hooks, _effects = _coordinator(store)
+    with patch("mindroom.terminal_delivery.send_message_result", return_value=_delivered()) as send:
+        await active.retry_pending()
+
+    send.assert_awaited_once()
+    active.deps.redact_message_event.assert_not_awaited()
+    settled = store.get_turn_record(surviving_source)
+    assert settled is not None
+    assert settled.terminal_edit_checkpoint is None
+    assert settled.source_event_revisions == {
+        surviving_source: (2, "$surviving-edit"),
+    }
+
+
+@pytest.mark.asyncio
 async def test_source_redaction_during_transport_removes_accepted_target(tmp_path: Path) -> None:
     store = _store(tmp_path)
     coordinator, hooks, effects = _coordinator(store)

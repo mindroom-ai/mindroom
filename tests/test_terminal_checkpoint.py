@@ -84,7 +84,10 @@ def _pending_turn() -> TurnRecord:
 
 
 def test_checkpoint_codec_round_trip_and_absent_legacy_field() -> None:
-    checkpoint = _checkpoint()
+    checkpoint = replace(
+        _checkpoint(),
+        accepted_redacted_source_event_ids=("$redacted",),
+    )
     record = TurnRecord.create(
         ["$source"],
         response_event_id="$visible",
@@ -102,6 +105,24 @@ def test_checkpoint_codec_round_trip_and_absent_legacy_field() -> None:
     assert decoded.terminal_edit_checkpoint == checkpoint
     assert legacy is not None
     assert legacy.terminal_edit_checkpoint is None
+
+
+@pytest.mark.parametrize(
+    ("field_name", "malformed_value"),
+    [
+        ("wire_content", "not-a-mapping"),
+        ("response_envelope", ["not", "a", "mapping"]),
+        ("interactive_metadata", "not-a-mapping"),
+    ],
+)
+def test_checkpoint_codec_rejects_non_mapping_json_fields(
+    field_name: str,
+    malformed_value: object,
+) -> None:
+    raw_checkpoint = _checkpoint().to_record()
+    raw_checkpoint[field_name] = malformed_value
+
+    assert TerminalEditCheckpoint.from_raw(raw_checkpoint) is None
 
 
 def test_settled_terminal_delivery_receipt_round_trips_in_ledger() -> None:
@@ -173,6 +194,152 @@ def test_completed_turn_commits_newer_same_target_regeneration_checkpoint(
     assert committed is not None
     assert committed.response_event_id == "$visible"
     assert committed.terminal_edit_checkpoint == edit_checkpoint
+
+
+def test_newer_regeneration_replaces_deferred_same_target_checkpoint(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    pending = store.record_pending_turn(_pending_turn())
+    assert pending is not None
+    store.record_turn(replace(pending, completed=True, response_event_id="$visible"))
+    completed = store.get_turn_record("$source")
+    assert completed is not None
+    first_candidate = replace(
+        completed,
+        correlation_id="$edit-1",
+        source_event_revisions={"$source": (1, "$edit-1")},
+    )
+    first_checkpoint = replace(
+        _checkpoint(),
+        transaction_id="mindroom-terminal-edit-1",
+        correlation_id="$edit-1",
+        target_was_placeholder=False,
+    )
+    first_commit = store.commit_terminal_checkpoint(
+        completed,
+        response_event_id="$visible",
+        checkpoint=first_checkpoint,
+        regeneration_turn_record=first_candidate,
+    )
+    assert first_commit is not None
+    second_candidate = replace(
+        first_commit,
+        correlation_id="$edit-2",
+        source_event_revisions={"$source": (2, "$edit-2")},
+    )
+    second_checkpoint = replace(
+        first_checkpoint,
+        transaction_id="mindroom-terminal-edit-2",
+        correlation_id="$edit-2",
+    )
+
+    second_commit = store.commit_terminal_checkpoint(
+        first_commit,
+        response_event_id="$visible",
+        checkpoint=second_checkpoint,
+        regeneration_turn_record=second_candidate,
+    )
+
+    assert second_commit is not None
+    assert second_commit.terminal_edit_checkpoint == second_checkpoint
+    assert second_commit.source_event_revisions == {"$source": (2, "$edit-2")}
+    assert _store(tmp_path).get_turn_record("$source") == second_commit
+
+
+def test_surviving_coalesced_edit_replaces_checkpoint_with_matching_redactions(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    pending = store.record_pending_turn(
+        replace(
+            _pending_turn(),
+            source_event_ids=("$redacted", "$surviving"),
+            anchor_event_id="$surviving",
+            redacted_source_event_ids=("$redacted",),
+        ),
+    )
+    assert pending is not None
+    store.record_turn(replace(pending, completed=True, response_event_id="$visible"))
+    completed = store.get_turn_record("$surviving")
+    assert completed is not None
+    candidate = replace(
+        completed,
+        correlation_id="$edit-surviving",
+        source_event_revisions={"$surviving": (2, "$edit-surviving")},
+    )
+    checkpoint = replace(
+        _checkpoint(),
+        transaction_id="mindroom-terminal-surviving-edit",
+        correlation_id="$edit-surviving",
+        target_was_placeholder=False,
+    )
+
+    committed = store.commit_terminal_checkpoint(
+        completed,
+        response_event_id="$visible",
+        checkpoint=checkpoint,
+        regeneration_turn_record=candidate,
+    )
+
+    assert committed is not None
+    assert committed.redacted_source_event_ids == ("$redacted",)
+    assert committed.terminal_edit_checkpoint is not None
+    assert committed.terminal_edit_checkpoint.accepted_redacted_source_event_ids == ("$redacted",)
+    assert committed.source_event_revisions == {
+        "$surviving": (2, "$edit-surviving"),
+    }
+
+
+def test_surviving_coalesced_edit_rejects_revision_of_redacted_source(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    pending = store.record_pending_turn(
+        replace(
+            _pending_turn(),
+            source_event_ids=("$redacted", "$surviving"),
+            anchor_event_id="$surviving",
+            redacted_source_event_ids=("$redacted",),
+            source_event_revisions={
+                "$redacted": (1, "$redacted-edit-1"),
+                "$surviving": (1, "$surviving-edit-1"),
+            },
+        ),
+    )
+    assert pending is not None
+    store.record_turn(replace(pending, completed=True, response_event_id="$visible"))
+    completed = store.get_turn_record("$surviving")
+    assert completed is not None
+    candidate = replace(
+        completed,
+        correlation_id="$edit-redacted",
+        source_event_revisions={
+            "$redacted": (2, "$redacted-edit-2"),
+            "$surviving": (1, "$surviving-edit-1"),
+        },
+    )
+    checkpoint = replace(
+        _checkpoint(),
+        transaction_id="mindroom-terminal-redacted-edit",
+        correlation_id="$edit-redacted",
+        target_was_placeholder=False,
+    )
+
+    committed = store.commit_terminal_checkpoint(
+        completed,
+        response_event_id="$visible",
+        checkpoint=checkpoint,
+        regeneration_turn_record=candidate,
+    )
+
+    assert committed is None
+    unchanged = store.get_turn_record("$surviving")
+    assert unchanged is not None
+    assert unchanged.terminal_edit_checkpoint is None
+    assert dict(unchanged.source_event_revisions or {}) == {
+        "$surviving": (1, "$surviving-edit-1"),
+    }
 
 
 def test_completed_turn_rejects_checkpoint_for_unrelated_regeneration_target(tmp_path: Path) -> None:
@@ -315,6 +482,50 @@ def test_checkpoint_clear_requires_matching_transaction_and_lifecycle_convergenc
     assert cleared is not None
     assert cleared.terminal_edit_checkpoint is None
     assert cleared.settled_terminal_delivery_correlation_id == _checkpoint().correlation_id
+
+
+def test_stale_outer_turn_record_preserves_settled_terminal_receipt(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    pending = store.record_pending_turn(_pending_turn())
+    assert pending is not None
+    committed = store.commit_terminal_checkpoint(
+        pending,
+        response_event_id="$visible",
+        checkpoint=_checkpoint(),
+    )
+    assert committed is not None
+    converged = store.update_terminal_checkpoint(
+        committed,
+        expected_transaction_id=_checkpoint().transaction_id,
+        update=lambda checkpoint: replace(
+            checkpoint,
+            after_response_claimed=True,
+            interactive_completed=True,
+        ),
+    )
+    assert converged is not None
+    cleared = store.clear_terminal_checkpoint(
+        converged,
+        expected_transaction_id=_checkpoint().transaction_id,
+    )
+    assert cleared is not None
+
+    store.record_turn(
+        replace(
+            pending,
+            completed=True,
+            response_event_id="$visible",
+        ),
+    )
+
+    recorded = store.get_turn_record("$source")
+    assert recorded is not None
+    assert recorded.settled_terminal_delivery_correlation_id == "corr-1"
+    restarted = _store(tmp_path).get_turn_record("$source")
+    assert restarted is not None
+    assert restarted.settled_terminal_delivery_correlation_id == "corr-1"
 
 
 @pytest.mark.parametrize("frozen_time", [100.0, 0.0], ids=["equal", "regressed"])

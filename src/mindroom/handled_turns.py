@@ -91,6 +91,7 @@ class TerminalEditCheckpoint:
     target_was_placeholder: bool
     response_envelope: Mapping[str, object]
     correlation_id: str
+    accepted_redacted_source_event_ids: tuple[str, ...] = ()
     interactive_metadata: Mapping[str, object] | None = None
     after_response_claimed: bool = False
     interactive_completed: bool = False
@@ -109,11 +110,26 @@ class TerminalEditCheckpoint:
         ):
             message = "Terminal checkpoint state flags must be booleans"
             raise TypeError(message)
+        if (
+            not isinstance(self.wire_content, Mapping)
+            or not isinstance(self.response_envelope, Mapping)
+            or (self.interactive_metadata is not None and not isinstance(self.interactive_metadata, Mapping))
+        ):
+            message = "Terminal checkpoint JSON object fields must be mappings"
+            raise TypeError(message)
+        if not isinstance(self.accepted_redacted_source_event_ids, tuple | list):
+            message = "Terminal checkpoint accepted redactions must be a sequence"
+            raise TypeError(message)
         if not self.wire_content or not self.response_envelope:
             message = "Terminal checkpoint wire content and response envelope must be non-empty"
             raise ValueError(message)
         object.__setattr__(self, "wire_content", _freeze_json_mapping(self.wire_content))
         object.__setattr__(self, "response_envelope", _freeze_json_mapping(self.response_envelope))
+        object.__setattr__(
+            self,
+            "accepted_redacted_source_event_ids",
+            _normalize_source_event_ids(self.accepted_redacted_source_event_ids),
+        )
         object.__setattr__(
             self,
             "interactive_metadata",
@@ -130,6 +146,7 @@ class TerminalEditCheckpoint:
             "target_was_placeholder": self.target_was_placeholder,
             "response_envelope": _thaw_json_value(self.response_envelope),
             "correlation_id": self.correlation_id,
+            "accepted_redacted_source_event_ids": list(self.accepted_redacted_source_event_ids),
             "interactive_metadata": _thaw_json_value(self.interactive_metadata),
             "after_response_claimed": self.after_response_claimed,
             "interactive_completed": self.interactive_completed,
@@ -150,6 +167,10 @@ class TerminalEditCheckpoint:
                 target_was_placeholder=checkpoint["target_was_placeholder"],
                 response_envelope=checkpoint["response_envelope"],
                 correlation_id=checkpoint["correlation_id"],
+                accepted_redacted_source_event_ids=checkpoint.get(
+                    "accepted_redacted_source_event_ids",
+                    (),
+                ),
                 interactive_metadata=checkpoint.get("interactive_metadata"),
                 after_response_claimed=checkpoint.get("after_response_claimed", False),
                 interactive_completed=checkpoint.get("interactive_completed", False),
