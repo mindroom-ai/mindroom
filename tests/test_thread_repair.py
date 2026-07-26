@@ -153,7 +153,7 @@ async def test_repairs_are_principal_scoped_and_unrelated_threads_run_concurrent
             await release.wait()
             return f"{principal_id}:{thread_id}"
 
-        repair_run = await coordinator.run_thread_repair(
+        return await coordinator.run_thread_repair(
             "!room:localhost",
             thread_id,
             repair,
@@ -162,7 +162,6 @@ async def test_repairs_are_principal_scoped_and_unrelated_threads_run_concurrent
             allow_stale_fallback=False,
             result_arms_backoff=lambda _result: False,
         )
-        return repair_run.value
 
     tasks = [
         asyncio.create_task(run("@alice:localhost", "$same")),
@@ -226,10 +225,8 @@ async def test_cancelled_waiter_does_not_cancel_repair_or_leak_ownership() -> No
         result_arms_backoff=lambda _result: False,
     )
 
-    assert joined.value == "usable"
-    assert joined.joined is True
-    assert second.value == "usable"
-    assert second.joined is False
+    assert joined == "usable"
+    assert second == "usable"
     assert repair_count == 2
 
 
@@ -283,7 +280,7 @@ async def test_repair_bypasses_cancelled_room_fence_without_crossing_same_thread
         cancelled_room.cancel()
         await asyncio.gather(cancelled_room, return_exceptions=True)
         await asyncio.wait_for(repair_started.wait(), timeout=1.0)
-        assert (await repair_task).value == "usable"
+        assert await repair_task == "usable"
         assert blocker.done() is False
     finally:
         release_blocker.set()
@@ -339,7 +336,7 @@ async def test_hard_failure_enters_backoff_without_reusing_history() -> None:
             result_arms_backoff=lambda result: not result.usable,
         )
 
-    assert first.value is ThreadCacheReplaceOutcome.HARD_FAILURE
+    assert first is ThreadCacheReplaceOutcome.HARD_FAILURE
     repair.assert_awaited_once()
 
     now = 12.0
@@ -350,8 +347,7 @@ async def test_hard_failure_enters_backoff_without_reusing_history() -> None:
         result_arms_backoff=lambda result: not result.usable,
     )
 
-    assert second.value is ThreadCacheReplaceOutcome.HARD_FAILURE
-    assert second.joined is False
+    assert second is ThreadCacheReplaceOutcome.HARD_FAILURE
     assert repair.await_count == 2
 
 
@@ -375,8 +371,8 @@ async def test_writes_unavailable_completion_does_not_arm_backoff() -> None:
         result_arms_backoff=lambda result: result is ThreadCacheReplaceOutcome.HARD_FAILURE,
     )
 
-    assert first.value is ThreadCacheReplaceOutcome.WRITES_UNAVAILABLE
-    assert second.value is ThreadCacheReplaceOutcome.WRITES_UNAVAILABLE
+    assert first is ThreadCacheReplaceOutcome.WRITES_UNAVAILABLE
+    assert second is ThreadCacheReplaceOutcome.WRITES_UNAVAILABLE
     assert repair.await_count == 2
 
 
@@ -477,9 +473,8 @@ async def test_clear_room_detaches_active_flight_and_ignores_its_late_failure() 
         release_old.set()
         old_result = await old_flight
 
-    assert new_result.value is ThreadCacheReplaceOutcome.STORED
-    assert new_result.joined is False
-    assert old_result.value is ThreadCacheReplaceOutcome.HARD_FAILURE
+    assert new_result is ThreadCacheReplaceOutcome.STORED
+    assert old_result is ThreadCacheReplaceOutcome.HARD_FAILURE
     assert registry.retry_after_seconds(key) == 0.0
 
 

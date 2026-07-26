@@ -32,7 +32,7 @@ from mindroom.background_tasks import create_background_task, wait_for_backgroun
 from mindroom.logging_config import bound_log_context
 from mindroom.timing import elapsed_ms_between, emit_timing_event, timing_enabled
 
-from .thread_repair import ThreadRepairRegistry, ThreadRepairRunResult
+from .thread_repair import ThreadRepairRegistry
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Collection
@@ -647,7 +647,7 @@ class EventCacheWriteCoordinator:
         hydrate_sidecars: bool,
         allow_stale_fallback: bool,
         result_arms_backoff: Callable[[T], bool],
-    ) -> ThreadRepairRunResult[T]:
+    ) -> T:
         """Join or start one principal-scoped repair under the same-thread barrier."""
         return await self._thread_repairs.run(
             (coordination_scope, room_id, thread_id, hydrate_sidecars, allow_stale_fallback),

@@ -1207,30 +1207,6 @@ async def _fetch_thread_repair_snapshot(
     )
 
 
-async def _stale_history_after_refresh_error(
-    client: nio.AsyncClient,
-    *,
-    room_id: str,
-    thread_id: str,
-    event_cache: ConversationEventCache,
-    hydrate_sidecars: bool,
-    fetch_error: Exception,
-    cache_reject_diagnostics: Mapping[str, str | int | float | bool] | None,
-    trusted_sender_ids: Collection[str],
-) -> ThreadHistoryResult | None:
-    """Load the optional stale-cache fallback after a refresh failure."""
-    return await _load_stale_cached_thread_history(
-        client,
-        room_id=room_id,
-        thread_id=thread_id,
-        event_cache=event_cache,
-        hydrate_sidecars=hydrate_sidecars,
-        fetch_error=fetch_error,
-        cache_reject_diagnostics=cache_reject_diagnostics,
-        trusted_sender_ids=trusted_sender_ids,
-    )
-
-
 async def _reject_opaque_thread_snapshot(
     event_cache: ConversationEventCache,
     *,
@@ -1402,7 +1378,7 @@ async def refresh_thread_history_from_source(
             raise
         except Exception as exc:
             stale_history = (
-                await _stale_history_after_refresh_error(
+                await _load_stale_cached_thread_history(
                     client,
                     room_id=room_id,
                     thread_id=thread_id,

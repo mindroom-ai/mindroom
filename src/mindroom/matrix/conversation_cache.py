@@ -888,7 +888,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
                 )
             return result
 
-        repair_run = await coordinator.run_thread_repair(
+        return await coordinator.run_thread_repair(
             room_id,
             thread_id,
             repair,
@@ -897,7 +897,6 @@ class MatrixConversationCache(ConversationCacheProtocol):
             allow_stale_fallback=allows_stale_fallback,
             result_arms_backoff=self._thread_repair_result_arms_backoff,
         )
-        return repair_run.value
 
     async def _fetch_thread_from_client(
         self,

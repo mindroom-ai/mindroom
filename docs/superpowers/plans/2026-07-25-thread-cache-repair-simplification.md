@@ -203,7 +203,7 @@ async def run_thread_repair[T](
     hydrate_sidecars: bool,
     allow_stale_fallback: bool,
     result_arms_backoff: Callable[[T], bool],
-) -> ThreadRepairRunResult[T]:
+) -> T:
 ```
 
 Inline `(coordination_scope, room_id, thread_id)` in retained-delta methods and use `(coordination_scope, room_id, thread_id, hydrate_sidecars, allow_stale_fallback)` only for flight ownership.
@@ -449,8 +449,8 @@ async def test_writes_unavailable_completion_does_not_arm_backoff() -> None:
         result_arms_backoff=lambda result: result is not ThreadCacheReplaceOutcome.WRITES_UNAVAILABLE,
     )
 
-    assert first.value is ThreadCacheReplaceOutcome.WRITES_UNAVAILABLE
-    assert second.value is ThreadCacheReplaceOutcome.WRITES_UNAVAILABLE
+    assert first is ThreadCacheReplaceOutcome.WRITES_UNAVAILABLE
+    assert second is ThreadCacheReplaceOutcome.WRITES_UNAVAILABLE
     assert repair.await_count == 2
 ```
 

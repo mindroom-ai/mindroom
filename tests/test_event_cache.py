@@ -36,7 +36,6 @@ from mindroom.matrix.cache.thread_reads import ThreadReadMode
 from mindroom.matrix.cache.thread_repair import (
     ThreadRepairBackoffError,
     ThreadRepairRegistry,
-    ThreadRepairRunResult,
 )
 from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
 from mindroom.matrix.client_thread_history import (
@@ -508,8 +507,8 @@ async def test_dispatch_thread_read_enters_repair_ownership_once_after_idle_wait
         _thread_id: str,
         repair: Callable[[], Awaitable[ThreadHistoryResult]],
         **_kwargs: object,
-    ) -> ThreadRepairRunResult[ThreadHistoryResult]:
-        return ThreadRepairRunResult(value=await repair(), joined=False)
+    ) -> ThreadHistoryResult:
+        return await repair()
 
     coordinator.run_thread_repair = AsyncMock(side_effect=run_thread_repair)
     conversation_cache.runtime.event_cache_write_coordinator = coordinator
@@ -682,7 +681,7 @@ async def test_shared_repair_logs_completion_for_each_caller(tmp_path: Path) -> 
         thread_id: str,
         repair: Callable[[], Awaitable[ThreadHistoryResult]],
         **kwargs: object,
-    ) -> ThreadRepairRunResult[ThreadHistoryResult]:
+    ) -> ThreadHistoryResult:
         nonlocal repair_call_count
         repair_call_count += 1
         if repair_call_count == 2:
@@ -1117,8 +1116,8 @@ async def test_strict_thread_history_uses_no_stale_fetch_without_dispatch_timeou
         _thread_id: str,
         repair: Callable[[], Awaitable[ThreadHistoryResult]],
         **_kwargs: object,
-    ) -> ThreadRepairRunResult[ThreadHistoryResult]:
-        return ThreadRepairRunResult(value=await repair(), joined=False)
+    ) -> ThreadHistoryResult:
+        return await repair()
 
     coordinator = MagicMock()
     coordinator.wait_for_thread_idle = AsyncMock(return_value=None)
@@ -1169,7 +1168,7 @@ async def test_strict_thread_history_waits_out_repair_backoff(tmp_path: Path) ->
     coordinator.run_thread_repair = AsyncMock(
         side_effect=[
             ThreadRepairBackoffError(0.0),
-            ThreadRepairRunResult(value=fresh_history, joined=False),
+            fresh_history,
         ],
     )
     conversation_cache.runtime.event_cache_write_coordinator = coordinator
@@ -1244,8 +1243,8 @@ async def test_stored_repair_releases_replayed_delta_filtered_by_redaction(tmp_p
         _thread_id: str,
         repair: Callable[[], Awaitable[ThreadHistoryResult]],
         **_kwargs: object,
-    ) -> ThreadRepairRunResult[ThreadHistoryResult]:
-        return ThreadRepairRunResult(value=await repair(), joined=False)
+    ) -> ThreadHistoryResult:
+        return await repair()
 
     async def refresh(
         _client: object,
@@ -1304,8 +1303,8 @@ async def test_fresh_strict_history_bypasses_inherited_turn_memoization(tmp_path
         _thread_id: str,
         repair: Callable[[], Awaitable[ThreadHistoryResult]],
         **_kwargs: object,
-    ) -> ThreadRepairRunResult[ThreadHistoryResult]:
-        return ThreadRepairRunResult(value=await repair(), joined=False)
+    ) -> ThreadHistoryResult:
+        return await repair()
 
     coordinator = MagicMock()
     coordinator.wait_for_thread_idle = AsyncMock(return_value=None)

@@ -42,14 +42,6 @@ class ThreadRepairBackoffError(RuntimeError):
         super().__init__(f"thread cache repair backoff active for {retry_after_seconds:.3f}s")
 
 
-@dataclass(frozen=True, slots=True)
-class ThreadRepairRunResult[T]:
-    """One repair result plus whether this caller joined existing ownership."""
-
-    value: T
-    joined: bool
-
-
 @dataclass
 class ThreadRepairRegistry:
     """Own principal-scoped repair flights, failure backoff, and certified deltas."""
@@ -116,12 +108,11 @@ class ThreadRepairRegistry:
         schedule: Callable[[Callable[[], Awaitable[T]]], asyncio.Task[T]],
         repair: Callable[[], Awaitable[T]],
         result_arms_backoff: Callable[[T], bool],
-    ) -> ThreadRepairRunResult[T]:
+    ) -> T:
         """Join or start one shielded repair and update backoff from its outcome."""
         active = self._active_task(key)
         if active is not None:
-            value = cast("T", await asyncio.shield(active))
-            return ThreadRepairRunResult(value=value, joined=True)
+            return cast("T", await asyncio.shield(active))
 
         retry_after_seconds = self.retry_after_seconds(key)
         if retry_after_seconds > 0:
@@ -144,8 +135,7 @@ class ThreadRepairRegistry:
         task = schedule(run_repair)
         self._tasks[key] = task
         task.add_done_callback(lambda done_task: self._clear_task(key, done_task))
-        value = await asyncio.shield(task)
-        return ThreadRepairRunResult(value=value, joined=False)
+        return await asyncio.shield(task)
 
     def _drop_expired_deltas(self) -> None:
         cutoff = self.clock() - self.delta_retention_seconds
