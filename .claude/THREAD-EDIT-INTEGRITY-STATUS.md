@@ -1,14 +1,14 @@
 # Thread edit integrity gate status
 
-Updated 2026-07-25 after correcting the exact-`861eea90b` root-promotion review blocker.
+Updated 2026-07-25 after correcting the exact-`592220fa2` ancestry review and CI blockers.
 
 ## Exact target
 
 - PR: `mindroom-ai/mindroom#1641`
 - Branch: `fix/thread-edit-integrity`
-- Latest production commit: `ce2c8e391108da90f2e8c5b6085f7231e9ad4e95`
+- Latest production commit: `d8926444cd8dcc630528da6ce27ad160d050b2d0`
 - Current base and merge base: `f6190d4c2457381e63f40f99fb27e794ae8667b8`
-- Current branch and PR head contain only the crash-handoff successor after the latest production commit.
+- The current branch and PR head contain only this crash-handoff successor after the latest production commit.
 - The production, test, and documentation corrections are pushed.
 - Tracked working tree is clean.
 - Resolve local, remote, and PR heads before counting any exact-head gate.
@@ -30,6 +30,9 @@ Updated 2026-07-25 after correcting the exact-`861eea90b` root-promotion review 
 - `e14938185` proves current rich-reply root status before accepting inherited indexes, gives batch projection the same current-root semantics, and preserves mutation-time inherited-index proof.
 - `0f439bd2a` rejects invalid successful point lookups and legacy wrong-room cache rows in snapshot and replay consumers while retaining edits as non-visible snapshot ancestry nodes.
 - `ce2c8e391` transactionally invalidates a rich reply's old parent snapshot when its first explicit child promotes it to a thread root.
+- `d8926444c` rejects state and wrong-room events from mutation root proofs and cleanup ancestry.
+- `d8926444c` validates fetched replacements against their outer originals and preserves only original reply ancestry.
+- `d8926444c` also memoizes one mutation resolution so root proof does not repeat the same durable index lookup.
 
 ## Reconciled review status
 
@@ -45,8 +48,11 @@ Updated 2026-07-25 after correcting the exact-`861eea90b` root-promotion review 
 - Every exact-`3e0575aa7` finding is corrected in `e14938185` and `0f439bd2a`; those old review verdicts and CI results are now stale.
 - The fresh exact-`861eea90b` native review found one further blocker: durable root promotion rewrote the rich reply's index but left its old parent snapshot certified.
 - The claim failed four regression variants before implementation and passes after `ce2c8e391`; the reviewer found no second blocker.
+- The fresh exact-`592220fa2` native review found two further blockers: poisoned cached children could prove a false rich-reply root, and cleanup trusted state, wrong-room, and forged replacement ancestry.
+- Both claims reproduced before implementation and are corrected in `d8926444c`.
+- Exact-`592220fa2` GitHub pytest failed only two redundant-index-lookup expectations; the same production correction restores the one-lookup contract.
 - The withdrawn edit-index timestamp-poison claim remains excluded because it required direct inconsistent SQL writes outside production paths.
-- Production source against current `main` is `+1601/-1138`, net `+463`.
+- Production source against current `main` is `+1705/-1168`, net `+537`.
 
 ## Validation already completed
 
@@ -62,6 +68,11 @@ Updated 2026-07-25 after correcting the exact-`861eea90b` root-promotion review 
 - The seven affected owning files pass together, including SQLite and PostgreSQL snapshot regressions for legacy wrong-room rows and reply-to-edit ancestry.
 - Root-promotion invalidation failed before implementation and now passes all four SQLite/PostgreSQL point-store/thread-append variants.
 - The `304` focused event-cache, cache-semantics, mutation, and membership tests pass after the fix and after merging current `main`.
+- Nine new state, wrong-room, wrong-sender, forged-relation, and edit-of-edit regressions failed before `d8926444c` and pass afterward.
+- The two exact GitHub pytest failures reproduce before `d8926444c` and pass afterward.
+- The three owning cleanup, mutation, and read-guard files pass together after `d8926444c`.
+- The nine-file Matrix/thread selection passes after `d8926444c`, including SQLite and PostgreSQL.
+- Exact-head Tach and changed-file pre-commit pass after the new canonical replacement dependency was declared.
 - Changed-file pre-commit passes, including Ruff, formatting, `ty`, Vulture, Tach, module privacy, and generated documentation checks.
 - Ruff, format, `ty`, Vulture, Tach, module privacy, and normal commit hooks pass.
 - Git author was verified as `Bas Nijholt <bas@nijho.lt>` before every new commit.
