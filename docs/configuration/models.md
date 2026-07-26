@@ -21,6 +21,7 @@ Models define the AI providers and model IDs used by agents.
 - `cerebras` - Cerebras-hosted models
 - `deepseek` - DeepSeek models
 - `zai` - Z.ai GLM models
+- `synthetic` - Built-in Lorem Ipsum model for local conversations and load generation
 
 ## Model Config Fields
 
@@ -125,6 +126,38 @@ models:
     extra_kwargs:
       base_url: http://localhost:8080/v1
 ```
+
+## Built-In Synthetic Model
+
+Use `provider: synthetic` to exercise normal MindRoom conversations without an API key or model server.
+The model streams a seeded random amount of Lorem Ipsum at a fixed character rate.
+When the agent has the `shell` tool, the model occasionally calls `run_shell_command` with `echo hi` and then continues its response.
+
+```yaml
+models:
+  synthetic:
+    provider: synthetic
+    id: lorem-ipsum
+    extra_kwargs:
+      seed: 1
+      min_response_chars: 320
+      max_response_chars: 960
+      chunk_chars: 40
+      chars_per_second: 80
+      tool_call_probability: 0.2
+
+agents:
+  load_test:
+    display_name: Load Test
+    role: Generate synthetic traffic.
+    model: synthetic
+    tools: [shell]
+    rooms: [lobby]
+```
+
+Tag `@load_test` in Lobby to receive a streamed synthetic reply through the same Matrix path as any other agent.
+Set `tool_call_probability: 1` to force the shell call on every turn, or `0` to disable tool calls.
+Changing `seed` changes the repeatable response length, split point, and tool-call choice for each conversation history.
 
 ## OpenAI API Models
 
