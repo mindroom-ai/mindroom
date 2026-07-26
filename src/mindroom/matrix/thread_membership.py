@@ -315,6 +315,8 @@ async def resolve_event_thread_membership(
     allow_current_root: bool = False,
 ) -> ThreadResolution:
     """Return canonical thread membership for one event."""
+    if event_source is not None and not event_source_supports_valid_thread_relations(event_source, room_id):
+        return ThreadResolution.room_level()
     explicit_thread_id = event_info.thread_id
     if explicit_thread_id is not None:
         explicit_thread_is_valid = (
@@ -351,12 +353,14 @@ async def resolve_event_thread_membership(
                 )
             if not valid_replacement:
                 return ThreadResolution.room_level()
-        return await resolve_related_event_thread_membership(
+        resolution = await resolve_related_event_thread_membership(
             room_id,
             related_event_id,
             access=access,
         )
-    return ThreadResolution.room_level()
+    else:
+        resolution = ThreadResolution.room_level()
+    return resolution
 
 
 async def resolve_related_event_thread_membership(  # noqa: C901
@@ -461,6 +465,13 @@ def map_backed_thread_membership_access(
                 thread_root_id,
                 event_id=event_id,
                 event_info=event_info,
+            )
+            and (
+                event_sources_by_event_id is None
+                or (
+                    (event_source := event_sources_by_event_id.get(event_id)) is not None
+                    and event_source_supports_valid_thread_relations(event_source, _room_id)
+                )
             )
             for event_id, event_info in event_infos.items()
         )

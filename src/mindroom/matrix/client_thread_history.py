@@ -92,7 +92,7 @@ from mindroom.matrix.message_content import (
     prepare_sidecar_hydration_batch,
     resolve_event_source_content,
 )
-from mindroom.matrix.replacements import bundled_replacement_candidates, ordered_replacements
+from mindroom.matrix.replacements import bundled_replacement_candidates, is_valid_replacement, ordered_replacements
 from mindroom.matrix.thread_diagnostics import (
     THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC,
     THREAD_HISTORY_DEGRADED_DIAGNOSTIC,
@@ -2002,10 +2002,20 @@ async def _group_scanned_sources_by_thread(
 
     edits_by_root: dict[str, list[dict[str, Any]]] = {}
     for original_event_id, edit_candidates in edit_candidates_by_original_event_id.items():
+        original_source = scanned_message_sources.get(original_event_id)
+        if original_source is None:
+            continue
         target_roots = {
             root_id for root_id in (original_event_id, resolved_thread_ids.get(original_event_id)) if root_id in grouped
         }
         for edit_source in edit_candidates:
+            if not is_valid_replacement(
+                original_source,
+                edit_source,
+                room_id=room_id,
+                validator=valid_room_message_replacement,
+            ):
+                continue
             for root_id in target_roots:
                 edits_by_root.setdefault(root_id, []).append(edit_source)
 

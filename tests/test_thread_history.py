@@ -2738,12 +2738,14 @@ class TestThreadHistory:
                 "$room_root": {
                     "event_id": "$room_root",
                     "origin_server_ts": 1000,
+                    "sender": "@user:localhost",
                     "type": "m.room.message",
                     "content": {"msgtype": "m.text", "body": "root"},
                 },
                 "$plain_reply": {
                     "event_id": "$plain_reply",
                     "origin_server_ts": 2000,
+                    "sender": "@user:localhost",
                     "type": "m.room.message",
                     "content": {
                         "msgtype": "m.text",
@@ -2767,12 +2769,14 @@ class TestThreadHistory:
                 "$root": {
                     "event_id": "$root",
                     "origin_server_ts": 1000,
+                    "sender": "@user:localhost",
                     "type": "m.room.message",
                     "content": {"msgtype": "m.text", "body": "root"},
                 },
                 "$z-parent": {
                     "event_id": "$z-parent",
                     "origin_server_ts": 2000,
+                    "sender": "@user:localhost",
                     "type": "m.room.message",
                     "content": {
                         "msgtype": "m.text",
@@ -2783,6 +2787,7 @@ class TestThreadHistory:
                 "$a-child": {
                     "event_id": "$a-child",
                     "origin_server_ts": 2000,
+                    "sender": "@user:localhost",
                     "type": "m.room.message",
                     "content": {
                         "msgtype": "m.text",
@@ -2806,12 +2811,14 @@ class TestThreadHistory:
                 "$root": {
                     "event_id": "$root",
                     "origin_server_ts": 1000,
+                    "sender": "@user:localhost",
                     "type": "m.room.message",
                     "content": {"msgtype": "m.text", "body": "root"},
                 },
                 "$thread_reply": {
                     "event_id": "$thread_reply",
                     "origin_server_ts": 1500,
+                    "sender": "@user:localhost",
                     "type": "m.room.message",
                     "content": {
                         "msgtype": "m.text",
@@ -2822,6 +2829,7 @@ class TestThreadHistory:
                 "$plain1": {
                     "event_id": "$plain1",
                     "origin_server_ts": 2000,
+                    "sender": "@user:localhost",
                     "type": "m.room.message",
                     "content": {
                         "msgtype": "m.text",
@@ -2832,6 +2840,7 @@ class TestThreadHistory:
                 "$plain2": {
                     "event_id": "$plain2",
                     "origin_server_ts": 2500,
+                    "sender": "@user:localhost",
                     "type": "m.room.message",
                     "content": {
                         "msgtype": "m.text",
@@ -4284,6 +4293,70 @@ class TestThreadHistoryCache:
         assert history.diagnostics["homeserver_scanned_event_count"] == 2
         assert history.diagnostics["homeserver_thread_event_count"] == 2
         assert history.diagnostics["homeserver_fetch_ms"] >= 0.0
+        assert cached_events is not None
+        assert [event["event_id"] for event in cached_events] == ["$thread_root", "$reply"]
+
+    @pytest.mark.asyncio
+    async def test_cold_scan_omits_wrong_sender_edit_and_reuses_cache(self, tmp_path: Path) -> None:
+        """A forged replacement cannot make every later thread read rescan the room."""
+        cache = SqliteEventCache(tmp_path / "event_cache.db")
+        await cache.initialize()
+        root_event = self._make_text_event(
+            event_id="$thread_root",
+            sender="@alice:localhost",
+            body="Root",
+            server_timestamp=1000,
+            source_content={"body": "Root"},
+        )
+        reply_event = self._make_text_event(
+            event_id="$reply",
+            sender="@alice:localhost",
+            body="Original",
+            server_timestamp=2000,
+            source_content={
+                "body": "Original",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
+            },
+        )
+        forged_edit = self._make_text_event(
+            event_id="$forged",
+            sender="@mallory:localhost",
+            body="* forged",
+            server_timestamp=3000,
+            source_content={
+                "body": "* forged",
+                "m.new_content": {"body": "forged", "msgtype": "m.text"},
+                "m.relates_to": {"rel_type": "m.replace", "event_id": "$reply"},
+            },
+        )
+        client = MagicMock()
+        page = MagicMock(spec=nio.RoomMessagesResponse)
+        page.chunk = [forged_edit, reply_event, root_event]
+        page.end = None
+        client.room_messages = AsyncMock(return_value=page)
+
+        try:
+            first_history = await fetch_thread_history(
+                client,
+                "!room:localhost",
+                "$thread_root",
+                event_cache=cache,
+            )
+            second_history = await fetch_thread_history(
+                client,
+                "!room:localhost",
+                "$thread_root",
+                event_cache=cache,
+            )
+            cached_events = await cache.get_thread_events("!room:localhost", "$thread_root")
+        finally:
+            await cache.close()
+
+        assert [message.body for message in first_history] == ["Root", "Original"]
+        assert [message.body for message in second_history] == ["Root", "Original"]
+        assert first_history.diagnostics[THREAD_HISTORY_SOURCE_DIAGNOSTIC] == THREAD_HISTORY_SOURCE_HOMESERVER
+        assert second_history.diagnostics[THREAD_HISTORY_SOURCE_DIAGNOSTIC] == THREAD_HISTORY_SOURCE_CACHE
+        assert client.room_messages.await_count == 1
         assert cached_events is not None
         assert [event["event_id"] for event in cached_events] == ["$thread_root", "$reply"]
 

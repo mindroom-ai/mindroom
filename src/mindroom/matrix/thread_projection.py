@@ -405,6 +405,7 @@ async def resolve_thread_ids_for_event_infos(
                 room_id,
                 event_info,
                 event_id=event_id,
+                event_source=(None if event_sources_by_event_id is None else event_sources_by_event_id.get(event_id)),
                 allow_current_root=True,
                 access=access,
             )
