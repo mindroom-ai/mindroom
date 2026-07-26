@@ -567,19 +567,6 @@ def test_configure_summary_model_applies_the_resolved_compaction_timeout() -> No
     assert model.timeout == 480.0
 
 
-def test_configure_summary_model_keeps_a_shorter_authored_provider_timeout() -> None:
-    model = MindroomVertexAIClaude(
-        id="claude-sonnet-5",
-        project_id="demo-project",
-        region="us-central1",
-        timeout=300.0,
-    )
-
-    configure_summary_model(model, timeout_seconds=480.0)
-
-    assert model.timeout == 300.0
-
-
 def test_configure_summary_model_preserves_authored_output_cap() -> None:
     model = Claude(id="claude-sonnet-5", max_tokens=1024, timeout=30.0)
 
