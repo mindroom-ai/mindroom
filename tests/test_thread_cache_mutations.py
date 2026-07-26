@@ -287,7 +287,7 @@ class TestThreadMutationHelpers:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        ("context", "invalidate_on_append_failure"),
+        ("context", "use_append_failure_reason"),
         [
             ("outbound", False),
             ("live", True),
@@ -297,7 +297,7 @@ class TestThreadMutationHelpers:
     async def test_thread_message_mutation_room_level_skips_invalidation(
         self,
         context: str,
-        invalidate_on_append_failure: bool,
+        use_append_failure_reason: bool,
     ) -> None:
         """Room-level message mutations should only log and leave thread state untouched."""
         cache_ops, logger, event_cache = _thread_mutation_cache_ops()
@@ -311,7 +311,7 @@ class TestThreadMutationHelpers:
             event_id="$event:localhost",
             context=context,
             room_level_skip_message=f"skip-{context}",
-            invalidate_on_append_failure=invalidate_on_append_failure,
+            use_append_failure_reason=use_append_failure_reason,
         )
 
         assert result is False
@@ -327,7 +327,7 @@ class TestThreadMutationHelpers:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        ("context", "invalidate_on_append_failure"),
+        ("context", "use_append_failure_reason"),
         [
             ("outbound", False),
             ("live", True),
@@ -337,7 +337,7 @@ class TestThreadMutationHelpers:
     async def test_thread_message_mutation_unknown_invalidates_room_once(
         self,
         context: str,
-        invalidate_on_append_failure: bool,
+        use_append_failure_reason: bool,
     ) -> None:
         """Unknown message mutations should fail closed with one room-thread invalidation."""
         cache_ops, _logger, event_cache = _thread_mutation_cache_ops()
@@ -351,7 +351,7 @@ class TestThreadMutationHelpers:
             event_id="$event:localhost",
             context=context,
             room_level_skip_message=f"skip-{context}",
-            invalidate_on_append_failure=invalidate_on_append_failure,
+            use_append_failure_reason=use_append_failure_reason,
         )
 
         assert result is True
@@ -364,7 +364,7 @@ class TestThreadMutationHelpers:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        ("context", "invalidate_on_append_failure"),
+        ("context", "use_append_failure_reason"),
         [
             ("outbound", False),
             ("live", True),
@@ -374,7 +374,7 @@ class TestThreadMutationHelpers:
     async def test_thread_message_mutation_threaded_success_uses_context_reasons(
         self,
         context: str,
-        invalidate_on_append_failure: bool,
+        use_append_failure_reason: bool,
     ) -> None:
         """Threaded message mutations should append atomically and avoid room invalidation."""
         cache_ops, _logger, event_cache = _thread_mutation_cache_ops()
@@ -389,7 +389,7 @@ class TestThreadMutationHelpers:
             event_id="$event:localhost",
             context=context,
             room_level_skip_message=f"skip-{context}",
-            invalidate_on_append_failure=invalidate_on_append_failure,
+            use_append_failure_reason=use_append_failure_reason,
         )
 
         assert result is False
@@ -399,7 +399,7 @@ class TestThreadMutationHelpers:
             "$thread:localhost",
             event_source,
             append_failed_reason=(
-                f"{context}_append_failed" if invalidate_on_append_failure else f"{context}_thread_mutation"
+                f"{context}_append_failed" if use_append_failure_reason else f"{context}_thread_mutation"
             ),
         )
         event_cache.mark_room_threads_stale.assert_not_awaited()
@@ -407,7 +407,7 @@ class TestThreadMutationHelpers:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        ("context", "invalidate_on_append_failure", "expected_reason"),
+        ("context", "use_append_failure_reason", "expected_reason"),
         [
             ("outbound", False, "outbound_thread_mutation"),
             ("live", True, "live_append_failed"),
@@ -417,7 +417,7 @@ class TestThreadMutationHelpers:
     async def test_thread_message_mutation_threaded_append_failure_uses_path_policy(
         self,
         context: str,
-        invalidate_on_append_failure: bool,
+        use_append_failure_reason: bool,
         expected_reason: str,
     ) -> None:
         """An append that cannot land must carry each path's own durable marker reason."""
@@ -433,7 +433,7 @@ class TestThreadMutationHelpers:
             event_id="$event:localhost",
             context=context,
             room_level_skip_message=f"skip-{context}",
-            invalidate_on_append_failure=invalidate_on_append_failure,
+            use_append_failure_reason=use_append_failure_reason,
         )
 
         assert result is False
@@ -1019,6 +1019,9 @@ class TestMatrixConversationCacheThreadReads:
         assert isinstance(stored_event_source.get("origin_server_ts"), int)
         event_cache.mark_thread_stale.assert_not_awaited()
         event_cache.mark_room_threads_stale.assert_not_awaited()
+        # A successful threaded mutation now writes no marker at all, so this is the only assertion
+        # left that would catch a reaction being appended into thread cache.
+        event_cache.apply_thread_mutation_append.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_notify_outbound_reaction_normalizes_event_for_real_cache(

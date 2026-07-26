@@ -347,7 +347,14 @@ class ThreadRepairRegistry:
             value = cast("T", await asyncio.shield(active_task))
         if not joined_speculative_flight or result_needs_own_flight is None or not result_needs_own_flight(value):
             return True, value
-        return self._active_task(key) is not None, value
+        follow_on_task = self._active_task(key)
+        if follow_on_task is None or key in self._speculative_flights:
+            return False, value
+        # Every caller that shared the speculative flight reaches here together, and only the first
+        # to resume gets to own the replacement. The rest join it rather than returning the result
+        # they just judged insufficient: it carries the same contract, so its answer is theirs too.
+        with self._joined_interactively(key):
+            return True, cast("T", await asyncio.shield(follow_on_task))
 
     async def run[T](
         self,

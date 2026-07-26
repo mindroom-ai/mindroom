@@ -195,7 +195,7 @@ async def _apply_thread_message_mutation(
     event_id: str | None,
     context: MutationWriteContext,
     room_level_skip_message: str,
-    invalidate_on_append_failure: bool,
+    use_append_failure_reason: bool,
     allow_room_invalidation: bool = True,
     raise_on_cache_write_failure: bool = False,
 ) -> bool:
@@ -243,9 +243,11 @@ async def _apply_thread_message_mutation(
         impact.thread_id,
         event_source,
         context=context,
+        # Every path marks the thread stale when the append cannot land; this only chooses whether
+        # that marker carries its own reason or the plain mutation one a later append may clear.
         append_failed_reason=_mutation_reason(
             context,
-            "append_failed" if invalidate_on_append_failure else "thread_mutation",
+            "append_failed" if use_append_failure_reason else "thread_mutation",
         ),
         raise_on_failure=raise_on_cache_write_failure,
     )
@@ -379,7 +381,7 @@ class ThreadOutboundWritePolicy:
             event_id=event_id,
             context="outbound",
             room_level_skip_message="Skipping outbound thread cache bookkeeping for non-threaded event mutation",
-            invalidate_on_append_failure=False,
+            use_append_failure_reason=False,
         )
 
     def _resolve_prequeue_thread_route(
@@ -889,7 +891,7 @@ class ThreadLiveWritePolicy:
                 event_id=event.event_id,
                 context="live",
                 room_level_skip_message=room_level_skip_message,
-                invalidate_on_append_failure=True,
+                use_append_failure_reason=True,
             )
             return
         if impact.state is MutationThreadImpactState.UNKNOWN:
@@ -909,7 +911,7 @@ class ThreadLiveWritePolicy:
         event_source = normalize_nio_event_for_cache(event)
         self._cache_ops.retain_thread_repair_delta(room_id, thread_id, event_source)
 
-        async def append_and_invalidate() -> bool:
+        async def append_live_mutation() -> bool:
             return await _apply_thread_message_mutation(
                 cache_ops=self._cache_ops,
                 room_id=room_id,
@@ -919,13 +921,13 @@ class ThreadLiveWritePolicy:
                 event_id=event.event_id,
                 context="live",
                 room_level_skip_message=room_level_skip_message,
-                invalidate_on_append_failure=True,
+                use_append_failure_reason=True,
             )
 
         await self._cache_ops.queue_thread_cache_update(
             room_id,
             thread_id,
-            append_and_invalidate,
+            append_live_mutation,
             name="matrix_cache_append_live_event",
         )
 
@@ -945,7 +947,7 @@ class ThreadLiveWritePolicy:
         queue_started = time.perf_counter()
         append_metrics: dict[str, str | int | float | bool] = {}
 
-        async def append_and_invalidate() -> bool:
+        async def append_live_mutation() -> bool:
             # One durable operation now covers what used to be invalidate, append, and revalidate,
             # so there is no separate invalidation to time and no window for a reader to reject.
             append_started = time.perf_counter()
@@ -965,7 +967,7 @@ class ThreadLiveWritePolicy:
             appended = await self._cache_ops.queue_thread_cache_update(
                 room_id,
                 thread_id,
-                append_and_invalidate,
+                append_live_mutation,
                 name="matrix_cache_append_live_event",
             )
             if appended is False:
@@ -1157,7 +1159,7 @@ class ThreadSyncWritePolicy:
                     event_id=event_id if isinstance(event_id, str) else None,
                     context="sync",
                     room_level_skip_message="Skipping sync thread cache bookkeeping for known non-threaded message mutation",
-                    invalidate_on_append_failure=True,
+                    use_append_failure_reason=True,
                     allow_room_invalidation=not room_threads_invalidated,
                     raise_on_cache_write_failure=raise_on_cache_write_failure,
                 )

@@ -15,6 +15,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 import pytest_asyncio
 
+from mindroom.background_tasks import _tasks_for_owner, wait_for_background_tasks
 from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -238,7 +239,7 @@ async def test_write_policy_mutation_never_exposes_an_invalid_snapshot(tmp_path:
                 event_id=str(event_source["event_id"]),
                 context="sync",
                 room_level_skip_message="skip",
-                invalidate_on_append_failure=True,
+                use_append_failure_reason=True,
             )
 
     try:
@@ -296,7 +297,7 @@ async def test_a_failed_cache_write_never_leaves_a_trusted_snapshot(tmp_path: Pa
                 event_id="$live",
                 context="sync",
                 room_level_skip_message="skip",
-                invalidate_on_append_failure=True,
+                use_append_failure_reason=True,
             )
         state = await cache.get_thread_cache_state(ROOM_ID, THREAD_ID)
     finally:
@@ -335,7 +336,7 @@ async def test_a_cancelled_cache_write_never_leaves_a_trusted_snapshot(tmp_path:
                 event_id="$live",
                 context="sync",
                 room_level_skip_message="skip",
-                invalidate_on_append_failure=True,
+                use_append_failure_reason=True,
             )
         state = await cache.get_thread_cache_state(ROOM_ID, THREAD_ID)
     finally:
@@ -344,3 +345,74 @@ async def test_a_cancelled_cache_write_never_leaves_a_trusted_snapshot(tmp_path:
     assert thread_cache_rejection_reason(state) == "thread_invalidated_after_validation"
     assert state is not None
     assert state.invalidation_reason == "sync_append_failed"
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_appends_marker_is_owned_by_the_shutdown_drain(tmp_path: Path) -> None:
+    """The marker a rolled-back append owes must be drainable, not an untracked orphan.
+
+    Shutdown cancels pending work in bounded rounds. A marker write that is merely shielded keeps
+    running but is invisible to the drain, so a second round abandons it and the thread stays
+    trusted while missing the event -- the fail-open this handler exists to prevent.
+    """
+    root_cache = SqliteEventCache(tmp_path / "event_cache.db")
+    cache = root_cache.for_principal(PRINCIPAL_ID)
+    await cache.initialize()
+    cache_ops = _cache_ops(tmp_path, cache)
+    coordinator = cache_ops.runtime.event_cache_write_coordinator
+    assert coordinator is not None
+    impact = MutationThreadImpact(state=MutationThreadImpactState.THREADED, thread_id=THREAD_ID)
+    event_source = _event("$live", 2000, thread_id=THREAD_ID)
+
+    append_started = asyncio.Event()
+    marker_started = asyncio.Event()
+    release_marker = asyncio.Event()
+    real_mark_thread_stale = cache.mark_thread_stale
+
+    async def hanging_append(*_args: object, **_kwargs: object) -> ThreadAppendOutcome:
+        append_started.set()
+        await asyncio.Event().wait()
+        raise AssertionError
+
+    async def blocked_mark_thread_stale(room_id: str, thread_id: str, *, reason: str) -> None:
+        marker_started.set()
+        await release_marker.wait()
+        await real_mark_thread_stale(room_id, thread_id, reason=reason)
+
+    try:
+        await _seed_valid_thread(cache)
+        with (
+            patch.object(cache, "apply_thread_mutation_append", hanging_append),
+            patch.object(cache, "mark_thread_stale", blocked_mark_thread_stale),
+        ):
+            mutation = asyncio.create_task(
+                _apply_thread_message_mutation(
+                    cache_ops=cache_ops,
+                    room_id=ROOM_ID,
+                    event_info=EventInfo.from_event(event_source),
+                    impact=impact,
+                    event_source=event_source,
+                    event_id="$live",
+                    context="sync",
+                    room_level_skip_message="skip",
+                    use_append_failure_reason=True,
+                ),
+            )
+            await asyncio.wait_for(append_started.wait(), timeout=5.0)
+            mutation.cancel()
+            await asyncio.wait_for(marker_started.wait(), timeout=5.0)
+
+            # The marker is in flight and the mutation is already cancelled: the drain must be able
+            # to see this write, or the next shutdown round drops it.
+            owned = _tasks_for_owner(coordinator.background_task_owner)
+            assert owned, "the marker write is untracked, so the shutdown drain cannot wait for it"
+
+            release_marker.set()
+            with pytest.raises(asyncio.CancelledError):
+                await mutation
+            await wait_for_background_tasks(timeout=5.0, owner=coordinator.background_task_owner)
+        state = await cache.get_thread_cache_state(ROOM_ID, THREAD_ID)
+    finally:
+        await root_cache.close()
+
+    assert thread_cache_rejection_reason(state) == "thread_invalidated_after_validation"

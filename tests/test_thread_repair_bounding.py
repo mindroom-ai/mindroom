@@ -21,7 +21,7 @@ from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
-from mindroom.matrix.cache import ThreadCacheReplaceOutcome
+from mindroom.matrix.cache import ThreadCacheReplaceOutcome, ThreadHistoryResult, thread_history_result
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from mindroom.matrix.cache.thread_repair import (
     ThreadRepairRegistry,
@@ -30,6 +30,11 @@ from mindroom.matrix.cache.thread_repair import (
 from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
 from mindroom.matrix.client_thread_history import fetch_dispatch_thread_snapshot
 from mindroom.matrix.conversation_cache import MatrixConversationCache, is_sync_replay_batch
+from mindroom.matrix.thread_diagnostics import (
+    THREAD_HISTORY_SOURCE_CACHE,
+    THREAD_HISTORY_SOURCE_DIAGNOSTIC,
+    THREAD_HISTORY_SOURCE_HOMESERVER,
+)
 from tests.conftest import bind_runtime_paths, test_runtime_paths
 
 if TYPE_CHECKING:
@@ -604,6 +609,7 @@ async def test_late_interactive_join_repairs_again_when_the_speculative_result_i
 async def test_only_a_retryable_shared_result_earns_the_joiner_its_own_flight(
     store_outcome: ThreadCacheReplaceOutcome,
     expected_flights: int,
+    tmp_path: Path,
 ) -> None:
     """A terminal outcome is settled, so rescanning it only meets the backoff it just armed."""
     registry = ThreadRepairRegistry()
@@ -611,21 +617,22 @@ async def test_only_a_retryable_shared_result_earns_the_joiner_its_own_flight(
     gate = asyncio.Event()
     flights = 0
 
-    def result() -> MagicMock:
-        return MagicMock(diagnostics={"cache_store_outcome": store_outcome.value})
+    # The production predicates decide this, so the test must exercise those and not a local copy.
+    conversation_cache = _conversation_cache(tmp_path, SqliteEventCache(tmp_path / "event_cache.db"))
+    needs_own_flight = conversation_cache._thread_repair_result_needs_own_flight
+    arms_backoff = conversation_cache._thread_repair_result_arms_backoff
 
-    async def scan() -> MagicMock:
+    async def scan() -> ThreadHistoryResult:
         nonlocal flights
         flights += 1
-        return result()
-
-    def needs_own_flight(value: MagicMock) -> bool:
-        return value.diagnostics["cache_store_outcome"] in {
-            outcome.value for outcome in ThreadCacheReplaceOutcome if outcome.retryable
-        }
-
-    def arms_backoff(value: MagicMock) -> bool:
-        return value.diagnostics["cache_store_outcome"] == ThreadCacheReplaceOutcome.HARD_FAILURE.value
+        return thread_history_result(
+            [],
+            is_full_history=False,
+            diagnostics={
+                "cache_store_outcome": store_outcome.value,
+                THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_HOMESERVER,
+            },
+        )
 
     def delayed_schedule[T](repair_factory: Callable[[], Awaitable[T]]) -> asyncio.Task[T]:
         async def runner() -> T:
@@ -683,3 +690,121 @@ async def test_dropping_a_finished_flight_drops_its_tier() -> None:
 
     assert registry._active_task(key) is None
     assert registry._speculative_flights == set()
+
+
+@pytest.mark.asyncio
+async def test_every_joiner_of_a_speculative_flight_gets_the_replacement_scan(tmp_path: Path) -> None:
+    """All readers sharing a speculative flight are owed the rescan, not just whoever resumes first.
+
+    They all resume off one shield, so only the first can own the replacement. The rest must join it
+    rather than returning the result they just judged insufficient.
+    """
+    registry = ThreadRepairRegistry()
+    key = _flight_key("$thread", hydrate_sidecars=False)
+    conversation_cache = _conversation_cache(tmp_path, SqliteEventCache(tmp_path / "event_cache.db"))
+    gate = asyncio.Event()
+    scans: list[str] = []
+
+    def scan(tag: str, outcome: ThreadCacheReplaceOutcome) -> Callable[[], Awaitable[ThreadHistoryResult]]:
+        async def run() -> ThreadHistoryResult:
+            scans.append(tag)
+            return thread_history_result(
+                [],
+                is_full_history=False,
+                diagnostics={
+                    "cache_store_outcome": outcome.value,
+                    THREAD_HISTORY_SOURCE_DIAGNOSTIC: (
+                        THREAD_HISTORY_SOURCE_CACHE
+                        if outcome is ThreadCacheReplaceOutcome.STORED
+                        else THREAD_HISTORY_SOURCE_HOMESERVER
+                    ),
+                },
+            )
+
+        return run
+
+    def delayed_schedule[T](repair_factory: Callable[[], Awaitable[T]]) -> asyncio.Task[T]:
+        async def runner() -> T:
+            await gate.wait()
+            return await repair_factory()
+
+        return asyncio.create_task(runner())
+
+    speculative = asyncio.create_task(
+        registry.run(
+            key,
+            schedule=delayed_schedule,
+            repair=scan("speculative", ThreadCacheReplaceOutcome.RETRYABLE_CONFLICT),
+            result_arms_backoff=conversation_cache._thread_repair_result_arms_backoff,
+            speculative=True,
+        ),
+    )
+    await asyncio.sleep(0)
+    readers = [
+        asyncio.create_task(
+            registry.run(
+                key,
+                schedule=_schedule,
+                repair=scan("interactive", ThreadCacheReplaceOutcome.STORED),
+                result_arms_backoff=conversation_cache._thread_repair_result_arms_backoff,
+                result_needs_own_flight=conversation_cache._thread_repair_result_needs_own_flight,
+            ),
+        )
+        for _ in range(3)
+    ]
+    await asyncio.sleep(0)
+    gate.set()
+    results = await asyncio.gather(*readers)
+    await speculative
+
+    outcomes = [result.diagnostics["cache_store_outcome"] for result in results]
+    assert outcomes == [ThreadCacheReplaceOutcome.STORED.value] * 3, (
+        f"a joiner kept the unusable speculative result: {outcomes}"
+    )
+    # One replacement serves all three; the point is not to fan out, it is not to strand anyone.
+    assert scans == ["speculative", "interactive"]
+
+
+@pytest.mark.asyncio
+async def test_clearing_the_registry_resets_every_admission_gate() -> None:
+    """State left behind by `clear` would silently disable speculative repair for the process."""
+    registry = ThreadRepairRegistry(max_concurrent_speculative_repairs=1)
+    thread_key = ("@agent:localhost", ROOM_ID, "$thread")
+    await registry.run(
+        _flight_key("$thread", hydrate_sidecars=False),
+        schedule=_schedule,
+        repair=AsyncMock(return_value="scanned"),
+        result_arms_backoff=lambda _r: False,
+        speculative=True,
+    )
+    # A repair just ran, so its cooldown and slot bookkeeping are populated.
+    assert registry.speculative_suppression_reason(thread_key) == "recently_repaired"
+    registry._running_speculative_repairs = 1
+
+    registry.clear()
+
+    assert registry.speculative_suppression_reason(thread_key) is None
+    assert registry._speculative_cooldowns == {}
+    assert registry._interactive_joins == {}
+    assert registry._speculative_flights == set()
+    assert registry._slot_waiters == []
+    assert registry._running_repairs == 0
+    assert registry._running_speculative_repairs == 0
+
+
+@pytest.mark.asyncio
+async def test_clearing_one_room_forgets_its_cooldowns() -> None:
+    """A departed room must not keep holding its threads inside a repair cooldown."""
+    registry = ThreadRepairRegistry()
+    await registry.run(
+        _flight_key("$thread", hydrate_sidecars=False),
+        schedule=_schedule,
+        repair=AsyncMock(return_value="scanned"),
+        result_arms_backoff=lambda _r: False,
+        speculative=True,
+    )
+    assert registry.speculative_suppression_reason(("@agent:localhost", ROOM_ID, "$thread")) == "recently_repaired"
+
+    registry.clear_room("@agent:localhost", ROOM_ID)
+
+    assert registry.speculative_suppression_reason(("@agent:localhost", ROOM_ID, "$thread")) is None

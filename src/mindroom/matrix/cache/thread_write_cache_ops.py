@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING, Any
 
+from mindroom.background_tasks import create_background_task
 from mindroom.matrix.thread_bookkeeping import MutationThreadImpact, MutationThreadImpactState
 
 from .thread_cache_invalidation import mark_room_threads_stale_fail_closed, mark_thread_stale_fail_closed
@@ -330,10 +331,8 @@ class ThreadMutationCacheOps:
             # that was trusted before this mutation stays trusted while missing the event, so the
             # marker has to be written separately and fail closed exactly as pre-invalidation did.
             # Cancellation rolls the transaction back the same way and is not an ``Exception``, so it
-            # is caught here too, and the marker is shielded so a second cancellation cannot skip it.
-            await asyncio.shield(
-                self.invalidate_known_thread(room_id, thread_id, reason=append_failed_reason),
-            )
+            # is caught here too.
+            await self._write_append_failure_marker(room_id, thread_id, reason=append_failed_reason)
             self._schedule_repair_if_available(room_id, thread_id)
             if raise_on_failure or not isinstance(exc, Exception):
                 raise
@@ -366,6 +365,27 @@ class ThreadMutationCacheOps:
                 coordination_scope=self.runtime.event_cache.principal_id,
             )
         return True
+
+    async def _write_append_failure_marker(self, room_id: str, thread_id: str, *, reason: str) -> None:
+        """Persist the marker a rolled-back append owes, surviving a second cancellation.
+
+        Shutdown cancels pending work in bounded rounds, so shielding alone is not enough: the shield
+        keeps the write running but leaves it untracked, and a marker abandoned mid-shutdown is the
+        fail-open this handler exists to prevent. Owning the task hands it to the same drain that
+        waits for every other cache write.
+        """
+        coordinator = self.runtime.event_cache_write_coordinator
+        marker = self.invalidate_known_thread(room_id, thread_id, reason=reason)
+        if coordinator is None:
+            await marker
+            return
+        await asyncio.shield(
+            create_background_task(
+                marker,
+                name="matrix_cache_append_failure_marker",
+                owner=coordinator.background_task_owner,
+            ),
+        )
 
     def retain_thread_repair_delta(
         self,
