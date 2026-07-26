@@ -11,6 +11,7 @@ without blocking the event loop on filesystem I/O (issue #1260).
 from __future__ import annotations
 
 import json
+import math
 import threading
 import time
 import typing
@@ -95,7 +96,26 @@ class TerminalEditCheckpoint:
     interactive_completed: bool = False
 
     def __post_init__(self) -> None:
-        """Freeze JSON payloads so later retries cannot observe caller mutation."""
+        """Validate and freeze state so every constructed checkpoint can reload."""
+        required_strings = (
+            self.transaction_id,
+            self.response_text,
+            self.response_kind,
+            self.correlation_id,
+        )
+        if any(not isinstance(value, str) or not value for value in required_strings):
+            message = "Terminal checkpoint identity and response strings must be non-empty"
+            raise ValueError(message)
+        if (
+            not isinstance(self.target_was_placeholder, bool)
+            or not isinstance(self.after_response_claimed, bool)
+            or not isinstance(self.interactive_completed, bool)
+        ):
+            message = "Terminal checkpoint state flags must be booleans"
+            raise TypeError(message)
+        if not self.wire_content or not self.response_envelope:
+            message = "Terminal checkpoint wire content and response envelope must be non-empty"
+            raise ValueError(message)
         object.__setattr__(self, "wire_content", _immutable_json_mapping(self.wire_content))
         object.__setattr__(self, "response_envelope", _immutable_json_mapping(self.response_envelope))
         object.__setattr__(
@@ -758,12 +778,27 @@ class HandledTurnLedger:
         """Return the unique canonical owner of one visible response event."""
         with self._state.lock:
             self._ensure_loaded_locked()
-            matches = {
-                record.indexed_event_ids: record
-                for record in self._responses.values()
-                if record.response_event_id == response_event_id
-            }
-            return next(iter(matches.values()), None) if len(matches) == 1 else None
+            return self._turn_record_for_response_event_locked(response_event_id)
+
+    def transact_redaction(
+        self,
+        event_id: str,
+        update: Callable[
+            [Mapping[str, TurnRecord], TurnRecord | None],
+            Sequence[TurnRecord],
+        ],
+    ) -> tuple[TurnRecord, ...]:
+        """Discover response ownership and persist tombstones in one transaction."""
+        with self._state.lock:
+            self._ensure_loaded_locked()
+            response_owner = self._turn_record_for_response_event_locked(event_id)
+            lookup_event_ids = (
+                (*response_owner.indexed_event_ids, event_id) if response_owner is not None else (event_id,)
+            )
+            return self.transact_handled_turns(
+                lookup_event_ids,
+                lambda existing_records: update(existing_records, response_owner),
+            )
 
     def transact_handled_turns(
         self,
@@ -817,6 +852,14 @@ class HandledTurnLedger:
         with advisory_file_lock(self._responses_lock_file, exclusive=True):
             self._responses = self._read_responses_file_locked()
         self._state.loaded = True
+
+    def _turn_record_for_response_event_locked(self, response_event_id: str) -> TurnRecord | None:
+        matches = {
+            record.indexed_event_ids: record
+            for record in self._responses.values()
+            if record.response_event_id == response_event_id
+        }
+        return next(iter(matches.values()), None) if len(matches) == 1 else None
 
     def _wait_for_pending_persists_locked(self) -> None:
         """Wait for the exact FIFO prefix queued before this barrier."""
@@ -1141,8 +1184,11 @@ def _normalize_string(value: object) -> str | None:
 
 def _immutable_json_mapping(value: Mapping[str, object]) -> Mapping[str, object]:
     """Recursively freeze one JSON-like mapping."""
+    if any(not isinstance(key, str) for key in value):
+        message = "Terminal checkpoint JSON object keys must be strings"
+        raise TypeError(message)
     return MappingProxyType(
-        {key: _immutable_json_value(item) for key, item in value.items() if isinstance(key, str)},
+        {key: _immutable_json_value(item) for key, item in value.items()},
     )
 
 
@@ -1152,7 +1198,12 @@ def _immutable_json_value(value: object) -> object:
         return _immutable_json_mapping(typing.cast("Mapping[str, object]", value))
     if isinstance(value, list | tuple):
         return tuple(_immutable_json_value(item) for item in value)
-    return value
+    if value is None or isinstance(value, str | bool | int):
+        return value
+    if isinstance(value, float) and math.isfinite(value):
+        return value
+    message = f"Terminal checkpoint contains non-JSON value: {type(value).__name__}"
+    raise TypeError(message)
 
 
 def _thaw_json_value(value: object) -> object:

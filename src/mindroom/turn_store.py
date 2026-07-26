@@ -174,7 +174,11 @@ class TurnStore:
         """Return the ledger-backed canonical record for one source event."""
         return self._ledger.get_turn_record(source_event_id)
 
-    def commit_terminal_checkpoint(
+    def turn_for_event(self, event_id: str) -> TurnRecord | None:
+        """Resolve a canonical turn by source, alias, or visible response ID."""
+        return self._ledger.get_turn_record(event_id) or self._ledger.get_turn_record_for_response_event(event_id)
+
+    def commit_terminal_checkpoint(  # noqa: C901
         self,
         turn_record: TurnRecord,
         *,
@@ -193,12 +197,20 @@ class TurnStore:
                 and not same_turn_identity(target_record, turn_record)
             ):
                 raise _TerminalCheckpointConflictError
-            matching_records = tuple(
-                existing
-                for event_id, existing in existing_records.items()
-                if event_id in turn_record.indexed_event_ids and same_turn_identity(existing, turn_record)
-            )
-            authority = next(iter(matching_records), turn_record)
+            indexed_records = tuple(existing_records.get(event_id) for event_id in turn_record.indexed_event_ids)
+            if any(existing is None for existing in indexed_records):
+                raise _TerminalCheckpointConflictError
+            unique_records = {
+                existing.indexed_event_ids: existing for existing in indexed_records if existing is not None
+            }
+            if len(unique_records) != 1:
+                raise _TerminalCheckpointConflictError
+            authority = next(iter(unique_records.values()))
+            if authority.indexed_event_ids != turn_record.indexed_event_ids or not same_turn_identity(
+                authority,
+                turn_record,
+            ):
+                raise _TerminalCheckpointConflictError
             if any(event_id in authority.redacted_source_event_ids for event_id in turn_record.indexed_event_ids):
                 raise _TerminalCheckpointConflictError
             existing_checkpoint = authority.terminal_edit_checkpoint
@@ -373,12 +385,11 @@ class TurnStore:
         source_event_id: str,
     ) -> TurnRecord | None:
         """Durably tombstone one source event before later replay cleanup."""
-        response_owner = self._ledger.get_turn_record_for_response_event(source_event_id)
-        lookup_event_ids = (
-            (*response_owner.indexed_event_ids, source_event_id) if response_owner is not None else (source_event_id,)
-        )
 
-        def redacted_records(existing_records: Mapping[str, TurnRecord]) -> tuple[TurnRecord, ...]:
+        def redacted_records(
+            existing_records: Mapping[str, TurnRecord],
+            response_owner: TurnRecord | None,
+        ) -> tuple[TurnRecord, ...]:
             if response_owner is not None:
                 current_owner = next(
                     (
@@ -415,7 +426,7 @@ class TurnStore:
                 ),
             )
 
-        redacted = self._ledger.transact_handled_turns(lookup_event_ids, redacted_records)
+        redacted = self._ledger.transact_redaction(source_event_id, redacted_records)
         return redacted[0] if redacted else None
 
     def any_source_redacted(self, source_event_ids: tuple[str, ...]) -> bool:

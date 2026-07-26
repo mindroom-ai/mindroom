@@ -194,6 +194,8 @@ _.commit_terminal_checkpoint  # terminal coordinator integration follows checkpo
 _.terminal_checkpoint_for_sources  # terminal coordinator integration follows checkpoint primitives
 _.update_terminal_checkpoint  # terminal coordinator integration follows checkpoint primitives
 _.clear_terminal_checkpoint  # terminal coordinator integration follows checkpoint primitives
+_.turn_for_event  # terminal coordinator integration follows checkpoint primitives
+_.get_turn_record_for_response_event  # terminal coordinator integration follows checkpoint primitives
 _reset_terminal_delivery_store_runtime  # unused function (src/mindroom/terminal_delivery.py)
 _reset_primary_worker_manager  # unused function (src/mindroom/workers/runtime.py)
 _.read_file_chunk  # unused method (src/mindroom/tools/file.py)

@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import threading
 from dataclasses import replace
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
@@ -281,3 +282,102 @@ def test_checkpoint_lookup_accepts_subset_or_reordering_but_rejects_new_ids(
     assert store.terminal_checkpoint_for_sources(("$second", "$first")) == committed
     assert store.terminal_checkpoint_for_sources(("$alias",)) == committed
     assert store.terminal_checkpoint_for_sources(("$first", "$new")) is None
+
+
+@pytest.mark.parametrize(
+    ("changes", "error"),
+    [
+        ({"transaction_id": ""}, ValueError),
+        ({"wire_content": {1: "bad"}}, TypeError),
+        ({"wire_content": {"bad": {"not-json"}}}, TypeError),
+        ({"response_envelope": {}}, ValueError),
+    ],
+)
+def test_checkpoint_constructor_rejects_state_the_codec_cannot_restore(
+    changes: dict[str, object],
+    error: type[Exception],
+) -> None:
+    fields = {
+        "transaction_id": "mindroom-terminal-checkpoint-1",
+        "wire_content": {"body": "final"},
+        "response_text": "final",
+        "response_kind": "ai",
+        "target_was_placeholder": True,
+        "response_envelope": {"source_event_id": "$source"},
+        "correlation_id": "corr-1",
+    }
+    fields.update(changes)
+
+    with pytest.raises(error):
+        TerminalEditCheckpoint(**fields)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("source_event_ids", [("$first",), ("$second", "$first")])
+def test_checkpoint_commit_rejects_stale_subset_or_reordered_caller(
+    tmp_path: Path,
+    source_event_ids: tuple[str, ...],
+) -> None:
+    store = _store(tmp_path)
+    authority = store.record_pending_turn(
+        TurnRecord.create(
+            ["$first", "$second"],
+            completed=False,
+            response_owner="agent",
+            correlation_id="corr-1",
+        ),
+    )
+    assert authority is not None
+    stale = TurnRecord.create(
+        source_event_ids,
+        completed=False,
+        response_owner="agent",
+        correlation_id="corr-1",
+    )
+
+    assert (
+        store.commit_terminal_checkpoint(
+            stale,
+            response_event_id="$visible",
+            checkpoint=_checkpoint(),
+        )
+        is None
+    )
+    assert store.get_turn_record("$first") == authority
+    assert store.get_turn_record("$second") == authority
+
+
+def test_target_redaction_and_checkpoint_commit_have_one_atomic_order(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    pending = store.record_pending_turn(_pending_turn())
+    assert pending is not None
+    barrier = threading.Barrier(2)
+    result: list[TurnRecord | None] = []
+
+    def commit() -> None:
+        barrier.wait()
+        result.append(
+            store.commit_terminal_checkpoint(
+                pending,
+                response_event_id="$visible",
+                checkpoint=_checkpoint(),
+            ),
+        )
+
+    def redact() -> None:
+        barrier.wait()
+        store.mark_source_redacted("$visible")
+
+    commit_thread = threading.Thread(target=commit)
+    redact_thread = threading.Thread(target=redact)
+    commit_thread.start()
+    redact_thread.start()
+    commit_thread.join()
+    redact_thread.join()
+
+    owner = store.get_turn_record("$source")
+    tombstone = store.get_turn_record("$visible")
+    assert owner is not None
+    assert owner.terminal_edit_checkpoint is None
+    assert tombstone is not None
+    assert tombstone.redacted_source_event_ids == ("$visible",)
+    assert len(result) == 1
