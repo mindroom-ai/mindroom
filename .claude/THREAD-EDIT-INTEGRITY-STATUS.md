@@ -1,12 +1,12 @@
 # Thread edit integrity gate status
 
-Updated 2026-07-26 after making durable redaction context mandatory for thread previews.
+Updated 2026-07-26 after rejecting conflicting edit identities and stale inherited membership.
 
 ## Exact target
 
 - PR: `mindroom-ai/mindroom#1641`
 - Branch: `fix/thread-edit-integrity`
-- Latest production commit: `c351edbaa4d11c2e4362f6155b89c935000ffd42`
+- Latest production commit: `41fe53933b44b3bb929754a4e63b2d1021674e67`
 - Current base and merge base: `858282afc77adb480fa06cd9e4057d511ff861d5`
 - Latest integration commit before this handoff-only successor: `0d77e1b7475d31d0a644b1bb02c22a6c33533228`
 - A commit cannot contain its own SHA, so this file does not claim that its stored parent is the exact gate head.
@@ -35,6 +35,8 @@ Updated 2026-07-26 after making durable redaction context mandatory for thread p
 - `ae5f72397` rejects fetched message envelopes that parse as `nio.BadEvent` before they can provide cleanup requester ancestry.
 - `6eea89ebf` makes related replacements follow their original before consulting a legacy cached membership index.
 - `6eea89ebf` also retains valid replacement rows as non-visible room-scan ancestry so replies targeting an edit remain in the original thread.
+- `41fe53933` rejects conflicting payloads that claim one immutable replacement event ID.
+- `41fe53933` also follows current reply ancestry before accepting a derived membership index.
 - The current correction requires canonical replacement validity before an edit may supply thread ancestry in point, scan, cache-certification, snapshot, cleanup, or mutation paths.
 - The current correction rejects malformed `m.room.message` point events and cache rows before their raw relations can create durable thread indexes.
 - Known invalid edits resolve room-level; unavailable replacement ancestry remains indeterminate so mutation writes fail closed.
@@ -264,4 +266,22 @@ Updated 2026-07-26 after making durable redaction context mandatory for thread p
 - Production source against current `main` is `+2163/-1199`, net `+964`.
 - Every exact-`6580fe505` review, CI, full-suite, PostgreSQL, static, and live claim is historical after production commit `c351edbaa`.
 - Fresh exact-head native Codex review, CI, full pytest, PostgreSQL stress, all-file pre-commit, and real-Tuwunel validation remain mandatory.
+- Merge gate remains closed.
+
+## Exact-41fe replacement identity and ancestry correction
+
+- Exact-`ff8cc420f` review B approved the complete production diff.
+- Exact-`ff8cc420f` review A reproduced two blockers before live execution.
+- Full history selected bundled content while SQLite selected explicit content when conflicting payloads shared one event ID.
+- An edit of a descendant followed its stale inherited index instead of current ancestry after an intermediate rich reply became a root.
+- Both claims failed deterministic RED regressions before production commit `41fe53933`.
+- Identical duplicate representations still deduplicate and apply normally; conflicting representations now fail closed.
+- Current relation ancestry now outranks derived index membership, while relation-free events retain the index fallback.
+- Full resolution and both SQLite cache regressions pass after the correction.
+- The complete owning selection passes `589` tests with zero failures, errors, or skips.
+- Ruff, formatting, `ty`, Tach dependencies/interfaces, changed-file pre-commit, diff checks, and commit hooks pass.
+- Production source against current `main` is `+2198/-1199`, net `+999`.
+- Local PostgreSQL fixture startup was externally interrupted, so exact PostgreSQL variants remain pending on the persistent Linux gate host.
+- Every exact-`ff8cc420f` review, CI, full-suite, PostgreSQL, all-file, and live result is historical after `41fe53933`.
+- Fresh exact-head native Codex review, CI, PostgreSQL/full/Tach/all-file validation, and real-Tuwunel validation are mandatory.
 - Merge gate remains closed.
