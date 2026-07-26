@@ -37,6 +37,7 @@ if TYPE_CHECKING:
     from psycopg import AsyncConnection
 
     from .event_cache import ThreadCacheState, ThreadRevision
+    from .event_cache_events import SerializedCachedEvent
 
 
 async def load_thread_events(
@@ -286,6 +287,44 @@ async def set_room_membership_locked(
     )
 
 
+async def _upsert_thread_membership_rows(
+    db: AsyncConnection,
+    *,
+    namespace: str,
+    room_id: str,
+    thread_id: str,
+    serialized_events: list[SerializedCachedEvent],
+) -> None:
+    """Bind one event set to a thread in a single statement.
+
+    Every row targets the same thread, so a repeated event ID resolves to the values the
+    row-at-a-time upsert left behind; only the last occurrence is sent because
+    ``ON CONFLICT DO UPDATE`` cannot touch the same row twice in one statement.
+    """
+    if not serialized_events:
+        return
+    events = list({event.event_id: event for event in serialized_events}.values())
+    await db.execute(
+        """
+        INSERT INTO mindroom_event_cache_thread_events(namespace, room_id, thread_id, event_id, origin_server_ts)
+        SELECT %s::text, %s::text, %s::text, incoming.event_id, incoming.origin_server_ts
+        FROM unnest(%s::text[], %s::bigint[]) AS incoming(event_id, origin_server_ts)
+        ON CONFLICT(namespace, room_id, event_id) DO UPDATE SET
+            thread_id = excluded.thread_id,
+            origin_server_ts = excluded.origin_server_ts,
+            event_json = NULL,
+            write_seq = nextval('mindroom_event_cache_write_seq')
+        """,
+        (
+            namespace,
+            room_id,
+            thread_id,
+            [event.event_id for event in events],
+            [event.origin_server_ts for event in events],
+        ),
+    )
+
+
 async def _store_thread_events_locked(
     db: AsyncConnection,
     *,
@@ -312,25 +351,13 @@ async def _store_thread_events_locked(
         cached_at=validated_at,
         thread_id=thread_id,
     )
-    for event in serialized_events:
-        await db.execute(
-            """
-            INSERT INTO mindroom_event_cache_thread_events(namespace, room_id, thread_id, event_id, origin_server_ts)
-            VALUES (%s, %s, %s, %s, %s)
-            ON CONFLICT(namespace, room_id, event_id) DO UPDATE SET
-                thread_id = excluded.thread_id,
-                origin_server_ts = excluded.origin_server_ts,
-                event_json = NULL,
-                write_seq = nextval('mindroom_event_cache_write_seq')
-            """,
-            (
-                namespace,
-                room_id,
-                thread_id,
-                event.event_id,
-                event.origin_server_ts,
-            ),
-        )
+    await _upsert_thread_membership_rows(
+        db,
+        namespace=namespace,
+        room_id=room_id,
+        thread_id=thread_id,
+        serialized_events=serialized_events,
+    )
     await _upsert_thread_cache_state(
         db,
         namespace=namespace,
@@ -698,23 +725,12 @@ async def append_existing_thread_event(
         thread_id=thread_id,
     )
     if thread_exists:
-        await db.execute(
-            """
-            INSERT INTO mindroom_event_cache_thread_events(namespace, room_id, thread_id, event_id, origin_server_ts)
-            VALUES (%s, %s, %s, %s, %s)
-            ON CONFLICT(namespace, room_id, event_id) DO UPDATE SET
-                thread_id = excluded.thread_id,
-                origin_server_ts = excluded.origin_server_ts,
-                event_json = NULL,
-                write_seq = nextval('mindroom_event_cache_write_seq')
-            """,
-            (
-                namespace,
-                room_id,
-                thread_id,
-                serialized_event.event_id,
-                serialized_event.origin_server_ts,
-            ),
+        await _upsert_thread_membership_rows(
+            db,
+            namespace=namespace,
+            room_id=room_id,
+            thread_id=thread_id,
+            serialized_events=[serialized_event],
         )
     return thread_exists
 
