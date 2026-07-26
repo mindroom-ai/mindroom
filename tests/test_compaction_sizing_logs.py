@@ -14,6 +14,7 @@ from agno.session.summary import SessionSummary
 from structlog.testing import capture_logs
 
 from mindroom.agent_storage import create_session_storage
+from mindroom.constants import DEFAULT_COMPACTION_TIMEOUT_SECONDS
 from mindroom.history.compaction import _rewrite_working_session_for_compaction
 from mindroom.history.types import HistoryScope, HistoryScopeState
 from mindroom.prompts import COMPACTION_SUMMARY_PROMPT
@@ -60,6 +61,7 @@ async def _rewrite_with_summary_model(
         runs_before=len(working_session.runs or []),
         threshold_tokens=None,
         summary_prompt=COMPACTION_SUMMARY_PROMPT,
+        summary_timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
         lifecycle_notice_event_id=None,
         progress_callback=None,
         collect_compaction_hook_messages=False,

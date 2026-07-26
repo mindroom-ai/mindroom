@@ -446,6 +446,7 @@ class _TeamResponseRequest:
     team_agents: tuple[MatrixID, ...]
     team_mode: str
     reason_prefix: str = "Team request"
+    resolution_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1146,13 +1147,13 @@ class ResponseRunner:
         request: ResponseRequest,
         final_outcome: FinalDeliveryOutcome,
     ) -> None:
-        """Tell the dispatcher when stall recovery interrupted a marked-handled turn.
+        """Tell the dispatcher when a bot replacement interrupted a marked-handled turn.
 
         Only turns that end as a visible interrupted note are reported: they get
-        recorded in the handled-turn ledger, so the post-restart sync replay
-        dedups them away and an explicit retry is their only recovery. Unmarked
-        turns are recovered by that replay instead; retrying them too would
-        answer twice.
+        recorded in the handled-turn ledger, so the replacement runtime's sync
+        replay dedups them away and room-scoped recovery is their only route back.
+        Unmarked turns are recovered by that replay instead; recovering them too
+        would answer twice.
         """
         if request.on_sync_restart_cancelled is None or final_outcome.terminal_status != "cancelled":
             return
@@ -1174,6 +1175,12 @@ class ResponseRunner:
     ) -> ResponseRequest | None:
         """Expose a locked turn before running its potentially slow preparation."""
         placeholder_state = early_placeholder_state or _EarlyPlaceholderState()
+        if not self._sync_restart_retry_is_current(
+            request,
+            history_scope=history_scope,
+            execution_identity=execution_identity,
+        ):
+            return None
         if request.on_lifecycle_lock_acquired is not None:
             request.on_lifecycle_lock_acquired()
         request = self._request_with_locked_target(request, resolved_target)
@@ -1197,12 +1204,6 @@ class ResponseRunner:
                         ),
                     ),
                 )
-            return None
-        if not self._sync_restart_retry_is_current(
-            request,
-            history_scope=history_scope,
-            execution_identity=execution_identity,
-        ):
             return None
         placeholder_event_id = None
         if (
@@ -1558,6 +1559,7 @@ class ResponseRunner:
         team_agents: list[MatrixID],
         team_mode: str,
         reason_prefix: str = "Team request",
+        resolution_reason: str | None = None,
     ) -> str | None:
         """Generate a team response with lifecycle locking and queued-message state."""
         team_request = _TeamResponseRequest(
@@ -1565,6 +1567,7 @@ class ResponseRunner:
             team_agents=tuple(team_agents),
             team_mode=team_mode,
             reason_prefix=reason_prefix,
+            resolution_reason=resolution_reason,
         )
         return await self._run_locked_response_lifecycle(
             request,
@@ -1631,6 +1634,42 @@ class ResponseRunner:
             return None
         request = prepared_request
         team_request = replace(team_request, request=request)
+        reason = team_request.resolution_reason
+        if reason is not None:
+            response_identity = self._response_identity(request, response_kind="team")
+            lifecycle = self._build_lifecycle(identity=response_identity, request=request)
+            progress = _DeliveryProgress(tracked_event_id=request.existing_event_id)
+
+            async def deliver_resolution_reason(message_id: str | None) -> None:
+                progress.settle(
+                    await self.deps.delivery_gateway.deliver_final(
+                        FinalDeliveryRequest(
+                            target=resolved_target,
+                            existing_event_id=message_id,
+                            existing_event_is_placeholder=request.existing_event_is_placeholder,
+                            response_text=reason,
+                            identity=response_identity,
+                            tool_trace=None,
+                            extra_content=None,
+                        ),
+                    ),
+                )
+
+            return await self._run_and_settle_locked_response(
+                request,
+                target=resolved_target,
+                lifecycle=lifecycle,
+                progress=progress,
+                response_function=deliver_resolution_reason,
+                thinking_message=None,
+                user_id=request.user_id,
+                run_id=str(uuid4()),
+                build_post_response_outcome=lambda _final_outcome: ResponseOutcome(),
+                post_response_deps=lambda: self.deps.post_response_effects.build_deps(
+                    room_id=request.room_id,
+                    interactive_agent_name=self.deps.agent_name,
+                ),
+            )
         requester_user_id = request.user_id or ""
         _memory_prompt, _memory_thread_history, prepared_prompt, model_thread_history = (
             prepare_memory_and_model_context(

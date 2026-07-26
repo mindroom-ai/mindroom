@@ -93,7 +93,6 @@ Config changes are detected via polling (`watch_paths()` checks watched source-f
 4. A runtime being replaced wakes its pre-admission waiters with `ResponseAdmissionRefusedError`.
    This is deliberately not an `asyncio.CancelledError`, because the Matrix callback must fail and invalidate the old sync checkpoint so the replacement runtime replays the source event.
    The refusal path performs no Matrix I/O, so replacement shutdown cannot stall on an untimed send.
-   A queued sync-restart retry is put back on the queue rather than consuming its one attempt.
    Auto-resume messages received by replacement bots during the apply wait for the gate to reopen instead of being dropped
 5. If responses never drain, the reload stops deferring after ten minutes and closes the gate over the still-running responses, so a config change cannot be starved forever on a busy install
 6. `ConfigReloadLifecycle.update_config()` loads the new config and `_identify_entities_to_restart()` computes the diff using `model_dump(exclude_none=True)`
@@ -162,6 +161,9 @@ Non-MindRoom bots listed in `bot_accounts` are excluded from this detection.
 - Each bot runs its own sync loop via `sync_forever_with_restart()`
 - Sync loop failures trigger automatic restart with linear backoff (5s, 10s, 15s, ... up to 60s max)
 - Watchdog-driven restarts of stalled sync loops add 0–10s of random jitter on top of the backoff so a loop-wide stall does not restart every sync loop as one thundering herd
+- An automatic receive-loop restart replaces only the sync task and its watchdog, so in-flight responses keep their original owner and finish across the restart
+- The response runtime is drained and cancelled only when the bot itself stops: a config reload replacing the entity, entity removal, or process shutdown
+- Each of those lifecycle events logs `restart_reason_category` and `resulting_action`, so `matrix_sync_transport_restart` is distinguishable from `matrix_agent_response_runtime_shutdown` in logs
 - Event callbacks run as background tasks (never block the sync loop)
 - `ResponseTracker` prevents duplicate replies
 - `StopManager` handles cancellation of in-progress responses

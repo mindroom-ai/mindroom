@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import math
 import threading
 from dataclasses import dataclass, field, replace
@@ -14,7 +15,7 @@ from agno.run.team import TeamRunOutput
 
 from mindroom.agent_storage import get_agent_session, get_team_session
 from mindroom.agents import remove_run_by_event_id
-from mindroom.handled_turns import HandledTurnLedger, TurnRecord, TurnRecordCodec, same_turn_identity
+from mindroom.handled_turns import HandledTurnLedger, TurnRecord, TurnRecordCodec, merge_edit_facts, same_turn_identity
 from mindroom.history.storage import invalidate_compacted_replay, read_scope_seen_event_ids
 from mindroom.session_ids import create_session_id
 
@@ -67,7 +68,9 @@ class TurnStore:
     deps: TurnStoreDeps
     _ledger: HandledTurnLedger = field(init=False, repr=False)
     _pending_claim_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
-    _pending_claimed_event_ids: set[str] = field(default_factory=set, init=False, repr=False)
+    _pending_claim_changed: asyncio.Event = field(default_factory=asyncio.Event, init=False, repr=False)
+    _pending_turn_claims: list[TurnRecord] = field(default_factory=list, init=False, repr=False)
+    _pending_claimed_alias_event_ids: set[str] = field(default_factory=set, init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Construct the private handled-turn ledger for this runtime entity."""
@@ -198,22 +201,42 @@ class TurnStore:
         )
 
     def try_claim_turn(self, turn_record: TurnRecord) -> bool:
-        """Claim source processing when no live or terminal turn owns it."""
-        event_ids = turn_record.indexed_event_ids
-        if not turn_record.source_event_ids:
+        """Claim exclusive physical sources while aliases remain advisory."""
+        alias_owners = map(self.get_turn_record, turn_record.discovery_event_ids)
+        if not turn_record.source_event_ids or any(
+            owner is not None and owner.completed and not same_turn_identity(owner, turn_record)
+            for owner in alias_owners
+        ):
             return False
+        source_ids, discovery_ids = set(turn_record.source_event_ids), set(turn_record.discovery_event_ids)
         with self._pending_claim_lock:
-            if self._pending_claimed_event_ids.intersection(event_ids) or any(
-                self.is_handled(event_id) for event_id in event_ids
+            if any(
+                source_ids.intersection(claim.source_event_ids) or discovery_ids.intersection(claim.discovery_event_ids)
+                for claim in self._pending_turn_claims
             ):
                 return False
-            self._pending_claimed_event_ids.update(event_ids)
+            self._pending_turn_claims.append(turn_record)
         return True
 
     def release_pending_turn_claim(self, turn_record: TurnRecord) -> None:
         """Release a response claim after terminal settlement or failure."""
         with self._pending_claim_lock:
-            self._pending_claimed_event_ids.difference_update(turn_record.indexed_event_ids)
+            self._pending_turn_claims = [
+                claim for claim in self._pending_turn_claims if not same_turn_identity(claim, turn_record)
+            ]
+            self._pending_claimed_alias_event_ids.difference_update(turn_record.discovery_event_ids)
+            claim_changed, self._pending_claim_changed = self._pending_claim_changed, asyncio.Event()
+        claim_changed.set()
+
+    async def wait_for_turn_settled(self, event_ids: tuple[str, ...]) -> None:
+        """Wait until every claim indexed by a source or alias settles."""
+        event_id_set = set(event_ids)
+        while True:
+            with self._pending_claim_lock:
+                if not any(event_id_set.intersection(claim.indexed_event_ids) for claim in self._pending_turn_claims):
+                    return
+                claim_changed = self._pending_claim_changed
+            await claim_changed.wait()
 
     def is_claimed_in_flight(self, event_id: str) -> bool:
         """Return whether one source event is already claimed by a live turn.
@@ -223,7 +246,9 @@ class TurnStore:
         into a follow-up batch, poison the whole batch's all-or-nothing claim.
         """
         with self._pending_claim_lock:
-            return event_id in self._pending_claimed_event_ids
+            return event_id in self._pending_claimed_alias_event_ids or any(
+                event_id in claim.indexed_event_ids for claim in self._pending_turn_claims
+            )
 
     def try_claim_turn_alias(self, event_id: str) -> bool:
         """Atomically claim one identity alias only when no live turn owns it.
@@ -239,12 +264,20 @@ class TurnStore:
         never releases a claim it did not take.
         """
         with self._pending_claim_lock:
-            if event_id in self._pending_claimed_event_ids:
+            if event_id in self._pending_claimed_alias_event_ids or any(
+                event_id in claim.indexed_event_ids for claim in self._pending_turn_claims
+            ):
                 return False
-            self._pending_claimed_event_ids.add(event_id)
+            self._pending_claimed_alias_event_ids.add(event_id)
             return True
 
-    def try_claim_turn_subset(self, event_ids: Sequence[str]) -> tuple[str, ...]:
+    def try_claim_turn_subset(
+        self,
+        event_ids: Sequence[str],
+        *,
+        relinquished_claims: Sequence[TurnRecord] = (),
+        discovery_event_ids_by_source: Mapping[str, str] | None = None,
+    ) -> tuple[str, ...]:
         """Atomically claim whichever of these sources no live or finished turn owns.
 
         The ingress in-flight precheck is only a fast path: a replayed source
@@ -254,14 +287,49 @@ class TurnStore:
         still-unowned subset in one lock acquisition lets the flush drop only
         the stale duplicates and keep the rest of the batch's turn.
         """
+        discovery_by_source = discovery_event_ids_by_source or {}
+        alias_owners = {alias: self.get_turn_record(alias) for alias in discovery_by_source.values()}
         with self._pending_claim_lock:
-            claimable = tuple(
-                event_id
-                for event_id in dict.fromkeys(event_ids)
-                if event_id not in self._pending_claimed_event_ids and not self.is_handled(event_id)
-            )
-            self._pending_claimed_event_ids.update(claimable)
-        return claimable
+            self._pending_turn_claims = [
+                claim
+                for claim in self._pending_turn_claims
+                if not any(same_turn_identity(claim, relinquished) for relinquished in relinquished_claims)
+            ]
+            claimed_source_ids = {
+                event_id for claim in self._pending_turn_claims for event_id in claim.source_event_ids
+            }
+            claimed_discovery_ids = {
+                event_id for claim in self._pending_turn_claims for event_id in claim.discovery_event_ids
+            }
+            claimable: list[str] = []
+            for event_id in dict.fromkeys(event_ids):
+                alias = discovery_by_source.get(event_id)
+                owner = alias_owners.get(alias) if alias is not None else None
+                candidate = TurnRecord.create([event_id], completed=False)
+                alias_conflicts = alias is not None and (
+                    alias in claimed_discovery_ids
+                    or (owner is not None and owner.completed and not same_turn_identity(owner, candidate))
+                )
+                if (
+                    event_id in claimed_source_ids
+                    or event_id in self._pending_claimed_alias_event_ids
+                    or self.is_handled(event_id)
+                    or alias_conflicts
+                ):
+                    continue
+                claimable.append(event_id)
+            if claimable:
+                discovery_event_ids = tuple(
+                    alias for event_id in claimable if (alias := discovery_by_source.get(event_id)) is not None
+                )
+                self._pending_turn_claims.append(
+                    TurnRecord.create(
+                        claimable,
+                        discovery_event_ids=discovery_event_ids,
+                        completed=False,
+                    ),
+                )
+        return tuple(claimable)
 
     def mark_source_redacted(
         self,
@@ -295,7 +363,10 @@ class TurnStore:
         """Return whether durable state tombstones any source in one pending response."""
         return any(
             (record := self._ledger.get_turn_record(source_event_id)) is not None
-            and source_event_id in record.redacted_source_event_ids
+            and (
+                source_event_id in record.redacted_source_event_ids
+                or source_event_id in set(record.source_event_ids).difference(record.replay_source_event_ids)
+            )
             for source_event_id in source_event_ids
         )
 
@@ -704,12 +775,7 @@ def _has_redaction_cleanup_context(turn_record: TurnRecord) -> bool:
 
 
 def _backfill_missing_turn_facts(authority: TurnRecord, recovery: TurnRecord) -> TurnRecord:
-    """Fill absent optional facts without overriding authoritative ledger values.
-
-    Source identity, anchor, completion, and timestamp always come from
-    ``authority``. Every optional fact uses ``recovery`` only when the
-    authoritative value is absent.
-    """
+    """Fill absent optional facts from recovery without overriding ledger authority."""
     return replace(
         authority,
         discovery_event_ids=(*authority.discovery_event_ids, *recovery.discovery_event_ids),
@@ -728,6 +794,7 @@ def _backfill_missing_turn_facts(authority: TurnRecord, recovery: TurnRecord) ->
             if authority.source_event_prompts is not None
             else recovery.source_event_prompts
         ),
+        source_event_revisions=authority.source_event_revisions or recovery.source_event_revisions,
         source_event_metadata=(
             authority.source_event_metadata
             if authority.source_event_metadata is not None
@@ -754,6 +821,7 @@ def _reconcile_ledger_and_recovery(
         or recovery_record.response_event_id is None
         or not same_turn_identity(ledger_record, recovery_record)
     ):
+        recovery_record = replace(recovery_record, source_event_revisions=None)
         backfilled_record = _backfill_missing_turn_facts(ledger_record, recovery_record)
         return (
             replace(
@@ -763,6 +831,7 @@ def _reconcile_ledger_and_recovery(
             if backfilled_record != ledger_record
             else ledger_record
         )
+    source_event_prompts, source_event_revisions = merge_edit_facts(ledger_record, recovery_record)
     recovered_record = replace(
         ledger_record,
         discovery_event_ids=(*ledger_record.discovery_event_ids, *recovery_record.discovery_event_ids),
@@ -772,7 +841,8 @@ def _reconcile_ledger_and_recovery(
         ),
         response_event_id=recovery_record.response_event_id,
         completed=recovery_record.completed,
-        source_event_prompts=recovery_record.source_event_prompts or ledger_record.source_event_prompts,
+        source_event_prompts=source_event_prompts,
+        source_event_revisions=source_event_revisions,
         source_event_metadata=recovery_record.source_event_metadata or ledger_record.source_event_metadata,
         response_owner=recovery_record.response_owner or ledger_record.response_owner,
         requester_id=recovery_record.requester_id or ledger_record.requester_id,

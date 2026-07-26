@@ -54,7 +54,6 @@ from tests.conftest import (
     TEST_PASSWORD,
     delivered_matrix_event,
     delivered_matrix_side_effect,
-    install_send_response_mock,
     message_origin,
     patch_response_runner_module,
     replace_delivery_gateway_deps,
@@ -403,11 +402,11 @@ class TestAgentBot(AgentBotTestBase):
         assert mock_edit_message.await_args.args[3]["m.relates_to"]["event_id"] == "$canonical_thread:localhost"
 
     @pytest.mark.asyncio
-    async def test_team_generate_response_nonteam_fallback_delivers_without_after_response(
+    async def test_team_generate_response_nonteam_fallback_uses_locked_runner(
         self,
         tmp_path: Path,
     ) -> None:
-        """Non-team fallback should deliver directly without response lifecycle hooks."""
+        """Non-team fallback must enter the runner before touching the existing response."""
         config = _configured_team_test_config(tmp_path)
         runtime_paths = runtime_paths_for(config)
         team_member = entity_ids(config, runtime_paths)["general"]
@@ -442,10 +441,7 @@ class TestAgentBot(AgentBotTestBase):
             reason="No team available",
         )
 
-        bot._edit_message = AsyncMock(return_value=True)
-        bot._delivery_gateway.deliver_final = AsyncMock()
-        bot._delivery_gateway.deps.response_hooks.emit_after_response = AsyncMock()
-        bot._delivery_gateway.deps.response_hooks.emit_cancelled_response = AsyncMock()
+        generate_team_response = AsyncMock(return_value=None)
 
         with (
             patch.object(
@@ -454,6 +450,7 @@ class TestAgentBot(AgentBotTestBase):
                 return_value=_ResponderAvailability(materializable_agent_names={"general"}, live_entity_names=None),
             ),
             patch("mindroom.bot.resolve_configured_team", return_value=resolution),
+            patch.object(bot._response_runner, "generate_team_response_helper", new=generate_team_response),
         ):
             delivery_resolution = await bot._run_regenerated_response(
                 ResponseRequest(
@@ -467,16 +464,14 @@ class TestAgentBot(AgentBotTestBase):
                 ),
             )
 
-        bot._delivery_gateway.deliver_final.assert_not_awaited()
-        bot._edit_message.assert_awaited_once_with(
-            room_id="!test:localhost",
-            event_id="$existing",
-            new_text="No team available",
-            thread_id="$thread",
-        )
-        bot._delivery_gateway.deps.response_hooks.emit_after_response.assert_not_awaited()
-        bot._delivery_gateway.deps.response_hooks.emit_cancelled_response.assert_not_awaited()
-        assert delivery_resolution == "$existing"
+        assert delivery_resolution is None
+        call = generate_team_response.await_args
+        assert call.kwargs == {
+            "team_agents": [team_member],
+            "team_mode": "coordinate",
+            "resolution_reason": "No team available",
+        }
+        assert call.args[0].existing_event_id == "$existing"
 
     @pytest.mark.asyncio
     async def test_configured_team_response_resolves_current_member_identity(
@@ -542,8 +537,7 @@ class TestAgentBot(AgentBotTestBase):
                 reason="not materializable",
             )
 
-        send_response = AsyncMock(return_value="$reject")
-        install_send_response_mock(bot, send_response)
+        generate_team_response = AsyncMock(return_value="$reject")
 
         with (
             patch.object(
@@ -552,6 +546,7 @@ class TestAgentBot(AgentBotTestBase):
                 return_value=_ResponderAvailability(materializable_agent_names={"general"}, live_entity_names=None),
             ),
             patch("mindroom.bot.resolve_configured_team", side_effect=capture_resolve_configured_team),
+            patch.object(bot._response_runner, "generate_team_response_helper", new=generate_team_response),
         ):
             result = await bot._run_regenerated_response(
                 ResponseRequest(
@@ -571,6 +566,7 @@ class TestAgentBot(AgentBotTestBase):
 
         assert captured_member_ids == [[current_member.full_id]]
         assert stale_member.full_id not in captured_member_ids[0]
+        assert generate_team_response.await_args.kwargs["resolution_reason"] == "not materializable"
         assert result == "$reject"
 
     @pytest.mark.asyncio
@@ -638,11 +634,14 @@ class TestAgentBot(AgentBotTestBase):
         mock_add_buttons.assert_awaited_once()
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(("retry_source", "expected_memory_calls"), [(None, 1), ("$event", 0)])
     async def test_generate_team_response_queues_memory_before_helper_failure(
         self,
         tmp_path: Path,
+        retry_source: str | None,
+        expected_memory_calls: int,
     ) -> None:
-        """Team memory should be queued before the shared helper runs."""
+        """Initial edits queue memory, while restart retries reuse that durable input."""
 
         async def fake_store_conversation_memory(*args: object, **kwargs: object) -> None:
             store_calls.append((args, kwargs))
@@ -664,7 +663,7 @@ class TestAgentBot(AgentBotTestBase):
             return task
 
         async def fail_helper(*_args: object, **_kwargs: object) -> str:
-            assert any(name.startswith("memory_save_team_") for name in scheduled_names)
+            assert any(name.startswith("memory_save_team_") for name in scheduled_names) is (retry_source is None)
             msg = "boom"
             raise RuntimeError(msg)
 
@@ -724,14 +723,15 @@ class TestAgentBot(AgentBotTestBase):
                         user_id="@alice:localhost",
                         agent_name=bot.agent_name,
                     ),
+                    sync_restart_retry_source_event_id=retry_source,
                 ),
             )
 
         if scheduled_tasks:
             await asyncio.gather(*scheduled_tasks)
 
-        assert len(store_calls) == 1
-        assert any(name.startswith("memory_save_team_") for name in scheduled_names)
+        assert len(store_calls) == expected_memory_calls
+        assert sum(name.startswith("memory_save_team_") for name in scheduled_names) == expected_memory_calls
 
     @pytest.mark.asyncio
     async def test_team_generate_response_uses_shared_thread_summary_helper_for_summary_gate(

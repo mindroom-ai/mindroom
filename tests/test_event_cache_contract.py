@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from mindroom.matrix.cache import ConversationEventCache
+from mindroom.matrix.cache import ConversationEventCache, ThreadCacheReplaceOutcome
 from tests.event_cache_test_support import replace_thread_unconditionally
 
 
@@ -269,7 +269,7 @@ class TestConversationEventCacheContract:
 
         assert appended is True
         assert revalidated is True
-        assert guarded_replacement is False
+        assert guarded_replacement is ThreadCacheReplaceOutcome.EXISTING_USABLE
         assert cached_events is not None
         assert [event["event_id"] for event in cached_events] == [
             "$thread:localhost",

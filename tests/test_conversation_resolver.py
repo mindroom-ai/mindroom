@@ -23,6 +23,11 @@ from mindroom.conversation_resolver import ConversationResolver, ConversationRes
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.logging_config import get_logger
 from mindroom.matrix.cache.thread_history_result import thread_history_result
+from mindroom.matrix.thread_diagnostics import (
+    THREAD_HISTORY_DEGRADED_DIAGNOSTIC,
+    THREAD_HISTORY_SOURCE_DEGRADED,
+    THREAD_HISTORY_SOURCE_DIAGNOSTIC,
+)
 from tests.conftest import (
     bind_runtime_paths,
     make_conversation_cache_mock,
@@ -163,6 +168,43 @@ async def test_reply_to_proven_thread_root_joins_that_thread(config: Config) -> 
     assert result.context.is_thread is True
     assert result.context.thread_id == _PARENT
     assert [message.event_id for message in result.context.thread_history] == ["$child:localhost"]
+
+
+@pytest.mark.asyncio
+async def test_reply_to_candidate_retries_strictly_after_degraded_dispatch_proof(config: Config) -> None:
+    """A dispatch backoff must not demote a candidate that strict history proves is a thread."""
+    cache = make_conversation_cache_mock()
+    degraded_history = thread_history_result(
+        [],
+        is_full_history=False,
+        diagnostics={
+            THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_DEGRADED,
+            THREAD_HISTORY_DEGRADED_DIAGNOSTIC: True,
+        },
+    )
+    strict_history = thread_history_result(
+        [make_visible_message(sender=_SENDER, body="child", event_id="$child:localhost")],
+        is_full_history=True,
+    )
+    cache.get_dispatch_thread_history = AsyncMock(return_value=degraded_history)
+    cache.get_strict_thread_history = AsyncMock(return_value=strict_history)
+    resolver = _resolver(config, conversation_cache=cache)
+
+    result = await resolver.extract_dispatch_context(_room(), _reply_event())
+
+    assert result.context.is_thread is True
+    assert result.context.thread_id == _PARENT
+    assert result.context.thread_history == strict_history
+    cache.get_dispatch_thread_history.assert_awaited_once_with(
+        _ROOM_ID,
+        _PARENT,
+        caller_label="dispatch_context",
+    )
+    cache.get_strict_thread_history.assert_awaited_once_with(
+        _ROOM_ID,
+        _PARENT,
+        caller_label="dispatch_context_strict_candidate_fallback",
+    )
 
 
 @pytest.mark.asyncio

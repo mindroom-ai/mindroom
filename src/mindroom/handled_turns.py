@@ -48,6 +48,7 @@ class SourceEventMetadata:
 
     sender: str
     timestamp_ms: float | None = None
+    discovery_event_id: str | None = None
 
     def __post_init__(self) -> None:
         """Normalize the timestamp once for every physical representation."""
@@ -58,6 +59,8 @@ class SourceEventMetadata:
         record: dict[str, object] = {"sender": self.sender}
         if self.timestamp_ms is not None:
             record["timestamp_ms"] = self.timestamp_ms
+        if self.discovery_event_id is not None:
+            record["discovery_event_id"] = self.discovery_event_id
         return record
 
     @classmethod
@@ -69,7 +72,19 @@ class SourceEventMetadata:
         sender = metadata.get("sender")
         if not isinstance(sender, str) or not sender:
             return None
-        return cls(sender=sender, timestamp_ms=normalize_timestamp_ms(metadata.get("timestamp_ms")))
+        timestamp_ms = normalize_timestamp_ms(metadata.get("timestamp_ms"))
+        return cls(sender, timestamp_ms, _normalize_string(metadata.get("discovery_event_id")))
+
+
+SourceEventRevision = tuple[int, str]
+
+
+def _prompt_source_event_id(source_event_metadata: Mapping[str, SourceEventMetadata] | None, event_id: str) -> str:
+    """Return the physical prompt owner for a source or discovery alias."""
+    for source_id, metadata in (source_event_metadata or {}).items():
+        if metadata.discovery_event_id == event_id:
+            return source_id
+    return event_id
 
 
 @dataclass(frozen=True)
@@ -85,6 +100,8 @@ class TurnRecord:
     completed: bool = True
     visible_echo_event_id: str | None = None
     source_event_prompts: Mapping[str, str] | None = None
+    source_event_revisions: Mapping[str, SourceEventRevision] | None = None
+    suppressed_source_event_revisions: Mapping[str, SourceEventRevision] | None = None
     source_event_metadata: Mapping[str, SourceEventMetadata] | None = None
     response_owner: str | None = None
     requester_id: str | None = None
@@ -121,6 +138,30 @@ class TurnRecord:
         normalized_timestamp = (
             float(timestamp) if isinstance(timestamp, int | float) and not isinstance(timestamp, bool) else 0.0
         )
+        source_event_metadata = _immutable_source_event_metadata(
+            source_event_ids,
+            self.source_event_metadata,
+            excluded_event_ids=redacted_source_event_id_set,
+        )
+        source_event_prompts = _immutable_prompt_map(
+            source_event_ids,
+            self.source_event_prompts,
+            excluded_event_ids={
+                _prompt_source_event_id(source_event_metadata, event_id) for event_id in redacted_source_event_ids
+            },
+        )
+        source_event_revisions = _immutable_source_event_revisions(
+            (*source_event_ids, *discovery_event_ids),
+            self.source_event_revisions,
+            excluded_event_ids=redacted_source_event_id_set,
+        )
+        suppressed_source_event_revisions = _immutable_source_event_revisions(
+            (*source_event_ids, *discovery_event_ids),
+            self.suppressed_source_event_revisions,
+            excluded_event_ids=redacted_source_event_id_set,
+        )
+        history_scope = self.history_scope if isinstance(self.history_scope, HistoryScope) else None
+        conversation_target = self.conversation_target if isinstance(self.conversation_target, MessageTarget) else None
         object.__setattr__(self, "source_event_ids", source_event_ids)
         object.__setattr__(self, "discovery_event_ids", discovery_event_ids)
         object.__setattr__(self, "redacted_source_event_ids", redacted_source_event_ids)
@@ -128,37 +169,15 @@ class TurnRecord:
         object.__setattr__(self, "anchor_event_id", anchor_event_id)
         object.__setattr__(self, "response_event_id", _normalize_string(self.response_event_id))
         object.__setattr__(self, "visible_echo_event_id", _normalize_string(self.visible_echo_event_id))
-        object.__setattr__(
-            self,
-            "source_event_prompts",
-            _immutable_prompt_map(
-                source_event_ids,
-                self.source_event_prompts,
-                excluded_event_ids=redacted_source_event_id_set,
-            ),
-        )
-        object.__setattr__(
-            self,
-            "source_event_metadata",
-            _immutable_source_event_metadata(
-                source_event_ids,
-                self.source_event_metadata,
-                excluded_event_ids=redacted_source_event_id_set,
-            ),
-        )
+        object.__setattr__(self, "source_event_prompts", source_event_prompts)
+        object.__setattr__(self, "source_event_revisions", source_event_revisions)
+        object.__setattr__(self, "suppressed_source_event_revisions", suppressed_source_event_revisions)
+        object.__setattr__(self, "source_event_metadata", source_event_metadata)
         object.__setattr__(self, "response_owner", _normalize_string(self.response_owner))
         object.__setattr__(self, "requester_id", _normalize_string(self.requester_id))
         object.__setattr__(self, "correlation_id", _normalize_string(self.correlation_id))
-        object.__setattr__(
-            self,
-            "history_scope",
-            self.history_scope if isinstance(self.history_scope, HistoryScope) else None,
-        )
-        object.__setattr__(
-            self,
-            "conversation_target",
-            self.conversation_target if isinstance(self.conversation_target, MessageTarget) else None,
-        )
+        object.__setattr__(self, "history_scope", history_scope)
+        object.__setattr__(self, "conversation_target", conversation_target)
         object.__setattr__(self, "timestamp", normalized_timestamp)
 
     @classmethod
@@ -174,6 +193,8 @@ class TurnRecord:
         completed: bool = True,
         visible_echo_event_id: str | None = None,
         source_event_prompts: Mapping[str, str] | None = None,
+        source_event_revisions: Mapping[str, object] | None = None,
+        suppressed_source_event_revisions: Mapping[str, object] | None = None,
         source_event_metadata: Mapping[str, object] | None = None,
         response_owner: str | None = None,
         requester_id: str | None = None,
@@ -193,6 +214,11 @@ class TurnRecord:
             completed=completed,
             visible_echo_event_id=visible_echo_event_id,
             source_event_prompts=source_event_prompts,
+            source_event_revisions=typing.cast("Mapping[str, SourceEventRevision] | None", source_event_revisions),
+            suppressed_source_event_revisions=typing.cast(
+                "Mapping[str, SourceEventRevision] | None",
+                suppressed_source_event_revisions,
+            ),
             source_event_metadata=typing.cast("Mapping[str, SourceEventMetadata] | None", source_event_metadata),
             response_owner=response_owner,
             requester_id=requester_id,
@@ -212,10 +238,14 @@ class TurnRecord:
         """Return canonical source IDs followed by non-source discovery aliases."""
         return (*self.source_event_ids, *self.discovery_event_ids)
 
+    def prompt_source_event_id(self, event_id: str) -> str:
+        """Return the physical prompt owner for a source or discovery alias."""
+        return _prompt_source_event_id(self.source_event_metadata, event_id)
+
     @property
     def replay_source_event_ids(self) -> tuple[str, ...]:
         """Return source IDs whose content remains eligible for replay or regeneration."""
-        redacted_event_ids = set(self.redacted_source_event_ids)
+        redacted_event_ids = {self.prompt_source_event_id(event_id) for event_id in self.redacted_source_event_ids}
         return tuple(event_id for event_id in self.source_event_ids if event_id not in redacted_event_ids)
 
 
@@ -228,7 +258,7 @@ class TurnRecordCodec:
         return _TURN_RECORD_SCHEMA_VERSION
 
     @staticmethod
-    def to_ledger_record(record: TurnRecord) -> dict[str, object]:
+    def to_ledger_record(record: TurnRecord) -> dict[str, object]:  # noqa: C901
         """Serialize one exact record for the versioned handled-turn ledger."""
         payload: dict[str, object] = {
             "anchor_event_id": record.anchor_event_id,
@@ -245,6 +275,14 @@ class TurnRecordCodec:
             payload["visible_echo_event_id"] = record.visible_echo_event_id
         if record.source_event_prompts is not None:
             payload["source_event_prompts"] = dict(record.source_event_prompts)
+        if record.source_event_revisions is not None:
+            payload["source_event_revisions"] = {
+                event_id: list(revision) for event_id, revision in record.source_event_revisions.items()
+            }
+        if record.suppressed_source_event_revisions is not None:
+            payload["suppressed_source_event_revisions"] = {
+                event_id: list(revision) for event_id, revision in record.suppressed_source_event_revisions.items()
+            }
         if record.source_event_metadata is not None:
             payload["source_event_metadata"] = {
                 event_id: metadata.to_record() for event_id, metadata in record.source_event_metadata.items()
@@ -303,6 +341,10 @@ class TurnRecordCodec:
             completed=completed,
             visible_echo_event_id=_normalize_string(record.get("visible_echo_event_id")),
             source_event_prompts=_mapping_or_none(record.get("source_event_prompts")),
+            source_event_revisions=_mapping_or_none(record.get("source_event_revisions")),
+            suppressed_source_event_revisions=_mapping_or_none(
+                record.get("suppressed_source_event_revisions"),
+            ),
             source_event_metadata=_mapping_or_none(record.get("source_event_metadata")),
             response_owner=_normalize_string(record.get("response_owner")),
             requester_id=_normalize_string(record.get("requester_id")),
@@ -316,7 +358,7 @@ class TurnRecordCodec:
         return turn_record
 
     @staticmethod
-    def to_run_metadata(record: TurnRecord) -> dict[str, object]:
+    def to_run_metadata(record: TurnRecord) -> dict[str, object]:  # noqa: C901
         """Project one record into the recoverable subset stored with an Agno run."""
         if not record.source_event_ids:
             return {}
@@ -332,6 +374,10 @@ class TurnRecordCodec:
             )
         if record.source_event_prompts is not None:
             metadata[constants.MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY] = dict(record.source_event_prompts)
+        if record.source_event_revisions is not None:
+            metadata[constants.MATRIX_SOURCE_EVENT_REVISIONS_METADATA_KEY] = {
+                event_id: list(revision) for event_id, revision in record.source_event_revisions.items()
+            }
         if record.source_event_metadata is not None:
             metadata[constants.MATRIX_SOURCE_EVENT_METADATA_KEY] = {
                 event_id: source_metadata.to_record()
@@ -339,6 +385,8 @@ class TurnRecordCodec:
             }
         if record.response_owner is not None:
             metadata[constants.MATRIX_RESPONSE_OWNER_METADATA_KEY] = record.response_owner
+        if record.requester_id is not None:
+            metadata["requester_id"] = record.requester_id
         if record.history_scope is not None:
             metadata[constants.MATRIX_HISTORY_SCOPE_METADATA_KEY] = record.history_scope.to_metadata()
         if record.conversation_target is not None:
@@ -380,6 +428,9 @@ class TurnRecordCodec:
             response_event_id=response_event_id,
             completed=response_event_id is not None,
             source_event_prompts=_mapping_or_none(metadata.get(constants.MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY)),
+            source_event_revisions=_mapping_or_none(
+                metadata.get(constants.MATRIX_SOURCE_EVENT_REVISIONS_METADATA_KEY),
+            ),
             source_event_metadata=_mapping_or_none(metadata.get(constants.MATRIX_SOURCE_EVENT_METADATA_KEY)),
             response_owner=_normalize_string(metadata.get(constants.MATRIX_RESPONSE_OWNER_METADATA_KEY)),
             requester_id=_normalize_string(metadata.get("requester_id")),
@@ -938,6 +989,43 @@ def _immutable_prompt_map(
         if isinstance((prompt := source_event_prompts.get(event_id)), str)
     }
     return MappingProxyType(prompt_map) if prompt_map else None
+
+
+def merge_edit_facts(ledger: TurnRecord, recovery: TurnRecord) -> tuple[dict[str, str], dict[str, SourceEventRevision]]:
+    """Merge source prompts and revisions by canonical Matrix revision."""
+    prompts = dict(ledger.source_event_prompts or {})
+    prompts.update(recovery.source_event_prompts or {})
+    revisions = dict(recovery.source_event_revisions or {})
+    ledger_prompts = ledger.source_event_prompts or {}
+    for event_id, revision in (ledger.source_event_revisions or {}).items():
+        prompt_event_id = ledger.prompt_source_event_id(event_id)
+        if revision >= revisions.get(event_id, revision) and prompt_event_id in ledger_prompts:
+            revisions[event_id] = revision
+            prompts[prompt_event_id] = ledger_prompts[prompt_event_id]
+    return prompts, revisions
+
+
+def _immutable_source_event_revisions(
+    indexed_event_ids: tuple[str, ...],
+    source_event_revisions: Mapping[str, SourceEventRevision] | None,
+    *,
+    excluded_event_ids: set[str],
+) -> Mapping[str, SourceEventRevision] | None:
+    """Normalize and freeze edit revisions belonging to canonical live sources."""
+    if not source_event_revisions:
+        return None
+    revisions = {
+        event_id: (raw_revision[0], raw_revision[1])
+        for event_id in indexed_event_ids
+        if event_id not in excluded_event_ids
+        if isinstance((raw_revision := source_event_revisions.get(event_id)), tuple | list)
+        and len(raw_revision) == 2
+        and isinstance(raw_revision[0], int)
+        and not isinstance(raw_revision[0], bool)
+        and isinstance(raw_revision[1], str)
+        and raw_revision[1]
+    }
+    return MappingProxyType(revisions) if revisions else None
 
 
 def _immutable_source_event_metadata(

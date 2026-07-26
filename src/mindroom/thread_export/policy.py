@@ -5,6 +5,8 @@ authorization answer: the target no longer accepts the room's source category, o
 membership lookup proves the scoped user is not a member. When authorization cannot be verified
 (membership lookup errors, account failures), targets keep their existing exports and simply skip
 the room for that pass; a transient homeserver error must never destroy authorized data.
+Each target may retract data only from an output directory it exclusively owns, so enabled targets
+whose resolved directories overlap by equality or nesting are all skipped before Matrix work.
 """
 
 from mindroom.thread_export.models import ThreadExportRoom, ThreadExportTarget
