@@ -168,22 +168,24 @@ class TestAIErrorDisplay:
 
         edited_messages = []
 
-        async def mock_gateway_edit_message(
+        async def mock_terminal_edit(
             client: object,  # noqa: ARG001
             room_id: str,  # noqa: ARG001
-            event_id: str,
             content: dict[str, object],
-            text: str,
             **_kwargs: object,
         ) -> DeliveredMatrixEvent:
-            edited_messages.append((event_id, text))
+            relation = content["m.relates_to"]
+            replacement = content["m.new_content"]
+            assert isinstance(relation, dict)
+            assert isinstance(replacement, dict)
+            edited_messages.append((relation["event_id"], replacement["body"]))
             return DeliveredMatrixEvent(event_id="$edit", content_sent=content)
 
         with (
             patch("mindroom.response_runner.ai_response") as mock_ai,
             patch(
-                "mindroom.delivery_gateway.edit_message_result",
-                new=AsyncMock(side_effect=mock_gateway_edit_message),
+                "mindroom.terminal_delivery.send_message_result",
+                new=AsyncMock(side_effect=mock_terminal_edit),
             ),
         ):
             _build_response_runner(bot)
@@ -530,15 +532,15 @@ class TestAIErrorDisplay:
 
         edited_messages = []
 
-        async def mock_gateway_edit_message(
+        async def mock_terminal_edit(
             client: object,  # noqa: ARG001
             room_id: str,  # noqa: ARG001
-            event_id: str,  # noqa: ARG001
             content: dict[str, object],
-            text: str,
             **_kwargs: object,
         ) -> DeliveredMatrixEvent:
-            edited_messages.append(text)
+            replacement = content["m.new_content"]
+            assert isinstance(replacement, dict)
+            edited_messages.append(replacement["body"])
             return DeliveredMatrixEvent(event_id="$edit", content_sent=content)
 
         error_messages = [
@@ -555,8 +557,8 @@ class TestAIErrorDisplay:
             with (
                 patch("mindroom.response_runner.ai_response") as mock_ai,
                 patch(
-                    "mindroom.delivery_gateway.edit_message_result",
-                    new=AsyncMock(side_effect=mock_gateway_edit_message),
+                    "mindroom.terminal_delivery.send_message_result",
+                    new=AsyncMock(side_effect=mock_terminal_edit),
                 ),
             ):
                 _build_response_runner(bot)

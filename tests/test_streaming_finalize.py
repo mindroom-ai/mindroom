@@ -40,7 +40,7 @@ from mindroom.post_response_effects import (
 )
 from mindroom.response_lifecycle import ResponseLifecycle, ResponseLifecycleDeps
 from mindroom.streaming import StreamingResponse, send_streaming_response
-from mindroom.terminal_delivery import TerminalDeliveryAttempt, TerminalDeliveryCommit
+from mindroom.terminal_delivery import TerminalDeliveryCommit
 from tests.conftest import (
     bind_runtime_paths,
     make_matrix_client_mock,
@@ -217,7 +217,7 @@ async def test_completed_terminal_edit_uses_durable_first_attempt(tmp_path: Path
     terminal_edit = AsyncMock(
         return_value=TerminalStreamDelivery(
             commit=SimpleNamespace(
-                attempt=TerminalDeliveryAttempt.transient("edit_failed"),
+                status="deferred",
                 pending=object(),
                 lifecycle_managed=True,
             ),
@@ -499,8 +499,6 @@ async def test_transport_failed_terminal_update_ignores_hidden_canonical_interac
             terminal_delivery_coordinator=terminal_delivery_coordinator_for(runtime_paths_for(config), "code"),
         ),
     )
-    gateway.deps.terminal_delivery_coordinator.record.return_value = MagicMock()
-
     outcome = await gateway.finalize_streamed_response(
         FinalizeStreamedResponseRequest(
             target=MessageTarget.resolve("!room:localhost", None, "$reply"),
@@ -511,6 +509,8 @@ async def test_transport_failed_terminal_update_ignores_hidden_canonical_interac
                 visible_body_state="visible_body",
                 canonical_final_body_candidate="yes\n\n- ✅ approve",
                 failure_reason="terminal_update_failed",
+                deferred_terminal_delivery=True,
+                durable_lifecycle_managed=True,
             ),
             initial_delivery_kind="sent",
             identity=ResponseIdentity(
@@ -535,8 +535,6 @@ async def test_transport_failed_terminal_update_ignores_hidden_canonical_interac
 async def test_durable_stream_failure_does_not_rebuild_terminal_payload(tmp_path: Path) -> None:
     """Finalization must reuse the row created before the stream's first edit attempt."""
     gateway = _delivery_gateway(tmp_path)
-    record = AsyncMock()
-    object.__setattr__(gateway, "_record_stream_terminal_delivery", record)
 
     outcome = await gateway.finalize_streamed_response(
         FinalizeStreamedResponseRequest(
@@ -562,7 +560,6 @@ async def test_durable_stream_failure_does_not_rebuild_terminal_payload(tmp_path
         ),
     )
 
-    record.assert_not_awaited()
     gateway.deps.response_hooks.apply_final_response_transform.assert_not_awaited()
     assert outcome.failure_reason == _DURABLE_TERMINAL_RETRY_FAILURE_REASON
     assert outcome.deferred_terminal_delivery is True
@@ -645,8 +642,8 @@ async def test_final_delivery_failure_replaces_placeholder_with_failure_update(t
     coordinator = gateway.deps.terminal_delivery_coordinator
     coordinator.commit_and_attempt.return_value = TerminalDeliveryCommit(
         item=None,
-        attempt=TerminalDeliveryAttempt.transient("edit_failed"),
-        settled=False,
+        status="deferred",
+        reason="edit_failed",
     )
     object.__setattr__(
         gateway,
@@ -682,14 +679,14 @@ async def test_final_delivery_failure_replaces_placeholder_with_failure_update(t
 
 
 @pytest.mark.asyncio
-async def test_persistent_sync_recovery_barrier_settles_placeholder_as_delivery_failure(tmp_path: Path) -> None:
-    """A transient durable commit should still run placeholder failure settlement."""
+async def test_durable_pending_edit_never_competes_with_placeholder_failure_update(tmp_path: Path) -> None:
+    """A frozen stable transaction must remain the only edit after an ambiguous failure."""
     gateway = _delivery_gateway(tmp_path)
     coordinator = gateway.deps.terminal_delivery_coordinator
     coordinator.commit_and_attempt.return_value = TerminalDeliveryCommit(
-        item=None,
-        attempt=TerminalDeliveryAttempt.transient("edit_failed"),
-        settled=False,
+        item=MagicMock(settled=False),
+        status="deferred",
+        reason="edit_failed",
     )
     object.__setattr__(gateway, "edit_text", AsyncMock(return_value=False))
     outcome = await gateway.deliver_final(
@@ -709,11 +706,11 @@ async def test_persistent_sync_recovery_barrier_settles_placeholder_as_delivery_
     )
 
     coordinator.commit_and_attempt.assert_awaited_once()
-    gateway.edit_text.assert_awaited_once()
-    assert gateway.edit_text.await_args.args[0].retry_sync_recovery is False
+    gateway.edit_text.assert_not_awaited()
     assert outcome.terminal_status == "error"
     assert outcome.final_visible_event_id == "$placeholder"
-    assert outcome.failure_reason == "delivery_failed"
+    assert outcome.failure_reason == "delivery_failed_pending_durable_retry"
+    assert outcome.deferred_terminal_delivery
 
 
 @pytest.mark.asyncio

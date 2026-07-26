@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from copy import deepcopy
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from html import escape as html_escape
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -51,8 +51,6 @@ from mindroom.streaming import (
     send_streaming_response,
 )
 from mindroom.terminal_delivery import (
-    PendingTerminalDelivery,
-    TerminalDeliveryAttempt,
     TerminalDeliveryCommit,
     TerminalDeliveryCoordinator,
     TerminalDeliveryIntent,
@@ -218,7 +216,6 @@ class EditTextRequest:  # noqa: D101
     tool_trace: list[ToolTraceEntry] | None = None
     extra_content: dict[str, Any] | None = None
     retry_sync_recovery: bool = False
-    transaction_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -522,7 +519,6 @@ class DeliveryGateway:
             target_event_id=target_event_id,
             identity=identity,
             interactive_metadata=interactive_metadata,
-            thread_summary_entity_name=self.deps.agent_name,
             body=body,
             wire_content=wire_content,
         )
@@ -551,57 +547,11 @@ class DeliveryGateway:
         if intent is None:
             return TerminalDeliveryCommit(
                 item=None,
-                attempt=TerminalDeliveryAttempt.transient("terminal_intent_unavailable"),
-                settled=False,
+                status="deferred",
+                reason="terminal_intent_unavailable",
                 lifecycle_managed=False,
             )
         return await self.deps.terminal_delivery_coordinator.commit_and_attempt(intent)
-
-    async def _record_stream_terminal_delivery(
-        self,
-        request: FinalizeStreamedResponseRequest,
-        *,
-        stream_outcome: StreamTransportOutcome,
-        failure_reason: str,
-        target_event_id: str | None,
-    ) -> PendingTerminalDelivery | None:
-        """Persist the stream's committed final body when only Matrix transport failed.
-
-        Only a completed stream is durably retried. ``StreamTransportOutcome`` carries
-        the canonical success body, but the terminal text for an error or cancellation
-        (its note-suffixed rendering) is not exposed, and publishing an approximation
-        of a terminal notice later would be worse than leaving today's behaviour.
-        """
-        canonical_body = stream_outcome.canonical_final_body_candidate
-        if (
-            target_event_id is None
-            or canonical_body is None
-            or not canonical_body.strip()
-            or stream_outcome.terminal_status != "completed"
-            or not _is_placeholder_delivery_failure(failure_reason)
-        ):
-            return None
-        interactive_response = interactive.parse_and_format_interactive(canonical_body, extract_mapping=True)
-        intent = await self._prepare_terminal_delivery_intent(
-            target=request.target,
-            target_event_id=target_event_id,
-            identity=request.identity,
-            body=interactive_response.formatted_text,
-            tool_trace=request.tool_trace,
-            extra_content=request.extra_content,
-            interactive_metadata=interactive_response.interactive_metadata,
-        )
-        if intent is None:
-            return None
-        recorded = await self.deps.terminal_delivery_coordinator.record(intent)
-        if recorded is not None:
-            self.deps.logger.warning(
-                "Persisted terminal delivery for durable retry",
-                correlation_id=request.identity.correlation_id,
-                **recorded.log_context,
-                **request.target.log_context,
-            )
-        return recorded
 
     async def send_text(self, request: SendTextRequest) -> str | None:
         """Send one response message to a room."""
@@ -717,7 +667,6 @@ class DeliveryGateway:
                 content,
                 request.new_text,
                 retry_sync_recovery=request.retry_sync_recovery,
-                transaction_id=request.transaction_id,
             )
         except SendRetryError:
             delivered = None
@@ -884,7 +833,7 @@ class DeliveryGateway:
                     tool_trace=tuple(draft.tool_trace or ()),
                     extra_content=draft.extra_content,
                 )
-            if commit.attempt.result == "delivered":
+            if commit.status == "delivered":
                 return FinalDeliveryOutcome(
                     terminal_status="completed",
                     event_id=request.existing_event_id,
@@ -896,30 +845,14 @@ class DeliveryGateway:
                     extra_content=draft.extra_content,
                     interactive_metadata=interactive_response.interactive_metadata,
                 )
-            if commit.attempt.result == "superseded":
+            if commit.status == "superseded":
                 return FinalDeliveryOutcome(
                     terminal_status="error",
                     event_id=request.existing_event_id,
                     is_visible_response=True,
-                    failure_reason=commit.attempt.reason,
+                    failure_reason=commit.reason,
                     tool_trace=tuple(draft.tool_trace or ()),
                     extra_content=draft.extra_content,
-                )
-            # The visible repair still runs even once a durable row exists. Recording
-            # does not classify the failure, so a permanently rejected edit would
-            # otherwise leave the placeholder spinning forever; a later successful
-            # retry simply replaces the failure note with the real answer.
-            failure_reason = _DURABLE_TERMINAL_RETRY_FAILURE_REASON if commit.pending is not None else "delivery_failed"
-            if request.existing_event_is_placeholder:
-                return await self._finish_placeholder_delivery_failure(
-                    _PlaceholderFailureUpdateRequest(
-                        target=request.target,
-                        event_id=request.existing_event_id,
-                        identity=request.identity,
-                        failure_reason=failure_reason,
-                        tool_trace=draft.tool_trace,
-                        extra_content=draft.extra_content,
-                    ),
                 )
             if commit.pending is not None:
                 return FinalDeliveryOutcome(
@@ -930,6 +863,17 @@ class DeliveryGateway:
                     deferred_terminal_delivery=True,
                     tool_trace=tuple(draft.tool_trace or ()),
                     extra_content=draft.extra_content,
+                )
+            if request.existing_event_is_placeholder:
+                return await self._finish_placeholder_delivery_failure(
+                    _PlaceholderFailureUpdateRequest(
+                        target=request.target,
+                        event_id=request.existing_event_id,
+                        identity=request.identity,
+                        failure_reason="delivery_failed",
+                        tool_trace=draft.tool_trace,
+                        extra_content=draft.extra_content,
+                    ),
                 )
             return FinalDeliveryOutcome(
                 terminal_status="error",
@@ -1318,37 +1262,27 @@ class DeliveryGateway:
             )
 
         if _is_placeholder_delivery_failure(failure_reason):
-            pending_delivery = None
-            if not stream_outcome.deferred_terminal_delivery:
-                pending_delivery = await self._record_stream_terminal_delivery(
-                    request,
-                    stream_outcome=stream_outcome,
-                    failure_reason=failure_reason,
-                    target_event_id=placeholder_event_id,
+            if stream_outcome.deferred_terminal_delivery:
+                return FinalDeliveryOutcome(
+                    terminal_status="error",
+                    event_id=placeholder_event_id,
+                    is_visible_response=True,
+                    failure_reason=_DURABLE_TERMINAL_RETRY_FAILURE_REASON,
+                    deferred_terminal_delivery=True,
+                    durable_lifecycle_managed=stream_outcome.durable_lifecycle_managed,
+                    tool_trace=tuple(request.tool_trace or ()),
+                    extra_content=request.extra_content,
                 )
-            # As in deliver_final, the placeholder is repaired even when a durable
-            # row exists, so an undeliverable payload cannot strand it.
-            outcome = await self._finish_placeholder_delivery_failure(
+            return await self._finish_placeholder_delivery_failure(
                 _PlaceholderFailureUpdateRequest(
                     target=request.target,
                     event_id=placeholder_event_id,
                     identity=request.identity,
-                    failure_reason=(
-                        _DURABLE_TERMINAL_RETRY_FAILURE_REASON
-                        if pending_delivery is not None or stream_outcome.deferred_terminal_delivery
-                        else failure_reason
-                    ),
+                    failure_reason=failure_reason,
                     tool_trace=request.tool_trace,
                     extra_content=request.extra_content,
                 ),
             )
-            if stream_outcome.durable_lifecycle_managed:
-                return replace(
-                    outcome,
-                    deferred_terminal_delivery=stream_outcome.deferred_terminal_delivery,
-                    durable_lifecycle_managed=True,
-                )
-            return outcome
 
         return await self._cleanup_completed_placeholder_only_stream(
             room_id=request.target.room_id,
@@ -1609,24 +1543,17 @@ class DeliveryGateway:
             try:
                 if stream_outcome.failure_reason is not None:
                     failure_reason = stream_outcome.failure_reason or "terminal_update_failed"
-                    pending_delivery = None
-                    if not stream_outcome.deferred_terminal_delivery:
-                        pending_delivery = await self._record_stream_terminal_delivery(
-                            request,
-                            stream_outcome=stream_outcome,
-                            failure_reason=failure_reason,
-                            target_event_id=streamed_event_id,
-                        )
-                    has_pending_delivery = pending_delivery is not None or stream_outcome.deferred_terminal_delivery
                     return FinalDeliveryOutcome(
                         terminal_status="error",
                         event_id=visible_stream_event_id,
                         is_visible_response=True,
                         final_visible_body=streamed_text,
                         failure_reason=(
-                            _DURABLE_TERMINAL_RETRY_FAILURE_REASON if has_pending_delivery else failure_reason
+                            _DURABLE_TERMINAL_RETRY_FAILURE_REASON
+                            if stream_outcome.deferred_terminal_delivery
+                            else failure_reason
                         ),
-                        deferred_terminal_delivery=has_pending_delivery,
+                        deferred_terminal_delivery=stream_outcome.deferred_terminal_delivery,
                         durable_lifecycle_managed=stream_outcome.durable_lifecycle_managed,
                         tool_trace=tuple(request.tool_trace or ()),
                         extra_content=request.extra_content,

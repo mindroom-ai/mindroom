@@ -3303,6 +3303,7 @@ depends_on = [
     "mindroom.matrix.client_delivery",
     "mindroom.model_instance_checks",
     "mindroom.model_loading",
+    "mindroom.response_identity",
     "mindroom.thread_tag_vocabulary",
     "mindroom.thread_tags",
 ]
@@ -3347,8 +3348,8 @@ depends_on = [
 [[modules]]
 path = "mindroom.post_response_effects"
 depends_on = [
-    "mindroom.delivery_gateway",
     "mindroom.matrix.conversation_cache",
+    "mindroom.response_identity",
     "mindroom.runtime_protocols",
     "mindroom.thread_summary",
 ]
@@ -4066,7 +4067,6 @@ expose = [
     "send_audio_message",
     "send_file_message",
     "send_message_result",
-    "send_prepared_message_result",
     "send_runtime_encrypted_media_message",
 ]
 from = ["mindroom.matrix.client_delivery"]

@@ -496,6 +496,7 @@ class AgentBot:
             TerminalDeliveryCoordinatorDeps(
                 runtime=self._runtime_view,
                 store=terminal_delivery_store,
+                turn_store=self._turn_store,
                 conversation_cache=self._conversation_cache,
                 response_hooks=response_hooks,
                 post_response_effects=self._post_response_effects_support,
@@ -580,7 +581,6 @@ class AgentBot:
         self._redacted_turn_cleanup = RedactedTurnCleanup(
             RedactedTurnCleanupDeps(
                 conversation_cache=self._conversation_cache,
-                turn_store=self._turn_store,
                 terminal_delivery_coordinator=self._terminal_delivery_coordinator,
             ),
         )
@@ -606,17 +606,6 @@ class AgentBot:
                 interrupted_turn_rooms=self._interrupted_turn_rooms,
             ),
         )
-
-    async def _start_durable_terminal_delivery(self) -> None:
-        """Load durable terminal-delivery state and start its retry worker.
-
-        The worker is safe to start before the first sync: ``_terminal_delivery_ready``
-        keeps it idle until this bot is running with a live, synced Matrix client.
-        """
-        recovered = await asyncio.to_thread(self._terminal_delivery_coordinator.store.warm)
-        if recovered:
-            self.logger.warning("terminal_delivery_startup_recovery", recovered_count=len(recovered))
-        self._terminal_delivery_coordinator.start()
 
     def _terminal_delivery_ready(self) -> bool:
         """Return whether durable terminal delivery may talk to Matrix right now."""
@@ -1215,9 +1204,7 @@ class AgentBot:
         if first_sync_response or has_deferred_overdue_tasks():
             self._maybe_start_deferred_overdue_task_drain()
 
-        # Limited-sync timeline recovery closes its gaps while a sync response is
-        # applied, so every applied sync is the practical recovery-ready signal for
-        # durable terminal delivery. Missing one only delays the periodic scan.
+        # Applied sync state may unblock a previously deferred terminal edit.
         self._terminal_delivery_coordinator.wake(reason="sync_response_applied")
 
     async def _on_sync_response(self, _response: nio.SyncResponse | nio.SlidingSyncResponse) -> None:
@@ -1469,7 +1456,7 @@ class AgentBot:
         if call_manager is not None:
             await call_manager.on_room_membership_event(room, event)
 
-    async def start(self) -> None:
+    async def start(self) -> None:  # noqa: PLR0915
         """Start the agent bot with user account setup (but don't join rooms yet)."""
         self._validate_runtime_support_injection_contract_for_startup()
         await self.ensure_user_account()
@@ -1489,7 +1476,10 @@ class AgentBot:
             await self._set_avatar_if_available()
             # Keep durable tracking-state loading off the event loop at startup.
             await asyncio.to_thread(self._turn_store.warm)
-            await self._start_durable_terminal_delivery()
+            recovered = await asyncio.to_thread(self._terminal_delivery_coordinator.store.warm)
+            if recovered:
+                self.logger.warning("terminal_delivery_startup_recovery", recovered_count=len(recovered))
+            self._terminal_delivery_coordinator.start()
             await asyncio.to_thread(interactive.init_persistence, self.runtime_paths.storage_root)
             client = self.client
             assert client is not None
@@ -1567,21 +1557,16 @@ class AgentBot:
             self.logger.info("agent_setup_complete", user_id=self.agent_user.user_id)
             await self._emit_agent_lifecycle_event(EVENT_AGENT_STARTED)
         except Exception:
-            await self._abort_startup()
+            client = self.client
+            self.running = False
+            self.client = None
+            await self._terminal_delivery_coordinator.stop()
+            if client is not None:
+                try:
+                    await client.close()
+                except Exception:
+                    self.logger.warning("Failed to close Matrix client after startup failure", exc_info=True)
             raise
-
-    async def _abort_startup(self) -> None:
-        """Release everything one failed startup attempt may already have claimed."""
-        client = self.client
-        self.running = False
-        self.client = None
-        await self._terminal_delivery_coordinator.stop()
-        if client is None:
-            return
-        try:
-            await client.close()
-        except Exception:
-            self.logger.warning("Failed to close Matrix client after startup failure", exc_info=True)
 
     async def try_start(self) -> bool:
         """Try to start the agent bot with smart retry logic.

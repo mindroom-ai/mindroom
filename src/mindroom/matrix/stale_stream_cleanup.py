@@ -105,18 +105,13 @@ class _InterruptedThread:
     timestamp_ms: int = field(default=0, compare=False)
 
 
-def _no_pending_terminal_deliveries(_room_id: str) -> frozenset[str]:
-    """Return no durably owned event IDs for actors without a durable delivery store."""
-    return frozenset()
-
-
 @dataclass(frozen=True)
 class StaleStreamCleanupActor:
     """One bot account that may repair its own stale messages."""
 
     client: nio.AsyncClient
     conversation_cache: ConversationCacheProtocol | None
-    pending_terminal_delivery_event_ids: Callable[[str], frozenset[str]] = _no_pending_terminal_deliveries
+    pending_terminal_delivery_event_ids: Callable[[str], frozenset[str]]
 
 
 @dataclass(frozen=True)

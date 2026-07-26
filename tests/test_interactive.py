@@ -1453,7 +1453,10 @@ Just let me know your preference!"""
             file_obj.flush()
             raise _InterruptedWriteError
 
-        with patch("mindroom.interactive.json.dump", side_effect=_partial_dump):
+        with (
+            patch("mindroom.interactive.json.dump", side_effect=_partial_dump),
+            pytest.raises(OSError, match="persistence failed"),
+        ):
             interactive.register_interactive_question(
                 "$question456",
                 "!room:localhost",

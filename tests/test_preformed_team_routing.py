@@ -321,7 +321,7 @@ async def test_preformed_team_rejection_edits_existing_message(config_with_team:
     bot.orchestrator.agent_bots = {"a1": MagicMock()}
 
     with patch(
-        "mindroom.delivery_gateway.edit_message_result",
+        "mindroom.terminal_delivery.send_message_result",
         new=AsyncMock(
             return_value=DeliveredMatrixEvent(
                 event_id="$existing_response",
@@ -346,9 +346,11 @@ async def test_preformed_team_rejection_edits_existing_message(config_with_team:
         )
 
     assert resolution == "$existing_response"
-    assert mock_edit.await_args.args[2] == "$existing_response"
+    edit_content = mock_edit.await_args.args[2]
+    assert edit_content["m.relates_to"]["event_id"] == "$existing_response"
     assert (
-        mock_edit.await_args.args[4] == "Team 't1' includes agent 'a2' that could not be materialized for this request."
+        edit_content["m.new_content"]["body"]
+        == "Team 't1' includes agent 'a2' that could not be materialized for this request."
     )
 
 

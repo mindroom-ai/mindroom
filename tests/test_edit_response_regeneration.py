@@ -440,7 +440,7 @@ async def test_bot_regenerates_response_on_edit(tmp_path: Path) -> None:
         ),
         patch.object(bot._conversation_resolver, "extract_message_context", new_callable=AsyncMock) as mock_context,
         patch(
-            "mindroom.delivery_gateway.edit_message_result",
+            "mindroom.terminal_delivery.send_message_result",
             new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit")),
         ) as mock_edit,
     ):
@@ -464,9 +464,9 @@ async def test_bot_regenerates_response_on_edit(tmp_path: Path) -> None:
         edit_args = mock_edit.call_args.args
         assert edit_args[0] is bot.client
         assert edit_args[1] == room.room_id
-        assert edit_args[2] == response_event_id
-        assert edit_args[4] == "The answer is 6"
-        assert "m.relates_to" not in edit_args[3]
+        assert edit_args[2]["m.relates_to"]["event_id"] == response_event_id
+        assert edit_args[2]["m.new_content"]["body"] == "The answer is 6"
+        assert "m.relates_to" not in edit_args[2]["m.new_content"]
 
         # Verify that the response tracker still maps to the same response
         assert _response_event_id(bot, original_event.event_id) == response_event_id

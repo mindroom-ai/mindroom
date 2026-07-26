@@ -2307,7 +2307,7 @@ class TestAgentBot(AgentBotTestBase):
                 new=AsyncMock(side_effect=delivered_matrix_side_effect("$response")),
             ),
             patch(
-                "mindroom.delivery_gateway.edit_message_result",
+                "mindroom.terminal_delivery.send_message_result",
                 new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit")),
             ),
             patch.object(
@@ -2350,16 +2350,18 @@ class TestAgentBot(AgentBotTestBase):
         assert all(
             await_args.args == ("!test:localhost", "$thread") for await_args in mock_get_thread_history.await_args_list
         )
-        mock_thread_summary.assert_awaited_once_with(
-            client=bot.client,
-            room_id="!test:localhost",
-            thread_id="$thread",
-            config=config,
-            runtime_paths=bot.runtime_paths,
-            conversation_cache=bot._conversation_cache,
-            entity_name=bot.agent_name,
-        )
-        assert "thread_summary_!test:localhost_$thread" in scheduled_names
+        mock_thread_summary.assert_awaited_once()
+        summary_kwargs = mock_thread_summary.await_args.kwargs
+        assert summary_kwargs["client"] is bot.client
+        assert summary_kwargs["room_id"] == "!test:localhost"
+        assert summary_kwargs["thread_id"] == "$thread"
+        assert summary_kwargs["config"] is config
+        assert summary_kwargs["runtime_paths"] is bot.runtime_paths
+        assert summary_kwargs["conversation_cache"] is bot._conversation_cache
+        assert summary_kwargs["entity_name"] == bot.agent_name
+        assert summary_kwargs["raise_on_failure"] is True
+        assert callable(summary_kwargs["frozen_delivery"])
+        assert "thread_summary_!test:localhost_$thread" not in scheduled_names
 
     @pytest.mark.asyncio
     async def test_generate_response_keeps_first_turn_follow_up_effects_in_new_thread(

@@ -791,7 +791,7 @@ def register_interactive_question(
     *,
     question_text: str = "",
     option_labels: dict[str, str] | None = None,
-) -> bool:
+) -> None:
     """Register an interactive question for tracking.
 
     Args:
@@ -816,10 +816,11 @@ def register_interactive_question(
                 option_labels=dict(option_labels or {}),
             ),
         )
-        persisted = _save_active_questions_locked()
+        if not _save_active_questions_locked():
+            message = "Interactive question persistence failed"
+            raise OSError(message)
     with bound_log_context(room_id=room_id, thread_id=thread_id):
         logger.info("Registered interactive question", event_id=event_id, options=len(option_map))
-    return persisted
 
 
 def clear_interactive_question(event_id: str) -> None:

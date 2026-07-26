@@ -13,17 +13,15 @@ from collections.abc import Mapping  # noqa: TC003
 from dataclasses import asdict, dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Literal, cast
 
-import nio
+from pydantic import TypeAdapter
 
 from mindroom.durable_write import write_json_file_durable
-from mindroom.file_locks import advisory_file_lock
-from mindroom.hooks import MessageEnvelope
-from mindroom.interactive import InteractiveMetadata
+from mindroom.interactive import InteractiveMetadata  # noqa: TC001
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import send_message_result
-from mindroom.message_target import MessageTarget
-from mindroom.response_identity import ResponseIdentity
-from mindroom.turn_origin import SenderKind, TurnIntent, TurnOrigin, TurnTrust
+from mindroom.message_target import MessageTarget  # noqa: TC001
+from mindroom.response_identity import FrozenThreadSummary, ResponseIdentity  # noqa: TC001
+from mindroom.turn_origin import SenderKind, TurnIntent, TurnOrigin, TurnTrust  # noqa: F401
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -35,37 +33,16 @@ if TYPE_CHECKING:
     from mindroom.matrix.conversation_cache import ConversationCacheProtocol
     from mindroom.post_response_effects import PostResponseEffectsSupport
     from mindroom.runtime_protocols import SupportsClientConfig
+    from mindroom.turn_store import TurnStore
 
 logger = get_logger(__name__)
 
-TERMINAL_DELIVERY_SCHEMA_VERSION = 6
+TERMINAL_DELIVERY_SCHEMA_VERSION = 7
 DEFAULT_POLL_INTERVAL_SECONDS = 15.0
+_ITEM_ADAPTER: TypeAdapter[PendingTerminalDelivery] | None = None
 
-TerminalDeliveryAttemptResult = Literal["delivered", "transient", "superseded"]
+TerminalDeliveryStatus = Literal["delivered", "deferred", "superseded"]
 TerminalDeliveryLifecycleStep = Literal["interactive", "thread_summary"]
-
-
-@dataclass(frozen=True, slots=True)
-class TerminalDeliveryAttempt:
-    """One classified transport attempt."""
-
-    result: TerminalDeliveryAttemptResult
-    reason: str
-
-    @classmethod
-    def delivered_now(cls, reason: str = "delivered") -> TerminalDeliveryAttempt:
-        """Build a successful result."""
-        return cls("delivered", reason)
-
-    @classmethod
-    def transient(cls, reason: str) -> TerminalDeliveryAttempt:
-        """Build a retryable result."""
-        return cls("transient", reason)
-
-    @classmethod
-    def superseded(cls, reason: str) -> TerminalDeliveryAttempt:
-        """Build an obsolete result."""
-        return cls("superseded", reason)
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,7 +52,6 @@ class TerminalDeliveryIntent:
     target_event_id: str
     identity: ResponseIdentity
     interactive_metadata: InteractiveMetadata | None
-    thread_summary_entity_name: str
     body: str
     wire_content: Mapping[str, Any]
 
@@ -89,22 +65,22 @@ class TerminalDeliveryIntent:
 
 @dataclass(frozen=True, slots=True)
 class PendingTerminalDelivery:
-    """Persisted transport and lifecycle progress."""
+    """Persisted transport, lifecycle, and handled-ledger receipt progress."""
 
     delivery_id: str
     target_event_id: str
     identity: ResponseIdentity
     interactive_metadata: InteractiveMetadata | None
-    thread_summary_entity_name: str
     revision: int
     body: str
     wire_content: Mapping[str, Any]
-    transaction_id: str
     attempts: int
     next_attempt_at: float
     transport_delivered: bool = False
     after_response_claimed: bool = False
     completed_lifecycle_steps: tuple[TerminalDeliveryLifecycleStep, ...] = ()
+    thread_summary: FrozenThreadSummary | None = None
+    settled: bool = False
 
     @property
     def log_context(self) -> dict[str, object]:
@@ -121,62 +97,43 @@ class PendingTerminalDelivery:
         """Return every source whose redaction supersedes this delivery."""
         return self.identity.source_event_ids or (self.identity.response_envelope.source_event_id,)
 
-
-@dataclass
-class _StoreState:
-    items: dict[str, PendingTerminalDelivery] = field(default_factory=dict)
-    redacted: frozenset[str] = frozenset()
-    lock: threading.RLock = field(default_factory=threading.RLock)
-    loaded: bool = False
-
-
-_STORE_STATES: dict[str, _StoreState] = {}
-_STORE_STATES_LOCK = threading.Lock()
-
-
-def _reset_terminal_delivery_store_runtime() -> None:
-    """Forget process-local store caches for tests and forked runtimes."""
-    with _STORE_STATES_LOCK:
-        _STORE_STATES.clear()
+    @property
+    def transaction_id(self) -> str:
+        """Derive the stable Matrix transaction identity without persisting it twice."""
+        return f"mindroom-terminal-{self.delivery_id}-{self.revision}"
 
 
 @dataclass
 class TerminalDeliveryStore:
-    """Copy-on-write JSON store for one entity's outstanding terminal work."""
+    """One-file-per-row store for outstanding terminal work and settled receipts."""
 
     agent_name: str
     base_path: Path
     clock: Callable[[], float] = time.time
-    _store_file: Path = field(init=False)
-    _lock_file: Path = field(init=False)
-    _state: _StoreState = field(init=False)
+    _store_dir: Path = field(init=False)
+    _items: dict[str, PendingTerminalDelivery] = field(default_factory=dict, init=False)
+    _lock: threading.RLock = field(default_factory=threading.RLock, init=False)
+    _loaded: bool = field(default=False, init=False)
 
     def __post_init__(self) -> None:
-        """Bind this instance to its process-shared durable state."""
+        """Validate the entity key and derive its private row directory."""
         if not self.agent_name or any(part in self.agent_name for part in ("..", "/", "\\")):
             message = f"Invalid terminal delivery store agent name: {self.agent_name!r}"
             raise ValueError(message)
-        self._store_file = self.base_path / f"{self.agent_name}_pending_terminal_deliveries.json"
-        self._lock_file = self._store_file.with_suffix(".json.lock")
-        with _STORE_STATES_LOCK:
-            self._state = _STORE_STATES.setdefault(str(self._store_file.absolute()), _StoreState())
+        self._store_dir = self.base_path / f"{self.agent_name}_pending_terminal_deliveries"
 
     def warm(self) -> tuple[PendingTerminalDelivery, ...]:
-        """Reload outstanding work from disk."""
-        with self._state.lock:
+        """Reload outstanding work from independent row files."""
+        with self._lock:
             self._load(force=True)
-            return tuple(self._state.items.values())
+            return tuple(self._items.values())
 
-    def record(self, intent: TerminalDeliveryIntent) -> PendingTerminalDelivery | None:
+    def record(self, intent: TerminalDeliveryIntent) -> PendingTerminalDelivery:
         """Atomically insert or supersede one frozen intent."""
-        now = self.clock()
-        with self._state.lock:
+        with self._lock:
             self._load()
-            source_event_ids = intent.identity.source_event_ids or (intent.identity.response_envelope.source_event_id,)
-            if self._state.redacted.intersection((*source_event_ids, intent.target_event_id)):
-                return None
-            existing = self._state.items.get(intent.delivery_id)
-            if existing is not None and (intent.identity.correlation_id == existing.identity.correlation_id):
+            existing = self._items.get(intent.delivery_id)
+            if existing is not None and intent.identity.correlation_id == existing.identity.correlation_id:
                 return existing
             revision = 0 if existing is None else existing.revision + 1
             item = PendingTerminalDelivery(
@@ -184,39 +141,44 @@ class TerminalDeliveryStore:
                 target_event_id=intent.target_event_id,
                 identity=intent.identity,
                 interactive_metadata=intent.interactive_metadata,
-                thread_summary_entity_name=intent.thread_summary_entity_name,
                 revision=revision,
                 body=intent.body,
-                wire_content=json.loads(json.dumps(dict(intent.wire_content))),
-                transaction_id=f"mindroom-terminal-{intent.delivery_id}-{revision}",
+                wire_content=_json_mapping(intent.wire_content),
                 attempts=0,
-                next_attempt_at=now,
+                next_attempt_at=self.clock(),
             )
-            items = dict(self._state.items)
-            items[item.delivery_id] = item
-            self._commit(items, self._state.redacted)
+            self._publish(item)
             return item
 
     def get(self, delivery_id: str) -> PendingTerminalDelivery | None:
         """Return one current row."""
-        with self._state.lock:
+        with self._lock:
             self._load()
-            return self._state.items.get(delivery_id)
+            return self._items.get(delivery_id)
 
     def items(self) -> tuple[PendingTerminalDelivery, ...]:
         """Return all rows."""
-        with self._state.lock:
+        with self._lock:
             self._load()
-            return tuple(self._state.items.values())
+            return tuple(self._items.values())
+
+    def matching(self, *, room_id: str, event_id: str) -> tuple[PendingTerminalDelivery, ...]:
+        """Return rows sourced from or targeting one redacted event."""
+        return tuple(
+            item
+            for item in self.items()
+            if event_id in item.source_event_ids
+            or (item.target.room_id == room_id and item.target_event_id == event_id)
+        )
 
     def pending_target_event_ids(self, room_id: str | None = None) -> frozenset[str]:
-        """Return visible targets still owned by this store."""
+        """Return visible targets still owned by pending work or an unsettled receipt."""
         return frozenset(
             item.target_event_id for item in self.items() if room_id is None or item.target.room_id == room_id
         )
 
     def due(self, *, limit: int) -> tuple[PendingTerminalDelivery, ...]:
-        """Read due work round-robin across rooms without durable leases."""
+        """Read due work round-robin across rooms."""
         due = sorted(
             (item for item in self.items() if item.next_attempt_at <= self.clock()),
             key=lambda item: (item.next_attempt_at, item.delivery_id),
@@ -231,207 +193,118 @@ class TerminalDeliveryStore:
                     selected.append(queue.popleft())
         return tuple(selected)
 
-    def mark_transport_delivered(self, delivery_id: str, *, revision: int) -> PendingTerminalDelivery | None:
-        """Checkpoint transport success."""
-        return self._replace_current(delivery_id, revision, transport_delivered=True)
-
-    def claim_after_response(self, delivery_id: str, *, revision: int) -> bool:
-        """Claim the at-most-once hook before invoking it."""
-        with self._state.lock:
-            self._load()
-            item = self._current(delivery_id, revision)
-            if item is None or item.after_response_claimed:
-                return False
-            self._replace(item, after_response_claimed=True)
-            return True
-
-    def complete_lifecycle_step(
+    def update(
         self,
         delivery_id: str,
         *,
         revision: int,
-        step: TerminalDeliveryLifecycleStep,
-    ) -> None:
-        """Checkpoint one successful effect."""
-        with self._state.lock:
+        **changes: object,
+    ) -> PendingTerminalDelivery | None:
+        """Replace one exact row and persist only that row."""
+        with self._lock:
             self._load()
-            item = self._current(delivery_id, revision)
-            if item is not None:
-                self._replace(
-                    item,
-                    completed_lifecycle_steps=tuple(dict.fromkeys((*item.completed_lifecycle_steps, step))),
-                )
-
-    def lifecycle_is_settled(self, delivery_id: str, *, revision: int) -> bool:
-        """Return whether every effect has a durable terminal decision."""
-        item = self.get(delivery_id)
-        if item is None or item.revision != revision:
-            return False
-        completed = set(item.completed_lifecycle_steps)
-        return item.after_response_claimed and {"interactive", "thread_summary"}.issubset(completed)
-
-    def defer(self, delivery_id: str, *, revision: int, next_attempt_at: float) -> None:
-        """Move work's next attempt forward."""
-        with self._state.lock:
-            self._load()
-            item = self._current(delivery_id, revision)
-            if item is not None:
-                self._replace(item, attempts=item.attempts + 1, next_attempt_at=next_attempt_at)
+            current = self._items.get(delivery_id)
+            if current is None or current.revision != revision:
+                return None
+            updated = replace(current, **changes)
+            self._publish(updated)
+            return updated
 
     def finish(self, delivery_id: str, *, revision: int) -> None:
-        """Delete one exact settled revision."""
-        with self._state.lock:
+        """Delete one exact obsolete row or handled receipt."""
+        with self._lock:
             self._load()
-            if self._current(delivery_id, revision) is None:
+            current = self._items.get(delivery_id)
+            if current is None or current.revision != revision:
                 return
-            items = dict(self._state.items)
-            del items[delivery_id]
-            self._commit(items, self._state.redacted)
+            self._row_file(delivery_id).unlink(missing_ok=True)
+            del self._items[delivery_id]
 
-    def redact(self, *, room_id: str, event_id: str) -> None:
-        """Persist a tombstone and remove rows sourced from or targeting the event."""
-        with self._state.lock:
-            self._load()
-            items = {
-                key: item
-                for key, item in self._state.items.items()
-                if event_id not in item.source_event_ids
-                and not (item.target.room_id == room_id and item.target_event_id == event_id)
-            }
-            self._commit(items, self._state.redacted.union((event_id,)))
-
-    def is_current_and_not_redacted(self, item: PendingTerminalDelivery) -> bool:
-        """Revalidate an exact revision immediately before transport."""
-        current = self.get(item.delivery_id)
-        return (
-            current is not None
-            and current.revision == item.revision
-            and not self._state.redacted.intersection((*item.source_event_ids, item.target_event_id))
+    def _publish(self, item: PendingTerminalDelivery) -> None:
+        self._store_dir.mkdir(parents=True, exist_ok=True)
+        write_json_file_durable(
+            self._row_file(item.delivery_id),
+            {
+                "schema_version": TERMINAL_DELIVERY_SCHEMA_VERSION,
+                "item": asdict(item),
+            },
+            temp_dir=self._store_dir,
         )
-
-    def _replace_current(self, delivery_id: str, revision: int, **changes: object) -> PendingTerminalDelivery | None:
-        with self._state.lock:
-            self._load()
-            item = self._current(delivery_id, revision)
-            return self._replace(item, **changes) if item is not None else None
-
-    def _replace(self, item: PendingTerminalDelivery, **changes: object) -> PendingTerminalDelivery:
-        updated = replace(item, **changes)
-        items = dict(self._state.items)
-        items[item.delivery_id] = updated
-        self._commit(items, self._state.redacted)
-        return updated
-
-    def _current(self, delivery_id: str, revision: int) -> PendingTerminalDelivery | None:
-        item = self._state.items.get(delivery_id)
-        return item if item is not None and item.revision == revision else None
+        self._items[item.delivery_id] = item
+        self._loaded = True
 
     def _load(self, *, force: bool = False) -> None:
-        if self._state.loaded and not force:
+        if self._loaded and not force:
             return
         items: dict[str, PendingTerminalDelivery] = {}
-        redacted: frozenset[str] = frozenset()
-        if self._store_file.exists():
-            try:
-                raw = json.loads(self._store_file.read_text())
-                if raw.get("schema_version") != TERMINAL_DELIVERY_SCHEMA_VERSION:
-                    message = "unsupported terminal delivery schema"
-                    raise ValueError(message)  # noqa: TRY301
-                raw_items = raw.get("items", [])
-                if not isinstance(raw_items, list):
-                    message = "terminal delivery items must be a list"
-                    raise TypeError(message)  # noqa: TRY301
-                for value in raw_items:
-                    try:
-                        item = _item_from_record(value)
-                    except (ValueError, TypeError, KeyError, AttributeError):
-                        logger.warning("terminal_delivery_row_dropped", agent=self.agent_name, exc_info=True)
-                        continue
-                    items[item.delivery_id] = item
-                redacted = frozenset(value for value in raw.get("redacted_event_ids", []) if isinstance(value, str))
-            except (OSError, ValueError, TypeError, KeyError, AttributeError):
-                quarantined = self._store_file.with_suffix(f".corrupt-{time.time_ns()}.json")
-                with contextlib.suppress(OSError):
-                    self._store_file.replace(quarantined)
-                logger.warning("terminal_delivery_store_quarantined", agent=self.agent_name, exc_info=True)
-        self._state.items = items
-        self._state.redacted = redacted
-        self._state.loaded = True
+        if self._store_dir.exists():
+            for row_file in self._store_dir.glob("*.json"):
+                try:
+                    raw = json.loads(row_file.read_text())
+                    if not isinstance(raw, dict) or raw.get("schema_version") != TERMINAL_DELIVERY_SCHEMA_VERSION:
+                        message = "unsupported terminal delivery row schema"
+                        raise ValueError(message)  # noqa: TRY301
+                    item = _item_from_record(raw.get("item"))
+                    if row_file != self._row_file(item.delivery_id):
+                        message = "terminal delivery row filename mismatch"
+                        raise ValueError(message)  # noqa: TRY301
+                except (OSError, ValueError, TypeError, KeyError, AttributeError):
+                    logger.warning("terminal_delivery_row_dropped", agent=self.agent_name, exc_info=True)
+                    continue
+                items[item.delivery_id] = item
+        self._items = items
+        self._loaded = True
 
-    def _commit(self, items: dict[str, PendingTerminalDelivery], redacted: frozenset[str]) -> None:
-        payload = {
-            "schema_version": TERMINAL_DELIVERY_SCHEMA_VERSION,
-            "items": [asdict(item) for item in items.values()],
-            "redacted_event_ids": sorted(redacted),
-        }
-        with advisory_file_lock(self._lock_file):
-            write_json_file_durable(self._store_file, payload)
-        self._state.items = items
-        self._state.redacted = redacted
-        self._state.loaded = True
+    def _row_file(self, delivery_id: str) -> Path:
+        if len(delivery_id) != 32 or any(character not in "0123456789abcdef" for character in delivery_id):
+            message = f"Invalid terminal delivery ID: {delivery_id!r}"
+            raise ValueError(message)
+        return self._store_dir / f"{delivery_id}.json"
+
+
+def _json_mapping(value: Mapping[str, Any]) -> dict[str, Any]:
+    copied = json.loads(json.dumps(dict(value)))
+    if not isinstance(copied, dict):
+        message = "terminal delivery content must be a mapping"
+        raise TypeError(message)
+    return copied
 
 
 def _item_from_record(raw: object) -> PendingTerminalDelivery:
-    record = cast("dict[str, Any]", raw)
-    identity = cast("dict[str, Any]", record["identity"])
-    envelope = cast("dict[str, Any]", identity["response_envelope"])
-    origin = cast("dict[str, Any]", envelope["origin"])
-    metadata = record["interactive_metadata"]
-    envelope_target = MessageTarget(**cast("dict[str, Any]", envelope["target"]))
-    response_envelope = MessageEnvelope(
-        source_event_id=envelope["source_event_id"],
-        target=envelope_target,
-        body=envelope["body"],
-        attachment_ids=tuple(envelope["attachment_ids"]),
-        mentioned_agents=tuple(envelope["mentioned_agents"]),
-        agent_name=envelope["agent_name"],
-        origin=TurnOrigin(
-            transport_sender_id=origin["transport_sender_id"],
-            requester_id=origin["requester_id"],
-            sender_entity_name=origin["sender_entity_name"],
-            requester_entity_name=origin["requester_entity_name"],
-            sender_kind=SenderKind(origin["sender_kind"]),
-            requester_kind=SenderKind(origin["requester_kind"]),
-            intent=TurnIntent(origin["intent"]),
-            source_kind=origin["source_kind"],
-            trust=TurnTrust(origin["trust"]),
-        ),
-        hook_source=envelope["hook_source"],
-        message_received_depth=envelope["message_received_depth"],
-        dispatch_policy_source_kind=envelope["dispatch_policy_source_kind"],
-    )
-    interactive_metadata = (
-        None
-        if metadata is None
-        else InteractiveMetadata(
-            question_text=metadata["question_text"],
-            option_map=dict(metadata["option_map"]),
-            option_labels=dict(metadata["option_labels"]),
-            options_list=tuple(dict(option) for option in metadata["options_list"]),
+    global _ITEM_ADAPTER
+    if _ITEM_ADAPTER is None:
+        adapter = TypeAdapter(PendingTerminalDelivery)
+        adapter.rebuild(force=True, _types_namespace=globals())
+        _ITEM_ADAPTER = adapter
+    item = _ITEM_ADAPTER.validate_python(raw)
+    normalized = json.loads(json.dumps(asdict(item)))
+    if not _same_json_types(raw, normalized):
+        message = "terminal delivery row contains coerced field types"
+        raise TypeError(message)
+    return item
+
+
+def _same_json_types(raw: object, normalized: object) -> bool:
+    """Reject Pydantic coercion while allowing JSON integers for float fields."""
+    if isinstance(normalized, dict):
+        raw_mapping = cast("Mapping[object, object]", raw)
+        normalized_mapping = cast("Mapping[object, object]", normalized)
+        return (
+            isinstance(raw, dict)
+            and raw_mapping.keys() == normalized_mapping.keys()
+            and all(_same_json_types(raw_mapping[key], value) for key, value in normalized_mapping.items())
         )
-    )
-    return PendingTerminalDelivery(
-        delivery_id=record["delivery_id"],
-        target_event_id=record["target_event_id"],
-        identity=ResponseIdentity(
-            response_kind=identity["response_kind"],
-            response_envelope=response_envelope,
-            correlation_id=identity["correlation_id"],
-            source_event_ids=tuple(identity["source_event_ids"]),
-            thread_summary_message_count_hint=identity["thread_summary_message_count_hint"],
-        ),
-        interactive_metadata=interactive_metadata,
-        thread_summary_entity_name=record["thread_summary_entity_name"],
-        revision=record["revision"],
-        body=record["body"],
-        wire_content=dict(record["wire_content"]),
-        transaction_id=record["transaction_id"],
-        attempts=record["attempts"],
-        next_attempt_at=record["next_attempt_at"],
-        transport_delivered=record["transport_delivered"],
-        after_response_claimed=record["after_response_claimed"],
-        completed_lifecycle_steps=tuple(record["completed_lifecycle_steps"]),
-    )
+    if isinstance(normalized, list):
+        return (
+            isinstance(raw, list)
+            and len(raw) == len(normalized)
+            and all(_same_json_types(raw_item, item) for raw_item, item in zip(raw, normalized, strict=True))
+        )
+    if isinstance(normalized, bool):
+        return isinstance(raw, bool)
+    if isinstance(normalized, float):
+        return isinstance(raw, int | float) and not isinstance(raw, bool)
+    return raw is None if normalized is None else type(raw) is type(normalized)
 
 
 @dataclass(frozen=True, slots=True)
@@ -439,13 +312,18 @@ class TerminalDeliveryCommit:
     """First-attempt result and durable ownership state."""
 
     item: PendingTerminalDelivery | None
-    attempt: TerminalDeliveryAttempt
-    settled: bool
+    status: TerminalDeliveryStatus
+    reason: str
     lifecycle_managed: bool = True
 
     @property
+    def settled(self) -> bool:
+        """Return whether retry work is complete."""
+        return self.item is None or self.item.settled or self.status == "superseded"
+
+    @property
     def pending(self) -> PendingTerminalDelivery | None:
-        """Return work still held by the durable authority."""
+        """Return work still awaiting transport or lifecycle convergence."""
         return self.item if not self.settled else None
 
 
@@ -455,6 +333,7 @@ class TerminalDeliveryCoordinatorDeps:
 
     runtime: SupportsClientConfig
     store: TerminalDeliveryStore
+    turn_store: TurnStore
     conversation_cache: ConversationCacheProtocol
     response_hooks: ResponseHookService
     post_response_effects: PostResponseEffectsSupport
@@ -465,10 +344,10 @@ class TerminalDeliveryCoordinatorDeps:
 
 @dataclass
 class TerminalDeliveryCoordinator:
-    """Single authority for commit, transport, redaction, lifecycle, and retries."""
+    """Single authority for durable terminal transport and retryable success effects."""
 
     deps: TerminalDeliveryCoordinatorDeps
-    _lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
+    _locks: dict[str, asyncio.Lock] = field(default_factory=dict, init=False)
     _wake: asyncio.Event = field(default_factory=asyncio.Event, init=False)
     _task: asyncio.Task[None] | None = field(default=None, init=False)
     _settlement: asyncio.Task[None] | None = field(default=None, init=False)
@@ -504,64 +383,39 @@ class TerminalDeliveryCoordinator:
         del reason
         self._wake.set()
 
-    async def record(self, intent: TerminalDeliveryIntent) -> PendingTerminalDelivery | None:
-        """Persist an intent under terminal ordering."""
-        async with self._lock:
-            return await asyncio.to_thread(self.store.record, intent)
-
     async def commit_and_attempt(self, intent: TerminalDeliveryIntent) -> TerminalDeliveryCommit:
-        """Persist before first transport, then settle transport and lifecycle."""
-        async with self._lock:
-            item = await asyncio.to_thread(self.store.record, intent)
+        """Persist before first transport, then converge this delivery revision."""
+        async with self._lock_for(intent.delivery_id):
+            item = await self._record_locked(intent)
             if item is None:
-                return TerminalDeliveryCommit(None, TerminalDeliveryAttempt.superseded("record_rejected"), True)
-            attempt = (
-                TerminalDeliveryAttempt.delivered_now("transport_already_delivered")
+                return TerminalDeliveryCommit(None, "superseded", "redacted")
+            if item.settled:
+                return TerminalDeliveryCommit(item, "delivered", "settled_receipt")
+            status, reason = (
+                ("delivered", "transport_already_delivered")
                 if item.transport_delivered
-                else None
+                else await self._attempt_locked(item)
             )
             try:
-                if attempt is None:
-                    attempt = await self._attempt_locked(item)
-                settled = await self._settle_locked(item, attempt, self.store.clock())
+                await self._settle_locked(item, status, self.store.clock())
             except asyncio.CancelledError:
-                attempt = attempt or TerminalDeliveryAttempt.transient("attempt_cancelled")
+                return TerminalDeliveryCommit(item, status, reason)
             except Exception:
                 self.deps.logger.exception("terminal_delivery_first_attempt_raised", **item.log_context)
-                attempt = attempt or TerminalDeliveryAttempt.transient("attempt_exception")
-            else:
-                return TerminalDeliveryCommit(item, attempt, settled)
+                return TerminalDeliveryCommit(item, status, reason)
             current = await asyncio.to_thread(self.store.get, item.delivery_id)
-            return TerminalDeliveryCommit(current, attempt, current is None)
-
-    async def attempt(self, item: PendingTerminalDelivery) -> TerminalDeliveryAttempt:
-        """Attempt one exact persisted revision."""
-        async with self._lock:
-            current = await asyncio.to_thread(self.store.get, item.delivery_id)
-            if current is None or current.revision != item.revision:
-                return TerminalDeliveryAttempt.superseded("stale_revision")
-            if current.transport_delivered:
-                return TerminalDeliveryAttempt.delivered_now("transport_already_delivered")
-            return await self._attempt_locked(current)
-
-    async def settle_attempt(
-        self,
-        item: PendingTerminalDelivery,
-        attempt: TerminalDeliveryAttempt,
-        next_attempt_at: float,
-    ) -> None:
-        """Persist one completed attempt decision."""
-        async with self._lock:
-            await self._settle_locked(item, attempt, next_attempt_at)
+            return TerminalDeliveryCommit(current or item, status, reason)
 
     async def redact(self, *, room_id: str, event_id: str) -> None:
-        """Order the durable tombstone against record, transport, and settlement."""
+        """Announce redaction before durable authority and keep failures fail-closed."""
         self._redacting.add(event_id)
-        try:
-            async with self._lock:
-                await asyncio.to_thread(self.store.redact, room_id=room_id, event_id=event_id)
-        finally:
-            self._redacting.discard(event_id)
+        await asyncio.to_thread(self.deps.turn_store.mark_source_redacted, event_id)
+        for item in await asyncio.to_thread(self.store.matching, room_id=room_id, event_id=event_id):
+            async with self._lock_for(item.delivery_id):
+                current = await asyncio.to_thread(self.store.get, item.delivery_id)
+                if current is not None and current.revision == item.revision:
+                    await asyncio.to_thread(self.store.finish, item.delivery_id, revision=item.revision)
+        self._redacting.discard(event_id)
 
     def pending_target_event_ids(self, room_id: str | None = None) -> frozenset[str]:
         """Return targets still durably owned."""
@@ -571,21 +425,39 @@ class TerminalDeliveryCoordinator:
         """Drain one room-diverse due batch sequentially."""
         due = await asyncio.to_thread(self.store.due, limit=8)
         for item in due:
-            try:
-                attempt = await self.attempt(item)
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                self.deps.logger.exception("terminal_delivery_attempt_raised", **item.log_context)
-                attempt = TerminalDeliveryAttempt.transient("attempt_exception")
-            delay = min(300.0, 2 ** min(item.attempts, 8))
             self._settlement = asyncio.create_task(
-                self.settle_attempt(item, attempt, self.store.clock() + delay),
+                self._drain_item(item),
                 name=f"terminal_delivery_settle_{item.delivery_id}",
             )
             await asyncio.shield(self._settlement)
             self._settlement = None
         return len(due)
+
+    async def _drain_item(self, item: PendingTerminalDelivery) -> None:
+        async with self._lock_for(item.delivery_id):
+            current = await asyncio.to_thread(self.store.get, item.delivery_id)
+            if current is None or current.revision != item.revision:
+                return
+            if current.settled:
+                await asyncio.to_thread(self.deps.turn_store.flush)
+                if all(self.deps.turn_store.is_handled(event_id) for event_id in current.source_event_ids):
+                    await asyncio.to_thread(self.store.finish, current.delivery_id, revision=current.revision)
+                else:
+                    await self._defer(current, self.store.clock() + self.deps.poll_interval_seconds)
+                return
+            try:
+                status, _reason = (
+                    ("delivered", "transport_already_delivered")
+                    if current.transport_delivered
+                    else await self._attempt_locked(current)
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                self.deps.logger.exception("terminal_delivery_attempt_raised", **current.log_context)
+                status = "deferred"
+            delay = min(300.0, 2 ** min(current.attempts, 8))
+            await self._settle_locked(current, status, self.store.clock() + delay)
 
     async def _run(self) -> None:
         while True:
@@ -600,52 +472,18 @@ class TerminalDeliveryCoordinator:
                 except Exception:
                     self.deps.logger.exception("terminal_delivery_drain_failed")
 
-    async def _settle_locked(
-        self,
-        item: PendingTerminalDelivery,
-        attempt: TerminalDeliveryAttempt,
-        next_attempt_at: float,
-    ) -> bool:
-        current = await asyncio.to_thread(self.store.get, item.delivery_id)
-        if current is None or current.revision != item.revision:
-            return True
-        if attempt.result == "superseded":
-            await asyncio.to_thread(self.store.finish, item.delivery_id, revision=item.revision)
-            return True
-        if attempt.result == "transient":
-            await asyncio.to_thread(
-                self.store.defer,
-                item.delivery_id,
-                revision=item.revision,
-                next_attempt_at=next_attempt_at,
-            )
-            return False
-        current = await asyncio.to_thread(self.store.mark_transport_delivered, item.delivery_id, revision=item.revision)
-        if current is None or not await self._complete_lifecycle(current):
-            await asyncio.to_thread(
-                self.store.defer,
-                item.delivery_id,
-                revision=item.revision,
-                next_attempt_at=next_attempt_at,
-            )
-            return False
-        await asyncio.to_thread(self.store.finish, item.delivery_id, revision=item.revision)
-        return True
+    async def _record_locked(self, intent: TerminalDeliveryIntent) -> PendingTerminalDelivery | None:
+        event_ids = (*intent.identity.source_event_ids, intent.target_event_id)
+        if self._redacting.intersection(event_ids) or self.deps.turn_store.any_source_redacted(event_ids):
+            return None
+        return await asyncio.to_thread(self.store.record, intent)
 
-    async def _attempt_locked(self, item: PendingTerminalDelivery) -> TerminalDeliveryAttempt:
-        if not await asyncio.to_thread(self.store.is_current_and_not_redacted, item):
-            return TerminalDeliveryAttempt.superseded("stale_or_redacted")
+    async def _attempt_locked(self, item: PendingTerminalDelivery) -> tuple[TerminalDeliveryStatus, str]:
+        if not await self._is_current_and_live(item):
+            return "superseded", "stale_or_redacted"
         client = self.deps.runtime.client
         if client is None:
-            return TerminalDeliveryAttempt.transient("matrix_client_unavailable")
-        target_state = await self._inspect_target(item.target.room_id, item.target_event_id)
-        if target_state in {"missing", "redacted"}:
-            return TerminalDeliveryAttempt.superseded(f"target_event_{target_state}")
-        if self._redacting.intersection((*item.source_event_ids, item.target_event_id)) or not await asyncio.to_thread(
-            self.store.is_current_and_not_redacted,
-            item,
-        ):
-            return TerminalDeliveryAttempt.superseded("stale_or_redacted")
+            return "deferred", "matrix_client_unavailable"
         delivered = await send_message_result(
             client,
             item.target.room_id,
@@ -655,111 +493,196 @@ class TerminalDeliveryCoordinator:
             content_is_prepared=True,
         )
         if delivered is None:
-            return TerminalDeliveryAttempt.transient("edit_failed")
+            return "deferred", "edit_failed"
         self.deps.conversation_cache.notify_outbound_message(
             item.target.room_id,
             delivered.event_id,
             delivered.content_sent,
         )
-        return TerminalDeliveryAttempt.delivered_now()
+        return "delivered", "delivered"
 
-    async def _inspect_target(self, room_id: str, event_id: str) -> Literal["ok", "missing", "redacted", "unknown"]:
-        client = self.deps.runtime.client
-        if client is None:
-            return "unknown"
+    async def _settle_locked(
+        self,
+        item: PendingTerminalDelivery,
+        status: TerminalDeliveryStatus,
+        next_attempt_at: float,
+    ) -> bool:
+        current = await asyncio.to_thread(self.store.get, item.delivery_id)
+        if current is None or current.revision != item.revision:
+            return True
+        if status == "superseded":
+            await asyncio.to_thread(self.store.finish, item.delivery_id, revision=item.revision)
+            return True
+        if status == "deferred":
+            await self._defer(current, next_attempt_at)
+            return False
+        current = await asyncio.to_thread(
+            self.store.update,
+            item.delivery_id,
+            revision=item.revision,
+            transport_delivered=True,
+        )
+        if current is None:
+            return True
+        if not await self._complete_lifecycle(current):
+            if await self._is_current_and_live(current):
+                await self._defer(current, next_attempt_at)
+            else:
+                await asyncio.to_thread(self.store.finish, item.delivery_id, revision=item.revision)
+            return False
+        settled = await asyncio.to_thread(
+            self.store.update,
+            item.delivery_id,
+            revision=item.revision,
+            settled=True,
+            next_attempt_at=self.store.clock() + self.deps.poll_interval_seconds,
+        )
+        return settled is not None
+
+    async def _claim_after_response(self, item: PendingTerminalDelivery) -> PendingTerminalDelivery | None:
+        current = await asyncio.to_thread(self.store.get, item.delivery_id)
+        if current is None or not await self._is_current_and_live(current):
+            return None
+        if current.after_response_claimed:
+            return current
+        current = await asyncio.to_thread(
+            self.store.update,
+            item.delivery_id,
+            revision=item.revision,
+            after_response_claimed=True,
+        )
+        if current is None:
+            return None
         try:
-            response = await client.room_get_event(room_id, event_id)
+            await self.deps.response_hooks.emit_after_response(
+                identity=item.identity,
+                response_text=item.body,
+                response_event_id=item.target_event_id,
+                delivery_kind="edited",
+                continue_on_cancelled=True,
+            )
         except asyncio.CancelledError:
             raise
         except Exception:
-            return "unknown"
-        if isinstance(response, nio.RoomGetEventError):
-            return "missing" if response.status_code == "M_NOT_FOUND" else "unknown"
-        if not isinstance(response, nio.RoomGetEventResponse):
-            return "unknown"
-        if isinstance(response.event, nio.RedactedEvent):
-            return "redacted"
-        source = response.event.source if isinstance(response.event.source, dict) else {}
-        unsigned = source.get("unsigned")
-        return "redacted" if isinstance(unsigned, dict) and unsigned.get("redacted_because") is not None else "ok"
+            self.deps.logger.exception("terminal_delivery_lifecycle_step_failed", step="after_response")
+        return current
 
     async def _complete_lifecycle(self, item: PendingTerminalDelivery) -> bool:
-        if await asyncio.to_thread(
-            self.store.claim_after_response,
-            item.delivery_id,
-            revision=item.revision,
-        ):
-            try:
-                await self.deps.response_hooks.emit_after_response(
-                    identity=item.identity,
-                    response_text=item.body,
-                    response_event_id=item.target_event_id,
-                    delivery_kind="edited",
-                    continue_on_cancelled=True,
-                )
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                self.deps.logger.exception("terminal_delivery_lifecycle_step_failed", step="after_response")
+        current = await self._claim_after_response(item)
+        if current is None:
+            return False
         for step in ("interactive", "thread_summary"):
             current = await asyncio.to_thread(self.store.get, item.delivery_id)
-            if current is None or step in current.completed_lifecycle_steps:
+            if current is None or not await self._is_current_and_live(current):
+                return False
+            if step in current.completed_lifecycle_steps:
                 continue
             try:
-                await self._run_lifecycle_step(item, step)
+                if step == "interactive":
+                    await self._complete_interactive(current)
+                else:
+                    current = await self._complete_thread_summary(current)
+                    if current is None:
+                        return False
             except asyncio.CancelledError:
                 raise
             except Exception:
                 self.deps.logger.exception("terminal_delivery_lifecycle_step_failed", step=step, **item.log_context)
                 return False
-            await asyncio.to_thread(
-                self.store.complete_lifecycle_step,
+            completed = tuple(dict.fromkeys((*current.completed_lifecycle_steps, step)))
+            current = await asyncio.to_thread(
+                self.store.update,
                 item.delivery_id,
                 revision=item.revision,
-                step=step,
+                completed_lifecycle_steps=completed,
             )
-        return await asyncio.to_thread(self.store.lifecycle_is_settled, item.delivery_id, revision=item.revision)
+            if current is None:
+                return False
+        return True
 
-    async def _run_lifecycle_step(
+    async def _complete_interactive(self, item: PendingTerminalDelivery) -> None:
+        if item.interactive_metadata is None:
+            return
+        await self.deps.post_response_effects.register_interactive_delivery(
+            event_id=item.target_event_id,
+            room_id=item.target.room_id,
+            target=item.target,
+            interactive_metadata=item.interactive_metadata,
+            agent_name=item.identity.response_envelope.agent_name,
+            idempotency_key=f"{item.delivery_id}:{item.revision}:interactive",
+        )
+
+    async def _complete_thread_summary(
         self,
         item: PendingTerminalDelivery,
-        step: TerminalDeliveryLifecycleStep,
-    ) -> None:
-        key = f"{item.delivery_id}:{item.revision}:{step}"
-        if step == "interactive" and item.interactive_metadata is not None:
-            await self.deps.post_response_effects.register_interactive_delivery(
-                event_id=item.target_event_id,
-                room_id=item.target.room_id,
-                target=item.target,
-                interactive_metadata=item.interactive_metadata,
-                agent_name=item.thread_summary_entity_name,
-                idempotency_key=key,
-            )
-        elif step == "thread_summary":
-            thread_id = item.target.resolved_thread_id
-            if thread_id is not None and self.deps.post_response_effects.should_queue_thread_summary(
+    ) -> PendingTerminalDelivery | None:
+        thread_id = item.target.resolved_thread_id
+        if thread_id is None or not self.deps.post_response_effects.should_queue_thread_summary(
+            item.target.room_id,
+            thread_id,
+            item.identity.thread_summary_message_count_hint,
+        ):
+            return item
+        frozen = item.thread_summary
+        if frozen is None:
+            frozen = await self.deps.post_response_effects.prepare_thread_summary(
                 item.target.room_id,
                 thread_id,
-                item.identity.thread_summary_message_count_hint,
-            ):
-                await self.deps.post_response_effects.complete_thread_summary(
-                    item.target.room_id,
-                    thread_id,
-                    item.thread_summary_entity_name,
-                    idempotency_key=key,
-                )
+                item.identity.response_envelope.agent_name,
+            )
+            if frozen is None:
+                return item
+            if not await self._is_current_and_live(item):
+                return None
+            updated = await asyncio.to_thread(
+                self.store.update,
+                item.delivery_id,
+                revision=item.revision,
+                thread_summary=frozen,
+            )
+            if updated is None:
+                return None
+            item = updated
+        await self.deps.post_response_effects.deliver_thread_summary(
+            item.target.room_id,
+            thread_id,
+            frozen,
+            transaction_id=f"mindroom-summary-{item.delivery_id}-{item.revision}",
+        )
+        return item
+
+    async def _is_current_and_live(self, item: PendingTerminalDelivery) -> bool:
+        current = await asyncio.to_thread(self.store.get, item.delivery_id)
+        event_ids = (*item.source_event_ids, item.target_event_id)
+        return (
+            current is not None
+            and current.revision == item.revision
+            and not self._redacting.intersection(event_ids)
+            and not self.deps.turn_store.any_source_redacted(event_ids)
+        )
+
+    async def _defer(self, item: PendingTerminalDelivery, next_attempt_at: float) -> None:
+        await asyncio.to_thread(
+            self.store.update,
+            item.delivery_id,
+            revision=item.revision,
+            attempts=item.attempts + 1,
+            next_attempt_at=next_attempt_at,
+        )
+
+    def _lock_for(self, delivery_id: str) -> asyncio.Lock:
+        return self._locks.setdefault(delivery_id, asyncio.Lock())
 
 
 __all__ = [
     "DEFAULT_POLL_INTERVAL_SECONDS",
     "TERMINAL_DELIVERY_SCHEMA_VERSION",
     "PendingTerminalDelivery",
-    "TerminalDeliveryAttempt",
-    "TerminalDeliveryAttemptResult",
     "TerminalDeliveryCommit",
     "TerminalDeliveryCoordinator",
     "TerminalDeliveryCoordinatorDeps",
     "TerminalDeliveryIntent",
     "TerminalDeliveryLifecycleStep",
+    "TerminalDeliveryStatus",
     "TerminalDeliveryStore",
 ]

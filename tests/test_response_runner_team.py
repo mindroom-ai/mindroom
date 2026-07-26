@@ -126,7 +126,7 @@ class TestAgentBot(AgentBotTestBase):
                 new=AsyncMock(side_effect=delivered_matrix_side_effect("$team")),
             ) as mock_send_message,
             patch(
-                "mindroom.delivery_gateway.edit_message_result",
+                "mindroom.terminal_delivery.send_message_result",
                 new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit")),
             ) as mock_edit_message,
             patch_response_runner_module(
@@ -149,7 +149,7 @@ class TestAgentBot(AgentBotTestBase):
 
         assert _handled_response_event_id(resolution) == "$team"
         assert mock_send_message.await_args.args[2]["body"] == "🤝 Team Response: Thinking..."
-        assert mock_edit_message.await_args.args[4] == "Team reply [hooked]"
+        assert mock_edit_message.await_args.args[2]["m.new_content"]["body"] == "Team reply [hooked]"
         assert after_results == [("$team", "Team reply [hooked]", "edited", "team")]
 
     @pytest.mark.asyncio
@@ -601,7 +601,7 @@ class TestAgentBot(AgentBotTestBase):
                 new=AsyncMock(side_effect=delivered_matrix_side_effect("$team")),
             ),
             patch(
-                "mindroom.delivery_gateway.edit_message_result",
+                "mindroom.terminal_delivery.send_message_result",
                 new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit")),
             ),
             patch("mindroom.bot.interactive.register_interactive_question") as mock_register,

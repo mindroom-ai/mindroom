@@ -87,7 +87,6 @@ from mindroom.response_payload_preparation import (
 from mindroom.response_runner import PostLockRequestPreparationError, ResponseRequest, ResponseRunner
 from mindroom.runtime_support import StartupThreadPrewarmRegistry
 from mindroom.terminal_delivery import (
-    TerminalDeliveryAttempt,
     TerminalDeliveryCommit,
     TerminalDeliveryCoordinator,
     TerminalDeliveryStore,
@@ -1103,16 +1102,14 @@ def terminal_delivery_coordinator_for(
     """Build a successful terminal-delivery authority for gateway seam tests."""
     coordinator = MagicMock(spec=TerminalDeliveryCoordinator)
     coordinator.store = terminal_delivery_store_for(runtime_paths, agent_name)
-    coordinator.record = AsyncMock(return_value=None)
     coordinator.commit_and_attempt = AsyncMock(
         return_value=TerminalDeliveryCommit(
             item=None,
-            attempt=TerminalDeliveryAttempt.delivered_now(),
-            settled=True,
+            status="delivered",
+            reason="delivered",
             lifecycle_managed=False,
         ),
     )
-    coordinator.attempt = AsyncMock(return_value=TerminalDeliveryAttempt.delivered_now())
     coordinator.redact = AsyncMock()
     coordinator.pending_target_event_ids = MagicMock(return_value=frozenset())
     return coordinator

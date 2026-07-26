@@ -945,7 +945,7 @@ class StreamingResponse:
                     prepared_delivery.committed_state.tool_trace,
                     prepared_delivery.committed_state.interactive_metadata,
                 )
-                send_succeeded = self._terminal_delivery.commit.attempt.result == "delivered"
+                send_succeeded = self._terminal_delivery.commit.status == "delivered"
             else:
                 send_succeeded = await self._send_content(
                     client,

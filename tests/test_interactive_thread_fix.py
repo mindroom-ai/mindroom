@@ -21,6 +21,7 @@ from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
+from mindroom.interactive import InteractiveMetadata
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.response_runner import ResponseRequest
 from tests.conftest import (
@@ -183,7 +184,7 @@ async def test_interactive_question_preserves_thread_root_in_non_streaming(tmp_p
         patch("mindroom.response_runner.ai_response") as mock_ai_response,
         patch("mindroom.response_runner.should_use_streaming", new_callable=AsyncMock, return_value=False),
         patch(
-            "mindroom.delivery_gateway.edit_message_result",
+            "mindroom.terminal_delivery.send_message_result",
             new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit")),
         ),
         patch("mindroom.bot.interactive.parse_and_format_interactive") as mock_parse,
@@ -202,6 +203,10 @@ async def test_interactive_question_preserves_thread_root_in_non_streaming(tmp_p
             {"emoji": "A", "label": "Option A"},
             {"emoji": "B", "label": "Option B"},
         ]
+        mock_response_with_interactive.interactive_metadata = InteractiveMetadata.from_parts(
+            mock_response_with_interactive.option_map,
+            mock_response_with_interactive.options_list,
+        )
 
         mock_parse.return_value = mock_response_with_interactive
 

@@ -21,6 +21,7 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import send_message_result
 from mindroom.matrix.message_builder import build_message_content
 from mindroom.model_instance_checks import isinstance_of_loaded
+from mindroom.response_identity import FrozenThreadSummary
 from mindroom.thread_tag_vocabulary import (
     claim_vocabulary_check,
     format_tag_vocabulary_with_counts,
@@ -31,7 +32,7 @@ from mindroom.thread_tags import AUTOMATIC_THREAD_TAG_EXCLUSIONS, coerce_tag_nam
 from mindroom.timing import timed
 
 if TYPE_CHECKING:
-    from collections.abc import Collection, Sequence
+    from collections.abc import Awaitable, Callable, Collection, Sequence
 
     import nio
 
@@ -544,7 +545,7 @@ async def _deliver_generated_summary(
     model_name: str,
     conversation_cache: ConversationCacheProtocol,
     *,
-    transaction_id: str | None = None,
+    frozen_delivery: Callable[[FrozenThreadSummary], Awaitable[str | None]] | None = None,
 ) -> bool:
     """Apply initial tags, then independently deliver the generated summary."""
     initial_enrichment_complete: bool | None = None
@@ -556,7 +557,6 @@ async def _deliver_generated_summary(
             generated.tags,
         )
 
-    transaction = {"transaction_id": transaction_id} if transaction_id is not None else {}
     try:
         delivered_event_id = await send_thread_summary_event(
             client,
@@ -567,7 +567,7 @@ async def _deliver_generated_summary(
             model_name,
             conversation_cache,
             initial_enrichment_complete=initial_enrichment_complete,
-            **transaction,
+            frozen_delivery=frozen_delivery,
         )
     except Exception:
         logger.exception("Thread summary send failed", room_id=room_id, thread_id=thread_id)
@@ -585,7 +585,7 @@ async def send_thread_summary_event(
     conversation_cache: ConversationCacheProtocol,
     *,
     initial_enrichment_complete: bool | None = None,
-    transaction_id: str | None = None,
+    frozen_delivery: Callable[[FrozenThreadSummary], Awaitable[str | None]] | None = None,
 ) -> str | None:
     """Send a thread summary as a standard Matrix notice event."""
     normalized_summary = normalize_thread_summary_text(summary)
@@ -636,7 +636,9 @@ async def send_thread_summary_event(
             "io.mindroom.thread_summary": summary_metadata,
         },
     )
-    delivered = await send_message_result(client, room_id, content, transaction_id=transaction_id)
+    if frozen_delivery is not None:
+        return await frozen_delivery(FrozenThreadSummary(content, message_count))
+    delivered = await send_message_result(client, room_id, content)
     if delivered is not None:
         conversation_cache.notify_outbound_message(
             room_id,
@@ -652,6 +654,29 @@ async def send_thread_summary_event(
         return delivered.event_id
     logger.warning("Failed to send thread summary", room_id=room_id, thread_id=thread_id)
     return None
+
+
+async def deliver_frozen_thread_summary(
+    client: nio.AsyncClient,
+    room_id: str,
+    thread_id: str,
+    frozen: FrozenThreadSummary,
+    transaction_id: str,
+    conversation_cache: ConversationCacheProtocol,
+) -> None:
+    """Deliver one persisted exact summary payload."""
+    delivered = await send_message_result(
+        client,
+        room_id,
+        dict(frozen.wire_content),
+        transaction_id=transaction_id,
+        content_is_prepared=True,
+    )
+    if delivered is None:
+        message = "Thread summary delivery failed"
+        raise RuntimeError(message)
+    conversation_cache.notify_outbound_message(room_id, delivered.event_id, delivered.content_sent)
+    update_last_summary_count(room_id, thread_id, frozen.message_count)
 
 
 async def set_manual_thread_summary(
@@ -726,8 +751,8 @@ async def maybe_generate_thread_summary(  # noqa: C901
     *,
     conversation_cache: ConversationCacheProtocol,
     entity_name: str | None = None,
-    transaction_id: str | None = None,
     raise_on_failure: bool = False,
+    frozen_delivery: Callable[[FrozenThreadSummary], Awaitable[str | None]] | None = None,
 ) -> None:
     """Generate an early summary, then one-shot initial tags on its first refresh."""
     refreshed_tag_vocabulary = await _refresh_tag_vocabulary(client, room_id, config, runtime_paths)
@@ -825,7 +850,7 @@ async def maybe_generate_thread_summary(  # noqa: C901
             message_count,
             model_name,
             conversation_cache,
-            transaction_id=transaction_id,
+            frozen_delivery=frozen_delivery,
         )
         if not delivered and raise_on_failure:
             msg = "Thread summary delivery failed"
