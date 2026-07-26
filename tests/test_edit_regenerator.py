@@ -1253,6 +1253,54 @@ async def test_multi_sender_coalesced_source_allows_only_its_sender_to_edit(
 
 
 @pytest.mark.asyncio
+async def test_physical_source_edit_outranks_colliding_discovery_alias(tmp_path: Path) -> None:
+    """A physical event remains owned and edited directly when a relay aliases the same ID."""
+    relay_event_id = "$relay:example.org"
+    human_event_id = "$human:example.org"
+    record = _turn_record(
+        source_event_ids=(relay_event_id, human_event_id),
+        source_event_prompts={
+            relay_event_id: "relay base",
+            human_event_id: "human base",
+        },
+        source_event_metadata={
+            relay_event_id: SourceEventMetadata(
+                sender="@bob:example.org",
+                discovery_event_id=human_event_id,
+            ),
+            human_event_id: SourceEventMetadata(sender="@alice:example.org"),
+        },
+        requester_id="@bob:example.org",
+    )
+    harness = _harness(tmp_path, turn_record=record)
+    event, event_info = _edit_event(
+        original_event_id=human_event_id,
+        new_body="human edited",
+        sender="@alice:example.org",
+    )
+    harness.resolver.build_message_envelope.return_value = request_envelope(
+        room_id=ROOM_ID,
+        reply_to_event_id=human_event_id,
+        thread_id=THREAD_ID,
+        user_id="@alice:example.org",
+        agent_name=AGENT_NAME,
+        source_kind=EDIT_SOURCE_KIND,
+    )
+
+    await harness.regenerator.handle_message_edit(harness.room, event, event_info, event.sender)
+
+    request = harness.generate_response.await_args.args[0]
+    assert "human edited" in request.prompt
+    assert "human base" not in request.prompt
+    assert "relay base" in request.prompt
+    recorded = harness.turn_store.record_turn.call_args.args[0]
+    assert recorded.source_event_prompts == {
+        relay_event_id: "relay base",
+        human_event_id: "human edited",
+    }
+
+
+@pytest.mark.asyncio
 async def test_partial_coalesced_metadata_rejects_anchor_sender_editing_sibling(tmp_path: Path) -> None:
     """Missing exact-source ownership must fail closed for a coalesced turn."""
     alice_event_id = "$alice:example.org"

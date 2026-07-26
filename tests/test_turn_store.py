@@ -1103,6 +1103,61 @@ def test_turn_record_codec_projects_and_parses_one_versioned_run_schema() -> Non
     assert parsed == turn_record
 
 
+def test_turn_record_codec_preserves_physical_source_ownership_when_alias_id_collides() -> None:
+    """A physical source must outrank another source's discovery alias with the same ID."""
+    relay_event_id = "$relay"
+    human_event_id = "$human"
+    turn_record = TurnRecord.create(
+        [relay_event_id, human_event_id],
+        source_event_prompts={
+            relay_event_id: "routed prompt",
+            human_event_id: "physical prompt",
+        },
+        source_event_metadata={
+            relay_event_id: SourceEventMetadata(
+                sender="@bob:example.org",
+                discovery_event_id=human_event_id,
+            ),
+            human_event_id: SourceEventMetadata(sender="@alice:example.org"),
+        },
+        requester_id="@bob:example.org",
+    )
+
+    run_metadata = TurnRecordCodec.to_run_metadata(turn_record)
+    run_metadata[constants.MATRIX_EVENT_ID_METADATA_KEY] = human_event_id
+    recovered = TurnRecordCodec.from_run_metadata(run_metadata)
+
+    assert recovered is not None
+    assert recovered.prompt_source_event_id(human_event_id) == human_event_id
+    assert recovered.requester_id_for_source(human_event_id) == "@alice:example.org"
+    assert recovered.requester_id_for_source(relay_event_id) == "@bob:example.org"
+
+
+def test_turn_record_codecs_preserve_explicit_unknown_source_ownership() -> None:
+    """An explicit empty source map must survive persistence and disable singleton fallback."""
+    event_id = "$source"
+    turn_record = TurnRecord.create(
+        [event_id],
+        source_event_metadata={},
+        requester_id="@stale:example.org",
+    )
+
+    ledger_recovered = TurnRecordCodec.from_ledger_record(
+        event_id,
+        TurnRecordCodec.to_ledger_record(turn_record),
+    )
+    run_metadata = TurnRecordCodec.to_run_metadata(turn_record)
+    run_metadata[constants.MATRIX_EVENT_ID_METADATA_KEY] = event_id
+    run_recovered = TurnRecordCodec.from_run_metadata(run_metadata)
+
+    assert turn_record.source_event_metadata == {}
+    assert ledger_recovered is not None
+    assert ledger_recovered.source_event_metadata == {}
+    assert run_recovered is not None
+    assert run_recovered.source_event_metadata == {}
+    assert run_recovered.requester_id_for_source(event_id) is None
+
+
 def test_build_run_metadata_normalizes_discovery_aliases(tmp_path: Path) -> None:
     """Additional discovery IDs should share canonical source-ID normalization."""
     store = _store(tmp_path)
@@ -1330,6 +1385,39 @@ def test_recovery_without_prompts_preserves_durable_prompt_map(tmp_path: Path) -
 
     assert loaded is not None
     assert loaded.source_event_prompts == {"$first": "first", "$anchor": "anchor"}
+
+
+def test_recovery_preserves_explicit_unknown_source_ownership(tmp_path: Path) -> None:
+    """A newer explicit unknown-ownership marker must not inherit stale ledger attribution."""
+    store = _store(tmp_path)
+    store._ledger.record_handled_turn(
+        TurnRecord.create(
+            ["$event"],
+            response_event_id="$old-response",
+            source_event_metadata={
+                "$event": SourceEventMetadata(sender="@stale:example.org"),
+            },
+            timestamp=10,
+        ),
+    )
+    recovery_record = TurnRecord.create(
+        ["$event"],
+        response_event_id="$new-response",
+        source_event_metadata={},
+        requester_id="@current:example.org",
+        timestamp=20,
+    )
+
+    loaded = _load_with_recovery(
+        store,
+        original_event_id="$event",
+        recovery_record=recovery_record,
+    )
+
+    assert loaded is not None
+    assert loaded.response_event_id == "$new-response"
+    assert loaded.source_event_metadata == {}
+    assert loaded.requester_id_for_source("$event") is None
 
 
 def test_routed_alias_redaction_marks_owning_relay_under_lock(tmp_path: Path) -> None:

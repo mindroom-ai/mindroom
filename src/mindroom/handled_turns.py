@@ -81,7 +81,10 @@ SourceEventRevision = tuple[int, str]
 
 def _prompt_source_event_id(source_event_metadata: Mapping[str, SourceEventMetadata] | None, event_id: str) -> str:
     """Return the physical prompt owner for a source or discovery alias."""
-    for source_id, metadata in (source_event_metadata or {}).items():
+    metadata_by_source = source_event_metadata or {}
+    if event_id in metadata_by_source:
+        return event_id
+    for source_id, metadata in metadata_by_source.items():
         if metadata.discovery_event_id == event_id:
             return source_id
     return event_id
@@ -951,10 +954,21 @@ def _project_redaction_alias(
         if turn_record.anchor_event_id in retained_source_event_ids
         else retained_source_event_ids[-1]
     )
+    retained_sources_have_metadata = all(
+        event_id in (turn_record.source_event_metadata or {}) for event_id in retained_source_event_ids
+    )
     return replace(
         turn_record,
         source_event_ids=retained_source_event_ids,
         anchor_event_id=anchor_event_id,
+        source_event_metadata=(
+            {}
+            if turn_record.is_coalesced and turn_record.source_event_metadata is None
+            else turn_record.source_event_metadata
+        ),
+        requester_id=(
+            turn_record.requester_id if not turn_record.is_coalesced or retained_sources_have_metadata else None
+        ),
     )
 
 
@@ -1047,7 +1061,7 @@ def _immutable_source_event_metadata(
     excluded_event_ids: set[str],
 ) -> Mapping[str, SourceEventMetadata] | None:
     """Normalize and freeze source metadata belonging to the canonical identity."""
-    if not source_event_metadata:
+    if source_event_metadata is None:
         return None
     metadata: dict[str, SourceEventMetadata] = {}
     for event_id in source_event_ids:
@@ -1061,7 +1075,7 @@ def _immutable_source_event_metadata(
         )
         if normalized is not None:
             metadata[event_id] = normalized
-    return MappingProxyType(metadata) if metadata else None
+    return MappingProxyType(metadata)
 
 
 def _responses_file_path(base_path: Path, agent_name: str) -> Path:
