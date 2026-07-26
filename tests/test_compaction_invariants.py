@@ -520,7 +520,7 @@ def test_configure_summary_model_tunes_claude_in_one_place() -> None:
     assert model.extended_cache_time is False
     assert model.thinking is None
     assert model.max_tokens == 64_000
-    assert model.timeout == MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS
+    assert model.timeout == 600.0
     assert model.client_params == {"max_retries": 0, "custom": "keep"}
 
 
@@ -541,7 +541,7 @@ def test_configure_summary_model_tunes_vertexai_claude() -> None:
     assert model.extended_cache_time is False
     assert model.thinking is None
     assert model.max_tokens == 8192
-    assert model.timeout == MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS
+    assert model.timeout == 300.0
     assert model.client_params == {"max_retries": 0}
 
 
@@ -1518,6 +1518,7 @@ async def test_retry_helper_switches_to_fallback_once_with_unchanged_prompt_and_
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
             token_estimator=lambda _value: 2_000,
             estimate_kind="o200k_base_tokens",
+            timeout_seconds=420.0,
             fallback_model=fallback,
             fallback_model_name="fallback-model",
             fallback_input_budget=4_000,
@@ -1537,6 +1538,7 @@ async def test_retry_helper_switches_to_fallback_once_with_unchanged_prompt_and_
         COMPACTION_SUMMARY_PROMPT,
         COMPACTION_SUMMARY_PROMPT,
     ]
+    assert [call.kwargs["timeout_seconds"] for call in generate_summary.await_args_list] == [420.0, 420.0]
     retry_sleep.assert_not_awaited()
     # Structured request/failure/completion logs identify the actual serving model.
     assert [
@@ -1544,6 +1546,11 @@ async def test_retry_helper_switches_to_fallback_once_with_unchanged_prompt_and_
         for call in logger_mock.info.call_args_list
         if call.args[0] == "Compaction summary chunk request"
     ] == ["summary-model", "fallback-model"]
+    assert [
+        call.kwargs["timeout_seconds"]
+        for call in logger_mock.info.call_args_list
+        if call.args[0] == "Compaction summary chunk request"
+    ] == [420.0, 420.0]
     assert [
         call.kwargs["model_name"]
         for call in logger_mock.warning.call_args_list

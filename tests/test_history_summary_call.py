@@ -362,7 +362,10 @@ async def test_compaction_call_timeout_falls_back_in_runtime(
 
     config, runtime_paths = _make_config(
         tmp_path,
-        compaction=CompactionOverrideConfig(enabled=True),
+        compaction=CompactionOverrideConfig(
+            enabled=True,
+            timeout_seconds=0.01,
+        ),
         context_window=64_000,
     )
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
@@ -384,7 +387,6 @@ async def test_compaction_call_timeout_falls_back_in_runtime(
             "mindroom.model_loading.get_model_instance",
             return_value=_SlowSummaryModel(id="summary-model", provider="fake"),
         ),
-        patch("mindroom.history.summary_call.MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS", 0.01),
         capture_logs() as logs,
     ):
         prepared = await prepare_history_for_run_for_test(

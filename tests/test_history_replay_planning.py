@@ -290,6 +290,15 @@ def test_resolved_compaction_config_merges_authored_overrides(tmp_path: Path) ->
     assert resolved.reserve_tokens == 2_048
     assert resolved.model == "summary-model"
     assert resolved.timeout_seconds == 75.0
+    execution_plan = resolve_history_execution_plan(
+        config=config,
+        compaction_config=resolved,
+        has_authored_compaction_config=True,
+        active_model_name="default",
+        active_context_window=48_000,
+        static_prompt_tokens=2_000,
+    )
+    assert execution_plan.compaction_timeout_seconds == 75.0
 
 
 def test_compaction_timeout_defaults_to_ten_minutes_and_must_be_positive() -> None:
@@ -1077,6 +1086,7 @@ def test_classify_compaction_decision_forced_compaction_takes_priority() -> None
         replay_budget_tokens=10_000,
         hard_replay_budget_tokens=10_000,
         summary_input_budget_tokens=5_000,
+        compaction_timeout_seconds=600.0,
     )
 
     decision = classify_compaction_decision(
@@ -1103,6 +1113,7 @@ def test_classify_compaction_decision_does_not_compact_when_over_trigger_but_wit
         replay_budget_tokens=10_000,
         summary_input_budget_tokens=5_000,
         hard_replay_budget_tokens=20_000,
+        compaction_timeout_seconds=600.0,
     )
 
     decision = classify_compaction_decision(
