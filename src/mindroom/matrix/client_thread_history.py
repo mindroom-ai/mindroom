@@ -221,25 +221,33 @@ def log_thread_history_refresh(
     coordinator_queue_wait_ms: float,
 ) -> None:
     """Emit one structured INFO line for a completed thread read."""
-    logger.info(
-        "matrix_cache_thread_history_refreshed",
-        room_id=room_id,
-        thread_id=thread_id,
-        caller_label=caller_label,
-        mode=mode,
-        cache_read_ms=diagnostics.get("cache_read_ms", 0.0),
-        homeserver_fetch_ms=diagnostics.get("homeserver_fetch_ms", 0.0),
-        homeserver_scan_pages=diagnostics.get("homeserver_scan_pages", 0),
-        homeserver_scanned_event_count=diagnostics.get("homeserver_scanned_event_count", 0),
-        homeserver_thread_event_count=diagnostics.get("homeserver_thread_event_count", 0),
-        resolution_ms=diagnostics.get("resolution_ms", 0.0),
-        sidecar_hydration_ms=diagnostics.get("sidecar_hydration_ms", 0.0),
-        coordinator_queue_wait_ms=coordinator_queue_wait_ms,
-        cache_reject_reason=diagnostics.get(THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC),
-        thread_read_source=diagnostics.get(THREAD_HISTORY_SOURCE_DIAGNOSTIC),
-        thread_read_degraded=diagnostics.get(THREAD_HISTORY_DEGRADED_DIAGNOSTIC, False),
-        thread_read_error=diagnostics.get(THREAD_HISTORY_ERROR_DIAGNOSTIC),
-    )
+    log_fields: dict[str, _ThreadHistoryDiagnosticValue] = {
+        "room_id": room_id,
+        "thread_id": thread_id,
+        "caller_label": caller_label,
+        "mode": mode,
+        "cache_read_ms": diagnostics.get("cache_read_ms", 0.0),
+        "homeserver_fetch_ms": diagnostics.get("homeserver_fetch_ms", 0.0),
+        "homeserver_scan_pages": diagnostics.get("homeserver_scan_pages", 0),
+        "homeserver_scanned_event_count": diagnostics.get("homeserver_scanned_event_count", 0),
+        "homeserver_thread_event_count": diagnostics.get("homeserver_thread_event_count", 0),
+        "resolution_ms": diagnostics.get("resolution_ms", 0.0),
+        "sidecar_hydration_ms": diagnostics.get("sidecar_hydration_ms", 0.0),
+        "coordinator_queue_wait_ms": coordinator_queue_wait_ms,
+        "cache_reject_reason": diagnostics.get(THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC),
+        "thread_read_source": diagnostics.get(THREAD_HISTORY_SOURCE_DIAGNOSTIC),
+        "thread_read_degraded": diagnostics.get(THREAD_HISTORY_DEGRADED_DIAGNOSTIC, False),
+        "thread_read_error": diagnostics.get(THREAD_HISTORY_ERROR_DIAGNOSTIC),
+    }
+    for field_name in (
+        "cache_store_outcome",
+        "cache_repair_attempts",
+        "cache_repair_usable",
+        "cache_repair_backoff_seconds",
+    ):
+        if field_name in diagnostics:
+            log_fields[field_name] = diagnostics[field_name]
+    logger.info("matrix_cache_thread_history_refreshed", **log_fields)
 
 
 def thread_history_refresh_mode(result: ThreadHistoryResult, *, cache_hit: bool) -> str:
@@ -252,6 +260,27 @@ def thread_history_refresh_mode(result: ThreadHistoryResult, *, cache_hit: bool)
     ):
         return "cache_hit_after_repair_conflict"
     return "full_scan"
+
+
+def _report_direct_source_refresh(
+    result: ThreadHistoryResult,
+    *,
+    room_id: str,
+    thread_id: str,
+    caller_label: str | None,
+    coordinator_queue_wait_ms: float,
+) -> ThreadHistoryResult:
+    """Report a direct source caller; shared repairs report at their outer caller boundary."""
+    if caller_label is not None:
+        log_thread_history_refresh(
+            room_id=room_id,
+            thread_id=thread_id,
+            caller_label=caller_label,
+            mode=thread_history_refresh_mode(result, cache_hit=False),
+            diagnostics=result.diagnostics,
+            coordinator_queue_wait_ms=coordinator_queue_wait_ms,
+        )
+    return result
 
 
 class RoomThreadsPageError(ValueError):
@@ -1347,6 +1376,8 @@ async def refresh_thread_history_from_source(
     cache_reject_diagnostics: Mapping[str, str | int | float | bool] | None = None,
     trusted_sender_ids: Collection[str] = (),
     retained_event_sources: RetainedThreadEventSourceProvider | None = None,
+    caller_label: str | None = None,
+    coordinator_queue_wait_ms: float = 0.0,
 ) -> ThreadHistoryResult:
     """Fetch fresh thread history from Matrix and repopulate the advisory cache."""
     fetch_result: _ThreadHistoryFetchResult | None = None
@@ -1385,7 +1416,13 @@ async def refresh_thread_history_from_source(
                 else None
             )
             if stale_history is not None:
-                return stale_history
+                return _report_direct_source_refresh(
+                    stale_history,
+                    room_id=room_id,
+                    thread_id=thread_id,
+                    caller_label=caller_label,
+                    coordinator_queue_wait_ms=coordinator_queue_wait_ms,
+                )
             raise
         attempt = await _store_repaired_thread_snapshot(
             client,
@@ -1400,15 +1437,21 @@ async def refresh_thread_history_from_source(
             repair_attempt=repair_attempts,
         )
         if attempt.existing_history is not None:
-            return _thread_history_result(
-                list(attempt.existing_history),
-                is_full_history=hydrate_sidecars,
-                diagnostics={
-                    **attempt.existing_history.diagnostics,
-                    "cache_store_outcome": attempt.replace_outcome.value,
-                    "cache_repair_attempts": repair_attempts,
-                    "cache_repair_usable": True,
-                },
+            return _report_direct_source_refresh(
+                _thread_history_result(
+                    list(attempt.existing_history),
+                    is_full_history=hydrate_sidecars,
+                    diagnostics={
+                        **attempt.existing_history.diagnostics,
+                        "cache_store_outcome": attempt.replace_outcome.value,
+                        "cache_repair_attempts": repair_attempts,
+                        "cache_repair_usable": True,
+                    },
+                ),
+                room_id=room_id,
+                thread_id=thread_id,
+                caller_label=caller_label,
+                coordinator_queue_wait_ms=coordinator_queue_wait_ms,
             )
         if not attempt.retryable or repair_attempts == _MAX_THREAD_REPAIR_ATTEMPTS:
             break
@@ -1432,13 +1475,19 @@ async def refresh_thread_history_from_source(
             cache_store_outcome=attempt.replace_outcome.value,
             cache_repair_attempts=repair_attempts,
         )
-    return _homeserver_thread_history_result(
-        fetch_result,
-        hydrate_sidecars=hydrate_sidecars,
-        cache_store_outcome=attempt.replace_outcome.value,
-        repair_attempts=repair_attempts,
-        cache_repair_usable=attempt.cache_repair_usable,
-        cache_reject_diagnostics=cache_reject_diagnostics,
+    return _report_direct_source_refresh(
+        _homeserver_thread_history_result(
+            fetch_result,
+            hydrate_sidecars=hydrate_sidecars,
+            cache_store_outcome=attempt.replace_outcome.value,
+            repair_attempts=repair_attempts,
+            cache_repair_usable=attempt.cache_repair_usable,
+            cache_reject_diagnostics=cache_reject_diagnostics,
+        ),
+        room_id=room_id,
+        thread_id=thread_id,
+        caller_label=caller_label,
+        coordinator_queue_wait_ms=coordinator_queue_wait_ms,
     )
 
 

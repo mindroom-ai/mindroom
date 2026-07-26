@@ -3165,22 +3165,36 @@ class TestThreadHistoryCache:
             sidecar_hydration_ms=0.0,
         )
 
-        with patch(
-            "mindroom.matrix.client_thread_history._fetch_thread_repair_snapshot",
-            new=AsyncMock(return_value=fetch_result),
-        ) as fetch:
+        logger = MagicMock()
+        with (
+            patch.object(matrix_client_module, "logger", logger),
+            patch(
+                "mindroom.matrix.client_thread_history._fetch_thread_repair_snapshot",
+                new=AsyncMock(return_value=fetch_result),
+            ) as fetch,
+        ):
             history = await matrix_client_module.refresh_thread_history_from_source(
                 AsyncMock(),
                 "!room:localhost",
                 "$thread_root",
                 event_cache=event_cache,
                 allow_stale_fallback=False,
+                caller_label="direct_source_test",
             )
 
         assert fetch.await_count == 2
         assert history.diagnostics["cache_store_outcome"] == ThreadCacheReplaceOutcome.STORED.value
         assert history.diagnostics["cache_repair_attempts"] == 2
         assert history.diagnostics["cache_repair_usable"] is True
+        refreshed_log = next(
+            call
+            for call in logger.info.call_args_list
+            if call.args and call.args[0] == "matrix_cache_thread_history_refreshed"
+        )
+        assert refreshed_log.kwargs["caller_label"] == "direct_source_test"
+        assert refreshed_log.kwargs["cache_store_outcome"] == ThreadCacheReplaceOutcome.STORED.value
+        assert refreshed_log.kwargs["cache_repair_attempts"] == 2
+        assert refreshed_log.kwargs["cache_repair_usable"] is True
 
     @pytest.mark.asyncio
     async def test_refresh_retries_membership_epoch_race_then_installs_snapshot(
@@ -3573,6 +3587,9 @@ class TestThreadHistoryCache:
             "thread_read_source": THREAD_HISTORY_SOURCE_HOMESERVER,
             "thread_read_degraded": False,
             "thread_read_error": None,
+            "cache_store_outcome": ThreadCacheReplaceOutcome.STORED.value,
+            "cache_repair_attempts": 1,
+            "cache_repair_usable": True,
         }
 
     @pytest.mark.asyncio

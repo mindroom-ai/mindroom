@@ -123,6 +123,7 @@ async def test_export_threads_fetches_from_matrix_source_and_writes_yaml(tmp_pat
     enumerate_threads.assert_awaited_once()
     fetch_thread.assert_awaited_once()
     assert fetch_thread.await_args.kwargs["allow_stale_fallback"] is False
+    assert fetch_thread.await_args.kwargs["caller_label"] == "thread_export"
 
     exported_files = list((tmp_path / "exports" / "lobby").glob("*.yaml"))
     assert len(exported_files) == 1
