@@ -3412,7 +3412,7 @@ class TestThreadHistoryCache:
         assert history.diagnostics["cache_repair_usable"] is True
 
     @pytest.mark.asyncio
-    async def test_refresh_fails_open_when_existing_winner_load_keeps_failing(self) -> None:
+    async def test_refresh_fails_open_without_rescanning_when_existing_winner_load_fails(self) -> None:
         """A backend read fault after an existing winner must not discard fetched homeserver history."""
         event_cache = _event_cache()
         event_cache.replace_thread_if_not_newer.return_value = ThreadCacheReplaceOutcome.EXISTING_USABLE
@@ -3451,11 +3451,11 @@ class TestThreadHistoryCache:
                 allow_stale_fallback=False,
             )
 
-        assert fetch.await_count == 2
-        assert load_existing.await_count == 2
+        assert fetch.await_count == 1
+        assert load_existing.await_count == 1
         assert [message.body for message in history] == ["homeserver fallback"]
-        assert history.diagnostics["cache_store_outcome"] == ThreadCacheReplaceOutcome.RETRYABLE_CONFLICT.value
-        assert history.diagnostics["cache_repair_attempts"] == 2
+        assert history.diagnostics["cache_store_outcome"] == ThreadCacheReplaceOutcome.EXISTING_USABLE.value
+        assert history.diagnostics["cache_repair_attempts"] == 1
         assert history.diagnostics["cache_repair_usable"] is False
 
     @pytest.mark.asyncio

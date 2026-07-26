@@ -1135,13 +1135,9 @@ class _ThreadCacheRefillAttempt:
     """One completed reconstruct-and-store attempt and any already-usable winner."""
 
     cache_store_outcome: str
+    cache_repair_usable: bool
     replace_outcome: ThreadCacheReplaceOutcome | None
     existing_history: ThreadHistoryResult | None = None
-
-    @property
-    def usable(self) -> bool:
-        """Return whether this attempt left a usable durable snapshot."""
-        return self.replace_outcome is not None and self.replace_outcome.usable
 
     @property
     def retryable(self) -> bool:
@@ -1237,18 +1233,6 @@ async def _cache_store_rejection_outcome(
     return f"skipped_{rejection_reason}"
 
 
-def _refill_attempt_for_outcome(
-    outcome: ThreadCacheReplaceOutcome,
-    *,
-    existing_history: ThreadHistoryResult | None = None,
-) -> _ThreadCacheRefillAttempt:
-    return _ThreadCacheRefillAttempt(
-        cache_store_outcome=outcome.value,
-        replace_outcome=outcome,
-        existing_history=existing_history,
-    )
-
-
 async def _store_repaired_thread_snapshot(
     client: nio.AsyncClient,
     *,
@@ -1270,7 +1254,11 @@ async def _store_repaired_thread_snapshot(
         fetch_result=fetch_result,
     )
     if skipped_reason is not None:
-        return _ThreadCacheRefillAttempt(cache_store_outcome=skipped_reason, replace_outcome=None)
+        return _ThreadCacheRefillAttempt(
+            cache_store_outcome=skipped_reason,
+            cache_repair_usable=False,
+            replace_outcome=None,
+        )
     outcome = await _store_thread_history_cache(
         event_cache,
         room_id=room_id,
@@ -1292,7 +1280,11 @@ async def _store_repaired_thread_snapshot(
         homeserver_thread_event_count=len(fetch_result.event_sources),
     )
     if outcome is not ThreadCacheReplaceOutcome.EXISTING_USABLE:
-        return _refill_attempt_for_outcome(outcome)
+        return _ThreadCacheRefillAttempt(
+            cache_store_outcome=outcome.value,
+            cache_repair_usable=outcome.usable,
+            replace_outcome=outcome,
+        )
     try:
         existing_history, _existing_reject = await _load_cached_thread_history_if_usable(
             client,
@@ -1304,7 +1296,7 @@ async def _store_repaired_thread_snapshot(
         )
     except Exception as exc:
         logger.warning(
-            "Failed to load usable concurrent thread snapshot; retrying repair",
+            "Failed to load usable concurrent thread snapshot; continuing with fetched history",
             room_id=room_id,
             thread_id=thread_id,
             cache_store_outcome=outcome.value,
@@ -1312,10 +1304,30 @@ async def _store_repaired_thread_snapshot(
             error_type=type(exc).__name__,
             error=str(exc),
         )
-        return _refill_attempt_for_outcome(ThreadCacheReplaceOutcome.RETRYABLE_CONFLICT)
+        return _ThreadCacheRefillAttempt(
+            cache_store_outcome=outcome.value,
+            cache_repair_usable=False,
+            replace_outcome=outcome,
+        )
     if existing_history is None:
-        return _refill_attempt_for_outcome(ThreadCacheReplaceOutcome.RETRYABLE_CONFLICT)
-    return _refill_attempt_for_outcome(outcome, existing_history=existing_history)
+        logger.warning(
+            "Concurrent usable thread snapshot was unavailable; continuing with fetched history",
+            room_id=room_id,
+            thread_id=thread_id,
+            cache_store_outcome=outcome.value,
+            cache_repair_attempt=repair_attempt,
+        )
+        return _ThreadCacheRefillAttempt(
+            cache_store_outcome=outcome.value,
+            cache_repair_usable=False,
+            replace_outcome=outcome,
+        )
+    return _ThreadCacheRefillAttempt(
+        cache_store_outcome=outcome.value,
+        cache_repair_usable=True,
+        replace_outcome=outcome,
+        existing_history=existing_history,
+    )
 
 
 def _homeserver_thread_history_result(
@@ -1436,7 +1448,7 @@ async def refresh_thread_history_from_source(
 
     assert fetch_result is not None
     assert attempt is not None
-    if attempt.replace_outcome is not None and not attempt.usable:
+    if attempt.replace_outcome is not None and not attempt.cache_repair_usable:
         # Covers durable-write faults too, not just conflicts: a cache that cannot accept writes is
         # the condition operators most need to see, and it is otherwise only logged at INFO.
         logger.warning(
@@ -1451,7 +1463,7 @@ async def refresh_thread_history_from_source(
         hydrate_sidecars=hydrate_sidecars,
         cache_store_outcome=attempt.cache_store_outcome,
         repair_attempts=repair_attempts,
-        cache_repair_usable=attempt.usable,
+        cache_repair_usable=attempt.cache_repair_usable,
         cache_reject_diagnostics=cache_reject_diagnostics,
     )
 
