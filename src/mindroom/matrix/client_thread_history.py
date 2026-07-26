@@ -1825,6 +1825,7 @@ async def fetch_thread_event_sources_via_room_messages(
             "Thread room scan ended without finding root",
             room_id=room_id,
             thread_id=thread_id,
+            client_user_id=client.user_id,
             room_scan_pages=scan_result.page_count,
             scanned_event_count=scan_result.scanned_event_count,
         )
@@ -1987,7 +1988,12 @@ async def _bulk_scan_thread_event_sources(
         )
         if not isinstance(response, nio.RoomMessagesResponse):
             msg = f"bulk room scan failed for {room_id}: {response}"
-            logger.error("Failed bulk thread history scan", room_id=room_id, error=str(response))
+            logger.error(
+                "Failed bulk thread history scan",
+                room_id=room_id,
+                client_user_id=client.user_id,
+                error=str(response),
+            )
             raise RuntimeError(msg)  # noqa: TRY004
         if not response.chunk:
             break

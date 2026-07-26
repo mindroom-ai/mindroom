@@ -6,9 +6,14 @@ from unittest.mock import AsyncMock, Mock
 
 import nio
 import pytest
+from structlog.testing import capture_logs
 
 from mindroom.matrix.cache import ThreadCacheReplaceOutcome
-from mindroom.matrix.client_thread_history import bulk_refresh_room_thread_histories
+from mindroom.matrix.client_thread_history import (
+    bulk_refresh_room_thread_histories,
+    fetch_thread_event_sources_via_room_messages,
+)
+from mindroom.matrix.thread_membership import ThreadRoomScanRootNotFoundError
 
 _ROOM_ID = "!room:localhost"
 
@@ -209,3 +214,61 @@ async def test_bulk_refresh_page_budget_stores_found_threads_and_reports_remaini
     assert stats.scan_truncated is True
     event_cache.replace_thread_if_not_newer.assert_awaited_once()
     assert event_cache.replace_thread_if_not_newer.await_args.args[1] == "$a:localhost"
+
+
+@pytest.mark.asyncio
+async def test_scan_failure_log_names_the_acting_client() -> None:
+    """A rejected scan must name the client whose credentials the homeserver refused.
+
+    The control plane runs several clients against one homeserver, so a permission
+    failure is only actionable if the log says which one was refused.
+    """
+    client = AsyncMock()
+    client.user_id = "@agent:localhost"
+    client.room_messages = AsyncMock(
+        return_value=nio.RoomMessagesError.from_dict(
+            {"errcode": "M_FORBIDDEN", "error": "You don't have permission to view this room."},
+            _ROOM_ID,
+        ),
+    )
+    event_cache = AsyncMock()
+    event_cache.room_membership_epoch = AsyncMock(return_value=7)
+
+    with capture_logs() as logs, pytest.raises(RuntimeError, match="bulk room scan failed"):
+        await bulk_refresh_room_thread_histories(
+            client,
+            _ROOM_ID,
+            event_cache,
+            thread_root_ids=["$a:localhost"],
+            caller_label="test",
+        )
+
+    failures = [entry for entry in logs if entry["event"] == "Failed bulk thread history scan"]
+    assert len(failures) == 1
+    assert failures[0]["client_user_id"] == "@agent:localhost"
+    assert failures[0]["room_id"] == _ROOM_ID
+    assert "M_FORBIDDEN" in failures[0]["error"]
+
+
+@pytest.mark.asyncio
+async def test_root_not_found_log_names_the_acting_client() -> None:
+    """A scan that never sees the thread root must also name the acting client.
+
+    A client that can only see part of a room's history produces the same symptom,
+    so this log needs the same identity to be diagnosable.
+    """
+    client = AsyncMock()
+    client.user_id = "@agent:localhost"
+    client.room_messages = AsyncMock(
+        return_value=_messages_response(
+            [_message_event("$other:localhost", "unrelated", timestamp=1000)],
+            end=None,
+        ),
+    )
+
+    with capture_logs() as logs, pytest.raises(ThreadRoomScanRootNotFoundError):
+        await fetch_thread_event_sources_via_room_messages(client, _ROOM_ID, "$missing:localhost")
+
+    misses = [entry for entry in logs if entry["event"] == "Thread room scan ended without finding root"]
+    assert len(misses) == 1
+    assert misses[0]["client_user_id"] == "@agent:localhost"
