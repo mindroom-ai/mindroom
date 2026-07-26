@@ -1,6 +1,6 @@
 # Thread edit integrity gate status
 
-Updated 2026-07-26 after making room-snapshot freshness total on malformed bundled identities.
+Updated 2026-07-26 after correcting the full-suite immutable-event reuse fixture.
 
 ## Exact target
 
@@ -8,7 +8,7 @@ Updated 2026-07-26 after making room-snapshot freshness total on malformed bundl
 - Branch: `fix/thread-edit-integrity`
 - Latest production commit: `e2eb2753042908ea88537a51c2a1f2e2e59263eb`
 - Current base and merge base: `858282afc77adb480fa06cd9e4057d511ff861d5`
-- Latest integration commit before the next handoff-only successor: `e2eb2753042908ea88537a51c2a1f2e2e59263eb`
+- Latest integration commit before the next handoff-only successor: `576bbe3ffb44632bb2210db4a57c6a562a8f795e`
 - A commit cannot contain its own SHA, so this file does not claim that its stored parent is the exact gate head.
 - Resolve local `HEAD`, `origin/fix/thread-edit-integrity`, and GitHub PR `headRefOid` live and require all three values to match before counting any gate.
 - The tracked tree is clean; three user-owned task notes and preserved test artifacts are untracked.
@@ -48,6 +48,7 @@ Updated 2026-07-26 after making room-snapshot freshness total on malformed bundl
 - `785904677` prevents a fresh plain-original observation from reviving an explicit edit that was observed only before the current runtime.
 - `785904677` lets original cache time refresh an edited snapshot only when the selected edit identity is actually present in the original's bundled aggregation.
 - `e2eb27530` compares bundled edit identities without hashing untrusted JSON values, so list and mapping IDs are ignored instead of crashing snapshot reads.
+- `576bbe3ff` updates the reuse invalidation fixture to a legal unsigned metadata refresh instead of mutating immutable clear event content under one event ID.
 - The current correction requires canonical replacement validity before an edit may supply thread ancestry in point, scan, cache-certification, snapshot, cleanup, or mutation paths.
 - The current correction rejects malformed `m.room.message` point events and cache rows before their raw relations can create durable thread indexes.
 - Known invalid edits resolve room-level; unavailable replacement ancestry remains indeterminate so mutation writes fail closed.
@@ -346,6 +347,23 @@ Updated 2026-07-26 after making room-snapshot freshness total on malformed bundl
 - Total production source against current main is `+2437/-1226`, net `+1211`.
 - Every predecessor review, CI, PostgreSQL, full-suite, all-file, and real-Tuwunel result is historical after `3c6a1d2a0`.
 - Fresh exact-head Codex review and CI are required.
+- Exact-head PostgreSQL stress, full pytest, Tach, all-file pre-commit, and isolated real-Tuwunel remain mandatory.
+- Merge gate remains closed; never merge from this task.
+
+## Test-576b immutable event reuse correction
+
+- Test correction commit is `576bbe3ffb44632bb2210db4a57c6a562a8f795e`; production source is unchanged.
+- Resolve the handoff successor live; this tracked file deliberately does not claim its own commit SHA.
+- Base and merge base remain current `main` `858282afc77adb480fa06cd9e4057d511ff861d5`.
+- Exact-`b092c8f1d` full pytest deterministically failed one test that changed a clear event body while retaining the same event ID, sender, timestamp, and type.
+- Production correctly quarantines that conflicting immutable identity, so no production fallback was added.
+- The fixture now changes only legal unsigned metadata while preserving its intended contract: a changed point-row revision forces full resolution even when the thread index is unchanged.
+- The exact failed test and its complete `33`-test owning file pass after correction.
+- Focused pre-commit, Tach, diff checks, and commit hooks pass.
+- Exact-`b092c8f1d` PostgreSQL stress passed all `12` serial cases across SQLite and PostgreSQL.
+- Exact-`b092c8f1d` PC all-file hooks passed except Linux `ty`, which cannot resolve the pre-existing macOS-only `AppKit`, `ApplicationServices`, and `Quartz` imports; exact-head macOS all-file validation remains required.
+- Every exact-head review, CI, PostgreSQL, full-suite, all-file, and real-Tuwunel result is stale after `576bbe3ff`.
+- Fresh exact-head incremental Codex review and CI are required.
 - Exact-head PostgreSQL stress, full pytest, Tach, all-file pre-commit, and isolated real-Tuwunel remain mandatory.
 - Merge gate remains closed; never merge from this task.
 
