@@ -32,15 +32,7 @@ from mindroom.hooks import (
     emit_final_response_transform,
     emit_transform,
 )
-from mindroom.matrix.client_delivery import (
-    DeliveredMatrixEvent,
-    MatrixSendOutcome,
-    build_threaded_edit_content,
-    edit_message_outcome,
-    edit_message_result,
-    send_message_outcome,
-    send_message_result,
-)
+from mindroom.matrix.client_delivery import build_threaded_edit_content, edit_message_result, send_message_result
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import build_message_content
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
@@ -57,7 +49,6 @@ from mindroom.terminal_delivery import (
     TerminalDeliveryAttempt,
     TerminalDeliveryIntent,
     TerminalDeliveryStore,
-    TerminalOutcomeKind,
 )
 
 if TYPE_CHECKING:
@@ -88,6 +79,8 @@ _PLACEHOLDER_DELIVERY_FAILURE_REASONS = frozenset(
         "terminal_update_failed",
     },
 )
+
+
 # A terminal outcome whose only failure was Matrix transport is durably retried
 # instead of being overwritten with a user-visible delivery-failure note.
 _DURABLE_TERMINAL_RETRY_FAILURE_REASON = "delivery_failed_pending_durable_retry"
@@ -98,25 +91,6 @@ def _is_placeholder_delivery_failure(failure_reason: str) -> bool:
     return failure_reason in _PLACEHOLDER_DELIVERY_FAILURE_REASONS or failure_reason.startswith(
         "terminal_update_exception:",
     )
-
-
-def _send_failure_reason(outcome: MatrixSendOutcome, *, blocked_detail: str) -> str:
-    """Return one log-safe reason string for a failed Matrix send or edit."""
-    failure = outcome.failure
-    if failure is None:
-        return "matrix delivery returned no event"
-    if failure.kind == "sync_recovery":
-        return blocked_detail
-    return f"{failure.kind}:{failure.detail}"
-
-
-def _terminal_stream_status(outcome_kind: TerminalOutcomeKind) -> str:
-    """Map one durable outcome kind onto the terminal stream status it must publish."""
-    if outcome_kind == "completed":
-        return constants.STREAM_STATUS_COMPLETED
-    if outcome_kind == "error":
-        return constants.STREAM_STATUS_ERROR
-    return constants.STREAM_STATUS_CANCELLED
 
 
 @dataclass(frozen=True)
@@ -237,7 +211,6 @@ class SendTextRequest:  # noqa: D101
     tool_trace: list[ToolTraceEntry] | None = None
     extra_content: dict[str, Any] | None = None
     retry_sync_recovery: bool = False
-    transaction_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -513,13 +486,11 @@ class DeliveryGateway:
         self,
         *,
         target: MessageTarget,
-        target_event_id: str | None,
+        target_event_id: str,
         identity: ResponseIdentity,
-        outcome_kind: TerminalOutcomeKind,
         body: str,
         tool_trace: list[ToolTraceEntry] | None,
         extra_content: dict[str, Any] | None,
-        skip_mentions: bool = False,
     ) -> PendingTerminalDelivery | None:
         """Persist one committed terminal outcome that Matrix transport could not deliver.
 
@@ -532,83 +503,47 @@ class DeliveryGateway:
         # The repaired edit must publish the terminal status even when the
         # carried content still describes an in-progress stream.
         durable_extra_content = dict(extra_content or {})
-        durable_extra_content[constants.STREAM_STATUS_KEY] = _terminal_stream_status(outcome_kind)
+        durable_extra_content[constants.STREAM_STATUS_KEY] = constants.STREAM_STATUS_COMPLETED
         intent = TerminalDeliveryIntent(
             agent_name=self.deps.agent_name,
             target=target,
             target_event_id=target_event_id,
             anchor_event_id=identity.response_envelope.source_event_id,
             source_event_ids=(identity.response_envelope.source_event_id,),
-            outcome_kind=outcome_kind,
             body=body,
             correlation_id=identity.correlation_id,
-            response_kind=identity.response_kind,
             tool_trace=tuple(tool_trace or ()),
             extra_content=durable_extra_content,
-            skip_mentions=skip_mentions,
         )
         recorded = await asyncio.to_thread(store.record, intent)
         if recorded is None or recorded.is_settled:
             return None
         self.deps.logger.warning(
             "Persisted terminal delivery for durable retry",
-            response_kind=identity.response_kind,
             correlation_id=identity.correlation_id,
             **recorded.log_context,
             **target.log_context,
         )
         return recorded
 
-    async def attempt_pending_terminal_delivery(  # noqa: PLR0911
-        self,
-        item: PendingTerminalDelivery,
-    ) -> TerminalDeliveryAttempt:
+    async def attempt_pending_terminal_delivery(self, item: PendingTerminalDelivery) -> TerminalDeliveryAttempt:
         """Try once to make one durable terminal outcome visible, and classify the result."""
         if self.deps.runtime.client is None:
             return TerminalDeliveryAttempt.transient("matrix_client_unavailable")
-        if item.target_event_id is not None:
-            target_state = await self._inspect_terminal_target(item.target.room_id, item.target_event_id)
-            if target_state == "missing":
-                return TerminalDeliveryAttempt.superseded("target_event_missing")
-            if target_state == "redacted":
-                return TerminalDeliveryAttempt.superseded("target_event_redacted")
-        tool_trace = list(item.tool_trace) or None
-        extra_content = dict(item.extra_content) if item.extra_content else None
-        if item.target_event_id is not None:
-            outcome = await self.edit_text_outcome(
-                EditTextRequest(
-                    target=item.target,
-                    event_id=item.target_event_id,
-                    new_text=item.body,
-                    tool_trace=tool_trace,
-                    extra_content=extra_content,
-                    transaction_id=item.transaction_id,
-                ),
-            )
-        else:
-            outcome = await self.send_text_outcome(
-                SendTextRequest(
-                    target=item.target,
-                    response_text=item.body,
-                    skip_mentions=item.skip_mentions,
-                    tool_trace=tool_trace,
-                    extra_content=extra_content,
-                    transaction_id=item.transaction_id,
-                ),
-            )
-        if outcome.delivered is not None:
-            return TerminalDeliveryAttempt.delivered_now()
-        failure = outcome.failure
-        if failure is None:
-            return TerminalDeliveryAttempt.transient("delivery_returned_no_event")
-        if failure.kind == "target_missing":
-            return TerminalDeliveryAttempt.superseded("target_event_missing")
-        if failure.retryable or failure.kind == "local_precondition":
-            return TerminalDeliveryAttempt.transient(
-                f"{failure.kind}:{failure.detail}",
-                retry_after_seconds=failure.retry_after_seconds,
-            )
-        return TerminalDeliveryAttempt.permanent(f"{failure.kind}:{failure.detail}")
+        target_state = await self._inspect_terminal_target(item.target.room_id, item.target_event_id)
+        if target_state in {"missing", "redacted"}:
+            return TerminalDeliveryAttempt.superseded(f"target_event_{target_state}")
+        edited = await self.edit_text(
+            EditTextRequest(
+                target=item.target,
+                event_id=item.target_event_id,
+                new_text=item.body,
+                tool_trace=list(item.tool_trace) or None,
+                extra_content=dict(item.extra_content) if item.extra_content else None,
+                transaction_id=item.transaction_id,
+            ),
+        )
+        return TerminalDeliveryAttempt.delivered_now() if edited else TerminalDeliveryAttempt.transient("edit_failed")
 
     async def _inspect_terminal_target(  # noqa: PLR0911
         self,
@@ -635,79 +570,50 @@ class DeliveryGateway:
             return "missing" if response.status_code == "M_NOT_FOUND" else "unknown"
         if not isinstance(response, nio_runtime.RoomGetEventResponse):
             return "unknown"
-        event = response.event
-        if isinstance(event, nio_runtime.RedactedEvent):
+        if isinstance(response.event, nio_runtime.RedactedEvent):
             return "redacted"
-        source = event.source if isinstance(event.source, dict) else {}
+        source = response.event.source if isinstance(response.event.source, dict) else {}
         unsigned = source.get("unsigned")
         if isinstance(unsigned, dict) and unsigned.get("redacted_because") is not None:
             return "redacted"
         return "ok"
 
+    async def _record_stream_terminal_delivery(
+        self,
+        request: FinalizeStreamedResponseRequest,
+        *,
+        stream_outcome: StreamTransportOutcome,
+        failure_reason: str,
+        target_event_id: str | None,
+    ) -> PendingTerminalDelivery | None:
+        """Persist the stream's committed final body when only Matrix transport failed.
+
+        Only a completed stream is durably retried. ``StreamTransportOutcome`` carries
+        the canonical success body, but the terminal text for an error or cancellation
+        (its note-suffixed rendering) is not exposed, and publishing an approximation
+        of a terminal notice later would be worse than leaving today's behaviour.
+        """
+        canonical_body = stream_outcome.canonical_final_body_candidate
+        if (
+            target_event_id is None
+            or canonical_body is None
+            or not canonical_body.strip()
+            or stream_outcome.terminal_status != "completed"
+            or not _is_placeholder_delivery_failure(failure_reason)
+        ):
+            return None
+        return await self.record_pending_terminal_delivery(
+            target=request.target,
+            target_event_id=target_event_id,
+            identity=request.identity,
+            body=interactive.parse_and_format_interactive(canonical_body, extract_mapping=True).formatted_text,
+            tool_trace=request.tool_trace,
+            extra_content=request.extra_content,
+        )
+
     async def send_text(self, request: SendTextRequest) -> str | None:
         """Send one response message to a room."""
         client = self._client()
-        resolved_target = request.target
-        content = await self._build_send_content(request)
-        try:
-            delivered = await send_message_result(
-                client,
-                resolved_target.room_id,
-                content,
-                retry_sync_recovery=request.retry_sync_recovery,
-                transaction_id=request.transaction_id,
-            )
-        except SendRetryError:
-            delivered = None
-            self._log_send_failure(resolved_target, reason="matrix timeline recovery still blocked the send")
-            return None
-        if delivered is None:
-            self._log_send_failure(resolved_target, reason="send_message_result returned None")
-            return None
-        self._note_delivered(resolved_target.room_id, delivered)
-        self.deps.logger.info("Sent response", event_id=delivered.event_id, **resolved_target.log_context)
-        return delivered.event_id
-
-    async def send_text_outcome(self, request: SendTextRequest) -> MatrixSendOutcome:
-        """Send one response message and return its delivered payload or classified failure."""
-        client = self._client()
-        resolved_target = request.target
-        content = await self._build_send_content(request)
-        outcome = await send_message_outcome(
-            client,
-            resolved_target.room_id,
-            content,
-            retry_sync_recovery=request.retry_sync_recovery,
-            transaction_id=request.transaction_id,
-        )
-        if outcome.delivered is not None:
-            self._note_delivered(resolved_target.room_id, outcome.delivered)
-            self.deps.logger.info("Sent response", event_id=outcome.delivered.event_id, **resolved_target.log_context)
-            return outcome
-        self._log_send_failure(
-            resolved_target,
-            reason=_send_failure_reason(outcome, blocked_detail="matrix timeline recovery still blocked the send"),
-        )
-        return outcome
-
-    def _note_delivered(self, room_id: str, delivered: DeliveredMatrixEvent) -> None:
-        """Record one just-delivered outbound event in the conversation cache."""
-        self.deps.resolver.deps.conversation_cache.notify_outbound_message(
-            room_id,
-            delivered.event_id,
-            delivered.content_sent,
-        )
-
-    def _log_send_failure(self, target: MessageTarget, *, reason: str) -> None:
-        """Log one failed room send with a log-safe reason."""
-        self.deps.logger.error("Failed to send response to room", error=reason, **target.log_context)
-
-    def _log_edit_failure(self, target: MessageTarget, *, event_id: str, reason: str) -> None:
-        """Log one failed message edit with a log-safe reason."""
-        self.deps.logger.error("Failed to edit message", event_id=event_id, error=reason, **target.log_context)
-
-    async def _build_send_content(self, request: SendTextRequest) -> dict[str, Any]:
-        """Build the exact wire content for one outbound response message."""
         config = self.deps.runtime.config
         resolved_target = request.target
         effective_thread_id = resolved_target.resolved_thread_id
@@ -744,64 +650,35 @@ class DeliveryGateway:
             )
         if request.skip_mentions:
             content[SKIP_MENTIONS_KEY] = True
-        return content
+        failure_reason = "send_message_result returned None"
+        try:
+            delivered = await send_message_result(
+                client,
+                resolved_target.room_id,
+                content,
+                retry_sync_recovery=request.retry_sync_recovery,
+            )
+        except SendRetryError:
+            delivered = None
+            failure_reason = "matrix timeline recovery still blocked the send"
+        if delivered is not None:
+            self.deps.resolver.deps.conversation_cache.notify_outbound_message(
+                resolved_target.room_id,
+                delivered.event_id,
+                delivered.content_sent,
+            )
+            self.deps.logger.info("Sent response", event_id=delivered.event_id, **resolved_target.log_context)
+            return delivered.event_id
+        self.deps.logger.error(
+            "Failed to send response to room",
+            error=failure_reason,
+            **resolved_target.log_context,
+        )
+        return None
 
     async def edit_text(self, request: EditTextRequest) -> bool:
         """Edit one existing response message."""
         client = self._client()
-        target = request.target
-        content = await self._build_edit_content(request)
-        try:
-            delivered = await edit_message_result(
-                client,
-                target.room_id,
-                request.event_id,
-                content,
-                request.new_text,
-                retry_sync_recovery=request.retry_sync_recovery,
-                transaction_id=request.transaction_id,
-            )
-        except SendRetryError:
-            self._log_edit_failure(
-                target,
-                event_id=request.event_id,
-                reason="matrix timeline recovery still blocked the edit",
-            )
-            return False
-        if delivered is None:
-            self._log_edit_failure(target, event_id=request.event_id, reason="edit_message_result returned None")
-            return False
-        self._note_delivered(target.room_id, delivered)
-        self.deps.logger.info("Edited message", event_id=request.event_id, **target.log_context)
-        return True
-
-    async def edit_text_outcome(self, request: EditTextRequest) -> MatrixSendOutcome:
-        """Edit one existing response message and return its outcome or classified failure."""
-        client = self._client()
-        target = request.target
-        content = await self._build_edit_content(request)
-        outcome = await edit_message_outcome(
-            client,
-            target.room_id,
-            request.event_id,
-            content,
-            request.new_text,
-            retry_sync_recovery=request.retry_sync_recovery,
-            transaction_id=request.transaction_id,
-        )
-        if outcome.delivered is not None:
-            self._note_delivered(target.room_id, outcome.delivered)
-            self.deps.logger.info("Edited message", event_id=request.event_id, **target.log_context)
-            return outcome
-        self._log_edit_failure(
-            target,
-            event_id=request.event_id,
-            reason=_send_failure_reason(outcome, blocked_detail="matrix timeline recovery still blocked the edit"),
-        )
-        return outcome
-
-    async def _build_edit_content(self, request: EditTextRequest) -> dict[str, Any]:
-        """Build the exact wire content for one message edit."""
         config = self.deps.runtime.config
         target = request.target
         if (
@@ -837,7 +714,36 @@ class DeliveryGateway:
                 extra_content=request.extra_content,
                 latest_thread_event_id=latest_thread_event_id,
             )
-        return content
+
+        failure_reason = "edit_message_result returned None"
+        try:
+            delivered = await edit_message_result(
+                client,
+                target.room_id,
+                request.event_id,
+                content,
+                request.new_text,
+                retry_sync_recovery=request.retry_sync_recovery,
+                transaction_id=request.transaction_id,
+            )
+        except SendRetryError:
+            delivered = None
+            failure_reason = "matrix timeline recovery still blocked the edit"
+        if delivered is not None:
+            self.deps.resolver.deps.conversation_cache.notify_outbound_message(
+                target.room_id,
+                delivered.event_id,
+                delivered.content_sent,
+            )
+            self.deps.logger.info("Edited message", event_id=request.event_id, **target.log_context)
+            return True
+        self.deps.logger.error(
+            "Failed to edit message",
+            event_id=request.event_id,
+            error=failure_reason,
+            **target.log_context,
+        )
+        return False
 
     async def deliver_final(  # noqa: C901, PLR0911, PLR0912
         self,
@@ -988,7 +894,6 @@ class DeliveryGateway:
                 target=request.target,
                 target_event_id=request.existing_event_id,
                 identity=request.identity,
-                outcome_kind="completed",
                 body=display_text,
                 tool_trace=draft.tool_trace,
                 extra_content=draft.extra_content,
@@ -1032,22 +937,10 @@ class DeliveryGateway:
             ),
         )
         if event_id is None:
-            pending_delivery = await self.record_pending_terminal_delivery(
-                target=request.target,
-                target_event_id=None,
-                identity=request.identity,
-                outcome_kind="completed",
-                body=display_text,
-                tool_trace=draft.tool_trace,
-                extra_content=draft.extra_content,
-                skip_mentions=request.skip_mentions,
-            )
             return FinalDeliveryOutcome(
                 terminal_status="error",
                 event_id=None,
-                failure_reason=(
-                    _DURABLE_TERMINAL_RETRY_FAILURE_REASON if pending_delivery is not None else "delivery_failed"
-                ),
+                failure_reason="delivery_failed",
                 tool_trace=tuple(draft.tool_trace or ()),
                 extra_content=draft.extra_content,
             )
@@ -1344,37 +1237,6 @@ class DeliveryGateway:
             interactive_metadata=interactive_response.interactive_metadata,
         )
 
-    async def _record_stream_terminal_delivery(
-        self,
-        request: FinalizeStreamedResponseRequest,
-        *,
-        stream_outcome: StreamTransportOutcome,
-        failure_reason: str,
-        target_event_id: str | None,
-    ) -> PendingTerminalDelivery | None:
-        """Persist the stream's committed terminal body when only Matrix transport failed.
-
-        Only a completed stream is durably retried. ``StreamTransportOutcome`` carries
-        the canonical success body, but the terminal text for an error or cancellation
-        (its note-suffixed rendering) is not exposed, and publishing an approximation
-        of a terminal notice later would be worse than leaving today's behaviour.
-        """
-        if not _is_placeholder_delivery_failure(failure_reason) or stream_outcome.terminal_status != "completed":
-            return None
-        canonical_body = stream_outcome.canonical_final_body_candidate
-        if canonical_body is None or not canonical_body.strip():
-            return None
-        rendered = interactive.parse_and_format_interactive(canonical_body, extract_mapping=True)
-        return await self.record_pending_terminal_delivery(
-            target=request.target,
-            target_event_id=target_event_id,
-            identity=request.identity,
-            outcome_kind="completed",
-            body=rendered.formatted_text,
-            tool_trace=request.tool_trace,
-            extra_content=request.extra_content,
-        )
-
     async def _finalize_placeholder_only_stream_error(
         self,
         request: FinalizeStreamedResponseRequest,
@@ -1530,20 +1392,12 @@ class DeliveryGateway:
 
                 visible_stream_event_id = stream_outcome.visible_event_id
                 if visible_stream_event_id is not None:
-                    pending_delivery = await self._record_stream_terminal_delivery(
-                        request,
-                        stream_outcome=stream_outcome,
-                        failure_reason=failure_reason,
-                        target_event_id=streamed_event_id,
-                    )
                     return FinalDeliveryOutcome(
                         terminal_status="error",
                         event_id=visible_stream_event_id,
                         is_visible_response=True,
                         final_visible_body=streamed_text or None,
-                        failure_reason=(
-                            _DURABLE_TERMINAL_RETRY_FAILURE_REASON if pending_delivery is not None else failure_reason
-                        ),
+                        failure_reason=failure_reason,
                         tool_trace=tuple(request.tool_trace or ()),
                         extra_content=request.extra_content,
                     )

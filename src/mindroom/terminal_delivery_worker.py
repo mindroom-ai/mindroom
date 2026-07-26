@@ -57,7 +57,6 @@ class TerminalDeliveryWorkerDeps:
     attempt: Callable[[PendingTerminalDelivery], Awaitable[TerminalDeliveryAttempt]]
     is_ready: Callable[[], bool]
     logger: structlog.stdlib.BoundLogger = field(default_factory=lambda: logger)
-    clock: Callable[[], float] = time.monotonic
     wall_clock: Callable[[], float] = time.time
     jitter: Callable[[], float] = random.random
     poll_interval_seconds: float = DEFAULT_POLL_INTERVAL_SECONDS
@@ -160,16 +159,17 @@ class TerminalDeliveryWorker:
             )
             attempted += len(batch)
         if attempted:
-            backlog = await asyncio.to_thread(self.deps.store.backlog)
+            unsettled = await asyncio.to_thread(self.deps.store.unsettled_items)
             self.deps.logger.info(
                 "terminal_delivery_drain_completed",
                 attempted_count=attempted,
-                unsettled_count=backlog.unsettled_count,
-                dead_letter_count=backlog.dead_letter_count,
-                oldest_unsettled_age_seconds=round(backlog.oldest_unsettled_age_seconds, 3),
-                max_attempts=backlog.max_attempts,
-                unsettled_room_count=len(backlog.unsettled_by_room),
-                unsettled_by_outcome=dict(backlog.unsettled_by_outcome),
+                unsettled_count=len(unsettled),
+                unsettled_room_count=len({item.target.room_id for item in unsettled}),
+                oldest_unsettled_age_seconds=round(
+                    max((self.deps.wall_clock() - item.created_at for item in unsettled), default=0.0),
+                    3,
+                ),
+                max_attempts=max((item.attempts for item in unsettled), default=0),
             )
         return attempted
 
@@ -224,9 +224,6 @@ class TerminalDeliveryWorker:
                 **item.log_context,
             )
             return
-        if attempt.result == "permanent":
-            await asyncio.to_thread(store.mark_dead_letter, item.delivery_id, reason=attempt.reason)
-            return
         next_attempts = item.attempts + 1
         if next_attempts >= self.deps.max_attempts:
             await asyncio.to_thread(
@@ -235,7 +232,7 @@ class TerminalDeliveryWorker:
                 reason=f"retry_budget_exhausted:{attempt.reason}",
             )
             return
-        delay = self._backoff_seconds(next_attempts, retry_after_seconds=attempt.retry_after_seconds)
+        delay = self._backoff_seconds(next_attempts)
         await asyncio.to_thread(
             store.defer,
             item.delivery_id,
@@ -249,14 +246,11 @@ class TerminalDeliveryWorker:
             **item.log_context,
         )
 
-    def _backoff_seconds(self, attempts: int, *, retry_after_seconds: float | None) -> float:
-        """Return exponential backoff with jitter, honouring a server retry hint."""
+    def _backoff_seconds(self, attempts: int) -> float:
+        """Return exponential backoff with jitter, bounded above."""
         exponential = self.deps.initial_backoff_seconds * (2 ** max(0, attempts - 1))
         bounded = min(exponential, self.deps.max_backoff_seconds)
-        jittered = bounded * (0.5 + 0.5 * self.deps.jitter())
-        if retry_after_seconds is not None:
-            jittered = max(jittered, min(retry_after_seconds, self.deps.max_backoff_seconds))
-        return max(jittered, 0.0)
+        return bounded * (0.5 + 0.5 * self.deps.jitter())
 
     async def _release_leases(self, *, reason: str) -> None:
         """Return every record this worker still holds to the retry queue."""
