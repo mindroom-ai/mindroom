@@ -1368,7 +1368,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         """A failed thread append should not stop later redactions in the same sync batch."""
         event_cache = _runtime_event_cache()
         event_cache.store_events_batch = AsyncMock()
-        event_cache.append_event = AsyncMock(side_effect=RuntimeError("append failed"))
+        event_cache.apply_thread_mutation_append = AsyncMock(side_effect=RuntimeError("append failed"))
         event_cache.redact_event = AsyncMock(return_value=True)
         bot.event_cache = event_cache
         _install_runtime_write_coordinator(bot)

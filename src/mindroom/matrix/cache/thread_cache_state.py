@@ -197,28 +197,12 @@ def guarded_thread_replacement_conflict(
     return ThreadCacheReplaceOutcome.RETRYABLE_CONFLICT
 
 
-def can_revalidate_after_incremental_update(cache_state: ThreadCacheStateRow | None) -> bool:
-    """Return whether an incremental update may clear one thread invalidation."""
-    if cache_state is None:
-        return False
-    return (
-        cache_state.validated_at is not None
-        and cache_state.invalidated_at is not None
-        and is_incremental_thread_revalidation_reason(cache_state.invalidation_reason)
-        and not (
-            cache_state.room_invalidated_at is not None and cache_state.room_invalidated_at >= cache_state.validated_at
-        )
-    )
-
-
 def append_keeps_thread_valid(cache_state: ThreadCacheStateRow | None) -> bool:
     """Return whether one appended mutation may leave this thread trusted.
 
-    This generalizes :func:`can_revalidate_after_incremental_update` to the case the atomic append
-    introduces: a thread that was still valid when the mutation began. Such a thread was never
-    invalidated, so there is nothing to clear and nothing to expose. Everything else is unchanged --
-    a room-wide marker at or after the last validation still outranks an append, and a thread marker
-    is only cleared when an incremental mutation wrote it.
+    A thread that was still valid when the mutation began was never invalidated, so there is nothing
+    to clear and nothing to expose. A room-wide marker at or after the last validation outranks an
+    append, and a thread marker is only cleared when an incremental mutation wrote it.
     """
     if cache_state is None or cache_state.validated_at is None:
         return False

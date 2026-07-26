@@ -896,7 +896,7 @@ class ThreadLiveWritePolicy:
             # UNKNOWN-impact mutations must use the eager invalidate_room_threads
             # path: the per-thread coordinator's concurrent writers cannot safely
             # uphold the `room_invalidated_at >= validated_at` invariant that
-            # revalidate_thread_after_incremental_update_locked relies on at read
+            # append_keeps_thread_valid relies on at read
             # time. See ISSUE-189 for the architectural follow-up.
             await self._cache_ops.invalidate_room_threads(
                 room_id,
@@ -1028,7 +1028,7 @@ class ThreadLiveWritePolicy:
             # UNKNOWN-impact mutations must use the eager invalidate_room_threads
             # path: the per-thread coordinator's concurrent writers cannot safely
             # uphold the `room_invalidated_at >= validated_at` invariant that
-            # revalidate_thread_after_incremental_update_locked relies on at read
+            # append_keeps_thread_valid relies on at read
             # time. See ISSUE-189 for the architectural follow-up.
             await self._cache_ops.invalidate_room_threads(
                 room_id,

@@ -22,6 +22,7 @@ from mindroom.config.models import ModelConfig
 from mindroom.conversation_resolver import ConversationResolver, ConversationResolverDeps, _ThreadIdLookup
 from mindroom.matrix.cache import (
     ConversationEventCache,
+    ThreadAppendOutcome,
     ThreadCacheReplaceOutcome,
     ThreadCacheState,
     event_normalization,
@@ -985,7 +986,7 @@ async def test_dispatch_retries_strictly_after_failed_cache_repair_backoff(tmp_p
     await event_cache.initialize()
     conversation_cache = _conversation_cache_for_thread_reads(tmp_path, event_cache, client=MagicMock())
     coordinator = EventCacheWriteCoordinator(logger=MagicMock())
-    coordinator.thread_repairs = ThreadRepairRegistry(failure_backoff_seconds=0.05)
+    coordinator._thread_repairs = ThreadRepairRegistry(failure_backoff_seconds=0.05)
     conversation_cache.runtime.event_cache_write_coordinator = coordinator
     config = conversation_cache.runtime.config
     runtime_paths = conversation_cache.runtime.runtime_paths
@@ -1176,7 +1177,7 @@ async def test_strict_thread_history_bypasses_repair_backoff_without_stalling(tm
         failure_backoff_seconds=30.0,
         max_failure_backoff_seconds=30.0,
     )
-    coordinator.thread_repairs = registry
+    coordinator._thread_repairs = registry
     conversation_cache.runtime.event_cache_write_coordinator = coordinator
     repair_key = (event_cache.principal_id, "!room:localhost", "$thread:localhost", True, False)
     await coordinator.run_thread_repair(
@@ -1805,35 +1806,43 @@ async def test_incremental_revalidation_requires_incremental_invalidation_reason
         "content": {"body": "Root message", "msgtype": "m.text"},
     }
 
+    async def append(event_id: str) -> ThreadAppendOutcome:
+        return await cache.apply_thread_mutation_append(
+            "!room:localhost",
+            "$thread_root",
+            _clear_payload(event_id, thread_root_id="$thread_root", origin_server_ts=2000),
+            append_failed_reason="live_append_failed",
+        )
+
     try:
         await _replace_thread(cache, "!room:localhost", "$thread_root", [root_source], validated_at=100.0)
 
-        not_invalidated = await cache.revalidate_thread_after_incremental_update("!room:localhost", "$thread_root")
+        not_invalidated = await append("$still-valid")
 
         await cache.mark_thread_stale("!room:localhost", "$thread_root", reason="live_append_failed")
-        non_incremental = await cache.revalidate_thread_after_incremental_update("!room:localhost", "$thread_root")
+        non_incremental = await append("$after-non-incremental")
         state_after_non_incremental = await cache.get_thread_cache_state("!room:localhost", "$thread_root")
 
         await cache.mark_thread_stale("!room:localhost", "$thread_root", reason="live_thread_mutation")
-        weakened = await cache.revalidate_thread_after_incremental_update("!room:localhost", "$thread_root")
+        weakened = await append("$after-weakening-attempt")
         state_after_weakening_attempt = await cache.get_thread_cache_state("!room:localhost", "$thread_root")
 
         await _replace_thread(cache, "!room:localhost", "$thread_root", [root_source])
         await cache.mark_thread_stale("!room:localhost", "$thread_root", reason="live_thread_mutation")
-        incremental = await cache.revalidate_thread_after_incremental_update("!room:localhost", "$thread_root")
+        incremental = await append("$after-incremental")
         state_after_incremental = await cache.get_thread_cache_state("!room:localhost", "$thread_root")
     finally:
         await cache.close()
 
-    assert not_invalidated is False
-    assert non_incremental is False
+    assert not_invalidated is ThreadAppendOutcome.APPENDED
+    assert non_incremental is ThreadAppendOutcome.APPENDED_STALE
     assert state_after_non_incremental is not None
     assert thread_cache_rejection_reason(state_after_non_incremental) == "thread_invalidated_after_validation"
-    assert weakened is False
+    assert weakened is ThreadAppendOutcome.APPENDED_STALE
     assert state_after_weakening_attempt is not None
     assert state_after_weakening_attempt.invalidation_reason == "live_append_failed"
     assert thread_cache_rejection_reason(state_after_weakening_attempt) == "thread_invalidated_after_validation"
-    assert incremental is True
+    assert incremental is ThreadAppendOutcome.APPENDED
     assert state_after_incremental is not None
     assert thread_cache_rejection_reason(state_after_incremental) is None
 
@@ -2301,7 +2310,13 @@ async def test_thread_append_preserves_decrypted_payload_across_arrival_orders(
     }
 
     for payload_kind in arrival_order:
-        assert await event_cache.append_event(room_id, thread_id, payloads[payload_kind])
+        outcome = await event_cache.apply_thread_mutation_append(
+            room_id,
+            thread_id,
+            payloads[payload_kind],
+            append_failed_reason="live_append_failed",
+        )
+        assert outcome is ThreadAppendOutcome.APPENDED
 
     thread_events = await event_cache.get_thread_events(room_id, thread_id)
     assert thread_events is not None

@@ -13,6 +13,7 @@ from collections import Counter
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import nio
 import pytest
 
 from mindroom.background_tasks import wait_for_background_tasks
@@ -23,8 +24,6 @@ from mindroom.config.models import ModelConfig
 from mindroom.matrix.cache import ThreadCacheReplaceOutcome
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from mindroom.matrix.cache.thread_repair import (
-    MAX_CONCURRENT_SPECULATIVE_THREAD_REPAIRS,
-    MAX_CONCURRENT_THREAD_REPAIRS,
     ThreadRepairRegistry,
     ThreadRepairSuppressedError,
 )
@@ -187,11 +186,12 @@ async def test_missing_cache_append_storm_bounds_concurrent_history_scans(tmp_pa
     finally:
         await event_cache.close()
 
-    assert recorder.peak_concurrent_scans <= MAX_CONCURRENT_SPECULATIVE_THREAD_REPAIRS, (
+    budgets = ThreadRepairRegistry()
+    assert recorder.peak_concurrent_scans <= budgets.max_concurrent_speculative_repairs, (
         f"peak concurrent history scans {recorder.peak_concurrent_scans} exceeded the speculative repair "
-        f"budget of {MAX_CONCURRENT_SPECULATIVE_THREAD_REPAIRS} across {thread_count} stale threads"
+        f"budget of {budgets.max_concurrent_speculative_repairs} across {thread_count} stale threads"
     )
-    assert recorder.peak_concurrent_scans <= MAX_CONCURRENT_THREAD_REPAIRS
+    assert recorder.peak_concurrent_scans <= budgets.max_concurrent_repairs
     assert len(recorder.scanned_thread_ids) >= 1
 
 
@@ -386,11 +386,33 @@ async def test_sync_replay_suppresses_speculative_repair_but_not_interactive_rep
     assert repair.await_count == 2
 
 
-def _sync_response(*, event_count: int, limited: bool) -> MagicMock:
-    timeline = MagicMock(limited=limited, events=[MagicMock() for _ in range(event_count)])
-    response = MagicMock()
-    response.rooms.join = {ROOM_ID: MagicMock(timeline=timeline)}
-    return response
+def _sync_response(*, event_count: int, limited: bool) -> nio.SyncResponse:
+    timeline = nio.responses.Timeline(
+        events=[_room_message(f"$event-{index}:localhost") for index in range(event_count)],
+        limited=limited,
+        prev_batch="s0",
+    )
+    room_info = nio.responses.RoomInfo(timeline=timeline, state=[], ephemeral=[], account_data=[])
+    return nio.SyncResponse(
+        next_batch="s1",
+        rooms=nio.responses.Rooms(invite={}, join={ROOM_ID: room_info}, leave={}),
+        device_key_count=nio.responses.DeviceOneTimeKeyCount(curve25519=0, signed_curve25519=0),
+        device_list=nio.responses.DeviceList(changed=[], left=[]),
+        to_device_events=[],
+        presence_events=[],
+    )
+
+
+def _room_message(event_id: str) -> nio.RoomMessageText:
+    return nio.RoomMessageText.from_dict(
+        {
+            "event_id": event_id,
+            "sender": "@user:localhost",
+            "origin_server_ts": 1000,
+            "type": "m.room.message",
+            "content": {"body": "hello", "msgtype": "m.text"},
+        },
+    )
 
 
 @pytest.mark.parametrize(
@@ -443,3 +465,72 @@ async def test_sync_certification_declines_speculative_repair_for_a_replay_batch
         await event_cache.close()
 
     assert suppression_reasons == ["sync_replay", None]
+
+
+@pytest.mark.asyncio
+async def test_interactive_join_keeps_a_declined_speculative_flight_running() -> None:
+    """A read joined to a speculative flight must not inherit its suppression."""
+    registry = ThreadRepairRegistry()
+    key = _flight_key("$thread", hydrate_sidecars=False)
+    gate = asyncio.Event()
+    scans = 0
+
+    async def scan() -> str:
+        nonlocal scans
+        scans += 1
+        return "history"
+
+    def delayed_schedule[T](repair_factory: Callable[[], Awaitable[T]]) -> asyncio.Task[T]:
+        async def runner() -> T:
+            await gate.wait()
+            return await repair_factory()
+
+        return asyncio.create_task(runner())
+
+    speculative = asyncio.create_task(
+        registry.run(
+            key,
+            schedule=delayed_schedule,
+            repair=scan,
+            result_arms_backoff=lambda _r: False,
+            speculative=True,
+        ),
+    )
+    await asyncio.sleep(0)
+    interactive = asyncio.create_task(
+        registry.run(key, schedule=_schedule, repair=scan, result_arms_backoff=lambda _r: False),
+    )
+    await asyncio.sleep(0)
+
+    # A replay batch begins while the admitted flight is still queued behind the write barrier.
+    with registry.suppress_speculative_repairs():
+        gate.set()
+        results = await asyncio.gather(speculative, interactive)
+
+    assert results == ["history", "history"]
+    assert scans == 1
+
+
+@pytest.mark.asyncio
+async def test_released_repair_slot_is_reserved_for_the_waiting_caller() -> None:
+    """Handing a slot over must reserve it, or a newcomer takes it and re-queues the waiter.
+
+    Driven through the slot accounting itself: the barge window is between waking a waiter and that
+    waiter resuming, which no public call can be scheduled into deterministically.
+    """
+    registry = ThreadRepairRegistry(max_concurrent_repairs=1)
+    thread_key = ("@agent:localhost", ROOM_ID, "$newcomer")
+
+    await registry._acquire_repair_slot(speculative=False)
+    waiting = asyncio.create_task(registry._acquire_repair_slot(speculative=False))
+    await asyncio.sleep(0)
+
+    registry._release_repair_slot(speculative=False)
+
+    # The waiter has been woken but has not resumed yet. A newcomer arriving right now must still
+    # see the ceiling as full, because the released slot already belongs to the waiter.
+    assert registry.speculative_suppression_reason(thread_key) == "repair_concurrency_limit"
+
+    await waiting
+    registry._release_repair_slot(speculative=False)
+    assert registry.speculative_suppression_reason(thread_key) is None

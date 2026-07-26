@@ -13,9 +13,9 @@ Durable trust-state invariants (mirrored by ``postgres_event_cache_threads``):
    The concrete caches additionally clamp the stored ``validated_at`` to the fetch start time, so an
    invalidation that lands during the fetch still outranks the snapshot at read time.
 
-3. Incremental revalidation is allowlisted: ``revalidate_thread_after_incremental_update_locked`` clears
-   an invalidation only when the thread was previously validated, the invalidation reason is one of the
-   incremental mutation reasons, and the room was not invalidated at or after that validation.
+3. Incremental revalidation is allowlisted: ``append_keeps_thread_valid`` leaves a thread trusted only
+   when it was previously validated, any invalidation reason is one of the incremental mutation reasons,
+   and the room was not invalidated at or after that validation.
    Invalidations from any other reason can only be cleared by a full authoritative snapshot replacement.
 
 4. Thread snapshot rows and the lookup, edit, and thread index rows are written and deleted together so
@@ -48,7 +48,6 @@ from .thread_cache_state import (
     ThreadCacheReplaceOutcome,
     ThreadCacheStateRow,
     append_keeps_thread_valid,
-    can_revalidate_after_incremental_update,
     guarded_thread_replacement_conflict,
     incremental_thread_revalidation_reasons,
     is_incremental_thread_revalidation_reason,
@@ -653,66 +652,6 @@ async def mark_thread_stale_locked(
     )
 
 
-async def revalidate_thread_after_incremental_update_locked(
-    db: aiosqlite.Connection,
-    *,
-    principal_id: str,
-    room_id: str,
-    thread_id: str,
-) -> bool:
-    """Mark one thread cache fresh after a safe incremental update."""
-    row = await _load_thread_cache_state_row(
-        db,
-        principal_id=principal_id,
-        room_id=room_id,
-        thread_id=thread_id,
-    )
-    if not can_revalidate_after_incremental_update(row):
-        return False
-    await db.execute(
-        """
-        UPDATE thread_cache_state
-        SET validated_at = ?, invalidated_at = NULL, invalidation_reason = NULL
-        WHERE principal_id = ? AND room_id = ? AND thread_id = ?
-        """,
-        (time.time(), principal_id, room_id, thread_id),
-    )
-    return True
-
-
-async def _thread_has_appendable_snapshot_rows(
-    db: aiosqlite.Connection,
-    *,
-    principal_id: str,
-    room_id: str,
-    thread_id: str,
-) -> bool:
-    """Return whether this thread has snapshot rows an incremental append can extend.
-
-    Mirrors the join ``append_existing_thread_event`` performs, so it predicts that call exactly.
-    ``_thread_has_snapshot_rows_for_thread`` answers a different question: it counts index rows whose
-    event row may already be gone.
-    """
-    cursor = await db.execute(
-        """
-        SELECT 1
-        FROM thread_events
-        JOIN events
-            ON events.principal_id = thread_events.principal_id
-            AND events.room_id = thread_events.room_id
-            AND events.event_id = thread_events.event_id
-        WHERE thread_events.principal_id = ?
-            AND thread_events.room_id = ?
-            AND thread_events.thread_id = ?
-        LIMIT 1
-        """,
-        (principal_id, room_id, thread_id),
-    )
-    row = await cursor.fetchone()
-    await cursor.close()
-    return row is not None
-
-
 async def apply_thread_mutation_append_locked(
     db: aiosqlite.Connection,
     *,
@@ -730,45 +669,14 @@ async def apply_thread_mutation_append_locked(
     one transaction means a reader observes either the state before the mutation or the state after
     it, and a crash rolls the whole thing back rather than leaving a half-applied snapshot trusted.
     """
-    state_row = await _load_thread_cache_state_row(
-        db,
-        principal_id=principal_id,
-        room_id=room_id,
-        thread_id=thread_id,
-    )
-    if not await _thread_has_appendable_snapshot_rows(
-        db,
-        principal_id=principal_id,
-        room_id=room_id,
-        thread_id=thread_id,
-    ):
-        # There is no snapshot to extend, so only a full history scan can make this thread readable.
-        # The lookup-index rows are still worth recording for later thread resolution.
-        await write_lookup_index_rows(
-            db,
-            principal_id=principal_id,
-            room_id=room_id,
-            serialized_events=[serialize_cached_event(event_id_for_cache(normalized_event), normalized_event)],
-            cached_at=time.time(),
-            thread_id=thread_id,
-        )
-        await mark_thread_stale_locked(
-            db,
-            principal_id=principal_id,
-            room_id=room_id,
-            thread_id=thread_id,
-            reason=append_failed_reason,
-        )
-        return ThreadAppendOutcome.SNAPSHOT_MISSING
-
-    appended = await append_existing_thread_event(
+    outcome = await _append_existing_thread_event(
         db,
         principal_id=principal_id,
         room_id=room_id,
         thread_id=thread_id,
         normalized_event=normalized_event,
     )
-    if not appended:
+    if outcome is not ThreadAppendOutcome.APPENDED:
         await mark_thread_stale_locked(
             db,
             principal_id=principal_id,
@@ -776,8 +684,15 @@ async def apply_thread_mutation_append_locked(
             thread_id=thread_id,
             reason=append_failed_reason,
         )
-        return ThreadAppendOutcome.APPEND_REFUSED
+        return outcome
 
+    # Read after the append: it touches no trust column, and the failure paths above never need it.
+    state_row = await _load_thread_cache_state_row(
+        db,
+        principal_id=principal_id,
+        room_id=room_id,
+        thread_id=thread_id,
+    )
     if not append_keeps_thread_valid(state_row):
         return ThreadAppendOutcome.APPENDED_STALE
 
@@ -827,17 +742,19 @@ async def mark_room_stale_locked(
     )
 
 
-async def append_existing_thread_event(
+async def _append_existing_thread_event(
     db: aiosqlite.Connection,
     *,
     principal_id: str,
     room_id: str,
     thread_id: str,
     normalized_event: dict[str, Any],
-) -> bool:
-    """Append one event to an existing cached thread.
+) -> ThreadAppendOutcome:
+    """Append one event to an existing cached thread and classify what happened.
 
     An opaque ``m.room.encrypted`` payload never replaces stored clear content for the same event ID.
+    A redacted event (or one whose edit target is redacted) is refused before anything is written, so
+    its payload never reaches the point-lookup table.
     """
     event_id = event_id_for_cache(normalized_event)
     if await event_or_original_is_redacted(
@@ -847,7 +764,7 @@ async def append_existing_thread_event(
         event_id=event_id,
         event=normalized_event,
     ):
-        return False
+        return ThreadAppendOutcome.APPEND_REFUSED
 
     serialized_event = serialize_cached_event(event_id, normalized_event)
     cursor = await db.execute(
@@ -876,7 +793,9 @@ async def append_existing_thread_event(
         thread_id=thread_id,
     )
     if row is None:
-        return False
+        # Only lookup-index rows are recorded: there is no snapshot to extend, so only a full
+        # history scan can make this thread readable again.
+        return ThreadAppendOutcome.SNAPSHOT_MISSING
 
     write_sequence = (await allocate_write_sequences(db, 1))[0]
     await db.execute(
@@ -904,7 +823,7 @@ async def append_existing_thread_event(
             write_sequence,
         ),
     )
-    return True
+    return ThreadAppendOutcome.APPENDED
 
 
 async def _thread_event_ids_for_thread(

@@ -1630,24 +1630,6 @@ class PostgresEventCache:
             )
             raise
 
-    async def append_event(self, room_id: str, thread_id: str, event: dict[str, Any]) -> bool:
-        """Append one event when the thread already has cached data."""
-        normalized_event = normalize_event_source_for_cache(event)
-        return bool(
-            await self._operation(
-                room_id,
-                operation="append_event",
-                disabled_result=False,
-                callback=lambda db: postgres_event_cache_threads.append_existing_thread_event(
-                    db,
-                    namespace=self._runtime.namespace,
-                    room_id=room_id,
-                    thread_id=thread_id,
-                    normalized_event=normalized_event,
-                ),
-            ),
-        )
-
     async def apply_thread_mutation_append(
         self,
         room_id: str,
@@ -1658,7 +1640,7 @@ class PostgresEventCache:
     ) -> ThreadAppendOutcome:
         """Append one threaded mutation and settle this thread's trust atomically."""
         normalized_event = normalize_event_source_for_cache(event)
-        result = await self._operation(
+        return await self._operation(
             room_id,
             operation="apply_thread_mutation_append",
             disabled_result=ThreadAppendOutcome.WRITES_UNAVAILABLE,
@@ -1669,27 +1651,6 @@ class PostgresEventCache:
                 thread_id=thread_id,
                 normalized_event=normalized_event,
                 append_failed_reason=append_failed_reason,
-            ),
-        )
-        return ThreadAppendOutcome(result)
-
-    async def revalidate_thread_after_incremental_update(
-        self,
-        room_id: str,
-        thread_id: str,
-    ) -> bool:
-        """Refresh one thread's validated timestamp after a safe incremental update."""
-        return bool(
-            await self._operation(
-                room_id,
-                operation="revalidate_thread_after_incremental_update",
-                disabled_result=False,
-                callback=lambda db: postgres_event_cache_threads.revalidate_thread_after_incremental_update_locked(
-                    db,
-                    namespace=self._runtime.namespace,
-                    room_id=room_id,
-                    thread_id=thread_id,
-                ),
             ),
         )
 

@@ -34,16 +34,16 @@ _DELTA_RETENTION_SECONDS = 60.0
 # Ceiling on scans in progress at once. This is a safety valve against a pathological storm, not a
 # throttle: it sits well above the widest fan-out a real dispatch produces, because an interactive
 # repair is a user-facing read and queueing one behind another is latency a caller pays for.
-MAX_CONCURRENT_THREAD_REPAIRS = 64
+_MAX_CONCURRENT_THREAD_REPAIRS = 64
 
 # The working bound. Every repair is a full history scan contending for the same serialized cache
 # write path the Matrix sync callback is blocked on, and nobody is waiting on a speculative one,
 # so only a couple run at a time however many threads are stale.
-MAX_CONCURRENT_SPECULATIVE_THREAD_REPAIRS = 2
+_MAX_CONCURRENT_SPECULATIVE_THREAD_REPAIRS = 2
 
 # One speculative scan per thread per window. A thread that is still broken afterwards is repaired
 # by the next read, which is interactive and exempt.
-SPECULATIVE_THREAD_REPAIR_COOLDOWN_SECONDS = 30.0
+_SPECULATIVE_THREAD_REPAIR_COOLDOWN_SECONDS = 30.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,14 +85,15 @@ class ThreadRepairRegistry:
     failure_backoff_seconds: float = 1.0
     max_failure_backoff_seconds: float = 30.0
     delta_retention_seconds: float = _DELTA_RETENTION_SECONDS
-    max_concurrent_repairs: int = MAX_CONCURRENT_THREAD_REPAIRS
-    max_concurrent_speculative_repairs: int = MAX_CONCURRENT_SPECULATIVE_THREAD_REPAIRS
-    speculative_cooldown_seconds: float = SPECULATIVE_THREAD_REPAIR_COOLDOWN_SECONDS
+    max_concurrent_repairs: int = _MAX_CONCURRENT_THREAD_REPAIRS
+    max_concurrent_speculative_repairs: int = _MAX_CONCURRENT_SPECULATIVE_THREAD_REPAIRS
+    speculative_cooldown_seconds: float = _SPECULATIVE_THREAD_REPAIR_COOLDOWN_SECONDS
     clock: Callable[[], float] = time.monotonic
     _tasks: dict[_ThreadRepairFlightKey, asyncio.Task[object]] = field(default_factory=dict, init=False)
     _failure_backoffs: dict[_ThreadRepairFlightKey, _RepairFailureBackoff] = field(default_factory=dict, init=False)
     _deltas: dict[_ThreadRepairDeltaKey, dict[str, _RetainedDelta]] = field(default_factory=dict, init=False)
     _speculative_cooldowns: dict[_ThreadRepairDeltaKey, float] = field(default_factory=dict, init=False)
+    _interactive_joins: dict[_ThreadRepairFlightKey, int] = field(default_factory=dict, init=False)
     _slot_waiters: list[asyncio.Future[None]] = field(default_factory=list, init=False)
     _running_repairs: int = field(default=0, init=False)
     _running_speculative_repairs: int = field(default=0, init=False)
@@ -203,13 +204,34 @@ class ThreadRepairRegistry:
             return "repair_concurrency_limit"
         return None
 
+    def has_interactive_waiter(self, key: _ThreadRepairFlightKey) -> bool:
+        """Return whether a caller waiting on history has joined this flight."""
+        return bool(self._interactive_joins.get(key))
+
+    @contextmanager
+    def _joined_interactively(self, key: _ThreadRepairFlightKey) -> Iterator[None]:
+        """Record that a waiting caller depends on this flight for as long as it is joined."""
+        self._interactive_joins[key] = self._interactive_joins.get(key, 0) + 1
+        try:
+            yield
+        finally:
+            remaining = self._interactive_joins.get(key, 1) - 1
+            if remaining > 0:
+                self._interactive_joins[key] = remaining
+            else:
+                self._interactive_joins.pop(key, None)
+
     def _discard_slot_waiter(self, waiter: asyncio.Future[None]) -> None:
         self._slot_waiters = [existing for existing in self._slot_waiters if existing is not waiter]
 
     def _wake_next_slot_waiter(self) -> None:
+        """Hand the just-released slot to the longest-waiting caller."""
         while self._slot_waiters:
             waiter = self._slot_waiters.pop(0)
             if not waiter.done():
+                # Reserved here rather than by the waiter itself: a newcomer resuming first would
+                # otherwise take the slot and push the waiter back to the end of the queue.
+                self._running_repairs += 1
                 waiter.set_result(None)
                 return
 
@@ -219,18 +241,21 @@ class ThreadRepairRegistry:
         The slot is taken immediately before the scan, never while the flight is still queued behind
         same-thread predecessors, so a slot always measures work actually in progress. Speculative
         callers re-check capacity without blocking first, so only interactive callers ever join the
-        waiter queue and they are served in arrival order ahead of any speculative admission.
+        waiter queue, and they are served in arrival order.
         """
-        while self._running_repairs >= self.max_concurrent_repairs:
+        if not self._slot_waiters and self._running_repairs < self.max_concurrent_repairs:
+            self._running_repairs += 1
+        else:
             waiter = asyncio.get_running_loop().create_future()
             self._slot_waiters.append(waiter)
             try:
                 await waiter
             except asyncio.CancelledError:
                 self._discard_slot_waiter(waiter)
-                self._wake_next_slot_waiter()
+                if waiter.done() and not waiter.cancelled():
+                    # The slot was handed over before the cancellation landed; pass it along.
+                    self._release_repair_slot(speculative=False)
                 raise
-        self._running_repairs += 1
         if speculative:
             self._running_speculative_repairs += 1
 
@@ -241,8 +266,19 @@ class ThreadRepairRegistry:
         self._wake_next_slot_waiter()
 
     def _arm_speculative_cooldown(self, key: _ThreadRepairFlightKey) -> None:
-        """Hold off further speculative scans of this thread after one has just run."""
-        self._speculative_cooldowns[self._thread_key(key)] = self.clock() + self.speculative_cooldown_seconds
+        """Hold off further speculative scans of this thread after one has just run.
+
+        Expired entries are swept here rather than on the append path: a repair completing is rare
+        next to an append, and a thread that is never speculatively re-checked would otherwise keep
+        its entry for the life of the process.
+        """
+        now = self.clock()
+        self._speculative_cooldowns = {
+            cooled_key: retry_after
+            for cooled_key, retry_after in self._speculative_cooldowns.items()
+            if retry_after > now
+        }
+        self._speculative_cooldowns[self._thread_key(key)] = now + self.speculative_cooldown_seconds
 
     def _admission_error(
         self,
@@ -273,7 +309,12 @@ class ThreadRepairRegistry:
         Reached only once same-thread predecessors have drained, so a held slot always measures a
         scan in progress. Capacity is re-checked for speculative work because that queue wait can be
         long enough for the runtime to have filled up, or for another flight to have fixed a thread.
+
+        A flight an interactive caller has joined stops being speculative: declining it would raise
+        into a read that is waiting on this exact result, and that caller is owed the scan.
         """
+        if speculative and self._interactive_joins.get(key):
+            speculative = False
         if speculative:
             deferred_reason = self.speculative_suppression_reason(
                 self._thread_key(key),
@@ -321,7 +362,10 @@ class ThreadRepairRegistry:
 
         active_task = self._active_task(key)
         if active_task is not None:
-            return cast("T", await asyncio.shield(active_task))
+            if speculative:
+                return cast("T", await asyncio.shield(active_task))
+            with self._joined_interactively(key):
+                return cast("T", await asyncio.shield(active_task))
         admission_error = self._admission_error(
             key,
             speculative=speculative,
@@ -395,6 +439,7 @@ class ThreadRepairRegistry:
         self._failure_backoffs.clear()
         self._deltas.clear()
         self._speculative_cooldowns.clear()
+        self._interactive_joins.clear()
         self._slot_waiters.clear()
         self._running_repairs = 0
         self._running_speculative_repairs = 0

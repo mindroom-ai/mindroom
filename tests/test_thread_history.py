@@ -20,6 +20,7 @@ from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.matrix.cache import (
+    ThreadAppendOutcome,
     ThreadCacheReplaceOutcome,
     ThreadHistoryResult,
     thread_cache_rejection_reason,
@@ -3458,14 +3459,11 @@ class TestThreadHistoryCache:
             validated_at=runtime_started_at - 100,
         )
         await cache.mark_thread_stale("!room:localhost", "$thread_root", reason="sync_thread_mutation")
-        pre_runtime_appended = await cache.append_event(
+        pre_runtime_append = await cache.apply_thread_mutation_append(
             "!room:localhost",
             "$thread_root",
             self._cache_source(appended_reply),
-        )
-        pre_runtime_revalidated = await cache.revalidate_thread_after_incremental_update(
-            "!room:localhost",
-            "$thread_root",
+            append_failed_reason="sync_append_failed",
         )
 
         await _replace_thread(
@@ -3477,14 +3475,11 @@ class TestThreadHistoryCache:
         )
         await cache.mark_room_threads_stale("!room:localhost", reason="sync_redaction_lookup_unavailable")
         await cache.mark_thread_stale("!room:localhost", "$thread_root", reason="sync_thread_mutation")
-        room_stale_appended = await cache.append_event(
+        room_stale_append = await cache.apply_thread_mutation_append(
             "!room:localhost",
             "$thread_root",
             self._cache_source(appended_reply),
-        )
-        room_stale_revalidated = await cache.revalidate_thread_after_incremental_update(
-            "!room:localhost",
-            "$thread_root",
+            append_failed_reason="sync_append_failed",
         )
 
         client = MagicMock()
@@ -3503,10 +3498,8 @@ class TestThreadHistoryCache:
         finally:
             await cache.close()
 
-        assert pre_runtime_appended is True
-        assert pre_runtime_revalidated is True
-        assert room_stale_appended is True
-        assert room_stale_revalidated is False
+        assert pre_runtime_append is ThreadAppendOutcome.APPENDED
+        assert room_stale_append is ThreadAppendOutcome.APPENDED_STALE
         assert [message.event_id for message in history] == ["$thread_root", "$reply1", "$reply2"]
         assert history.diagnostics[THREAD_HISTORY_SOURCE_DIAGNOSTIC] == THREAD_HISTORY_SOURCE_HOMESERVER
 

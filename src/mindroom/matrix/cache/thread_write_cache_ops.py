@@ -11,6 +11,9 @@ This is the application layer below the write policies in ``thread_writes``; it 
    settles the thread's trust in one transaction. It refuses when the thread has no cached snapshot
    rows (then only recording lookup-index rows) and marks the thread stale, so a partial snapshot is
    never trusted, and a mutation that succeeds is never observably stale in between.
+   That transaction also carries the marker, so when it fails there is no marker either; the append
+   path then writes one through the same fail-closed ladder as rule 1 rather than leaving a thread
+   trusted while it is missing the mutation.
 
 3. A successful append leaves the thread trusted only under the conditions enforced by
    ``append_keeps_thread_valid`` (see ``thread_cache_state``): a thread that was already valid stays
@@ -323,6 +326,10 @@ class ThreadMutationCacheOps:
                 context=context,
                 error=str(exc),
             )
+            # The atomic operation rolled back, so it wrote no marker either. Without one, a thread
+            # that was trusted before this mutation stays trusted while missing the event, so the
+            # marker has to be written separately and fail closed exactly as pre-invalidation did.
+            await self.invalidate_known_thread(room_id, thread_id, reason=append_failed_reason)
             self._schedule_repair_if_available(room_id, thread_id)
             if raise_on_failure:
                 raise
@@ -336,8 +343,6 @@ class ThreadMutationCacheOps:
                 event_id=event_id,
                 context=context,
             )
-            self._schedule_repair_if_available(room_id, thread_id)
-            return False
         if not outcome.wrote_event:
             self._schedule_repair_if_available(room_id, thread_id)
             return False

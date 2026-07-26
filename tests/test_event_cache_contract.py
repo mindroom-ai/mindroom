@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from mindroom.matrix.cache import ConversationEventCache, ThreadCacheReplaceOutcome
+from mindroom.matrix.cache import ConversationEventCache, ThreadAppendOutcome, ThreadCacheReplaceOutcome
 from tests.event_cache_test_support import replace_thread_unconditionally
 
 
@@ -90,12 +90,13 @@ class TestConversationEventCacheContract:
             == []
         )
         assert (
-            await event_cache.append_event(
+            await event_cache.apply_thread_mutation_append(
                 "!room:localhost",
                 "$thread:localhost",
                 _message_event("$reply:localhost", 2),
+                append_failed_reason="live_append_failed",
             )
-            is False
+            is ThreadAppendOutcome.WRITES_UNAVAILABLE
         )
         assert await event_cache.redact_event("!room:localhost", "$missing") is False
 
@@ -251,13 +252,21 @@ class TestConversationEventCacheContract:
         reply = _message_event("$reply:localhost", 2, thread_id=thread_id)
         await replace_thread_unconditionally(event_cache, room_id, thread_id, [reply, root], validated_at=10.0)
 
-        appended = await event_cache.append_event(
+        appended = await event_cache.apply_thread_mutation_append(
             room_id,
             thread_id,
             _message_event("$appended:localhost", 3, thread_id=thread_id),
+            append_failed_reason="live_append_failed",
         )
         await event_cache.mark_thread_stale(room_id, thread_id, reason="live_thread_mutation")
-        revalidated = await event_cache.revalidate_thread_after_incremental_update(room_id, thread_id)
+        # Re-appending the same event keeps thread membership identical, so this asserts trust
+        # recovery alone rather than also changing what the snapshot contains.
+        revalidated = await event_cache.apply_thread_mutation_append(
+            room_id,
+            thread_id,
+            _message_event("$appended:localhost", 3, thread_id=thread_id),
+            append_failed_reason="live_append_failed",
+        )
         guarded_replacement = await event_cache.replace_thread_if_not_newer(
             room_id,
             thread_id,
@@ -267,8 +276,8 @@ class TestConversationEventCacheContract:
         )
         cached_events = await event_cache.get_thread_events(room_id, thread_id)
 
-        assert appended is True
-        assert revalidated is True
+        assert appended is ThreadAppendOutcome.APPENDED
+        assert revalidated is ThreadAppendOutcome.APPENDED
         assert guarded_replacement is ThreadCacheReplaceOutcome.EXISTING_USABLE
         assert cached_events is not None
         assert [event["event_id"] for event in cached_events] == [

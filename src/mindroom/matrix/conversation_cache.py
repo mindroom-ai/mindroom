@@ -120,20 +120,10 @@ def is_sync_replay_batch(response: nio.SyncResponse) -> bool:
     A truncated (``limited``) timeline is the homeserver saying the client fell behind, which is the
     exact condition that leaves many threads without a usable snapshot at once.
     """
-    joined_rooms = getattr(getattr(response, "rooms", None), "join", None)
-    if not isinstance(joined_rooms, dict):
-        return False
-    timeline_event_count = 0
-    for room_info in joined_rooms.values():
-        timeline = getattr(room_info, "timeline", None)
-        if timeline is None:
-            continue
-        if getattr(timeline, "limited", False) is True:
-            return True
-        events = getattr(timeline, "events", None)
-        if isinstance(events, list):
-            timeline_event_count += len(events)
-    return timeline_event_count >= _SYNC_REPLAY_TIMELINE_EVENT_THRESHOLD
+    timelines = [room_info.timeline for room_info in response.rooms.join.values()]
+    if any(timeline.limited for timeline in timelines):
+        return True
+    return sum(len(timeline.events) for timeline in timelines) >= _SYNC_REPLAY_TIMELINE_EVENT_THRESHOLD
 
 
 async def resolve_thread_root_event_id_for_client(
@@ -876,7 +866,6 @@ class MatrixConversationCache(ConversationCacheProtocol):
         speculative: bool = False,
     ) -> ThreadHistoryResult:
         coordinator = self.runtime.event_cache_write_coordinator
-        max_repair_attempts = _SPECULATIVE_REPAIR_ATTEMPTS if speculative else None
         if coordinator is None:
             return await refresh_thread_history_from_source(
                 self._require_client(),
@@ -887,10 +876,26 @@ class MatrixConversationCache(ConversationCacheProtocol):
                 allow_stale_fallback=allows_stale_fallback,
                 cache_reject_diagnostics=cache_reject_diagnostics,
                 trusted_sender_ids=self._trusted_sender_ids(),
-                max_repair_attempts=max_repair_attempts,
             )
 
         principal_id = self.runtime.event_cache.principal_id
+
+        def repair_attempt_limit() -> int | None:
+            """Resolve the attempt budget when the flight runs, not when it is queued.
+
+            A speculative scan nobody is waiting on gets one attempt, but by the time it runs an
+            interactive caller may have joined this exact flight and be waiting on its result. That
+            caller is owed the retry a lost guarded replacement normally earns it.
+            """
+            if not speculative or coordinator.thread_repair_has_interactive_waiter(
+                room_id,
+                thread_id,
+                coordination_scope=principal_id,
+                hydrate_sidecars=wants_full_history,
+                allow_stale_fallback=allows_stale_fallback,
+            ):
+                return None
+            return _SPECULATIVE_REPAIR_ATTEMPTS
 
         async def repair() -> ThreadHistoryResult:
             def pending_event_sources() -> tuple[dict[str, Any], ...]:
@@ -911,7 +916,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
                 cache_reject_diagnostics=cache_reject_diagnostics,
                 trusted_sender_ids=self._trusted_sender_ids(),
                 retained_event_sources=retained_event_source_provider,
-                max_repair_attempts=max_repair_attempts,
+                max_repair_attempts=repair_attempt_limit(),
             )
             if self._thread_repair_result_is_usable(result):
                 await self._acknowledge_repaired_thread_deltas(

@@ -321,7 +321,7 @@ class TestThreadMutationHelpers:
             event_id="$event:localhost",
             original_event_id="$target:localhost",
         )
-        event_cache.append_event.assert_not_awaited()
+        event_cache.apply_thread_mutation_append.assert_not_awaited()
         event_cache.mark_room_threads_stale.assert_not_awaited()
         event_cache.mark_thread_stale.assert_not_awaited()
 
@@ -355,7 +355,7 @@ class TestThreadMutationHelpers:
         )
 
         assert result is True
-        event_cache.append_event.assert_not_awaited()
+        event_cache.apply_thread_mutation_append.assert_not_awaited()
         event_cache.mark_room_threads_stale.assert_awaited_once_with(
             "!room:localhost",
             reason=f"{context}_thread_lookup_unavailable",
@@ -402,7 +402,6 @@ class TestThreadMutationHelpers:
                 f"{context}_append_failed" if invalidate_on_append_failure else f"{context}_thread_mutation"
             ),
         )
-        event_cache.append_event.assert_not_awaited()
         event_cache.mark_room_threads_stale.assert_not_awaited()
         event_cache.mark_thread_stale.assert_not_awaited()
 
@@ -622,7 +621,7 @@ class TestMatrixConversationCacheThreadReads:
             reason="outbound_thread_lookup_unavailable",
         )
         event_cache.mark_thread_stale.assert_not_awaited()
-        event_cache.append_event.assert_not_awaited()
+        event_cache.apply_thread_mutation_append.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_notify_outbound_event_threaded_edit_uses_claimed_thread_barrier(self) -> None:
@@ -1020,7 +1019,6 @@ class TestMatrixConversationCacheThreadReads:
         assert isinstance(stored_event_source.get("origin_server_ts"), int)
         event_cache.mark_thread_stale.assert_not_awaited()
         event_cache.mark_room_threads_stale.assert_not_awaited()
-        event_cache.append_event.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_notify_outbound_reaction_normalizes_event_for_real_cache(
