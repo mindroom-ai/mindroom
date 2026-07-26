@@ -1,12 +1,12 @@
 # Thread edit integrity gate status
 
-Updated 2026-07-25 after correcting the exact-`9093c2a90` malformed-ancestry review blocker.
+Updated 2026-07-25 after correcting the exact-`7f4a9eaea` edit-membership review blockers.
 
 ## Exact target
 
 - PR: `mindroom-ai/mindroom#1641`
 - Branch: `fix/thread-edit-integrity`
-- Latest production commit: `ae5f72397`
+- Latest production commit: `6eea89ebf`
 - Current base and merge base: `f6190d4c2457381e63f40f99fb27e794ae8667b8`
 - The current branch and PR head contain only this crash-handoff successor after the latest production commit.
 - The production, test, and documentation corrections are pushed.
@@ -34,6 +34,8 @@ Updated 2026-07-25 after correcting the exact-`9093c2a90` malformed-ancestry rev
 - `d8926444c` validates fetched replacements against their outer originals and preserves only original reply ancestry.
 - `d8926444c` also memoizes one mutation resolution so root proof does not repeat the same durable index lookup.
 - `ae5f72397` rejects fetched message envelopes that parse as `nio.BadEvent` before they can provide cleanup requester ancestry.
+- `6eea89ebf` makes related replacements follow their original before consulting a legacy cached membership index.
+- `6eea89ebf` also retains valid replacement rows as non-visible room-scan ancestry so replies targeting an edit remain in the original thread.
 
 ## Reconciled review status
 
@@ -54,8 +56,10 @@ Updated 2026-07-25 after correcting the exact-`9093c2a90` malformed-ancestry rev
 - Exact-`592220fa2` GitHub pytest failed only two redundant-index-lookup expectations; the same production correction restores the one-lookup contract.
 - The fresh exact-`9093c2a90` native review found one further blocker: a fetched original missing `msgtype` parsed as `nio.BadEvent` but still supplied attacker-controlled reply ancestry.
 - The malformed-original case failed before implementation and passes after `ae5f72397`; valid originals, wrong-sender replacements, edit-of-edit targets, and invalid scope remain correct.
+- Two fresh exact-`7f4a9eaea` native reviewers found a stale handoff count plus two blockers: a legacy edit index could override the original's membership, and cold scans dropped replies targeting valid edits.
+- Both code claims failed deterministic regressions before implementation and pass after `6eea89ebf`; edits remain non-visible.
 - The withdrawn edit-index timestamp-poison claim remains excluded because it required direct inconsistent SQL writes outside production paths.
-- Production source against current `main` is `+1705/-1168`, net `+537`.
+- Production source against current `main` is `+1709/-1169`, net `+540`.
 
 ## Validation already completed
 
@@ -81,6 +85,11 @@ Updated 2026-07-25 after correcting the exact-`9093c2a90` malformed-ancestry rev
 - The malformed-original regression failed before `ae5f72397` and passes afterward with six neighboring exact-fetch variants.
 - The complete stale-stream cleanup file passes after `ae5f72397`.
 - Ruff, format, `ty`, and normal commit hooks pass for `ae5f72397`.
+- Exact-`7f4a9eaea` PostgreSQL/cache suites passed `285` tests, full pytest passed `12041` tests with `54` skipped, and Tach plus all-file pre-commit passed.
+- Exact-`7f4a9eaea` real-Tuwunel stopped all bots but hung during its first planned restart after `73` operations and required `SIGKILL`.
+- The identical frozen harness, scenario, nio head, and Tuwunel image passed `200` operations against exact current `main`, so the liveness failure is specific to the PR predecessor.
+- The two edit-membership regressions failed before `6eea89ebf`; both and their complete owning files pass afterward (`147` tests).
+- Ruff, format, `ty`, Tach, module privacy, and normal commit hooks pass for `6eea89ebf`.
 - Git author was verified as `Bas Nijholt <bas@nijho.lt>` before every new commit.
 
 ## Pending exact-head gates
@@ -90,7 +99,7 @@ Updated 2026-07-25 after correcting the exact-`9093c2a90` malformed-ancestry rev
 - Exact-head PostgreSQL owning and stress selections are required.
 - Exact-head full pytest is required.
 - Exact-head Tach and all-file pre-commit are required.
-- Exact-head real-Tuwunel validation is required after merged #1666 and #1667, using isolated persistent evidence on `ssh pc`.
+- Exact-head real-Tuwunel validation is required using isolated persistent evidence.
 - Any branch-head change invalidates every review, CI, and live result.
 
 ## Completion rule
