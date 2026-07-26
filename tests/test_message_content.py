@@ -1,6 +1,7 @@
 """Tests for centralized message content extraction with large message support."""
 
 import json
+from functools import partial
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -38,7 +39,13 @@ from mindroom.matrix.visible_body import (
     visible_body_from_event_source,
     visible_content_from_content,
 )
-from tests.conftest import bind_runtime_paths, make_matrix_client_mock, runtime_paths_for, test_runtime_paths
+from tests.conftest import (
+    bind_runtime_paths,
+    make_event_cache_mock,
+    make_matrix_client_mock,
+    runtime_paths_for,
+    test_runtime_paths,
+)
 from tests.identity_helpers import persist_entity_accounts
 
 
@@ -742,6 +749,8 @@ class TestResolvedMessageExtraction:
             client=_make_client(),
             config=config,
             runtime_paths=runtime_paths,
+            event_cache=make_event_cache_mock(),
+            room_id="!room:example.com",
         )
 
         assert preview == "Edited body"
@@ -840,10 +849,34 @@ class TestResolvedMessageExtraction:
             client=_make_client(),
             config=config,
             runtime_paths=runtime_paths,
-            room_id="!room:example.com" if invalidity == "caller-room" else None,
+            event_cache=make_event_cache_mock(),
+            room_id="!room:example.com",
         )
 
         assert preview == "Original root"
+
+    @pytest.mark.asyncio
+    async def test_thread_root_body_preview_requires_durable_redaction_context(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Bundled replacement previews must not run without durable redaction context."""
+        config = bind_runtime_paths(Config(), test_runtime_paths(tmp_path))
+        event = _make_message_event(
+            body="Original root",
+            content={"msgtype": "m.text", "body": "Original root"},
+            event_id="$thread-root",
+        )
+        preview_without_redaction_context = partial(
+            thread_root_body_preview,
+            event,
+            client=_make_client(),
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+        )
+
+        with pytest.raises(TypeError, match="event_cache"):
+            await preview_without_redaction_context()
 
     @pytest.mark.asyncio
     async def test_thread_root_body_preview_ignores_tombstoned_bundled_replacement(
@@ -961,6 +994,8 @@ class TestResolvedMessageExtraction:
             client=_make_client(),
             config=config,
             runtime_paths=runtime_paths,
+            event_cache=make_event_cache_mock(),
+            room_id="!room:example.com",
         )
 
         assert preview == expected_body
@@ -1031,6 +1066,8 @@ class TestResolvedMessageExtraction:
             client=client,
             config=config,
             runtime_paths=runtime_paths_for(config),
+            event_cache=make_event_cache_mock(),
+            room_id="!room:example.com",
         )
 
         assert preview == "Older valid"
@@ -1058,6 +1095,7 @@ class TestResolvedMessageExtraction:
             sender="@user:example.com",
         )
         client = _make_client()
+        event_cache = make_event_cache_mock()
         trusted_sender_ids = frozenset({"@mindroom_general:localhost"})
 
         with (
@@ -1075,6 +1113,8 @@ class TestResolvedMessageExtraction:
                 client=client,
                 config=config,
                 runtime_paths=runtime_paths,
+                event_cache=event_cache,
+                room_id="!room:example.com",
                 trusted_sender_ids=trusted_sender_ids,
             )
 
@@ -1084,8 +1124,8 @@ class TestResolvedMessageExtraction:
             client=client,
             config=config,
             runtime_paths=runtime_paths,
-            event_cache=None,
-            room_id=None,
+            event_cache=event_cache,
+            room_id="!room:example.com",
             trusted_sender_ids=trusted_sender_ids,
         )
         mock_resolve.assert_awaited_once_with(
@@ -1094,8 +1134,8 @@ class TestResolvedMessageExtraction:
             fallback_body="Original root",
             config=config,
             runtime_paths=runtime_paths,
-            event_cache=None,
-            room_id=None,
+            event_cache=event_cache,
+            room_id="!room:example.com",
             trusted_sender_ids=trusted_sender_ids,
         )
 

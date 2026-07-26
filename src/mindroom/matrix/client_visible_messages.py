@@ -249,8 +249,8 @@ async def bundled_replacement_body(
     client: nio.AsyncClient,
     config: Config,
     runtime_paths: RuntimePaths,
-    event_cache: ConversationEventCache | None = None,
-    room_id: str | None = None,
+    event_cache: ConversationEventCache,
+    room_id: str,
     trusted_sender_ids: Collection[str] | None = None,
 ) -> str | None:
     """Return one canonical bundled replacement body using runtime-derived sender trust."""
@@ -260,11 +260,7 @@ async def bundled_replacement_body(
         for candidate in replacements.bundled_replacement_candidates(event_source)
         if isinstance((event_id := candidate.get("event_id")), str)
     }
-    excluded_event_ids = (
-        await event_cache.redacted_event_ids(room_id, bundled_event_ids)
-        if event_cache is not None and room_id is not None
-        else ()
-    )
+    excluded_event_ids = await event_cache.redacted_event_ids(room_id, bundled_event_ids)
     for candidate in replacements.ordered_replacements(
         event_source,
         room_id=room_id,
@@ -303,8 +299,8 @@ async def thread_root_body_preview(
     client: nio.AsyncClient,
     config: Config,
     runtime_paths: RuntimePaths,
-    event_cache: ConversationEventCache | None = None,
-    room_id: str | None = None,
+    event_cache: ConversationEventCache,
+    room_id: str,
     trusted_sender_ids: Collection[str] | None = None,
 ) -> str:
     """Return the canonical preview body for one thread root event."""
