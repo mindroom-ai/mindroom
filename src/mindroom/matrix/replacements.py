@@ -55,8 +55,10 @@ def event_representations_conflict(first: Mapping[str, Any], second: Mapping[str
     return not same_timeline_identity or rooms_conflict
 
 
-def _deduplicated_replacement_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Deduplicate one immutable event identity and reject conflicting representations."""
+def _replacement_candidates_by_identity(
+    candidates: Iterable[Mapping[str, Any]],
+) -> tuple[dict[str, dict[str, Any]], set[str]]:
+    """Group replacement representations and identify immutable conflicts."""
     candidates_by_event_id: dict[str, dict[str, Any]] = {}
     conflicting_event_ids: set[str] = set()
 
@@ -66,13 +68,34 @@ def _deduplicated_replacement_candidates(candidates: list[dict[str, Any]]) -> li
             continue
         existing = candidates_by_event_id.get(event_id)
         if existing is None:
-            candidates_by_event_id[event_id] = candidate
+            candidates_by_event_id[event_id] = dict(candidate)
             continue
         if event_representations_conflict(existing, candidate):
             conflicting_event_ids.add(event_id)
             continue
         if "room_id" in candidate and "room_id" not in existing:
-            candidates_by_event_id[event_id] = candidate
+            candidates_by_event_id[event_id] = dict(candidate)
+
+    return candidates_by_event_id, conflicting_event_ids
+
+
+def conflicting_replacement_event_ids(event_sources: Iterable[Mapping[str, Any]]) -> frozenset[str]:
+    """Return edit IDs whose explicit and bundled representations conflict globally."""
+    observations = [
+        candidate
+        for event_source in event_sources
+        for candidate in (
+            *bundled_replacement_candidates(event_source),
+            *((event_source,) if EventInfo.from_event(dict(event_source)).is_edit else ()),
+        )
+    ]
+    _, conflicting_event_ids = _replacement_candidates_by_identity(observations)
+    return frozenset(conflicting_event_ids)
+
+
+def _deduplicated_replacement_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Deduplicate one immutable event identity and reject conflicting representations."""
+    candidates_by_event_id, conflicting_event_ids = _replacement_candidates_by_identity(candidates)
 
     return [
         candidate for event_id, candidate in candidates_by_event_id.items() if event_id not in conflicting_event_ids

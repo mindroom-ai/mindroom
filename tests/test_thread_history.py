@@ -177,6 +177,74 @@ class TestThreadHistory:
             (root_id, expected_body),
         ]
 
+    @pytest.mark.asyncio
+    async def test_conflicting_replacement_identity_across_originals_is_rejected(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """One immutable edit identity cannot replace two different originals."""
+        room_id = "!room:localhost"
+        root_id = "$root:localhost"
+        reply_id = "$reply:localhost"
+        edit_id = "$same-edit:localhost"
+        sender = "@alice:localhost"
+
+        def edit(target_id: str, body: str) -> dict[str, object]:
+            return {
+                "event_id": edit_id,
+                "room_id": room_id,
+                "sender": sender,
+                "origin_server_ts": 3000,
+                "type": "m.room.message",
+                "content": {
+                    "body": f"* {body}",
+                    "msgtype": "m.text",
+                    "m.new_content": {"body": body, "msgtype": "m.text"},
+                    "m.relates_to": {"rel_type": "m.replace", "event_id": target_id},
+                },
+            }
+
+        root = {
+            "event_id": root_id,
+            "room_id": room_id,
+            "sender": sender,
+            "origin_server_ts": 1000,
+            "type": "m.room.message",
+            "content": {"body": "Root", "msgtype": "m.text"},
+            "unsigned": {"m.relations": {"m.replace": edit(root_id, "Forged root")}},
+        }
+        reply = {
+            "event_id": reply_id,
+            "room_id": room_id,
+            "sender": sender,
+            "origin_server_ts": 2000,
+            "type": "m.room.message",
+            "content": {
+                "body": "Reply",
+                "msgtype": "m.text",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": root_id},
+            },
+        }
+        explicit = edit(reply_id, "Forged reply")
+        cache = SqliteEventCache(tmp_path / "cross-original-edit.db")
+        await cache.initialize()
+        try:
+            resolution = await _resolve_thread_history_from_event_sources_timed(
+                AsyncMock(),
+                room_id=room_id,
+                thread_id=root_id,
+                event_sources=[root, reply, explicit],
+                hydrate_sidecars=False,
+                event_cache=cache,
+            )
+        finally:
+            await cache.close()
+
+        assert [(message.event_id, message.body) for message in resolution.messages] == [
+            (root_id, "Root"),
+            (reply_id, "Reply"),
+        ]
+
     def test_retained_delta_does_not_resurrect_redacted_fetched_event(self) -> None:
         """Authoritative fetched state must win when the retained journal has the same event ID."""
         fetched_sources = [

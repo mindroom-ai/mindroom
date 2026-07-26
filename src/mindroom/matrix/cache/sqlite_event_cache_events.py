@@ -9,6 +9,7 @@ from .event_cache_events import (
     CachedEventRow,
     SerializedCachedEvent,
     batch_redaction_candidate_ids,
+    bundled_replacement_event_ids,
     cache_rows_were_deleted,
     cached_event_owns_mxc,
     decode_cached_event,
@@ -22,6 +23,7 @@ from .event_cache_events import (
     scrub_bundled_replacement_json,
     select_latest_cached_edit,
     serialize_cacheable_events,
+    serialized_event_observation_ids,
     validated_mxc_text_rows,
 )
 
@@ -177,6 +179,12 @@ async def load_latest_edit_row(
 ) -> CachedEventRow | None:
     """Select the latest edit across explicit rows and bundled metadata."""
     original_event_id = original.get("event_id")
+    rejected_event_ids = frozenset(excluded_event_ids) | await redacted_event_ids(
+        db,
+        principal_id,
+        room_id,
+        event_ids=bundled_replacement_event_ids(original),
+    )
     cursor = await db.execute(
         """
         SELECT
@@ -201,7 +209,7 @@ async def load_latest_edit_row(
             rows,
             room_id=room_id,
             validator=validator,
-            excluded_event_ids=excluded_event_ids,
+            excluded_event_ids=rejected_event_ids,
         )
     finally:
         await cursor.close()
@@ -573,17 +581,32 @@ async def _safe_event_transitions(
 ) -> tuple[list[SerializedCachedEvent], list[SerializedCachedEvent]]:
     """Return payload-writable and thread-indexable events after quarantining conflicts."""
     existing: dict[str, dict[str, Any]] = {}
-    event_ids = list(dict.fromkeys(event.event_id for event in serialized_events))
-    for start in range(0, len(event_ids), _MAX_SQLITE_QUERY_IDS):
-        chunk = event_ids[start : start + _MAX_SQLITE_QUERY_IDS]
+    event_ids = serialized_event_observation_ids(serialized_events)
+    identity_chunk_size = (_MAX_SQLITE_QUERY_IDS - 2) // 4
+    for start in range(0, len(event_ids), identity_chunk_size):
+        chunk = event_ids[start : start + identity_chunk_size]
         placeholders = ",".join("?" for _ in chunk)
         cursor = await db.execute(
             f"""
             SELECT event_id, event_json
             FROM events
-            WHERE principal_id = ? AND room_id = ? AND event_id IN ({placeholders})
+            WHERE principal_id = ? AND room_id = ? AND (
+                event_id IN ({placeholders})
+                OR json_extract(
+                    event_json,
+                    '$.unsigned."m.relations"."m.replace".event_id'
+                ) IN ({placeholders})
+                OR json_extract(
+                    event_json,
+                    '$.unsigned."m.relations"."m.replace".latest_event.event_id'
+                ) IN ({placeholders})
+                OR json_extract(
+                    event_json,
+                    '$.unsigned."m.relations"."m.replace".event.event_id'
+                ) IN ({placeholders})
+            )
             """,  # noqa: S608
-            (principal_id, room_id, *chunk),
+            (principal_id, room_id, *chunk, *chunk, *chunk, *chunk),
         )
         rows = await cursor.fetchall()
         await cursor.close()

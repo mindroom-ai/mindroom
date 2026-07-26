@@ -9,6 +9,7 @@ from .event_cache_events import (
     CachedEventRow,
     SerializedCachedEvent,
     batch_redaction_candidate_ids,
+    bundled_replacement_event_ids,
     cache_rows_were_deleted,
     cached_event_owns_mxc,
     decode_cached_event,
@@ -22,6 +23,7 @@ from .event_cache_events import (
     scrub_bundled_replacement_json,
     select_latest_cached_edit,
     serialize_cacheable_events,
+    serialized_event_observation_ids,
     validated_mxc_text_rows,
 )
 from .postgres_cursor import fetchall, fetchone, rowcount
@@ -171,6 +173,12 @@ async def load_latest_edit_row(
 ) -> CachedEventRow | None:
     """Select the latest edit across explicit rows and bundled metadata."""
     original_event_id = original.get("event_id")
+    rejected_event_ids = frozenset(excluded_event_ids) | await redacted_event_ids(
+        db,
+        namespace,
+        room_id,
+        event_ids=bundled_replacement_event_ids(original),
+    )
     cursor = db.cursor(name="mindroom_latest_edit")
     await cursor.execute(
         """
@@ -196,7 +204,7 @@ async def load_latest_edit_row(
             rows,
             room_id=room_id,
             validator=validator,
-            excluded_event_ids=excluded_event_ids,
+            excluded_event_ids=rejected_event_ids,
         )
     finally:
         await cursor.close()
@@ -542,16 +550,21 @@ async def _safe_event_transitions(
     serialized_events: list[SerializedCachedEvent],
 ) -> tuple[list[SerializedCachedEvent], list[SerializedCachedEvent]]:
     """Return payload-writable and thread-indexable events after quarantining conflicts."""
-    event_ids = list(dict.fromkeys(event.event_id for event in serialized_events))
+    event_ids = serialized_event_observation_ids(serialized_events)
     rows = await fetchall(
         db,
         """
         SELECT event_id, event_json
         FROM mindroom_event_cache_events
-        WHERE namespace = %s AND room_id = %s AND event_id = ANY(%s)
+        WHERE namespace = %s AND room_id = %s AND (
+            event_id = ANY(%s)
+            OR event_json::jsonb #>> '{unsigned,m.relations,m.replace,event_id}' = ANY(%s)
+            OR event_json::jsonb #>> '{unsigned,m.relations,m.replace,latest_event,event_id}' = ANY(%s)
+            OR event_json::jsonb #>> '{unsigned,m.relations,m.replace,event,event_id}' = ANY(%s)
+        )
         FOR UPDATE
         """,
-        (namespace, room_id, event_ids),
+        (namespace, room_id, event_ids, event_ids, event_ids, event_ids),
     )
     existing = {str(event_id): decode_cached_event(event_json=event_json).event for event_id, event_json in rows}
     return await safe_cached_event_transitions(

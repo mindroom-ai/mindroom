@@ -93,7 +93,12 @@ from mindroom.matrix.message_content import (
     prepare_sidecar_hydration_batch,
     resolve_event_source_content,
 )
-from mindroom.matrix.replacements import bundled_replacement_candidates, is_valid_replacement, ordered_replacements
+from mindroom.matrix.replacements import (
+    bundled_replacement_candidates,
+    conflicting_replacement_event_ids,
+    is_valid_replacement,
+    ordered_replacements,
+)
 from mindroom.matrix.thread_diagnostics import (
     THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC,
     THREAD_HISTORY_DEGRADED_DIAGNOSTIC,
@@ -433,6 +438,10 @@ async def _resolve_thread_history_from_event_sources_timed(
             if isinstance(candidate_id := candidate.get("event_id"), str)
         },
     )
+    room_event_sources = [
+        event_source for event_source in event_sources if event_source_is_timeline_in_room(event_source, room_id)
+    ]
+    redacted_event_ids |= conflicting_replacement_event_ids(room_event_sources)
     input_order_by_event_id: dict[str, int] = {}
     related_event_id_by_event_id: dict[str, str] = {}
     for index, event_source in enumerate(event_sources):
@@ -444,9 +453,8 @@ async def _resolve_thread_history_from_event_sources_timed(
                 related_event_id_by_event_id[event_id] = related_event_id
     eligible_event_sources = [
         event_source
-        for event_source in event_sources
-        if event_source_is_timeline_in_room(event_source, room_id)
-        and _event_id_from_source(event_source) not in redacted_event_ids
+        for event_source in room_event_sources
+        if _event_id_from_source(event_source) not in redacted_event_ids
     ]
     parsed_events = [
         parsed_event

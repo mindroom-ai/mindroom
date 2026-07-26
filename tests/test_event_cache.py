@@ -2467,6 +2467,75 @@ async def test_conflicting_duplicate_replacement_identity_is_rejected_by_cache(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "representation_order",
+    [("bundled", "explicit"), ("explicit", "bundled")],
+)
+async def test_conflicting_replacement_identity_across_originals_is_quarantined(
+    event_cache: ConversationEventCache,
+    representation_order: tuple[str, str],
+) -> None:
+    """Both caches quarantine cross-original edit identities in either arrival order."""
+    room_id = "!room:localhost"
+    root_id = "$root:localhost"
+    reply_id = "$reply:localhost"
+    edit_id = "$same-edit:localhost"
+    sender = "@user:localhost"
+
+    def edit(target_id: str, body: str) -> dict[str, object]:
+        return {
+            "event_id": edit_id,
+            "room_id": room_id,
+            "sender": sender,
+            "origin_server_ts": 3000,
+            "type": "m.room.message",
+            "content": {
+                "body": f"* {body}",
+                "msgtype": "m.text",
+                "m.new_content": {"body": body, "msgtype": "m.text"},
+                "m.relates_to": {"rel_type": "m.replace", "event_id": target_id},
+            },
+        }
+
+    plain_root = _clear_payload(root_id, body="Root", origin_server_ts=1000)
+    root = json.loads(json.dumps(plain_root))
+    root["unsigned"] = {"m.relations": {"m.replace": edit(root_id, "Forged root")}}
+    reply = _clear_payload(
+        reply_id,
+        body="Reply",
+        thread_root_id=root_id,
+        origin_server_ts=2000,
+    )
+    explicit = edit(reply_id, "Forged reply")
+    batches = {
+        "bundled": [(root_id, room_id, root), (reply_id, room_id, reply)],
+        "explicit": [(edit_id, room_id, explicit)],
+    }
+    await event_cache.store_events_batch(
+        [(root_id, room_id, plain_root), (reply_id, room_id, reply)],
+    )
+    for representation in representation_order:
+        await event_cache.store_events_batch(batches[representation])
+
+    assert await event_cache.get_event(room_id, edit_id) is None
+    assert await event_cache.redacted_event_ids(room_id, {edit_id}) == {edit_id}
+    cached_root = await event_cache.get_event(room_id, root_id)
+    cached_reply = await event_cache.get_event(room_id, reply_id)
+    assert cached_root is not None
+    assert cached_reply is not None
+    assert "m.replace" not in cached_root.get("unsigned", {}).get("m.relations", {})
+    for original in (cached_root, cached_reply):
+        assert (
+            await event_cache.get_latest_edit(
+                room_id,
+                original,
+                validator=valid_room_message_replacement,
+            )
+            is None
+        )
+
+
+@pytest.mark.asyncio
 async def test_conflicting_cached_and_bundled_newest_edit_falls_back_to_older(
     event_cache: ConversationEventCache,
 ) -> None:

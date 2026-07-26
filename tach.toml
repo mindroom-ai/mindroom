@@ -4006,6 +4006,7 @@ from = ["mindroom.matrix.event_info"]
 expose = [
     "ReplacementValidator",
     "bundled_replacement_candidates",
+    "conflicting_replacement_event_ids",
     "event_representations_conflict",
     "is_valid_replacement",
     "ordered_replacements",

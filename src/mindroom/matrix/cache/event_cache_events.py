@@ -80,6 +80,24 @@ def _cached_event_transition(
     return "conflict" if event_representations_conflict(existing, candidate) else "accept"
 
 
+def _observe_cached_event_identity(
+    observed: dict[str, dict[str, Any]],
+    conflicting_event_ids: set[str],
+    candidate: Mapping[str, Any],
+) -> Literal["accept", "ignore", "conflict"]:
+    """Record one top-level or bundled view of an immutable event."""
+    event_id = candidate.get("event_id")
+    if not isinstance(event_id, str) or not event_id:
+        return "ignore"
+    previous = observed.get(event_id)
+    transition = "accept" if previous is None else _cached_event_transition(previous, candidate)
+    if transition == "conflict":
+        conflicting_event_ids.add(event_id)
+    elif transition == "accept":
+        observed[event_id] = dict(candidate)
+    return transition
+
+
 def _without_tombstoned_serialized_events(
     events: list[SerializedCachedEvent],
     room_id: str,
@@ -106,20 +124,24 @@ async def safe_cached_event_transitions(
     load_tombstones: Callable[[frozenset[str]], Awaitable[frozenset[str]]],
 ) -> tuple[list[SerializedCachedEvent], list[SerializedCachedEvent]]:
     """Return payload-writable and thread-indexable events after durable quarantine."""
-    observed = dict(existing)
+    observed: dict[str, dict[str, Any]] = {}
     writable: list[SerializedCachedEvent] = []
     indexable: list[SerializedCachedEvent] = []
     conflicting_event_ids: set[str] = set()
+
+    for existing_event in existing.values():
+        _observe_cached_event_identity(observed, conflicting_event_ids, existing_event)
+        for bundled in bundled_replacement_candidates(existing_event):
+            _observe_cached_event_identity(observed, conflicting_event_ids, bundled)
+
     for event in serialized_events:
-        previous = observed.get(event.event_id)
-        transition = "accept" if previous is None else _cached_event_transition(previous, event.event)
-        if transition == "conflict":
-            conflicting_event_ids.add(event.event_id)
-        else:
+        transition = _observe_cached_event_identity(observed, conflicting_event_ids, event.event)
+        if transition != "conflict" and event.event_id not in conflicting_event_ids:
             indexable.append(event)
             if transition == "accept":
                 writable.append(event)
-                observed[event.event_id] = event.event
+        for bundled in bundled_replacement_candidates(event.event):
+            _observe_cached_event_identity(observed, conflicting_event_ids, bundled)
     if not conflicting_event_ids:
         return writable, indexable
     for event_id in sorted(conflicting_event_ids):
@@ -135,6 +157,18 @@ async def safe_cached_event_transitions(
         )
 
     return retained(writable), retained(indexable)
+
+
+def serialized_event_observation_ids(events: Iterable[SerializedCachedEvent]) -> list[str]:
+    """Return top-level and bundled event IDs whose stored representations must be compared."""
+    return list(
+        dict.fromkeys(
+            event_id
+            for event in events
+            for candidate in (event.event, *bundled_replacement_candidates(event.event))
+            if isinstance(event_id := candidate.get("event_id"), str) and event_id
+        ),
+    )
 
 
 def select_latest_cached_edit(
@@ -271,7 +305,7 @@ def validated_mxc_text_rows(rows: Iterable[Sequence[Any]], *, room_id: str) -> d
     }
 
 
-def _bundled_replacement_event_ids(event: dict[str, Any]) -> frozenset[str]:
+def bundled_replacement_event_ids(event: Mapping[str, Any]) -> frozenset[str]:
     """Return every event ID carried by bundled replacement metadata."""
     return frozenset(
         candidate["event_id"]
@@ -296,7 +330,7 @@ def batch_redaction_candidate_ids(events: list[_CachedEventValue], room_id: str)
     """Return IDs whose tombstones would prevent caching any event in a batch."""
     return frozenset().union(
         *(
-            _direct_redaction_candidate_ids(event_id, event, room_id) | _bundled_replacement_event_ids(event)
+            _direct_redaction_candidate_ids(event_id, event, room_id) | bundled_replacement_event_ids(event)
             for event_id, event in events
         ),
     )
@@ -330,7 +364,7 @@ def _without_tombstoned_bundled_replacements(
     if bundled.get("event_id") in redacted_event_ids:
         # The wrapper identity matters only for direct replacement shapes without nested events.
         del bundled["event_id"]
-    if not _bundled_replacement_event_ids(sanitized):
+    if not bundled_replacement_event_ids(sanitized):
         del relations["m.replace"]
     return sanitized
 
@@ -358,7 +392,7 @@ def filter_redacted_events(
             continue
         sanitized = (
             _without_tombstoned_bundled_replacements(event, redacted_event_ids)
-            if not _bundled_replacement_event_ids(event).isdisjoint(redacted_event_ids)
+            if not bundled_replacement_event_ids(event).isdisjoint(redacted_event_ids)
             else event
         )
         retained.append((event_id, sanitized))
