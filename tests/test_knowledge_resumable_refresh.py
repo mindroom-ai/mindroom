@@ -626,7 +626,9 @@ async def test_permanent_embedding_failure_never_publishes_and_reports_classifie
     config = _config(tmp_path, docs_path)
     runtime_paths = runtime_paths_for(config)
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
-    published_collection = _published_state(config, runtime_paths).collection
+    state = _published_state(config, runtime_paths)
+    assert state is not None
+    published_collection = state.collection
 
     (docs_path / "b.md").write_text("secret sk-should-never-appear", encoding="utf-8")
     embedder.fail_everything = EmbedderRequestError("embedder authentication failed (HTTP 401)")
@@ -722,7 +724,9 @@ async def test_incompatible_settings_start_a_clean_candidate_and_keep_published_
     config = _config(tmp_path, docs_path)
     runtime_paths = runtime_paths_for(config)
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
-    published_collection = _published_state(config, runtime_paths).collection
+    state = _published_state(config, runtime_paths)
+    assert state is not None
+    published_collection = state.collection
 
     # Leave a partial candidate behind under the current settings.
     storage_path = _storage_path(config, runtime_paths)
@@ -2627,6 +2631,45 @@ async def test_unchanged_publish_retries_orphan_cleanup_after_delete_failure(
     assert second.index_published is True
     assert load_candidate_checkpoint(storage) is None
     assert orphan not in _FakeVectorDb.store
+
+
+@pytest.mark.asyncio
+async def test_unchanged_publish_stays_ready_when_checkpoint_cleanup_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Best-effort candidate cleanup cannot undo an already-published refresh."""
+    docs_path = tmp_path / "docs"
+    _write_corpus(docs_path, 3)
+    config = _config(tmp_path, docs_path)
+    runtime_paths = runtime_paths_for(config)
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    state = _published_state(config, runtime_paths)
+    assert state is not None
+    orphan = f"{state.collection}_orphan"
+    _FakeVectorDb.store[orphan] = []
+    storage = _storage_path(config, runtime_paths)
+    save_candidate_checkpoint(
+        storage,
+        CandidateCheckpoint(collection=orphan, settings=_manager(config)._indexing_settings),
+    )
+
+    def _fail_checkpoint_delete(_storage_path: Path) -> None:
+        message = "checkpoint directory is read-only"
+        raise OSError(message)
+
+    monkeypatch.setattr(knowledge_manager_module, "delete_candidate_checkpoint", _fail_checkpoint_delete)
+
+    result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+
+    assert result.index_published is True
+    assert result.availability is KnowledgeAvailability.READY
+    assert result.last_error is None
+    refreshed_state = _published_state(config, runtime_paths)
+    assert refreshed_state is not None
+    assert refreshed_state.refresh_job == "idle"
+    assert refreshed_state.last_error is None
+    assert load_candidate_checkpoint(storage) is not None, "failed cleanup unexpectedly removed the checkpoint"
 
 
 def test_prefetch_text_is_bounded_by_bytes_not_only_file_count(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
