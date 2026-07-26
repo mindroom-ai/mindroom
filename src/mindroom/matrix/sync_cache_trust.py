@@ -133,7 +133,7 @@ class SyncCacheTrust:
             decision = replace(decision, reset_client_token=True)
         if decision.reset_client_token:
             self._awaiting_initial_window = True
-        elif limited_timeline or decision.state is SyncTrustState.CERTIFIED:
+        elif decision.state is SyncTrustState.CERTIFIED:
             self._awaiting_initial_window = False
         self._apply_decision(decision, cache_result=cache_result)
         return decision

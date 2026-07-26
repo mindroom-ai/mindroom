@@ -169,6 +169,26 @@ def test_limited_recovery_window_is_consumed_once_then_complete_delta_certifies(
     )
 
 
+def test_sustained_limited_responses_reset_once_until_a_delta_certifies(tmp_path: Path) -> None:
+    """Back-to-back gaps must cost one replay, not one every other response."""
+    trust, _cache, _runtime = _trust(tmp_path)
+    trust.state = SyncTrustState.CERTIFIED
+
+    decisions = [
+        trust.certify_response(
+            next_batch=f"s_partial_{index}",
+            cache_result=SyncCacheWriteResult(
+                complete=False,
+                limited_room_ids=("!room:localhost",),
+            ),
+            first_sync=False,
+        )
+        for index in range(4)
+    ]
+
+    assert [decision.reset_client_token for decision in decisions] == [True, False, False, False]
+
+
 @pytest.mark.asyncio
 async def test_cold_limited_initial_window_does_not_reset_again(tmp_path: Path) -> None:
     """A since-less startup window may be limited without replaying itself forever."""
