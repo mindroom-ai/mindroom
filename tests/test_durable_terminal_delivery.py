@@ -360,6 +360,23 @@ async def test_cancelled_retry_safe_lifecycle_claim_is_released(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
+async def test_first_attempt_cancellation_after_transport_returns_managed_pending(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    coordinator, hooks = _coordinator(store)
+    hooks.emit_after_response.side_effect = asyncio.CancelledError
+
+    with patch("mindroom.terminal_delivery.send_message_result", new=AsyncMock(return_value=_delivered())):
+        commit = await coordinator.commit_and_attempt(_intent())
+
+    assert commit.attempt.result == "delivered"
+    assert commit.pending is not None
+    current = store.get(commit.pending.delivery_id)
+    assert current is not None
+    assert current.transport_delivered
+    assert current.after_response_claimed
+
+
+@pytest.mark.asyncio
 async def test_stale_settlement_cannot_delete_newer_regeneration(tmp_path: Path) -> None:
     store = _store(tmp_path)
     old = store.record(_intent())

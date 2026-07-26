@@ -520,13 +520,19 @@ class TerminalDeliveryCoordinator:
                 if item.transport_delivered
                 else None
             )
-            if attempt is None:
-                try:
+            try:
+                if attempt is None:
                     attempt = await self._attempt_locked(item)
-                except asyncio.CancelledError:
-                    attempt = TerminalDeliveryAttempt.transient("attempt_cancelled")
-            settled = await self._settle_locked(item, attempt, self.store.clock())
-            return TerminalDeliveryCommit(item, attempt, settled)
+                settled = await self._settle_locked(item, attempt, self.store.clock())
+            except asyncio.CancelledError:
+                attempt = attempt or TerminalDeliveryAttempt.transient("attempt_cancelled")
+            except Exception:
+                self.deps.logger.exception("terminal_delivery_first_attempt_raised", **item.log_context)
+                attempt = attempt or TerminalDeliveryAttempt.transient("attempt_exception")
+            else:
+                return TerminalDeliveryCommit(item, attempt, settled)
+            current = await asyncio.to_thread(self.store.get, item.delivery_id)
+            return TerminalDeliveryCommit(current, attempt, current is None)
 
     async def attempt(self, item: PendingTerminalDelivery) -> TerminalDeliveryAttempt:
         """Attempt one exact persisted revision."""
