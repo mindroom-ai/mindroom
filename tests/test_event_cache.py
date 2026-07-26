@@ -985,7 +985,7 @@ async def test_dispatch_retries_strictly_after_failed_cache_repair_backoff(tmp_p
     await event_cache.initialize()
     conversation_cache = _conversation_cache_for_thread_reads(tmp_path, event_cache, client=MagicMock())
     coordinator = EventCacheWriteCoordinator(logger=MagicMock())
-    coordinator._thread_repairs = ThreadRepairRegistry(failure_backoff_seconds=0.05)
+    coordinator.thread_repairs = ThreadRepairRegistry(failure_backoff_seconds=0.05)
     conversation_cache.runtime.event_cache_write_coordinator = coordinator
     config = conversation_cache.runtime.config
     runtime_paths = conversation_cache.runtime.runtime_paths
@@ -1176,7 +1176,7 @@ async def test_strict_thread_history_bypasses_repair_backoff_without_stalling(tm
         failure_backoff_seconds=30.0,
         max_failure_backoff_seconds=30.0,
     )
-    coordinator._thread_repairs = registry
+    coordinator.thread_repairs = registry
     conversation_cache.runtime.event_cache_write_coordinator = coordinator
     repair_key = (event_cache.principal_id, "!room:localhost", "$thread:localhost", True, False)
     await coordinator.run_thread_repair(

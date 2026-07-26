@@ -36,6 +36,7 @@ from .thread_repair import ThreadRepairRegistry
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Collection
+    from contextlib import AbstractContextManager
 
     import structlog
 
@@ -95,6 +96,7 @@ class EventCacheWriteCoordinator:
 
     logger: structlog.stdlib.BoundLogger
     background_task_owner: object = field(default_factory=object)
+    thread_repairs: ThreadRepairRegistry = field(default_factory=ThreadRepairRegistry)
     _room_states: dict[_CoordinationRoomKey, _RoomSchedulerState] = field(default_factory=dict, init=False)
     _room_update_tasks: dict[_CoordinationRoomKey, _UpdateTask] = field(default_factory=dict, init=False)
     _thread_update_tasks: dict[tuple[_CoordinationRoomKey, str], _UpdateTask] = field(
@@ -106,7 +108,6 @@ class EventCacheWriteCoordinator:
         init=False,
     )
     _next_sequence: int = field(default=0, init=False)
-    _thread_repairs: ThreadRepairRegistry = field(default_factory=ThreadRepairRegistry, init=False)
 
     def _next_entry_sequence(self) -> int:
         sequence = self._next_sequence
@@ -648,12 +649,14 @@ class EventCacheWriteCoordinator:
         allow_stale_fallback: bool,
         result_arms_backoff: Callable[[T], bool],
         bypass_failure_backoff: bool = False,
+        speculative: bool = False,
     ) -> T:
         """Join or start one principal-scoped repair under the same-thread barrier.
 
         Untimed reads may bypass a retained delay; dispatch and background repairs leave the default.
+        A speculative caller is subject to the fan-out gate and may be declined outright.
         """
-        return await self._thread_repairs.run(
+        return await self.thread_repairs.run(
             (coordination_scope, room_id, thread_id, hydrate_sidecars, allow_stale_fallback),
             schedule=lambda repair: typing.cast(
                 "asyncio.Task[T]",
@@ -670,7 +673,28 @@ class EventCacheWriteCoordinator:
             repair=repair_coro_factory,
             result_arms_backoff=result_arms_backoff,
             bypass_failure_backoff=bypass_failure_backoff,
+            speculative=speculative,
         )
+
+    def speculative_thread_repair_suppression_reason(
+        self,
+        room_id: str,
+        thread_id: str,
+        *,
+        coordination_scope: str,
+    ) -> str | None:
+        """Return why one speculative repair would be declined, without reserving a slot.
+
+        Callers use this to avoid spawning a background task per replayed event; the authoritative
+        decision is still made inside ``run_thread_repair``.
+        """
+        return self.thread_repairs.speculative_suppression_reason(
+            (coordination_scope, room_id, thread_id),
+        )
+
+    def suppress_speculative_thread_repairs(self) -> AbstractContextManager[None]:
+        """Drop speculative repairs for the duration of one sync replay batch."""
+        return self.thread_repairs.suppress_speculative_repairs()
 
     def retain_thread_repair_delta(
         self,
@@ -681,7 +705,7 @@ class EventCacheWriteCoordinator:
         coordination_scope: str,
     ) -> None:
         """Retain one certified delta until append or repair includes it."""
-        self._thread_repairs.retain_delta(
+        self.thread_repairs.retain_delta(
             (coordination_scope, room_id, thread_id),
             event_source,
         )
@@ -694,7 +718,7 @@ class EventCacheWriteCoordinator:
         coordination_scope: str,
     ) -> tuple[dict[str, Any], ...]:
         """Return retained deltas for one principal-scoped repair."""
-        return self._thread_repairs.pending_deltas(
+        return self.thread_repairs.pending_deltas(
             (coordination_scope, room_id, thread_id),
         )
 
@@ -707,14 +731,14 @@ class EventCacheWriteCoordinator:
         coordination_scope: str,
     ) -> None:
         """Forget retained deltas after a successful append."""
-        self._thread_repairs.acknowledge_deltas(
+        self.thread_repairs.acknowledge_deltas(
             (coordination_scope, room_id, thread_id),
             event_ids,
         )
 
     def clear_thread_repair_room(self, room_id: str, *, coordination_scope: str) -> None:
         """Drop retained repair state at one authoritative membership departure."""
-        self._thread_repairs.clear_room(coordination_scope, room_id)
+        self.thread_repairs.clear_room(coordination_scope, room_id)
 
     async def wait_for_thread_idle(
         self,
@@ -791,4 +815,4 @@ class EventCacheWriteCoordinator:
         self._room_update_tasks.clear()
         self._thread_update_tasks.clear()
         self._thread_update_tasks_by_room.clear()
-        self._thread_repairs.clear()
+        self.thread_repairs.clear()

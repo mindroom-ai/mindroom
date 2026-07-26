@@ -1,14 +1,28 @@
-"""Single-flight ownership and retained live deltas for thread-cache repair."""
+"""Single-flight ownership, fan-out bounding, and retained live deltas for thread-cache repair.
+
+Repair admission has two tiers. An *interactive* repair backs a caller that is waiting for the
+history right now, so it always runs, queueing only behind a global ceiling set well above any real
+dispatch fan-out. A *speculative* repair is launched by a live append that found no cached snapshot;
+nobody is waiting on its result, so it is dropped rather than queued whenever it would add load:
+
+1. while any flight for the same thread is already scanning, whatever caller contract owns it;
+2. while that thread is inside its post-repair cooldown;
+3. while the speculative concurrency budget is spent or an interactive repair is waiting for a slot;
+4. while a sync replay batch is being applied.
+
+Dropping is safe because the thread stays marked stale, so the next read repairs it interactively.
+"""
 
 from __future__ import annotations
 
 import asyncio
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Collection
+    from collections.abc import Awaitable, Callable, Collection, Iterator
 
 type _ThreadRepairFlightKey = tuple[str, str, str, bool, bool]
 type _ThreadRepairDeltaKey = tuple[str, str, str]
@@ -16,6 +30,20 @@ type _ThreadRepairDeltaKey = tuple[str, str, str]
 # Retained deltas only cover the window where a homeserver scan can miss a just-certified event.
 # Once a delta is older than this, any new scan already observes it, so keeping it only wastes memory.
 _DELTA_RETENTION_SECONDS = 60.0
+
+# Ceiling on scans in progress at once. This is a safety valve against a pathological storm, not a
+# throttle: it sits well above the widest fan-out a real dispatch produces, because an interactive
+# repair is a user-facing read and queueing one behind another is latency a caller pays for.
+MAX_CONCURRENT_THREAD_REPAIRS = 64
+
+# The working bound. Every repair is a full history scan contending for the same serialized cache
+# write path the Matrix sync callback is blocked on, and nobody is waiting on a speculative one,
+# so only a couple run at a time however many threads are stale.
+MAX_CONCURRENT_SPECULATIVE_THREAD_REPAIRS = 2
+
+# One speculative scan per thread per window. A thread that is still broken afterwards is repaired
+# by the next read, which is interactive and exempt.
+SPECULATIVE_THREAD_REPAIR_COOLDOWN_SECONDS = 30.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,6 +70,14 @@ class ThreadRepairBackoffError(RuntimeError):
         super().__init__(f"thread cache repair backoff active for {retry_after_seconds:.3f}s")
 
 
+class ThreadRepairSuppressedError(RuntimeError):
+    """Raised when one speculative repair is dropped to bound global repair fan-out."""
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+        super().__init__(f"speculative thread cache repair suppressed: {reason}")
+
+
 @dataclass
 class ThreadRepairRegistry:
     """Own principal-scoped repair flights, failure backoff, and certified deltas."""
@@ -49,10 +85,24 @@ class ThreadRepairRegistry:
     failure_backoff_seconds: float = 1.0
     max_failure_backoff_seconds: float = 30.0
     delta_retention_seconds: float = _DELTA_RETENTION_SECONDS
+    max_concurrent_repairs: int = MAX_CONCURRENT_THREAD_REPAIRS
+    max_concurrent_speculative_repairs: int = MAX_CONCURRENT_SPECULATIVE_THREAD_REPAIRS
+    speculative_cooldown_seconds: float = SPECULATIVE_THREAD_REPAIR_COOLDOWN_SECONDS
     clock: Callable[[], float] = time.monotonic
     _tasks: dict[_ThreadRepairFlightKey, asyncio.Task[object]] = field(default_factory=dict, init=False)
     _failure_backoffs: dict[_ThreadRepairFlightKey, _RepairFailureBackoff] = field(default_factory=dict, init=False)
     _deltas: dict[_ThreadRepairDeltaKey, dict[str, _RetainedDelta]] = field(default_factory=dict, init=False)
+    _speculative_cooldowns: dict[_ThreadRepairDeltaKey, float] = field(default_factory=dict, init=False)
+    _slot_waiters: list[asyncio.Future[None]] = field(default_factory=list, init=False)
+    _running_repairs: int = field(default=0, init=False)
+    _running_speculative_repairs: int = field(default=0, init=False)
+    _speculative_suppression_depth: int = field(default=0, init=False)
+
+    @staticmethod
+    def _thread_key(key: _ThreadRepairFlightKey) -> _ThreadRepairDeltaKey:
+        """Return the thread one caller contract repairs, without the contract itself."""
+        coordination_scope, room_id, thread_id, _hydrate_sidecars, _allow_stale_fallback = key
+        return coordination_scope, room_id, thread_id
 
     def _active_task(self, key: _ThreadRepairFlightKey) -> asyncio.Task[object] | None:
         task = self._tasks.get(key)
@@ -101,6 +151,143 @@ class ThreadRepairRegistry:
             return 0.0
         return max(0.0, backoff.retry_after - self.clock())
 
+    @contextmanager
+    def suppress_speculative_repairs(self) -> Iterator[None]:
+        """Drop speculative repairs while one sync replay batch is being applied.
+
+        Replay re-delivers events whose threads are being rewritten anyway, so speculative scans
+        started from it are near-certain to lose the guarded replacement race and only add load to
+        the write path the sync callback is already blocked on.
+        """
+        self._speculative_suppression_depth += 1
+        try:
+            yield
+        finally:
+            self._speculative_suppression_depth = max(0, self._speculative_suppression_depth - 1)
+
+    def _speculative_cooldown_active(self, key: _ThreadRepairDeltaKey) -> bool:
+        """Return whether this thread was scanned too recently, expiring its entry in passing.
+
+        Checked once per append that finds a missing snapshot, so it stays O(1) rather than sweeping
+        every known thread on the hottest path in a replay storm.
+        """
+        retry_after = self._speculative_cooldowns.get(key)
+        if retry_after is None:
+            return False
+        if retry_after > self.clock():
+            return True
+        del self._speculative_cooldowns[key]
+        return False
+
+    def speculative_suppression_reason(
+        self,
+        key: _ThreadRepairDeltaKey,
+        *,
+        ignore_active_flight: bool = False,
+    ) -> str | None:
+        """Return why one speculative repair must be dropped, or ``None`` when it may run.
+
+        The key is the thread, not the caller contract, so a speculative trigger never opens a
+        second scan of a thread another contract is already scanning. A flight re-checking itself
+        just before it scans passes ``ignore_active_flight`` so it does not see its own ownership.
+        """
+        if self._speculative_suppression_depth > 0:
+            return "sync_replay"
+        if not ignore_active_flight and self._has_active_task(key):
+            return "repair_in_flight"
+        if self._speculative_cooldown_active(key):
+            return "recently_repaired"
+        if self._running_speculative_repairs >= self.max_concurrent_speculative_repairs:
+            return "speculative_concurrency_limit"
+        if self._slot_waiters or self._running_repairs >= self.max_concurrent_repairs:
+            return "repair_concurrency_limit"
+        return None
+
+    def _discard_slot_waiter(self, waiter: asyncio.Future[None]) -> None:
+        self._slot_waiters = [existing for existing in self._slot_waiters if existing is not waiter]
+
+    def _wake_next_slot_waiter(self) -> None:
+        while self._slot_waiters:
+            waiter = self._slot_waiters.pop(0)
+            if not waiter.done():
+                waiter.set_result(None)
+                return
+
+    async def _acquire_repair_slot(self, *, speculative: bool) -> None:
+        """Take one global repair slot, waiting only for callers someone is blocked on.
+
+        The slot is taken immediately before the scan, never while the flight is still queued behind
+        same-thread predecessors, so a slot always measures work actually in progress. Speculative
+        callers re-check capacity without blocking first, so only interactive callers ever join the
+        waiter queue and they are served in arrival order ahead of any speculative admission.
+        """
+        while self._running_repairs >= self.max_concurrent_repairs:
+            waiter = asyncio.get_running_loop().create_future()
+            self._slot_waiters.append(waiter)
+            try:
+                await waiter
+            except asyncio.CancelledError:
+                self._discard_slot_waiter(waiter)
+                self._wake_next_slot_waiter()
+                raise
+        self._running_repairs += 1
+        if speculative:
+            self._running_speculative_repairs += 1
+
+    def _release_repair_slot(self, *, speculative: bool) -> None:
+        self._running_repairs = max(0, self._running_repairs - 1)
+        if speculative:
+            self._running_speculative_repairs = max(0, self._running_speculative_repairs - 1)
+        self._wake_next_slot_waiter()
+
+    def _arm_speculative_cooldown(self, key: _ThreadRepairFlightKey) -> None:
+        """Hold off further speculative scans of this thread after one has just run."""
+        self._speculative_cooldowns[self._thread_key(key)] = self.clock() + self.speculative_cooldown_seconds
+
+    def _admission_error(
+        self,
+        key: _ThreadRepairFlightKey,
+        *,
+        speculative: bool,
+        bypass_failure_backoff: bool,
+    ) -> Exception | None:
+        """Return why this caller may not start a new scan right now."""
+        if speculative:
+            suppression_reason = self.speculative_suppression_reason(self._thread_key(key))
+            if suppression_reason is not None:
+                return ThreadRepairSuppressedError(suppression_reason)
+        retry_after_seconds = self.retry_after_seconds(key)
+        if retry_after_seconds > 0 and not bypass_failure_backoff:
+            return ThreadRepairBackoffError(retry_after_seconds)
+        return None
+
+    async def _run_in_repair_slot[T](
+        self,
+        key: _ThreadRepairFlightKey,
+        run_repair: Callable[[], Awaitable[T]],
+        *,
+        speculative: bool,
+    ) -> T:
+        """Run one admitted repair while holding exactly one global slot.
+
+        Reached only once same-thread predecessors have drained, so a held slot always measures a
+        scan in progress. Capacity is re-checked for speculative work because that queue wait can be
+        long enough for the runtime to have filled up, or for another flight to have fixed a thread.
+        """
+        if speculative:
+            deferred_reason = self.speculative_suppression_reason(
+                self._thread_key(key),
+                ignore_active_flight=True,
+            )
+            if deferred_reason is not None:
+                raise ThreadRepairSuppressedError(deferred_reason)
+        await self._acquire_repair_slot(speculative=speculative)
+        try:
+            return await run_repair()
+        finally:
+            self._release_repair_slot(speculative=speculative)
+            self._arm_speculative_cooldown(key)
+
     async def run[T](
         self,
         key: _ThreadRepairFlightKey,
@@ -109,18 +296,14 @@ class ThreadRepairRegistry:
         repair: Callable[[], Awaitable[T]],
         result_arms_backoff: Callable[[T], bool],
         bypass_failure_backoff: bool = False,
+        speculative: bool = False,
     ) -> T:
         """Join or start one shielded repair and update backoff from its outcome.
 
         Authoritative untimed reads may bypass an existing delay while preserving its failure count.
+        A speculative caller raises ``ThreadRepairSuppressedError`` instead of adding a scan whenever
+        the fan-out gate declines it.
         """
-        active = self._active_task(key)
-        if active is not None:
-            return cast("T", await asyncio.shield(active))
-
-        retry_after_seconds = self.retry_after_seconds(key)
-        if retry_after_seconds > 0 and not bypass_failure_backoff:
-            raise ThreadRepairBackoffError(retry_after_seconds)
 
         async def run_repair() -> T:
             try:
@@ -136,7 +319,18 @@ class ThreadRepairRegistry:
                     self._failure_backoffs.pop(key, None)
             return value
 
-        task = schedule(run_repair)
+        active_task = self._active_task(key)
+        if active_task is not None:
+            return cast("T", await asyncio.shield(active_task))
+        admission_error = self._admission_error(
+            key,
+            speculative=speculative,
+            bypass_failure_backoff=bypass_failure_backoff,
+        )
+        if admission_error is not None:
+            raise admission_error
+
+        task = schedule(lambda: self._run_in_repair_slot(key, run_repair, speculative=speculative))
         self._tasks[key] = task
         task.add_done_callback(lambda done_task: self._clear_task(key, done_task))
         return await asyncio.shield(task)
@@ -189,9 +383,18 @@ class ThreadRepairRegistry:
         self._failure_backoffs = {
             key: backoff for key, backoff in self._failure_backoffs.items() if key[:2] != (coordination_scope, room_id)
         }
+        self._speculative_cooldowns = {
+            key: retry_after
+            for key, retry_after in self._speculative_cooldowns.items()
+            if key[:2] != (coordination_scope, room_id)
+        }
 
     def clear(self) -> None:
         """Drop runtime-only ownership after all coordinator tasks drained."""
         self._tasks.clear()
         self._failure_backoffs.clear()
         self._deltas.clear()
+        self._speculative_cooldowns.clear()
+        self._slot_waiters.clear()
+        self._running_repairs = 0
+        self._running_speculative_repairs = 0
