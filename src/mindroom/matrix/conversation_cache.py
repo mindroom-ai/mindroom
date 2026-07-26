@@ -97,7 +97,6 @@ __all__ = [
     "EventLookupResult",
     "MatrixConversationCache",
     "ThreadReadResult",
-    "is_sync_replay_batch",
     "resolve_thread_root_event_id_for_client",
 ]
 
@@ -113,11 +112,8 @@ _SYNC_REPLAY_TIMELINE_EVENT_THRESHOLD = 50
 # repair may not, because the conflict it lost is another writer already rewriting that thread.
 _SPECULATIVE_REPAIR_ATTEMPTS = 1
 
-# Store outcomes another bounded reconstruction could still turn into a snapshot. Every other
-# outcome is settled, so a second flight would only repeat it.
 
-
-def is_sync_replay_batch(response: nio.SyncResponse) -> bool:
+def _is_sync_replay_batch(response: nio.SyncResponse) -> bool:
     """Return whether one sync response is a gap catch-up rather than steady-state delivery.
 
     A truncated (``limited``) timeline is the homeserver saying the client fell behind, which is the
@@ -1460,7 +1456,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
     ) -> SyncCacheWriteResult:
         """Durably persist sync timeline events and report cache-certification status."""
         coordinator = self.runtime.event_cache_write_coordinator
-        if coordinator is None or not is_sync_replay_batch(response):
+        if coordinator is None or not _is_sync_replay_batch(response):
             return await self._sync.cache_sync_timeline_for_certification(response)
         # Replay rewrites these threads anyway, and its speculative repairs would contend for the
         # very write path this call is blocking the sync callback on.

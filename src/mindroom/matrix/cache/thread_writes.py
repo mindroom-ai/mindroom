@@ -31,8 +31,7 @@ These three policies are the only writers of durable thread-cache state:
    stays rejected until a decryption-capable refresh replaces it.
 
 8. Every other threaded mutation appends through one atomic cache operation that also settles the
-   thread's trust. Marking stale up front and revalidating afterwards left the snapshot observably
-   rejected for the duration of an append that was going to succeed.
+   thread's trust, so the snapshot is never observably rejected mid-append.
    Point rows and explicit relation indexes are still persisted by the batch store, and unknown-impact
    opaque mutations fail closed through the standard room-scope invalidation.
 """
@@ -233,11 +232,6 @@ async def _apply_thread_message_mutation(
         impact.thread_id,
         event_source,
     )
-    # No pre-invalidation: `append_event_to_cache` appends and settles this thread's trust in one
-    # durable operation, so a mutation that succeeds never makes the snapshot observably stale, and
-    # one that cannot append leaves the same durable marker this sequence used to write up front.
-    # Callers that did not add a second marker on append failure keep the plain mutation reason, so
-    # a later append can still clear it exactly as it could before.
     await cache_ops.append_event_to_cache(
         room_id,
         impact.thread_id,
@@ -948,8 +942,6 @@ class ThreadLiveWritePolicy:
         append_metrics: dict[str, str | int | float | bool] = {}
 
         async def append_live_mutation() -> bool:
-            # One durable operation now covers what used to be invalidate, append, and revalidate,
-            # so there is no separate invalidation to time and no window for a reader to reject.
             append_started = time.perf_counter()
             appended = await self._cache_ops.append_event_to_cache(
                 room_id,

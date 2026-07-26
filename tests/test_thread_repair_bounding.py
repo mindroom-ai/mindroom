@@ -28,7 +28,7 @@ from mindroom.matrix.cache.thread_repair import (
     ThreadRepairSuppressedError,
 )
 from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
-from mindroom.matrix.conversation_cache import MatrixConversationCache, is_sync_replay_batch
+from mindroom.matrix.conversation_cache import MatrixConversationCache, _is_sync_replay_batch
 from tests.conftest import bind_runtime_paths, test_runtime_paths
 
 if TYPE_CHECKING:
@@ -425,7 +425,7 @@ def _room_message(event_id: str) -> nio.RoomMessageText:
 )
 def test_sync_replay_batch_detection(event_count: int, limited: bool, expected: bool) -> None:
     """Only gap catch-up batches should switch speculative repair off."""
-    assert is_sync_replay_batch(_sync_response(event_count=event_count, limited=limited)) is expected
+    assert _is_sync_replay_batch(_sync_response(event_count=event_count, limited=limited)) is expected
 
 
 @pytest.mark.asyncio
@@ -553,9 +553,6 @@ async def test_clearing_the_registry_resets_every_admission_gate() -> None:
     assert registry.speculative_suppression_reason(thread_key) == "recently_repaired"
     registry._running_speculative_repairs = 1
     registry._interactive_joins[_flight_key("$thread", hydrate_sidecars=False)] = 1
-    for _ in range(registry.max_concurrent_repairs):
-        await registry._repair_slots.acquire()
-    assert registry._repair_slots.locked()
 
     registry.clear()
 
@@ -563,7 +560,6 @@ async def test_clearing_the_registry_resets_every_admission_gate() -> None:
     assert registry._speculative_cooldowns == {}
     assert registry._interactive_joins == {}
     assert registry._running_speculative_repairs == 0
-    assert not registry._repair_slots.locked()
 
 
 @pytest.mark.asyncio

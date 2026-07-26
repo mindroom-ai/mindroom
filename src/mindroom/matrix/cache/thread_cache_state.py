@@ -25,6 +25,8 @@ class ThreadAppendOutcome(StrEnum):
 
     APPENDED = "appended"
     APPENDED_STALE = "appended_stale"
+    # No rows to append into: only a full history scan can make this thread readable again. A
+    # refused append leaves the existing snapshot under a durable marker instead.
     SNAPSHOT_MISSING = "snapshot_missing"
     APPEND_REFUSED = "append_refused"
     WRITES_UNAVAILABLE = "writes_unavailable"
@@ -33,15 +35,6 @@ class ThreadAppendOutcome(StrEnum):
     def wrote_event(self) -> bool:
         """Return whether the mutation landed in the cached snapshot."""
         return self in {ThreadAppendOutcome.APPENDED, ThreadAppendOutcome.APPENDED_STALE}
-
-    @property
-    def needs_full_repair(self) -> bool:
-        """Return whether only a full history scan can make this thread readable again.
-
-        Only a thread with no rows to append into qualifies. A refused append leaves the existing
-        snapshot in place under a durable marker, and a stale append already has its own reason.
-        """
-        return self is ThreadAppendOutcome.SNAPSHOT_MISSING
 
 
 class ThreadCacheReplaceOutcome(StrEnum):

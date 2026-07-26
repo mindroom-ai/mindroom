@@ -5,10 +5,13 @@ history right now, so it always runs, queueing only behind a global ceiling set 
 dispatch fan-out. A *speculative* repair is launched by a live append that found no cached snapshot;
 nobody is waiting on its result, so it is dropped rather than queued whenever it would add load:
 
-1. while any flight for the same thread is already scanning, whatever caller contract owns it;
-2. while that thread is inside its post-repair cooldown;
-3. while the speculative concurrency budget is spent or an interactive repair is waiting for a slot;
-4. while a sync replay batch is being applied.
+1. while a sync replay batch is being applied;
+2. while any flight for the same thread is already scanning, whatever caller contract owns it;
+3. while that thread is inside its post-repair cooldown;
+4. while the speculative concurrency budget is spent or an interactive repair is waiting for a slot.
+
+They are listed in the order ``speculative_suppression_reason`` tests them, because the reason it
+returns is what gets logged.
 
 Dropping is safe because the thread stays marked stale, so the next read repairs it interactively.
 """
@@ -99,7 +102,12 @@ class ThreadRepairRegistry:
     _speculative_suppression_depth: int = field(default=0, init=False)
 
     def __post_init__(self) -> None:
-        """Bind the global repair ceiling. A semaphore binds its loop on first blocking acquire."""
+        """Bind the global repair ceiling, which is fixed for the life of the registry.
+
+        A semaphore binds its loop on the first blocking acquire, not here, so constructing one
+        outside a running loop is fine. It is never replaced: a repair still holding a permit would
+        release it into the replacement and raise the ceiling above its own bound.
+        """
         self._repair_slots = asyncio.Semaphore(self.max_concurrent_repairs)
 
     @staticmethod
@@ -424,5 +432,4 @@ class ThreadRepairRegistry:
         self._deltas.clear()
         self._speculative_cooldowns.clear()
         self._interactive_joins.clear()
-        self._repair_slots = asyncio.Semaphore(self.max_concurrent_repairs)
         self._running_speculative_repairs = 0

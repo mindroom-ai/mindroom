@@ -20,6 +20,13 @@ Durable trust-state invariants (mirrored by ``postgres_event_cache_threads``):
 
 4. Thread snapshot rows and the lookup, edit, and thread index rows are written and deleted together so
    point lookups can never resurrect rows the snapshot no longer contains.
+
+5. One threaded mutation is one transaction: ``apply_thread_mutation_append_locked`` appends and settles
+   trust together. Marking stale, appending, and revalidating as three separate operations reported a
+   thread that was about to be perfectly appendable as invalid for the duration, so every read arriving
+   in that window rejected a good snapshot and paid for a full history scan. In one transaction a reader
+   observes either the state before the mutation or the state after it, and a crash rolls back rather
+   than leaving a half-applied snapshot trusted.
 """
 
 from __future__ import annotations
@@ -663,11 +670,7 @@ async def apply_thread_mutation_append_locked(
 ) -> ThreadAppendOutcome:
     """Append one threaded mutation and settle this thread's trust in the same transaction.
 
-    The caller used to mark the thread stale, append, and revalidate as three separate operations,
-    each taking the write lock on its own. A reader between the first and last saw a thread that was
-    about to be perfectly appendable reported as invalid, and rejected it. Holding all three steps in
-    one transaction means a reader observes either the state before the mutation or the state after
-    it, and a crash rolls the whole thing back rather than leaving a half-applied snapshot trusted.
+    See invariant 5 in the module docstring of ``sqlite_event_cache_threads`` for why it is one.
     """
     outcome = await _append_existing_thread_event(
         db,

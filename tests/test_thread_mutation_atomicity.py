@@ -135,7 +135,6 @@ async def test_mutation_on_a_snapshotless_thread_reports_it_distinctly(cache: Co
     state = await cache.get_thread_cache_state(ROOM_ID, THREAD_ID)
 
     assert outcome is ThreadAppendOutcome.SNAPSHOT_MISSING
-    assert outcome.needs_full_repair is True
     assert outcome.wrote_event is False
     assert thread_cache_rejection_reason(state) is not None
 
@@ -175,7 +174,6 @@ async def test_append_does_not_clear_an_invalidation_outside_the_allowlist(cache
 
     assert outcome is ThreadAppendOutcome.APPENDED_STALE
     assert outcome.wrote_event is True
-    assert outcome.needs_full_repair is False
     assert thread_cache_rejection_reason(state) is not None
 
 

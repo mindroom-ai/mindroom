@@ -338,7 +338,7 @@ class ThreadMutationCacheOps:
                 raise
             return False
 
-        if outcome.needs_full_repair:
+        if outcome is ThreadAppendOutcome.SNAPSHOT_MISSING:
             self.logger.debug(
                 "Skipping thread event append because raw thread cache is missing",
                 room_id=room_id,
@@ -375,14 +375,13 @@ class ThreadMutationCacheOps:
         same bounded budget as every other cache write -- a backend too wedged to finish inside that
         budget loses the marker, but by then it is failing every write, not just this one.
         """
+        # Every caller reaches an append only through `cache_runtime_available`, and the queue
+        # helpers dereference the coordinator unguarded, so a missing one is a bug, not a mode.
         coordinator = self.runtime.event_cache_write_coordinator
-        marker = self.invalidate_known_thread(room_id, thread_id, reason=reason)
-        if coordinator is None:
-            await marker
-            return
+        assert coordinator is not None
         await asyncio.shield(
             create_background_task(
-                marker,
+                self.invalidate_known_thread(room_id, thread_id, reason=reason),
                 name="matrix_cache_append_failure_marker",
                 owner=coordinator.background_task_owner,
             ),
