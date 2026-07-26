@@ -863,6 +863,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
         allows_stale_fallback: bool,
         bypass_repair_backoff: bool,
         speculative: bool = False,
+        claim_token: object | None = None,
     ) -> ThreadHistoryResult:
         coordinator = self.runtime.event_cache_write_coordinator
         if coordinator is None:
@@ -922,6 +923,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
             result_arms_backoff=self._thread_repair_result_arms_backoff,
             bypass_failure_backoff=bypass_repair_backoff,
             speculative=speculative,
+            claim_token=claim_token,
         )
 
     async def _fetch_thread_from_client(
@@ -936,6 +938,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
         allows_stale_fallback: bool,
         bypass_repair_backoff: bool,
         speculative: bool = False,
+        claim_token: object | None = None,
     ) -> ThreadHistoryResult:
         coordinator = self.runtime.event_cache_write_coordinator
         await self._prepare_pending_thread_repair_deltas(room_id, thread_id)
@@ -951,6 +954,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
                 allows_stale_fallback=allows_stale_fallback,
                 bypass_repair_backoff=bypass_repair_backoff,
                 speculative=speculative,
+                claim_token=claim_token,
             )
 
         return await fetcher(
@@ -1013,6 +1017,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
                     # Speculative work is the one caller the retained delay is meant to suppress.
                     bypass_repair_backoff=False,
                     speculative=True,
+                    claim_token=reservation,
                 )
             except ThreadRepairSuppressedError as exc:
                 self._log_suppressed_thread_repair(room_id, thread_id, reason=exc.reason)

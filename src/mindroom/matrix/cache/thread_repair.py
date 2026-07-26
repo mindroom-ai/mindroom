@@ -49,6 +49,9 @@ _MAX_CONCURRENT_SPECULATIVE_THREAD_REPAIRS = 2
 # by the next read, which is interactive and exempt.
 _SPECULATIVE_THREAD_REPAIR_COOLDOWN_SECONDS = 30.0
 
+# A scheduler whose claim was dropped at a membership boundary while it was still preparing.
+_CLAIM_REVOKED = "claim_revoked"
+
 
 @dataclass(frozen=True, slots=True)
 class _RetainedDelta:
@@ -275,13 +278,28 @@ class ThreadRepairRegistry:
         if claim is not None and claim.token is token and not claim.handed_off:
             del self._reserved_speculative[key]
 
-    def _hand_off_claim(self, key: _ThreadRepairDeltaKey) -> object | None:
-        """Move this thread's claim from the scheduling task to the flight being registered."""
+    def _owns_claim(self, key: _ThreadRepairDeltaKey, token: object) -> bool:
+        """Return whether this exact token is still the live claim on this thread."""
         claim = self._reserved_speculative.get(key)
-        if claim is None:
+        return claim is not None and claim.token is token
+
+    def _hand_off_claim(self, key: _ThreadRepairDeltaKey, token: object) -> object | None:
+        """Move this thread's claim to the flight being registered, if this token still holds it.
+
+        Keyed on the token rather than the thread, because a scheduler blocked in preparation can
+        resume after a ``clear_room`` and find a later attempt holding a different claim; handing
+        that one off would register a stale flight against a newer caller's token.
+        """
+        if not self._owns_claim(key, token):
             return None
+        claim = self._reserved_speculative[key]
         claim.handed_off = True
         return claim.token
+
+    def _discard_flight_claim(self, key: _ThreadRepairFlightKey, token: object | None) -> None:
+        """Forget a flight's cleanup token, but only while it is still that flight's."""
+        if token is not None and self._flight_claims.get(key) is token:
+            del self._flight_claims[key]
 
     def _release_flight_claim(self, key: _ThreadRepairDeltaKey, token: object | None) -> None:
         """Drop a claim a flight owns, identified by token so a stale body cannot take a newer one."""
@@ -380,7 +398,7 @@ class ThreadRepairRegistry:
             # Released by the token this flight was registered with, so a body that outlived a
             # `clear_room` cannot drop the claim a later attempt on the same thread now holds.
             self._release_flight_claim(self._thread_key(key), claim_token)
-            self._flight_claims.pop(key, None)
+            self._discard_flight_claim(key, claim_token)
         if speculative and self._interactive_joins.get(key):
             speculative = False
         if speculative:
@@ -425,6 +443,7 @@ class ThreadRepairRegistry:
         result_arms_backoff: Callable[[T], bool],
         bypass_failure_backoff: bool = False,
         speculative: bool = False,
+        claim_token: object | None = None,
     ) -> T:
         """Join or start one shielded repair and update backoff from its outcome.
 
@@ -447,6 +466,11 @@ class ThreadRepairRegistry:
                     self._failure_backoffs.pop(key, None)
             return value
 
+        if speculative and claim_token is not None and not self._owns_claim(self._thread_key(key), claim_token):
+            # This caller's claim was dropped at a membership boundary while it was still preparing.
+            # Whatever holds the thread now belongs to a later attempt, and joining or registering
+            # against it would let a pre-clear flight answer a post-clear caller.
+            raise ThreadRepairSuppressedError(_CLAIM_REVOKED)
         active_task = self._active_task(key)
         if active_task is not None:
             return await self._join_running_flight(key, active_task, speculative=speculative)
@@ -458,13 +482,17 @@ class ThreadRepairRegistry:
         if admission_error is not None:
             raise admission_error
 
-        claim_token = self._hand_off_claim(self._thread_key(key)) if speculative else None
+        flight_token = (
+            self._hand_off_claim(self._thread_key(key), claim_token)
+            if speculative and claim_token is not None
+            else None
+        )
         task = schedule(
-            lambda: self._run_in_repair_slot(key, run_repair, speculative=speculative, claim_token=claim_token),
+            lambda: self._run_in_repair_slot(key, run_repair, speculative=speculative, claim_token=flight_token),
         )
         self._tasks[key] = task
-        if claim_token is not None:
-            self._flight_claims[key] = claim_token
+        if flight_token is not None:
+            self._flight_claims[key] = flight_token
         task.add_done_callback(lambda done_task: self._clear_task(key, done_task))
         return await asyncio.shield(task)
 
@@ -522,7 +550,10 @@ class ThreadRepairRegistry:
             if key[:2] != (coordination_scope, room_id)
         }
         self._reserved_speculative = {
-            key: token for key, token in self._reserved_speculative.items() if key[:2] != (coordination_scope, room_id)
+            key: claim for key, claim in self._reserved_speculative.items() if key[:2] != (coordination_scope, room_id)
+        }
+        self._flight_claims = {
+            key: token for key, token in self._flight_claims.items() if key[:2] != (coordination_scope, room_id)
         }
 
     def clear(self) -> None:

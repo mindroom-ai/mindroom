@@ -653,6 +653,7 @@ class EventCacheWriteCoordinator:
         result_arms_backoff: Callable[[T], bool],
         bypass_failure_backoff: bool = False,
         speculative: bool = False,
+        claim_token: object | None = None,
     ) -> T:
         """Join or start one principal-scoped repair under the same-thread barrier.
 
@@ -677,6 +678,7 @@ class EventCacheWriteCoordinator:
             result_arms_backoff=result_arms_backoff,
             bypass_failure_backoff=bypass_failure_backoff,
             speculative=speculative,
+            claim_token=claim_token,
         )
 
     def reserve_speculative_thread_repair(

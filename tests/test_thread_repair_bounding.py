@@ -842,6 +842,7 @@ async def test_cancelling_the_scheduler_after_registration_keeps_the_flight_boun
                         repair=scan,
                         result_arms_backoff=lambda _r: False,
                         speculative=True,
+                        claim_token=token,
                     ),
                 )
                 outers.append(outer)
@@ -907,3 +908,170 @@ async def test_a_stale_queued_body_cannot_drop_a_reclaimed_thread() -> None:
     surviving = registry._reserved_speculative.get(thread_key)
     assert surviving is not None, "the stale body released the reclaimed thread's newer claim"
     assert surviving.token is reclaimed
+
+
+def _barrier_schedule[T](barrier: asyncio.Event) -> Callable[[Callable[[], Awaitable[T]]], asyncio.Task[T]]:
+    """Queue a repair body behind a barrier, as the coordinator does."""
+
+    def schedule(repair_factory: Callable[[], Awaitable[T]]) -> asyncio.Task[T]:
+        async def runner() -> T:
+            await barrier.wait()
+            return await repair_factory()
+
+        return asyncio.create_task(runner())
+
+    return schedule
+
+
+@pytest.mark.asyncio
+async def test_a_scheduler_cleared_mid_preparation_cannot_hand_off_a_newer_claim() -> None:
+    """A claim dropped at a membership boundary must not be usable by the caller that lost it.
+
+    The original scheduler can still be inside pending-delta preparation when `clear_room` runs and
+    a later attempt claims the same thread. Handing that newer claim to the stale flight would let a
+    pre-clear scan answer a post-clear caller.
+    """
+    registry = ThreadRepairRegistry()
+    thread_key = ("@agent:localhost", ROOM_ID, "$thread")
+    flight_key = _flight_key("$thread", hydrate_sidecars=False)
+
+    async def stale_scan() -> str:
+        await asyncio.sleep(0.05)
+        return "stale-result"
+
+    async def fresh_scan() -> str:
+        return "fresh-result"
+
+    stale_token = registry.reserve_speculative_repair(thread_key)
+    registry.clear_room("@agent:localhost", ROOM_ID)
+    fresh_token = registry.reserve_speculative_repair(thread_key)
+    assert stale_token is not None
+    assert fresh_token is not None
+    assert stale_token is not fresh_token
+
+    stale = asyncio.create_task(
+        registry.run(
+            flight_key,
+            schedule=lambda factory: asyncio.create_task(factory()),
+            repair=stale_scan,
+            result_arms_backoff=lambda _r: False,
+            speculative=True,
+            claim_token=stale_token,
+        ),
+    )
+    await asyncio.sleep(0)
+    claim = registry._reserved_speculative.get(thread_key)
+    assert claim is not None
+    assert claim.token is fresh_token
+    assert not claim.handed_off, "the stale scheduler handed off a claim it no longer owns"
+
+    fresh = asyncio.create_task(
+        registry.run(
+            flight_key,
+            schedule=lambda factory: asyncio.create_task(factory()),
+            repair=fresh_scan,
+            result_arms_backoff=lambda _r: False,
+            speculative=True,
+            claim_token=fresh_token,
+        ),
+    )
+    stale_result, fresh_result = await asyncio.gather(stale, fresh, return_exceptions=True)
+
+    assert isinstance(stale_result, ThreadRepairSuppressedError)
+    assert stale_result.reason == "claim_revoked"
+    assert fresh_result == "fresh-result", "the post-clear caller was answered by the pre-clear flight"
+
+
+@pytest.mark.asyncio
+async def test_a_stale_body_cannot_erase_a_newer_flights_cleanup_token() -> None:
+    """Cleanup metadata is per flight: a stale body must not strand the newer flight's claim."""
+    registry = ThreadRepairRegistry()
+    thread_key = ("@agent:localhost", ROOM_ID, "$thread")
+    flight_key = _flight_key("$thread", hydrate_sidecars=False)
+    stale_barrier = asyncio.Event()
+    fresh_barrier = asyncio.Event()
+
+    async def scan() -> str:
+        return "scanned"
+
+    stale_token = registry.reserve_speculative_repair(thread_key)
+    stale = asyncio.create_task(
+        registry.run(
+            flight_key,
+            schedule=_barrier_schedule(stale_barrier),
+            repair=scan,
+            result_arms_backoff=lambda _r: False,
+            speculative=True,
+            claim_token=stale_token,
+        ),
+    )
+    await asyncio.sleep(0)
+    registry.clear_room("@agent:localhost", ROOM_ID)
+    assert registry._flight_claims == {}, "clear_room left the detached flight's cleanup token behind"
+
+    fresh_token = registry.reserve_speculative_repair(thread_key)
+    fresh = asyncio.create_task(
+        registry.run(
+            flight_key,
+            schedule=_barrier_schedule(fresh_barrier),
+            repair=scan,
+            result_arms_backoff=lambda _r: False,
+            speculative=True,
+            claim_token=fresh_token,
+        ),
+    )
+    await asyncio.sleep(0)
+    assert registry._flight_claims.get(flight_key) is fresh_token
+
+    stale_barrier.set()
+    await asyncio.gather(stale, return_exceptions=True)
+    await _drain_done_callbacks()
+    assert registry._flight_claims.get(flight_key) is fresh_token, "the stale body erased newer cleanup metadata"
+
+    # With its metadata intact, cancelling the newer flight before its body releases the claim.
+    inner = registry._tasks.get(flight_key)
+    assert inner is not None
+    inner.cancel()
+    await asyncio.gather(inner, fresh, return_exceptions=True)
+    await _drain_done_callbacks()
+    fresh_barrier.set()
+
+    assert registry._reserved_speculative.get(thread_key) is None, "the newer claim was stranded"
+    assert registry._flight_claims == {}
+
+
+@pytest.mark.asyncio
+async def test_clear_room_then_cancelling_the_old_flight_leaves_no_cleanup_state() -> None:
+    """A detached flight cancelled before its body must leave nothing behind for the next attempt."""
+    registry = ThreadRepairRegistry()
+    thread_key = ("@agent:localhost", ROOM_ID, "$thread")
+    flight_key = _flight_key("$thread", hydrate_sidecars=False)
+    barrier = asyncio.Event()
+
+    async def scan() -> str:
+        return "scanned"
+
+    token = registry.reserve_speculative_repair(thread_key)
+    flight = asyncio.create_task(
+        registry.run(
+            flight_key,
+            schedule=_barrier_schedule(barrier),
+            repair=scan,
+            result_arms_backoff=lambda _r: False,
+            speculative=True,
+            claim_token=token,
+        ),
+    )
+    await asyncio.sleep(0)
+    inner = registry._tasks.get(flight_key)
+    assert inner is not None
+
+    registry.clear_room("@agent:localhost", ROOM_ID)
+    inner.cancel()
+    await asyncio.gather(inner, flight, return_exceptions=True)
+    await _drain_done_callbacks()
+    barrier.set()
+
+    assert registry._flight_claims == {}
+    assert registry._reserved_speculative == {}
+    assert registry.reserve_speculative_repair(thread_key) is not None
