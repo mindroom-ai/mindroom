@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Literal, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -4201,16 +4201,53 @@ async def test_backlog_replay_skips_older_message_when_newer_exists(tmp_path: Pa
     assert bot._turn_store.is_handled("$m1")
 
 
+_SourceOwnership = Literal["single", "mixed", "absent", "partial", "redacted"]
+
+
+def _coalesced_ownership_record(ownership: _SourceOwnership) -> TurnRecord:
+    """Build the persisted coalesced record for one source-ownership shape.
+
+    ``absent`` models a record written before ``source_event_metadata`` existed, which still
+    decodes because the ledger schema version never changed. ``partial`` models a map missing one
+    source's entry, and ``redacted`` models the map normalization prunes for a redacted source.
+    """
+    if ownership == "absent":
+        record = TurnRecord.create(["$alice", "$bob"])
+        assert record.source_event_metadata is None
+        return record
+    alice_metadata = SourceEventMetadata(
+        sender="@alice:localhost" if ownership == "mixed" else "@bob:localhost",
+        timestamp_ms=1000,
+    )
+    bob_metadata = SourceEventMetadata(sender="@bob:localhost", timestamp_ms=2000)
+    record = TurnRecord.create(
+        ["$alice", "$bob"],
+        redacted_source_event_ids=["$alice"] if ownership == "redacted" else [],
+        source_event_metadata=(
+            {"$bob": bob_metadata} if ownership == "partial" else {"$alice": alice_metadata, "$bob": bob_metadata}
+        ),
+    )
+    assert record.source_event_metadata is not None
+    assert set(record.source_event_metadata) == (
+        {"$bob"} if ownership in {"partial", "redacted"} else {"$alice", "$bob"}
+    )
+    return record
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("degraded", [False, True])
-@pytest.mark.parametrize("mixed_requesters", [False, True])
+@pytest.mark.parametrize("ownership", ["single", "mixed", "absent", "partial", "redacted"])
 async def test_backlog_replay_respects_coalesced_source_ownership(
     tmp_path: Path,
     *,
     degraded: bool,
-    mixed_requesters: bool,
+    ownership: _SourceOwnership,
 ) -> None:
-    """A newer requester turn supersedes a coalesced batch only when every source is theirs."""
+    """A newer requester turn supersedes a coalesced batch only when every replayable source is theirs.
+
+    Sources the record cannot attribute — metadata absent entirely, or missing for one source — fail
+    closed, because whole-turn suppression would settle another requester's message without a reply.
+    """
     bot = _make_bot(tmp_path)
     room = _make_room()
     primary_event = PreparedTextEvent(
@@ -4257,16 +4294,8 @@ async def test_backlog_replay_respects_coalesced_source_ownership(
         ]
     else:
         _set_context_histories(dispatch, [newer_bob_message])
-    handled_turn = TurnRecord.create(
-        ["$alice", "$bob"],
-        source_event_metadata={
-            "$alice": SourceEventMetadata(
-                sender="@alice:localhost" if mixed_requesters else "@bob:localhost",
-                timestamp_ms=1000,
-            ),
-            "$bob": SourceEventMetadata(sender="@bob:localhost", timestamp_ms=2000),
-        },
-    )
+    handled_turn = _coalesced_ownership_record(ownership)
+    superseded = ownership in {"single", "redacted"}
 
     plan_calls: list[PreparedDispatch] = []
 
@@ -4298,12 +4327,12 @@ async def test_backlog_replay_respects_coalesced_source_ownership(
             handled_turn=handled_turn,
         )
 
-    assert plan_calls == ([dispatch] if mixed_requesters else [])
+    assert plan_calls == ([] if superseded else [dispatch])
     assert not any(
         log.get("event") == "Thread replay guard degraded; proceeding without negative newer-message proof"
         for log in captured_logs
     )
-    if degraded and not mixed_requesters:
+    if degraded and superseded:
         bot.event_cache.get_recent_room_events.assert_awaited_once_with(
             room.room_id,
             event_type="m.room.message",
@@ -4311,79 +4340,8 @@ async def test_backlog_replay_respects_coalesced_source_ownership(
         )
     else:
         bot.event_cache.get_recent_room_events.assert_not_awaited()
-    assert bot._turn_store.is_handled("$alice") is not mixed_requesters
-    assert bot._turn_store.is_handled("$bob") is not mixed_requesters
-
-
-@pytest.mark.asyncio
-async def test_backlog_replay_keeps_coalesced_turn_without_source_metadata(tmp_path: Path) -> None:
-    """A coalesced turn that cannot prove single-requester ownership must not be suppressed.
-
-    Records persisted before ``source_event_metadata`` existed still decode under the current
-    ledger schema version, so an empty metadata mapping must fail closed rather than read as
-    "every source belongs to this requester".
-    """
-    bot = _make_bot(tmp_path)
-    room = _make_room()
-    primary_event = PreparedTextEvent(
-        sender="@bob:localhost",
-        event_id="$bob",
-        body="bob",
-        source={"content": {"msgtype": "m.text", "body": "bob"}},
-        server_timestamp=2000,
-    )
-    dispatch = _prepared_dispatch(
-        event_id="$bob",
-        requester_user_id="@bob:localhost",
-        body="bob",
-        thread_id="$thread",
-    )
-    _set_context_histories(
-        dispatch,
-        [
-            ResolvedVisibleMessage(
-                sender="@bob:localhost",
-                body="newer bob",
-                timestamp=3000,
-                event_id="$newer-bob",
-                content={"body": "newer bob"},
-                thread_id="$thread",
-                latest_event_id="$newer-bob",
-            ),
-        ],
-    )
-    handled_turn = TurnRecord.create(["$alice", "$bob"])
-    assert handled_turn.is_coalesced
-    assert handled_turn.source_event_metadata is None
-
-    plan_calls: list[PreparedDispatch] = []
-
-    async def prepare_dispatch(*_args: object, **_kwargs: object) -> object:
-        return prepared_dispatch_result(dispatch)
-
-    async def plan_turn(
-        _room: object,
-        _event: object,
-        prepared_dispatch: PreparedDispatch,
-        **_kwargs: object,
-    ) -> _DispatchPlan:
-        plan_calls.append(prepared_dispatch)
-        return _DispatchPlan(kind="ignore")
-
-    with (
-        patch.object(bot._turn_controller, "_prepare_dispatch", new=prepare_dispatch),
-        patch.object(bot._turn_policy, "plan_turn", new=plan_turn),
-    ):
-        await bot._turn_controller._dispatch_text_message(
-            room,
-            primary_event,
-            "@bob:localhost",
-            handled_turn=handled_turn,
-        )
-
-    assert plan_calls == [dispatch]
-    assert not bot._turn_store.is_handled("$alice")
-    assert not bot._turn_store.is_handled("$bob")
+    assert bot._turn_store.is_handled("$alice") is superseded
+    assert bot._turn_store.is_handled("$bob") is superseded
 
 
 @pytest.mark.asyncio
