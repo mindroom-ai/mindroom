@@ -1,14 +1,14 @@
 # Thread edit integrity gate status
 
-Updated 2026-07-26 after preserving canonical nested bundled replacements.
+Updated 2026-07-26 after quarantining conflicting immutable event payloads.
 
 ## Exact target
 
 - PR: `mindroom-ai/mindroom#1641`
 - Branch: `fix/thread-edit-integrity`
-- Latest production commit: `09b2e9453dbdd232485a8a50c5c0a920c31b4910`
+- Latest production commit: `974c34573e192628a8d8a9962543cf94afa4bb85`
 - Current base and merge base: `858282afc77adb480fa06cd9e4057d511ff861d5`
-- Latest integration commit before this handoff-only successor: `09b2e9453dbdd232485a8a50c5c0a920c31b4910`
+- Latest integration commit before the next handoff-only successor: `974c34573e192628a8d8a9962543cf94afa4bb85`
 - A commit cannot contain its own SHA, so this file does not claim that its stored parent is the exact gate head.
 - Resolve local `HEAD`, `origin/fix/thread-edit-integrity`, and GitHub PR `headRefOid` live and require all three values to match before counting any gate.
 - The tracked tree is clean; three user-owned task notes and preserved test artifacts are untracked.
@@ -39,6 +39,10 @@ Updated 2026-07-26 after preserving canonical nested bundled replacements.
 - `41fe53933` also follows current reply ancestry before accepting a derived membership index.
 - `09b2e9453` treats a bundled-relation wrapper as aggregation metadata when it contains a canonical nested replacement event.
 - `09b2e9453` also makes two ancestry tests return the exact event requested instead of reusing a mismatched mock response.
+- `974c34573` selects once across every explicit and bundled replacement so a conflicting newest identity falls back to the next valid edit.
+- `974c34573` quarantines sequential conflicting clear payloads for one immutable event ID across point rows, edit indexes, snapshots, restart, and retry.
+- `974c34573` prevents deletion of the last nested bundled edit from promoting wrapper metadata and rejects bundled previews of malformed originals.
+- `974c34573` preserves the one legitimate clear-payload exception: a trusted local outbound placeholder may yield to its canonical sync echo, while an input-spoofed marker is stripped.
 - The current correction requires canonical replacement validity before an edit may supply thread ancestry in point, scan, cache-certification, snapshot, cleanup, or mutation paths.
 - The current correction rejects malformed `m.room.message` point events and cache rows before their raw relations can create durable thread indexes.
 - Known invalid edits resolve room-level; unavailable replacement ancestry remains indeterminate so mutation writes fail closed.
@@ -302,3 +306,20 @@ Updated 2026-07-26 after preserving canonical nested bundled replacements.
 - Every exact-`06dd78a0a` review, CI, full-suite, PostgreSQL, all-file, and live result is historical after `09b2e9453`.
 - Fresh exact-head native Codex review, CI, PostgreSQL/full/Tach/all-file validation, and real-Tuwunel validation are mandatory.
 - Merge gate remains closed.
+
+## Exact-974c immutable event correction
+
+- Local, remote, and GitHub PR heads match `974c34573e192628a8d8a9962543cf94afa4bb85`.
+- Base and merge base remain current `main` `858282afc77adb480fa06cd9e4057d511ff861d5`.
+- Two exact-`825444e8b` reviewers independently reproduced four blockers: invalid newest explicit/bundled identity hiding an older valid edit, last-nested-edit redaction promoting wrapper metadata, sequential same-ID clear payload mutation, and malformed originals gaining a synthesized bundled preview.
+- Every claim failed a deterministic regression before its owning fix.
+- The sequential collision regression also proves input-spoofed provisional markers are stripped, conflicting identities remain durably quarantined over restart, and the original survives with poisoned bundled metadata removed.
+- The existing outbound-sync regression caught the only valid clear-payload transition; trusted local placeholders now yield to their canonical sync echoes without weakening ordinary immutable identity checks.
+- The final nine-file owning selection passes `777` tests with `57` skips and zero failures or errors across SQLite and PostgreSQL.
+- Changed-file pre-commit, Tach dependencies/interfaces, Ruff, formatting, `ty`, Vulture, module privacy, commit hooks, and diff checks pass.
+- This correction changes production by `+317/-120`, net `+197`.
+- Total production source against current main is `+2425/-1226`, net `+1199`.
+- Every predecessor review, CI, PostgreSQL, full-suite, all-file, and real-Tuwunel result is historical after `974c34573`.
+- Fresh exact-head Codex review and CI are active.
+- Exact-head PostgreSQL stress, full pytest, Tach, all-file pre-commit, and isolated real-Tuwunel remain mandatory.
+- Merge gate remains closed; never merge from this task.
