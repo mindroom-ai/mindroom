@@ -31,7 +31,7 @@ Checkpoint commit atomically marks the canonical turn completed, records its vis
 The ledger writes the transaction to disk before publishing it to shared process memory.
 A failed write therefore does not publish a new in-memory checkpoint.
 Disk mutations are allowed to finish before caller cancellation propagates.
-An edit regeneration keeps retrying its frozen initial checkpoint after transient persistence failures, so a newer edit cannot be reported handled before it becomes durable.
+Every successful terminal edit keeps retrying its frozen initial checkpoint after persistence failures, so no final placeholder or regeneration can be reported handled before it becomes durable.
 
 The coordinator scans the unique canonical `TurnRecord` values that still contain checkpoints.
 It attempts up to eight checkpoints concurrently and serializes work that shares a canonical turn or visible target.

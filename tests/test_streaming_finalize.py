@@ -640,38 +640,33 @@ async def test_final_delivery_failure_replaces_placeholder_with_failure_update(t
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("failure_edit_succeeds", [True, False])
-async def test_terminal_persist_failure_handles_placeholder_only_after_failure_edit(
+async def test_unexpected_terminal_persist_failure_never_edits_undurable_placeholder(
     tmp_path: Path,
-    *,
-    failure_edit_succeeds: bool,
 ) -> None:
-    """Disk failure leaves source replayable unless a terminal Matrix edit lands."""
+    """An unexpected coordinator failure must not create undurable visible state."""
     gateway = _delivery_gateway(tmp_path)
     coordinator = gateway.deps.terminal_delivery_coordinator
     coordinator.commit_and_attempt.side_effect = OSError("disk full")
-    object.__setattr__(gateway, "edit_text", AsyncMock(return_value=failure_edit_succeeds))
+    object.__setattr__(gateway, "edit_text", AsyncMock())
 
-    outcome = await gateway.deliver_final(
-        FinalDeliveryRequest(
-            target=MessageTarget.resolve("!room:localhost", None, "$reply"),
-            existing_event_id="$placeholder",
-            existing_event_is_placeholder=True,
-            response_text="final answer",
-            identity=ResponseIdentity(
-                response_kind="ai",
-                response_envelope=_envelope(),
-                correlation_id="corr-terminal-persist-failure",
+    with pytest.raises(OSError, match="disk full"):
+        await gateway.deliver_final(
+            FinalDeliveryRequest(
+                target=MessageTarget.resolve("!room:localhost", None, "$reply"),
+                existing_event_id="$placeholder",
+                existing_event_is_placeholder=True,
+                response_text="final answer",
+                identity=ResponseIdentity(
+                    response_kind="ai",
+                    response_envelope=_envelope(),
+                    correlation_id="corr-terminal-persist-failure",
+                ),
+                tool_trace=None,
+                extra_content=None,
             ),
-            tool_trace=None,
-            extra_content=None,
-        ),
-    )
+        )
 
-    assert outcome.failure_reason == "terminal_delivery_persist_failed"
-    assert outcome.mark_handled is failure_edit_succeeds
-    assert outcome.final_visible_event_id == ("$placeholder" if failure_edit_succeeds else None)
-    gateway.edit_text.assert_awaited_once()
+    gateway.edit_text.assert_not_awaited()
 
 
 @pytest.mark.asyncio

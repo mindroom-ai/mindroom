@@ -787,41 +787,16 @@ class DeliveryGateway:
         display_text = interactive_response.formatted_text
 
         if request.existing_event_id is not None:
-            try:
-                commit = await self._commit_terminal_edit(
-                    target=request.target,
-                    target_event_id=request.existing_event_id,
-                    target_was_placeholder=request.existing_event_is_placeholder,
-                    identity=request.identity,
-                    body=display_text,
-                    tool_trace=draft.tool_trace,
-                    extra_content=draft.extra_content,
-                    interactive_metadata=interactive_response.interactive_metadata,
-                )
-            except OSError:
-                self.deps.logger.exception(
-                    "Failed to persist terminal delivery before Matrix transport",
-                    correlation_id=request.identity.correlation_id,
-                )
-                if request.existing_event_is_placeholder:
-                    return await self._finish_placeholder_delivery_failure(
-                        _PlaceholderFailureUpdateRequest(
-                            target=request.target,
-                            event_id=request.existing_event_id,
-                            identity=request.identity,
-                            failure_reason="terminal_delivery_persist_failed",
-                            tool_trace=draft.tool_trace,
-                            extra_content=draft.extra_content,
-                        ),
-                    )
-                return FinalDeliveryOutcome(
-                    terminal_status="error",
-                    event_id=request.existing_event_id,
-                    is_visible_response=True,
-                    failure_reason="terminal_delivery_persist_failed",
-                    tool_trace=tuple(draft.tool_trace or ()),
-                    extra_content=draft.extra_content,
-                )
+            commit = await self._commit_terminal_edit(
+                target=request.target,
+                target_event_id=request.existing_event_id,
+                target_was_placeholder=request.existing_event_is_placeholder,
+                identity=request.identity,
+                body=display_text,
+                tool_trace=draft.tool_trace,
+                extra_content=draft.extra_content,
+                interactive_metadata=interactive_response.interactive_metadata,
+            )
             if commit.status == "delivered" or (commit.status == "deferred" and commit.lifecycle_managed):
                 return FinalDeliveryOutcome(
                     terminal_status="completed",

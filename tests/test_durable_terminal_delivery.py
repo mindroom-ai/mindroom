@@ -257,17 +257,54 @@ async def test_plain_completed_turn_is_not_a_terminal_delivery_receipt(tmp_path:
 
 
 @pytest.mark.asyncio
-async def test_persist_failure_leaves_thinking_and_never_calls_matrix(tmp_path: Path) -> None:
+async def test_fresh_response_retries_initial_checkpoint_persist_failure(tmp_path: Path) -> None:
     store = _store(tmp_path)
     coordinator, _hooks, _effects = _coordinator(store)
-    send = AsyncMock()
+    original_commit = store.commit_terminal_checkpoint
+    attempts = 0
+
+    def fail_once(*args: object, **kwargs: object) -> TurnRecord | None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            message = "transient disk failure"
+            raise OSError(message)
+        return original_commit(*args, **kwargs)  # type: ignore[arg-type]
 
     with (
-        patch.object(store._ledger, "_persist_records", side_effect=OSError("disk full")),
-        patch("mindroom.terminal_delivery.send_message_result", send),
-        pytest.raises(OSError, match="disk full"),
+        patch.object(store, "commit_terminal_checkpoint", side_effect=fail_once),
+        patch("mindroom.terminal_delivery.send_message_result", return_value=_delivered()) as send,
     ):
-        await coordinator.commit_and_attempt(_intent())
+        result = await coordinator.commit_and_attempt(_intent())
+
+    assert result.status == "delivered"
+    assert attempts == 2
+    send.assert_awaited_once()
+    assert store.terminal_checkpoint_records() == ()
+
+
+@pytest.mark.asyncio
+async def test_cancellation_stops_fresh_checkpoint_persist_retries_without_matrix(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    coordinator, _hooks, _effects = _coordinator(store)
+    attempted = threading.Event()
+
+    def fail_persist(*_args: object, **_kwargs: object) -> TurnRecord | None:
+        attempted.set()
+        message = "disk full"
+        raise OSError(message)
+
+    with (
+        patch.object(store, "commit_terminal_checkpoint", side_effect=fail_persist),
+        patch("mindroom.terminal_delivery.send_message_result") as send,
+    ):
+        task = asyncio.create_task(coordinator.commit_and_attempt(_intent()))
+        assert await asyncio.to_thread(attempted.wait, 5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
 
     send.assert_not_awaited()
     assert store.terminal_checkpoint_records() == ()

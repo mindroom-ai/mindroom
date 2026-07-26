@@ -215,8 +215,6 @@ class TerminalDeliveryCoordinator:
                         regeneration_turn_record=intent.identity.regeneration_turn_record,
                     )
                 except OSError:
-                    if intent.identity.regeneration_turn_record is None:
-                        raise
                     self.deps.logger.exception(
                         "terminal_checkpoint_initial_persist_failed",
                         transaction_id=checkpoint.transaction_id,
