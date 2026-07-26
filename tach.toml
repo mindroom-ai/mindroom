@@ -1782,6 +1782,7 @@ depends_on = []
 path = "mindroom.matrix.cache.event_cache_events"
 depends_on = [
     "mindroom.matrix.event_info",
+    "mindroom.matrix.media",
     "mindroom.matrix.replacements",
     "mindroom.matrix.sidecar_content",
 ]
@@ -2388,6 +2389,7 @@ visibility = [
     "mindroom.matrix.client_visible_messages",
     "mindroom.matrix.conversation_cache",
     "mindroom.matrix.stale_stream_cleanup",
+    "mindroom.matrix.thread_membership",
     "mindroom.matrix.thread_resolution_reuse",
 ]
 
@@ -2586,7 +2588,12 @@ depends_on = ["mindroom.matrix.event_info", "mindroom.matrix.thread_membership"]
 
 [[modules]]
 path = "mindroom.matrix.thread_membership"
-depends_on = ["mindroom.matrix.event_info", "mindroom.matrix.thread_diagnostics"]
+depends_on = [
+    "mindroom.matrix.event_info",
+    "mindroom.matrix.media",
+    "mindroom.matrix.replacements",
+    "mindroom.matrix.thread_diagnostics",
+]
 
 [[modules]]
 path = "mindroom.matrix.thread_bookkeeping"
@@ -2602,6 +2609,7 @@ path = "mindroom.matrix.thread_room_scan"
 depends_on = [
     "mindroom.matrix.client_thread_history",
     "mindroom.matrix.event_info",
+    "mindroom.matrix.media",
     "mindroom.matrix.thread_membership",
 ]
 

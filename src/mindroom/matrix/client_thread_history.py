@@ -1202,6 +1202,7 @@ async def _thread_history_cache_rejection_reason(
     resolved_thread_ids = await resolve_thread_ids_for_event_infos(
         room_id,
         event_infos=event_infos,
+        event_sources_by_event_id=sources_by_event_id,
         ordered_event_ids=ordered_event_ids_from_scanned_event_sources(event_sources),
         # Seed the root only once these events prove it is one, so a payload holding nothing but
         # the root and plain replies to it cannot certify as a thread snapshot.
@@ -1616,6 +1617,7 @@ async def _unresolved_opaque_relation_event_ids(
     access = map_backed_thread_membership_access(
         event_infos=event_infos,
         resolved_thread_ids=resolved_thread_ids,
+        event_sources_by_event_id=scanned_message_sources,
     )
     unresolved_event_ids: set[str] = set()
     for event_id, event_source in scanned_message_sources.items():
@@ -1653,6 +1655,7 @@ async def _group_scanned_sources_by_thread(
     resolved_thread_ids = await resolve_thread_ids_for_event_infos(
         room_id,
         event_infos=event_infos,
+        event_sources_by_event_id=scanned_message_sources,
         ordered_event_ids=ordered_event_ids,
     )
     for event_id in ordered_event_ids:

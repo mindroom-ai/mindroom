@@ -31,7 +31,12 @@ from mindroom.matrix.cache.thread_history_result import ThreadHistoryResult
 from mindroom.matrix.cache.thread_reads import ThreadReadMode
 from mindroom.matrix.client_delivery import cached_room as matrix_cached_room
 from mindroom.matrix.event_info import EventInfo, event_source_is_timeline_in_room
-from mindroom.matrix.media import MatrixMediaEvent, is_audio_message_event, is_image_message_event
+from mindroom.matrix.media import (
+    MatrixMediaEvent,
+    is_audio_message_event,
+    is_image_message_event,
+    valid_room_message_event_source,
+)
 from mindroom.matrix.message_content import resolve_event_source_content
 from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
 from mindroom.matrix.thread_membership import (
@@ -601,6 +606,7 @@ class ConversationResolver:
                 mode=mode,
                 caller_label=caller_label,
             ),
+            fetch_event_source=self._event_source_for_event_id,
         )
 
     async def _read_thread_messages(
@@ -625,6 +631,15 @@ class ConversationResolver:
         room_id: str,
         event_id: str,
     ) -> EventInfo | None:
+        event_source = await self._event_source_for_event_id(room_id, event_id)
+        return EventInfo.from_event(event_source) if event_source is not None else None
+
+    async def _event_source_for_event_id(
+        self,
+        room_id: str,
+        event_id: str,
+    ) -> dict[str, Any] | None:
+        """Return one valid room-scoped timeline source for thread resolution."""
         target_event = await self.deps.conversation_cache.get_event(room_id, event_id)
         if not isinstance(target_event, nio.RoomGetEventResponse):
             if isinstance(target_event, RoomGetEventError) and target_event.status_code == "M_NOT_FOUND":
@@ -637,9 +652,11 @@ class ConversationResolver:
             msg = f"Failed to resolve related Matrix event {event_id}: {detail}"
             raise RuntimeError(msg)
         event_source = target_event.event.source
-        if not event_source_is_timeline_in_room(event_source, room_id):
+        if not event_source_is_timeline_in_room(event_source, room_id) or (
+            event_source.get("type") == "m.room.message" and not valid_room_message_event_source(event_source)
+        ):
             return None
-        return EventInfo.from_event(event_source)
+        return {key: value for key, value in event_source.items() if isinstance(key, str)}
 
     async def _resolve_thread_context(
         self,

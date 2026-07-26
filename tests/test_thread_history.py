@@ -2503,6 +2503,101 @@ class TestThreadHistory:
         ]
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "invalidity",
+        ["wrong-sender", "missing-new-content", "wrong-type", "edit-of-edit"],
+    )
+    async def test_room_scan_ignores_invalid_edit_as_reply_ancestry(self, invalidity: str) -> None:
+        """Cold room scans never use an invalid replacement as a thread ancestry node."""
+        client = AsyncMock()
+        root_event = self._make_text_event(
+            event_id="$thread_root",
+            sender="@user:localhost",
+            body="root",
+            server_timestamp=1000,
+            source_content={"msgtype": "m.text", "body": "root"},
+        )
+        thread_reply = self._make_text_event(
+            event_id="$thread_reply",
+            sender="@agent:localhost",
+            body="original",
+            server_timestamp=2000,
+            source_content={
+                "msgtype": "m.text",
+                "body": "original",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
+            },
+        )
+        first_target_id = "$thread_reply"
+        preceding_events: list[nio.Event] = []
+        expected_thread_reply_body = "original"
+        if invalidity == "edit-of-edit":
+            valid_edit = self._make_text_event(
+                event_id="$valid_edit",
+                sender="@agent:localhost",
+                body="* edited",
+                server_timestamp=2500,
+                source_content={
+                    "msgtype": "m.text",
+                    "body": "* edited",
+                    "m.new_content": {"msgtype": "m.text", "body": "edited"},
+                    "m.relates_to": {"rel_type": "m.replace", "event_id": "$thread_reply"},
+                },
+            )
+            first_target_id = "$valid_edit"
+            preceding_events.append(valid_edit)
+            expected_thread_reply_body = "edited"
+
+        invalid_edit = self._make_text_event(
+            event_id="$invalid_edit",
+            sender="@mallory:localhost" if invalidity == "wrong-sender" else "@agent:localhost",
+            body="* forged",
+            server_timestamp=3000,
+            source_content={
+                "msgtype": "m.text",
+                "body": "* forged",
+                "m.new_content": {"msgtype": "m.text", "body": "forged"},
+                "m.relates_to": {"rel_type": "m.replace", "event_id": first_target_id},
+            },
+        )
+        if invalidity == "missing-new-content":
+            invalid_edit.source["content"].pop("m.new_content")
+        elif invalidity == "wrong-type":
+            invalid_edit.source["type"] = "io.mindroom.tool_approval"
+
+        plain_reply = self._make_text_event(
+            event_id="$plain_reply",
+            sender="@bridge:localhost",
+            body="reply to invalid edit",
+            server_timestamp=4000,
+            source_content={
+                "msgtype": "m.text",
+                "body": "reply to invalid edit",
+                "m.relates_to": {"m.in_reply_to": {"event_id": "$invalid_edit"}},
+            },
+        )
+        response = MagicMock(spec=nio.RoomMessagesResponse)
+        response.chunk = [plain_reply, invalid_edit, *preceding_events, thread_reply, root_event]
+        response.end = None
+        client.room_messages.return_value = response
+
+        history = (
+            await _fetch_thread_history_via_room_messages_with_events(
+                client,
+                "!room:localhost",
+                "$thread_root",
+                hydrate_sidecars=True,
+                event_cache=_event_cache(),
+                expected_membership_epoch=0,
+            )
+        ).history
+
+        assert [(message.event_id, message.body) for message in history] == [
+            ("$thread_root", "root"),
+            ("$thread_reply", expected_thread_reply_body),
+        ]
+
+    @pytest.mark.asyncio
     async def test_room_scan_does_not_promote_plain_reply_to_non_thread_root(self) -> None:
         """Cold room scans must not treat arbitrary room replies as threaded."""
         grouped, _unresolved_opaque = await _group_scanned_sources_by_thread(
@@ -3800,6 +3895,93 @@ class TestThreadHistoryCache:
                     "m.relates_to": {"m.in_reply_to": {"event_id": thread_id}},
                 },
             },
+        ]
+
+        rejection = await matrix_client_module._thread_history_cache_rejection_reason(
+            event_sources,
+            room_id=room_id,
+            thread_id=thread_id,
+        )
+
+        assert rejection == "invalid_thread_membership"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("invalidity", ["wrong-sender", "missing-new-content", "edit-of-edit"])
+    async def test_cache_certification_rejects_invalid_edit_ancestry(self, invalidity: str) -> None:
+        """Invalid replacements cannot certify replies that target them as thread members."""
+        room_id = "!room:localhost"
+        thread_id = "$thread_root"
+
+        def source(
+            event_id: str,
+            sender: str,
+            timestamp: int,
+            content: dict[str, object],
+        ) -> dict[str, object]:
+            return {
+                "event_id": event_id,
+                "room_id": room_id,
+                "sender": sender,
+                "type": "m.room.message",
+                "origin_server_ts": timestamp,
+                "content": content,
+            }
+
+        original = source(
+            "$thread_reply",
+            "@alice:localhost",
+            2000,
+            {
+                "body": "Reply",
+                "msgtype": "m.text",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": thread_id},
+            },
+        )
+        target_id = "$thread_reply"
+        preceding_edits: list[dict[str, object]] = []
+        if invalidity == "edit-of-edit":
+            valid_edit = source(
+                "$valid_edit",
+                "@alice:localhost",
+                2500,
+                {
+                    "body": "* edited",
+                    "msgtype": "m.text",
+                    "m.new_content": {"body": "edited", "msgtype": "m.text"},
+                    "m.relates_to": {"rel_type": "m.replace", "event_id": "$thread_reply"},
+                },
+            )
+            target_id = "$valid_edit"
+            preceding_edits.append(valid_edit)
+        invalid_content: dict[str, object] = {
+            "body": "* forged",
+            "msgtype": "m.text",
+            "m.new_content": {"body": "forged", "msgtype": "m.text"},
+            "m.relates_to": {"rel_type": "m.replace", "event_id": target_id},
+        }
+        if invalidity == "missing-new-content":
+            invalid_content.pop("m.new_content")
+        invalid_edit = source(
+            "$invalid_edit",
+            "@mallory:localhost" if invalidity == "wrong-sender" else "@alice:localhost",
+            3000,
+            invalid_content,
+        )
+        event_sources = [
+            source(thread_id, "@alice:localhost", 1000, {"body": "Root", "msgtype": "m.text"}),
+            original,
+            *preceding_edits,
+            invalid_edit,
+            source(
+                "$plain_reply",
+                "@bob:localhost",
+                4000,
+                {
+                    "body": "Reply to invalid edit",
+                    "msgtype": "m.text",
+                    "m.relates_to": {"m.in_reply_to": {"event_id": "$invalid_edit"}},
+                },
+            ),
         ]
 
         rejection = await matrix_client_module._thread_history_cache_rejection_reason(

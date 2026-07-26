@@ -132,6 +132,7 @@ class MutationResolutionContext:
     """Cache-backed lookup context reused across one mutation batch."""
 
     page_event_infos: dict[str, EventInfo]
+    page_event_sources: dict[str, dict[str, object]]
     page_resolved_thread_ids: dict[str, str]
     cached_thread_ids: dict[str, str | None] = field(default_factory=dict)
     cached_event_infos: dict[str, EventInfo] = field(default_factory=dict)
@@ -236,6 +237,7 @@ class ThreadMutationResolver:
     ) -> MutationResolutionContext:
         """Build one page-local resolution context for a sync batch."""
         page_event_infos: dict[str, EventInfo] = {}
+        page_event_sources: dict[str, dict[str, object]] = {}
         relation_event_infos: dict[str, EventInfo] = {}
         ordered_event_ids: list[str] = []
         for event_source in [*plain_events, *threaded_events]:
@@ -243,6 +245,7 @@ class ThreadMutationResolver:
             if not isinstance(event_id, str) or not event_id:
                 continue
             event_info = EventInfo.from_event(event_source)
+            page_event_sources[event_id] = event_source
             supports_relations = event_type_supports_thread_relations(event_info.event_type)
             if supports_relations and not event_source_supports_thread_relations(event_source, room_id):
                 # A state or wrong-room event claiming a message type must never contribute
@@ -259,10 +262,12 @@ class ThreadMutationResolver:
         page_resolved_thread_ids = await resolve_thread_ids_for_event_infos(
             room_id,
             event_infos=relation_event_infos,
+            event_sources_by_event_id=page_event_sources,
             ordered_event_ids=ordered_event_ids,
         )
         return MutationResolutionContext(
             page_event_infos=page_event_infos,
+            page_event_sources=page_event_sources,
             page_resolved_thread_ids=page_resolved_thread_ids,
         )
 
@@ -358,6 +363,7 @@ class ThreadMutationResolver:
         *,
         event_info: EventInfo,
         event_id: str | None,
+        event_source: Mapping[str, object] | None = None,
         context: MutationWriteContext,
         resolution_context: MutationResolutionContext | None = None,
     ) -> MutationThreadImpact:
@@ -365,8 +371,11 @@ class ThreadMutationResolver:
         if resolution_context is None:
             resolution_context = MutationResolutionContext(
                 page_event_infos={},
+                page_event_sources={},
                 page_resolved_thread_ids={},
             )
+        if event_id is not None and event_source is not None:
+            resolution_context.page_event_sources[event_id] = dict(event_source)
         explicit_thread_id = event_info.thread_id
         if explicit_thread_id is not None:
             return MutationThreadImpact.threaded(explicit_thread_id)
@@ -527,11 +536,20 @@ class ThreadMutationResolver:
                 resolution_context=resolution_context,
             )
 
+        async def fetch_event_source(_room_id: str, event_id: str) -> dict[str, object] | None:
+            if resolution_context is not None:
+                page_source = resolution_context.page_event_sources.get(event_id)
+                if page_source is not None:
+                    return page_source
+            cached_source = await self.runtime.event_cache.get_event(room_id, event_id)
+            return cast("dict[str, object]", cached_source) if isinstance(cached_source, dict) else None
+
         return conversation_relation_thread_membership_access(
             ThreadMembershipAccess(
                 lookup_thread_id=lookup_thread_id,
                 fetch_event_info=fetch_event_info,
                 prove_thread_root=prove_thread_root,
+                fetch_event_source=fetch_event_source,
             ),
         )
 

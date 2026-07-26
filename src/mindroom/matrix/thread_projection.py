@@ -380,6 +380,7 @@ async def resolve_thread_ids_for_event_infos(
     room_id: str,
     *,
     event_infos: Mapping[str, EventInfo],
+    event_sources_by_event_id: Mapping[str, Mapping[str, Any]] | None = None,
     ordered_event_ids: Sequence[str],
     resolved_thread_ids: dict[str, str] | None = None,
 ) -> dict[str, str]:
@@ -388,6 +389,7 @@ async def resolve_thread_ids_for_event_infos(
     access = map_backed_thread_membership_access(
         event_infos=event_infos,
         resolved_thread_ids=resolved,
+        event_sources_by_event_id=event_sources_by_event_id,
     )
 
     progress_made = True

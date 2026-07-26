@@ -104,6 +104,11 @@ def parse_room_message_event_source(event_source: Mapping[str, Any]) -> nio.Room
     return parsed_event if isinstance(parsed_event, (nio.RoomMessage, nio.BadEvent)) else None
 
 
+def valid_room_message_event_source(event_source: Mapping[str, Any]) -> bool:
+    """Return whether nio accepts one plaintext room-message envelope."""
+    return isinstance(parse_room_message_event_source(event_source), nio.RoomMessage)
+
+
 def valid_room_message_replacement(event_source: Mapping[str, Any]) -> bool:
     """Return whether nio accepts both layers of one room-message replacement."""
     content = event_source.get("content")

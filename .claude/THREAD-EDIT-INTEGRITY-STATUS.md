@@ -1,16 +1,14 @@
 # Thread edit integrity gate status
 
-Updated 2026-07-25 after correcting the exact-`7f4a9eaea` edit-membership review blockers.
+Updated 2026-07-25 after correcting the exact-`09090b1ec` replacement-ancestry review blockers.
 
 ## Exact target
 
 - PR: `mindroom-ai/mindroom#1641`
 - Branch: `fix/thread-edit-integrity`
-- Latest production commit: `6eea89ebf`
+- Latest published production commit before this correction: `6eea89ebf`
 - Current base and merge base: `f6190d4c2457381e63f40f99fb27e794ae8667b8`
-- The current branch and PR head contain only this crash-handoff successor after the latest production commit.
-- The production, test, and documentation corrections are pushed.
-- Tracked working tree is clean.
+- This correction and its deterministic regressions are being committed together with this crash handoff.
 - Resolve local, remote, and PR heads before counting any exact-head gate.
 - Resolve and compare local, origin, and GitHub heads before counting any gate.
 - Three pre-existing untracked `.claude/TASK-*.md` notes are user-owned and must remain untouched.
@@ -36,6 +34,9 @@ Updated 2026-07-25 after correcting the exact-`7f4a9eaea` edit-membership review
 - `ae5f72397` rejects fetched message envelopes that parse as `nio.BadEvent` before they can provide cleanup requester ancestry.
 - `6eea89ebf` makes related replacements follow their original before consulting a legacy cached membership index.
 - `6eea89ebf` also retains valid replacement rows as non-visible room-scan ancestry so replies targeting an edit remain in the original thread.
+- The current correction requires canonical replacement validity before an edit may supply thread ancestry in point, scan, cache-certification, snapshot, cleanup, or mutation paths.
+- The current correction rejects malformed `m.room.message` point events and cache rows before their raw relations can create durable thread indexes.
+- Known invalid edits resolve room-level; unavailable replacement ancestry remains indeterminate so mutation writes fail closed.
 
 ## Reconciled review status
 
@@ -58,8 +59,12 @@ Updated 2026-07-25 after correcting the exact-`7f4a9eaea` edit-membership review
 - The malformed-original case failed before implementation and passes after `ae5f72397`; valid originals, wrong-sender replacements, edit-of-edit targets, and invalid scope remain correct.
 - Two fresh exact-`7f4a9eaea` native reviewers found a stale handoff count plus two blockers: a legacy edit index could override the original's membership, and cold scans dropped replies targeting valid edits.
 - Both code claims failed deterministic regressions before implementation and pass after `6eea89ebf`; edits remain non-visible.
+- Two fresh exact-`09090b1ec` native reviewers independently found that structurally invalid replacements still supplied ancestry after being retained as non-visible graph nodes.
+- One reviewer also found that a successful `nio.BadEvent` message envelope could supply a raw thread relation and persist self/root indexes.
+- Ten wrong-sender, malformed, wrong-type, edit-of-edit, cache-certification, point-read, and SQLite/PostgreSQL index variants failed before this correction.
+- All exact claims were reproduced before implementation; the correction centralizes replacement validation in `thread_membership` and leaves storage/transport seams responsible only for source loading.
 - The withdrawn edit-index timestamp-poison claim remains excluded because it required direct inconsistent SQL writes outside production paths.
-- Production source against current `main` is `+1709/-1169`, net `+540`.
+- This correction adds `+196/-15` production lines, net `+181`; exact total branch counts must be refreshed after commit.
 
 ## Validation already completed
 
@@ -90,11 +95,16 @@ Updated 2026-07-25 after correcting the exact-`7f4a9eaea` edit-membership review
 - The identical frozen harness, scenario, nio head, and Tuwunel image passed `200` operations against exact current `main`, so the liveness failure is specific to the PR predecessor.
 - The two edit-membership regressions failed before `6eea89ebf`; both and their complete owning files pass afterward (`147` tests).
 - Ruff, format, `ty`, Tach, module privacy, and normal commit hooks pass for `6eea89ebf`.
+- The ten new exact review cases fail before the current correction; all thirteen parametrized regression variants pass afterward across SQLite and PostgreSQL.
+- Three neighboring live/outbound mutation tests initially caught missing current-source and unavailable-original handling; all three pass after the source is seeded and unavailable ancestry remains indeterminate.
+- The complete twelve-file owning selection passes `792` tests, including SQLite, PostgreSQL, 45-thread fanout, seeded fuzz, snapshots, mutations, tags, room scans, and cleanup.
+- Ruff, format, `ty`, Tach dependencies/interfaces, and diff checks pass for the current correction.
 - Git author was verified as `Bas Nijholt <bas@nijho.lt>` before every new commit.
 
 ## Pending exact-head gates
 
-- Fresh CI must complete on the current crash-handoff successor head.
+- Commit and push the current correction, then freeze its exact head.
+- Fresh CI must complete on the new exact head.
 - A fresh independent native Codex correctness review is required on that exact head.
 - Exact-head PostgreSQL owning and stress selections are required.
 - Exact-head full pytest is required.

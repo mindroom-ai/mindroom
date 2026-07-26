@@ -477,37 +477,43 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         thread_root_id = "$thread_root:localhost"
         thread_reply_id = "$thread_reply:localhost"
         edit_id = "$thread_reply_edit:localhost"
-        event_infos = {
-            thread_reply_id: EventInfo.from_event(
-                {
-                    "type": "m.room.message",
-                    "content": {
-                        "body": "Thread reply",
-                        "msgtype": "m.text",
-                        "m.relates_to": {"rel_type": "m.thread", "event_id": thread_root_id},
-                    },
+        event_sources = {
+            thread_reply_id: {
+                "event_id": thread_reply_id,
+                "room_id": room_id,
+                "sender": "@alice:localhost",
+                "origin_server_ts": 1,
+                "type": "m.room.message",
+                "content": {
+                    "body": "Thread reply",
+                    "msgtype": "m.text",
+                    "m.relates_to": {"rel_type": "m.thread", "event_id": thread_root_id},
                 },
-            ),
-            edit_id: EventInfo.from_event(
-                {
-                    "type": "m.room.message",
-                    "content": {
-                        "body": "* forged relation",
+            },
+            edit_id: {
+                "event_id": edit_id,
+                "room_id": room_id,
+                "sender": "@alice:localhost",
+                "origin_server_ts": 2,
+                "type": "m.room.message",
+                "content": {
+                    "body": "* forged relation",
+                    "msgtype": "m.text",
+                    "m.new_content": {
+                        "body": "forged relation",
                         "msgtype": "m.text",
-                        "m.new_content": {
-                            "body": "forged relation",
-                            "msgtype": "m.text",
-                            "m.relates_to": {"rel_type": "m.thread", "event_id": "$other_thread:localhost"},
-                        },
-                        "m.relates_to": {"rel_type": "m.replace", "event_id": thread_reply_id},
+                        "m.relates_to": {"rel_type": "m.thread", "event_id": "$other_thread:localhost"},
                     },
+                    "m.relates_to": {"rel_type": "m.replace", "event_id": thread_reply_id},
                 },
-            ),
+            },
         }
+        event_infos = {event_id: EventInfo.from_event(event_source) for event_id, event_source in event_sources.items()}
 
         resolved_thread_ids = await resolve_thread_ids_for_event_infos(
             room_id,
             event_infos=event_infos,
+            event_sources_by_event_id=event_sources,
             ordered_event_ids=[edit_id, thread_reply_id],
         )
 
@@ -613,6 +619,35 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 lookup_thread_id=lookup_thread_id,
                 fetch_event_info=fetch_event_info,
                 prove_thread_root=AsyncMock(side_effect=AssertionError("edits cannot be roots")),
+                fetch_event_source=AsyncMock(
+                    side_effect=lambda _room_id, event_id: {
+                        edit_id: {
+                            "event_id": edit_id,
+                            "room_id": room_id,
+                            "sender": "@alice:localhost",
+                            "origin_server_ts": 2,
+                            "type": "m.room.message",
+                            "content": {
+                                "body": "* edited",
+                                "msgtype": "m.text",
+                                "m.new_content": {"body": "edited", "msgtype": "m.text"},
+                                "m.relates_to": {"rel_type": "m.replace", "event_id": original_id},
+                            },
+                        },
+                        original_id: {
+                            "event_id": original_id,
+                            "room_id": room_id,
+                            "sender": "@alice:localhost",
+                            "origin_server_ts": 1,
+                            "type": "m.room.message",
+                            "content": {
+                                "body": "Thread reply",
+                                "msgtype": "m.text",
+                                "m.relates_to": {"rel_type": "m.thread", "event_id": thread_root_id},
+                            },
+                        },
+                    }.get(event_id),
+                ),
             ),
         )
 

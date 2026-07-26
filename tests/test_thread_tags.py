@@ -38,12 +38,13 @@ def _message_event_response(
     content: dict[str, object],
     room_id: str = "!room:localhost",
     event_type: str = "m.room.message",
+    sender: str = "@user:localhost",
 ) -> nio.RoomGetEventResponse:
     return nio.RoomGetEventResponse.from_dict(
         {
             "content": content,
             "event_id": event_id,
-            "sender": "@user:localhost",
+            "sender": sender,
             "origin_server_ts": 1,
             "room_id": room_id,
             "type": event_type,
@@ -2725,7 +2726,7 @@ async def test_resolve_thread_root_event_id_for_client_uses_cache_when_event_loo
     )
 
 
-@pytest.mark.parametrize("invalid_kind", ["state", "wrong-room"])
+@pytest.mark.parametrize("invalid_kind", ["state", "wrong-room", "bad-event"])
 @pytest.mark.asyncio
 async def test_resolve_thread_root_event_id_for_client_rejects_invalid_success_before_cache_fallback(
     invalid_kind: str,
@@ -2741,8 +2742,16 @@ async def test_resolve_thread_root_event_id_for_client_rejects_invalid_success_b
     }
     if invalid_kind == "state":
         event_source["state_key"] = ""
-    else:
+    elif invalid_kind == "wrong-room":
         event_source["room_id"] = "!other:localhost"
+    else:
+        event_source["content"] = {
+            "body": "forged",
+            "m.relates_to": {
+                "rel_type": "m.thread",
+                "event_id": "$forged-root:localhost",
+            },
+        }
     client = AsyncMock()
     client.room_get_event = AsyncMock(return_value=nio.RoomGetEventResponse.from_dict(event_source))
     conversation_cache = MagicMock()
@@ -2757,6 +2766,48 @@ async def test_resolve_thread_root_event_id_for_client_rejects_invalid_success_b
 
     assert normalized is None
     conversation_cache.get_thread_id_for_event.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_resolve_thread_root_event_id_for_client_rejects_wrong_sender_edit_ancestry() -> None:
+    """A replacement from another sender cannot inherit its target's thread."""
+    client = AsyncMock()
+    client.room_get_event = AsyncMock(
+        side_effect=[
+            _message_event_response(
+                "$edit:localhost",
+                sender="@mallory:localhost",
+                content={
+                    "body": "* forged",
+                    "msgtype": "m.text",
+                    "m.new_content": {"body": "forged", "msgtype": "m.text"},
+                    "m.relates_to": {
+                        "rel_type": "m.replace",
+                        "event_id": "$thread-reply:localhost",
+                    },
+                },
+            ),
+            _message_event_response(
+                "$thread-reply:localhost",
+                content={
+                    "body": "Reply",
+                    "msgtype": "m.text",
+                    "m.relates_to": {
+                        "rel_type": "m.thread",
+                        "event_id": "$thread-root:localhost",
+                    },
+                },
+            ),
+        ],
+    )
+
+    normalized = await resolve_thread_root_event_id_for_client(
+        client,
+        "!room:localhost",
+        "$edit:localhost",
+    )
+
+    assert normalized is None
 
 
 @pytest.mark.asyncio

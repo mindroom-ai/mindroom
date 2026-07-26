@@ -88,6 +88,9 @@ async def _resolved_snapshot_thread_event_ids(
     resolved = await resolve_thread_ids_for_event_infos(
         room_id,
         event_infos=event_infos,
+        event_sources_by_event_id={
+            event_id: event for event in events if isinstance(event_id := event.get("event_id"), str) and event_id
+        },
         ordered_event_ids=list(event_infos),
         # Seed the root only once these events prove it is one. Seeding unconditionally would let a
         # plain reply to the root inherit membership in a thread that never established one.

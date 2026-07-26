@@ -1021,8 +1021,11 @@ async def _scanned_message_data_by_event_id(
         [event.source for event in message_events],
     )
     resolved_thread_ids = await resolve_thread_ids_for_event_infos(
-        "",
+        room_id,
         event_infos=event_infos,
+        event_sources_by_event_id={
+            event.event_id: event.source for event in message_events if isinstance(event.event_id, str)
+        },
         ordered_event_ids=ordered_event_ids,
     )
 

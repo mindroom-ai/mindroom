@@ -14,6 +14,7 @@ from mindroom.matrix.event_info import (
     event_source_matches_room,
     event_source_supports_thread_relations,
 )
+from mindroom.matrix.media import valid_room_message_event_source
 from mindroom.matrix.replacements import bundled_replacement_candidates
 from mindroom.matrix.sidecar_content import sidecar_mxc_url
 
@@ -258,13 +259,20 @@ def cache_rows_were_deleted(*row_counts: int) -> bool:
 
 def _event_thread_row(room_id: str, event: SerializedCachedEvent) -> _EventThreadRow | None:
     """Return an event-to-thread row when thread membership is explicit."""
-    if not event_source_supports_thread_relations(event.event, room_id):
+    if not _event_can_supply_thread_index(event.event, room_id=room_id):
         return None
     event_info = EventInfo.from_event(event.event)
     thread_id = event_info.thread_id
     if not thread_id:
         return None
     return _EventThreadRow(room_id=room_id, event_id=event.event_id, thread_id=thread_id)
+
+
+def _event_can_supply_thread_index(event: dict[str, Any], *, room_id: str) -> bool:
+    """Return whether one timeline event may create durable thread-index rows."""
+    return event_source_supports_thread_relations(event, room_id) and (
+        event.get("type") != "m.room.message" or valid_room_message_event_source(event)
+    )
 
 
 def _with_thread_root_self_rows(thread_rows: list[_EventThreadRow]) -> list[_EventThreadRow]:
@@ -309,7 +317,7 @@ def event_thread_rows(
         [
             _EventThreadRow(room_id=room_id, event_id=event.event_id, thread_id=thread_id)
             for event in events
-            if event_source_supports_thread_relations(event.event, room_id)
+            if _event_can_supply_thread_index(event.event, room_id=room_id)
         ]
         if thread_id is not None
         else [row for event in events if (row := _event_thread_row(room_id, event)) is not None]

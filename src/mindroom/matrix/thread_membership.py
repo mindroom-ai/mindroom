@@ -52,13 +52,16 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import Protocol
+from typing import Any, Protocol
 
 from mindroom.matrix.event_info import EventInfo, event_type_supports_thread_relations
+from mindroom.matrix.media import valid_room_message_event_source, valid_room_message_replacement
+from mindroom.matrix.replacements import is_valid_replacement
 from mindroom.matrix.thread_diagnostics import is_thread_history_source_degraded
 
 type _ThreadIdLookup = Callable[[str, str], Awaitable[str | None]]
 type _EventInfoLookup = Callable[[str, str], Awaitable[EventInfo | None]]
+type _EventSourceLookup = Callable[[str, str], Awaitable[Mapping[str, Any] | None]]
 type _ThreadRootProofLookup = Callable[[str, str], Awaitable["ThreadRootProof"]]
 type _ThreadEventSourcesLookup = Callable[[str, str], Awaitable[tuple[Sequence[Mapping[str, object]], bool]]]
 _MAX_THREAD_MEMBERSHIP_HOPS = 512
@@ -186,6 +189,51 @@ def _next_related_event_target(
     return event_info.next_related_event_id(current_event_id)
 
 
+async def _validated_next_related_event_target(
+    room_id: str,
+    event_info: EventInfo,
+    *,
+    current_event_id: str,
+    access: ThreadMembershipAccess,
+) -> str | None:
+    """Return the next relation target after validating replacement ancestry."""
+    next_target = _next_related_event_target(event_info, current_event_id=current_event_id)
+    if not event_info.is_edit:
+        return next_target
+    if next_target is None or not await _replacement_ancestry_is_valid(
+        room_id,
+        current_event_id,
+        next_target,
+        access=access,
+    ):
+        return None
+    return next_target
+
+
+async def _replacement_ancestry_is_valid(
+    room_id: str,
+    replacement_event_id: str,
+    original_event_id: str,
+    *,
+    access: ThreadMembershipAccess,
+) -> bool:
+    """Return whether one replacement may inherit its original's membership."""
+    if access.fetch_event_source is None:
+        msg = f"Replacement ancestry lookup unavailable for {replacement_event_id}"
+        raise ThreadMembershipLookupError(msg)
+    candidate = await access.fetch_event_source(room_id, replacement_event_id)
+    original = await access.fetch_event_source(room_id, original_event_id)
+    if candidate is None or original is None:
+        msg = f"Replacement ancestry lookup unavailable for {replacement_event_id}"
+        raise ThreadMembershipLookupError(msg)
+    return valid_room_message_event_source(original) and is_valid_replacement(
+        original,
+        candidate,
+        room_id=room_id,
+        validator=valid_room_message_replacement,
+    )
+
+
 @dataclass(frozen=True)
 class ThreadMembershipAccess:
     """Repository-wide accessors used to resolve one event's thread membership."""
@@ -193,6 +241,7 @@ class ThreadMembershipAccess:
     lookup_thread_id: _ThreadIdLookup
     fetch_event_info: _EventInfoLookup
     prove_thread_root: _ThreadRootProofLookup
+    fetch_event_source: _EventSourceLookup | None = None
 
 
 def conversation_relation_thread_membership_access(
@@ -211,6 +260,7 @@ def conversation_relation_thread_membership_access(
         lookup_thread_id=access.lookup_thread_id,
         fetch_event_info=fetch_event_info,
         prove_thread_root=access.prove_thread_root,
+        fetch_event_source=access.fetch_event_source,
     )
 
 
@@ -249,6 +299,21 @@ async def resolve_event_thread_membership(
             return _resolution_from_root_proof(event_id, proof)
     related_event_id = event_info.next_related_event_id("")
     if related_event_id is not None:
+        if event_info.is_edit and event_id is not None:
+            try:
+                valid_replacement = await _replacement_ancestry_is_valid(
+                    room_id,
+                    event_id,
+                    related_event_id,
+                    access=access,
+                )
+            except Exception as exc:
+                return ThreadResolution.indeterminate(
+                    exc,
+                    candidate_thread_root_id=related_event_id,
+                )
+            if not valid_replacement:
+                return ThreadResolution.room_level()
         return await resolve_related_event_thread_membership(
             room_id,
             related_event_id,
@@ -257,7 +322,7 @@ async def resolve_event_thread_membership(
     return ThreadResolution.room_level()
 
 
-async def resolve_related_event_thread_membership(
+async def resolve_related_event_thread_membership(  # noqa: C901
     room_id: str,
     related_event_id: str,
     *,
@@ -300,10 +365,16 @@ async def resolve_related_event_thread_membership(
                 resolution = _resolution_from_root_proof(current_event_id, proof)
                 break
 
-        next_target = _next_related_event_target(
-            related_event_info,
-            current_event_id=current_event_id,
-        )
+        try:
+            next_target = await _validated_next_related_event_target(
+                room_id,
+                related_event_info,
+                current_event_id=current_event_id,
+                access=access,
+            )
+        except Exception as exc:
+            resolution = ThreadResolution.indeterminate(exc, candidate_thread_root_id=current_event_id)
+            break
 
         if indexed_thread_id is not None and not related_event_info.is_edit:
             resolution = ThreadResolution.threaded(indexed_thread_id)
@@ -336,6 +407,7 @@ def map_backed_thread_membership_access(
     *,
     event_infos: Mapping[str, EventInfo],
     resolved_thread_ids: dict[str, str],
+    event_sources_by_event_id: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> ThreadMembershipAccess:
     """Return one thread-membership access adapter backed by in-memory event maps."""
 
@@ -356,11 +428,18 @@ def map_backed_thread_membership_access(
         )
         return ThreadRootProof.proven() if has_children else ThreadRootProof.not_a_thread_root()
 
+    async def fetch_event_source(
+        _room_id: str,
+        event_id: str,
+    ) -> Mapping[str, Any] | None:
+        return None if event_sources_by_event_id is None else event_sources_by_event_id.get(event_id)
+
     return conversation_relation_thread_membership_access(
         ThreadMembershipAccess(
             lookup_thread_id=lookup_thread_id,
             fetch_event_info=fetch_event_info,
             prove_thread_root=prove_thread_root,
+            fetch_event_source=fetch_event_source,
         ),
     )
 
@@ -471,6 +550,7 @@ def thread_messages_thread_membership_access(
     lookup_thread_id: _ThreadIdLookup,
     fetch_event_info: _EventInfoLookup,
     fetch_thread_messages: _ThreadMessagesLookup,
+    fetch_event_source: _EventSourceLookup | None = None,
 ) -> ThreadMembershipAccess:
     """Build shared membership access backed by authoritative thread messages."""
 
@@ -486,6 +566,7 @@ def thread_messages_thread_membership_access(
             lookup_thread_id=lookup_thread_id,
             fetch_event_info=fetch_event_info,
             prove_thread_root=prove_thread_root,
+            fetch_event_source=fetch_event_source,
         ),
     )
 
@@ -495,6 +576,7 @@ def room_scan_thread_membership_access(
     lookup_thread_id: _ThreadIdLookup,
     fetch_event_info: _EventInfoLookup,
     fetch_thread_event_sources: _ThreadEventSourcesLookup,
+    fetch_event_source: _EventSourceLookup | None = None,
 ) -> ThreadMembershipAccess:
     """Build shared membership access backed by authoritative room scans."""
 
@@ -510,5 +592,6 @@ def room_scan_thread_membership_access(
             lookup_thread_id=lookup_thread_id,
             fetch_event_info=fetch_event_info,
             prove_thread_root=prove_thread_root,
+            fetch_event_source=fetch_event_source,
         ),
     )

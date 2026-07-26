@@ -18,6 +18,7 @@ from nio.responses import RoomGetEventError
 
 from mindroom.matrix.client_thread_history import fetch_thread_event_sources_via_room_messages
 from mindroom.matrix.event_info import EventInfo, event_source_is_timeline_in_room
+from mindroom.matrix.media import valid_room_message_event_source
 from mindroom.matrix.thread_membership import ThreadMembershipAccess, room_scan_thread_membership_access
 
 if TYPE_CHECKING:
@@ -56,7 +57,9 @@ def _event_info_from_lookup_response(
     """Normalize one room-get-event style response into EventInfo when available."""
     if isinstance(response, nio.RoomGetEventResponse):
         event_source = response.event.source
-        if not event_source_is_timeline_in_room(event_source, room_id):
+        if not event_source_is_timeline_in_room(event_source, room_id) or (
+            event_source.get("type") == "m.room.message" and not valid_room_message_event_source(event_source)
+        ):
             return None
         return EventInfo.from_event(event_source)
     if not strict:
@@ -118,8 +121,10 @@ def room_scan_membership_access_for_client(
     *,
     conversation_cache: RoomScanConversationCache | None,
     fetch_event_info: Callable[[str, str], Awaitable[EventInfo | None]] | None = None,
+    known_event_sources: Mapping[str, dict[str, object]] | None = None,
 ) -> ThreadMembershipAccess:
     """Build client-backed membership access without widening the cache protocol."""
+    event_sources = {} if known_event_sources is None else dict(known_event_sources)
 
     async def lookup_thread_id(lookup_room_id: str, lookup_event_id: str) -> str | None:
         return await lookup_thread_id_from_conversation_cache(
@@ -129,6 +134,9 @@ def room_scan_membership_access_for_client(
         )
 
     async def resolved_fetch_event_info(lookup_room_id: str, lookup_event_id: str) -> EventInfo | None:
+        known_source = event_sources.get(lookup_event_id)
+        if known_source is not None:
+            return EventInfo.from_event(known_source)
         if fetch_event_info is not None:
             return await fetch_event_info(lookup_room_id, lookup_event_id)
         if conversation_cache is None:
@@ -140,6 +148,24 @@ def room_scan_membership_access_for_client(
             strict=True,
         )
 
+    async def fetch_event_source(lookup_room_id: str, lookup_event_id: str) -> dict[str, object] | None:
+        known_source = event_sources.get(lookup_event_id)
+        if known_source is not None:
+            return known_source
+        response = (
+            await conversation_cache.get_event(lookup_room_id, lookup_event_id)
+            if conversation_cache is not None
+            else await client.room_get_event(lookup_room_id, lookup_event_id)
+        )
+        if not isinstance(response, nio.RoomGetEventResponse):
+            return None
+        event_source = response.event.source
+        if not event_source_is_timeline_in_room(event_source, lookup_room_id):
+            return None
+        normalized_source = {key: value for key, value in event_source.items() if isinstance(key, str)}
+        event_sources[lookup_event_id] = normalized_source
+        return normalized_source
+
     return room_scan_thread_membership_access(
         lookup_thread_id=lookup_thread_id,
         fetch_event_info=resolved_fetch_event_info,
@@ -148,6 +174,7 @@ def room_scan_membership_access_for_client(
             room_id,
             thread_root_id,
         ),
+        fetch_event_source=fetch_event_source,
     )
 
 

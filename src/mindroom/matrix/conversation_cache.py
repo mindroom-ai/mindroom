@@ -117,7 +117,10 @@ async def resolve_thread_root_event_id_for_client(
     response = await client.room_get_event(room_id, normalized_event_id)
     if isinstance(response, nio.RoomGetEventResponse):
         event_source = response.event.source
-        if not event_source_is_timeline_in_room(event_source, room_id):
+        if not event_source_is_timeline_in_room(event_source, room_id) or (
+            event_source.get("type") == "m.room.message"
+            and not isinstance(parse_room_message_event_source(event_source), nio.RoomMessage)
+        ):
             return None
         event_info = EventInfo.from_event(event_source)
     else:
@@ -143,6 +146,9 @@ async def resolve_thread_root_event_id_for_client(
                 lookup_event_id,
                 strict=False,
             ),
+            known_event_sources={
+                normalized_event_id: {key: value for key, value in event_source.items() if isinstance(key, str)},
+            },
         ),
     )
     return resolution.thread_id

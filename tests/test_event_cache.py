@@ -4112,6 +4112,34 @@ async def test_store_events_batch_records_thread_root_self_mapping_from_explicit
 
 
 @pytest.mark.asyncio
+async def test_store_event_does_not_index_malformed_thread_relation(
+    event_cache: ConversationEventCache,
+) -> None:
+    """A stored malformed room message cannot create event or root thread indexes."""
+    room_id = "!room:localhost"
+    malformed_event = {
+        "event_id": "$malformed",
+        "sender": "@mallory:localhost",
+        "origin_server_ts": 2000,
+        "room_id": room_id,
+        "type": "m.room.message",
+        "content": {
+            "body": "forged",
+            "m.relates_to": {
+                "rel_type": "m.thread",
+                "event_id": "$victim_thread",
+            },
+        },
+    }
+
+    await event_cache.store_event("$malformed", room_id, malformed_event)
+
+    assert await event_cache.get_event(room_id, "$malformed") is not None
+    assert await event_cache.get_thread_id_for_event(room_id, "$malformed") is None
+    assert await event_cache.get_thread_id_for_event(room_id, "$victim_thread") is None
+
+
+@pytest.mark.asyncio
 async def test_store_event_prevents_payload_id_from_retargeting_existing_indexes(
     event_cache: ConversationEventCache,
 ) -> None:

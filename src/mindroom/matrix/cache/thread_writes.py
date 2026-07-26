@@ -360,6 +360,7 @@ class ThreadOutboundWritePolicy:
                 room_id,
                 event_info=event_info,
                 event_id=event_id,
+                event_source=event_source,
                 context="outbound",
             )
         )
@@ -849,11 +850,13 @@ class ThreadLiveWritePolicy:
         *,
         event_id: str,
         event_info: EventInfo,
+        event_source: dict[str, object],
     ) -> MutationThreadImpact:
         return await self._resolver.resolve_thread_impact_for_mutation(
             room_id,
             event_info=event_info,
             event_id=event_id,
+            event_source=event_source,
             context="live",
         )
 
@@ -864,10 +867,12 @@ class ThreadLiveWritePolicy:
         *,
         event_info: EventInfo,
     ) -> None:
+        event_source = normalize_nio_event_for_cache(event)
         impact = await self._resolve_live_event_impact(
             room_id,
             event_id=event.event_id,
             event_info=event_info,
+            event_source=event_source,
         )
         room_level_skip_message = "Skipping live thread cache bookkeeping for known non-threaded message mutation"
         if impact.state is MutationThreadImpactState.ROOM_LEVEL:
@@ -897,7 +902,6 @@ class ThreadLiveWritePolicy:
 
         thread_id = impact.thread_id
         assert thread_id is not None
-        event_source = normalize_nio_event_for_cache(event)
 
         async def append_and_invalidate() -> bool:
             return await _apply_thread_message_mutation(
@@ -1003,10 +1007,12 @@ class ThreadLiveWritePolicy:
     ) -> None:
         started = time.perf_counter()
         impact_started = time.perf_counter()
+        event_source = normalize_nio_event_for_cache(event)
         impact = await self._resolve_live_event_impact(
             room_id,
             event_id=event.event_id,
             event_info=event_info,
+            event_source=event_source,
         )
         impact_resolution_ms = elapsed_ms_since(impact_started, clock=time.perf_counter)
         room_level_skip_message = "Skipping live thread cache bookkeeping for known non-threaded message mutation"
