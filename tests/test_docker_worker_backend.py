@@ -2206,28 +2206,32 @@ router:
     assert list(projected_config["agents"]) == ["My Agent"]
 
 
-def test_docker_projection_filters_call_agents_to_projected_agents(
+def test_docker_projection_keeps_no_references_to_stripped_agents(
+    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """calls.agents entries for stripped agents must not survive projection.
+    """Projected worker configs must stay loadable after projection strips other agents.
 
-    Leftover references fail Config validation inside the worker
+    References to stripped agents fail Config validation inside the worker
     ("calls.agents references unknown agent(s): ..."), crash-looping every
     dedicated worker start.
     """
-    config_path = tmp_path / "config.yaml"
-    config_path.write_text(
-        """
+    backend, fake_client, _sync_calls = _backend(
+        monkeypatch,
+        tmp_path,
+        config_text="""
 agents:
   alpha:
     display_name: Alpha
     role: Test
     model: default
     worker_scope: shared
+    delegate_to: [beta]
   beta:
     display_name: Beta
     role: Test
     model: default
+    worker_scope: shared
 calls:
   enabled: true
   profiles:
@@ -2243,53 +2247,26 @@ models:
   default:
     provider: openai
     id: test-model
-router:
-  model: default
 """.lstrip(),
-        encoding="utf-8",
-    )
-    runtime_paths = resolve_runtime_paths(config_path=config_path, storage_path=tmp_path)
-    config = _DockerWorkerBackendConfig(
-        image="ghcr.io/mindroom-ai/mindroom:latest",
-        worker_port=8766,
-        storage_mount_path="/app/worker",
-        config_path="/app/config-host/config.yaml",
-        host_config_path=config_path,
-        idle_timeout_seconds=60.0,
-        ready_timeout_seconds=5.0,
-        name_prefix="mindroom-worker",
-        publish_host="127.0.0.1",
-        endpoint_host="127.0.0.1",
-        user="1000:1000",
-        extra_env={},
-        extra_labels={},
-    )
-    manager = DockerProjectionManager(
-        config=config,
-        projected_configs_root=tmp_path / _PROJECTED_CONFIGS_DIRNAME,
-        runtime_paths=runtime_paths,
-    )
-    worker_paths = local_worker_state_paths_for_root(tmp_path / "workers" / "call-agents")
-    worker_key = resolve_worker_key(
-        "shared",
-        ToolExecutionIdentity(
-            channel="matrix",
-            agent_name="alpha",
-            requester_id=None,
-            room_id="!room:example.org",
-            thread_id=None,
-            resolved_thread_id=None,
-            session_id=None,
-            tenant_id="default",
-        ),
-        agent_name="alpha",
     )
 
-    projection = manager.projected_config(worker_paths, worker_key=worker_key, materialize=False)
-    projected_config = yaml.safe_load(projection.projected_yaml)
+    backend.ensure_worker(WorkerSpec("v1:default:shared:alpha"), now=10.0)
+
+    volumes = fake_client.containers.run_calls[0]["volumes"]
+    assert isinstance(volumes, dict)
+    projection_root = _projection_root(volumes)
+    projected_config = yaml.safe_load((projection_root / "config.yaml").read_text(encoding="utf-8"))
 
     assert list(projected_config["agents"]) == ["alpha"]
-    assert projected_config["calls"]["agents"] == {"alpha": "realtime-profile"}
+    assert projected_config["agents"]["alpha"]["delegate_to"] == []
+    assert projected_config["calls"] == {}
+
+    projected_runtime_paths = resolve_runtime_paths(
+        config_path=projection_root / "config.yaml",
+        storage_path=tmp_path / "projected-storage",
+    )
+
+    assert set(load_config(projected_runtime_paths).agents) == {"alpha"}
 
 
 def test_docker_backend_recreates_container_when_launch_config_changes(
