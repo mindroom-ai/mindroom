@@ -117,34 +117,48 @@ export interface CompactionConfig {
   threshold_percent?: number | null;
   replay_window_tokens?: number | null;
   reserve_tokens?: number;
+  timeout_seconds?: number | null;
   model?: string | null;
   fallback_model?: string | null;
 }
 
 const DEFAULT_INHERITED_TOOLS = ["scheduler"] as const;
 
+// Every authored compaction field except the model names, which carry their own
+// clear semantics. Keep in sync with CompactionOverrideConfig in the backend:
+// authoring any of these marks the override as authored, which the backend
+// resolves to enabled compaction.
+const COMPACTION_NON_MODEL_FIELDS: readonly (keyof CompactionConfig)[] = [
+  "enabled",
+  "threshold_tokens",
+  "threshold_percent",
+  "replay_window_tokens",
+  "reserve_tokens",
+  "timeout_seconds",
+];
+
+function hasAuthoredNonModelCompactionField(
+  compaction: CompactionConfig,
+): boolean {
+  return COMPACTION_NON_MODEL_FIELDS.some(
+    (field) => compaction[field] !== undefined,
+  );
+}
+
 function isPureCompactionModelClear(compaction: CompactionConfig): boolean {
   const modelFields = [compaction.model, compaction.fallback_model];
   return (
     modelFields.some((value) => value === null) &&
     modelFields.every((value) => value === null || value === undefined) &&
-    compaction.enabled === undefined &&
-    compaction.threshold_tokens === undefined &&
-    compaction.threshold_percent === undefined &&
-    compaction.replay_window_tokens === undefined &&
-    compaction.reserve_tokens === undefined
+    !hasAuthoredNonModelCompactionField(compaction)
   );
 }
 
 function isEmptyCompactionOverride(compaction: CompactionConfig): boolean {
   return (
-    compaction.enabled === undefined &&
     compaction.model === undefined &&
     compaction.fallback_model === undefined &&
-    compaction.threshold_tokens === undefined &&
-    compaction.threshold_percent === undefined &&
-    compaction.replay_window_tokens === undefined &&
-    compaction.reserve_tokens === undefined
+    !hasAuthoredNonModelCompactionField(compaction)
   );
 }
 

@@ -17,7 +17,12 @@ import pytest
 from mindroom.config.matrix import CacheConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.logging_config import get_logger
-from mindroom.matrix.cache import postgres_event_cache_threads, sqlite_event_cache, sqlite_event_cache_threads
+from mindroom.matrix.cache import (
+    ThreadCacheReplaceOutcome,
+    postgres_event_cache_threads,
+    sqlite_event_cache,
+    sqlite_event_cache_threads,
+)
 from mindroom.matrix.cache.event_cache import EventCacheBackendUnavailableError
 from mindroom.matrix.cache.postgres_event_cache import (
     PostgresEventCache,
@@ -31,6 +36,7 @@ from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from mindroom.matrix.cache.thread_cache_state import (
     THREAD_HISTORY_TRUST_METADATA_KEY,
     THREAD_HISTORY_TRUST_VERSION,
+    ThreadCacheStateRow,
 )
 from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
 from mindroom.runtime_support import (
@@ -77,6 +83,162 @@ def _message_event(
         "origin_server_ts": origin_server_ts,
         "content": content,
     }
+
+
+@pytest.mark.asyncio
+async def test_sqlite_guarded_replace_fast_path_skips_snapshot_row_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unchanged SQLite cache state must not query existing snapshot rows."""
+    load_state = AsyncMock(
+        return_value=ThreadCacheStateRow(
+            validated_at=50.0,
+            invalidated_at=None,
+            invalidation_reason=None,
+            room_invalidated_at=None,
+            room_invalidation_reason=None,
+        ),
+    )
+    has_snapshot_rows = AsyncMock()
+    replace_thread = AsyncMock()
+    monkeypatch.setattr(sqlite_event_cache_threads, "_load_thread_cache_state_row", load_state)
+    monkeypatch.setattr(
+        sqlite_event_cache_threads,
+        "_thread_has_snapshot_rows_for_thread",
+        has_snapshot_rows,
+    )
+    monkeypatch.setattr(sqlite_event_cache_threads, "_replace_thread_locked", replace_thread)
+
+    result = await sqlite_event_cache_threads.replace_thread_locked_if_not_newer(
+        AsyncMock(),
+        principal_id="@agent:localhost",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        events=[],
+        fetch_started_at=100.0,
+        validated_at=100.0,
+    )
+
+    assert result is ThreadCacheReplaceOutcome.STORED
+    has_snapshot_rows.assert_not_awaited()
+    replace_thread.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_postgres_guarded_replace_fast_path_skips_snapshot_row_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unchanged PostgreSQL cache state must not query existing snapshot rows."""
+    load_state = AsyncMock(
+        return_value=ThreadCacheStateRow(
+            validated_at=50.0,
+            invalidated_at=None,
+            invalidation_reason=None,
+            room_invalidated_at=None,
+            room_invalidation_reason=None,
+        ),
+    )
+    has_snapshot_rows = AsyncMock()
+    replace_thread = AsyncMock()
+    monkeypatch.setattr(postgres_event_cache_threads, "_load_thread_cache_state_row", load_state)
+    monkeypatch.setattr(
+        postgres_event_cache_threads,
+        "_thread_has_snapshot_rows_for_thread",
+        has_snapshot_rows,
+    )
+    monkeypatch.setattr(postgres_event_cache_threads, "_replace_thread_locked", replace_thread)
+
+    result = await postgres_event_cache_threads.replace_thread_locked_if_not_newer(
+        AsyncMock(),
+        namespace="@agent:localhost",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        events=[],
+        fetch_started_at=100.0,
+        validated_at=100.0,
+    )
+
+    assert result is ThreadCacheReplaceOutcome.STORED
+    has_snapshot_rows.assert_not_awaited()
+    replace_thread.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_sqlite_guarded_replace_recognizes_newer_usable_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A later validation wins over an invalidation raised during the fetch."""
+    load_state = AsyncMock(
+        return_value=ThreadCacheStateRow(
+            validated_at=200.0,
+            invalidated_at=150.0,
+            invalidation_reason="concurrent update",
+            room_invalidated_at=None,
+            room_invalidation_reason=None,
+        ),
+    )
+    has_snapshot_rows = AsyncMock(return_value=True)
+    replace_thread = AsyncMock()
+    monkeypatch.setattr(sqlite_event_cache_threads, "_load_thread_cache_state_row", load_state)
+    monkeypatch.setattr(
+        sqlite_event_cache_threads,
+        "_thread_has_snapshot_rows_for_thread",
+        has_snapshot_rows,
+    )
+    monkeypatch.setattr(sqlite_event_cache_threads, "_replace_thread_locked", replace_thread)
+
+    result = await sqlite_event_cache_threads.replace_thread_locked_if_not_newer(
+        AsyncMock(),
+        principal_id="@agent:localhost",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        events=[],
+        fetch_started_at=100.0,
+        validated_at=100.0,
+    )
+
+    assert result is ThreadCacheReplaceOutcome.EXISTING_USABLE
+    has_snapshot_rows.assert_awaited_once()
+    replace_thread.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_postgres_guarded_replace_recognizes_newer_usable_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A later validation wins over an invalidation raised during the fetch."""
+    load_state = AsyncMock(
+        return_value=ThreadCacheStateRow(
+            validated_at=200.0,
+            invalidated_at=150.0,
+            invalidation_reason="concurrent update",
+            room_invalidated_at=None,
+            room_invalidation_reason=None,
+        ),
+    )
+    has_snapshot_rows = AsyncMock(return_value=True)
+    replace_thread = AsyncMock()
+    monkeypatch.setattr(postgres_event_cache_threads, "_load_thread_cache_state_row", load_state)
+    monkeypatch.setattr(
+        postgres_event_cache_threads,
+        "_thread_has_snapshot_rows_for_thread",
+        has_snapshot_rows,
+    )
+    monkeypatch.setattr(postgres_event_cache_threads, "_replace_thread_locked", replace_thread)
+
+    result = await postgres_event_cache_threads.replace_thread_locked_if_not_newer(
+        AsyncMock(),
+        namespace="@agent:localhost",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        events=[],
+        fetch_started_at=100.0,
+        validated_at=100.0,
+    )
+
+    assert result is ThreadCacheReplaceOutcome.EXISTING_USABLE
+    has_snapshot_rows.assert_awaited_once()
+    replace_thread.assert_not_awaited()
 
 
 def _edit_event(
@@ -1762,7 +1924,7 @@ async def test_postgres_event_cache_flushes_pending_invalidations_before_guarded
             fetch_started_at=150.0,
         )
 
-        assert replaced is False
+        assert replaced is ThreadCacheReplaceOutcome.INVALIDATED
         state = await cache.get_thread_cache_state(room_id, thread_id)
         assert state is not None
         assert state.invalidated_at == 200.0
@@ -1817,7 +1979,7 @@ async def test_postgres_event_cache_flushes_newer_thread_marker_with_pending_roo
             fetch_started_at=150.0,
         )
 
-        assert replaced is False
+        assert replaced is ThreadCacheReplaceOutcome.INVALIDATED
         state = await cache.get_thread_cache_state(room_id, thread_id)
         assert state is not None
         assert state.room_invalidated_at == 100.0
@@ -1892,7 +2054,7 @@ async def test_postgres_event_cache_preserves_pending_marker_recorded_during_flu
             fetch_started_at=150.0,
         )
 
-        assert replaced is False
+        assert replaced is ThreadCacheReplaceOutcome.INVALIDATED
         assert injected_newer_pending_marker is True
         diagnostics = cache.runtime_diagnostics()
         assert diagnostics["cache_postgres_pending_thread_invalidations"] == 1

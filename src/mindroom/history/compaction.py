@@ -21,7 +21,6 @@ from pydantic import BaseModel
 from mindroom.claude_prompt_cache import as_anthropic_claude
 from mindroom.constants import (
     AI_RUN_METADATA_KEY,
-    MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS,
     MINDROOM_COMPACTION_METADATA_KEY,
     MINDROOM_MATRIX_HISTORY_METADATA_KEY,
     prompt_roles_for_history_storage,
@@ -37,7 +36,11 @@ from mindroom.history.storage import (
     update_scope_state_on_latest,
     write_scope_state,
 )
-from mindroom.history.summary_call import DEFAULT_SUMMARY_RETRY_POLICY, generate_compaction_summary
+from mindroom.history.summary_call import (
+    DEFAULT_SUMMARY_RETRY_POLICY,
+    effective_summary_timeout_seconds,
+    generate_compaction_summary,
+)
 from mindroom.history.types import (
     CompactionLifecycleProgress,
     CompactionOutcome,
@@ -200,6 +203,7 @@ async def compact_scope_history(
     replay_window_tokens: int | None,
     threshold_tokens: int | None,
     summary_prompt: str,
+    summary_timeout_seconds: float,
     fallback_summary_model: Model | None = None,
     fallback_summary_model_name: str | None = None,
     fallback_summary_input_budget: int | None = None,
@@ -278,6 +282,7 @@ async def compact_scope_history(
         runs_before=before_run_count,
         threshold_tokens=threshold_tokens,
         summary_prompt=summary_prompt,
+        summary_timeout_seconds=summary_timeout_seconds,
         lifecycle_notice_event_id=lifecycle_notice_event_id,
         progress_callback=progress_callback,
         collect_compaction_hook_messages=collect_compaction_hook_messages,
@@ -374,6 +379,7 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901
     progress_callback: Callable[[CompactionLifecycleProgress], Awaitable[None]] | None,
     collect_compaction_hook_messages: bool,
     summary_prompt: str,
+    summary_timeout_seconds: float,
     fallback_summary_model: Model | None = None,
     fallback_summary_model_name: str | None = None,
     fallback_summary_input_budget: int | None = None,
@@ -430,6 +436,7 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901
             summary_prompt=summary_prompt,
             token_estimator=token_estimator,
             estimate_kind=estimate_kind,
+            timeout_seconds=summary_timeout_seconds,
             fallback_model=fallback_summary_model,
             fallback_model_name=fallback_summary_model_name,
             fallback_input_budget=fallback_summary_input_budget,
@@ -583,6 +590,7 @@ async def _generate_compaction_summary_with_retry(  # noqa: PLR0915
     summary_prompt: str,
     token_estimator: Callable[[str], int],
     estimate_kind: CompactionEstimateKind,
+    timeout_seconds: float,
     fallback_model: Model | None = None,
     fallback_model_name: str | None = None,
     fallback_input_budget: int | None = None,
@@ -610,6 +618,7 @@ async def _generate_compaction_summary_with_retry(  # noqa: PLR0915
     attempt = 1
     while True:
         summary_input_estimate = token_estimator(summary_input)
+        effective_timeout_seconds = effective_summary_timeout_seconds(model, timeout_seconds=timeout_seconds)
         started = asyncio.get_running_loop().time()
         logger.info(
             "Compaction summary chunk request",
@@ -620,13 +629,15 @@ async def _generate_compaction_summary_with_retry(  # noqa: PLR0915
             candidate_runs=len(compactable_runs),
             included_runs=len(included_runs),
             **_sizing_log_fields(kind=estimate_kind, estimate=summary_input_estimate, budget_tokens=budget),
-            timeout_seconds=MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS,
+            timeout_seconds=timeout_seconds,
+            effective_timeout_seconds=effective_timeout_seconds,
         )
         try:
             summary = await generate_compaction_summary(
                 model=model,
                 summary_input=summary_input,
                 summary_prompt=summary_prompt,
+                timeout_seconds=timeout_seconds,
             )
         except Exception as exc:
             duration_ms = int((asyncio.get_running_loop().time() - started) * 1000)
@@ -639,7 +650,8 @@ async def _generate_compaction_summary_with_retry(  # noqa: PLR0915
                 candidate_runs=len(compactable_runs),
                 included_runs=len(included_runs),
                 **_sizing_log_fields(kind=estimate_kind, estimate=summary_input_estimate, budget_tokens=budget),
-                timeout_seconds=MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS,
+                timeout_seconds=timeout_seconds,
+                effective_timeout_seconds=effective_timeout_seconds,
                 duration_ms=duration_ms,
                 error=str(exc) or type(exc).__name__,
             )
@@ -722,7 +734,8 @@ async def _generate_compaction_summary_with_retry(  # noqa: PLR0915
             candidate_runs=len(compactable_runs),
             included_runs=len(included_runs),
             **_sizing_log_fields(kind=estimate_kind, estimate=summary_input_estimate, budget_tokens=budget),
-            timeout_seconds=MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS,
+            timeout_seconds=timeout_seconds,
+            effective_timeout_seconds=effective_timeout_seconds,
             duration_ms=duration_ms,
         )
         return _GeneratedSummaryChunk(

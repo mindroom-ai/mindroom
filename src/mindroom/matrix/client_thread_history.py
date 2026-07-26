@@ -42,8 +42,8 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Collection, Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping, Sequence
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast
 
 import nio
@@ -52,6 +52,7 @@ from nio.responses import RoomThreadsResponse
 
 from mindroom.logging_config import get_logger
 from mindroom.matrix.cache import (
+    ThreadCacheReplaceOutcome,
     ThreadCacheState,
     ThreadHistoryResult,
     ThreadRevision,
@@ -124,7 +125,35 @@ _MAX_THREAD_ENUMERATION_PAGES = 100
 _OPAQUE_ENCRYPTED_THREAD_HISTORY_REASON = "thread_history_opaque_encrypted_event"
 _OPAQUE_ENCRYPTED_EVENT_REJECTION = "opaque_encrypted_event"
 _MISSING_THREAD_ROOT_REJECTION = "missing_thread_root"
+_MAX_THREAD_REPAIR_ATTEMPTS = 2
 type _ThreadHistoryDiagnosticValue = str | int | float | bool | None
+type _ThreadHistoryRefill = Callable[
+    [Mapping[str, str | int | float | bool] | None],
+    Awaitable[ThreadHistoryResult],
+]
+
+
+@dataclass(slots=True)
+class RetainedThreadEventSourceProvider:
+    """Late-bound retained deltas captured after the homeserver scan completes."""
+
+    get_event_sources: Callable[[], Collection[dict[str, Any]]]
+    _provided_event_ids: set[str] = field(default_factory=set, init=False)
+
+    def current_event_sources(self) -> tuple[dict[str, Any], ...]:
+        """Return current retained deltas and remember which IDs entered this snapshot."""
+        event_sources = tuple(dict(event_source) for event_source in self.get_event_sources())
+        self._provided_event_ids.update(
+            event_id
+            for event_source in event_sources
+            if isinstance((event_id := event_source.get("event_id")), str) and event_id
+        )
+        return event_sources
+
+    @property
+    def provided_event_ids(self) -> frozenset[str]:
+        """Return IDs supplied to snapshot reconstruction."""
+        return frozenset(self._provided_event_ids)
 
 
 class OpaqueEncryptedThreadHistoryError(RuntimeError):
@@ -182,7 +211,7 @@ def _thread_history_result(
     return thread_history_result(history, is_full_history=is_full_history, diagnostics=diagnostics)
 
 
-def _log_thread_history_refresh(
+def log_thread_history_refresh(
     *,
     room_id: str,
     thread_id: str,
@@ -192,25 +221,66 @@ def _log_thread_history_refresh(
     coordinator_queue_wait_ms: float,
 ) -> None:
     """Emit one structured INFO line for a completed thread read."""
-    logger.info(
-        "matrix_cache_thread_history_refreshed",
-        room_id=room_id,
-        thread_id=thread_id,
-        caller_label=caller_label,
-        mode=mode,
-        cache_read_ms=diagnostics.get("cache_read_ms", 0.0),
-        homeserver_fetch_ms=diagnostics.get("homeserver_fetch_ms", 0.0),
-        homeserver_scan_pages=diagnostics.get("homeserver_scan_pages", 0),
-        homeserver_scanned_event_count=diagnostics.get("homeserver_scanned_event_count", 0),
-        homeserver_thread_event_count=diagnostics.get("homeserver_thread_event_count", 0),
-        resolution_ms=diagnostics.get("resolution_ms", 0.0),
-        sidecar_hydration_ms=diagnostics.get("sidecar_hydration_ms", 0.0),
-        coordinator_queue_wait_ms=coordinator_queue_wait_ms,
-        cache_reject_reason=diagnostics.get(THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC),
-        thread_read_source=diagnostics.get(THREAD_HISTORY_SOURCE_DIAGNOSTIC),
-        thread_read_degraded=diagnostics.get(THREAD_HISTORY_DEGRADED_DIAGNOSTIC, False),
-        thread_read_error=diagnostics.get(THREAD_HISTORY_ERROR_DIAGNOSTIC),
-    )
+    log_fields: dict[str, _ThreadHistoryDiagnosticValue] = {
+        "room_id": room_id,
+        "thread_id": thread_id,
+        "caller_label": caller_label,
+        "mode": mode,
+        "cache_read_ms": diagnostics.get("cache_read_ms", 0.0),
+        "homeserver_fetch_ms": diagnostics.get("homeserver_fetch_ms", 0.0),
+        "homeserver_scan_pages": diagnostics.get("homeserver_scan_pages", 0),
+        "homeserver_scanned_event_count": diagnostics.get("homeserver_scanned_event_count", 0),
+        "homeserver_thread_event_count": diagnostics.get("homeserver_thread_event_count", 0),
+        "resolution_ms": diagnostics.get("resolution_ms", 0.0),
+        "sidecar_hydration_ms": diagnostics.get("sidecar_hydration_ms", 0.0),
+        "coordinator_queue_wait_ms": coordinator_queue_wait_ms,
+        "cache_reject_reason": diagnostics.get(THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC),
+        "thread_read_source": diagnostics.get(THREAD_HISTORY_SOURCE_DIAGNOSTIC),
+        "thread_read_degraded": diagnostics.get(THREAD_HISTORY_DEGRADED_DIAGNOSTIC, False),
+        "thread_read_error": diagnostics.get(THREAD_HISTORY_ERROR_DIAGNOSTIC),
+    }
+    for field_name in (
+        "cache_store_outcome",
+        "cache_repair_attempts",
+        "cache_repair_usable",
+        "cache_repair_backoff_seconds",
+    ):
+        if field_name in diagnostics:
+            log_fields[field_name] = diagnostics[field_name]
+    logger.info("matrix_cache_thread_history_refreshed", **log_fields)
+
+
+def thread_history_refresh_mode(result: ThreadHistoryResult, *, cache_hit: bool) -> str:
+    """Classify one completed public read from its authoritative diagnostics."""
+    if cache_hit:
+        return "cache_hit"
+    if (
+        result.diagnostics.get(THREAD_HISTORY_SOURCE_DIAGNOSTIC) == THREAD_HISTORY_SOURCE_CACHE
+        and result.diagnostics.get("cache_store_outcome") == ThreadCacheReplaceOutcome.EXISTING_USABLE.value
+    ):
+        return "cache_hit_after_repair_conflict"
+    return "full_scan"
+
+
+def _report_direct_source_refresh(
+    result: ThreadHistoryResult,
+    *,
+    room_id: str,
+    thread_id: str,
+    caller_label: str | None,
+    coordinator_queue_wait_ms: float,
+) -> ThreadHistoryResult:
+    """Report a direct source caller; shared repairs report at their outer caller boundary."""
+    if caller_label is not None:
+        log_thread_history_refresh(
+            room_id=room_id,
+            thread_id=thread_id,
+            caller_label=caller_label,
+            mode=thread_history_refresh_mode(result, cache_hit=False),
+            diagnostics=result.diagnostics,
+            coordinator_queue_wait_ms=coordinator_queue_wait_ms,
+        )
+    return result
 
 
 class RoomThreadsPageError(ValueError):
@@ -1018,107 +1088,232 @@ async def _fetch_thread_history_with_events(
     )
 
 
-async def refresh_thread_history_from_source(
+def _merge_retained_thread_event_sources(
+    event_sources: Sequence[dict[str, Any]],
+    retained_event_sources: Collection[dict[str, Any]],
+    *,
+    thread_id: str,
+) -> tuple[list[dict[str, Any]], bool]:
+    """Merge certified concurrent deltas exactly once in canonical event order."""
+    merged_by_event_id = {
+        event_id: dict(event_source)
+        for event_source in event_sources
+        if (event_id := _event_id_from_source(event_source)) is not None
+    }
+    changed = False
+    for event_source in retained_event_sources:
+        event_id = _event_id_from_source(event_source)
+        if event_id is None or event_id in merged_by_event_id:
+            continue
+        merged_by_event_id[event_id] = dict(event_source)
+        changed = True
+    return (
+        sort_thread_event_sources_root_first(
+            list(merged_by_event_id.values()),
+            thread_id=thread_id,
+        ),
+        changed,
+    )
+
+
+async def _resolve_merged_thread_fetch_result(
+    fetch_result: _ThreadHistoryFetchResult,
+    *,
     client: nio.AsyncClient,
     room_id: str,
     thread_id: str,
     event_cache: ConversationEventCache,
-    *,
-    hydrate_sidecars: bool = True,
-    allow_stale_fallback: bool = True,
-    cache_write_guard_started_at: float | None = None,
-    cache_reject_diagnostics: Mapping[str, str | int | float | bool] | None = None,
-    trusted_sender_ids: Collection[str] = (),
-    caller_label: str = "unknown",
-    coordinator_queue_wait_ms: float = 0.0,
-) -> ThreadHistoryResult:
-    """Fetch fresh thread history from Matrix and repopulate the advisory cache."""
-    fetch_started_at = time.time() if cache_write_guard_started_at is None else cache_write_guard_started_at
-    fetch_membership_epoch = await _capture_membership_epoch(event_cache, room_id)
-    try:
-        fetch_result = await _fetch_thread_history_with_events(
-            client,
-            room_id,
-            thread_id,
-            hydrate_sidecars=hydrate_sidecars,
-            event_cache=event_cache,
-            expected_membership_epoch=fetch_membership_epoch,
-            trusted_sender_ids=trusted_sender_ids,
-        )
-    except _UnresolvedOpaqueRoomHistoryError:
-        await _mark_room_stale_for_opaque_history(event_cache, room_id=room_id)
-        raise
-    except Exception as exc:
-        if allow_stale_fallback:
-            stale_history = await _load_stale_cached_thread_history(
-                client,
-                room_id=room_id,
-                thread_id=thread_id,
-                event_cache=event_cache,
-                hydrate_sidecars=hydrate_sidecars,
-                fetch_error=exc,
-                cache_reject_diagnostics=cache_reject_diagnostics,
-                trusted_sender_ids=trusted_sender_ids,
-            )
-            if stale_history is not None:
-                _log_thread_history_refresh(
-                    room_id=room_id,
-                    thread_id=thread_id,
-                    caller_label=caller_label,
-                    mode="full_scan",
-                    diagnostics=stale_history.diagnostics,
-                    coordinator_queue_wait_ms=coordinator_queue_wait_ms,
-                )
-                return stale_history
-        raise
-    fetch_rejection_reason = _thread_history_cache_rejection_reason(
+    expected_membership_epoch: int,
+    hydrate_sidecars: bool,
+    retained_event_sources: RetainedThreadEventSourceProvider | None,
+    trusted_sender_ids: Collection[str],
+) -> _ThreadHistoryFetchResult:
+    """Replay retained deltas onto a fetched snapshot before installation and delivery."""
+    merged_event_sources, changed = _merge_retained_thread_event_sources(
         fetch_result.event_sources,
+        () if retained_event_sources is None else retained_event_sources.current_event_sources(),
         thread_id=thread_id,
     )
-    if fetch_rejection_reason == _OPAQUE_ENCRYPTED_EVENT_REJECTION:
-        await _mark_thread_stale_for_opaque_history(event_cache, room_id=room_id, thread_id=thread_id)
-        msg = f"thread history for {thread_id} contains still-undecryptable encrypted events"
-        raise OpaqueEncryptedThreadHistoryError(msg)
-    if fetch_rejection_reason is None:
-        cache_store_written = await _store_thread_history_cache(
-            event_cache,
+    if not changed:
+        return fetch_result
+    resolution_started = time.perf_counter()
+    resolution = await _resolve_thread_history_from_event_sources_timed(
+        client,
+        room_id=room_id,
+        thread_id=thread_id,
+        event_sources=merged_event_sources,
+        hydrate_sidecars=hydrate_sidecars,
+        event_cache=event_cache,
+        expected_membership_epoch=expected_membership_epoch,
+        trusted_sender_ids=trusted_sender_ids,
+        register_sidecar_owners=True,
+    )
+    return _ThreadHistoryFetchResult(
+        history=resolution.messages,
+        event_sources=merged_event_sources,
+        fetch_ms=fetch_result.fetch_ms,
+        room_scan_pages=fetch_result.room_scan_pages,
+        scanned_event_count=fetch_result.scanned_event_count,
+        resolution_ms=elapsed_ms_since(resolution_started, clock=time.perf_counter),
+        sidecar_hydration_ms=resolution.sidecar_hydration_ms,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _ThreadCacheRefillAttempt:
+    """One completed reconstruct-and-store attempt and any already-usable winner."""
+
+    replace_outcome: ThreadCacheReplaceOutcome
+    cache_repair_usable: bool
+    existing_history: ThreadHistoryResult | None = None
+
+
+async def _fetch_thread_repair_snapshot(
+    client: nio.AsyncClient,
+    *,
+    room_id: str,
+    thread_id: str,
+    event_cache: ConversationEventCache,
+    membership_epoch: int,
+    hydrate_sidecars: bool,
+    retained_event_sources: RetainedThreadEventSourceProvider | None,
+    trusted_sender_ids: Collection[str],
+) -> _ThreadHistoryFetchResult:
+    """Fetch and resolve one snapshot with every retained live delta."""
+    fetch_result = await _fetch_thread_history_with_events(
+        client,
+        room_id,
+        thread_id,
+        hydrate_sidecars=hydrate_sidecars,
+        event_cache=event_cache,
+        expected_membership_epoch=membership_epoch,
+        trusted_sender_ids=trusted_sender_ids,
+    )
+    return await _resolve_merged_thread_fetch_result(
+        fetch_result,
+        client=client,
+        room_id=room_id,
+        thread_id=thread_id,
+        event_cache=event_cache,
+        expected_membership_epoch=membership_epoch,
+        hydrate_sidecars=hydrate_sidecars,
+        retained_event_sources=retained_event_sources,
+        trusted_sender_ids=trusted_sender_ids,
+    )
+
+
+async def _reject_opaque_thread_snapshot(
+    event_cache: ConversationEventCache,
+    *,
+    room_id: str,
+    thread_id: str,
+    fetch_result: _ThreadHistoryFetchResult,
+) -> None:
+    """Reject an opaque-poisoned reconstruction before its guarded store."""
+    if not any(is_opaque_encrypted_event_source(source) for source in fetch_result.event_sources):
+        return
+    await _mark_thread_stale_for_opaque_history(event_cache, room_id=room_id, thread_id=thread_id)
+    msg = f"thread history for {thread_id} contains still-undecryptable encrypted events"
+    raise OpaqueEncryptedThreadHistoryError(msg)
+
+
+async def _store_repaired_thread_snapshot(
+    client: nio.AsyncClient,
+    *,
+    room_id: str,
+    thread_id: str,
+    event_cache: ConversationEventCache,
+    fetch_result: _ThreadHistoryFetchResult,
+    membership_epoch: int,
+    fetch_started_at: float,
+    hydrate_sidecars: bool,
+    trusted_sender_ids: Collection[str],
+    repair_attempt: int,
+) -> _ThreadCacheRefillAttempt:
+    """Guard one snapshot replacement and resolve any existing usable winner."""
+    await _reject_opaque_thread_snapshot(
+        event_cache,
+        room_id=room_id,
+        thread_id=thread_id,
+        fetch_result=fetch_result,
+    )
+    outcome = await _store_thread_history_cache(
+        event_cache,
+        room_id=room_id,
+        thread_id=thread_id,
+        event_sources=fetch_result.event_sources,
+        expected_membership_epoch=membership_epoch,
+        fetch_started_at=fetch_started_at,
+    )
+    logger.info(
+        "Thread history cache store completed",
+        room_id=room_id,
+        thread_id=thread_id,
+        cache_store_outcome=outcome.value,
+        cache_store_written=outcome.written,
+        cache_repair_attempt=repair_attempt,
+        event_count=len(fetch_result.event_sources),
+        homeserver_scan_pages=fetch_result.room_scan_pages,
+        homeserver_scanned_event_count=fetch_result.scanned_event_count,
+        homeserver_thread_event_count=len(fetch_result.event_sources),
+    )
+    if outcome is not ThreadCacheReplaceOutcome.EXISTING_USABLE:
+        return _ThreadCacheRefillAttempt(
+            replace_outcome=outcome,
+            cache_repair_usable=outcome.usable,
+        )
+    try:
+        existing_history, _existing_reject = await _load_cached_thread_history_if_usable(
+            client,
             room_id=room_id,
             thread_id=thread_id,
-            event_sources=fetch_result.event_sources,
-            expected_membership_epoch=fetch_membership_epoch,
-            fetch_started_at=fetch_started_at,
+            event_cache=event_cache,
+            hydrate_sidecars=hydrate_sidecars,
+            trusted_sender_ids=trusted_sender_ids,
         )
-        cache_store_outcome = (
-            "stored"
-            if cache_store_written
-            else "writes_unavailable"
-            if not event_cache.durable_writes_available
-            else "not_replaced"
-        )
-        logger.info(
-            "Thread history cache store completed",
+    except Exception as exc:
+        logger.warning(
+            "Failed to load usable concurrent thread snapshot; continuing with fetched history",
             room_id=room_id,
             thread_id=thread_id,
-            cache_store_outcome=cache_store_outcome,
-            cache_store_written=cache_store_written,
-            event_count=len(fetch_result.event_sources),
-            homeserver_scan_pages=fetch_result.room_scan_pages,
-            homeserver_scanned_event_count=fetch_result.scanned_event_count,
-            homeserver_thread_event_count=len(fetch_result.event_sources),
+            cache_store_outcome=outcome.value,
+            cache_repair_attempt=repair_attempt,
+            error_type=type(exc).__name__,
+            error=str(exc),
         )
-    else:
-        logger.info(
-            "Thread history cache store skipped",
+        return _ThreadCacheRefillAttempt(
+            replace_outcome=outcome,
+            cache_repair_usable=False,
+        )
+    if existing_history is None:
+        logger.warning(
+            "Concurrent usable thread snapshot was unavailable; continuing with fetched history",
             room_id=room_id,
             thread_id=thread_id,
-            cache_store_skipped_reason=fetch_rejection_reason,
-            has_thread_root=False,
-            event_count=len(fetch_result.event_sources),
-            history_event_count=len(fetch_result.history),
-            homeserver_scan_pages=fetch_result.room_scan_pages,
-            homeserver_scanned_event_count=fetch_result.scanned_event_count,
-            homeserver_thread_event_count=len(fetch_result.event_sources),
+            cache_store_outcome=outcome.value,
+            cache_repair_attempt=repair_attempt,
         )
+        return _ThreadCacheRefillAttempt(
+            replace_outcome=outcome,
+            cache_repair_usable=False,
+        )
+    return _ThreadCacheRefillAttempt(
+        replace_outcome=outcome,
+        cache_repair_usable=True,
+        existing_history=existing_history,
+    )
+
+
+def _homeserver_thread_history_result(
+    fetch_result: _ThreadHistoryFetchResult,
+    *,
+    hydrate_sidecars: bool,
+    cache_store_outcome: str,
+    repair_attempts: int,
+    cache_repair_usable: bool,
+    cache_reject_diagnostics: Mapping[str, str | int | float | bool] | None,
+) -> ThreadHistoryResult:
+    """Build the fail-open homeserver result after a repair attempt."""
     diagnostics: dict[str, str | int | float | bool] = {
         "cache_read_ms": 0.0,
         "homeserver_fetch_ms": fetch_result.fetch_ms,
@@ -1127,24 +1322,144 @@ async def refresh_thread_history_from_source(
         "homeserver_thread_event_count": len(fetch_result.event_sources),
         "resolution_ms": fetch_result.resolution_ms,
         "sidecar_hydration_ms": fetch_result.sidecar_hydration_ms,
+        "cache_store_outcome": cache_store_outcome,
+        "cache_repair_attempts": repair_attempts,
+        "cache_repair_usable": cache_repair_usable,
         THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_HOMESERVER,
     }
     if cache_reject_diagnostics is not None:
         diagnostics.update(cache_reject_diagnostics)
-    result = _thread_history_result(
+    return _thread_history_result(
         fetch_result.history,
         is_full_history=hydrate_sidecars,
         diagnostics=diagnostics,
     )
-    _log_thread_history_refresh(
+
+
+async def refresh_thread_history_from_source(
+    client: nio.AsyncClient,
+    room_id: str,
+    thread_id: str,
+    event_cache: ConversationEventCache,
+    *,
+    hydrate_sidecars: bool = True,
+    allow_stale_fallback: bool = True,
+    cache_reject_diagnostics: Mapping[str, str | int | float | bool] | None = None,
+    trusted_sender_ids: Collection[str] = (),
+    retained_event_sources: RetainedThreadEventSourceProvider | None = None,
+    caller_label: str | None = None,
+    coordinator_queue_wait_ms: float = 0.0,
+) -> ThreadHistoryResult:
+    """Fetch fresh thread history from Matrix and repopulate the advisory cache."""
+    fetch_result: _ThreadHistoryFetchResult | None = None
+    attempt: _ThreadCacheRefillAttempt | None = None
+    repair_attempts = 0
+    for repair_attempts in range(1, _MAX_THREAD_REPAIR_ATTEMPTS + 1):
+        fetch_started_at = time.time()
+        fetch_membership_epoch = await _capture_membership_epoch(event_cache, room_id)
+        try:
+            fetch_result = await _fetch_thread_repair_snapshot(
+                client,
+                room_id=room_id,
+                thread_id=thread_id,
+                event_cache=event_cache,
+                membership_epoch=fetch_membership_epoch,
+                hydrate_sidecars=hydrate_sidecars,
+                retained_event_sources=retained_event_sources,
+                trusted_sender_ids=trusted_sender_ids,
+            )
+        except _UnresolvedOpaqueRoomHistoryError:
+            await _mark_room_stale_for_opaque_history(event_cache, room_id=room_id)
+            raise
+        except Exception as exc:
+            stale_history = (
+                await _load_stale_cached_thread_history(
+                    client,
+                    room_id=room_id,
+                    thread_id=thread_id,
+                    event_cache=event_cache,
+                    hydrate_sidecars=hydrate_sidecars,
+                    fetch_error=exc,
+                    cache_reject_diagnostics=cache_reject_diagnostics,
+                    trusted_sender_ids=trusted_sender_ids,
+                )
+                if allow_stale_fallback
+                else None
+            )
+            if stale_history is not None:
+                return _report_direct_source_refresh(
+                    stale_history,
+                    room_id=room_id,
+                    thread_id=thread_id,
+                    caller_label=caller_label,
+                    coordinator_queue_wait_ms=coordinator_queue_wait_ms,
+                )
+            raise
+        attempt = await _store_repaired_thread_snapshot(
+            client,
+            room_id=room_id,
+            thread_id=thread_id,
+            event_cache=event_cache,
+            fetch_result=fetch_result,
+            membership_epoch=fetch_membership_epoch,
+            fetch_started_at=fetch_started_at,
+            hydrate_sidecars=hydrate_sidecars,
+            trusted_sender_ids=trusted_sender_ids,
+            repair_attempt=repair_attempts,
+        )
+        if attempt.existing_history is not None:
+            return _report_direct_source_refresh(
+                _thread_history_result(
+                    list(attempt.existing_history),
+                    is_full_history=hydrate_sidecars,
+                    diagnostics={
+                        **attempt.existing_history.diagnostics,
+                        "cache_store_outcome": attempt.replace_outcome.value,
+                        "cache_repair_attempts": repair_attempts,
+                        "cache_repair_usable": True,
+                    },
+                ),
+                room_id=room_id,
+                thread_id=thread_id,
+                caller_label=caller_label,
+                coordinator_queue_wait_ms=coordinator_queue_wait_ms,
+            )
+        if not attempt.replace_outcome.retryable or repair_attempts == _MAX_THREAD_REPAIR_ATTEMPTS:
+            break
+        logger.warning(
+            "Retrying thread cache repair after guarded replacement conflict",
+            room_id=room_id,
+            thread_id=thread_id,
+            cache_store_outcome=attempt.replace_outcome.value,
+            cache_repair_attempt=repair_attempts,
+        )
+
+    assert fetch_result is not None
+    assert attempt is not None
+    if not attempt.cache_repair_usable:
+        # Covers durable-write faults too, not just conflicts: a cache that cannot accept writes is
+        # the condition operators most need to see, and it is otherwise only logged at INFO.
+        logger.warning(
+            "Thread cache repair did not install a usable snapshot",
+            room_id=room_id,
+            thread_id=thread_id,
+            cache_store_outcome=attempt.replace_outcome.value,
+            cache_repair_attempts=repair_attempts,
+        )
+    return _report_direct_source_refresh(
+        _homeserver_thread_history_result(
+            fetch_result,
+            hydrate_sidecars=hydrate_sidecars,
+            cache_store_outcome=attempt.replace_outcome.value,
+            repair_attempts=repair_attempts,
+            cache_repair_usable=attempt.cache_repair_usable,
+            cache_reject_diagnostics=cache_reject_diagnostics,
+        ),
         room_id=room_id,
         thread_id=thread_id,
         caller_label=caller_label,
-        mode="full_scan",
-        diagnostics=result.diagnostics,
         coordinator_queue_wait_ms=coordinator_queue_wait_ms,
     )
-    return result
 
 
 async def _store_thread_history_cache(
@@ -1155,7 +1470,7 @@ async def _store_thread_history_cache(
     event_sources: Sequence[dict[str, Any]],
     expected_membership_epoch: int,
     fetch_started_at: float,
-) -> bool:
+) -> ThreadCacheReplaceOutcome:
     """Best-effort replacement of one cached thread snapshot."""
     try:
         return await event_cache.replace_thread_if_not_newer(
@@ -1170,12 +1485,12 @@ async def _store_thread_history_cache(
             "Event cache write failed; continuing without cache",
             room_id=room_id,
             thread_id=thread_id,
-            cache_store_outcome="failed",
+            cache_store_outcome=ThreadCacheReplaceOutcome.HARD_FAILURE.value,
             event_count=len(event_sources),
             error_type=type(exc).__name__,
             error=str(exc),
         )
-        return False
+        return ThreadCacheReplaceOutcome.HARD_FAILURE
 
 
 def _thread_history_cache_rejection_reason(
@@ -1275,59 +1590,93 @@ async def _resolve_thread_history_message(
     return message
 
 
-async def fetch_thread_history(
+async def _fetch_thread_history_with_cache_policy(
     client: nio.AsyncClient,
     room_id: str,
     thread_id: str,
     event_cache: ConversationEventCache,
     *,
-    cache_write_guard_started_at: float | None = None,
+    hydrate_sidecars: bool,
+    allow_stale_fallback: bool,
+    cache_read_failure_message: str,
     trusted_sender_ids: Collection[str] = (),
     caller_label: str = "unknown",
     coordinator_queue_wait_ms: float = 0.0,
     resolution_reuse: ThreadResolutionReuseCache | None = None,
+    refill: _ThreadHistoryRefill | None = None,
 ) -> ThreadHistoryResult:
-    """Fetch all messages in a thread."""
+    """Serve one trusted cache hit or delegate only the required refill."""
     cache_reject_diagnostics: dict[str, str | int | float | bool] | None = None
+    cached_history: ThreadHistoryResult | None = None
     try:
         cached_history, cache_reject_diagnostics = await _load_cached_thread_history_if_usable(
             client,
             room_id=room_id,
             thread_id=thread_id,
             event_cache=event_cache,
-            hydrate_sidecars=True,
+            hydrate_sidecars=hydrate_sidecars,
             trusted_sender_ids=trusted_sender_ids,
             resolution_reuse=resolution_reuse,
         )
     except Exception as exc:
         logger.warning(
-            "Durable thread cache read failed; refetching from homeserver",
+            cache_read_failure_message,
             room_id=room_id,
             thread_id=thread_id,
             error=str(exc),
         )
+    if cached_history is not None:
+        result = cached_history
+    elif refill is not None:
+        result = await refill(cache_reject_diagnostics)
     else:
-        if cached_history is not None:
-            _log_thread_history_refresh(
-                room_id=room_id,
-                thread_id=thread_id,
-                caller_label=caller_label,
-                mode="cache_hit",
-                diagnostics=cached_history.diagnostics,
-                coordinator_queue_wait_ms=coordinator_queue_wait_ms,
-            )
-            return cached_history
-    return await refresh_thread_history_from_source(
+        result = await refresh_thread_history_from_source(
+            client,
+            room_id,
+            thread_id,
+            event_cache,
+            hydrate_sidecars=hydrate_sidecars,
+            allow_stale_fallback=allow_stale_fallback,
+            cache_reject_diagnostics=cache_reject_diagnostics,
+            trusted_sender_ids=trusted_sender_ids,
+        )
+    log_thread_history_refresh(
+        room_id=room_id,
+        thread_id=thread_id,
+        caller_label=caller_label,
+        mode=thread_history_refresh_mode(result, cache_hit=cached_history is not None),
+        diagnostics=result.diagnostics,
+        coordinator_queue_wait_ms=coordinator_queue_wait_ms,
+    )
+    return result
+
+
+async def fetch_thread_history(
+    client: nio.AsyncClient,
+    room_id: str,
+    thread_id: str,
+    event_cache: ConversationEventCache,
+    *,
+    trusted_sender_ids: Collection[str] = (),
+    caller_label: str = "unknown",
+    coordinator_queue_wait_ms: float = 0.0,
+    resolution_reuse: ThreadResolutionReuseCache | None = None,
+    refill: _ThreadHistoryRefill | None = None,
+) -> ThreadHistoryResult:
+    """Fetch all messages in a thread, allowing advisory stale fallback."""
+    return await _fetch_thread_history_with_cache_policy(
         client,
         room_id,
         thread_id,
         event_cache,
+        hydrate_sidecars=True,
         allow_stale_fallback=True,
-        cache_write_guard_started_at=cache_write_guard_started_at,
-        cache_reject_diagnostics=cache_reject_diagnostics,
+        cache_read_failure_message="Durable thread cache read failed; refetching from homeserver",
         trusted_sender_ids=trusted_sender_ids,
         caller_label=caller_label,
         coordinator_queue_wait_ms=coordinator_queue_wait_ms,
+        resolution_reuse=resolution_reuse,
+        refill=refill,
     )
 
 
@@ -1337,54 +1686,26 @@ async def fetch_dispatch_thread_history(
     thread_id: str,
     event_cache: ConversationEventCache,
     *,
-    cache_write_guard_started_at: float | None = None,
     trusted_sender_ids: Collection[str] = (),
     caller_label: str = "unknown",
     coordinator_queue_wait_ms: float = 0.0,
     resolution_reuse: ThreadResolutionReuseCache | None = None,
+    refill: _ThreadHistoryRefill | None = None,
 ) -> ThreadHistoryResult:
-    """Fetch strict full thread history for dispatch using only fresh cache data or a homeserver refill."""
-    cache_reject_diagnostics: dict[str, str | int | float | bool] | None = None
-    try:
-        cached_history, cache_reject_diagnostics = await _load_cached_thread_history_if_usable(
-            client,
-            room_id=room_id,
-            thread_id=thread_id,
-            event_cache=event_cache,
-            hydrate_sidecars=True,
-            trusted_sender_ids=trusted_sender_ids,
-            resolution_reuse=resolution_reuse,
-        )
-    except Exception as exc:
-        logger.warning(
-            "Durable dispatch thread cache read failed; refetching from homeserver",
-            room_id=room_id,
-            thread_id=thread_id,
-            error=str(exc),
-        )
-    else:
-        if cached_history is not None:
-            _log_thread_history_refresh(
-                room_id=room_id,
-                thread_id=thread_id,
-                caller_label=caller_label,
-                mode="cache_hit",
-                diagnostics=cached_history.diagnostics,
-                coordinator_queue_wait_ms=coordinator_queue_wait_ms,
-            )
-            return cached_history
-    return await refresh_thread_history_from_source(
+    """Fetch strict full thread history from trusted cache or a fresh refill."""
+    return await _fetch_thread_history_with_cache_policy(
         client,
         room_id,
         thread_id,
         event_cache,
         hydrate_sidecars=True,
         allow_stale_fallback=False,
-        cache_write_guard_started_at=cache_write_guard_started_at,
-        cache_reject_diagnostics=cache_reject_diagnostics,
+        cache_read_failure_message="Durable dispatch thread cache read failed; refetching from homeserver",
         trusted_sender_ids=trusted_sender_ids,
         caller_label=caller_label,
         coordinator_queue_wait_ms=coordinator_queue_wait_ms,
+        resolution_reuse=resolution_reuse,
+        refill=refill,
     )
 
 
@@ -1394,54 +1715,26 @@ async def fetch_dispatch_thread_snapshot(
     thread_id: str,
     event_cache: ConversationEventCache,
     *,
-    cache_write_guard_started_at: float | None = None,
     trusted_sender_ids: Collection[str] = (),
     caller_label: str = "unknown",
     coordinator_queue_wait_ms: float = 0.0,
     resolution_reuse: ThreadResolutionReuseCache | None = None,
+    refill: _ThreadHistoryRefill | None = None,
 ) -> ThreadHistoryResult:
-    """Fetch strict lightweight dispatch context using only fresh cache data or a homeserver refill."""
-    cache_reject_diagnostics: dict[str, str | int | float | bool] | None = None
-    try:
-        cached_history, cache_reject_diagnostics = await _load_cached_thread_history_if_usable(
-            client,
-            room_id=room_id,
-            thread_id=thread_id,
-            event_cache=event_cache,
-            hydrate_sidecars=False,
-            trusted_sender_ids=trusted_sender_ids,
-            resolution_reuse=resolution_reuse,
-        )
-    except Exception as exc:
-        logger.warning(
-            "Durable dispatch thread cache read failed; refetching snapshot from homeserver",
-            room_id=room_id,
-            thread_id=thread_id,
-            error=str(exc),
-        )
-    else:
-        if cached_history is not None:
-            _log_thread_history_refresh(
-                room_id=room_id,
-                thread_id=thread_id,
-                caller_label=caller_label,
-                mode="cache_hit",
-                diagnostics=cached_history.diagnostics,
-                coordinator_queue_wait_ms=coordinator_queue_wait_ms,
-            )
-            return cached_history
-    return await refresh_thread_history_from_source(
+    """Fetch strict lightweight dispatch context from trusted cache or a fresh refill."""
+    return await _fetch_thread_history_with_cache_policy(
         client,
         room_id,
         thread_id,
         event_cache,
         hydrate_sidecars=False,
         allow_stale_fallback=False,
-        cache_write_guard_started_at=cache_write_guard_started_at,
-        cache_reject_diagnostics=cache_reject_diagnostics,
+        cache_read_failure_message="Durable dispatch thread cache read failed; refetching snapshot from homeserver",
         trusted_sender_ids=trusted_sender_ids,
         caller_label=caller_label,
         coordinator_queue_wait_ms=coordinator_queue_wait_ms,
+        resolution_reuse=resolution_reuse,
+        refill=refill,
     )
 
 
@@ -1569,7 +1862,7 @@ class BulkThreadRefreshStats:
     """Summary for one bulk thread-cache refresh pass over a room."""
 
     requested_threads: int
-    stored_threads: int
+    usable_threads: int
     missing_root_ids: frozenset[str]
     room_scan_pages: int
     scanned_event_count: int
@@ -1759,7 +2052,7 @@ async def bulk_refresh_room_thread_histories(
         thread_root_ids=thread_root_ids,
         max_scan_pages=max_scan_pages,
     )
-    stored_threads = 0
+    usable_threads = 0
     opaque_stale_threads = 0
     if scan_result.unresolved_opaque_event_ids:
         logger.warning(
@@ -1779,18 +2072,19 @@ async def bulk_refresh_room_thread_histories(
                 continue
             if rejection_reason is not None:
                 continue
-            if await _store_thread_history_cache(
+            store_outcome = await _store_thread_history_cache(
                 event_cache,
                 room_id=room_id,
                 thread_id=thread_id,
                 event_sources=event_sources,
                 expected_membership_epoch=fetch_membership_epoch,
                 fetch_started_at=fetch_started_at,
-            ):
-                stored_threads += 1
+            )
+            if store_outcome.usable:
+                usable_threads += 1
     stats = BulkThreadRefreshStats(
         requested_threads=len(set(thread_root_ids)),
-        stored_threads=stored_threads,
+        usable_threads=usable_threads,
         missing_root_ids=scan_result.missing_root_ids,
         room_scan_pages=scan_result.page_count,
         scanned_event_count=scan_result.scanned_event_count,
@@ -1801,7 +2095,7 @@ async def bulk_refresh_room_thread_histories(
         room_id=room_id,
         caller_label=caller_label,
         requested_threads=stats.requested_threads,
-        stored_threads=stats.stored_threads,
+        usable_threads=stats.usable_threads,
         opaque_stale_threads=opaque_stale_threads,
         missing_roots=len(stats.missing_root_ids),
         room_scan_pages=stats.room_scan_pages,
@@ -1983,6 +2277,7 @@ async def enumerate_room_thread_root_ids(
 __all__ = [
     "BulkThreadRefreshStats",
     "OpaqueEncryptedThreadHistoryError",
+    "RetainedThreadEventSourceProvider",
     "RoomThreadsPageError",
     "ThreadRoomScanRootNotFoundError",
     "bulk_refresh_room_thread_histories",
@@ -1992,6 +2287,8 @@ __all__ = [
     "fetch_thread_event_sources_via_room_messages",
     "fetch_thread_history",
     "get_room_threads_page",
+    "log_thread_history_refresh",
     "refresh_thread_history_from_source",
+    "thread_history_refresh_mode",
     "untrusted_cached_thread_ids",
 ]

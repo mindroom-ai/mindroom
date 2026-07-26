@@ -26,6 +26,7 @@ from .sqlite_cache_maintenance import (
 from .thread_cache_state import (
     THREAD_HISTORY_TRUST_METADATA_KEY,
     THREAD_HISTORY_TRUST_VERSION,
+    ThreadCacheReplaceOutcome,
     replacement_validated_at,
 )
 
@@ -775,6 +776,7 @@ class SqliteEventCache:
         writer: Callable[[aiosqlite.Connection], Awaitable[_T]],
         allow_departed: bool = False,
         expected_membership_epoch: int | None = None,
+        membership_epoch_mismatch_result: _T | None = None,
     ) -> _T:
         if not self._can_expose_write_result(room_id, allow_departed=allow_departed):
             return disabled_result
@@ -818,10 +820,14 @@ class SqliteEventCache:
                         principal_id=self.principal_id,
                         room_id=room_id,
                     )
-                    if membership_state != "joined" or (
-                        expected_membership_epoch is not None and membership_epoch != expected_membership_epoch
-                    ):
+                    if membership_state != "joined":
                         result = disabled_result
+                    elif expected_membership_epoch is not None and membership_epoch != expected_membership_epoch:
+                        result = (
+                            disabled_result
+                            if membership_epoch_mismatch_result is None
+                            else membership_epoch_mismatch_result
+                        )
                     else:
                         result = await writer(db)
                 await db.commit()
@@ -1125,29 +1131,28 @@ class SqliteEventCache:
         expected_membership_epoch: int,
         fetch_started_at: float,
         validated_at: float | None = None,
-    ) -> bool:
-        """Replace a fetched snapshot only when its room epoch and cache state remain current."""
+    ) -> ThreadCacheReplaceOutcome:
+        """Replace a fetched snapshot and classify any guarded non-installation."""
         replacement_timestamp = replacement_validated_at(
             fetch_started_at=fetch_started_at,
             validated_at=validated_at,
         )
 
-        return bool(
-            await self._write_operation(
-                room_id,
-                operation="replace_thread_if_not_newer",
-                disabled_result=False,
-                writer=lambda db: sqlite_event_cache_threads.replace_thread_locked_if_not_newer(
-                    db,
-                    principal_id=self.principal_id,
-                    room_id=room_id,
-                    thread_id=thread_id,
-                    events=events,
-                    fetch_started_at=fetch_started_at,
-                    validated_at=replacement_timestamp,
-                ),
-                expected_membership_epoch=expected_membership_epoch,
+        return await self._write_operation(
+            room_id,
+            operation="replace_thread_if_not_newer",
+            disabled_result=ThreadCacheReplaceOutcome.WRITES_UNAVAILABLE,
+            writer=lambda db: sqlite_event_cache_threads.replace_thread_locked_if_not_newer(
+                db,
+                principal_id=self.principal_id,
+                room_id=room_id,
+                thread_id=thread_id,
+                events=events,
+                fetch_started_at=fetch_started_at,
+                validated_at=replacement_timestamp,
             ),
+            expected_membership_epoch=expected_membership_epoch,
+            membership_epoch_mismatch_result=ThreadCacheReplaceOutcome.RETRYABLE_CONFLICT,
         )
 
     async def invalidate_thread(self, room_id: str, thread_id: str) -> None:

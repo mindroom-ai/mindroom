@@ -22,8 +22,10 @@ from .postgres_event_cache_events import (
     write_lookup_index_rows,
 )
 from .thread_cache_state import (
+    ThreadCacheReplaceOutcome,
     ThreadCacheStateRow,
     can_revalidate_after_incremental_update,
+    guarded_thread_replacement_conflict,
     incremental_thread_revalidation_reasons,
     is_incremental_thread_revalidation_reason,
     thread_cache_state_changed_after,
@@ -403,16 +405,31 @@ async def replace_thread_locked_if_not_newer(
     events: list[dict[str, Any]],
     fetch_started_at: float,
     validated_at: float,
-) -> bool:
-    """Replace one thread snapshot only when nothing newer touched this room after the fetch began."""
+) -> ThreadCacheReplaceOutcome:
+    """Replace one thread snapshot or classify the newer state that won."""
     cache_state_row = await _load_thread_cache_state_row(
         db,
         namespace=namespace,
         room_id=room_id,
         thread_id=thread_id,
     )
-    if thread_cache_state_changed_after(cache_state_row, fetch_started_at=fetch_started_at):
-        return False
+    # The snapshot-row lookup only distinguishes conflict outcomes, so unchanged state skips it.
+    conflict = (
+        guarded_thread_replacement_conflict(
+            cache_state_row,
+            fetch_started_at=fetch_started_at,
+            has_snapshot_rows=await _thread_has_snapshot_rows_for_thread(
+                db,
+                namespace=namespace,
+                room_id=room_id,
+                thread_id=thread_id,
+            ),
+        )
+        if thread_cache_state_changed_after(cache_state_row, fetch_started_at=fetch_started_at)
+        else None
+    )
+    if conflict is not None:
+        return conflict
     await _replace_thread_locked(
         db,
         namespace=namespace,
@@ -421,7 +438,7 @@ async def replace_thread_locked_if_not_newer(
         events=events,
         validated_at=validated_at,
     )
-    return True
+    return ThreadCacheReplaceOutcome.STORED
 
 
 async def invalidate_thread_locked(
@@ -748,6 +765,27 @@ async def _thread_event_ids_for_thread(
         (namespace, room_id, thread_id),
     )
     return [str(row[0]) for row in rows]
+
+
+async def _thread_has_snapshot_rows_for_thread(
+    db: AsyncConnection,
+    *,
+    namespace: str,
+    room_id: str,
+    thread_id: str,
+) -> bool:
+    """Return whether one thread has at least one cached snapshot row."""
+    row = await fetchone(
+        db,
+        """
+        SELECT 1
+        FROM mindroom_event_cache_thread_events
+        WHERE namespace = %s AND room_id = %s AND thread_id = %s
+        LIMIT 1
+        """,
+        (namespace, room_id, thread_id),
+    )
+    return row is not None
 
 
 async def _thread_event_ids_for_room(

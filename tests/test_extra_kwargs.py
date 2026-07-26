@@ -1,10 +1,15 @@
 """Test extra_kwargs functionality in model configuration."""
 
+import asyncio
+import gc
 import importlib
 import os
 import tempfile
+import threading
+import warnings
 from pathlib import Path
 
+import httpx
 import pytest
 import yaml
 from agno.models.anthropic import Claude
@@ -17,6 +22,7 @@ from agno.models.openai.like import OpenAILike
 from agno.models.response import ModelResponse
 from agno.models.vertexai.claude import Claude as VertexAIClaude
 from agno.utils.models.claude import format_messages
+from anthropic import AsyncAnthropic
 from anthropic.types import Message as AnthropicMessage
 
 from mindroom.claude_prompt_cache import (
@@ -1457,6 +1463,176 @@ async def test_prompt_cache_hook_drops_orphaned_search_use_from_streaming_replay
     )
     assert any(getattr(block, "type", None) == "tool_use" for block in assistant_wire["content"])
     assert wire_messages[-1]["content"][0]["type"] == "tool_result"
+
+
+@pytest.mark.parametrize("use_beta", [False, True])
+@pytest.mark.asyncio
+async def test_prompt_cache_hook_constructs_async_stream_off_event_loop(*, use_beta: bool) -> None:
+    """Slow synchronous SDK stream setup must not block unrelated async work."""
+    model = Claude(id="claude-opus-4-8", api_key="test-key", cache_system_prompt=False)
+    stream_started = threading.Event()
+    heartbeat_seen = threading.Event()
+    allow_stream_return = threading.Event()
+    heartbeat_before_release: list[bool] = []
+    stream_thread_ids: list[int] = []
+    event_loop_thread_id = threading.get_ident()
+
+    class _EmptyAsyncStream:
+        async def __aenter__(self) -> object:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        def __aiter__(self) -> object:
+            return self
+
+        async def __anext__(self) -> object:
+            raise StopAsyncIteration
+
+    class _BlockingAsyncMessagesAPI:
+        def stream(self, **_kwargs: object) -> object:
+            stream_thread_ids.append(threading.get_ident())
+            stream_started.set()
+            assert allow_stream_return.wait(2.0)
+            return _EmptyAsyncStream()
+
+    class _FakeBetaAPI:
+        def __init__(self) -> None:
+            self.messages = _BlockingAsyncMessagesAPI()
+
+    class _FakeAsyncClient:
+        def __init__(self) -> None:
+            self.messages = _BlockingAsyncMessagesAPI()
+            self.beta = _FakeBetaAPI()
+
+    def release_after_heartbeat() -> None:
+        assert stream_started.wait(2.0)
+        heartbeat_before_release.append(heartbeat_seen.wait(0.5))
+        allow_stream_return.set()
+
+    vars(model)["get_async_client"] = lambda: _FakeAsyncClient()
+    vars(model)["_prepare_request_kwargs"] = lambda *_args, **_kwargs: {}
+    vars(model)["_has_beta_features"] = lambda **_kwargs: use_beta
+    install_claude_prompt_cache_hook(model)
+    release_thread = threading.Thread(target=release_after_heartbeat)
+    release_thread.start()
+
+    async def consume_stream() -> list[ModelResponse]:
+        return [
+            response
+            async for response in model.ainvoke_stream(
+                messages=[Message(role="user", content="Current turn")],
+                assistant_message=Message(role="assistant"),
+            )
+        ]
+
+    stream_task = asyncio.create_task(consume_stream())
+    try:
+        assert await asyncio.to_thread(stream_started.wait, 2.0)
+        await asyncio.sleep(0)
+        heartbeat_seen.set()
+        assert await asyncio.wait_for(stream_task, timeout=2.0) == []
+    finally:
+        allow_stream_return.set()
+        await asyncio.to_thread(release_thread.join, 2.0)
+
+    assert heartbeat_before_release == [True]
+    assert stream_thread_ids
+    assert stream_thread_ids[0] != event_loop_thread_id
+
+
+@pytest.mark.parametrize("cancel_count", [1, 2])
+@pytest.mark.parametrize("cancel_before_setup", [False, True])
+@pytest.mark.parametrize("use_beta", [False, True])
+@pytest.mark.asyncio
+async def test_cancelled_async_stream_setup_does_not_orphan_sdk_request_coroutine(  # noqa: PLR0915
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    cancel_before_setup: bool,
+    cancel_count: int,
+    use_beta: bool,
+) -> None:
+    """Cancellation during worker setup must dispose the SDK request coroutine."""
+    transport_calls = 0
+
+    class _RecordingTransport(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+            nonlocal transport_calls
+            transport_calls += 1
+            return httpx.Response(200, request=request)
+
+    client = AsyncAnthropic(
+        api_key="test-key",
+        http_client=httpx.AsyncClient(transport=_RecordingTransport()),
+    )
+    model = Claude(id="claude-opus-4-8", api_key="test-key", cache_system_prompt=False)
+    setup_started = threading.Event()
+    allow_setup = threading.Event()
+    setup_finished = threading.Event()
+    manager_created = threading.Event()
+
+    def blocking_prepare(_model: object, request_kwargs: dict[str, object]) -> dict[str, object]:
+        setup_started.set()
+        assert allow_setup.wait(2.0)
+        setup_finished.set()
+        return request_kwargs
+
+    messages_namespace = client.beta.messages if use_beta else client.messages
+    namespace_type = type(messages_namespace)
+    original_stream = namespace_type.stream
+
+    def observed_stream(self: object, **kwargs: object) -> object:
+        stream_manager = original_stream(self, **kwargs)
+        manager_created.set()
+        return stream_manager
+
+    monkeypatch.setattr("mindroom.claude_prompt_cache.prepare_claude_request_kwargs", blocking_prepare)
+    monkeypatch.setattr(namespace_type, "stream", observed_stream)
+    vars(model)["get_async_client"] = lambda: client
+    vars(model)["_prepare_request_kwargs"] = lambda *_args, **_kwargs: {"max_tokens": 1}
+    vars(model)["_has_beta_features"] = lambda **_kwargs: use_beta
+    install_claude_prompt_cache_hook(model)
+
+    async def consume_stream() -> list[ModelResponse]:
+        if cancel_before_setup:
+            current_task = asyncio.current_task()
+            assert current_task is not None
+            for _ in range(cancel_count):
+                current_task.cancel()
+        return [
+            response
+            async for response in model.ainvoke_stream(
+                messages=[Message(role="user", content="hello")],
+                assistant_message=Message(role="assistant"),
+            )
+        ]
+
+    setup_task = asyncio.create_task(consume_stream())
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            assert await asyncio.to_thread(setup_started.wait, 2.0)
+            if not cancel_before_setup:
+                for _ in range(cancel_count):
+                    setup_task.cancel()
+            allow_setup.set()
+            with pytest.raises(asyncio.CancelledError):
+                await setup_task
+        finally:
+            allow_setup.set()
+
+        assert await asyncio.to_thread(setup_finished.wait, 2.0)
+        assert await asyncio.to_thread(manager_created.wait, 2.0)
+        assert setup_task.cancelling() == cancel_count
+        del setup_task
+        for _ in range(3):
+            gc.collect()
+            await asyncio.sleep(0)
+
+    await client.close()
+    assert transport_calls == 0
+    assert not any("was never awaited" in str(warning.message) for warning in caught)
 
 
 def _dirty_replay_messages() -> list[Message]:

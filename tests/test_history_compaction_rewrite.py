@@ -19,7 +19,7 @@ from agno.session.summary import SessionSummary
 from mindroom.agent_storage import create_session_storage, get_agent_session
 from mindroom.config.models import CompactionOverrideConfig
 from mindroom.constants import (
-    MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS,
+    DEFAULT_COMPACTION_TIMEOUT_SECONDS,
 )
 from mindroom.error_handling import ModelSafeguardRefusalError
 from mindroom.history.compaction import (
@@ -123,6 +123,7 @@ async def _rewrite_single_run(
         runs_before=len(working_session.runs or []),
         threshold_tokens=None,
         summary_prompt=COMPACTION_SUMMARY_PROMPT,
+        summary_timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
         lifecycle_notice_event_id=None,
         progress_callback=progress_callback,
         collect_compaction_hook_messages=False,
@@ -230,7 +231,7 @@ async def test_rewrite_retries_summary_with_smaller_chunk_after_timeout(tmp_path
     async def fake_summary(*, summary_input: str, **_kwargs: object) -> SessionSummary:
         summary_inputs.append(summary_input)
         if len(summary_inputs) == 1:
-            msg = f"compaction summary timed out after {MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS}s"
+            msg = f"compaction summary timed out after {DEFAULT_COMPACTION_TIMEOUT_SECONDS}s"
             raise RuntimeError(msg)
         return SessionSummary(summary="merged summary", updated_at=datetime.now(UTC))
 
@@ -813,6 +814,7 @@ async def test_compact_scope_history_emits_before_hook_for_each_persisted_chunk(
             replay_window_tokens=16_000,
             threshold_tokens=1,
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
+            summary_timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
         )
 
     assert outcome is not None
@@ -1426,6 +1428,7 @@ async def test_rewrite_working_session_for_compaction_strips_stale_replay_fields
             runs_before=2,
             threshold_tokens=None,
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
+            summary_timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
             lifecycle_notice_event_id=None,
             progress_callback=None,
             collect_compaction_hook_messages=False,
@@ -1480,6 +1483,7 @@ async def test_compact_scope_history_ignores_runs_without_stable_ids(
             replay_window_tokens=64_000,
             threshold_tokens=None,
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
+            summary_timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
         )
 
     assert outcome is None
@@ -1574,6 +1578,7 @@ async def test_compact_scope_history_persists_sanitized_remaining_runs(tmp_path:
             replay_window_tokens=16_000,
             threshold_tokens=1,
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
+            summary_timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
         )
 
     assert outcome is not None
@@ -1672,6 +1677,7 @@ async def test_rewrite_working_session_emits_progress_after_persisted_chunks(tmp
             runs_before=2,
             threshold_tokens=None,
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
+            summary_timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
             lifecycle_notice_event_id="$notice",
             progress_callback=record_progress,
             collect_compaction_hook_messages=False,
