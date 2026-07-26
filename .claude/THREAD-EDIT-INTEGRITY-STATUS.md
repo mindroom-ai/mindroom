@@ -4,7 +4,8 @@
 
 - PR: `#1641`
 - Branch: `fix/thread-edit-integrity`
-- Published head: `276a0df6ef0f1c1c70fef3be8e793d37a8bedc79`
+- Production and test correction head: `276a0df6ef0f1c1c70fef3be8e793d37a8bedc79`
+- The published status-only successor contains this file, so resolve its exact SHA from the branch instead of storing a self-invalidating SHA here.
 - Base and merge base: `858282afc77adb480fa06cd9e4057d511ff861d5`
 - Production diff: `+3360/-1283`, net `+2077`.
 - Test diff: `+12601/-1416`, net `+11185`.
