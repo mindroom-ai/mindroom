@@ -3127,10 +3127,14 @@ class LiveFuzzRunner:
     ) -> None:
         """Keep every observer open after all event-attached lane barriers."""
         quiet_deadline = time.monotonic() + max(self.settle_seconds, 1.0)
-        while time.monotonic() < quiet_deadline:
-            await asyncio.gather(
-                *(client.sync_incremental(timeout_ms=250, allow_limited=True) for client in self.clients),
-            )
+        while (remaining := quiet_deadline - time.monotonic()) > 0:
+            try:
+                async with asyncio.timeout(remaining):
+                    await asyncio.gather(
+                        *(client.sync_incremental(timeout_ms=250, allow_limited=True) for client in self.clients),
+                    )
+            except TimeoutError:
+                break
             self._assert_saturation_replies(expected_sources)
         self._assert_saturation_replies(expected_sources)
 
@@ -3275,7 +3279,7 @@ class LiveFuzzRunner:
     ) -> str:
         """Wait until one source has exactly one fully streamed response."""
         deadline = time.monotonic() + self.reply_timeout
-        while time.monotonic() < deadline:
+        while (remaining := deadline - time.monotonic()) > 0:
             malformed = self._malformed_agent_original_ids(client.seen_events.values())
             if malformed:
                 msg = f"malformed visible agent replies: {sorted(malformed)}"
@@ -3296,7 +3300,11 @@ class LiveFuzzRunner:
                     expected_history_fingerprint=_history_fingerprint(history_markers),
                 ):
                     return response_event_id
-            await client.sync_incremental(timeout_ms=1000, allow_limited=True)
+            try:
+                async with asyncio.timeout(remaining):
+                    await client.sync_incremental(timeout_ms=1000, allow_limited=True)
+            except TimeoutError:
+                break
         msg = f"agent response timeout for {source_event_id}"
         raise TimeoutError(msg)
 

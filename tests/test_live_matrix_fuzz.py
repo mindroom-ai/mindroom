@@ -1294,6 +1294,47 @@ async def test_exact_reply_deadline_bounds_a_stalled_sync(
 
 
 @pytest.mark.asyncio
+async def test_saturation_response_deadline_bounds_a_slow_sync() -> None:
+    """One slow sync cannot outlive the saturation reply deadline."""
+
+    class Client:
+        def __init__(self) -> None:
+            self.seen_events: dict[str, dict[str, object]] = {}
+            self.sync_cancelled = asyncio.Event()
+
+        async def sync_incremental(self, *, timeout_ms: int, allow_limited: bool = False) -> None:
+            del timeout_ms, allow_limited
+            try:
+                await asyncio.sleep(0.05)
+            finally:
+                self.sync_cancelled.set()
+
+    class Stack:
+        agent_id = "@agent:example"
+        router_id = "@router:example"
+
+    fake_client = Client()
+    runner = fuzz_live_matrix.LiveFuzzRunner(
+        cast("fuzz_live_matrix.ManagedTuwunelStack", Stack()),
+        (cast("LiveMatrixClient", fake_client),),
+        LiveFuzzScenario(thread_count=2, batches=(), profile="saturation"),
+        reply_timeout=0.01,
+        settle_seconds=0,
+    )
+
+    with pytest.raises(TimeoutError, match=r"agent response timeout for \$source"):
+        async with asyncio.timeout(0.03):
+            await runner._wait_for_completed_response(
+                cast("LiveMatrixClient", fake_client),
+                root_event_id="$root",
+                source_event_id="$source",
+                source_marker="source",
+                history_markers=(),
+            )
+    assert fake_client.sync_cancelled.is_set()
+
+
+@pytest.mark.asyncio
 async def test_exact_reply_oracle_requires_completed_streaming_body() -> None:
     """A placeholder original is not complete until its final edit arrives."""
     client = LiveMatrixClient("http://matrix.invalid", "!room:example")
@@ -1884,6 +1925,51 @@ def test_saturation_final_audit_rejects_late_corrupt_edit() -> None:
 
     with pytest.raises(AssertionError, match="corrupt_bodies"):
         runner._assert_saturation_replies(expected)
+
+
+@pytest.mark.asyncio
+async def test_saturation_quiescence_deadline_bounds_a_slow_sync(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Quiescence cancels observer syncs when the remaining quiet window expires."""
+
+    class Client:
+        def __init__(self) -> None:
+            self.seen_events: dict[str, dict[str, object]] = {}
+            self.sync_cancelled = asyncio.Event()
+
+        async def sync_incremental(self, *, timeout_ms: int, allow_limited: bool = False) -> None:
+            del timeout_ms, allow_limited
+            try:
+                await asyncio.sleep(0.05)
+            finally:
+                self.sync_cancelled.set()
+
+    class Stack:
+        agent_id = "@agent:example"
+        router_id = "@router:example"
+
+    fake_client = Client()
+    runner = fuzz_live_matrix.LiveFuzzRunner(
+        cast("fuzz_live_matrix.ManagedTuwunelStack", Stack()),
+        (cast("LiveMatrixClient", fake_client),),
+        LiveFuzzScenario(thread_count=2, batches=(), profile="saturation"),
+        reply_timeout=1,
+        settle_seconds=0,
+    )
+
+    class Clock:
+        def __init__(self) -> None:
+            self.values = iter((0.0, 0.99))
+
+        def monotonic(self) -> float:
+            return next(self.values)
+
+    monkeypatch.setattr(fuzz_live_matrix, "time", Clock())
+
+    async with asyncio.timeout(0.03):
+        await runner._wait_for_saturation_quiescence({})
+    assert fake_client.sync_cancelled.is_set()
 
 
 def test_saturation_audit_rejects_complete_wrong_edit_before_valid_final() -> None:
