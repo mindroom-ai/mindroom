@@ -11,7 +11,10 @@ import nio
 from nio import crypto
 
 from mindroom.logging_config import get_logger
-from mindroom.matrix.event_info import event_source_supports_thread_relations
+from mindroom.matrix.event_info import (
+    event_source_is_timeline_in_room,
+    event_source_supports_thread_relations,
+)
 
 logger = get_logger(__name__)
 
@@ -110,10 +113,39 @@ def valid_room_message_event_source(event_source: Mapping[str, Any]) -> bool:
     return isinstance(parse_room_message_event_source(event_source), nio.RoomMessage)
 
 
+def _valid_encrypted_event_source(event_source: Mapping[str, object]) -> bool:
+    """Return whether nio accepts one opaque Megolm room-event envelope."""
+    normalized_source = {key: value for key, value in event_source.items() if isinstance(key, str)}
+    try:
+        parsed_event = nio.Event.parse_event(normalized_source)
+    except Exception:
+        return False
+    return isinstance(parsed_event, nio.MegolmEvent)
+
+
+def event_source_supports_valid_explicit_thread_relation(
+    event_source: Mapping[str, object],
+    room_id: str,
+) -> bool:
+    """Return whether a timeline event may supply its own explicit thread relation."""
+    event_type = event_source.get("type")
+    if not isinstance(event_type, str) or not event_type.strip():
+        return False
+    if not event_source_is_timeline_in_room(event_source, room_id):
+        return False
+    if event_type == "m.room.message":
+        return valid_room_message_event_source(event_source)
+    if event_type == "m.room.encrypted":
+        return _valid_encrypted_event_source(event_source)
+    return True
+
+
 def event_source_supports_valid_thread_relations(event_source: Mapping[str, object], room_id: str) -> bool:
     """Return whether one valid room timeline event may supply thread relations."""
     return event_source_supports_thread_relations(event_source, room_id) and (
-        event_source.get("type") != "m.room.message" or valid_room_message_event_source(event_source)
+        valid_room_message_event_source(event_source)
+        if event_source.get("type") == "m.room.message"
+        else _valid_encrypted_event_source(event_source)
     )
 
 

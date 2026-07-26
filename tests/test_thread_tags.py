@@ -2727,7 +2727,10 @@ async def test_resolve_thread_root_event_id_for_client_uses_cache_when_event_loo
     )
 
 
-@pytest.mark.parametrize("invalid_kind", ["state", "wrong-room", "bad-event", "wrong-event-id"])
+@pytest.mark.parametrize(
+    "invalid_kind",
+    ["state", "wrong-room", "bad-event", "bad-encrypted", "wrong-event-id"],
+)
 @pytest.mark.asyncio
 async def test_resolve_thread_root_event_id_for_client_rejects_invalid_success_before_cache_fallback(
     invalid_kind: str,
@@ -2755,6 +2758,14 @@ async def test_resolve_thread_root_event_id_for_client_rejects_invalid_success_b
                 "event_id": "$forged-root:localhost",
             },
         }
+    elif invalid_kind == "bad-encrypted":
+        event_source["type"] = "m.room.encrypted"
+        event_source["content"] = {
+            "m.relates_to": {
+                "rel_type": "m.thread",
+                "event_id": "$forged-root:localhost",
+            },
+        }
     else:
         event_source["content"] = {
             "body": "forged",
@@ -2777,6 +2788,42 @@ async def test_resolve_thread_root_event_id_for_client_rejects_invalid_success_b
 
     assert normalized is None
     conversation_cache.get_thread_id_for_event.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_resolve_thread_root_event_id_for_client_accepts_valid_opaque_encrypted_relation() -> None:
+    """A valid opaque Megolm event may carry an explicit thread relation."""
+    client = AsyncMock()
+    client.room_get_event = AsyncMock(
+        return_value=nio.RoomGetEventResponse.from_dict(
+            {
+                "content": {
+                    "algorithm": "m.megolm.v1.aes-sha2",
+                    "ciphertext": "opaque",
+                    "device_id": "DEVICE",
+                    "sender_key": "sender-key",
+                    "session_id": "session",
+                    "m.relates_to": {
+                        "rel_type": "m.thread",
+                        "event_id": "$thread-root:localhost",
+                    },
+                },
+                "event_id": "$encrypted:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1,
+                "room_id": "!room:localhost",
+                "type": "m.room.encrypted",
+            },
+        ),
+    )
+
+    normalized = await resolve_thread_root_event_id_for_client(
+        client,
+        "!room:localhost",
+        "$encrypted:localhost",
+    )
+
+    assert normalized == "$thread-root:localhost"
 
 
 @pytest.mark.asyncio

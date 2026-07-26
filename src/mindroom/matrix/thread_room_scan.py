@@ -17,8 +17,8 @@ import nio
 from nio.responses import RoomGetEventError
 
 from mindroom.matrix.client_thread_history import fetch_thread_event_sources_via_room_messages
-from mindroom.matrix.event_info import EventInfo, event_source_is_timeline_in_room
-from mindroom.matrix.media import valid_room_message_event_source
+from mindroom.matrix.event_info import EventInfo
+from mindroom.matrix.media import event_source_supports_valid_explicit_thread_relation
 from mindroom.matrix.thread_membership import ThreadMembershipAccess, room_scan_thread_membership_access
 
 if TYPE_CHECKING:
@@ -79,14 +79,13 @@ def validated_event_source_from_lookup_response(
     room_id: str,
     event_id: str,
 ) -> dict[str, object] | None:
-    """Return one exact, room-scoped event lookup result with a valid plaintext envelope."""
+    """Return one exact, room-scoped event lookup result with a valid relation envelope."""
     if not isinstance(response, nio.RoomGetEventResponse):
         return None
     event_source = response.event.source
-    if (
-        event_source.get("event_id") != event_id
-        or not event_source_is_timeline_in_room(event_source, room_id)
-        or (event_source.get("type") == "m.room.message" and not valid_room_message_event_source(event_source))
+    if event_source.get("event_id") != event_id or not event_source_supports_valid_explicit_thread_relation(
+        event_source,
+        room_id,
     ):
         return None
     return {key: value for key, value in event_source.items() if isinstance(key, str)}

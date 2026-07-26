@@ -53,14 +53,12 @@ from mindroom.matrix.client_thread_history import (
 from mindroom.matrix.event_info import (
     EventInfo,
     event_source_is_state_event,
-    event_source_is_timeline_in_room,
     event_source_matches_room,
 )
 from mindroom.matrix.media import (
     is_encrypted_media_event_source,
     parse_matrix_media_event_source,
     parse_room_message_event_source,
-    valid_room_message_event_source,
     valid_room_message_replacement,
 )
 from mindroom.matrix.membership_fence import UNCERTIFIED_MEMBERSHIP_EPOCH
@@ -425,6 +423,8 @@ async def _cached_room_get_event(
         return response, None
 
     event = response.event
+    if event.source.get("event_id") != normalized_event_id:
+        return RoomGetEventError("Matrix event lookup returned an unexpected event ID"), None
     normalized_event_source = normalize_nio_event_for_cache(
         event,
         event_id=normalized_event_id,
@@ -683,12 +683,12 @@ class MatrixConversationCache(ConversationCacheProtocol):
         )
         if not isinstance(response, nio.RoomGetEventResponse):
             return None
-        event_source = response.event.source
-        if not event_source_is_timeline_in_room(event_source, room_id) or (
-            event_source.get("type") == "m.room.message" and not valid_room_message_event_source(event_source)
-        ):
-            return None
-        return EventInfo.from_event(event_source)
+        event_source = validated_event_source_from_lookup_response(
+            response,
+            room_id=room_id,
+            event_id=event_id,
+        )
+        return None if event_source is None else EventInfo.from_event(event_source)
 
     async def _fetch_thread_history_from_client(
         self,

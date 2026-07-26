@@ -9,6 +9,14 @@ from typing import cast
 _THREAD_RELATION_EVENT_TYPES = frozenset({"m.room.encrypted", "m.room.message"})
 
 
+def _normalized_event_id(value: object) -> str | None:
+    """Return one non-empty Matrix event ID string."""
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    return normalized or None
+
+
 def event_type_supports_thread_relations(event_type: object) -> bool:
     """Return whether this Matrix event family can affect conversation thread state."""
     return isinstance(event_type, str) and event_type in _THREAD_RELATION_EVENT_TYPES
@@ -61,8 +69,7 @@ def reply_to_event_id_from_content(content: Mapping[str, object] | None) -> str 
     if not isinstance(in_reply_to, Mapping):
         return None
     in_reply_to = cast("Mapping[str, object]", in_reply_to)
-    reply_to_event_id = in_reply_to.get("event_id")
-    return reply_to_event_id if isinstance(reply_to_event_id, str) else None
+    return _normalized_event_id(in_reply_to.get("event_id"))
 
 
 @dataclass
@@ -185,11 +192,13 @@ def _analyze_event_relations(event_source: dict | None) -> EventInfo:
     # Extract basic relation information
     relation_type = relates_to.get("rel_type")
     has_relations = bool(relates_to)
-    relates_to_event_id = relates_to.get("event_id")
+    relates_to_event_id = _normalized_event_id(relates_to.get("event_id"))
 
     # Thread analysis
     is_thread = relation_type == "m.thread"
     thread_id = relates_to_event_id if is_thread else None
+    if thread_id == _normalized_event_id(event_source.get("event_id")):
+        thread_id = None
 
     # Edit analysis
     is_edit = relation_type == "m.replace"

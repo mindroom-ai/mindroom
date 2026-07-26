@@ -1985,6 +1985,40 @@ class TestThreadHistory:
         assert resolved == {}
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("target", [[], {}], ids=["list", "object"])
+    async def test_visible_resolution_hides_malformed_replacement_targets(self, target: object) -> None:
+        """A malformed replacement stays non-visible and cannot alter the original."""
+        original_event = self._make_text_event(
+            event_id="$original",
+            sender="@alice:localhost",
+            body="Original",
+            server_timestamp=1000,
+            source_content={"body": "Original"},
+        )
+        malformed_edit = self._make_text_event(
+            event_id="$malformed-edit",
+            sender="@alice:localhost",
+            body="* Forged",
+            server_timestamp=2000,
+            source_content={
+                "body": "* Forged",
+                "m.new_content": {"body": "Forged", "msgtype": "m.text"},
+                "m.relates_to": {
+                    "rel_type": "m.replace",
+                    "event_id": target,
+                },
+            },
+        )
+
+        resolved = await resolve_latest_visible_messages(
+            [original_event, malformed_edit],
+            AsyncMock(),
+        )
+
+        assert list(resolved) == ["$original"]
+        assert resolved["$original"].body == "Original"
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize("invalidity", ["state", "other-room"])
     async def test_visible_resolution_rejects_non_timeline_originals_in_other_scope(
         self,

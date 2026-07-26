@@ -374,10 +374,10 @@ def record_thread_edit_candidate(
 ) -> bool:
     """Track one edit candidate, returning True if the event is an edit."""
     event_info = EventInfo.from_event(event_source)
-    if not (event_info.is_edit and event_info.original_event_id):
+    if not event_info.is_edit:
         return False
     event_id = event_source.get("event_id")
-    if isinstance(event_id, str) and event_id:
+    if event_info.original_event_id is not None and isinstance(event_id, str) and event_id:
         edit_candidates_by_original_event_id.setdefault(event_info.original_event_id, []).append(event_source)
     return True
 

@@ -394,6 +394,44 @@ async def test_conversation_cache_thread_reads_forward_client_fetch_metadata(
 
 
 @pytest.mark.asyncio
+async def test_conversation_cache_rejects_and_does_not_persist_mismatched_point_lookup(
+    tmp_path: Path,
+    event_cache: ConversationEventCache,
+) -> None:
+    """A successful lookup for another event ID must not poison either durable cache key."""
+    room_id = "!room:localhost"
+    requested_event_id = "$requested:localhost"
+    returned_event_id = "$different:localhost"
+    client = MagicMock()
+    client.room_get_event = AsyncMock(
+        return_value=nio.RoomGetEventResponse.from_dict(
+            {
+                "content": {
+                    "body": "forged",
+                    "msgtype": "m.text",
+                    "m.relates_to": {
+                        "event_id": "$forged-root:localhost",
+                        "rel_type": "m.thread",
+                    },
+                },
+                "event_id": returned_event_id,
+                "origin_server_ts": 1,
+                "room_id": room_id,
+                "sender": "@attacker:localhost",
+                "type": "m.room.message",
+            },
+        ),
+    )
+    conversation_cache = _conversation_cache_for_thread_reads(tmp_path, event_cache, client=client)
+
+    response = await conversation_cache.get_event(room_id, requested_event_id)
+
+    assert isinstance(response, nio.RoomGetEventError)
+    assert await event_cache.get_event(room_id, requested_event_id) is None
+    assert await event_cache.get_event(room_id, returned_event_id) is None
+
+
+@pytest.mark.asyncio
 async def test_dispatch_thread_read_degrades_when_cache_coordinator_never_drains(
     tmp_path: Path,
 ) -> None:

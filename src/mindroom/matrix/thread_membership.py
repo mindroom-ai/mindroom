@@ -56,6 +56,7 @@ from typing import Any, Protocol
 
 from mindroom.matrix.event_info import EventInfo, event_type_supports_thread_relations
 from mindroom.matrix.media import (
+    event_source_supports_valid_explicit_thread_relation,
     event_source_supports_valid_thread_relations,
     valid_room_message_event_source,
     valid_room_message_replacement,
@@ -316,8 +317,10 @@ async def resolve_event_thread_membership(
     """Return canonical thread membership for one event."""
     explicit_thread_id = event_info.thread_id
     if explicit_thread_id is not None:
-        explicit_thread_is_valid = event_type_supports_thread_relations(event_info.event_type) and (
-            event_source is None or event_source_supports_valid_thread_relations(event_source, room_id)
+        explicit_thread_is_valid = explicit_thread_id != event_id and (
+            event_source_supports_valid_explicit_thread_relation(event_source, room_id)
+            if event_source is not None
+            else isinstance(event_info.event_type, str) and bool(event_info.event_type.strip())
         )
         return (
             ThreadResolution.threaded(explicit_thread_id) if explicit_thread_is_valid else ThreadResolution.room_level()

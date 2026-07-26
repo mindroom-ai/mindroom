@@ -1771,6 +1771,34 @@ class TestMatrixConversationCacheThreadReads:
 
         assert impact == MutationThreadImpact.unknown()
 
+    @pytest.mark.asyncio
+    async def test_point_mutation_rejects_mismatched_event_lookup(self) -> None:
+        """Mutation ancestry must not accept a different event returned for the requested ID."""
+        room_id = "!test:localhost"
+        returned_source = {
+            "event_id": "$different",
+            "room_id": room_id,
+            "sender": "@attacker:localhost",
+            "origin_server_ts": 1,
+            "type": "m.room.message",
+            "content": {
+                "body": "forged",
+                "msgtype": "m.text",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": "$victim"},
+            },
+        }
+        response = nio.RoomGetEventResponse.from_dict(returned_source)
+        runtime = _conversation_runtime(client=_make_client_mock(), event_cache=_runtime_event_cache())
+        access = MatrixConversationCache(logger=MagicMock(), runtime=runtime)
+
+        with patch(
+            "mindroom.matrix.conversation_cache._cached_room_get_event",
+            new=AsyncMock(return_value=(response, returned_source)),
+        ):
+            event_info = await access._event_info_for_thread_resolution(room_id, "$requested")
+
+        assert event_info is None
+
     @pytest.mark.parametrize(
         "invalid_scope",
         [
