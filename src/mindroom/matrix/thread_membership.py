@@ -381,6 +381,7 @@ async def resolve_related_event_thread_membership(  # noqa: C901
             if proof.state is not _ThreadRootProofState.NOT_A_THREAD_ROOT:
                 resolution = _resolution_from_root_proof(current_event_id, proof)
                 break
+            resolution = ThreadResolution.room_level(thread_history=proof.thread_history)
 
         try:
             next_target = await _validated_next_related_event_target(
