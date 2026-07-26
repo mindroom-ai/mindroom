@@ -131,11 +131,14 @@ class SyncCacheTrust:
         limited_timeline = bool(cache_result.limited_room_ids)
         if limited_timeline and not self._awaiting_initial_window:
             decision = replace(decision, reset_client_token=True)
+        self._apply_decision(decision, cache_result=cache_result)
+        # Re-arm from applied trust, not from the decision: _apply_decision rejects
+        # certification while a callback failure is outstanding, and a rejected
+        # certification must not license another since-less replay.
         if decision.reset_client_token:
             self._awaiting_initial_window = True
-        elif limited_timeline or decision.state is SyncTrustState.CERTIFIED:
+        elif self.state is SyncTrustState.CERTIFIED:
             self._awaiting_initial_window = False
-        self._apply_decision(decision, cache_result=cache_result)
         return decision
 
     def reject_unknown_pos(self) -> SyncCertificationDecision:
