@@ -1,12 +1,12 @@
 # Thread edit integrity gate status
 
-Updated 2026-07-26 after correcting opaque replacement impact and synchronizing current main.
+Updated 2026-07-26 after making durable redaction context mandatory for thread previews.
 
 ## Exact target
 
 - PR: `mindroom-ai/mindroom#1641`
 - Branch: `fix/thread-edit-integrity`
-- Latest production commit: `0ec0b3007a7d1d45aad33d9327497938d049a237`
+- Latest production commit: `c351edbaa4d11c2e4362f6155b89c935000ffd42`
 - Current base and merge base: `858282afc77adb480fa06cd9e4057d511ff861d5`
 - Latest integration commit before this handoff-only successor: `0d77e1b7475d31d0a644b1bb02c22a6c33533228`
 - A commit cannot contain its own SHA, so this file does not claim that its stored parent is the exact gate head.
@@ -68,6 +68,7 @@ Updated 2026-07-26 after correcting opaque replacement impact and synchronizing 
 - `9dec1ba8b` requires canonical source validity before a supplied batch event can resolve membership or prove another event is a thread root.
 - `9dec1ba8b` filters cold-scan replacement candidates through the shared replacement validator before building a reusable snapshot.
 - Wrong-sender cold-scan edits remain non-visible and no longer force every later read back to the homeserver.
+- `c351edbaa` makes durable cache and room context mandatory for bundled thread-root previews, so no caller can silently bypass edit tombstones.
 - `658e47664` validates every supplied map-backed ancestor before a descendant may inherit its thread membership.
 - `658e47664` keeps undecryptable replacements fail closed when their visible outer relation targets a known thread event.
 - Opaque replacements with a visibly different sender remain ignored.
@@ -210,7 +211,7 @@ Updated 2026-07-26 after correcting opaque replacement impact and synchronizing 
 
 ## Pending exact-head gates
 
-- Commit and push this crash-handoff-only successor, resolve its exact SHA live, and freeze that resolved head.
+- Resolve the handoff successor SHA live and freeze only when local, remote, and GitHub heads match.
 - Fresh CI must complete on the final exact head.
 - A fresh independent native Codex correctness review is required on the final exact head.
 - Exact-head PostgreSQL owning and stress selections are required.
@@ -249,4 +250,18 @@ Updated 2026-07-26 after correcting opaque replacement impact and synchronizing 
 - This handoff-only commit invalidates those exact-head results and requires fresh final-head gates.
 - Fresh exact-head CI, independent native Codex review, PostgreSQL/full/Tach/all-file validation, and real-Tuwunel validation remain mandatory.
 - The living handoff remains tracked until every exact-head gate passes.
+- Merge gate remains closed.
+
+## Exact-c351 preview redaction correction
+
+- Exact-`6580fe505` review A approved the production diff.
+- Exact-`6580fe505` review B found that the exported preview helper could omit durable cache context and silently skip edit tombstones.
+- Both production callers already supplied cache and room context, so the correction tightens the owning helper contract instead of adding a fallback.
+- The new contract regression failed before implementation and passes afterward.
+- All `18` focused preview variants pass.
+- The complete message-content, matrix-message-tool, and matrix-room-tool selection passes `203` tests.
+- Ruff, formatting, `ty`, Tach dependencies/interfaces, `git diff --check`, all-file pre-commit, and commit hooks pass.
+- Production source against current `main` is `+2163/-1199`, net `+964`.
+- Every exact-`6580fe505` review, CI, full-suite, PostgreSQL, static, and live claim is historical after production commit `c351edbaa`.
+- Fresh exact-head native Codex review, CI, full pytest, PostgreSQL stress, all-file pre-commit, and real-Tuwunel validation remain mandatory.
 - Merge gate remains closed.
