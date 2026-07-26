@@ -144,18 +144,20 @@ class TerminalDeliveryCoordinator:
         del reason
         self._wake_event.set()
 
-    async def pending_target_event_ids(self, room_id: str | None = None) -> frozenset[str]:
-        """Return visible events protected from stale-stream cleanup."""
-        records = await asyncio.to_thread(self.deps.turn_store.terminal_checkpoint_records)
-        return frozenset(
-            record.response_event_id
-            for record in records
-            if record.response_event_id is not None
-            and (
-                room_id is None
-                or (record.conversation_target is not None and record.conversation_target.room_id == room_id)
+    @asynccontextmanager
+    async def stale_cleanup_guard(self, target_event_id: str) -> AsyncIterator[bool]:
+        """Serialize stale cleanup with delivery and recheck durable ownership."""
+        async with self._locked(None, target_event_id):
+            record = await asyncio.to_thread(self.deps.turn_store.turn_for_event, target_event_id)
+            is_owned = (
+                record is not None
+                and record.response_event_id == target_event_id
+                and (
+                    record.terminal_edit_checkpoint is not None
+                    or record.settled_terminal_delivery_correlation_id is not None
+                )
             )
-        )
+            yield not is_owned
 
     async def owned_delivery(self, identity: ResponseIdentity) -> PendingTerminalDelivery | None:
         """Return a durable outcome only when all replay IDs belong to one episode."""

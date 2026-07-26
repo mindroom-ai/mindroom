@@ -242,7 +242,8 @@ async def test_team_resolution_fallback_sync_restart_keeps_durable_owner(tmp_pat
     assert response == "$existing"
     assert retries == []
     assert edit_message.await_count == 1
-    assert await bot.pending_terminal_delivery_event_ids() == frozenset({"$existing"})
+    async with bot.terminal_delivery_cleanup_guard("$existing") as may_clean:
+        assert may_clean is False
 
 
 @pytest.mark.asyncio

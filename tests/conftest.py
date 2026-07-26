@@ -1132,7 +1132,10 @@ def terminal_delivery_coordinator_for(
     )
     coordinator.redact = AsyncMock()
     coordinator.owned_delivery = AsyncMock(return_value=None)
-    coordinator.pending_target_event_ids = AsyncMock(return_value=frozenset())
+    stale_cleanup_guard = MagicMock()
+    stale_cleanup_guard.__aenter__ = AsyncMock(return_value=True)
+    stale_cleanup_guard.__aexit__ = AsyncMock(return_value=False)
+    coordinator.stale_cleanup_guard = MagicMock(return_value=stale_cleanup_guard)
     return coordinator
 
 

@@ -188,6 +188,26 @@ async def test_checkpoint_is_durable_before_first_matrix_attempt(tmp_path: Path)
 
 
 @pytest.mark.asyncio
+async def test_stale_cleanup_guard_serializes_with_delivery_and_rechecks_settled_receipt(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    coordinator, _hooks, _effects = _coordinator(store)
+
+    with patch("mindroom.terminal_delivery.send_message_result", return_value=_delivered()):
+        async with coordinator.stale_cleanup_guard(TARGET) as may_clean:
+            assert may_clean is True
+            delivery = asyncio.create_task(coordinator.commit_and_attempt(_intent()))
+            await asyncio.sleep(0)
+            assert not delivery.done()
+
+        assert (await delivery).status == "delivered"
+
+    async with coordinator.stale_cleanup_guard(TARGET) as may_clean:
+        assert may_clean is False
+
+
+@pytest.mark.asyncio
 async def test_old_checkpoint_does_not_own_a_newer_response_episode(tmp_path: Path) -> None:
     store = _store(tmp_path)
     blocked, _hooks, _effects = _coordinator(store, ready=False)

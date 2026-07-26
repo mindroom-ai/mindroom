@@ -122,6 +122,7 @@ from .turn_store import TurnStore, TurnStoreDeps
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
+    from contextlib import AbstractAsyncContextManager
     from datetime import datetime
     from pathlib import Path
 
@@ -612,9 +613,9 @@ class AgentBot:
             and self._runtime_view.client is not None
         )
 
-    async def pending_terminal_delivery_event_ids(self, room_id: str | None = None) -> frozenset[str]:
-        """Return visible event IDs owned by outstanding TurnRecord checkpoints."""
-        return await self._terminal_delivery_coordinator.pending_target_event_ids(room_id)
+    def terminal_delivery_cleanup_guard(self, target_event_id: str) -> AbstractAsyncContextManager[bool]:
+        """Serialize stale cleanup with terminal delivery for one visible event."""
+        return self._terminal_delivery_coordinator.stale_cleanup_guard(target_event_id)
 
     async def _wait_until_coalesced_dispatch_allowed(self, key: CoalescingKey) -> None:
         """Hold active follow-up dispatch until the response lock for its target is idle."""

@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import json
-from contextlib import suppress
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock, Mock, call, patch
@@ -72,8 +72,9 @@ USER_ID = "@user:example.com"
 OTHER_USER_ID = "@other-user:example.com"
 
 
-async def _no_pending_terminal_deliveries(_room_id: str) -> frozenset[str]:
-    return frozenset()
+@asynccontextmanager
+async def _allow_stale_cleanup(_target_event_id: str) -> AsyncIterator[bool]:
+    yield True
 
 
 def _make_config(tmp_path: Path) -> Config:
@@ -264,7 +265,7 @@ async def _run_cleanup(
         return await cleanup_stale_streaming_room(
             client,
             room_id=ROOM_ID,
-            actors={BOT_USER_ID: StaleStreamCleanupActor(client, None, _no_pending_terminal_deliveries)},
+            actors={BOT_USER_ID: StaleStreamCleanupActor(client, None, _allow_stale_cleanup)},
             bot_user_ids={BOT_USER_ID} if bot_user_ids is None else bot_user_ids,
             config=config,
             runtime_paths=runtime_paths_for(config),
@@ -2181,7 +2182,7 @@ async def test_targeted_recovery_scans_only_handoff_rooms_without_a_clock_cutoff
     """Replacement recovery must exclude unrelated rooms and preserve the Matrix clock domain."""
     config = _make_config(tmp_path)
     client = make_matrix_client_mock(user_id=BOT_USER_ID)
-    actors = {BOT_USER_ID: StaleStreamCleanupActor(client, MagicMock(), _no_pending_terminal_deliveries)}
+    actors = {BOT_USER_ID: StaleStreamCleanupActor(client, MagicMock(), _allow_stale_cleanup)}
 
     with (
         patch(
@@ -2253,7 +2254,7 @@ async def test_failed_targeted_room_scan_remains_unscanned_for_retry(tmp_path: P
     """A transient room-history failure must leave the claimed handoff retryable."""
     config = _make_config(tmp_path)
     client = make_matrix_client_mock(user_id=BOT_USER_ID)
-    actors = {BOT_USER_ID: StaleStreamCleanupActor(client, MagicMock(), _no_pending_terminal_deliveries)}
+    actors = {BOT_USER_ID: StaleStreamCleanupActor(client, MagicMock(), _allow_stale_cleanup)}
 
     with (
         patch(
@@ -3144,8 +3145,8 @@ async def test_recovery_scans_unique_rooms_and_resumes_before_slow_rooms_finish(
     router_client = make_matrix_client_mock(user_id=router_user_id)
     agent_client = make_matrix_client_mock(user_id=BOT_USER_ID)
     actors = {
-        router_user_id: StaleStreamCleanupActor(router_client, MagicMock(), _no_pending_terminal_deliveries),
-        BOT_USER_ID: StaleStreamCleanupActor(agent_client, MagicMock(), _no_pending_terminal_deliveries),
+        router_user_id: StaleStreamCleanupActor(router_client, MagicMock(), _allow_stale_cleanup),
+        BOT_USER_ID: StaleStreamCleanupActor(agent_client, MagicMock(), _allow_stale_cleanup),
     }
     slow_room_started = asyncio.Event()
     release_slow_room = asyncio.Event()
@@ -3244,7 +3245,7 @@ async def test_recovery_resumes_all_51_rooms_even_when_newest_room_finishes_last
         "@actual_router:localhost": StaleStreamCleanupActor(
             router_client,
             MagicMock(),
-            _no_pending_terminal_deliveries,
+            _allow_stale_cleanup,
         ),
     }
     room_ids = [f"!room-{index}:example.com" for index in range(51)]
@@ -3313,7 +3314,7 @@ async def test_recovery_without_resume_client_still_cleans_rooms(tmp_path: Path)
     config = _make_config(tmp_path)
     config.defaults.auto_resume_after_restart = True
     client = make_matrix_client_mock(user_id=BOT_USER_ID)
-    actors = {BOT_USER_ID: StaleStreamCleanupActor(client, MagicMock(), _no_pending_terminal_deliveries)}
+    actors = {BOT_USER_ID: StaleStreamCleanupActor(client, MagicMock(), _allow_stale_cleanup)}
     interrupted = InterruptedThread(
         room_id=ROOM_ID,
         thread_id="$thread",
@@ -3356,8 +3357,8 @@ async def test_shared_room_cleanup_routes_edits_through_each_message_owner(tmp_p
     first_client = make_matrix_client_mock(user_id=BOT_USER_ID)
     second_client = make_matrix_client_mock(user_id=OTHER_BOT_USER_ID)
     actors = {
-        BOT_USER_ID: StaleStreamCleanupActor(first_client, MagicMock(), _no_pending_terminal_deliveries),
-        OTHER_BOT_USER_ID: StaleStreamCleanupActor(second_client, MagicMock(), _no_pending_terminal_deliveries),
+        BOT_USER_ID: StaleStreamCleanupActor(first_client, MagicMock(), _allow_stale_cleanup),
+        OTHER_BOT_USER_ID: StaleStreamCleanupActor(second_client, MagicMock(), _allow_stale_cleanup),
     }
     scanned_state = stale_stream_cleanup_module._ScannedRoomMessageStates(
         message_states={
@@ -3403,6 +3404,71 @@ async def test_shared_room_cleanup_routes_edits_through_each_message_owner(tmp_p
     assert cleaned_count == 2
     assert interrupted == []
     assert [call.args[0] for call in cleanup_candidate.await_args_list] == [first_client, second_client]
+
+
+@pytest.mark.asyncio
+async def test_terminal_delivery_ownership_published_after_scan_blocks_stale_edit(tmp_path: Path) -> None:
+    """The final ownership check must happen after the room-history snapshot."""
+    config = _make_config(tmp_path)
+    client = make_matrix_client_mock(user_id=BOT_USER_ID)
+    guard_entered = asyncio.Event()
+    ownership_published = asyncio.Event()
+
+    @asynccontextmanager
+    async def terminal_delivery_guard(_target_event_id: str) -> AsyncIterator[bool]:
+        guard_entered.set()
+        await ownership_published.wait()
+        yield False
+
+    actors = {
+        BOT_USER_ID: StaleStreamCleanupActor(
+            client,
+            MagicMock(),
+            terminal_delivery_guard,
+        ),
+    }
+    scanned_state = stale_stream_cleanup_module._ScannedRoomMessageStates(
+        message_states={
+            "$target": stale_stream_cleanup_module._MessageState(
+                latest_body="Partial",
+                latest_timestamp=NOW_MS - STALE_AGE_MS,
+                latest_event_id="$target",
+                stream_status="streaming",
+                bot_user_id=BOT_USER_ID,
+            ),
+        },
+        auto_resume_target_event_ids=set(),
+    )
+
+    with (
+        patch("mindroom.matrix.stale_stream_cleanup.time.time", return_value=NOW_MS / 1000),
+        patch(
+            "mindroom.matrix.stale_stream_cleanup._scan_room_message_states",
+            new=AsyncMock(return_value=scanned_state),
+        ),
+        patch(
+            "mindroom.matrix.stale_stream_cleanup._cleanup_candidate_message",
+            new=AsyncMock(return_value=(True, None)),
+        ) as cleanup_candidate,
+    ):
+        cleanup = asyncio.create_task(
+            cleanup_stale_streaming_room(
+                client,
+                room_id=ROOM_ID,
+                actors=actors,
+                bot_user_ids=set(actors),
+                config=config,
+                runtime_paths=runtime_paths_for(config),
+                startup_cutoff_ms=NOW_MS,
+            ),
+        )
+        await asyncio.wait_for(guard_entered.wait(), timeout=1.0)
+        ownership_published.set()
+        cleaned_count, interrupted = await asyncio.wait_for(cleanup, timeout=1.0)
+
+    assert cleaned_count == 0
+    assert interrupted == []
+    cleanup_candidate.assert_not_awaited()
 
 
 @pytest.mark.asyncio

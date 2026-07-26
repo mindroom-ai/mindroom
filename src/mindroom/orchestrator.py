@@ -1061,7 +1061,7 @@ class _MultiAgentOrchestrator:
             actors[bot.agent_user.user_id] = StaleStreamCleanupActor(
                 client=bot.client,
                 conversation_cache=bot._conversation_cache,
-                pending_terminal_delivery_event_ids=bot.pending_terminal_delivery_event_ids,
+                terminal_delivery_cleanup_guard=bot.terminal_delivery_cleanup_guard,
             )
         if not actors:
             return
