@@ -242,6 +242,18 @@ class TurnRecord:
         """Return the physical prompt owner for a source or discovery alias."""
         return _prompt_source_event_id(self.source_event_metadata, event_id)
 
+    def requester_id_for_source(self, event_id: str) -> str | None:
+        """Return the exact requester for one source, or None when the record cannot prove one.
+
+        A single-source turn is one requester by construction, so it falls back to the turn-level
+        requester. A coalesced turn needs per-source metadata: records persisted before that field
+        existed, and maps normalization pruned an entry from, cannot attribute their sources.
+        """
+        if self.source_event_metadata is None:
+            return self.requester_id if not self.is_coalesced else None
+        metadata = self.source_event_metadata.get(self.prompt_source_event_id(event_id))
+        return metadata.sender if metadata is not None else None
+
     @property
     def replay_source_event_ids(self) -> tuple[str, ...]:
         """Return source IDs whose content remains eligible for replay or regeneration."""

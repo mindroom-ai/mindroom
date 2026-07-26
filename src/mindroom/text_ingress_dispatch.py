@@ -297,16 +297,11 @@ def _turn_sources_all_from_requester(handled_turn: TurnRecord, requester_user_id
     """Return whether every replayable source in one turn was sent by ``requester_user_id``.
 
     Whole-turn suppression settles every source in a coalesced batch, so it is only safe when the
-    turn provably belongs to that one requester. A source without per-source metadata cannot prove
-    ownership, so it fails closed: records persisted before the metadata field existed still decode
-    under the current ledger schema version, and normalization drops entries it cannot read.
-    Redacted sources are excluded because they own no reply.
+    turn provably belongs to that one requester, and a source the record cannot attribute fails
+    closed. Redacted sources are excluded because they own no reply.
     """
-    source_event_metadata = handled_turn.source_event_metadata
-    if source_event_metadata is None:
-        return not handled_turn.is_coalesced
     return all(
-        (metadata := source_event_metadata.get(source_event_id)) is not None and metadata.sender == requester_user_id
+        handled_turn.requester_id_for_source(source_event_id) == requester_user_id
         for source_event_id in handled_turn.replay_source_event_ids
     )
 
