@@ -661,3 +661,25 @@ async def test_only_a_retryable_shared_result_earns_the_joiner_its_own_flight(
     await speculative
 
     assert flights == expected_flights
+
+
+@pytest.mark.asyncio
+async def test_dropping_a_finished_flight_drops_its_tier() -> None:
+    """Ownership and tier must be forgotten together, or the tier outlives every flight.
+
+    Exercised at the accounting itself: the gap is between a task finishing and its done callback
+    running, and whoever reads ownership inside that gap drops the task the callback was going to.
+    """
+    registry = ThreadRepairRegistry()
+    key = _flight_key("$thread", hydrate_sidecars=False)
+
+    async def scan() -> str:
+        return "scanned"
+
+    finished = asyncio.create_task(scan())
+    await finished
+    registry._tasks[key] = finished
+    registry._speculative_flights.add(key)
+
+    assert registry._active_task(key) is None
+    assert registry._speculative_flights == set()

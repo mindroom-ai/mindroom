@@ -254,7 +254,7 @@ async def test_write_policy_mutation_never_exposes_an_invalid_snapshot(tmp_path:
 async def test_mutation_for_a_redacted_event_never_writes_its_payload(cache: ConversationEventCache) -> None:
     """A redacted event must not reach the point-lookup table, snapshot or no snapshot."""
     redacted_reply = _event("$redacted", 2000, thread_id=THREAD_ID)
-    await cache.store_events_batch([(ROOM_ID, "$redacted", redacted_reply)])
+    await cache.store_events_batch([("$redacted", ROOM_ID, redacted_reply)])
     await cache.redact_event(ROOM_ID, "$redacted")
     assert await cache.get_event(ROOM_ID, "$redacted") is None
 
@@ -286,6 +286,45 @@ async def test_a_failed_cache_write_never_leaves_a_trusted_snapshot(tmp_path: Pa
             cache,
             "apply_thread_mutation_append",
             AsyncMock(side_effect=RuntimeError("cache write failed")),
+        ):
+            await _apply_thread_message_mutation(
+                cache_ops=cache_ops,
+                room_id=ROOM_ID,
+                event_info=EventInfo.from_event(event_source),
+                impact=impact,
+                event_source=event_source,
+                event_id="$live",
+                context="sync",
+                room_level_skip_message="skip",
+                invalidate_on_append_failure=True,
+            )
+        state = await cache.get_thread_cache_state(ROOM_ID, THREAD_ID)
+    finally:
+        await root_cache.close()
+
+    assert thread_cache_rejection_reason(state) == "thread_invalidated_after_validation"
+    assert state is not None
+    assert state.invalidation_reason == "sync_append_failed"
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_cache_write_never_leaves_a_trusted_snapshot(tmp_path: Path) -> None:
+    """Cancellation rolls the transaction back too, so it must still leave a durable marker."""
+    root_cache = SqliteEventCache(tmp_path / "event_cache.db")
+    cache = root_cache.for_principal(PRINCIPAL_ID)
+    await cache.initialize()
+    cache_ops = _cache_ops(tmp_path, cache)
+    impact = MutationThreadImpact(state=MutationThreadImpactState.THREADED, thread_id=THREAD_ID)
+    event_source = _event("$live", 2000, thread_id=THREAD_ID)
+
+    async def cancelled_append(*_args: object, **_kwargs: object) -> ThreadAppendOutcome:
+        raise asyncio.CancelledError
+
+    try:
+        await _seed_valid_thread(cache)
+        with (
+            patch.object(cache, "apply_thread_mutation_append", cancelled_append),
+            pytest.raises(asyncio.CancelledError),
         ):
             await _apply_thread_message_mutation(
                 cache_ops=cache_ops,

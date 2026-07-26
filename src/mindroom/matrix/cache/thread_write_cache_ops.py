@@ -23,6 +23,7 @@ This is the application layer below the write policies in ``thread_writes``; it 
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING, Any
 
 from mindroom.matrix.thread_bookkeeping import MutationThreadImpact, MutationThreadImpactState
@@ -31,7 +32,6 @@ from .thread_cache_invalidation import mark_room_threads_stale_fail_closed, mark
 from .thread_cache_state import ThreadAppendOutcome
 
 if TYPE_CHECKING:
-    import asyncio
     from collections.abc import Callable, Coroutine, Sequence
 
     import structlog
@@ -317,7 +317,7 @@ class ThreadMutationCacheOps:
                 event_source,
                 append_failed_reason=append_failed_reason,
             )
-        except Exception as exc:
+        except BaseException as exc:
             self.logger.warning(
                 "Failed to append thread event to cache",
                 room_id=room_id,
@@ -329,9 +329,13 @@ class ThreadMutationCacheOps:
             # The atomic operation rolled back, so it wrote no marker either. Without one, a thread
             # that was trusted before this mutation stays trusted while missing the event, so the
             # marker has to be written separately and fail closed exactly as pre-invalidation did.
-            await self.invalidate_known_thread(room_id, thread_id, reason=append_failed_reason)
+            # Cancellation rolls the transaction back the same way and is not an ``Exception``, so it
+            # is caught here too, and the marker is shielded so a second cancellation cannot skip it.
+            await asyncio.shield(
+                self.invalidate_known_thread(room_id, thread_id, reason=append_failed_reason),
+            )
             self._schedule_repair_if_available(room_id, thread_id)
-            if raise_on_failure:
+            if raise_on_failure or not isinstance(exc, Exception):
                 raise
             return False
 

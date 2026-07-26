@@ -111,7 +111,10 @@ class ThreadRepairRegistry:
         if task is None:
             return None
         if task.done():
+            # Dropping ownership here means the done callback can no longer match this task, so the
+            # flight's tier has to be forgotten in the same step or it outlives every flight.
             self._tasks.pop(key, None)
+            self._speculative_flights.discard(key)
             return None
         return task
 

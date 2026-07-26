@@ -24,7 +24,7 @@ from typing import Any
 from unittest.mock import AsyncMock
 
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
-from mindroom.matrix.cache.thread_cache_state import ThreadCacheReplaceOutcome
+from mindroom.matrix.cache.thread_cache_state import ThreadAppendOutcome, ThreadCacheReplaceOutcome
 from mindroom.matrix.client_thread_history import _load_cached_thread_history_if_usable
 from mindroom.matrix.thread_resolution_reuse import ThreadResolutionReuseCache
 
@@ -185,8 +185,13 @@ async def run_benchmark(*, visible_messages: int, edits_per_agent_message: int, 
                 appended = _appended_user_message(last_timestamp, turn)
                 last_timestamp = int(appended["origin_server_ts"])
                 await event_cache.mark_thread_stale(ROOM, THREAD, reason="live_thread_mutation")
-                assert await event_cache.append_event(ROOM, THREAD, appended)
-                assert await event_cache.revalidate_thread_after_incremental_update(ROOM, THREAD)
+                append_outcome = await event_cache.apply_thread_mutation_append(
+                    ROOM,
+                    THREAD,
+                    appended,
+                    append_failed_reason="live_append_failed",
+                )
+                assert append_outcome is ThreadAppendOutcome.APPENDED
                 elapsed_ms, visible, kind = await _timed_resolve(event_cache, reuse=reuse)
                 incremental_timings.append(elapsed_ms)
             _report(
