@@ -58,6 +58,18 @@ class _RetainedDelta:
     retained_at: float
 
 
+@dataclass(slots=True)
+class _SpeculativeClaim:
+    """One thread's scheduling claim and who currently owns it.
+
+    Ownership moves exactly once, from the scheduling task to the registered flight. Both sides
+    release by token identity, so neither can drop a claim belonging to a later attempt.
+    """
+
+    token: object
+    handed_off: bool = False
+
+
 @dataclass(frozen=True, slots=True)
 class _RepairFailureBackoff:
     """Current capped delay after consecutive repair failures."""
@@ -98,7 +110,11 @@ class ThreadRepairRegistry:
     _deltas: dict[_ThreadRepairDeltaKey, dict[str, _RetainedDelta]] = field(default_factory=dict, init=False)
     _speculative_cooldowns: dict[_ThreadRepairDeltaKey, float] = field(default_factory=dict, init=False)
     _interactive_joins: dict[_ThreadRepairFlightKey, int] = field(default_factory=dict, init=False)
-    _reserved_speculative: dict[_ThreadRepairDeltaKey, object] = field(default_factory=dict, init=False)
+    _reserved_speculative: dict[_ThreadRepairDeltaKey, _SpeculativeClaim] = field(
+        default_factory=dict,
+        init=False,
+    )
+    _flight_claims: dict[_ThreadRepairFlightKey, object] = field(default_factory=dict, init=False)
     _repair_slots: asyncio.Semaphore = field(init=False, repr=False)
     _running_speculative_repairs: int = field(default=0, init=False)
     _speculative_suppression_depth: int = field(default=0, init=False)
@@ -124,12 +140,16 @@ class ThreadRepairRegistry:
             return None
         if task.done():
             self._tasks.pop(key, None)
+            self._release_flight_claim(self._thread_key(key), self._flight_claims.pop(key, None))
             return None
         return task
 
     def _clear_task(self, key: _ThreadRepairFlightKey, task: asyncio.Task[object]) -> None:
         if self._tasks.get(key) is task:
             self._tasks.pop(key, None)
+            # A flight cancelled before its body ran still owns a claim; only this flight's own
+            # token is released, so a later attempt on the same thread keeps its own.
+            self._release_flight_claim(self._thread_key(key), self._flight_claims.pop(key, None))
 
     def _has_active_task(self, key: _ThreadRepairDeltaKey) -> bool:
         """Return whether any caller contract owns this thread's repair."""
@@ -241,12 +261,34 @@ class ThreadRepairRegistry:
         if self.speculative_suppression_reason(key) is not None:
             return None
         token = object()
-        self._reserved_speculative[key] = token
+        self._reserved_speculative[key] = _SpeculativeClaim(token=token)
         return token
 
     def release_speculative_repair(self, key: _ThreadRepairDeltaKey, token: object) -> None:
-        """Drop a scheduling claim, but only while this token still holds it."""
-        if self._reserved_speculative.get(key) is token:
+        """Drop a scheduling claim, but only while the scheduling task still owns this token.
+
+        Once the claim has been handed to a registered flight the scheduling task is no longer its
+        owner, so cancelling that task must leave the claim in place: the flight it registered is
+        still queued and still has to be bounded.
+        """
+        claim = self._reserved_speculative.get(key)
+        if claim is not None and claim.token is token and not claim.handed_off:
+            del self._reserved_speculative[key]
+
+    def _hand_off_claim(self, key: _ThreadRepairDeltaKey) -> object | None:
+        """Move this thread's claim from the scheduling task to the flight being registered."""
+        claim = self._reserved_speculative.get(key)
+        if claim is None:
+            return None
+        claim.handed_off = True
+        return claim.token
+
+    def _release_flight_claim(self, key: _ThreadRepairDeltaKey, token: object | None) -> None:
+        """Drop a claim a flight owns, identified by token so a stale body cannot take a newer one."""
+        if token is None:
+            return
+        claim = self._reserved_speculative.get(key)
+        if claim is not None and claim.token is token:
             del self._reserved_speculative[key]
 
     @contextmanager
@@ -319,6 +361,7 @@ class ThreadRepairRegistry:
         run_repair: Callable[[], Awaitable[T]],
         *,
         speculative: bool,
+        claim_token: object | None = None,
     ) -> T:
         """Run one admitted repair while holding exactly one global slot.
 
@@ -334,7 +377,10 @@ class ThreadRepairRegistry:
             # which then waits behind the coordinator barrier without holding a slot or counting
             # against the speculative budget. Releasing at registration would leave that whole wait
             # unbounded, so the claim is carried until here, where the scan gates below take over.
-            self._reserved_speculative.pop(self._thread_key(key), None)
+            # Released by the token this flight was registered with, so a body that outlived a
+            # `clear_room` cannot drop the claim a later attempt on the same thread now holds.
+            self._release_flight_claim(self._thread_key(key), claim_token)
+            self._flight_claims.pop(key, None)
         if speculative and self._interactive_joins.get(key):
             speculative = False
         if speculative:
@@ -412,8 +458,13 @@ class ThreadRepairRegistry:
         if admission_error is not None:
             raise admission_error
 
-        task = schedule(lambda: self._run_in_repair_slot(key, run_repair, speculative=speculative))
+        claim_token = self._hand_off_claim(self._thread_key(key)) if speculative else None
+        task = schedule(
+            lambda: self._run_in_repair_slot(key, run_repair, speculative=speculative, claim_token=claim_token),
+        )
         self._tasks[key] = task
+        if claim_token is not None:
+            self._flight_claims[key] = claim_token
         task.add_done_callback(lambda done_task: self._clear_task(key, done_task))
         return await asyncio.shield(task)
 
@@ -482,4 +533,5 @@ class ThreadRepairRegistry:
         self._speculative_cooldowns.clear()
         self._interactive_joins.clear()
         self._reserved_speculative.clear()
+        self._flight_claims.clear()
         self._running_speculative_repairs = 0

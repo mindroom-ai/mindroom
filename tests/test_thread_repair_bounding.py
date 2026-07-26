@@ -802,3 +802,108 @@ async def test_flights_queued_behind_the_barrier_stay_globally_bounded() -> None
     assert queued_flights <= budget, (
         f"{queued_flights} flights queued behind the barrier against a speculative budget of {budget}"
     )
+
+
+@pytest.mark.asyncio
+async def test_cancelling_the_scheduler_after_registration_keeps_the_flight_bounded() -> None:
+    """The scheduling task stops owning the claim once it has registered a flight.
+
+    ``run`` shields the flight, so cancelling the scheduling task leaves that flight queued behind
+    the coordinator barrier. Releasing the claim from the scheduler's done callback would drop the
+    only thing bounding it, and every wave could add another.
+    """
+    registry = ThreadRepairRegistry()
+    budget = registry.max_concurrent_speculative_repairs
+    barrier = asyncio.Event()
+
+    def queued_behind_barrier[T](repair_factory: Callable[[], Awaitable[T]]) -> asyncio.Task[T]:
+        async def runner() -> T:
+            await barrier.wait()
+            return await repair_factory()
+
+        return asyncio.create_task(runner())
+
+    async def scan() -> str:
+        return "scanned"
+
+    outers: list[asyncio.Task[str]] = []
+    try:
+        for wave in range(20):
+            for slot in range(budget):
+                thread_id = f"$w{wave}-t{slot}"
+                thread_key = ("@agent:localhost", ROOM_ID, thread_id)
+                token = registry.reserve_speculative_repair(thread_key)
+                if token is None:
+                    continue
+                outer = asyncio.create_task(
+                    registry.run(
+                        _flight_key(thread_id, hydrate_sidecars=False),
+                        schedule=queued_behind_barrier,
+                        repair=scan,
+                        result_arms_backoff=lambda _r: False,
+                        speculative=True,
+                    ),
+                )
+                outers.append(outer)
+                outer.add_done_callback(
+                    lambda _task, key=thread_key, tok=token: registry.release_speculative_repair(key, tok),
+                )
+            await asyncio.sleep(0)
+            # Cancel the schedulers only once their flights are registered and queued.
+            for outer in outers:
+                outer.cancel()
+            await asyncio.gather(*outers, return_exceptions=True)
+            await _drain_done_callbacks()
+
+        queued_flights = len(registry._tasks)
+    finally:
+        barrier.set()
+        await asyncio.sleep(0)
+
+    assert queued_flights <= budget, (
+        f"{queued_flights} flights survived their cancelled schedulers against a budget of {budget}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_stale_queued_body_cannot_drop_a_reclaimed_thread() -> None:
+    """A body that outlived a `clear_room` must not release the claim a later attempt now holds."""
+    registry = ThreadRepairRegistry()
+    thread_key = ("@agent:localhost", ROOM_ID, "$thread")
+    flight_key = _flight_key("$thread", hydrate_sidecars=False)
+    barrier = asyncio.Event()
+
+    def queued_behind_barrier[T](repair_factory: Callable[[], Awaitable[T]]) -> asyncio.Task[T]:
+        async def runner() -> T:
+            await barrier.wait()
+            return await repair_factory()
+
+        return asyncio.create_task(runner())
+
+    async def scan() -> str:
+        return "scanned"
+
+    assert registry.reserve_speculative_repair(thread_key) is not None
+    stale = asyncio.create_task(
+        registry.run(
+            flight_key,
+            schedule=queued_behind_barrier,
+            repair=scan,
+            result_arms_backoff=lambda _r: False,
+            speculative=True,
+        ),
+    )
+    await asyncio.sleep(0)
+    assert flight_key in registry._tasks, "the flight never registered, so this proves nothing"
+
+    registry.clear_room("@agent:localhost", ROOM_ID)
+    reclaimed = registry.reserve_speculative_repair(thread_key)
+    assert reclaimed is not None
+
+    barrier.set()
+    await asyncio.gather(stale, return_exceptions=True)
+    await _drain_done_callbacks()
+
+    surviving = registry._reserved_speculative.get(thread_key)
+    assert surviving is not None, "the stale body released the reclaimed thread's newer claim"
+    assert surviving.token is reclaimed
