@@ -433,6 +433,56 @@ def test_clear_room_drops_only_matching_retained_deltas() -> None:
     assert [source["event_id"] for source in registry.pending_deltas(kept)] == ["$kept"]
 
 
+@pytest.mark.asyncio
+async def test_clear_room_detaches_active_flight_and_ignores_its_late_failure() -> None:
+    """A rejoin must not join pre-departure work or inherit its later failure backoff."""
+    registry = ThreadRepairRegistry()
+    key = ("@agent:localhost", "!room:localhost", "$thread", True, False)
+    old_started = asyncio.Event()
+    release_old = asyncio.Event()
+    new_started = asyncio.Event()
+
+    async def old_repair() -> ThreadCacheReplaceOutcome:
+        old_started.set()
+        await release_old.wait()
+        return ThreadCacheReplaceOutcome.HARD_FAILURE
+
+    async def new_repair() -> ThreadCacheReplaceOutcome:
+        new_started.set()
+        return ThreadCacheReplaceOutcome.STORED
+
+    old_flight = asyncio.create_task(
+        registry.run(
+            key,
+            schedule=_schedule,
+            repair=old_repair,
+            result_arms_backoff=lambda result: result is ThreadCacheReplaceOutcome.HARD_FAILURE,
+        ),
+    )
+    await old_started.wait()
+    registry.clear_room("@agent:localhost", "!room:localhost")
+    new_flight = asyncio.create_task(
+        registry.run(
+            key,
+            schedule=_schedule,
+            repair=new_repair,
+            result_arms_backoff=lambda result: result is ThreadCacheReplaceOutcome.HARD_FAILURE,
+        ),
+    )
+
+    try:
+        await asyncio.wait_for(new_started.wait(), timeout=1.0)
+        new_result = await new_flight
+    finally:
+        release_old.set()
+        old_result = await old_flight
+
+    assert new_result.value is ThreadCacheReplaceOutcome.STORED
+    assert new_result.joined is False
+    assert old_result.value is ThreadCacheReplaceOutcome.HARD_FAILURE
+    assert registry.retry_after_seconds(key) == 0.0
+
+
 def test_retained_deltas_expire_once_any_new_scan_would_observe_them() -> None:
     """Unacknowledged deltas must not accumulate for threads that never install a snapshot."""
     now = 100.0

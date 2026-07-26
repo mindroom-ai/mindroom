@@ -131,12 +131,14 @@ class ThreadRepairRegistry:
             try:
                 value = await repair()
             except Exception:
-                self._record_failure(key)
+                if self._tasks.get(key) is asyncio.current_task():
+                    self._record_failure(key)
                 raise
-            if result_arms_backoff(value):
-                self._record_failure(key)
-            else:
-                self._failure_backoffs.pop(key, None)
+            if self._tasks.get(key) is asyncio.current_task():
+                if result_arms_backoff(value):
+                    self._record_failure(key)
+                else:
+                    self._failure_backoffs.pop(key, None)
             return value
 
         task = schedule(run_repair)
@@ -188,6 +190,7 @@ class ThreadRepairRegistry:
 
     def clear_room(self, coordination_scope: str, room_id: str) -> None:
         """Drop retained deltas and failure history at one membership boundary."""
+        self._tasks = {key: task for key, task in self._tasks.items() if key[:2] != (coordination_scope, room_id)}
         self._deltas = {key: deltas for key, deltas in self._deltas.items() if key[:2] != (coordination_scope, room_id)}
         self._failure_backoffs = {
             key: backoff for key, backoff in self._failure_backoffs.items() if key[:2] != (coordination_scope, room_id)
