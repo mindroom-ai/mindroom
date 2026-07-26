@@ -1,14 +1,15 @@
 # Thread edit integrity gate status
 
-Updated 2026-07-25 after the exact-`845b12e1d` full-suite follow-up.
+Updated 2026-07-25 after the exact-`708ebfffa` malformed-relation follow-up and current-main sync.
 
 ## Exact target
 
 - PR: `mindroom-ai/mindroom#1641`
 - Branch: `fix/thread-edit-integrity`
-- Latest production commit: `71c1ac07c`
-- Current base and merge base: `f6190d4c2457381e63f40f99fb27e794ae8667b8`
-- The full-suite follow-up and corrected intended-valid fixtures are pushed.
+- Latest production commit: `4cb69803f`
+- Current base and merge base: `5d149adb71a71770d60544c6a5f00b3e863bcdc8`
+- Current pushed head: `708ebfffa3c5c5eab1e897637aabd8cd7a32219c`
+- The malformed-relation follow-ups and current-main synchronization are pushed.
 - The tracked tree is clean apart from this crash-handoff successor.
 - Resolve local, remote, and PR heads before counting any exact-head gate.
 - Resolve and compare local, origin, and GitHub heads before counting any gate.
@@ -40,6 +41,9 @@ Updated 2026-07-25 after the exact-`845b12e1d` full-suite follow-up.
 - Known invalid edits resolve room-level; unavailable replacement ancestry remains indeterminate so mutation writes fail closed.
 - The current follow-up supplies the exact inbound edit source to canonical validation before it is persisted and reuses one fetched original for relation resolution.
 - Intended-valid tests now use same-sender originals and complete point-event envelopes; missing-original mutation tests assert direct fail-closed invalidation without an obsolete index lookup.
+- `9c25053bf` rejects malformed successful point lookups, malformed sync relations, and malformed cached child proof before mutation ancestry can trust them.
+- `4cb69803f` centralizes valid thread-relation source admission in `matrix.media` and applies it to degraded replay, preventing malformed cached relations from suppressing a valid turn.
+- `708ebfffa` synchronizes current `origin/main` without conflict after the two TDD corrections.
 
 ## Reconciled review status
 
@@ -69,10 +73,16 @@ Updated 2026-07-25 after the exact-`845b12e1d` full-suite follow-up.
 - Exact-`845b12e1d` full pytest exposed sixteen deterministic failures in the newly tightened seams.
 - One was a real current-event visibility gap; the remaining failures were incomplete envelopes, cross-sender fixtures that claimed to be valid, or obsolete lookup-count expectations.
 - The exact failed files were corrected without weakening production validation.
+- The fresh exact-`ac144420b` native review found malformed `nio.BadEvent` relations still entering point mutation ancestry, sync admission, cached root proof, and degraded replay.
+- All four claims reproduced as RED regressions before implementation and pass after `9c25053bf` plus `4cb69803f`.
+- The same review rejected a suspected edit-of-edit root-proof claim because it did not reproduce.
+- Exact-`ac144420b` review, CI, full-suite, and static evidence are stale after the production corrections and current-main merge.
 - The withdrawn edit-index timestamp-poison claim remains excluded because it required direct inconsistent SQL writes outside production paths.
 - This correction adds `+196/-15` production lines, net `+181`.
-- Production source against current `main` is `+1924/-1179`, net `+745`.
+- Production source against current `main` is `+1937/-1178`, net `+759`.
 - The full-suite follow-up adds `+28/-4` production lines, net `+24`.
+- The malformed mutation correction adds `+18/-6` production lines, net `+12`.
+- The degraded replay follow-up adds `+16/-18` production lines, net `-2`.
 
 ## Validation already completed
 
@@ -111,13 +121,17 @@ Updated 2026-07-25 after the exact-`845b12e1d` full-suite follow-up.
 - The expanded seventeen-file owning and affected selection passes `958` tests, including SQLite, PostgreSQL, fanout, seeded fuzz, inbound context, sync/live mutation, and turn control.
 - Ruff, format, `ty`, Tach dependencies/interfaces, and diff checks pass for the current correction.
 - Ruff, format, `ty`, Tach dependencies/interfaces, and diff checks pass for the full-suite follow-up.
+- The four malformed-relation cases failed before implementation and their nine state, wrong-room, malformed, point, sync, root-proof, and replay variants pass afterward.
+- The expanded live-coalescing, mutation, membership, read-guard, tag, and media owning selection passes after synchronizing current `main`.
+- Ruff, format, `ty`, Tach dependencies/interfaces, module privacy, focused pre-commit, and diff checks pass for both malformed-relation commits.
+- Exact-`ac144420b` full pytest passed `12000` tests with `54` skipped before the production correction; it is baseline evidence only and must be rerun on `708ebfffa`.
 - Git author was verified as `Bas Nijholt <bas@nijho.lt>` before every new commit.
 
 ## Pending exact-head gates
 
-- Commit and push this crash-handoff successor, then freeze its exact head.
-- Fresh CI must complete on that exact head.
-- A fresh independent native Codex correctness review is required on that exact head.
+- Commit and push this crash-handoff successor, then freeze the resulting exact head.
+- Fresh CI must complete on the final exact head.
+- A fresh independent native Codex correctness review is required on the final exact head.
 - Exact-head PostgreSQL owning and stress selections are required.
 - Exact-head full pytest is required.
 - Exact-head Tach and all-file pre-commit are required.
