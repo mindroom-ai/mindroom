@@ -3521,9 +3521,34 @@ depends_on = [
 path = "mindroom.knowledge.index_metadata"
 depends_on = []
 visibility = [
+    "mindroom.knowledge.candidate_checkpoint",
     "mindroom.knowledge.manager",
     "mindroom.knowledge.registry",
 ]
+
+[[modules]]
+path = "mindroom.knowledge.candidate_checkpoint"
+depends_on = [
+    "mindroom.knowledge.index_metadata",
+    "mindroom.knowledge.indexing_config",
+]
+visibility = [
+    "mindroom.knowledge.manager",
+    "mindroom.knowledge.status",
+]
+
+[[modules]]
+path = "mindroom.knowledge.embedding_batch"
+depends_on = [
+    "mindroom.embedding_errors",
+    "mindroom.logging_config",
+]
+visibility = ["mindroom.knowledge.manager"]
+
+[[modules]]
+path = "mindroom.knowledge.index_retry"
+depends_on = ["mindroom.embedding_errors"]
+visibility = ["mindroom.knowledge.manager"]
 
 [[modules]]
 path = "mindroom.knowledge.registry"
@@ -3551,8 +3576,11 @@ depends_on = [
     "mindroom.constants",
     "mindroom.embedding_errors",
     "mindroom.embedding_factory",
+    "mindroom.knowledge.candidate_checkpoint",
+    "mindroom.knowledge.embedding_batch",
     "mindroom.knowledge.file_listing",
     "mindroom.knowledge.index_metadata",
+    "mindroom.knowledge.index_retry",
     "mindroom.knowledge.indexing_config",
     "mindroom.knowledge.redaction",
     "mindroom.strict_knowledge",
@@ -3570,6 +3598,7 @@ depends_on = []
 path = "mindroom.knowledge.status"
 depends_on = [
     "mindroom.knowledge.availability",
+    "mindroom.knowledge.candidate_checkpoint",
     "mindroom.knowledge.registry",
 ]
 

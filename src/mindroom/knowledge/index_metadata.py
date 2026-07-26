@@ -79,6 +79,18 @@ def parse_index_metadata_fields(
     )
 
 
+def write_json_atomic(path: Path, payload: Mapping[str, object]) -> None:
+    """Write one JSON document so readers only ever see a complete file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+    try:
+        tmp_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+        tmp_path.replace(path)
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        raise
+
+
 def write_index_metadata_payload(  # noqa: D103
     metadata_path: Path,
     *,
@@ -86,16 +98,11 @@ def write_index_metadata_payload(  # noqa: D103
     status: str,
     **fields: object | None,
 ) -> None:
-    payload = {
-        "settings": dict(settings),
-        "status": status,
-        **{key: value for key, value in fields.items() if value is not None},
-    }
-    metadata_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = metadata_path.with_name(f".{metadata_path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
-    try:
-        tmp_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
-        tmp_path.replace(metadata_path)
-    except Exception:
-        tmp_path.unlink(missing_ok=True)
-        raise
+    write_json_atomic(
+        metadata_path,
+        {
+            "settings": dict(settings),
+            "status": status,
+            **{key: value for key, value in fields.items() if value is not None},
+        },
+    )

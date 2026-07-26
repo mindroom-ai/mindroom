@@ -13187,11 +13187,15 @@ Bundled container images already include it.
 - Chat and runtime requests never wait for Git sync or indexing.
 - Missing, stale, or failed knowledge schedules a per-binding refresh and the current request continues with availability metadata.
 - Explicit dashboard/API reindex or sync runs Git sync first for Git-backed bases.
-- Semantic Git refresh then rebuilds a candidate index, while files-only Git refresh publishes source metadata.
+- Semantic Git refresh then advances a candidate index, while files-only Git refresh publishes source metadata.
 - When `lfs: true`, MindRoom disables implicit LFS smudge during clone/checkout/reset and explicitly hydrates the checkout after sync, keeping the working tree complete even when indexing filters only include some file types.
 - Local edits to Git-tracked files are discarded during refresh sync, and tracked deletions are restored from the remote checkout.
 - Git-backed bases reject dashboard/API file upload and delete mutations; update the repository and sync or reindex instead.
 - Successful refresh publishes a new last successfully published index while failed refresh preserves the previous one and records the error in status metadata.
+- Semantic refresh is resumable: an interrupted or failed build keeps its private candidate index and continues it on the next refresh instead of restarting from zero.
+- A candidate is only continued when its recorded indexing settings, embedder identity, and source identity still match; otherwise it is discarded and one clean candidate is started.
+- Source changes during a build are reconciled against the candidate, so unchanged files keep their vectors, changed files are re-embedded, and deleted files have their vectors removed.
+- Transient embedding failures (timeouts, connection errors, HTTP 408/429/5xx) are retried with bounded backoff; permanent failures such as authentication errors stop the pass immediately and preserve the candidate.
 
 ### File Filtering with Patterns
 
@@ -13298,6 +13302,11 @@ The base ID is sanitized to alphanumerics, hyphens, and underscores only, and th
 For PrivateAgentKnowledge, the effective private-root path is part of that hash, so each requester-local root gets an isolated index.
 File-mode refreshes may write lightweight source metadata, but local file-only bases do not need a vector database.
 
+While a semantic build is in progress, that directory also holds `candidate_index.json` and `candidate_index.jsonl`, the durable record of which files the in-progress candidate has already indexed.
+Those files are removed once the candidate is published.
+At most one owned candidate collection per knowledge base is retained, and superseded owned candidates are deleted.
+Collections whose ownership cannot be proven from the base identity are preserved and reported rather than removed, so unrelated collections in that directory may remain.
+
 The storage path defaults to `mindroom_data/` next to your `config.yaml`, or can be set with `MINDROOM_STORAGE_PATH`.
 
 ## Dashboard Management
@@ -13310,7 +13319,7 @@ The web dashboard provides a Knowledge tab for managing knowledge bases without 
 - Configure Git sync settings
 - Upload and remove files for non-Git-backed bases
 - Trigger a full reindex or Git sync on demand
-- Monitor indexing status (file count vs. indexed count)
+- Monitor published indexing status (file count vs. indexed count)
 - Assign knowledge bases to agents from the Agents tab
 
 ## API Endpoints
