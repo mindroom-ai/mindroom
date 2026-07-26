@@ -880,23 +880,6 @@ class MatrixConversationCache(ConversationCacheProtocol):
 
         principal_id = self.runtime.event_cache.principal_id
 
-        def repair_attempt_limit() -> int | None:
-            """Resolve the attempt budget when the flight runs, not when it is queued.
-
-            A speculative scan nobody is waiting on gets one attempt, but by the time it runs an
-            interactive caller may have joined this exact flight and be waiting on its result. That
-            caller is owed the retry a lost guarded replacement normally earns it.
-            """
-            if not speculative or coordinator.thread_repair_has_interactive_waiter(
-                room_id,
-                thread_id,
-                coordination_scope=principal_id,
-                hydrate_sidecars=wants_full_history,
-                allow_stale_fallback=allows_stale_fallback,
-            ):
-                return None
-            return _SPECULATIVE_REPAIR_ATTEMPTS
-
         async def repair() -> ThreadHistoryResult:
             def pending_event_sources() -> tuple[dict[str, Any], ...]:
                 return coordinator.pending_thread_repair_deltas(
@@ -916,7 +899,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
                 cache_reject_diagnostics=cache_reject_diagnostics,
                 trusted_sender_ids=self._trusted_sender_ids(),
                 retained_event_sources=retained_event_source_provider,
-                max_repair_attempts=repair_attempt_limit(),
+                max_repair_attempts=_SPECULATIVE_REPAIR_ATTEMPTS if speculative else None,
             )
             if self._thread_repair_result_is_usable(result):
                 await self._acknowledge_repaired_thread_deltas(
@@ -930,17 +913,34 @@ class MatrixConversationCache(ConversationCacheProtocol):
                 )
             return result
 
-        return await coordinator.run_thread_repair(
+        async def run_flight() -> ThreadHistoryResult:
+            return await coordinator.run_thread_repair(
+                room_id,
+                thread_id,
+                repair,
+                coordination_scope=principal_id,
+                hydrate_sidecars=wants_full_history,
+                allow_stale_fallback=allows_stale_fallback,
+                result_arms_backoff=self._thread_repair_result_arms_backoff,
+                bypass_failure_backoff=bypass_repair_backoff,
+                speculative=speculative,
+            )
+
+        # Callers sharing one flight also share its contract, and a speculative flight rescans a lost
+        # guarded replacement once rather than the twice a waiting reader is owed. Checked before the
+        # join so the answer cannot change under us; a reader that ends up with the weaker contract's
+        # unusable result repairs again under its own.
+        joined_speculative_flight = not speculative and coordinator.thread_repair_flight_is_speculative(
             room_id,
             thread_id,
-            repair,
             coordination_scope=principal_id,
             hydrate_sidecars=wants_full_history,
             allow_stale_fallback=allows_stale_fallback,
-            result_arms_backoff=self._thread_repair_result_arms_backoff,
-            bypass_failure_backoff=bypass_repair_backoff,
-            speculative=speculative,
         )
+        result = await run_flight()
+        if joined_speculative_flight and not self._thread_repair_result_is_usable(result):
+            return await run_flight()
+        return result
 
     async def _fetch_thread_from_client(
         self,

@@ -94,6 +94,7 @@ class ThreadRepairRegistry:
     _deltas: dict[_ThreadRepairDeltaKey, dict[str, _RetainedDelta]] = field(default_factory=dict, init=False)
     _speculative_cooldowns: dict[_ThreadRepairDeltaKey, float] = field(default_factory=dict, init=False)
     _interactive_joins: dict[_ThreadRepairFlightKey, int] = field(default_factory=dict, init=False)
+    _speculative_flights: set[_ThreadRepairFlightKey] = field(default_factory=set, init=False)
     _slot_waiters: list[asyncio.Future[None]] = field(default_factory=list, init=False)
     _running_repairs: int = field(default=0, init=False)
     _running_speculative_repairs: int = field(default=0, init=False)
@@ -117,6 +118,7 @@ class ThreadRepairRegistry:
     def _clear_task(self, key: _ThreadRepairFlightKey, task: asyncio.Task[object]) -> None:
         if self._tasks.get(key) is task:
             self._tasks.pop(key, None)
+            self._speculative_flights.discard(key)
 
     def _has_active_task(self, key: _ThreadRepairDeltaKey) -> bool:
         """Return whether any caller contract owns this thread's repair."""
@@ -204,9 +206,14 @@ class ThreadRepairRegistry:
             return "repair_concurrency_limit"
         return None
 
-    def has_interactive_waiter(self, key: _ThreadRepairFlightKey) -> bool:
-        """Return whether a caller waiting on history has joined this flight."""
-        return bool(self._interactive_joins.get(key))
+    def flight_is_speculative(self, key: _ThreadRepairFlightKey) -> bool:
+        """Return whether the flight a caller would join right now is speculative.
+
+        A joining caller inherits the running flight's contract, so an interactive reader needs to
+        know it is about to share work nobody is waiting on and that scans a lost guarded
+        replacement one fewer time than it is owed.
+        """
+        return self._active_task(key) is not None and key in self._speculative_flights
 
     @contextmanager
     def _joined_interactively(self, key: _ThreadRepairFlightKey) -> Iterator[None]:
@@ -376,6 +383,10 @@ class ThreadRepairRegistry:
 
         task = schedule(lambda: self._run_in_repair_slot(key, run_repair, speculative=speculative))
         self._tasks[key] = task
+        if speculative:
+            self._speculative_flights.add(key)
+        else:
+            self._speculative_flights.discard(key)
         task.add_done_callback(lambda done_task: self._clear_task(key, done_task))
         return await asyncio.shield(task)
 
@@ -423,6 +434,9 @@ class ThreadRepairRegistry:
     def clear_room(self, coordination_scope: str, room_id: str) -> None:
         """Drop retained deltas and failure history at one membership boundary."""
         self._tasks = {key: task for key, task in self._tasks.items() if key[:2] != (coordination_scope, room_id)}
+        self._speculative_flights = {
+            key for key in self._speculative_flights if key[:2] != (coordination_scope, room_id)
+        }
         self._deltas = {key: deltas for key, deltas in self._deltas.items() if key[:2] != (coordination_scope, room_id)}
         self._failure_backoffs = {
             key: backoff for key, backoff in self._failure_backoffs.items() if key[:2] != (coordination_scope, room_id)
@@ -440,6 +454,7 @@ class ThreadRepairRegistry:
         self._deltas.clear()
         self._speculative_cooldowns.clear()
         self._interactive_joins.clear()
+        self._speculative_flights.clear()
         self._slot_waiters.clear()
         self._running_repairs = 0
         self._running_speculative_repairs = 0

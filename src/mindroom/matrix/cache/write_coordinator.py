@@ -676,7 +676,7 @@ class EventCacheWriteCoordinator:
             speculative=speculative,
         )
 
-    def thread_repair_has_interactive_waiter(
+    def thread_repair_flight_is_speculative(
         self,
         room_id: str,
         thread_id: str,
@@ -685,8 +685,8 @@ class EventCacheWriteCoordinator:
         hydrate_sidecars: bool,
         allow_stale_fallback: bool,
     ) -> bool:
-        """Return whether a caller waiting on history joined this flight after it was admitted."""
-        return self._thread_repairs.has_interactive_waiter(
+        """Return whether joining this thread's running flight would inherit a speculative contract."""
+        return self._thread_repairs.flight_is_speculative(
             (coordination_scope, room_id, thread_id, hydrate_sidecars, allow_stale_fallback),
         )
 

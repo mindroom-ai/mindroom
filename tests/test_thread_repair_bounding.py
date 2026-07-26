@@ -28,6 +28,7 @@ from mindroom.matrix.cache.thread_repair import (
     ThreadRepairSuppressedError,
 )
 from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
+from mindroom.matrix.client_thread_history import fetch_dispatch_thread_snapshot
 from mindroom.matrix.conversation_cache import MatrixConversationCache, is_sync_replay_batch
 from tests.conftest import bind_runtime_paths, test_runtime_paths
 
@@ -38,6 +39,9 @@ if TYPE_CHECKING:
     from mindroom.matrix.cache import ConversationEventCache
 
 ROOM_ID = "!room:localhost"
+
+# One speculative flight scans once; anything above proves the reader ran its own repair.
+_SPECULATIVE_ATTEMPTS_FOR_TEST = 1
 
 
 def _conversation_cache(tmp_path: Path, event_cache: ConversationEventCache) -> MatrixConversationCache:
@@ -534,3 +538,55 @@ async def test_released_repair_slot_is_reserved_for_the_waiting_caller() -> None
     await waiting
     registry._release_repair_slot(speculative=False)
     assert registry.speculative_suppression_reason(thread_key) is None
+
+
+@pytest.mark.asyncio
+async def test_late_interactive_join_repairs_again_when_the_speculative_result_is_unusable(
+    tmp_path: Path,
+) -> None:
+    """A reader joining mid-scan must not keep the speculative flight's one-attempt result."""
+    thread_id = "$thread:localhost"
+    event_cache = SqliteEventCache(tmp_path / "event_cache.db")
+    await event_cache.initialize()
+    conversation_cache = _conversation_cache(tmp_path, event_cache)
+    coordinator = EventCacheWriteCoordinator(logger=MagicMock())
+    conversation_cache.runtime.event_cache_write_coordinator = coordinator
+    recorder = _ScanRecorder(scan_seconds=0.05)
+    reader_joined = asyncio.Event()
+
+    async def scan_and_let_a_reader_join(*args: object, **kwargs: object) -> MagicMock:
+        reader_joined.set()
+        return await recorder.scan(*args, **kwargs)  # type: ignore[arg-type]
+
+    # Every replacement loses the guarded race, which is what an interactive caller retries.
+    invalidated_store = AsyncMock(return_value=ThreadCacheReplaceOutcome.INVALIDATED)
+
+    try:
+        with (
+            patch.object(event_cache, "replace_thread_if_not_newer", invalidated_store),
+            patch(
+                "mindroom.matrix.client_thread_history._fetch_thread_history_with_events",
+                AsyncMock(side_effect=scan_and_let_a_reader_join),
+            ),
+        ):
+            conversation_cache._schedule_missing_thread_repair(ROOM_ID, thread_id)
+            await asyncio.wait_for(reader_joined.wait(), timeout=5.0)
+            await conversation_cache._fetch_thread_from_client(
+                fetch_dispatch_thread_snapshot,
+                ROOM_ID,
+                thread_id,
+                caller_label="test_reader",
+                coordinator_queue_wait_ms=0.0,
+                wants_full_history=False,
+                allows_stale_fallback=False,
+                bypass_repair_backoff=False,
+            )
+            await wait_for_background_tasks(timeout=5.0, owner=coordinator.background_task_owner)
+            await coordinator.close()
+    finally:
+        await event_cache.close()
+
+    # One speculative attempt, then the reader's own flight with the full interactive budget.
+    assert len(recorder.scanned_thread_ids) > _SPECULATIVE_ATTEMPTS_FOR_TEST, (
+        f"reader inherited the speculative one-attempt limit, saw {recorder.scanned_thread_ids}"
+    )

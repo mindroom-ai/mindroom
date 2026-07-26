@@ -502,6 +502,8 @@ async def test_dispatch_thread_read_enters_repair_ownership_once_after_idle_wait
     coordinator = MagicMock()
     coordinator.wait_for_thread_idle = AsyncMock(return_value=None)
     coordinator.pending_thread_repair_deltas.return_value = ()
+    # No speculative flight exists here, so the read owns its own repair contract.
+    coordinator.thread_repair_flight_is_speculative.return_value = False
 
     async def run_thread_repair(
         _room_id: str,
@@ -553,6 +555,8 @@ async def test_healthy_cache_hit_does_not_enter_repair_lane(tmp_path: Path) -> N
     coordinator = MagicMock()
     coordinator.wait_for_thread_idle = AsyncMock(return_value=None)
     coordinator.pending_thread_repair_deltas.return_value = ()
+    # No speculative flight exists here, so the read owns its own repair contract.
+    coordinator.thread_repair_flight_is_speculative.return_value = False
     coordinator.run_thread_repair = AsyncMock(side_effect=AssertionError("cache hit must not claim repair ownership"))
     conversation_cache.runtime.event_cache_write_coordinator = coordinator
 
@@ -1123,6 +1127,8 @@ async def test_strict_thread_history_uses_no_stale_fetch_without_dispatch_timeou
     coordinator = MagicMock()
     coordinator.wait_for_thread_idle = AsyncMock(return_value=None)
     coordinator.pending_thread_repair_deltas.return_value = ()
+    # No speculative flight exists here, so the read owns its own repair contract.
+    coordinator.thread_repair_flight_is_speculative.return_value = False
     coordinator.run_thread_repair = AsyncMock(side_effect=run_thread_repair)
     conversation_cache.runtime.event_cache_write_coordinator = coordinator
     fetched_history = thread_history_result([], is_full_history=True)
@@ -1326,6 +1332,8 @@ async def test_fresh_strict_history_bypasses_inherited_turn_memoization(tmp_path
     coordinator = MagicMock()
     coordinator.wait_for_thread_idle = AsyncMock(return_value=None)
     coordinator.pending_thread_repair_deltas.return_value = ()
+    # No speculative flight exists here, so the read owns its own repair contract.
+    coordinator.thread_repair_flight_is_speculative.return_value = False
     coordinator.run_thread_repair = AsyncMock(side_effect=run_thread_repair)
     conversation_cache.runtime.event_cache_write_coordinator = coordinator
     before_delivery = thread_history_result(
