@@ -589,6 +589,7 @@ async def test_prepare_history_for_run_forced_compaction_finishes_selected_runs_
         replay_budget_tokens=replay_budget,
         hard_replay_budget_tokens=replay_budget,
         summary_input_budget_tokens=summary_input_budget,
+        compaction_timeout_seconds=600.0,
     )
 
     summary_mock = AsyncMock(
@@ -714,6 +715,7 @@ async def test_prepare_history_for_run_auto_compaction_runs_to_completion_before
         replay_budget_tokens=1,
         hard_replay_budget_tokens=1,
         summary_input_budget_tokens=summary_input_budget,
+        compaction_timeout_seconds=600.0,
     )
 
     summary_mock = AsyncMock(
@@ -835,6 +837,7 @@ async def test_prepare_history_for_run_auto_required_compaction_finishes_origina
         replay_budget_tokens=replay_budget,
         hard_replay_budget_tokens=replay_budget,
         summary_input_budget_tokens=summary_input_budget,
+        compaction_timeout_seconds=600.0,
     )
 
     async def fake_summary(*, summary_input: str, **_kwargs: object) -> SessionSummary:
@@ -1010,6 +1013,7 @@ async def test_prepare_history_for_run_persists_successful_compaction_chunks_bef
         replay_budget_tokens=replay_budget,
         hard_replay_budget_tokens=replay_budget,
         summary_input_budget_tokens=summary_input_budget,
+        compaction_timeout_seconds=600.0,
     )
     summary_mock = AsyncMock(
         side_effect=[
@@ -1123,6 +1127,7 @@ async def test_prepare_history_for_run_failure_notice_reports_serving_fallback_m
         replay_budget_tokens=1,
         hard_replay_budget_tokens=1,
         summary_input_budget_tokens=summary_input_budget,
+        compaction_timeout_seconds=600.0,
         compaction_fallback_model_name="fallback-model",
         compaction_fallback_summary_input_budget_tokens=summary_input_budget,
     )
@@ -1203,6 +1208,7 @@ async def test_prepare_history_for_run_compacts_on_primary_when_fallback_constru
         replay_budget_tokens=1,
         hard_replay_budget_tokens=1,
         summary_input_budget_tokens=16_000,
+        compaction_timeout_seconds=600.0,
         compaction_fallback_model_name="fallback-model",
         compaction_fallback_summary_input_budget_tokens=16_000,
     )

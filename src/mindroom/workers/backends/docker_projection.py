@@ -552,6 +552,7 @@ class DockerProjectionManager:
 
         config_data["teams"] = {}
         config_data["cultures"] = {}
+        config_data["calls"] = {}
         config_data["room_models"] = {}
         config_data["bot_accounts"] = []
         config_data["authorization"] = {}

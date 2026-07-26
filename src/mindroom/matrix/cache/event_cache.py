@@ -11,6 +11,7 @@ if TYPE_CHECKING:
     from mindroom.matrix.replacements import ReplacementValidator
 
     from .agent_message_snapshot import AgentMessageSnapshot
+    from .thread_cache_state import ThreadCacheReplaceOutcome
 
 
 @dataclass(frozen=True, slots=True)
@@ -197,8 +198,8 @@ class ConversationEventCache(Protocol):
         expected_membership_epoch: int,
         fetch_started_at: float,
         validated_at: float | None = None,
-    ) -> bool:
-        """Replace a fetched snapshot only when its room epoch and cache state remain current."""
+    ) -> ThreadCacheReplaceOutcome:
+        """Replace a fetched snapshot and classify any guarded non-installation."""
 
     async def invalidate_thread(self, room_id: str, thread_id: str) -> None:
         """Delete cached events for one thread."""

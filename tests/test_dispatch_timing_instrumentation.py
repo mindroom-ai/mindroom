@@ -225,9 +225,20 @@ def test_notify_outbound_message_marks_cache_schedule() -> None:
         def __init__(self) -> None:
             self.logger = Mock()
             self.thread_updates: list[tuple[str, str, dict[str, object]]] = []
+            self.retained_event_ids: list[tuple[str, str, str]] = []
 
         def cache_runtime_available(self) -> bool:
             return True
+
+        def retain_thread_repair_delta(
+            self,
+            room_id: str,
+            thread_id: str,
+            event_source: dict[str, object],
+        ) -> None:
+            event_id = event_source["event_id"]
+            assert isinstance(event_id, str)
+            self.retained_event_ids.append((room_id, thread_id, event_id))
 
         def queue_thread_cache_update(
             self,
@@ -276,6 +287,7 @@ def test_notify_outbound_message_marks_cache_schedule() -> None:
         )
 
     assert cache_ops.thread_updates
+    assert cache_ops.retained_event_ids == [("!room:localhost", "$thread", "$tool_use")]
     assert timing_events == [
         (
             "Event cache outbound schedule timing",

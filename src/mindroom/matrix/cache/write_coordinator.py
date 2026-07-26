@@ -12,7 +12,9 @@ All ordering is scoped to one ``(principal, room)`` lane.
 
 3. A room update cancelled before it started leaves a fence in its lane: later thread updates still wait
    for the earlier queue segment to drain, so cancellation cannot reorder writes.
-   Read-style operations may opt in to ``ignore_cancelled_room_fences`` because they mutate nothing.
+   Thread-cache repair (``run_thread_repair``) opts out via ``ignore_cancelled_room_fences``: it rebuilds
+   its snapshot from the homeserver under a membership-epoch guard rather than extending queued state, and
+   it still waits for same-thread predecessors, so it cannot reorder same-thread writes.
 
 4. Readers establish the write-read barrier with ``wait_for_thread_idle``: a thread read started after a
    mutation was queued in the same lane never observes cache state older than that mutation.
@@ -30,7 +32,11 @@ from mindroom.background_tasks import create_background_task, wait_for_backgroun
 from mindroom.logging_config import bound_log_context
 from mindroom.timing import elapsed_ms_between, emit_timing_event, timing_enabled
 
+from .thread_repair import ThreadRepairRegistry
+
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable, Collection
+
     import structlog
 
 
@@ -100,6 +106,7 @@ class EventCacheWriteCoordinator:
         init=False,
     )
     _next_sequence: int = field(default=0, init=False)
+    _thread_repairs: ThreadRepairRegistry = field(default_factory=ThreadRepairRegistry, init=False)
 
     def _next_entry_sequence(self) -> int:
         sequence = self._next_sequence
@@ -612,6 +619,7 @@ class EventCacheWriteCoordinator:
         emit_timing: bool = False,
         coalesce_key: _CoalesceKey | None = None,
         coalesce_log_context: dict[str, object] | None = None,
+        ignore_cancelled_room_fences: bool = False,
         coordination_scope: str,
     ) -> asyncio.Task[object]:
         """Schedule one thread-scoped cache update behind room-wide and same-thread predecessors."""
@@ -625,30 +633,88 @@ class EventCacheWriteCoordinator:
             emit_timing=emit_timing,
             coalesce_key=coalesce_key,
             coalesce_log_context=coalesce_log_context,
-            coordination_scope=coordination_scope,
-        )
-
-    async def run_thread_update(
-        self,
-        room_id: str,
-        thread_id: str,
-        update_coro_factory: _UpdateCoroFactory,
-        *,
-        name: str,
-        ignore_cancelled_room_fences: bool = False,
-        coordination_scope: str,
-    ) -> object:
-        """Run one thread-scoped operation through the ordered thread barrier and await its result."""
-        return await self._queue_update(
-            room_id=room_id,
-            thread_id=thread_id,
-            kind="thread",
-            update_coro_factory=update_coro_factory,
-            name=name,
-            log_exceptions=False,
             ignore_cancelled_room_fences=ignore_cancelled_room_fences,
             coordination_scope=coordination_scope,
         )
+
+    async def run_thread_repair[T](
+        self,
+        room_id: str,
+        thread_id: str,
+        repair_coro_factory: Callable[[], Awaitable[T]],
+        *,
+        coordination_scope: str,
+        hydrate_sidecars: bool,
+        allow_stale_fallback: bool,
+        result_arms_backoff: Callable[[T], bool],
+        bypass_failure_backoff: bool = False,
+    ) -> T:
+        """Join or start one principal-scoped repair under the same-thread barrier.
+
+        Untimed reads may bypass a retained delay; dispatch and background repairs leave the default.
+        """
+        return await self._thread_repairs.run(
+            (coordination_scope, room_id, thread_id, hydrate_sidecars, allow_stale_fallback),
+            schedule=lambda repair: typing.cast(
+                "asyncio.Task[T]",
+                self.queue_thread_update(
+                    room_id,
+                    thread_id,
+                    repair,
+                    name="matrix_cache_repair_thread",
+                    log_exceptions=False,
+                    ignore_cancelled_room_fences=True,
+                    coordination_scope=coordination_scope,
+                ),
+            ),
+            repair=repair_coro_factory,
+            result_arms_backoff=result_arms_backoff,
+            bypass_failure_backoff=bypass_failure_backoff,
+        )
+
+    def retain_thread_repair_delta(
+        self,
+        room_id: str,
+        thread_id: str,
+        event_source: dict[str, Any],
+        *,
+        coordination_scope: str,
+    ) -> None:
+        """Retain one certified delta until append or repair includes it."""
+        self._thread_repairs.retain_delta(
+            (coordination_scope, room_id, thread_id),
+            event_source,
+        )
+
+    def pending_thread_repair_deltas(
+        self,
+        room_id: str,
+        thread_id: str,
+        *,
+        coordination_scope: str,
+    ) -> tuple[dict[str, Any], ...]:
+        """Return retained deltas for one principal-scoped repair."""
+        return self._thread_repairs.pending_deltas(
+            (coordination_scope, room_id, thread_id),
+        )
+
+    def acknowledge_thread_repair_deltas(
+        self,
+        room_id: str,
+        thread_id: str,
+        event_ids: Collection[str],
+        *,
+        coordination_scope: str,
+    ) -> None:
+        """Forget retained deltas after a successful append."""
+        self._thread_repairs.acknowledge_deltas(
+            (coordination_scope, room_id, thread_id),
+            event_ids,
+        )
+
+    def clear_thread_repair_room(self, room_id: str, *, coordination_scope: str) -> None:
+        """Drop retained repair state at one authoritative membership departure."""
+        self._thread_repairs.clear_room(coordination_scope, room_id)
 
     async def wait_for_thread_idle(
         self,
@@ -725,3 +791,4 @@ class EventCacheWriteCoordinator:
         self._room_update_tasks.clear()
         self._thread_update_tasks.clear()
         self._thread_update_tasks_by_room.clear()
+        self._thread_repairs.clear()

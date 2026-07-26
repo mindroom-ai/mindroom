@@ -2206,6 +2206,69 @@ router:
     assert list(projected_config["agents"]) == ["My Agent"]
 
 
+def test_docker_projection_keeps_no_references_to_stripped_agents(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Projected worker configs must stay loadable after projection strips other agents.
+
+    References to stripped agents fail Config validation inside the worker
+    ("calls.agents references unknown agent(s): ..."), crash-looping every
+    dedicated worker start.
+    """
+    backend, fake_client, _sync_calls = _backend(
+        monkeypatch,
+        tmp_path,
+        config_text="""
+agents:
+  alpha:
+    display_name: Alpha
+    role: Test
+    model: default
+    worker_scope: shared
+    delegate_to: [beta]
+  beta:
+    display_name: Beta
+    role: Test
+    model: default
+    worker_scope: shared
+calls:
+  enabled: true
+  profiles:
+    realtime-profile:
+      backend: realtime
+      model: test-realtime-model
+      credentials_service: openai
+      voice: test-voice
+  agents:
+    alpha: realtime-profile
+    beta: realtime-profile
+models:
+  default:
+    provider: openai
+    id: test-model
+""".lstrip(),
+    )
+
+    backend.ensure_worker(WorkerSpec("v1:default:shared:alpha"), now=10.0)
+
+    volumes = fake_client.containers.run_calls[0]["volumes"]
+    assert isinstance(volumes, dict)
+    projection_root = _projection_root(volumes)
+    projected_config = yaml.safe_load((projection_root / "config.yaml").read_text(encoding="utf-8"))
+
+    assert list(projected_config["agents"]) == ["alpha"]
+    assert projected_config["agents"]["alpha"]["delegate_to"] == []
+    assert projected_config["calls"] == {}
+
+    projected_runtime_paths = resolve_runtime_paths(
+        config_path=projection_root / "config.yaml",
+        storage_path=tmp_path / "projected-storage",
+    )
+
+    assert set(load_config(projected_runtime_paths).agents) == {"alpha"}
+
+
 def test_docker_backend_recreates_container_when_launch_config_changes(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

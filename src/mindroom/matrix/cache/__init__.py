@@ -16,6 +16,7 @@ Developer note:
 - `sqlite_cache_maintenance.py` and `postgres_cache_maintenance.py` own transactional migration, invariant repair, and startup diagnostics.
 - `outbound_thread_reservations.py` owns bounded principal-, room-, and event-scoped thread claims for local response edits.
 - `thread_writes.py` owns live, outbound, and sync mutation flows; `thread_bookkeeping.py` resolves thread impact and `thread_write_cache_ops.py` applies queued cache mutations.
+- `thread_repair.py` owns principal-scoped single-flight repair ownership, failure backoff, and retained certified deltas.
 
 Package boundary:
 - `mindroom.matrix.cache` is the package-level import surface for cache-facing contracts and shared helpers used above the cache package.
@@ -33,6 +34,7 @@ from .agent_message_snapshot import AgentMessageSnapshot
 from .event_cache import ConversationEventCache, SharedConversationEventCache, ThreadCacheState, ThreadRevision
 from .event_normalization import is_opaque_encrypted_event_source, normalize_nio_event_for_cache
 from .thread_cache_helpers import thread_cache_rejection_reason
+from .thread_cache_state import ThreadCacheReplaceOutcome
 from .thread_history_result import ThreadHistoryResult, thread_history_result
 from .write_coordinator import EventCacheWriteCoordinator
 
@@ -41,6 +43,7 @@ __all__ = [
     "ConversationEventCache",
     "EventCacheWriteCoordinator",
     "SharedConversationEventCache",
+    "ThreadCacheReplaceOutcome",
     "ThreadCacheState",
     "ThreadHistoryResult",
     "ThreadRevision",

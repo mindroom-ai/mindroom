@@ -128,6 +128,7 @@ class ResolvedHistoryExecutionPlan:
     static_prompt_tokens: int | None
     replay_budget_tokens: int | None
     summary_input_budget_tokens: int | None
+    compaction_timeout_seconds: float
     unavailable_reason: CompactionAvailabilityReason | None = None
     hard_replay_budget_tokens: int | None = None
     compaction_fallback_model_name: str | None = None

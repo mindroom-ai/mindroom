@@ -8,7 +8,10 @@ from typing import Any, Literal, Self, cast
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_serializer, model_validator
 
 from mindroom.config.validation import duplicate_items, validate_history_limit_choice
-from mindroom.constants import DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES
+from mindroom.constants import (
+    DEFAULT_COMPACTION_TIMEOUT_SECONDS,
+    DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES,
+)
 from mindroom.credential_policy import credential_service_policy
 from mindroom.credentials import validate_service_name
 from mindroom.model_defaults import OPENAI_EMBEDDING_SMALL
@@ -265,6 +268,11 @@ class CompactionOverrideConfig(BaseModel):
             "is rebuilt under the fallback model's context budget when needed"
         ),
     )
+    timeout_seconds: float | None = Field(
+        default=None,
+        gt=0,
+        description="Maximum seconds allowed for each compaction summary request",
+    )
 
     @model_validator(mode="after")
     def validate_threshold_choice(self) -> Self:
@@ -320,6 +328,11 @@ class CompactionConfig(BaseModel):
             "Optional model config name retried once when the summary model refuses for safeguards; summary input "
             "is rebuilt under the fallback model's context budget when needed"
         ),
+    )
+    timeout_seconds: float = Field(
+        default=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
+        gt=0,
+        description="Maximum seconds allowed for each compaction summary request",
     )
 
     @model_validator(mode="after")
