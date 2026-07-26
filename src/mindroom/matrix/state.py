@@ -177,10 +177,16 @@ def get_room_alias_from_id(room_id: str, runtime_paths: constants.RuntimePaths) 
 
 
 def _matrix_state_cache_key(state_file: Path) -> tuple[Path, int | None, int | None]:
-    """Return one cache key that invalidates when the state file changes."""
-    if not state_file.exists():
+    """Return one cache key that invalidates when the state file changes.
+
+    Every cached read rebuilds this key, so it stats once and treats an
+    unreadable file as absent rather than paying a second syscall for a separate
+    existence check.
+    """
+    try:
+        stat = state_file.stat()
+    except OSError:
         return state_file, None, None
-    stat = state_file.stat()
     return state_file, stat.st_mtime_ns, stat.st_size
 
 

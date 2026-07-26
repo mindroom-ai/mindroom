@@ -3,15 +3,12 @@
 from __future__ import annotations
 
 import os
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 from mindroom import constants
 from mindroom.matrix import state as matrix_state
 from mindroom.matrix.state import MatrixState, _load_matrix_state_file_cached, matrix_state_for_runtime
 from tests.conftest import test_runtime_paths
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 
 def _seed_state(runtime_paths: constants.RuntimePaths, room_key: str, room_id: str) -> Path:
@@ -136,3 +133,33 @@ def test_resolve_room_aliases_does_not_reparse_yaml(
     matrix_state.resolve_room_aliases(["dev"], runtime_paths)
 
     assert safe_load_calls == 1
+
+
+def test_matrix_state_cache_key_stats_the_file_once(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    """The cache key is built on every read, so it must not stat the file twice."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    state_file = _seed_state(runtime_paths, "dev", "!dev:localhost")
+    stat_calls = 0
+    original_stat = Path.stat
+
+    def counting_stat(self: Path, *args: object, **kwargs: object) -> os.stat_result:
+        nonlocal stat_calls
+        if self == state_file:
+            stat_calls += 1
+        return original_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(matrix_state.Path, "stat", counting_stat)
+
+    key = matrix_state._matrix_state_cache_key(state_file)
+
+    assert key[0] == state_file
+    assert key[1] is not None
+    assert key[2] is not None
+    assert stat_calls == 1
+
+
+def test_matrix_state_cache_key_reports_missing_file_without_stat_details(tmp_path: Path) -> None:
+    """A missing state file must still key as absent rather than raising."""
+    missing = tmp_path / "nonexistent" / "matrix_state.yaml"
+
+    assert matrix_state._matrix_state_cache_key(missing) == (missing, None, None)
