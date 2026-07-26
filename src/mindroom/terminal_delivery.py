@@ -555,12 +555,11 @@ class TerminalDeliveryCoordinator:
             await self._settle_locked(item, attempt, next_attempt_at)
 
     async def redact(self, *, room_id: str, event_id: str) -> None:
-        """Tombstone before waiting for an in-flight terminal attempt."""
+        """Order the durable tombstone against record, transport, and settlement."""
         self._redacting.add(event_id)
         try:
-            await asyncio.to_thread(self.store.redact, room_id=room_id, event_id=event_id)
             async with self._lock:
-                pass
+                await asyncio.to_thread(self.store.redact, room_id=room_id, event_id=event_id)
         finally:
             self._redacting.discard(event_id)
 

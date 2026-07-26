@@ -41,8 +41,9 @@ Every attempt and settlement revalidates its exact revision, so stale work canno
 
 Source and target redactions are durable tombstones.
 A tombstoned source prevents a later record from recreating its answer.
-Redaction announces itself before waiting for an in-flight attempt, persists the tombstone, and the attempt revalidates immediately before transport.
-The same authority lock orders redaction, regeneration, transport, and settlement.
+Redaction announces itself before waiting for an in-flight attempt, and the attempt revalidates immediately before transport.
+The same authority lock gives the tombstone, regeneration, transport, and settlement one durable commit order.
+An attempt that already crossed its final check commits before the tombstone; every other attempt observes the redaction announcement or tombstone and stops.
 
 ## Lifecycle progress
 

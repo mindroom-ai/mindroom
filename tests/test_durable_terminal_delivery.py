@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
@@ -276,7 +277,7 @@ async def test_redaction_during_target_inspection_prevents_transport(tmp_path: P
     async def inspect(_room: str, _event: str) -> str:
         nonlocal redaction_task
         redaction_task = asyncio.create_task(coordinator.redact(room_id=ROOM, event_id="$coalesced"))
-        while store.get(item.delivery_id) is not None:  # noqa: ASYNC110
+        while "$coalesced" not in coordinator._redacting:  # noqa: ASYNC110
             await asyncio.sleep(0)
         return "ok"
 
@@ -289,6 +290,46 @@ async def test_redaction_during_target_inspection_prevents_transport(tmp_path: P
 
     assert attempt.result == "superseded"
     send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_redaction_and_transport_have_one_linearized_commit_order(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    item = store.record(_intent())
+    assert item is not None
+    coordinator, _hooks = _coordinator(store)
+    send_started = asyncio.Event()
+    release_send = asyncio.Event()
+    redact_called = threading.Event()
+    store_redact = store.redact
+
+    def tracked_redact(*, room_id: str, event_id: str) -> None:
+        redact_called.set()
+        store_redact(room_id=room_id, event_id=event_id)
+
+    store.redact = tracked_redact  # type: ignore[method-assign]
+
+    async def send(*_args: object, **_kwargs: object) -> DeliveredMatrixEvent:
+        send_started.set()
+        await release_send.wait()
+        return _delivered()
+
+    with patch("mindroom.terminal_delivery.send_message_result", new=send):
+        attempt_task = asyncio.create_task(coordinator.attempt(item))
+        await send_started.wait()
+        redaction_task = asyncio.create_task(coordinator.redact(room_id=ROOM, event_id=SOURCE))
+        await asyncio.sleep(0.05)
+
+        assert not redaction_task.done()
+        assert not redact_called.is_set()
+        assert store.get(item.delivery_id) == item
+
+        release_send.set()
+        attempt = await attempt_task
+        await redaction_task
+
+    assert attempt.result == "delivered"
+    assert store.record(_intent(correlation_id="corr-2")) is None
 
 
 @pytest.mark.asyncio
