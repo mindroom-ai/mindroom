@@ -1,14 +1,14 @@
 # Thread edit integrity gate status
 
-Updated 2026-07-26 after rejecting conflicting edit identities and stale inherited membership.
+Updated 2026-07-26 after preserving canonical nested bundled replacements.
 
 ## Exact target
 
 - PR: `mindroom-ai/mindroom#1641`
 - Branch: `fix/thread-edit-integrity`
-- Latest production commit: `41fe53933b44b3bb929754a4e63b2d1021674e67`
+- Latest production commit: `09b2e9453dbdd232485a8a50c5c0a920c31b4910`
 - Current base and merge base: `858282afc77adb480fa06cd9e4057d511ff861d5`
-- Latest integration commit before this handoff-only successor: `0d77e1b7475d31d0a644b1bb02c22a6c33533228`
+- Latest integration commit before this handoff-only successor: `09b2e9453dbdd232485a8a50c5c0a920c31b4910`
 - A commit cannot contain its own SHA, so this file does not claim that its stored parent is the exact gate head.
 - Resolve local `HEAD`, `origin/fix/thread-edit-integrity`, and GitHub PR `headRefOid` live and require all three values to match before counting any gate.
 - The tracked tree is clean; three user-owned task notes and preserved test artifacts are untracked.
@@ -37,6 +37,8 @@ Updated 2026-07-26 after rejecting conflicting edit identities and stale inherit
 - `6eea89ebf` also retains valid replacement rows as non-visible room-scan ancestry so replies targeting an edit remain in the original thread.
 - `41fe53933` rejects conflicting payloads that claim one immutable replacement event ID.
 - `41fe53933` also follows current reply ancestry before accepting a derived membership index.
+- `09b2e9453` treats a bundled-relation wrapper as aggregation metadata when it contains a canonical nested replacement event.
+- `09b2e9453` also makes two ancestry tests return the exact event requested instead of reusing a mismatched mock response.
 - The current correction requires canonical replacement validity before an edit may supply thread ancestry in point, scan, cache-certification, snapshot, cleanup, or mutation paths.
 - The current correction rejects malformed `m.room.message` point events and cache rows before their raw relations can create durable thread indexes.
 - Known invalid edits resolve room-level; unavailable replacement ancestry remains indeterminate so mutation writes fail closed.
@@ -283,5 +285,20 @@ Updated 2026-07-26 after rejecting conflicting edit identities and stale inherit
 - Production source against current `main` is `+2198/-1199`, net `+999`.
 - Local PostgreSQL fixture startup was externally interrupted, so exact PostgreSQL variants remain pending on the persistent Linux gate host.
 - Every exact-`ff8cc420f` review, CI, full-suite, PostgreSQL, all-file, and live result is historical after `41fe53933`.
+- Fresh exact-head native Codex review, CI, PostgreSQL/full/Tach/all-file validation, and real-Tuwunel validation are mandatory.
+- Merge gate remains closed.
+
+## Exact-09b2 canonical bundled replacement correction
+
+- Exact-`06dd78a0a` full pytest exposed one production mismatch and two stale test mocks.
+- A bundled aggregation wrapper with a nested canonical event was incorrectly compared as a second event representation and made the valid edit fail closed.
+- Two ancestry mocks returned the first event for a later event-ID lookup, which correctly failed exact-response validation.
+- The three cases reproduced deterministically before correction.
+- `09b2e9453` ignores aggregation wrapper metadata when canonical nested replacement events exist while preserving direct wrapper payloads when no nested event exists.
+- The two test fixtures now return complete, exact events keyed by the requested event ID.
+- The exact regressions and the affected seven-file owning selection pass `532` tests.
+- Changed-file pre-commit, Tach dependencies/interfaces, diff checks, and commit hooks pass.
+- Production source against current `main` is `+2201/-1199`, net `+1002`.
+- Every exact-`06dd78a0a` review, CI, full-suite, PostgreSQL, all-file, and live result is historical after `09b2e9453`.
 - Fresh exact-head native Codex review, CI, PostgreSQL/full/Tach/all-file validation, and real-Tuwunel validation are mandatory.
 - Merge gate remains closed.
