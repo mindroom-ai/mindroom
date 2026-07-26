@@ -76,6 +76,7 @@ from mindroom.matrix.client import DeliveredMatrixEvent, ResolvedVisibleMessage
 from mindroom.matrix.client_delivery import build_edit_event_content
 from mindroom.matrix.conversation_cache import ConversationCacheProtocol
 from mindroom.matrix.identity import MatrixID
+from mindroom.matrix.replacements import ReplacementValidator, ordered_replacements
 from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
 from mindroom.media_fallback import reset_model_media_capability_cache
 from mindroom.message_target import MessageTarget
@@ -787,7 +788,23 @@ def make_event_cache_mock() -> AsyncMock:
     event_cache.durable_writes_available = True
     event_cache.get_event.return_value = None
     event_cache.redacted_event_ids.return_value = frozenset()
-    event_cache.get_latest_edit.return_value = None
+
+    async def get_latest_edit(
+        room_id: str,
+        original: dict[str, Any],
+        *,
+        validator: ReplacementValidator,
+        excluded_event_ids: Iterable[str] = (),
+    ) -> dict[str, Any] | None:
+        candidates = ordered_replacements(
+            original,
+            room_id=room_id,
+            validator=validator,
+            excluded_event_ids=tuple(excluded_event_ids),
+        )
+        return candidates[0] if candidates else None
+
+    event_cache.get_latest_edit.side_effect = get_latest_edit
     event_cache.get_mxc_text.return_value = None
     event_cache.get_mxc_texts.return_value = {}
     event_cache.get_recent_room_events.return_value = []
