@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import fcntl
 import hashlib
+import json
 import os
 import time
 from dataclasses import dataclass
@@ -16,7 +17,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
 _LEASE_DIRECTORY = "runtime_generation_leases"
-_RETIRED_AT_PREFIX = "retired_at_ns="
+_LEASE_RECORD_KEYS = frozenset({"generation", "retired_at_ns"})
 
 
 @dataclass(frozen=True)
@@ -153,31 +154,42 @@ def _retire_or_validate_stopped_owner(
 
 
 def _read_lease_record(lock_file: TextIO) -> _LeaseRecord | None:
-    """Read one active or retired lease record."""
+    """Read the last valid complete active or retired lease frame."""
     lock_file.seek(0)
-    lines = lock_file.read().splitlines()
-    if not lines or not lines[0]:
-        return None
-    if len(lines) == 1:
-        return _LeaseRecord(generation=lines[0], retired_at_ns=None)
-    if len(lines) != 2 or not lines[1].startswith(_RETIRED_AT_PREFIX):
-        return None
-    retired_at_value = lines[1].removeprefix(_RETIRED_AT_PREFIX)
-    try:
-        retired_at_ns = int(retired_at_value)
-    except ValueError:
-        return None
-    return _LeaseRecord(generation=lines[0], retired_at_ns=retired_at_ns)
+    for frame in reversed(lock_file.readlines()):
+        if not frame.endswith("\n"):
+            continue
+        try:
+            payload = json.loads(frame)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(payload, dict) or set(payload) != _LEASE_RECORD_KEYS:
+            continue
+        generation = payload["generation"]
+        retired_at_ns = payload["retired_at_ns"]
+        if not isinstance(generation, str) or not generation:
+            continue
+        if retired_at_ns is not None and (not isinstance(retired_at_ns, int) or isinstance(retired_at_ns, bool)):
+            continue
+        return _LeaseRecord(generation=generation, retired_at_ns=retired_at_ns)
+    return None
 
 
 def _write_lease_record(lock_file: TextIO, record: _LeaseRecord) -> None:
-    """Persist one active or retired lease record through its locked descriptor."""
-    body = record.generation
-    if record.retired_at_ns is not None:
-        body = f"{body}\n{_RETIRED_AT_PREFIX}{record.retired_at_ns}"
-    lock_file.seek(0)
-    lock_file.truncate()
-    lock_file.write(body)
+    """Append one failure-atomic lease frame through its locked descriptor."""
+    lock_file.seek(0, os.SEEK_END)
+    end_offset = lock_file.tell()
+    if end_offset:
+        lock_file.seek(end_offset - 1)
+        if lock_file.read(1) != "\n":
+            lock_file.seek(0, os.SEEK_END)
+            lock_file.write("\n")
+    payload = {
+        "generation": record.generation,
+        "retired_at_ns": record.retired_at_ns,
+    }
+    lock_file.seek(0, os.SEEK_END)
+    lock_file.write(f"{json.dumps(payload, separators=(',', ':'), sort_keys=True)}\n")
     lock_file.flush()
     os.fsync(lock_file.fileno())
 

@@ -305,7 +305,9 @@ async def recover_stale_streaming_messages(
         and all_room_ids
         and all_room_ids.issubset(fresh_full_history_room_ids),
     )
-    proof_retry_required = bool(stopped_generations and target_room_ids is None and not proof_coverage_complete)
+    proof_retry_required = bool(
+        stopped_generations and target_room_ids is None and all_room_ids and not proof_coverage_complete,
+    )
     acknowledge_stopped_runtime_generation_proofs(
         runtime_paths,
         stopped_generations if proof_coverage_complete else set(),
@@ -1011,6 +1013,7 @@ async def _collect_room_history_events(
     message_states: dict[str, _MessageState] = {}
     message_events: list[nio.RoomMessageText | nio.RoomMessageNotice] = []
     from_token: str | None = None
+    seen_end_tokens: set[str] = set()
     lookback_pages_scanned = 0
     history_complete = False
 
@@ -1048,9 +1051,10 @@ async def _collect_room_history_events(
                     error=str(exc),
                 )
 
-        if not response.end:
-            history_complete = True
+        if not response.end or response.end in seen_end_tokens:
+            history_complete = not response.end
             break
+        seen_end_tokens.add(response.end)
         lookback_pages_scanned, stop_scan = _lookback_scan_state(
             response.chunk,
             now_ms=now_ms,

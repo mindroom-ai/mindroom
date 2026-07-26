@@ -69,6 +69,7 @@ from tests.identity_helpers import entity_ids, persist_entity_accounts
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
+    from typing import TextIO
 
 BOT_USER_ID = "@actual_test_agent:localhost"
 OTHER_BOT_USER_ID = "@actual_other:localhost"
@@ -2915,6 +2916,46 @@ def test_runtime_generation_acquire_retries_replaced_open_inode(tmp_path: Path) 
         lease.release()
 
 
+def test_partial_retirement_write_preserves_prior_generation_proof(tmp_path: Path) -> None:
+    """A failed retirement append must leave the prior complete lease record readable."""
+    config = _make_config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    generation = "generation-with-partial-retirement"
+    real_open = runtime_generation_lease_module._open_generation_lease_file
+    opened_lock_files: list[tuple[TextIO, MagicMock]] = []
+
+    def open_wrapped_lock_file(path: Path) -> MagicMock:
+        raw_lock_file = real_open(path)
+        wrapped_lock_file = MagicMock(wraps=raw_lock_file)
+        opened_lock_files.append((raw_lock_file, wrapped_lock_file))
+        return wrapped_lock_file
+
+    with patch.object(
+        runtime_generation_lease_module,
+        "_open_generation_lease_file",
+        side_effect=open_wrapped_lock_file,
+    ):
+        lease = runtime_generation_lease_module.acquire_runtime_generation_lease(
+            runtime_paths,
+            generation,
+        )
+    assert len(opened_lock_files) == 1
+    raw_lock_file, wrapped_lock_file = opened_lock_files[0]
+
+    def partial_write(body: str) -> int:
+        raw_lock_file.write(body[:5])
+        raw_lock_file.flush()
+        os.fsync(raw_lock_file.fileno())
+        msg = "simulated crash during retirement write"
+        raise OSError(msg)
+
+    wrapped_lock_file.write.side_effect = partial_write
+    with pytest.raises(OSError, match="simulated crash"):
+        lease.release()
+
+    assert runtime_generation_owner_stopped(runtime_paths, generation)
+
+
 @pytest.mark.asyncio
 async def test_runtime_generation_acquire_retries_cross_process_pruner_race(tmp_path: Path) -> None:
     """A cross-process prune between open and flock must force path reacquisition."""
@@ -3458,6 +3499,117 @@ async def test_second_wave_does_not_ack_new_proof_using_first_wave_room_coverage
 
     assert first_result.room_count == 1
     assert second_result.room_count == 0
+    assert runtime_generation_owner_stopped(runtime_paths, stopped_generation)
+
+
+@pytest.mark.asyncio
+async def test_zero_joined_rooms_retains_proof_without_busy_retry(tmp_path: Path) -> None:
+    """An empty room set keeps stopped proof for the later delta without immediate retry debt."""
+    config = _make_config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    stopped_runtime = BotRuntimeState(
+        client=None,
+        config=config,
+        runtime_paths=runtime_paths,
+        enable_streaming=False,
+        orchestrator=None,
+        event_cache=None,
+        event_cache_write_coordinator=None,
+    )
+    stopped_runtime.mark_runtime_started()
+    stopped_generation = stopped_runtime.runtime_generation
+    stopped_runtime.mark_runtime_stopped()
+    client = _make_client()
+    actors = {
+        BOT_USER_ID: StaleStreamCleanupActor(
+            client,
+            None,
+            runtime_generation="current-generation",
+        ),
+    }
+
+    with patch(
+        "mindroom.matrix.stale_stream_cleanup.get_joined_rooms",
+        new=AsyncMock(return_value=[]),
+    ):
+        result = await recover_stale_streaming_messages(
+            actors,
+            resume_client=None,
+            resume_conversation_cache=None,
+            config=config,
+            runtime_paths=runtime_paths,
+            scanned_room_ids=set(),
+        )
+
+    assert result == StaleStreamRecoveryResult(room_count=0, cleaned_count=0, resumed_count=0)
+    assert runtime_generation_owner_stopped(runtime_paths, stopped_generation)
+
+
+@pytest.mark.asyncio
+async def test_repeated_proof_pagination_token_stops_incomplete_and_retains_debt(tmp_path: Path) -> None:
+    """A non-progressing Matrix cursor must stop without acknowledging stopped proof."""
+    config = _make_config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    stopped_runtime = BotRuntimeState(
+        client=None,
+        config=config,
+        runtime_paths=runtime_paths,
+        enable_streaming=False,
+        orchestrator=None,
+        event_cache=None,
+        event_cache_write_coordinator=None,
+    )
+    stopped_runtime.mark_runtime_started()
+    stopped_generation = stopped_runtime.runtime_generation
+    stopped_runtime.mark_runtime_stopped()
+    client = _make_client()
+    looping_page = _room_messages_response(
+        _make_message_event(
+            event_id="$old-filler",
+            body="Old unrelated chatter",
+            sender=USER_ID,
+            timestamp_ms=NOW_MS - OLD_STALE_AGE_MS,
+        ),
+        end="loop-token",
+    )
+    history_call_count = 0
+
+    async def repeating_history(*_args: object, **_kwargs: object) -> nio.RoomMessagesResponse:
+        nonlocal history_call_count
+        history_call_count += 1
+        if history_call_count > 2:
+            msg = "cleanup requested the repeated pagination token again"
+            raise AssertionError(msg)
+        return looping_page
+
+    client.room_messages = AsyncMock(side_effect=repeating_history)
+    actors = {
+        BOT_USER_ID: StaleStreamCleanupActor(
+            client,
+            None,
+            runtime_generation="current-generation",
+        ),
+    }
+    scanned_room_ids: set[str] = set()
+
+    with patch(
+        "mindroom.matrix.stale_stream_cleanup.get_joined_rooms",
+        new=AsyncMock(return_value=[ROOM_ID]),
+    ):
+        result = await recover_stale_streaming_messages(
+            actors,
+            resume_client=None,
+            resume_conversation_cache=None,
+            config=config,
+            runtime_paths=runtime_paths,
+            scanned_room_ids=scanned_room_ids,
+        )
+
+    assert history_call_count == 2
+    assert client.room_messages.await_args_list[0].kwargs["start"] is None
+    assert client.room_messages.await_args_list[1].kwargs["start"] == "loop-token"
+    assert result.retry_required is True
+    assert scanned_room_ids == set()
     assert runtime_generation_owner_stopped(runtime_paths, stopped_generation)
 
 
