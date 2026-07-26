@@ -5,6 +5,7 @@
 - PR: `https://github.com/mindroom-ai/mindroom/pull/1641`
 - Branch: `fix/thread-edit-integrity`
 - Rejected local, remote, and GitHub head: `9ead99e87e15f59e8c9368451110fdf18bdcc674`
+- Current pushed implementation head: `7b68d9956c53dc6788bfebb2fe356b8aedd673f1`
 - Base and merge base: `858282afc77adb480fa06cd9e4057d511ff861d5`
 - Never amend, force-push, merge, or run real-Tuwunel on a rejected head.
 - Verify `Bas Nijholt <bas@nijho.lt>` before every commit.
@@ -42,7 +43,7 @@ Strict TDD evidence:
 - The two owning files pass `385/385` across SQLite and PostgreSQL.
 - Ten replacement consumers pass `903/903`, including snapshots, approvals, media, previews, and cache interaction contracts.
 - Import-graph, module-privacy, event-cache semantics, Tach split-boundary, compaction-invariant, Ruff, formatting, Tach, and diff checks pass.
-- Current production correction is net negative: `+26/-70`, net `-44`.
+- Current production correction is `+97/-70`, net `+27`; the new shared identity module replaces duplicated cache logic.
 
 Any commit invalidates all earlier review, CI, full-suite, PostgreSQL, and live evidence.
 Preserve every failure artifact.
