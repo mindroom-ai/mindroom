@@ -125,6 +125,14 @@ _VECTOR_VERIFY_BATCH = 128
 _MAX_CANDIDATE_RECONCILE_ROUNDS = 4
 #: Journal appends tolerated before the candidate snapshot is recompacted.
 _CANDIDATE_JOURNAL_COMPACT_ENTRIES = 5_000
+#: Wall-clock budget for reclaiming abandoned candidates before indexing starts.
+#: The bound has to be time rather than a count: deleting one collection costs
+#: microseconds on a small local store and minutes on a large one over network
+#: storage, so only a deadline bounds how long the first indexed file waits.
+#: One delete is always attempted, so a backlog still drains across refreshes.
+_PRE_INDEX_CANDIDATE_RECLAIM_BUDGET_SECONDS = 30.0
+#: Seam for tests to drive the reclaim budget without real elapsed time.
+_reclaim_clock = time.monotonic
 _PROGRESS_LOG_INTERVAL_FILES = 500
 _PROGRESS_LOG_INTERVAL_SECONDS = 30.0
 #: Consecutive classified embedder rejections, with no success in between,
@@ -1036,6 +1044,7 @@ class KnowledgeManager:
         *,
         preserved: frozenset[str],
         candidates_only: bool = False,
+        budget_seconds: float | None = None,
     ) -> None:
         """Delete this base's superseded collections, preserving proven-live ones.
 
@@ -1044,6 +1053,12 @@ class KnowledgeManager:
         and both live in this base's own private storage directory. Anything
         else in that directory is left alone and reported rather than deleted,
         because nothing here can prove who owns it.
+
+        `budget_seconds` caps how long one call spends deleting. Callers that
+        run ahead of useful work pass a budget so a large backlog is drained
+        over successive refreshes instead of blocking this one. Deferred
+        collections stay superseded and are reclaimed by a later call, and one
+        delete is always attempted, so bounding never leaks storage.
         """
         vector_db = self._knowledge.vector_db
         if not isinstance(vector_db, ChromaDb):
@@ -1051,9 +1066,6 @@ class KnowledgeManager:
         client = vector_db.client
         if client is None or not isinstance(client, _CollectionListingClient):
             return
-
-        default_collection = self._default_collection_name()
-        candidate_prefix = f"{default_collection}_candidate_"
 
         try:
             collection_names = self._listed_collection_names(client)
@@ -1065,6 +1077,56 @@ class KnowledgeManager:
             )
             return
 
+        superseded, unowned = self._partition_superseded_collections(
+            collection_names,
+            preserved=preserved,
+            candidates_only=candidates_only,
+        )
+
+        started_at = _reclaim_clock()
+        reclaimed = 0
+        for collection_name in superseded:
+            # Always attempt one delete, so a backlog drains even when a single
+            # delete costs more than the whole budget.
+            if budget_seconds is not None and reclaimed and _reclaim_clock() - started_at >= budget_seconds:
+                break
+            reclaimed += 1
+            try:
+                self._build_vector_db(collection_name).delete()
+            except Exception:
+                logger.warning(
+                    "Failed to clean superseded knowledge collection",
+                    base_id=self.base_id,
+                    collection=collection_name,
+                    exc_info=True,
+                )
+        deferred = len(superseded) - reclaimed
+        if deferred:
+            logger.info(
+                "Deferred superseded knowledge collections to a later refresh",
+                base_id=self.base_id,
+                reclaimed=reclaimed,
+                deferred=deferred,
+            )
+        if unowned:
+            logger.info(
+                "Preserved knowledge collections with unprovable ownership",
+                base_id=self.base_id,
+                collections=sorted(unowned),
+            )
+
+    def _partition_superseded_collections(
+        self,
+        collection_names: tuple[str, ...],
+        *,
+        preserved: frozenset[str],
+        candidates_only: bool,
+    ) -> tuple[list[str], list[str]]:
+        """Split listed collections into ones this base may delete and ones it may not."""
+        default_collection = self._default_collection_name()
+        candidate_prefix = f"{default_collection}_candidate_"
+
+        superseded: list[str] = []
         unowned: list[str] = []
         for collection_name in collection_names:
             if collection_name in preserved:
@@ -1076,21 +1138,8 @@ class KnowledgeManager:
                 if collection_name != default_collection:
                     unowned.append(collection_name)
                 continue
-            try:
-                self._build_vector_db(collection_name).delete()
-            except Exception:
-                logger.warning(
-                    "Failed to clean superseded knowledge collection",
-                    base_id=self.base_id,
-                    collection=collection_name,
-                    exc_info=True,
-                )
-        if unowned:
-            logger.info(
-                "Preserved knowledge collections with unprovable ownership",
-                base_id=self.base_id,
-                collections=sorted(unowned),
-            )
+            superseded.append(collection_name)
+        return superseded, unowned
 
     def _listed_collection_names(self, client: _CollectionListingClient) -> tuple[str, ...]:
         names: list[str] = []
@@ -1738,12 +1787,15 @@ class KnowledgeManager:
         )
         # Reconcile candidates abandoned by earlier crashed refreshes now, so
         # storage stays bounded even when a build never reaches publication.
+        # This runs ahead of the first indexed file, so it takes a bounded slice
+        # of the backlog per refresh and leaves the rest for later calls.
         if cleanup_is_safe:
             preserved = {checkpoint.collection, *published_collections}
             await asyncio.to_thread(
                 self._cleanup_superseded_collections,
                 preserved=frozenset(preserved),
                 candidates_only=True,
+                budget_seconds=_PRE_INDEX_CANDIDATE_RECLAIM_BUDGET_SECONDS,
             )
         else:
             logger.warning(
@@ -2173,6 +2225,9 @@ class KnowledgeManager:
             # never be rewritten as if the build were still in progress.
             run.published = publish_state.index_published
         await asyncio.to_thread(delete_candidate_checkpoint, self._base_storage_path)
+        # Deliberately unbounded: the new index is already published and
+        # queryable, so this sweep delays no one and is the call that finally
+        # drains whatever earlier bounded reclaims deferred.
         await asyncio.to_thread(
             self._cleanup_superseded_collections,
             preserved=frozenset({run.vector_db.collection_name}),

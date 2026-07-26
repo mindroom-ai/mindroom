@@ -1064,6 +1064,77 @@ async def test_repeated_interrupted_refreshes_keep_collection_count_bounded(
     assert len(_candidate_collections()) == 1
 
 
+def _seed_abandoned_candidates(config: Config, count: int) -> list[str]:
+    """Leave `count` abandoned candidate collections behind in the store."""
+    default_collection = _manager(config)._default_collection_name()
+    names = [f"{default_collection}_candidate_abandoned{index:04d}" for index in range(count)]
+    for name in names:
+        _FakeVectorDb.store[name] = []
+    return names
+
+
+def _use_expensive_deletes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the reclaim clock jump a full budget per read, as a slow store would.
+
+    `raising=False` keeps this a no-op against an implementation that has no
+    reclaim budget at all, so these tests still fail on the behavior rather than
+    on a missing attribute.
+    """
+    elapsed = iter(index * 3600.0 for index in range(1_000_000))
+    monkeypatch.setattr(knowledge_manager_module, "_reclaim_clock", lambda: next(elapsed), raising=False)
+
+
+@pytest.mark.asyncio
+async def test_pre_index_candidate_reclaim_is_bounded_per_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Opening a candidate reclaims a bounded slice, never the whole backlog at once.
+
+    Reclaim runs before the first file is indexed, so a store where deleting one
+    collection is expensive must not be able to spend an entire refresh draining
+    a backlog while indexing waits behind it.
+    """
+    docs_path = tmp_path / "docs"
+    _write_corpus(docs_path, 2)
+    config = _config(tmp_path, docs_path)
+    runtime_paths = runtime_paths_for(config)
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    abandoned = _seed_abandoned_candidates(config, 40)
+    _use_expensive_deletes(monkeypatch)
+
+    await _manager(config)._open_candidate_run()
+
+    surviving = [name for name in abandoned if name in _FakeVectorDb.store]
+    assert len(abandoned) - len(surviving), "a bounded reclaim still has to make progress"
+    assert surviving, (
+        f"opening a candidate reclaimed all {len(abandoned)} abandoned collections in one pass; "
+        "reclaim must be bounded so the first indexed file is not gated on a full store sweep"
+    )
+
+
+@pytest.mark.asyncio
+async def test_bounded_reclaim_still_drains_abandoned_candidates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bounding per-run reclaim must not leak storage: later refreshes finish the job."""
+    docs_path = tmp_path / "docs"
+    _write_corpus(docs_path, 2)
+    config = _config(tmp_path, docs_path)
+    runtime_paths = runtime_paths_for(config)
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    abandoned = _seed_abandoned_candidates(config, 40)
+    _use_expensive_deletes(monkeypatch)
+
+    for _ in range(len(abandoned) + 2):
+        if not any(name in _FakeVectorDb.store for name in abandoned):
+            break
+        await _manager(config)._open_candidate_run()
+
+    assert [name for name in abandoned if name in _FakeVectorDb.store] == []
+
+
 # --------------------------------------------------------------------------
 # 12. Batching
 # --------------------------------------------------------------------------
