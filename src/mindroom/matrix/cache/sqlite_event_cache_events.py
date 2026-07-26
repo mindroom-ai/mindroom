@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from typing import TYPE_CHECKING, Any
 
 from mindroom.matrix.replacements import ReplacementValidator, is_valid_replacement, ordered_replacements
@@ -508,6 +509,38 @@ async def _thread_ids_for_events(
     return {str(row[0]) for row in rows}
 
 
+async def _invalidate_displaced_root_snapshots(
+    db: aiosqlite.Connection,
+    principal_id: str,
+    room_id: str,
+    *,
+    root_ids: set[str],
+) -> set[str]:
+    """Invalidate old snapshots replaced by newly proven root self-mappings."""
+    if not root_ids:
+        return set()
+    placeholders = ",".join("?" for _ in root_ids)
+    cursor = await db.execute(
+        f"""
+        UPDATE thread_cache_state
+        SET
+            invalidated_at = MAX(COALESCE(invalidated_at, 0), ?),
+            invalidation_reason = 'event_thread_membership_changed'
+        WHERE principal_id = ? AND room_id = ? AND thread_id IN (
+            SELECT thread_id
+            FROM event_threads
+            WHERE principal_id = ? AND room_id = ? AND event_id IN ({placeholders})
+                AND event_id <> thread_id
+        )
+        RETURNING thread_id
+        """,  # noqa: S608
+        (time.time(), principal_id, room_id, principal_id, room_id, *root_ids),
+    )
+    rows = await cursor.fetchall()
+    await cursor.close()
+    return {str(row[0]) for row in rows}
+
+
 async def _reconcile_thread_root_self_rows(
     db: aiosqlite.Connection,
     principal_id: str,
@@ -663,6 +696,14 @@ async def write_lookup_index_rows(
         )
     thread_index_events = serialized_events if thread_id is not None else accepted_events
     thread_index_event_ids = [event.event_id for event in thread_index_events]
+    thread_rows = event_thread_rows(room_id, thread_index_events, thread_id=thread_id)
+    current_self_root_ids = {row.thread_id for row in thread_rows if row.event_id == row.thread_id}
+    displaced_thread_ids = await _invalidate_displaced_root_snapshots(
+        db,
+        principal_id,
+        room_id,
+        root_ids=current_self_root_ids,
+    )
     previous_thread_ids = (
         await _thread_ids_for_events(
             db,
@@ -673,7 +714,6 @@ async def write_lookup_index_rows(
         if thread_index_event_ids
         else set()
     )
-    thread_rows = event_thread_rows(room_id, thread_index_events, thread_id=thread_id)
     await db.executemany(
         """
         DELETE FROM event_threads
@@ -695,8 +735,8 @@ async def write_lookup_index_rows(
         db,
         principal_id,
         room_id,
-        candidate_root_ids=previous_thread_ids | {row.thread_id for row in thread_rows},
-        current_self_root_ids={row.thread_id for row in thread_rows if row.event_id == row.thread_id},
+        candidate_root_ids=previous_thread_ids | displaced_thread_ids | {row.thread_id for row in thread_rows},
+        current_self_root_ids=current_self_root_ids,
     )
 
 

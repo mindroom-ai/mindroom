@@ -1696,6 +1696,60 @@ async def test_duplicate_ids_in_one_batch_converge_on_clear_payload(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("promotion_write", ["point_store", "thread_append"])
+async def test_promoting_indexed_rich_reply_root_invalidates_old_parent_snapshot(
+    event_cache: ConversationEventCache,
+    promotion_write: str,
+) -> None:
+    """A newly proven rich-reply root must make its old parent snapshot unusable."""
+    room_id = "!room:localhost"
+    parent_id = "$parent:localhost"
+    rich_reply_id = "$rich-reply:localhost"
+    rich_reply = _clear_payload(
+        rich_reply_id,
+        body="Rich reply",
+        origin_server_ts=3000,
+    )
+    rich_reply["content"] = {
+        "body": "Rich reply",
+        "msgtype": "m.text",
+        "m.relates_to": {"m.in_reply_to": {"event_id": parent_id}},
+    }
+    await _replace_thread(
+        event_cache,
+        room_id,
+        parent_id,
+        [
+            _clear_payload(parent_id, body="Parent", origin_server_ts=1000),
+            _clear_payload(
+                "$parent-child:localhost",
+                body="Parent child",
+                thread_root_id=parent_id,
+                origin_server_ts=2000,
+            ),
+            rich_reply,
+        ],
+    )
+    assert await event_cache.get_thread_id_for_event(room_id, rich_reply_id) == parent_id
+
+    promoted_child_id = "$rich-reply-child:localhost"
+    promoted_child = _clear_payload(
+        promoted_child_id,
+        body="Rich reply child",
+        thread_root_id=rich_reply_id,
+        origin_server_ts=4000,
+    )
+    if promotion_write == "point_store":
+        await event_cache.store_event(promoted_child_id, room_id, promoted_child)
+    else:
+        assert not await event_cache.append_event(room_id, rich_reply_id, promoted_child)
+
+    assert await event_cache.get_thread_id_for_event(room_id, rich_reply_id) == rich_reply_id
+    parent_state = await event_cache.get_thread_cache_state(room_id, parent_id)
+    assert thread_cache_rejection_reason(parent_state) == "thread_invalidated_after_validation"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("arrival_order", [("clear", "opaque"), ("opaque", "clear")])
 async def test_separate_cache_clients_cannot_downgrade_decrypted_payload(
     event_cache_factory: Callable[[], ConversationEventCache],
