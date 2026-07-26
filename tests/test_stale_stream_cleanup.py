@@ -2384,19 +2384,23 @@ signal.pause()
             event_cache_write_coordinator=None,
         )
         later_runtime.mark_runtime_started()
+        later_generation = later_runtime.runtime_generation
         later_runtime.mark_runtime_stopped()
-
-    assert list(lease_directory.glob("*.lock")) == []
+        assert len(list(lease_directory.glob("*.lock"))) == 1
+        assert not runtime_generation_owner_stopped(runtime_paths, generation)
+        assert runtime_generation_owner_stopped(runtime_paths, later_generation)
 
 
 @pytest.mark.asyncio
-async def test_orderly_stopped_generation_has_no_crash_cleanup_proof(tmp_path: Path) -> None:
-    """An orderly stop removes its lease instead of leaving stale crash proof."""
+async def test_orderly_stopped_generation_terminal_note_is_certified_for_auto_resume(tmp_path: Path) -> None:
+    """An orderly stop retains bounded proof until its terminal note is certified."""
     config = _make_config(tmp_path)
+    config.defaults.auto_resume_after_restart = True
+    runtime_paths = runtime_paths_for(config)
     prior_runtime = BotRuntimeState(
         client=None,
         config=config,
-        runtime_paths=runtime_paths_for(config),
+        runtime_paths=runtime_paths,
         enable_streaming=False,
         orchestrator=None,
         event_cache=None,
@@ -2409,29 +2413,154 @@ async def test_orderly_stopped_generation_has_no_crash_cleanup_proof(tmp_path: P
     client.rooms = _joined_room_cache()
     client.room_messages.return_value = _room_messages_response(
         _make_message_event(
-            event_id="$leftover",
-            body="Working ⋯",
+            event_id="$thread-root",
+            body="Question",
+            sender=USER_ID,
+            timestamp_ms=NOW_MS - (STALE_AGE_MS + 20_000),
+        ),
+        _make_message_event(
+            event_id="$interrupted",
+            body="Partial answer\n\n**[Response interrupted]**",
             timestamp_ms=NOW_MS - (STALE_AGE_MS + 5_000),
+            relates_to=_thread_reply_relation("$thread-root", "$thread-root"),
             extra_content={
-                STREAM_STATUS_KEY: "streaming",
+                STREAM_STATUS_KEY: STREAM_STATUS_INTERRUPTED,
                 stale_stream_cleanup_module.STREAM_GENERATION_KEY: prior_generation,
             },
         ),
     )
+    client.room_get_event_relations = MagicMock(return_value=_aiter())
+    client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$certified", room_id=ROOM_ID))
+
+    cleaned, interrupted = await _run_cleanup(
+        client,
+        config,
+        joined_rooms=[ROOM_ID],
+        runtime_generation="gen-current",
+    )
+
+    assert cleaned == 1
+    assert [item.target_event_id for item in interrupted] == ["$interrupted"]
+    sent_content = cast("dict[str, object]", client.room_send.await_args.kwargs["content"])
+    certified_content = cast("dict[str, object]", sent_content["m.new_content"])
+    assert stale_stream_cleanup_module.STREAM_GENERATION_KEY not in certified_content
+    assert certified_content[STREAM_STATUS_KEY] == STREAM_STATUS_INTERRUPTED
+
+
+@pytest.mark.asyncio
+async def test_certified_terminal_note_retries_after_generation_proof_expires(tmp_path: Path) -> None:
+    """A failed initial resume remains retryable after its bounded owner proof expires."""
+    config = _make_config(tmp_path)
+    config.defaults.auto_resume_after_restart = True
+    runtime_paths = runtime_paths_for(config)
+    prior_runtime = BotRuntimeState(
+        client=None,
+        config=config,
+        runtime_paths=runtime_paths,
+        enable_streaming=False,
+        orchestrator=None,
+        event_cache=None,
+        event_cache_write_coordinator=None,
+    )
+    retired_at_ns = 1_000_000_000
+    prior_runtime.mark_runtime_started()
+    prior_generation = prior_runtime.runtime_generation
+    with patch("mindroom.runtime_generation_lease.time.time_ns", return_value=retired_at_ns):
+        prior_runtime.mark_runtime_stopped()
+
+    client = _make_client()
+    client.rooms = _joined_room_cache()
+    original_events = (
+        _make_message_event(
+            event_id="$thread-root",
+            body="Question",
+            sender=USER_ID,
+            timestamp_ms=NOW_MS - (STALE_AGE_MS + 20_000),
+        ),
+        _make_message_event(
+            event_id="$interrupted",
+            body="Partial answer\n\n**[Response interrupted]**",
+            timestamp_ms=NOW_MS - (STALE_AGE_MS + 5_000),
+            relates_to=_thread_reply_relation("$thread-root", "$thread-root"),
+            extra_content={
+                STREAM_STATUS_KEY: STREAM_STATUS_INTERRUPTED,
+                stale_stream_cleanup_module.STREAM_GENERATION_KEY: prior_generation,
+            },
+        ),
+    )
+    client.room_messages.return_value = _room_messages_response(*original_events)
+    client.room_get_event_relations = MagicMock(return_value=_aiter())
+    client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$certified", room_id=ROOM_ID))
 
     with patch(
-        "mindroom.matrix.stale_stream_cleanup.edit_message_result",
-        new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit")),
-    ) as edit_result:
-        cleaned, _interrupted = await _run_cleanup(
+        "mindroom.runtime_generation_lease.time.time_ns",
+        return_value=retired_at_ns + 60 * 60 * 1_000_000_000,
+    ):
+        cleaned, interrupted = await _run_cleanup(
             client,
             config,
             joined_rooms=[ROOM_ID],
             runtime_generation="gen-current",
         )
 
-    assert cleaned == 0
-    edit_result.assert_not_awaited()
+    assert cleaned == 1
+    assert [item.target_event_id for item in interrupted] == ["$interrupted"]
+    sent_content = cast("dict[str, object]", client.room_send.await_args.kwargs["content"])
+    certified_content = cast("dict[str, object]", sent_content["m.new_content"])
+    assert stale_stream_cleanup_module.STREAM_GENERATION_KEY not in certified_content
+
+    with patch(
+        "mindroom.matrix.stale_stream_cleanup.send_message_result",
+        new=AsyncMock(return_value=None),
+    ):
+        resumed_count = await auto_resume_interrupted_threads(
+            client,
+            interrupted,
+            config=config,
+            runtime_paths=runtime_paths,
+            conversation_cache=_auto_resume_conversation_cache(interrupted),
+            delay=0,
+        )
+    assert resumed_count == 0
+
+    expired_at_ns = retired_at_ns + 7 * 60 * 60 * 1_000_000_000
+    with patch("mindroom.runtime_generation_lease.time.time_ns", return_value=expired_at_ns):
+        later_runtime = BotRuntimeState(
+            client=None,
+            config=config,
+            runtime_paths=runtime_paths,
+            enable_streaming=False,
+            orchestrator=None,
+            event_cache=None,
+            event_cache_write_coordinator=None,
+        )
+        later_runtime.mark_runtime_started()
+        later_runtime.mark_runtime_stopped()
+        assert not runtime_generation_owner_stopped(runtime_paths, prior_generation)
+
+    client.room_messages.return_value = _room_messages_response(
+        *original_events,
+        _make_message_event(
+            event_id="$certified",
+            body=str(certified_content["body"]),
+            timestamp_ms=NOW_MS - STALE_AGE_MS,
+            relates_to={"rel_type": "m.replace", "event_id": "$interrupted"},
+            new_content=certified_content,
+        ),
+    )
+    client.room_send.reset_mock()
+
+    cleaned_after_expiry, retried = await _run_cleanup(
+        client,
+        config,
+        joined_rooms=[ROOM_ID],
+        now_ms=NOW_MS + 7 * 60 * 60 * 1_000,
+        runtime_generation="gen-later",
+    )
+
+    assert cleaned_after_expiry == 0
+    assert [item.target_event_id for item in retried] == ["$interrupted"]
+    client.room_send.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -2491,8 +2620,8 @@ def test_runtime_generation_rotates_on_same_object_restart(tmp_path: Path) -> No
     state.mark_runtime_stopped()
 
 
-def test_orderly_runtime_cycles_do_not_accumulate_generation_leases(tmp_path: Path) -> None:
-    """Repeated orderly starts and stops leave no per-generation lease files."""
+def test_orderly_runtime_cycles_retain_only_bounded_generation_proofs(tmp_path: Path) -> None:
+    """Orderly stopped-owner proofs expire while recent generations stay provable."""
     config = _make_config(tmp_path)
     runtime_paths = runtime_paths_for(config)
     lease_directory = runtime_paths.storage_root / "tracking" / "runtime_generation_leases"
@@ -2505,17 +2634,31 @@ def test_orderly_runtime_cycles_do_not_accumulate_generation_leases(tmp_path: Pa
         event_cache=None,
         event_cache_write_coordinator=None,
     )
+    started_at_ns = 1_000_000_000
+    cycle_ns = 2 * 60 * 60 * 1_000_000_000
 
-    for _ in range(5):
+    for cycle in range(5):
+        with patch(
+            "mindroom.runtime_generation_lease.time.time_ns",
+            return_value=started_at_ns + cycle * cycle_ns,
+        ):
+            state.mark_runtime_started()
+            generation = state.runtime_generation
+
+            assert not runtime_generation_owner_stopped(runtime_paths, generation)
+
+            state.mark_runtime_stopped()
+            assert runtime_generation_owner_stopped(runtime_paths, generation)
+            assert len(list(lease_directory.glob("*.lock"))) <= 4
+
+    with patch(
+        "mindroom.runtime_generation_lease.time.time_ns",
+        return_value=started_at_ns + 15 * 60 * 60 * 1_000_000_000,
+    ):
         state.mark_runtime_started()
-        generation = state.runtime_generation
-
-        assert not runtime_generation_owner_stopped(runtime_paths, generation)
-        assert len(list(lease_directory.glob("*.lock"))) == 1
-
         state.mark_runtime_stopped()
-        assert not runtime_generation_owner_stopped(runtime_paths, generation)
-        assert list(lease_directory.glob("*.lock")) == []
+
+    assert len(list(lease_directory.glob("*.lock"))) == 1
 
 
 def test_long_lived_active_generation_lease_is_not_age_pruned(tmp_path: Path) -> None:

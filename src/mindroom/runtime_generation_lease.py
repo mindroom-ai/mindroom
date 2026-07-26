@@ -44,14 +44,17 @@ class RuntimeGenerationLease:
     _lock_file: TextIO | None
 
     def release(self) -> None:
-        """Release and remove this orderly-stopped runtime generation lease."""
+        """Release this generation while retaining bounded stopped-owner proof."""
         lock_file = self._lock_file
         if lock_file is None:
             return
         self._lock_file = None
         try:
             if _path_references_lock_file(self._lease_path, lock_file):
-                self._lease_path.unlink()
+                _write_lease_record(
+                    lock_file,
+                    _LeaseRecord(generation=self.generation, retired_at_ns=time.time_ns()),
+                )
         finally:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
             lock_file.close()

@@ -622,14 +622,7 @@ async def _handle_interrupted_message(
     prior_edit_succeeded: bool,
 ) -> tuple[bool, _InterruptedThread | None]:
     """Handle an interrupted response or restart marker seen during startup cleanup."""
-    interrupted = None
-    if can_auto_resume and target_event_id not in auto_resume_target_event_ids:
-        interrupted = _interrupted_thread_from_terminal_state(
-            room_id=room_id,
-            target_event_id=target_event_id,
-            state=state,
-            agent_name=agent_name,
-        )
+    requires_stopped_owner_certification = _has_runtime_generation_stamp(state)
     repaired = await _repair_restart_marked_message_metadata(
         client,
         room_id=room_id,
@@ -640,6 +633,15 @@ async def _handle_interrupted_message(
         conversation_cache=conversation_cache,
         prior_edit_succeeded=prior_edit_succeeded,
     )
+    interrupted = None
+    stopped_owner_certified = not requires_stopped_owner_certification or repaired
+    if stopped_owner_certified and can_auto_resume and target_event_id not in auto_resume_target_event_ids:
+        interrupted = _interrupted_thread_from_terminal_state(
+            room_id=room_id,
+            target_event_id=target_event_id,
+            state=state,
+            agent_name=agent_name,
+        )
     await _redact_stop_reactions(
         client,
         room_id=room_id,
@@ -661,9 +663,9 @@ async def _repair_restart_marked_message_metadata(
     conversation_cache: ConversationCacheProtocol | None = None,
     prior_edit_succeeded: bool,
 ) -> bool:
-    """Repair non-terminal stream metadata on already restart-marked messages."""
+    """Repair active metadata and certify positively stopped runtime ownership."""
     assert state.latest_body is not None
-    if not _has_non_terminal_stream_status(state.latest_content):
+    if not _has_non_terminal_stream_status(state.latest_content) and not _has_runtime_generation_stamp(state):
         return False
 
     try:
@@ -1556,10 +1558,12 @@ def _has_non_terminal_stream_status(content: dict[str, Any] | None) -> bool:
 
 
 def _terminal_stream_content(content: dict[str, Any] | None) -> dict[str, Any]:
-    """Return metadata with a terminal stream status for cleanup edits."""
-    if content is None:
-        return {STREAM_STATUS_KEY: STREAM_STATUS_ERROR}
-    return {**content, STREAM_STATUS_KEY: STREAM_STATUS_ERROR}
+    """Return certified terminal metadata for cleanup edits."""
+    terminal_content = dict(content or {})
+    terminal_content.pop(STREAM_GENERATION_KEY, None)
+    if terminal_content.get(STREAM_STATUS_KEY) not in _TERMINAL_STREAM_STATUSES:
+        terminal_content[STREAM_STATUS_KEY] = STREAM_STATUS_ERROR
+    return terminal_content
 
 
 async def _redact_stop_reactions(
@@ -1756,6 +1760,11 @@ def _has_cleanup_authority(
         runtime_paths,
         latest_generation,
     )
+
+
+def _has_runtime_generation_stamp(state: _MessageState) -> bool:
+    """Return whether the latest visible state still needs owner certification."""
+    return isinstance((state.latest_content or {}).get(STREAM_GENERATION_KEY), str)
 
 
 def _is_cleanup_candidate(state: _MessageState) -> bool:
