@@ -154,6 +154,7 @@ class ScopeSessionContext:
     storage: BaseDb
     session: AgentSession | TeamSession | None
     session_id: str | None = None
+    storage_factory: Callable[[], BaseDb] | None = None
 
 
 @dataclass(frozen=True)
@@ -567,11 +568,16 @@ async def _run_scope_compaction(
         execution_plan.compaction_model_name,
     )
     fallback_model_name = execution_plan.compaction_fallback_model_name
+    fallback_summary_input_budget = execution_plan.compaction_fallback_summary_input_budget_tokens
     fallback_model: Model | None = None
-    if fallback_model_name is not None and _compaction_fallback_is_distinct(
-        config,
-        primary_model_name=execution_plan.compaction_model_name,
-        fallback_model_name=fallback_model_name,
+    if (
+        fallback_model_name is not None
+        and fallback_summary_input_budget is not None
+        and _compaction_fallback_is_distinct(
+            config,
+            primary_model_name=execution_plan.compaction_model_name,
+            fallback_model_name=fallback_model_name,
+        )
     ):
         # The fallback is an optional resilience knob: when its construction
         # fails (missing SDK, credentials, client setup), compaction still
@@ -600,8 +606,10 @@ async def _run_scope_compaction(
         replay_window_tokens=execution_plan.replay_window_tokens,
         threshold_tokens=execution_plan.trigger_threshold_tokens,
         summary_prompt=config.get_prompt("COMPACTION_SUMMARY_PROMPT"),
+        summary_timeout_seconds=execution_plan.compaction_timeout_seconds,
         fallback_summary_model=fallback_model,
         fallback_summary_model_name=fallback_model_name if fallback_model is not None else None,
+        fallback_summary_input_budget=fallback_summary_input_budget if fallback_model is not None else None,
         lifecycle_notice_event_id=lifecycle_notice_event_id,
         progress_callback=progress_callback,
     )
@@ -885,6 +893,7 @@ def _build_scope_session_context(
     scope: HistoryScope | None,
     session_id: str | None,
     storage: BaseDb,
+    storage_factory: Callable[[], BaseDb],
     create_session_if_missing: bool = False,
 ) -> ScopeSessionContext | None:
     """Build one scope/session context from an already-open storage handle."""
@@ -903,6 +912,7 @@ def _build_scope_session_context(
         storage=storage,
         session=session,
         session_id=session_id,
+        storage_factory=storage_factory,
     )
 
 
@@ -924,6 +934,16 @@ def open_resolved_scope_session_context(
     if scope is None:
         yield None
         return
+
+    def storage_factory() -> BaseDb:
+        return create_scope_session_storage(
+            agent_name=agent_name,
+            scope=scope,
+            config=config,
+            runtime_paths=runtime_paths,
+            execution_identity=execution_identity,
+        )
+
     with _open_scope_storage(
         agent_name=agent_name,
         scope=scope,
@@ -935,6 +955,7 @@ def open_resolved_scope_session_context(
             scope=scope,
             session_id=session_id,
             storage=storage,
+            storage_factory=storage_factory,
             create_session_if_missing=create_session_if_missing,
         )
 

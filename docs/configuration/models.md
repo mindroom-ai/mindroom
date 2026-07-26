@@ -21,6 +21,7 @@ Models define the AI providers and model IDs used by agents.
 - `cerebras` - Cerebras-hosted models
 - `deepseek` - DeepSeek models
 - `zai` - Z.ai GLM models
+- `synthetic` - Built-in Lorem Ipsum model for local conversations and load generation
 
 ## Model Config Fields
 
@@ -33,7 +34,7 @@ Each model configuration supports the following fields:
 | `host` | No | `null` | Host URL for self-hosted models (e.g., Ollama) |
 | `api_key` | No | `null` | API key (usually read from environment variables) |
 | `extra_kwargs` | No | `null` | Additional provider-specific parameters |
-| `context_window` | No | `null` | Actual provider context window size in tokens; MindRoom uses it as the default replay-planning window unless compaction sets a smaller `replay_window_tokens`; an explicit `compaction.model` or `compaction.fallback_model` needs its own `context_window` for summary generation; on `vertexai_claude` it also enables request-time fitting |
+| `context_window` | No | `null` | Actual provider context window size in tokens; MindRoom uses it for compaction summary input and as the default replay-planning window unless compaction sets a smaller `replay_window_tokens`; an explicit `compaction.model` or `compaction.fallback_model` needs its own `context_window` for summary generation; on `vertexai_claude` it also enables request-time fitting |
 
 ## Configuration Examples
 
@@ -125,6 +126,38 @@ models:
     extra_kwargs:
       base_url: http://localhost:8080/v1
 ```
+
+## Built-In Synthetic Model
+
+Use `provider: synthetic` to exercise normal MindRoom conversations without an API key or model server.
+The model streams a seeded random amount of Lorem Ipsum at a fixed character rate.
+When the agent has the `shell` tool, the model occasionally calls `run_shell_command` with `echo hi` and then continues its response.
+
+```yaml
+models:
+  synthetic:
+    provider: synthetic
+    id: lorem-ipsum
+    extra_kwargs:
+      seed: 1
+      min_response_chars: 320
+      max_response_chars: 960
+      chunk_chars: 40
+      chars_per_second: 80
+      tool_call_probability: 0.2
+
+agents:
+  load_test:
+    display_name: Load Test
+    role: Generate synthetic traffic.
+    model: synthetic
+    tools: [shell]
+    rooms: [lobby]
+```
+
+Tag `@load_test` in Lobby to receive a streamed synthetic reply through the same Matrix path as any other agent.
+Set `tool_call_probability: 1` to force the shell call on every turn, or `0` to disable tool calls.
+Changing `seed` changes the repeatable response length, split point, and tool-call choice for each conversation history.
 
 ## OpenAI API Models
 
@@ -258,13 +291,14 @@ It runs only when history exceeds the hard replay budget for the next reply.
 You can tune compaction behavior with these settings:
 
 - Use `threshold_tokens` or `threshold_percent` to set the soft trigger budget. Crossing this soft trigger while still within the hard budget leaves the stored session unchanged and relies on replay fitting for that reply.
-- Use `replay_window_tokens` to keep persisted replay, required-compaction planning, and summary input chunks within a smaller operational window without presenting that smaller value as the provider's request limit.
+- Use `replay_window_tokens` to keep persisted replay and required-compaction planning within a smaller operational window without presenting that smaller value as the provider's request limit.
 - Use `reserve_tokens` to leave hard-budget headroom for the current prompt and output.
-- Use `model` to choose the summary model, and `fallback_model` to name a different model config that resends the unchanged summary prompt and input once (only the target model differs) when the summary model refuses for safeguards; after a successful fallback, that model serves the remaining compaction chunks and is reported as the summary model.
+- Use `model` to choose the summary model, and `fallback_model` to name a different model config retried once when the summary model refuses for safeguards; the same input is reused when it fits, otherwise it is rebuilt under the fallback model's own context budget, and after success that model serves the remaining chunks.
+- Use `timeout_seconds` to bound each primary, retry, or fallback summary request; it defaults to 600 seconds, while an explicitly shorter provider timeout remains the stricter cap.
 
 When the active runtime model window is known, replay safety uses the smaller of it and `replay_window_tokens`.
 When that model window is unknown, an explicit `replay_window_tokens` still supplies the replay-planning window.
-The effective replay window also caps each compaction summary input chunk.
+Each compaction summary input chunk is sized independently from the selected compaction model's real `context_window`, after reserve, prompt overhead, and a safety margin.
 Destructive compaction requires the resolved summary input budget to exceed 2,000 tokens.
 With the default `reserve_tokens`, this makes destructive compaction unavailable when the compaction model's context window is roughly 10,000 tokens or smaller; lowering `reserve_tokens` restores availability for such small windows.
 
@@ -292,7 +326,7 @@ models:
 
 defaults:
   compaction:
-    replay_window_tokens: 200000  # Cap persisted replay and compaction summary chunks
+    replay_window_tokens: 200000  # Compact persisted replay around a smaller operational window
 ```
 
 This is useful for models with smaller context windows or long-running conversations that accumulate persisted history.

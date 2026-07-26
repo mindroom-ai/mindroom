@@ -252,15 +252,15 @@ def resolve_refresh_target(
     )
 
 
-def _published_index_storage_path(key: PublishedIndexKey) -> Path:
-    """Return the storage directory for one resolved knowledge base."""
+def published_index_storage_path(key: PublishedIndexKey) -> Path:
+    """Return the private storage directory backing one resolved knowledge base."""
     knowledge_path = Path(key.knowledge_path)
     return (Path(key.storage_root) / "knowledge_db" / storage_key_for_base(key.base_id, knowledge_path)).resolve()
 
 
 def published_index_metadata_path(key: PublishedIndexKey) -> Path:
     """Return the single persisted state file for one knowledge base."""
-    return _published_index_storage_path(key) / "indexing_settings.json"
+    return published_index_storage_path(key) / "indexing_settings.json"
 
 
 def _coerce_refresh_job(value: object) -> Literal["idle", "pending", "running", "failed"]:
@@ -467,7 +467,7 @@ def _build_published_index_vector_db(
         "_PublishedIndexVectorDb",
         ChromaDb(
             collection=_state_collection_name(state),
-            path=str(_published_index_storage_path(key)),
+            path=str(published_index_storage_path(key)),
             persistent_client=True,
             embedder=create_configured_embedder(config, runtime_paths),
         ),
@@ -491,7 +491,7 @@ def published_index_collection_exists_for_state(key: PublishedIndexKey, state: P
     if state.status != "complete" or state.collection is None:
         return False
     try:
-        return chroma_collection_exists(_published_index_storage_path(key), state.collection)
+        return chroma_collection_exists(published_index_storage_path(key), state.collection)
     except Exception:
         logger.warning(
             "Published knowledge collection existence check failed",
@@ -510,31 +510,18 @@ def _indexing_settings_query_compatible(
     return published_settings.query_compatibility_key() == current_settings.query_compatibility_key()
 
 
-def _indexing_settings_corpus_compatible(
-    published_settings: IndexingSettings,
-    current_settings: IndexingSettings,
-) -> bool:
-    """Return whether published content is safe for the current corpus config."""
-    return published_settings.corpus_compatibility_key() == current_settings.corpus_compatibility_key()
-
-
-def indexing_settings_metadata_equal(
-    published_settings: IndexingSettings,
-    current_settings: IndexingSettings,
-) -> bool:
-    """Return whether persisted metadata exactly matches current indexing settings."""
-    return published_settings == current_settings
-
-
 def published_index_settings_compatible(
     published_settings: IndexingSettings,
     current_settings: IndexingSettings,
 ) -> bool:
     """Return whether a published index can be queried under the current config."""
-    return _indexing_settings_query_compatible(
-        published_settings,
-        current_settings,
-    ) and _indexing_settings_corpus_compatible(published_settings, current_settings)
+    return (
+        _indexing_settings_query_compatible(
+            published_settings,
+            current_settings,
+        )
+        and published_settings.corpus_compatibility_key() == current_settings.corpus_compatibility_key()
+    )
 
 
 def _published_index_state_queryable(key: PublishedIndexKey, state: PublishedIndexState) -> bool:
@@ -560,10 +547,13 @@ def _published_index_availability(
         )
     elif state.collection is None and refresh_state == "refresh_failed":
         availability = KnowledgeAvailability.REFRESH_FAILED
-    elif not published_index_settings_compatible(
-        state.settings,
-        key.indexing_settings,
-    ) or not indexing_settings_metadata_equal(state.settings, key.indexing_settings):
+    elif (
+        not published_index_settings_compatible(
+            state.settings,
+            key.indexing_settings,
+        )
+        or state.settings != key.indexing_settings
+    ):
         availability = KnowledgeAvailability.CONFIG_MISMATCH
     elif refresh_state == "refresh_failed":
         availability = KnowledgeAvailability.REFRESH_FAILED

@@ -1291,6 +1291,7 @@ depends_on = [
     "mindroom.orchestration.external_trigger_runtime",
     "mindroom.orchestration.runtime",
     "mindroom.orchestration.todo_poke_runtime",
+    "mindroom.response_admission",
     "mindroom.runtime_support",
     "mindroom.scheduling_executor",
     "mindroom.tool_system.plugins",
@@ -1317,6 +1318,7 @@ depends_on = [
     "mindroom.memory",
     "mindroom.orchestration.runtime",
     "mindroom.post_response_effects",
+    "mindroom.response_admission",
     "mindroom.response_attempt",
     "mindroom.response_lifecycle",
     "mindroom.response_terminal",
@@ -1328,6 +1330,20 @@ depends_on = [
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.worker_routing",
     "mindroom.user_turn_time",
+]
+
+[[modules]]
+path = "mindroom.response_admission"
+depends_on = []
+visibility = [
+    "mindroom.bot",
+    "mindroom.bot_runtime_view",
+    "mindroom.orchestration.config_lifecycle",
+    "mindroom.orchestrator",
+    "mindroom.response_runner",
+    "mindroom.sync_restart_retry",
+    "mindroom.text_ingress_dispatch",
+    "mindroom.turn_controller",
 ]
 
 [[modules]]
@@ -1685,6 +1701,7 @@ depends_on = [
     "mindroom.matrix.cache.event_normalization",
     "mindroom.matrix.cache.write_coordinator",
     "mindroom.matrix.cache.thread_cache_helpers",
+    "mindroom.matrix.cache.thread_cache_state",
     "mindroom.matrix.cache.thread_history_result",
 ]
 
@@ -1787,7 +1804,17 @@ depends_on = [
     "mindroom.constants",
     "mindroom.matrix.cache.thread_cache_helpers",
     "mindroom.matrix.cache.thread_history_result",
+    "mindroom.matrix.cache.thread_repair",
     "mindroom.matrix.thread_diagnostics",
+]
+
+[[modules]]
+path = "mindroom.matrix.cache.thread_repair"
+depends_on = []
+visibility = [
+    "mindroom.matrix.cache.thread_reads",
+    "mindroom.matrix.cache.write_coordinator",
+    "mindroom.matrix.conversation_cache",
 ]
 
 [[modules]]
@@ -1806,6 +1833,7 @@ visibility = [
 path = "mindroom.matrix.cache.thread_cache_state"
 depends_on = ["mindroom.matrix.cache.event_cache"]
 visibility = [
+    "mindroom.matrix.cache",
     "mindroom.matrix.cache.postgres_event_cache",
     "mindroom.matrix.cache.postgres_event_cache_threads",
     "mindroom.matrix.cache.sqlite_event_cache",
@@ -1900,13 +1928,19 @@ visibility = ["mindroom.runtime_support"]
 
 [[modules]]
 path = "mindroom.matrix.cache.write_coordinator"
+depends_on = ["mindroom.matrix.cache.thread_repair"]
+
+[[modules]]
+path = "mindroom.matrix.cache.outbound_thread_reservations"
 depends_on = []
+visibility = ["mindroom.matrix.cache.thread_writes"]
 
 [[modules]]
 path = "mindroom.matrix.cache.thread_writes"
 depends_on = [
     "mindroom.constants",
     "mindroom.matrix.cache.event_normalization",
+    "mindroom.matrix.cache.outbound_thread_reservations",
     "mindroom.matrix.event_info",
     "mindroom.matrix.sync_certification",
     "mindroom.matrix.thread_bookkeeping",
@@ -1915,10 +1949,12 @@ depends_on = [
 [[modules]]
 path = "mindroom.matrix.conversation_cache"
 depends_on = [
+    "mindroom.background_tasks",
     "mindroom.entity_resolution",
     "mindroom.matrix.cache",
     "mindroom.matrix.cache.thread_history_result",
     "mindroom.matrix.cache.thread_reads",
+    "mindroom.matrix.cache.thread_repair",
     "mindroom.matrix.cache.thread_write_cache_ops",
     "mindroom.matrix.cache.thread_writes",
     "mindroom.matrix.client_thread_history",
@@ -1982,7 +2018,7 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.bot_runtime_view"
-depends_on = ["mindroom.matrix.cache"]
+depends_on = ["mindroom.matrix.cache", "mindroom.response_admission"]
 visibility = [
     "mindroom.bot",
     "mindroom.matrix.cache.thread_reads",
@@ -2025,6 +2061,7 @@ depends_on = []
 [[modules]]
 path = "mindroom.sync_restart_retry"
 depends_on = [
+    "mindroom.response_admission",
     "mindroom.constants",
     "mindroom.history.storage",
     "mindroom.history.types",
@@ -3337,6 +3374,7 @@ visibility = [
 [[modules]]
 path = "mindroom.text_ingress_dispatch"
 depends_on = [
+    "mindroom.response_admission",
     "mindroom.attachments",
     "mindroom.commands.parsing",
     "mindroom.constants",
@@ -3355,6 +3393,7 @@ visibility = ["mindroom.turn_controller"]
 [[modules]]
 path = "mindroom.turn_controller"
 depends_on = [
+    "mindroom.response_admission",
     "mindroom.commands.handler",
     "mindroom.commands.parsing",
     "mindroom.constants",
@@ -3465,9 +3504,34 @@ depends_on = [
 path = "mindroom.knowledge.index_metadata"
 depends_on = []
 visibility = [
+    "mindroom.knowledge.candidate_checkpoint",
     "mindroom.knowledge.manager",
     "mindroom.knowledge.registry",
 ]
+
+[[modules]]
+path = "mindroom.knowledge.candidate_checkpoint"
+depends_on = [
+    "mindroom.knowledge.index_metadata",
+    "mindroom.knowledge.indexing_config",
+]
+visibility = [
+    "mindroom.knowledge.manager",
+    "mindroom.knowledge.status",
+]
+
+[[modules]]
+path = "mindroom.knowledge.embedding_batch"
+depends_on = [
+    "mindroom.embedding_errors",
+    "mindroom.logging_config",
+]
+visibility = ["mindroom.knowledge.manager"]
+
+[[modules]]
+path = "mindroom.knowledge.index_retry"
+depends_on = ["mindroom.embedding_errors"]
+visibility = ["mindroom.knowledge.manager"]
 
 [[modules]]
 path = "mindroom.knowledge.registry"
@@ -3495,8 +3559,11 @@ depends_on = [
     "mindroom.constants",
     "mindroom.embedding_errors",
     "mindroom.embedding_factory",
+    "mindroom.knowledge.candidate_checkpoint",
+    "mindroom.knowledge.embedding_batch",
     "mindroom.knowledge.file_listing",
     "mindroom.knowledge.index_metadata",
+    "mindroom.knowledge.index_retry",
     "mindroom.knowledge.indexing_config",
     "mindroom.knowledge.redaction",
     "mindroom.strict_knowledge",
@@ -3514,6 +3581,7 @@ depends_on = []
 path = "mindroom.knowledge.status"
 depends_on = [
     "mindroom.knowledge.availability",
+    "mindroom.knowledge.candidate_checkpoint",
     "mindroom.knowledge.registry",
 ]
 
@@ -3568,8 +3636,9 @@ expose = [
 from = ["mindroom.memory._backend"]
 
 # Public seam for compaction summary calls: one model-configuration path, one
-# replaceable request builder (future warm-prefix builder, PR #861), and the
-# explicit budget-shrink retry policy. Tested in tests/test_compaction_invariants.py.
+# replaceable request builder (future warm-prefix builder, PR #861), the single
+# resolved-timeout rule callers log, and the explicit budget-shrink retry policy.
+# Tested in tests/test_compaction_invariants.py.
 [[interfaces]]
 expose = [
     "CompactionSummaryOutputLimitError",
@@ -3577,6 +3646,7 @@ expose = [
     "SummaryRetryPolicy",
     "build_summary_request_messages",
     "configure_summary_model",
+    "effective_summary_timeout_seconds",
     "generate_compaction_summary",
 ]
 from = ["mindroom.history.summary_call"]
@@ -3765,6 +3835,7 @@ expose = [
     "EventCacheWriteCoordinator",
     "SharedConversationEventCache",
     "ThreadCacheState",
+    "ThreadCacheReplaceOutcome",
     "ThreadHistoryResult",
     "ThreadRevision",
     "is_opaque_encrypted_event_source",
@@ -3808,6 +3879,7 @@ exclusive = true
 [[interfaces]]
 expose = [
     "ConversationEventCache",
+    "ThreadCacheReplaceOutcome",
     "ThreadHistoryResult",
     "normalize_nio_event_for_cache",
     "thread_history_result",
@@ -4005,6 +4077,7 @@ from = ["mindroom.matrix.client_visible_messages"]
 expose = [
     "fetch_thread_event_sources_via_room_messages",
     "BulkThreadRefreshStats",
+    "RetainedThreadEventSourceProvider",
     "RoomThreadsPageError",
     "ThreadRoomScanRootNotFoundError",
     "bulk_refresh_room_thread_histories",
@@ -4013,7 +4086,9 @@ expose = [
     "fetch_dispatch_thread_snapshot",
     "fetch_thread_history",
     "get_room_threads_page",
+    "log_thread_history_refresh",
     "refresh_thread_history_from_source",
+    "thread_history_refresh_mode",
     "untrusted_cached_thread_ids",
 ]
 from = ["mindroom.matrix.client_thread_history"]

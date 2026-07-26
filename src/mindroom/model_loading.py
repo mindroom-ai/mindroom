@@ -155,7 +155,15 @@ def _create_model_for_provider(  # noqa: C901, PLR0911, PLR0912, PLR0915
 
     if (
         canonical_provider_key
-        not in {"ollama", "llama_cpp", "vertexai_claude", "codex", "openai_codex", _BEDROCK_CLAUDE_PROVIDER}
+        not in {
+            "ollama",
+            "llama_cpp",
+            "vertexai_claude",
+            "codex",
+            "openai_codex",
+            "synthetic",
+            _BEDROCK_CLAUDE_PROVIDER,
+        }
         and "api_key" not in extra_kwargs
     ):
         api_key = get_api_key_for_provider(canonical_provider_key, runtime_paths=runtime_paths)
@@ -197,6 +205,12 @@ def _create_model_for_provider(  # noqa: C901, PLR0911, PLR0912, PLR0915
         host = model_config.host or get_ollama_host(runtime_paths=runtime_paths) or OLLAMA_HOST_DEFAULT
         logger.debug("using_ollama_host", host=host)
         return Ollama(id=model_id, host=host, **extra_kwargs)
+
+    if canonical_provider_key == "synthetic":
+        from mindroom.synthetic_model import SyntheticModel  # noqa: PLC0415
+
+        extra_kwargs.pop("api_key", None)
+        return SyntheticModel(id=model_id, **extra_kwargs)
 
     if canonical_provider_key == "openrouter":
         from mindroom.openai_models import MindRoomOpenRouter  # noqa: PLC0415

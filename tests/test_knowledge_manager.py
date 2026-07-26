@@ -18,6 +18,7 @@ from unittest.mock import MagicMock
 import httpx
 import pytest
 from agno.knowledge.document.base import Document
+from agno.knowledge.embedder.base import Embedder
 from fastapi.testclient import TestClient
 from openai import AuthenticationError
 from structlog.testing import capture_logs
@@ -40,6 +41,7 @@ from mindroom.credentials import get_runtime_shared_credentials_manager
 from mindroom.credentials_sync import get_embedder_api_key
 from mindroom.knowledge import KnowledgeRefreshScheduler, resolve_agent_knowledge_access
 from mindroom.knowledge.availability import KnowledgeAvailability
+from mindroom.knowledge.candidate_checkpoint import load_candidate_checkpoint
 from mindroom.knowledge.file_listing import (
     git_checkout_present,
     list_git_tracked_knowledge_files,
@@ -61,6 +63,7 @@ from mindroom.knowledge.utils import KnowledgeAvailabilityDetail
 from mindroom.knowledge.watch import KnowledgeSourceWatcher
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
+from tests.knowledge_test_support import metadata_matches
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Coroutine, Iterator
@@ -84,11 +87,20 @@ class _Collection:
         with _VectorDb.lock:
             selected_all = list(_VectorDb.collections.get(self._name, []))
         if where:
-            key, value = next(iter(where.items()))
-            selected_all = [item for item in selected_all if item["metadata"].get(key) == value]
+            key, condition = next(iter(where.items()))
+            selected_all = [item for item in selected_all if metadata_matches(item["metadata"], key, condition)]
         selected = selected_all[offset:] if limit is None else selected_all[offset : offset + limit]
         ids = [str(index) for index in range(offset, offset + len(selected))]
         return {"ids": ids, "metadatas": [dict(item["metadata"]) for item in selected]}
+
+    def delete(self, *, where: dict[str, object]) -> None:
+        key, condition = next(iter(where.items()))
+        with _VectorDb.lock:
+            _VectorDb.collections[self._name] = [
+                item
+                for item in _VectorDb.collections.get(self._name, [])
+                if not metadata_matches(item["metadata"], key, condition)
+            ]
 
 
 class _Client:
@@ -185,6 +197,20 @@ class _Knowledge:
         return self.vector_db.search(query=query, limit=max_results or 5)
 
 
+class _FakeEmbedder(Embedder):
+    """Typed stand-in for the configured embedder; never issues requests."""
+
+    def get_embedding(self, text: str) -> list[float]:
+        _ = text
+        msg = "fake embedder must not be asked for vectors"
+        raise AssertionError(msg)
+
+    def get_embedding_and_usage(self, text: str) -> tuple[list[float], dict[str, object] | None]:
+        _ = text
+        msg = "fake embedder must not be asked for vectors"
+        raise AssertionError(msg)
+
+
 class _AutoCreatingKnowledge(_Knowledge):
     def __init__(self, vector_db: _VectorDb) -> None:
         super().__init__(vector_db)
@@ -198,7 +224,10 @@ def patch_vector_store(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     _VectorDb.collections = {}
     monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _VectorDb)
     monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _Knowledge)
-    monkeypatch.setattr("mindroom.knowledge.manager.create_configured_embedder", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(
+        "mindroom.knowledge.manager.create_configured_embedder",
+        lambda *_args, **_kwargs: _FakeEmbedder(),
+    )
     monkeypatch.setattr("mindroom.knowledge.indexing_config.ChromaDb", _VectorDb)
     monkeypatch.setattr("mindroom.knowledge.registry.ChromaDb", _VectorDb)
     monkeypatch.setattr("mindroom.knowledge.registry.StrictSearchKnowledge", _Knowledge)
@@ -232,6 +261,13 @@ def _create_idle_refresh_lock(key: knowledge_registry.KnowledgeSourceRoot) -> No
     knowledge_refresh_runner._release_refresh_lock_for_key(key, entry)
 
 
+def _base_storage_path(config: Config, runtime_paths: RuntimePaths, base_id: str = "docs") -> Path:
+    """Return the private storage directory holding one base's candidate state."""
+    return knowledge_registry.published_index_storage_path(
+        resolve_published_index_key(base_id, config=config, runtime_paths=runtime_paths),
+    )
+
+
 def _test_indexing_settings(base_id: str = "docs") -> IndexingSettings:
     return IndexingSettings(
         base_id=base_id,
@@ -250,10 +286,11 @@ def _test_indexing_settings(base_id: str = "docs") -> IndexingSettings:
         git_skip_hidden="",
         git_include_patterns="",
         git_exclude_patterns="",
-        include_patterns="",
-        exclude_patterns="",
+        include_patterns="()",
+        exclude_patterns="()",
         include_extensions="",
         exclude_extensions="()",
+        extra_extensions="()",
     )
 
 
@@ -2553,9 +2590,58 @@ def test_indexing_settings_key_uses_named_settings(tmp_path: Path) -> None:
     assert not knowledge_registry.published_index_settings_compatible(key.indexing_settings, changed_repo_identity)
 
 
+def test_legacy_empty_optional_filter_metadata_remains_compatible() -> None:
+    """Legacy empty semantic filter keys normalize once when metadata is parsed."""
+    current = _test_indexing_settings()
+    legacy_metadata = current.to_metadata()
+    legacy_metadata["include_patterns"] = ""
+    del legacy_metadata["exclude_patterns"]
+    legacy_metadata["extra_extensions"] = ""
+    legacy = IndexingSettings.from_metadata(legacy_metadata)
+
+    assert legacy is not None
+    assert legacy == current
+    assert knowledge_registry.published_index_settings_compatible(legacy, current)
+    assert not knowledge_registry.published_index_settings_compatible(
+        legacy,
+        replace(current, extra_extensions="('.pdf',)"),
+    )
+
+
 def test_knowledge_file_indexing_parallelism_default_is_conservative() -> None:
     """One refresh subprocess should not fan out into dozens of concurrent file embeds by default."""
-    assert knowledge_manager_module._MAX_CONCURRENT_KNOWLEDGE_FILE_INDEXES == 4
+    assert knowledge_manager_module._max_concurrent_knowledge_file_indexes() == 4
+
+
+def test_knowledge_file_indexing_parallelism_reads_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Large corpora can raise file-level indexing concurrency explicitly."""
+    monkeypatch.setenv("MINDROOM_KNOWLEDGE_FILE_INDEX_CONCURRENCY", "16")
+
+    assert knowledge_manager_module._max_concurrent_knowledge_file_indexes() == 16
+
+
+def test_knowledge_file_indexing_parallelism_is_validated_at_manager_startup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bad operator override should fail when the manager is built, before refresh work starts."""
+    monkeypatch.setenv("MINDROOM_KNOWLEDGE_FILE_INDEX_CONCURRENCY", "bad")
+    config = _config(tmp_path, bases={"docs": tmp_path / "docs"}, agent_bases=["docs"])
+
+    with pytest.raises(ValueError, match="MINDROOM_KNOWLEDGE_FILE_INDEX_CONCURRENCY"):
+        KnowledgeManager("docs", config=config, runtime_paths=runtime_paths_for(config))
+
+
+@pytest.mark.parametrize("raw_value", ["bad", "0", "129"])
+def test_knowledge_file_indexing_parallelism_rejects_invalid_env(
+    raw_value: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Invalid file-level indexing concurrency should fail loudly."""
+    monkeypatch.setenv("MINDROOM_KNOWLEDGE_FILE_INDEX_CONCURRENCY", raw_value)
+
+    with pytest.raises(ValueError, match="MINDROOM_KNOWLEDGE_FILE_INDEX_CONCURRENCY"):
+        knowledge_manager_module._max_concurrent_knowledge_file_indexes()
 
 
 def test_indexing_settings_filter_keys_are_order_insensitive(tmp_path: Path) -> None:
@@ -2925,11 +3011,11 @@ async def test_existing_published_index_is_used_while_refresh_runs(
 
 
 @pytest.mark.asyncio
-async def test_cancelled_refresh_deletes_unpublished_candidate_collection(
+async def test_cancelled_refresh_keeps_unpublished_candidate_for_resume(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Cancelling a candidate refresh must not leave an owned candidate collection behind."""
+    """Cancelling a candidate refresh keeps its progress without ever publishing it."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
     doc = docs_path / "doc.md"
@@ -2973,7 +3059,16 @@ async def test_cancelled_refresh_deletes_unpublished_candidate_collection(
     with pytest.raises(asyncio.CancelledError):
         await refresh_task
 
-    assert set(_VectorDb.collections).isdisjoint(cancelled_candidate_collections)
+    # The candidate survives so the next refresh continues it instead of
+    # restarting from zero, but it is still private: readers keep last-good.
+    assert cancelled_candidate_collections <= set(_VectorDb.collections)
+    checkpoint = load_candidate_checkpoint(_base_storage_path(config, runtime_paths))
+    assert checkpoint is not None
+    assert checkpoint.collection in cancelled_candidate_collections
+    key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
+    state = load_published_index_state(published_index_metadata_path(key))
+    assert state is not None
+    assert state.collection not in cancelled_candidate_collections
     knowledge = resolve_agent_knowledge_access("helper", config, runtime_paths).knowledge
     assert knowledge is not None
     assert [document.content for document in knowledge.search("cancel", max_results=5)] == ["cancel stable"]
@@ -3040,11 +3135,16 @@ async def test_cancelled_publish_metadata_save_keeps_published_candidate_collect
 
 
 @pytest.mark.asyncio
-async def test_refresh_discards_candidate_when_sources_change_before_publish(
+async def test_refresh_never_publishes_while_source_keeps_changing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Published metadata stays bound to the exact corpus that was indexed."""
+    """A source that changes on every pass keeps last-good and its candidate work.
+
+    Published metadata stays bound to the exact corpus that was indexed, and a
+    source mutating faster than the refresh converges must not cost the
+    candidate the vectors it already built.
+    """
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
     doc = docs_path / "doc.md"
@@ -3054,25 +3154,17 @@ async def test_refresh_discards_candidate_when_sources_change_before_publish(
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     doc.write_text("candidate index", encoding="utf-8")
     original_reindex_files_locked = KnowledgeManager._reindex_files_locked
+    late_additions = 0
 
     async def _mutate_after_candidate_index(
         self: KnowledgeManager,
         files: list[Path],
-        *,
-        knowledge: object | None = None,
-        indexed_files: set[str] | None = None,
-        indexed_signatures: dict[str, tuple[int, int, str] | None] | None = None,
-        vanished_files: set[str] | None = None,
+        **kwargs: object,
     ) -> int:
-        indexed_count = await original_reindex_files_locked(
-            self,
-            files,
-            knowledge=knowledge,
-            indexed_files=indexed_files,
-            indexed_signatures=indexed_signatures,
-            vanished_files=vanished_files,
-        )
-        (docs_path / "late.md").write_text("late addition", encoding="utf-8")
+        nonlocal late_additions
+        indexed_count = await original_reindex_files_locked(self, files, **kwargs)
+        late_additions += 1
+        (docs_path / f"late{late_additions}.md").write_text("late addition", encoding="utf-8")
         return indexed_count
 
     monkeypatch.setattr(KnowledgeManager, "_reindex_files_locked", _mutate_after_candidate_index)
@@ -3082,12 +3174,54 @@ async def test_refresh_discards_candidate_when_sources_change_before_publish(
 
     assert result.index_published is False
     assert result.availability is KnowledgeAvailability.REFRESH_FAILED
-    assert result.last_error == "Knowledge source changed during refresh; refresh skipped"
+    assert result.last_error == (
+        "Knowledge source kept changing during refresh; candidate progress was kept for the next refresh"
+    )
     assert lookup.index is not None
     assert lookup.availability is KnowledgeAvailability.REFRESH_FAILED
     assert [document.content for document in lookup.index.knowledge.search("index", max_results=5)] == [
         "stable index",
     ]
+    checkpoint = load_candidate_checkpoint(_base_storage_path(config, runtime_paths))
+    assert checkpoint is not None
+    assert "doc.md" in checkpoint.completed
+
+
+@pytest.mark.asyncio
+async def test_refresh_reconciles_one_source_change_and_publishes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A single mid-refresh change is reconciled in the next pass instead of discarded."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    (docs_path / "doc.md").write_text("stable index", encoding="utf-8")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    original_reindex_files_locked = KnowledgeManager._reindex_files_locked
+    mutated = False
+
+    async def _mutate_once(self: KnowledgeManager, files: list[Path], **kwargs: object) -> int:
+        nonlocal mutated
+        indexed_count = await original_reindex_files_locked(self, files, **kwargs)
+        if not mutated:
+            mutated = True
+            (docs_path / "late.md").write_text("late addition", encoding="utf-8")
+        return indexed_count
+
+    monkeypatch.setattr(KnowledgeManager, "_reindex_files_locked", _mutate_once)
+
+    result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    lookup = get_published_index("docs", config=config, runtime_paths=runtime_paths)
+
+    assert result.index_published is True
+    assert result.availability is KnowledgeAvailability.READY
+    assert lookup.index is not None
+    assert sorted(
+        document.meta_data["source_path"] for document in lookup.index.knowledge.search("index", max_results=5)
+    ) == ["doc.md", "late.md"]
+    # Publication retires the candidate checkpoint.
+    assert load_candidate_checkpoint(_base_storage_path(config, runtime_paths)) is None
 
 
 @pytest.mark.asyncio
@@ -4237,7 +4371,14 @@ async def test_first_time_partial_refresh_does_not_publish_ready_index(
     assert state.last_error == "Indexed 1 of 2 managed knowledge files"
     assert lookup.index is None
     assert lookup.availability is KnowledgeAvailability.REFRESH_FAILED
-    assert not any("_candidate_" in collection for collection in _VectorDb.collections)
+    # The partial candidate stays private but durable: "good.md" must not be
+    # embedded again on the next attempt just because "bad.md" failed.
+    checkpoint = load_candidate_checkpoint(_base_storage_path(config, runtime_paths))
+    assert checkpoint is not None
+    assert "_candidate_" in checkpoint.collection
+    assert set(checkpoint.completed) == {"good.md"}
+    assert set(checkpoint.failed) == {"bad.md"}
+    assert checkpoint.status == "failed"
 
 
 def _embedder_auth_error() -> AuthenticationError:

@@ -63,6 +63,7 @@ from mindroom.mcp.manager import MCPServerManager
 from mindroom.mcp.registry import mcp_tool_name
 from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.memory import MemoryAutoFlushWorker, auto_flush_enabled
+from mindroom.response_admission import ResponseAdmissionGate
 from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
 from mindroom.runtime_state import (
     clear_api_server_address,
@@ -244,6 +245,7 @@ class _MultiAgentOrchestrator:
     config_reload: ConfigReloadLifecycle = field(init=False)
     _mcp_manager: MCPServerManager | None = field(default=None, init=False)
     _config_update_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
+    _response_admission_gate: ResponseAdmissionGate = field(default_factory=ResponseAdmissionGate, init=False)
     _pending_replacement_recovery_room_ids: dict[str, set[str]] = field(default_factory=dict, init=False)
     _runtime_support: OwnedRuntimeSupport = field(init=False)
     _event_cache_write_task_owner: object = field(default_factory=object, init=False)
@@ -283,9 +285,9 @@ class _MultiAgentOrchestrator:
             is_running=lambda: self.running,
             current_config=lambda: self.config,
             agent_bots=lambda: self.agent_bots,
-            in_flight_response_count=self.in_flight_response_count,
             load_initial_config=self._load_initial_config,
             apply_update_plan=self._apply_config_update_plan,
+            response_admission_gate=self._response_admission_gate,
             config_update_lock=self._config_update_lock,
         )
         self._approval_transport = ApprovalMatrixTransport(
@@ -375,6 +377,7 @@ class _MultiAgentOrchestrator:
 
     def _bind_runtime_support_services(self, bot: AgentBot | TeamBot) -> None:
         """Bind the current runtime support services to one managed bot."""
+        bot.admission_gate = self._response_admission_gate
         bot.event_cache = self._runtime_support.event_cache.for_principal(bot.matrix_id.full_id)
         bot.event_cache_write_coordinator = self._runtime_support.event_cache_write_coordinator
         bot.startup_thread_prewarm_registry = self._runtime_support.startup_thread_prewarm_registry
@@ -597,10 +600,6 @@ class _MultiAgentOrchestrator:
             name=f"retry_start_{entity_name}",
             failure_message="Background bot start task failed",
         )
-
-    def in_flight_response_count(self) -> int:
-        """Return the number of active response tasks across all managed bots."""
-        return sum(bot.in_flight_response_count for bot in self.agent_bots.values())
 
     async def _sync_runtime_support_services(
         self,
@@ -2152,7 +2151,65 @@ async def _cancel_task_if_pending(task: asyncio.Task | None) -> None:
         await task
 
 
-async def main(  # noqa: PLR0915
+async def _finish_runtime_shutdown(
+    *,
+    shutdown_wait_task: asyncio.Task[bool] | None,
+    api_task: asyncio.Task[None] | None,
+    orchestrator_task: asyncio.Task[None] | None,
+    auxiliary_tasks: list[asyncio.Task],
+    orchestrator: _MultiAgentOrchestrator | None,
+    stall_detector: EventLoopStallDetector | None,
+) -> None:
+    """Finish one runtime cleanup sequence without duplicating partial teardown."""
+    await _cancel_task_if_pending(shutdown_wait_task)
+    await _cancel_task_if_pending(api_task)
+    await _cancel_task_if_pending(orchestrator_task)
+    for task in auxiliary_tasks:
+        task.cancel()
+    for task in auxiliary_tasks:
+        with suppress(asyncio.CancelledError):
+            await task
+    try:
+        if orchestrator is not None:
+            await orchestrator.stop()
+    finally:
+        if stall_detector is not None:
+            stall_detector.stop()
+        reset_matrix_sync_health()
+        reset_runtime_state()
+        shutdown_primary_worker_manager()
+
+
+async def _wait_for_runtime_shutdown_cleanup(
+    cleanup_task: asyncio.Task[None],
+    *,
+    shutdown_was_requested: bool,
+) -> None:
+    """Wait for cleanup while preserving caller cancellation semantics."""
+    while True:
+        try:
+            await asyncio.shield(cleanup_task)
+        except asyncio.CancelledError:
+            if cleanup_task.done():
+                await cleanup_task
+                return
+            if not shutdown_was_requested:
+                cleanup_task.cancel()
+                try:
+                    await cleanup_task
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    logger.exception("Runtime cleanup failed while propagating caller cancellation")
+                raise
+            # Once orderly shutdown starts, later cancellation is duplicate
+            # shutdown pressure; cleanup must finish before main returns.
+            logger.info("Ignoring repeated signal cancellation during runtime cleanup")
+        else:
+            return
+
+
+async def main(
     log_level: str,
     runtime_paths: RuntimePaths,
     *,
@@ -2234,6 +2291,12 @@ async def main(  # noqa: PLR0915
             api_server=api_server,
         )
 
+    except asyncio.CancelledError:
+        if not shutdown_requested.is_set():
+            raise
+        # After an explicit shutdown request, cancellation is shutdown pressure
+        # rather than caller cancellation and must not bypass orderly cleanup.
+        logger.info("Ignoring duplicate signal cancellation during requested shutdown")
     except KeyboardInterrupt:
         shutdown_requested.set()
         logger.info("Multi-agent bot system stopped by user")
@@ -2246,22 +2309,20 @@ async def main(  # noqa: PLR0915
         logger.exception("Error in MindRoom runtime")
         raise
     finally:
+        shutdown_was_requested = shutdown_requested.is_set()
         shutdown_requested.set()
-        await _cancel_task_if_pending(shutdown_wait_task)
-        await _cancel_task_if_pending(api_task)
-        await _cancel_task_if_pending(orchestrator_task)
-        # Cancel auxiliary supervisors before shutting down the orchestrator itself.
-        for task in auxiliary_tasks:
-            task.cancel()
-        for task in auxiliary_tasks:
-            with suppress(asyncio.CancelledError):
-                await task
-        try:
-            if orchestrator is not None:
-                await orchestrator.stop()
-        finally:
-            if stall_detector is not None:
-                stall_detector.stop()
-            reset_matrix_sync_health()
-            reset_runtime_state()
-            shutdown_primary_worker_manager()
+        cleanup_task = asyncio.create_task(
+            _finish_runtime_shutdown(
+                shutdown_wait_task=shutdown_wait_task,
+                api_task=api_task,
+                orchestrator_task=orchestrator_task,
+                auxiliary_tasks=auxiliary_tasks,
+                orchestrator=orchestrator,
+                stall_detector=stall_detector,
+            ),
+            name="runtime_shutdown",
+        )
+        await _wait_for_runtime_shutdown_cleanup(
+            cleanup_task,
+            shutdown_was_requested=shutdown_was_requested,
+        )

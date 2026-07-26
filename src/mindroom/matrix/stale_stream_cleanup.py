@@ -44,7 +44,6 @@ from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import build_message_content, markdown_to_html
 from mindroom.matrix.message_content import extract_and_resolve_message, extract_edit_body
 from mindroom.matrix.thread_diagnostics import (
-    THREAD_HISTORY_SOURCE_CACHE,
     THREAD_HISTORY_SOURCE_DIAGNOSTIC,
     THREAD_HISTORY_SOURCE_HOMESERVER,
     is_thread_history_degraded,
@@ -334,6 +333,9 @@ async def _auto_resume_interrupted_threads(
                 target_event_id=interrupted_thread.target_event_id,
             )
             continue
+        if delay_due:
+            await asyncio.sleep(delay)
+            delay_due = False
         if not await _interrupted_target_remains_latest_human_work(
             interrupted_thread,
             config=config,
@@ -347,16 +349,6 @@ async def _auto_resume_interrupted_threads(
                 config=config,
                 runtime_paths=runtime_paths,
             )
-            if delay_due:
-                await asyncio.sleep(delay)
-                delay_due = False
-                if not await _interrupted_target_remains_latest_human_work(
-                    interrupted_thread,
-                    config=config,
-                    runtime_paths=runtime_paths,
-                    conversation_cache=conversation_cache,
-                ):
-                    continue
             delay_due = True
             delivered = await send_message_result(client, interrupted_thread.room_id, content)
             if delivered is not None:
@@ -405,7 +397,7 @@ async def _interrupted_target_remains_latest_human_work(
         return False
 
     try:
-        history = await conversation_cache.get_strict_thread_history(
+        history = await conversation_cache.refresh_strict_thread_history_from_source(
             interrupted_thread.room_id,
             interrupted_thread.thread_id,
             caller_label="startup_auto_resume_freshness",
@@ -445,7 +437,7 @@ def _authoritative_history_after_target(
     if not history.is_full_history or is_thread_history_degraded(history):
         msg = "Thread history is incomplete or degraded"
         raise ValueError(msg)
-    if history_source not in {THREAD_HISTORY_SOURCE_CACHE, THREAD_HISTORY_SOURCE_HOMESERVER}:
+    if history_source != THREAD_HISTORY_SOURCE_HOMESERVER:
         msg = f"Non-authoritative thread history source: {history_source!r}"
         raise ValueError(msg)
     target_index = next(

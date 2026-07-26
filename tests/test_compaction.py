@@ -73,6 +73,7 @@ def _make_execution_plan(**overrides: object) -> ResolvedHistoryExecutionPlan:
         "static_prompt_tokens": 0,
         "replay_budget_tokens": 10_000,
         "summary_input_budget_tokens": 20_000,
+        "compaction_timeout_seconds": 600.0,
         "hard_replay_budget_tokens": 59_904,
     }
     defaults.update(overrides)
@@ -92,6 +93,7 @@ def _make_policy_plan() -> ResolvedHistoryExecutionPlan:
         static_prompt_tokens=0,
         replay_budget_tokens=10_000,
         summary_input_budget_tokens=20_000,
+        compaction_timeout_seconds=600.0,
         hard_replay_budget_tokens=59_904,
     )
 

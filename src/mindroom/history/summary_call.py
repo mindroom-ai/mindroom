@@ -8,11 +8,13 @@ It enforces the call-side half of the compaction invariants
    ``configure_summary_model`` applies all compaction-specific provider tuning in
    one place: prompt-cache writes off, Claude thinking cleared (a thinking budget
    at or above max_tokens is a 400 from Anthropic), SDK retries disabled, and
-   one SDK timeout coordinated with the outer chunk budget
-   (``MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS``) instead of two uncoordinated
-   constants in two modules. Claude summary output uses the loaded model's own
-   max_tokens as the truncation guard. Unknown providers pass through untouched
-   and rely on the outer chunk timeout alone.
+   one SDK timeout coordinated with the caller's resolved chunk timeout
+   (``compaction.timeout_seconds``) instead of two uncoordinated timeouts in two
+   modules. ``effective_summary_timeout_seconds`` is the only place that combines
+   the resolved timeout with an authored provider timeout, so callers can log the
+   enforced value without re-deriving the rule. Claude summary output uses the
+   loaded model's own max_tokens as the truncation guard. Unknown providers pass
+   through untouched and rely on the outer chunk timeout alone.
 
 4. Retry on provider failure is deterministic.
    ``SummaryRetryPolicy`` decides which error classes warrant a smaller retry
@@ -52,7 +54,6 @@ from agno.session.summary import SessionSummary
 
 from mindroom.cancellation import request_task_cancel
 from mindroom.claude_prompt_cache import as_anthropic_claude
-from mindroom.constants import MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS
 from mindroom.error_handling import TRANSIENT_PROVIDER_STATUS_CODES
 from mindroom.history.types import COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS
 from mindroom.logging_config import get_logger
@@ -207,7 +208,19 @@ class SummaryRetryPolicy:
 DEFAULT_SUMMARY_RETRY_POLICY = SummaryRetryPolicy()
 
 
-def configure_summary_model(model: Model, *, timeout_seconds: float | None = None) -> Model:
+def effective_summary_timeout_seconds(model: Model, *, timeout_seconds: float) -> float:
+    """Return the timeout one summary request enforces after provider tuning (invariant 3).
+
+    An authored provider timeout shorter than the resolved compaction timeout stays
+    the stricter cap; every other model relies on the resolved timeout alone.
+    """
+    claude_model = as_anthropic_claude(model)
+    if claude_model is None or not claude_model.timeout:
+        return timeout_seconds
+    return min(claude_model.timeout, timeout_seconds)
+
+
+def configure_summary_model(model: Model, *, timeout_seconds: float) -> Model:
     """Apply all compaction-specific provider tuning to one loaded model (invariant 3).
 
     ``isinstance(model, Claude)`` covers the anthropic, vertexai_claude, and
@@ -223,11 +236,10 @@ def configure_summary_model(model: Model, *, timeout_seconds: float | None = Non
             reason="provider_specific_tuning_only_defined_for_claude",
         )
         return model
-    resolved_timeout = MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds
     claude_model.cache_system_prompt = False
     claude_model.extended_cache_time = False
     claude_model.thinking = None
-    claude_model.timeout = min(claude_model.timeout, resolved_timeout) if claude_model.timeout else resolved_timeout
+    claude_model.timeout = effective_summary_timeout_seconds(model, timeout_seconds=timeout_seconds)
     client_params = dict(claude_model.client_params or {})
     client_params["max_retries"] = 0
     claude_model.client_params = client_params
@@ -307,11 +319,10 @@ async def generate_compaction_summary(
     model: Model,
     summary_input: str,
     summary_prompt: str,
-    timeout_seconds: float | None = None,
+    timeout_seconds: float,
 ) -> SessionSummary:
     """Issue one compaction summary call with tuned provider config and one timeout."""
-    resolved_timeout = MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds
-    configured_model = configure_summary_model(model, timeout_seconds=resolved_timeout)
+    configured_model = configure_summary_model(model, timeout_seconds=timeout_seconds)
     summary_output_limit = _summary_output_token_limit(configured_model)
 
     async def _request_summary() -> ModelResponse:
@@ -332,7 +343,7 @@ async def generate_compaction_summary(
     try:
         done, _pending = await asyncio.wait(
             {response_task},
-            timeout=resolved_timeout,
+            timeout=timeout_seconds,
         )
     except asyncio.CancelledError:
         request_task_cancel(response_task)
@@ -348,7 +359,7 @@ async def generate_compaction_summary(
             response_task,
             reason="timeout",
         )
-        msg = f"compaction summary timed out after {resolved_timeout}s"
+        msg = f"compaction summary timed out after {timeout_seconds}s"
         raise RuntimeError(msg)
 
     try:

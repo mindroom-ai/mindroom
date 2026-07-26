@@ -57,7 +57,12 @@ from mindroom.matrix_rtc.call_manager import CallManager, maybe_build_call_manag
 from mindroom.memory import store_conversation_memory
 from mindroom.message_target import MessageTarget  # noqa: TC001
 from mindroom.post_response_effects import PostResponseEffectsSupport
-from mindroom.runtime_shutdown import ENTITY_REMOVED_SHUTDOWN, GENERIC_SHUTDOWN, RuntimeShutdownIntent
+from mindroom.runtime_shutdown import (
+    ENTITY_REMOVED_SHUTDOWN,
+    GENERIC_SHUTDOWN,
+    RuntimeShutdownIntent,
+    restart_reason_category_for,
+)
 from mindroom.stop import StopManager
 from mindroom.teams import TeamMode, TeamOutcome, resolve_configured_team
 from mindroom.timestamp_formatting import format_timestamp_ms
@@ -78,7 +83,6 @@ from .conversation_state_writer import ConversationStateWriter, ConversationStat
 from .delivery_gateway import (
     DeliveryGateway,
     DeliveryGatewayDeps,
-    EditTextRequest,
     ResponseHookService,
     SendTextRequest,
 )
@@ -110,7 +114,7 @@ from .scheduling import (
     restore_scheduled_tasks,
 )
 from .startup_errors import PermanentStartupError
-from .sync_restart_retry import SyncRestartRetryQueue
+from .sync_restart_retry import InterruptedTurnRooms
 from .turn_controller import TurnController, TurnControllerDeps
 from .turn_policy import IngressHookRunner, TurnPolicy, TurnPolicyDeps
 from .turn_store import TurnStore, TurnStoreDeps
@@ -128,9 +132,9 @@ if TYPE_CHECKING:
     from mindroom.matrix.cache import AgentMessageSnapshot, ConversationEventCache, EventCacheWriteCoordinator
     from mindroom.matrix.identity import MatrixID
     from mindroom.matrix.media import MatrixMediaEvent
+    from mindroom.response_admission import ResponseAdmissionGate
     from mindroom.runtime_protocols import OrchestratorRuntime
     from mindroom.runtime_support import StartupThreadPrewarmRegistry
-    from mindroom.tool_system.events import ToolTraceEntry
 
 type _MatrixEventId = str
 
@@ -331,7 +335,7 @@ class AgentBot:
         self.config_path = config_path
         self.logger = logger.bind(agent=self.agent_name)
         self.stop_manager = StopManager()
-        self._restart_retry_queue = SyncRestartRetryQueue()
+        self._interrupted_turn_rooms = InterruptedTurnRooms()
         self.running = False
         self.last_sync_time = None
         self._last_sync_monotonic = None
@@ -523,13 +527,14 @@ class AgentBot:
         self._edit_regenerator = EditRegenerator(
             EditRegeneratorDeps(
                 runtime=self._runtime_view,
-                get_logger=lambda: self.logger,
                 runtime_paths=self.runtime_paths,
                 agent_name=self.agent_name,
                 resolver=self._conversation_resolver,
                 turn_store=self._turn_store,
                 ingress_hook_runner=self._ingress_hook_runner,
                 generate_response=lambda request: self._run_regenerated_response(request),
+                wait_for_turn_settled=self._turn_store.wait_for_turn_settled,
+                interrupted_turn_rooms=self._interrupted_turn_rooms,
                 timestamp_formatter=lambda timestamp_ms: format_timestamp_ms(
                     timestamp_ms,
                     timezone=self.config.timezone,
@@ -579,7 +584,7 @@ class AgentBot:
                 coalescing_gate=self._coalescing_gate,
                 edit_regenerator=self._edit_regenerator,
                 ingress=self._ingress_validator,
-                restart_retry=self._restart_retry_queue,
+                interrupted_turn_rooms=self._interrupted_turn_rooms,
             ),
         )
 
@@ -730,15 +735,20 @@ class AgentBot:
         """Return the number of active response lifecycles."""
         return self._response_runner.in_flight_response_count
 
-    @in_flight_response_count.setter
-    def in_flight_response_count(self, value: int) -> None:
-        """Update the number of active response lifecycles."""
-        self._response_runner.in_flight_response_count = value
+    @property
+    def admission_gate(self) -> ResponseAdmissionGate:
+        """Return the gate deciding whether responses may start right now."""
+        return self._runtime_view.response_admission_gate
+
+    @admission_gate.setter
+    def admission_gate(self, value: ResponseAdmissionGate) -> None:
+        """Bind the orchestrator-owned response-admission gate."""
+        self._runtime_view.response_admission_gate = value
 
     @property
     def pending_sync_restart_retry_room_ids(self) -> frozenset[str]:
-        """Return rooms with interrupted turns awaiting same-bot retry."""
-        return self._restart_retry_queue.pending_room_ids
+        """Return rooms with interrupted turns awaiting replacement recovery."""
+        return self._interrupted_turn_rooms.pending_room_ids
 
     @property
     def agent_name(self) -> str:
@@ -811,7 +821,7 @@ class AgentBot:
                 await self.startup_thread_prewarm_registry.release(self.event_cache.principal_id, room_id)
 
     async def _run_startup_thread_prewarm(self) -> None:
-        """Prewarm recent thread snapshots per joined room without blocking live dispatch behind cache seeding."""
+        """Prewarm recent thread snapshots with one bulk scan per joined room."""
         try:
             joined_rooms = await self._get_startup_thread_prewarm_joined_rooms()
             for room_id in joined_rooms:
@@ -1035,6 +1045,7 @@ class AgentBot:
         own startup timeout for the pre-first-response window.
         """
         self._sync_shutting_down = False
+        self._response_runner.resume_pending_admissions()
         self._calls_reconcile_pending = self._call_manager is not None
         mark_matrix_sync_loop_started(self.agent_name)
 
@@ -1171,15 +1182,6 @@ class AgentBot:
 
         if self._sync_shutting_down:
             return
-
-        if self._restart_retry_queue.has_pending:
-            # The sync loop is healthy again: re-dispatch turns whose responses
-            # were cancelled by stall recovery, once each.
-            create_background_task(
-                self._restart_retry_queue.flush(),
-                name=f"sync_restart_retry_{self.agent_name}",
-                owner=self._runtime_view,
-            )
 
         if isinstance(_response, nio.SyncResponse):
             await self._apply_own_room_membership_from_sync(_response)
@@ -1688,7 +1690,15 @@ class AgentBot:
         shutdown_intent: RuntimeShutdownIntent = GENERIC_SHUTDOWN,
     ) -> None:
         """Cancel work that must not outlive the Matrix sync loop."""
+        if not self._sync_shutting_down:
+            self.logger.info(
+                "matrix_agent_response_runtime_shutdown",
+                active_response_count=self.in_flight_response_count,
+                restart_reason_category=restart_reason_category_for(shutdown_intent),
+                resulting_action="drain_then_cancel_response_runtime",
+            )
         self._sync_shutting_down = True
+        self._response_runner.refuse_pending_admissions()
         await self._cancel_startup_thread_prewarm()
         if self.agent_name == ROUTER_AGENT_NAME:
             await self._cancel_deferred_overdue_task_drain()
@@ -2126,35 +2136,6 @@ class AgentBot:
             runtime_started_at=runtime_started_at,
         )
 
-    async def _edit_message(
-        self,
-        room_id: str,
-        event_id: str,
-        new_text: str,
-        thread_id: str | None,
-        tool_trace: list[ToolTraceEntry] | None = None,
-        extra_content: dict[str, Any] | None = None,
-    ) -> bool:
-        """Edit an existing message.
-
-        Returns:
-            True if edit was successful, False otherwise.
-
-        """
-        return await self._delivery_gateway.edit_text(
-            EditTextRequest(
-                target=self._conversation_resolver.build_message_target(
-                    room_id=room_id,
-                    thread_id=thread_id,
-                    reply_to_event_id=None,
-                ),
-                event_id=event_id,
-                new_text=new_text,
-                tool_trace=tool_trace,
-                extra_content=extra_content,
-            ),
-        )
-
     async def _redact_message_event(
         self,
         *,
@@ -2248,23 +2229,12 @@ class TeamBot(AgentBot):
         )
         if team_resolution.outcome is not TeamOutcome.TEAM:
             assert team_resolution.reason is not None
-            response_event_id: str | None
-            if request.existing_event_id:
-                edited = await self._edit_message(
-                    room_id=target.room_id,
-                    event_id=request.existing_event_id,
-                    new_text=team_resolution.reason,
-                    thread_id=target.resolved_thread_id,
-                )
-                response_event_id = request.existing_event_id if edited else None
-            else:
-                response_event_id = await self._delivery_gateway.send_text(
-                    SendTextRequest(
-                        target=target,
-                        response_text=team_resolution.reason,
-                    ),
-                )
-            return response_event_id
+            return await self._response_runner.generate_team_response_helper(
+                request,
+                team_agents=self.current_configured_team_agents(),
+                team_mode=configured_mode.value,
+                resolution_reason=team_resolution.reason,
+            )
         assert team_resolution.mode is not None
 
         registry = entity_identity_registry(self.config, self.runtime_paths)
@@ -2277,22 +2247,23 @@ class TeamBot(AgentBot):
             target=target,
             user_id=request.user_id,
         )
-        with tool_execution_identity(execution_identity):
-            create_background_task(
-                store_conversation_memory(
-                    memory_prompt,
-                    agent_names,
-                    self.storage_path,
-                    session_id,
-                    self.config,
-                    self.runtime_paths,
-                    memory_thread_history,
-                    request.user_id,
-                    execution_identity=execution_identity,
-                ),
-                name=f"memory_save_team_{session_id}",
-                owner=self._runtime_view,
-            )
+        if request.sync_restart_retry_source_event_id is None:
+            with tool_execution_identity(execution_identity):
+                create_background_task(
+                    store_conversation_memory(
+                        memory_prompt,
+                        agent_names,
+                        self.storage_path,
+                        session_id,
+                        self.config,
+                        self.runtime_paths,
+                        memory_thread_history,
+                        request.user_id,
+                        execution_identity=execution_identity,
+                    ),
+                    name=f"memory_save_team_{session_id}",
+                    owner=self._runtime_view,
+                )
 
         return await self._response_runner.generate_team_response_helper(
             replace(

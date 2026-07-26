@@ -75,13 +75,27 @@ main() entry
 
 ## Hot Reload
 
-Config changes are detected via polling (`watch_file()` checks `st_mtime` every second):
+Config changes are detected via polling (`watch_paths()` checks watched source-file mtimes every second and fires after one quiet scan):
 
-1. On change, `ConfigReloadLifecycle.request_reload()` queues a debounced reload that first drains in-flight responses (forcing through after a timeout)
-2. `ConfigReloadLifecycle.update_config()` loads the new config and `_identify_entities_to_restart()` computes the diff using `model_dump(exclude_none=True)`
-3. The orchestrator applies the resulting plan: affected entities are stopped, recreated, and restarted
-4. Removed entities run `cleanup()` (leave rooms, stop bot)
-5. New/restarted bots go through room setup
+1. On change, `ConfigReloadLifecycle.request_reload()` queues a debounced reload that waits until no responses are in flight, logging periodic warnings while it waits
+2. Sampling the in-flight count and closing the shared `ResponseAdmissionGate` happen atomically, so a new response cannot race the decision to apply.
+   The gate covers Matrix-driven response lifecycles only.
+   Direct agent-run entry points that bypass the response lifecycle (`mindroom.api.openai_compat` and cascaded voice in `mindroom.matrix_rtc.call_tools`) are not admitted through it, so a reload can still land underneath one of those runs.
+   The gate stays closed, but is not held, across config loading and plan application.
+   Holding it would stall the apply against itself: applying the plan stops bots, and stopping a bot drains its detached responses
+3. While the gate is closed, a response waits before taking a lifecycle lock, incrementing the in-flight count, or publishing a placeholder.
+   The gate is global and covers the whole apply window regardless of how narrow the plan turns out to be.
+   When the apply finishes, responses owned by unchanged or replacement runtimes compete for admission normally.
+4. A runtime being replaced wakes its pre-admission waiters with `ResponseAdmissionRefusedError`.
+   This is deliberately not an `asyncio.CancelledError`, because the Matrix callback must fail and invalidate the old sync checkpoint so the replacement runtime replays the source event.
+   The refusal path performs no Matrix I/O, so replacement shutdown cannot stall on an untimed send.
+   Auto-resume messages received by replacement bots during the apply wait for the gate to reopen instead of being dropped
+5. If responses never drain, the reload stops deferring after ten minutes and closes the gate over the still-running responses, so a config change cannot be starved forever on a busy install
+6. `ConfigReloadLifecycle.update_config()` loads the new config and `_identify_entities_to_restart()` computes the diff using `model_dump(exclude_none=True)`
+7. The orchestrator applies the resulting plan: affected entities are stopped, recreated, and restarted
+8. Removed entities run `cleanup()` (leave rooms, stop bot)
+9. New/restarted bots go through room setup
+10. The gate reopens once the apply finishes, whether it succeeded or failed, and deferred responses may then start
 
 Skills are watched separately via `_watch_skills_task()` with cache invalidation.
 
@@ -143,6 +157,9 @@ Non-MindRoom bots listed in `bot_accounts` are excluded from this detection.
 - Each bot runs its own sync loop via `sync_forever_with_restart()`
 - Sync loop failures trigger automatic restart with linear backoff (5s, 10s, 15s, ... up to 60s max)
 - Watchdog-driven restarts of stalled sync loops add 0–10s of random jitter on top of the backoff so a loop-wide stall does not restart every sync loop as one thundering herd
+- An automatic receive-loop restart replaces only the sync task and its watchdog, so in-flight responses keep their original owner and finish across the restart
+- The response runtime is drained and cancelled only when the bot itself stops: a config reload replacing the entity, entity removal, or process shutdown
+- Each of those lifecycle events logs `restart_reason_category` and `resulting_action`, so `matrix_sync_transport_restart` is distinguishable from `matrix_agent_response_runtime_shutdown` in logs
 - Event callbacks run as background tasks (never block the sync loop)
 - `ResponseTracker` prevents duplicate replies
 - `StopManager` handles cancellation of in-progress responses

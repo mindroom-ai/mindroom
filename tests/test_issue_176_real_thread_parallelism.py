@@ -12,6 +12,7 @@ from mindroom.matrix.cache.write_coordinator import EventCacheWriteCoordinator
 ROOM_ID = "!issue-176:localhost"
 THREAD_A_ID = "$thread-a:localhost"
 THREAD_B_ID = "$thread-b:localhost"
+PRINCIPAL_ID = "@issue-176:localhost"
 
 
 async def _assert_sibling_threads_start_concurrently(coord: EventCacheWriteCoordinator) -> None:
@@ -30,23 +31,23 @@ async def _assert_sibling_threads_start_concurrently(coord: EventCacheWriteCoord
         await release_b.wait()
         return "thread-b"
 
-    first = asyncio.create_task(
-        coord.run_thread_update(
-            ROOM_ID,
-            THREAD_A_ID,
-            thread_a_update,
-            name="measure_thread_update_a",
-        ),
+    first = coord.queue_thread_update(
+        ROOM_ID,
+        THREAD_A_ID,
+        thread_a_update,
+        name="measure_thread_update_a",
+        log_exceptions=False,
+        coordination_scope=PRINCIPAL_ID,
     )
     await asyncio.wait_for(started_a.wait(), timeout=1.0)
 
-    second = asyncio.create_task(
-        coord.run_thread_update(
-            ROOM_ID,
-            THREAD_B_ID,
-            thread_b_update,
-            name="measure_thread_update_b",
-        ),
+    second = coord.queue_thread_update(
+        ROOM_ID,
+        THREAD_B_ID,
+        thread_b_update,
+        name="measure_thread_update_b",
+        log_exceptions=False,
+        coordination_scope=PRINCIPAL_ID,
     )
 
     try:
@@ -82,17 +83,18 @@ async def _assert_room_update_blocks_later_thread(coord: EventCacheWriteCoordina
         ROOM_ID,
         room_update,
         name="measure_room_update_a",
+        coordination_scope=PRINCIPAL_ID,
         log_exceptions=False,
     )
     await asyncio.wait_for(started_a.wait(), timeout=1.0)
 
-    second = asyncio.create_task(
-        coord.run_thread_update(
-            ROOM_ID,
-            THREAD_B_ID,
-            thread_b_update,
-            name="measure_thread_update_b",
-        ),
+    second = coord.queue_thread_update(
+        ROOM_ID,
+        THREAD_B_ID,
+        thread_b_update,
+        name="measure_thread_update_b",
+        log_exceptions=False,
+        coordination_scope=PRINCIPAL_ID,
     )
 
     try:

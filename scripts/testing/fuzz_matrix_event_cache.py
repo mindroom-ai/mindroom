@@ -38,6 +38,7 @@ from mindroom.matrix.cache import (
 )
 from mindroom.matrix.cache.event_cache_events import event_redaction_candidate_ids
 from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
+from mindroom.matrix.cache.thread_cache_state import ThreadCacheReplaceOutcome
 from mindroom.matrix.cache.thread_write_cache_ops import ThreadMutationCacheOps
 from mindroom.matrix.cache.thread_writes import ThreadSyncWritePolicy
 from mindroom.matrix.event_info import EventInfo
@@ -1236,7 +1237,7 @@ class CacheFuzzRunner:
                 fetch_started_at=float("inf"),
                 validated_at=time.time(),
             )
-            assert replaced
+            assert replaced is ThreadCacheReplaceOutcome.STORED
             self._remember_source(root)
 
     async def run(self) -> ObservableCacheState:
@@ -1517,7 +1518,7 @@ class CacheFuzzRunner:
             fetch_started_at=time.time(),
             validated_at=time.time(),
         )
-        if replaced:
+        if replaced.written:
             for source in sources:
                 self._remember_source(source)
 
@@ -1584,7 +1585,7 @@ class CacheFuzzRunner:
             if known_room_id == current_room_id:
                 self.clear_event_ids.discard((known_room_id, event_id))
         await self._seed_room(operation.room)
-        stale_write_accepted = await self.cache.replace_thread_if_not_newer(
+        stale_write_outcome = await self.cache.replace_thread_if_not_newer(
             current_room_id,
             thread_id(operation.room, operation.thread),
             [root_source(operation.room, operation.thread)],
@@ -1592,7 +1593,7 @@ class CacheFuzzRunner:
             fetch_started_at=stale_fetch_started_at,
             validated_at=time.time(),
         )
-        assert not stale_write_accepted
+        assert stale_write_outcome is ThreadCacheReplaceOutcome.RETRYABLE_CONFLICT
 
     async def _assert_tombstone_invariants(self) -> None:
         for current_room_id, event_id in sorted(self.redacted_ids):

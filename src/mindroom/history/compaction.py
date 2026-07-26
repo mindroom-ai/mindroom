@@ -21,7 +21,6 @@ from pydantic import BaseModel
 from mindroom.claude_prompt_cache import as_anthropic_claude
 from mindroom.constants import (
     AI_RUN_METADATA_KEY,
-    MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS,
     MINDROOM_COMPACTION_METADATA_KEY,
     MINDROOM_MATRIX_HISTORY_METADATA_KEY,
     prompt_roles_for_history_storage,
@@ -37,7 +36,11 @@ from mindroom.history.storage import (
     update_scope_state_on_latest,
     write_scope_state,
 )
-from mindroom.history.summary_call import DEFAULT_SUMMARY_RETRY_POLICY, generate_compaction_summary
+from mindroom.history.summary_call import (
+    DEFAULT_SUMMARY_RETRY_POLICY,
+    effective_summary_timeout_seconds,
+    generate_compaction_summary,
+)
 from mindroom.history.types import (
     CompactionLifecycleProgress,
     CompactionOutcome,
@@ -113,6 +116,7 @@ class _GeneratedSummaryChunk:
     # The model that actually served this chunk (fallback after a refusal switch).
     model: Model
     model_name: str
+    model_input_budget_tokens: int
 
 
 def _persist_cleared_force_state_if_needed(
@@ -199,8 +203,10 @@ async def compact_scope_history(
     replay_window_tokens: int | None,
     threshold_tokens: int | None,
     summary_prompt: str,
+    summary_timeout_seconds: float,
     fallback_summary_model: Model | None = None,
     fallback_summary_model_name: str | None = None,
+    fallback_summary_input_budget: int | None = None,
     lifecycle_notice_event_id: str | None = None,
     progress_callback: Callable[[CompactionLifecycleProgress], Awaitable[None]] | None = None,
 ) -> CompactionOutcome | None:
@@ -264,6 +270,7 @@ async def compact_scope_history(
         summary_model_name=summary_model_name,
         fallback_summary_model=fallback_summary_model,
         fallback_summary_model_name=fallback_summary_model_name,
+        fallback_summary_input_budget=fallback_summary_input_budget,
         session_id=session.session_id,
         scope=scope,
         state=state,
@@ -275,6 +282,7 @@ async def compact_scope_history(
         runs_before=before_run_count,
         threshold_tokens=threshold_tokens,
         summary_prompt=summary_prompt,
+        summary_timeout_seconds=summary_timeout_seconds,
         lifecycle_notice_event_id=lifecycle_notice_event_id,
         progress_callback=progress_callback,
         collect_compaction_hook_messages=collect_compaction_hook_messages,
@@ -371,8 +379,10 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901
     progress_callback: Callable[[CompactionLifecycleProgress], Awaitable[None]] | None,
     collect_compaction_hook_messages: bool,
     summary_prompt: str,
+    summary_timeout_seconds: float,
     fallback_summary_model: Model | None = None,
     fallback_summary_model_name: str | None = None,
+    fallback_summary_input_budget: int | None = None,
     before_persist_callback: Callable[[Sequence[RunOutput | TeamRunOutput]], Awaitable[None]] | None = None,
 ) -> _CompactionRewriteResult | None:
     final_summary_text = _current_summary_text(working_session) or ""
@@ -426,8 +436,10 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901
             summary_prompt=summary_prompt,
             token_estimator=token_estimator,
             estimate_kind=estimate_kind,
+            timeout_seconds=summary_timeout_seconds,
             fallback_model=fallback_summary_model,
             fallback_model_name=fallback_summary_model_name,
+            fallback_input_budget=fallback_summary_input_budget,
         )
         if new_summary.model is not summary_model:
             # A safeguard-refusal fallback served this chunk; it becomes the
@@ -435,8 +447,10 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901
             summary_model = new_summary.model
             summary_model_name = new_summary.model_name
             token_estimator, estimate_kind = _compaction_sizing(summary_model)
+            summary_input_budget = new_summary.model_input_budget_tokens
             fallback_summary_model = None
             fallback_summary_model_name = None
+            fallback_summary_input_budget = None
         included_runs = new_summary.included_runs
         generated_summary = new_summary.summary
         if before_persist_callback is not None:
@@ -561,7 +575,7 @@ def _sizing_log_fields(*, kind: CompactionEstimateKind, estimate: int, budget_to
     }
 
 
-async def _generate_compaction_summary_with_retry(
+async def _generate_compaction_summary_with_retry(  # noqa: PLR0915
     *,
     model: Model,
     model_name: str,
@@ -576,16 +590,18 @@ async def _generate_compaction_summary_with_retry(
     summary_prompt: str,
     token_estimator: Callable[[str], int],
     estimate_kind: CompactionEstimateKind,
+    timeout_seconds: float,
     fallback_model: Model | None = None,
     fallback_model_name: str | None = None,
+    fallback_input_budget: int | None = None,
 ) -> _GeneratedSummaryChunk:
     """Generate one summary chunk, retrying the same or smaller input when safe.
 
     A safeguard refusal from the primary model switches once to
-    ``fallback_model``, keeping the ``summary_prompt`` and ``summary_input``
-    bytes, included runs, and budget unchanged (only the target model
-    differs); a refusal or failure from the fallback propagates. The switch
-    shares the retry policy's attempt bound, so a
+    ``fallback_model``. The input remains unchanged when it fits the fallback
+    model, otherwise it is rebuilt under that model's own budget. A refusal or
+    failure from the fallback propagates. The switch shares the retry policy's
+    attempt bound, so a
     refusal after an earlier shrink or transient retry propagates without a
     fallback call. All other failures keep the existing shrink and transient
     same-input retry behavior.
@@ -602,6 +618,7 @@ async def _generate_compaction_summary_with_retry(
     attempt = 1
     while True:
         summary_input_estimate = token_estimator(summary_input)
+        effective_timeout_seconds = effective_summary_timeout_seconds(model, timeout_seconds=timeout_seconds)
         started = asyncio.get_running_loop().time()
         logger.info(
             "Compaction summary chunk request",
@@ -612,13 +629,15 @@ async def _generate_compaction_summary_with_retry(
             candidate_runs=len(compactable_runs),
             included_runs=len(included_runs),
             **_sizing_log_fields(kind=estimate_kind, estimate=summary_input_estimate, budget_tokens=budget),
-            timeout_seconds=MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS,
+            timeout_seconds=timeout_seconds,
+            effective_timeout_seconds=effective_timeout_seconds,
         )
         try:
             summary = await generate_compaction_summary(
                 model=model,
                 summary_input=summary_input,
                 summary_prompt=summary_prompt,
+                timeout_seconds=timeout_seconds,
             )
         except Exception as exc:
             duration_ms = int((asyncio.get_running_loop().time() - started) * 1000)
@@ -631,7 +650,8 @@ async def _generate_compaction_summary_with_retry(
                 candidate_runs=len(compactable_runs),
                 included_runs=len(included_runs),
                 **_sizing_log_fields(kind=estimate_kind, estimate=summary_input_estimate, budget_tokens=budget),
-                timeout_seconds=MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS,
+                timeout_seconds=timeout_seconds,
+                effective_timeout_seconds=effective_timeout_seconds,
                 duration_ms=duration_ms,
                 error=str(exc) or type(exc).__name__,
             )
@@ -639,6 +659,21 @@ async def _generate_compaction_summary_with_retry(
             # earlier shrink or transient retry propagates instead of issuing a
             # third provider call.
             if fallback_model is not None and attempt < retry_policy.max_attempts and is_model_safeguard_refusal(exc):
+                assert fallback_model_name is not None
+                assert fallback_input_budget is not None
+                fallback_token_estimator, fallback_estimate_kind = _compaction_sizing(fallback_model)
+                if fallback_token_estimator(summary_input) <= fallback_input_budget:
+                    rebuilt_input, rebuilt_runs = summary_input, included_runs
+                else:
+                    rebuilt_input, rebuilt_runs = _build_summary_input(
+                        previous_summary=previous_summary,
+                        compacted_runs=compactable_runs,
+                        history_settings=history_settings,
+                        max_input_tokens=fallback_input_budget,
+                        token_estimator=fallback_token_estimator,
+                    )
+                if not rebuilt_runs:
+                    raise
                 logger.info(
                     "Compaction summary refused; switching to fallback model",
                     session_id=session_id,
@@ -646,14 +681,18 @@ async def _generate_compaction_summary_with_retry(
                     attempt=attempt,
                     refused_model=model_name,
                     fallback_model=fallback_model_name,
+                    fallback_summary_input_budget_tokens=fallback_input_budget,
                 )
-                assert fallback_model_name is not None
                 model = fallback_model
                 model_name = fallback_model_name
-                # The fallback resends the unchanged prompt and input bytes
-                # exactly once; only the target model differs.
+                summary_input = rebuilt_input
+                included_runs = rebuilt_runs
+                budget = fallback_input_budget
+                token_estimator = fallback_token_estimator
+                estimate_kind = fallback_estimate_kind
                 fallback_model = None
                 fallback_model_name = None
+                fallback_input_budget = None
                 attempt += 1
                 continue
             retry_decision: SummaryRetryDecision | None = retry_policy.retry_budget(
@@ -695,7 +734,8 @@ async def _generate_compaction_summary_with_retry(
             candidate_runs=len(compactable_runs),
             included_runs=len(included_runs),
             **_sizing_log_fields(kind=estimate_kind, estimate=summary_input_estimate, budget_tokens=budget),
-            timeout_seconds=MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS,
+            timeout_seconds=timeout_seconds,
+            effective_timeout_seconds=effective_timeout_seconds,
             duration_ms=duration_ms,
         )
         return _GeneratedSummaryChunk(
@@ -703,6 +743,7 @@ async def _generate_compaction_summary_with_retry(
             included_runs=included_runs,
             model=model,
             model_name=model_name,
+            model_input_budget_tokens=budget,
         )
 
 

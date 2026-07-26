@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
@@ -912,6 +913,157 @@ class TestSendMessageResult:
         assert mock_error.call_args.args == ("matrix_message_delivery_exception",)
         assert mock_error.call_args.kwargs["operation"] == "edit_message"
         assert mock_error.call_args.kwargs["exception_type"] == "OlmUnverifiedDeviceError"
+
+    @pytest.mark.asyncio
+    async def test_sync_recovery_retry_reuses_one_prepared_payload(self) -> None:
+        """Opt-in recovery retries should reuse the exact prepared wire payload."""
+        client = _mock_client()
+        error = nio.SendRetryError("Room timeline recovery is still pending.")
+        response = nio.RoomSendResponse("$evt:localhost", "!room:localhost")
+        client.room_send.side_effect = [error, error, error, response]
+        prepared = {"body": "prepared", "msgtype": "m.text"}
+        prepare = AsyncMock(return_value=prepared)
+        sleep_mock = AsyncMock()
+
+        with (
+            patch("mindroom.matrix.client_delivery.prepare_large_message", new=prepare),
+            patch("mindroom.matrix.client_delivery.asyncio.sleep", new=sleep_mock),
+            patch("mindroom.matrix.client_delivery.logger.warning") as warning_mock,
+        ):
+            result = await send_message_result(
+                client,
+                "!room:localhost",
+                {"body": "hello", "msgtype": "m.text"},
+                retry_sync_recovery=True,
+            )
+
+        assert result is not None
+        assert result.event_id == "$evt:localhost"
+        prepare.assert_awaited_once()
+        assert client.room_send.await_count == 4
+        assert all(call.kwargs["content"] is prepared for call in client.room_send.await_args_list)
+        assert sleep_mock.await_count == 3
+        warning_mock.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_sync_recovery_retry_bounds_a_stuck_second_send(self) -> None:
+        """The recovery deadline should also bound a retry stuck in transport."""
+        client = _mock_client()
+        original_error = nio.SendRetryError("Room timeline recovery is still pending.")
+        send_count = 0
+        prepared = {"body": "prepared", "msgtype": "m.text"}
+        prepare = AsyncMock(return_value=prepared)
+
+        async def send(**_kwargs: object) -> nio.RoomSendResponse:
+            nonlocal send_count
+            send_count += 1
+            if send_count == 1:
+                raise original_error
+            await asyncio.Event().wait()
+            raise AssertionError
+
+        client.room_send.side_effect = send
+        with (
+            patch("mindroom.matrix.client_delivery.prepare_large_message", new=prepare),
+            patch("mindroom.matrix.client_delivery.asyncio.sleep", new=AsyncMock()),
+            patch("mindroom.matrix.client_delivery._SYNC_RECOVERY_RETRY_TIMEOUT_SECONDS", new=0.01),
+            pytest.raises(nio.SendRetryError) as raised,
+        ):
+            await asyncio.wait_for(
+                send_message_result(
+                    client,
+                    "!room:localhost",
+                    {"body": "hello", "msgtype": "m.text"},
+                    retry_sync_recovery=True,
+                ),
+                0.5,
+            )
+
+        assert raised.value is original_error
+        prepare.assert_awaited_once()
+        assert send_count == 2
+
+    @pytest.mark.asyncio
+    async def test_sync_recovery_retry_sleep_is_cancellation_aware(self) -> None:
+        """Cancellation should interrupt recovery backoff immediately."""
+        client = _mock_client()
+        client.room_send.side_effect = nio.SendRetryError("Room timeline recovery is still pending.")
+        sleep_started = asyncio.Event()
+
+        async def wait_forever(_delay: float) -> None:
+            sleep_started.set()
+            await asyncio.Event().wait()
+
+        with (
+            patch(
+                "mindroom.matrix.client_delivery.prepare_large_message",
+                new=AsyncMock(return_value={"body": "prepared", "msgtype": "m.text"}),
+            ),
+            patch("mindroom.matrix.client_delivery.asyncio.sleep", new=wait_forever),
+        ):
+            task = asyncio.create_task(
+                send_message_result(
+                    client,
+                    "!room:localhost",
+                    {"body": "hello", "msgtype": "m.text"},
+                    retry_sync_recovery=True,
+                ),
+            )
+            await sleep_started.wait()
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+    @pytest.mark.asyncio
+    async def test_sync_recovery_error_keeps_default_send_contract(self) -> None:
+        """Ordinary sends should retain normalized failure behavior."""
+        client = _mock_client()
+        client.room_send.side_effect = nio.SendRetryError("Room timeline recovery is still pending.")
+
+        with (
+            patch(
+                "mindroom.matrix.client_delivery.prepare_large_message",
+                new=AsyncMock(side_effect=lambda *_: {"body": "hello", "msgtype": "m.text"}),
+            ),
+            patch("mindroom.matrix.client_delivery.logger.error") as mock_error,
+        ):
+            result = await send_message_result(
+                client,
+                "!room:localhost",
+                {"body": "hello", "msgtype": "m.text"},
+            )
+
+        assert result is None
+        mock_error.assert_called_once()
+        assert mock_error.call_args.args == ("matrix_message_delivery_exception",)
+        assert mock_error.call_args.kwargs["exception_type"] == "SendRetryError"
+
+    @pytest.mark.asyncio
+    async def test_sync_recovery_error_keeps_default_edit_contract(self) -> None:
+        """Ordinary edits should retain normalized failure behavior."""
+        client = _mock_client()
+        client.room_send.side_effect = nio.SendRetryError("Room timeline recovery is still pending.")
+
+        with (
+            patch(
+                "mindroom.matrix.client_delivery.prepare_large_message",
+                new=AsyncMock(side_effect=lambda *_: {"body": "hello", "msgtype": "m.text"}),
+            ),
+            patch("mindroom.matrix.client_delivery.logger.error") as mock_error,
+        ):
+            result = await edit_message_result(
+                client,
+                "!room:localhost",
+                "$placeholder",
+                {"body": "hello", "msgtype": "m.text"},
+                "hello",
+            )
+
+        assert result is None
+        mock_error.assert_called_once()
+        assert mock_error.call_args.args == ("matrix_message_delivery_exception",)
+        assert mock_error.call_args.kwargs["operation"] == "edit_message"
+        assert mock_error.call_args.kwargs["exception_type"] == "SendRetryError"
 
     @pytest.mark.asyncio
     async def test_unexpected_room_send_exception_logs_generic_sanitized_message(self) -> None:

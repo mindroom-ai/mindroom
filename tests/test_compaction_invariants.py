@@ -35,7 +35,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import CompactionConfig, CompactionOverrideConfig, DefaultsConfig, ModelConfig
 from mindroom.constants import (
-    MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS,
+    DEFAULT_COMPACTION_TIMEOUT_SECONDS,
     MINDROOM_COMPACTION_METADATA_KEY,
     RuntimePaths,
     resolve_runtime_paths,
@@ -62,6 +62,7 @@ from mindroom.history.summary_call import (
     _CompactionSummaryEmptyResultError,
     build_summary_request_messages,
     configure_summary_model,
+    effective_summary_timeout_seconds,
     generate_compaction_summary,
 )
 from mindroom.history.types import (
@@ -167,6 +168,7 @@ def _make_config(
     tmp_path: Path,
     *,
     compaction: CompactionConfig | None = None,
+    context_window: int = 64_000,
 ) -> tuple[Config, RuntimePaths]:
     runtime_paths = resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",
@@ -186,7 +188,7 @@ def _make_config(
             },
             defaults=DefaultsConfig(tools=[], compaction=compaction or CompactionConfig()),
             models={
-                "default": ModelConfig(provider="openai", id="test-model", context_window=64_000),
+                "default": ModelConfig(provider="openai", id="test-model", context_window=context_window),
             },
         ),
         runtime_paths,
@@ -438,6 +440,7 @@ async def test_chunk_progress_survives_interruption_and_restart(tmp_path: Path) 
             replay_window_tokens=64_000,
             threshold_tokens=None,
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
+            summary_timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
         )
 
     interrupted = get_agent_session(storage, "session-1")
@@ -512,14 +515,14 @@ def test_configure_summary_model_tunes_claude_in_one_place() -> None:
         client_params={"max_retries": 2, "custom": "keep"},
     )
 
-    configured = configure_summary_model(model)
+    configured = configure_summary_model(model, timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS)
 
     assert configured is model
     assert model.cache_system_prompt is False
     assert model.extended_cache_time is False
     assert model.thinking is None
     assert model.max_tokens == 64_000
-    assert model.timeout == MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS
+    assert model.timeout == DEFAULT_COMPACTION_TIMEOUT_SECONDS
     assert model.client_params == {"max_retries": 0, "custom": "keep"}
 
 
@@ -531,23 +534,43 @@ def test_configure_summary_model_tunes_vertexai_claude() -> None:
         cache_system_prompt=True,
         extended_cache_time=True,
         max_tokens=8192,
-        timeout=300.0,
+        timeout=900.0,
     )
 
-    configure_summary_model(model)
+    configure_summary_model(model, timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS)
 
     assert model.cache_system_prompt is False
     assert model.extended_cache_time is False
     assert model.thinking is None
     assert model.max_tokens == 8192
-    assert model.timeout == MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS
+    assert model.timeout == DEFAULT_COMPACTION_TIMEOUT_SECONDS
     assert model.client_params == {"max_retries": 0}
+
+
+def test_effective_summary_timeout_resolves_every_provider_timeout_shape() -> None:
+    without_authored_timeout = Claude(id="claude-sonnet-5")
+    shorter_authored_timeout = Claude(id="claude-sonnet-5", timeout=300.0)
+    longer_authored_timeout = Claude(id="claude-sonnet-5", timeout=900.0)
+    non_claude_model = FakeModel(id="test-model", provider="fake")
+
+    assert effective_summary_timeout_seconds(without_authored_timeout, timeout_seconds=480.0) == 480.0
+    assert effective_summary_timeout_seconds(shorter_authored_timeout, timeout_seconds=480.0) == 300.0
+    assert effective_summary_timeout_seconds(longer_authored_timeout, timeout_seconds=480.0) == 480.0
+    assert effective_summary_timeout_seconds(non_claude_model, timeout_seconds=480.0) == 480.0
+
+
+def test_configure_summary_model_applies_the_resolved_compaction_timeout() -> None:
+    model = Claude(id="claude-sonnet-5")
+
+    configure_summary_model(model, timeout_seconds=480.0)
+
+    assert model.timeout == 480.0
 
 
 def test_configure_summary_model_preserves_authored_output_cap() -> None:
     model = Claude(id="claude-sonnet-5", max_tokens=1024, timeout=30.0)
 
-    configure_summary_model(model)
+    configure_summary_model(model, timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS)
 
     assert model.max_tokens == 1024
     assert model.timeout == 30.0
@@ -556,7 +579,7 @@ def test_configure_summary_model_preserves_authored_output_cap() -> None:
 def test_configure_summary_model_leaves_unknown_providers_untouched() -> None:
     model = FakeModel(id="test-model", provider="fake")
 
-    configured = configure_summary_model(model)
+    configured = configure_summary_model(model, timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS)
 
     assert configured is model
     assert model == FakeModel(id="test-model", provider="fake")
@@ -577,6 +600,7 @@ async def test_generate_compaction_summary_applies_tuning_and_request_shape() ->
         model=model,
         summary_input="conversation payload",
         summary_prompt="Summarize the conversation.",
+        timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
     )
 
     assert summary.summary == "recorded summary"
@@ -584,7 +608,7 @@ async def test_generate_compaction_summary_applies_tuning_and_request_shape() ->
     assert model.extended_cache_time is False
     assert model.thinking is None
     assert model.max_tokens == 64_000
-    assert model.timeout == MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS
+    assert model.timeout == DEFAULT_COMPACTION_TIMEOUT_SECONDS
     assert model.client_params == {"max_retries": 0}
     assert [(message.role, message.content) for message in model.seen_messages] == [
         ("system", "Summarize the conversation."),
@@ -606,6 +630,7 @@ async def test_generate_compaction_summary_rejects_output_cap_truncation() -> No
             ),
             summary_input="conversation payload",
             summary_prompt="Summarize the conversation.",
+            timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
         )
 
 
@@ -620,6 +645,7 @@ async def test_generate_compaction_summary_uses_configured_output_cap() -> None:
             ),
             summary_input="conversation payload",
             summary_prompt="Summarize the conversation.",
+            timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
         )
 
 
@@ -636,6 +662,7 @@ async def test_generate_compaction_summary_allows_claude_summary_below_output_ca
         ),
         summary_input="conversation payload",
         summary_prompt="Summarize the conversation.",
+        timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
     )
 
     assert summary.summary == "durable summary ended cleanly."
@@ -654,6 +681,7 @@ async def test_generate_compaction_summary_allows_full_history_summary_above_fou
         ),
         summary_input="conversation payload",
         summary_prompt="Summarize the conversation.",
+        timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
     )
 
     assert summary.summary == "durable full-history summary ended cleanly."
@@ -674,6 +702,7 @@ async def test_generate_compaction_summary_uses_claude_default_output_cap() -> N
             model=model,
             summary_input="conversation payload",
             summary_prompt="Summarize the conversation.",
+            timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
         )
 
 
@@ -687,6 +716,7 @@ async def test_generate_compaction_summary_allows_unknown_provider_without_outpu
         model=_UncappedSummaryModel(id="summary-model", provider="fake"),
         summary_input="conversation payload",
         summary_prompt="Summarize the conversation.",
+        timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
     )
 
     assert summary.summary == "durable summary ended cleanly."
@@ -1056,7 +1086,7 @@ def test_retry_policy_preserves_context_error_fragment_matches() -> None:
             attempt=1,
             budget=16_000,
             input_tokens=16_000,
-            error=RuntimeError(f"compaction summary timed out after {MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS}s"),
+            error=RuntimeError(f"compaction summary timed out after {DEFAULT_COMPACTION_TIMEOUT_SECONDS}s"),
         )
         == 8_000
     )
@@ -1157,6 +1187,7 @@ async def test_retry_helper_propagates_original_error_when_rebuilt_input_is_not_
             scope=_SCOPE,
             history_settings=_HISTORY_SETTINGS,
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
+            timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
             token_estimator=lambda _value: 2_000,
             estimate_kind="o200k_base_tokens",
         )
@@ -1197,6 +1228,7 @@ async def test_retry_helper_honors_transient_fallthrough_for_shrink_message_at_f
             scope=_SCOPE,
             history_settings=_HISTORY_SETTINGS,
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
+            timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
             token_estimator=lambda _value: COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS,
             estimate_kind="o200k_base_tokens",
         )
@@ -1252,6 +1284,7 @@ async def test_retry_helper_shrinks_around_a_large_durable_summary() -> None:
             scope=_SCOPE,
             history_settings=_HISTORY_SETTINGS,
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
+            timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
             token_estimator=_chars_per_token_estimator,
             estimate_kind="o200k_base_tokens",
         )
@@ -1298,6 +1331,7 @@ async def test_retry_helper_propagates_error_when_no_smaller_progress_input_exis
             scope=_SCOPE,
             history_settings=_HISTORY_SETTINGS,
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
+            timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
             token_estimator=_chars_per_token_estimator,
             estimate_kind="o200k_base_tokens",
         )
@@ -1322,6 +1356,7 @@ async def test_generate_compaction_summary_empty_result_raises_typed_error_with_
             ),
             summary_input="conversation payload",
             summary_prompt="Summarize the conversation.",
+            timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
         )
 
 
@@ -1415,6 +1450,7 @@ async def test_claude_compaction_splits_dense_preserved_metadata_before_the_inpu
             replay_window_tokens=200_000,
             threshold_tokens=None,
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
+            summary_timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
         )
 
     assert outcome is not None
@@ -1471,6 +1507,7 @@ async def test_compaction_retries_empty_summary_result_with_smaller_input(tmp_pa
             replay_window_tokens=64_000,
             threshold_tokens=None,
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
+            summary_timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
         )
 
     assert outcome is not None
@@ -1517,8 +1554,10 @@ async def test_retry_helper_switches_to_fallback_once_with_unchanged_prompt_and_
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
             token_estimator=lambda _value: 2_000,
             estimate_kind="o200k_base_tokens",
+            timeout_seconds=420.0,
             fallback_model=fallback,
             fallback_model_name="fallback-model",
+            fallback_input_budget=4_000,
         )
 
     assert generated.summary is recovered_summary
@@ -1535,6 +1574,7 @@ async def test_retry_helper_switches_to_fallback_once_with_unchanged_prompt_and_
         COMPACTION_SUMMARY_PROMPT,
         COMPACTION_SUMMARY_PROMPT,
     ]
+    assert [call.kwargs["timeout_seconds"] for call in generate_summary.await_args_list] == [420.0, 420.0]
     retry_sleep.assert_not_awaited()
     # Structured request/failure/completion logs identify the actual serving model.
     assert [
@@ -1542,6 +1582,11 @@ async def test_retry_helper_switches_to_fallback_once_with_unchanged_prompt_and_
         for call in logger_mock.info.call_args_list
         if call.args[0] == "Compaction summary chunk request"
     ] == ["summary-model", "fallback-model"]
+    assert [
+        call.kwargs["timeout_seconds"]
+        for call in logger_mock.info.call_args_list
+        if call.args[0] == "Compaction summary chunk request"
+    ] == [420.0, 420.0]
     assert [
         call.kwargs["model_name"]
         for call in logger_mock.warning.call_args_list
@@ -1552,6 +1597,44 @@ async def test_retry_helper_switches_to_fallback_once_with_unchanged_prompt_and_
         for call in logger_mock.info.call_args_list
         if call.args[0] == "Compaction summary chunk completed"
     ] == ["fallback-model"]
+
+
+@pytest.mark.asyncio
+async def test_retry_helper_logs_requested_and_effective_claude_timeouts() -> None:
+    run = _completed_run("run-1")
+    model = _RecordingClaude(id="claude-sonnet-5", timeout=300.0)
+    generate_summary = AsyncMock(
+        return_value=SessionSummary(summary="summary", updated_at=datetime.now(UTC)),
+    )
+    logger_mock = MagicMock()
+
+    with (
+        patch("mindroom.history.compaction.generate_compaction_summary", new=generate_summary),
+        patch("mindroom.history.compaction.logger", logger_mock),
+    ):
+        await _generate_compaction_summary_with_retry(
+            model=model,
+            model_name="summary-model",
+            previous_summary=None,
+            compactable_runs=[run],
+            initial_summary_input="original request",
+            initial_included_runs=[run],
+            summary_input_budget=4_000,
+            session_id="session-1",
+            scope=_SCOPE,
+            history_settings=_HISTORY_SETTINGS,
+            summary_prompt=COMPACTION_SUMMARY_PROMPT,
+            token_estimator=lambda _value: 2_000,
+            estimate_kind="o200k_base_tokens",
+            timeout_seconds=480.0,
+        )
+
+    request_log = next(
+        call for call in logger_mock.info.call_args_list if call.args[0] == "Compaction summary chunk request"
+    )
+    assert request_log.kwargs["timeout_seconds"] == 480.0
+    assert request_log.kwargs["effective_timeout_seconds"] == 300.0
+    assert generate_summary.await_args.kwargs["timeout_seconds"] == 480.0
 
 
 @pytest.mark.asyncio
@@ -1587,10 +1670,12 @@ async def test_retry_helper_propagates_fallback_refusal_or_failure(fallback_erro
             scope=_SCOPE,
             history_settings=_HISTORY_SETTINGS,
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
+            timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
             token_estimator=lambda _value: 2_000,
             estimate_kind="o200k_base_tokens",
             fallback_model=fallback,
             fallback_model_name="fallback-model",
+            fallback_input_budget=4_000,
         )
 
     assert raised.value is fallback_error
@@ -1630,10 +1715,12 @@ async def test_retry_helper_refusal_after_transient_retry_propagates_within_atte
             scope=_SCOPE,
             history_settings=_HISTORY_SETTINGS,
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
+            timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
             token_estimator=lambda _value: 2_000,
             estimate_kind="o200k_base_tokens",
             fallback_model=fallback,
             fallback_model_name="fallback-model",
+            fallback_input_budget=4_000,
         )
 
     assert raised.value is refusal
@@ -1677,21 +1764,26 @@ async def test_compaction_fallback_serves_later_chunks_state_and_outcome(tmp_pat
             state=read_scope_state(session, _SCOPE),
             history_settings=_HISTORY_SETTINGS,
             available_history_budget=None,
-            summary_input_budget=10_000,
+            summary_input_budget=100_000,
             summary_model=primary,
             summary_model_name="summary-model",
             replay_window_tokens=64_000,
             threshold_tokens=None,
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
+            summary_timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
             fallback_summary_model=fallback,
             fallback_summary_model_name="fallback-model",
+            fallback_summary_input_budget=10_000,
         )
 
     assert outcome is not None
-    # Chunk 1 refuses on the primary and resends the unchanged prompt and
-    # input to the fallback; chunk 2 goes straight to the fallback.
+    # The primary sees both runs. Its smaller-context fallback rebuilds the
+    # refused chunk with run 1, then keeps its own budget for run 2.
     assert [model_id for model_id, _ in attempts] == ["summary-model", "fallback-model-id", "fallback-model-id"]
-    assert attempts[1][1] == attempts[0][1]
+    assert "RUN1-MARKER" in attempts[0][1]
+    assert "RUN2-MARKER" in attempts[0][1]
+    assert "RUN1-MARKER" in attempts[1][1]
+    assert "RUN2-MARKER" not in attempts[1][1]
     assert "RUN2-MARKER" in attempts[2][1]
     assert outcome.summary_model == "fallback-model"
     persisted = get_agent_session(storage, "session-1")
@@ -1739,6 +1831,7 @@ async def test_small_refused_summary_request_fails_without_identical_retry_or_pe
             replay_window_tokens=64_000,
             threshold_tokens=None,
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
+            summary_timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
         )
 
     assert len(attempts) == 1
@@ -1792,6 +1885,7 @@ async def test_minimum_available_budget_can_issue_smaller_degradation_retry(tmp_
             replay_window_tokens=64_000,
             threshold_tokens=None,
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
+            summary_timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
         )
 
     assert outcome is not None
@@ -1814,7 +1908,7 @@ async def test_near_cap_durable_summary_with_tiny_budget_is_unavailable_without_
     summary_input_budget = COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS + 1
     config, runtime_paths = _make_config(
         tmp_path,
-        compaction=CompactionConfig(replay_window_tokens=summary_input_budget),
+        context_window=10_000,
     )
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     previous_summary = ("word " * 975) + "TAIL-FACT-MUST-SURVIVE"
@@ -1841,6 +1935,7 @@ async def test_near_cap_durable_summary_with_tiny_budget_is_unavailable_without_
             replay_window_tokens=summary_input_budget,
             threshold_tokens=None,
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
+            summary_timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
         )
 
     assert outcome is None
@@ -1986,6 +2081,7 @@ async def test_compaction_retries_transient_provider_error_at_same_budget(
             replay_window_tokens=64_000,
             threshold_tokens=None,
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
+            summary_timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
         )
 
     assert outcome is not None

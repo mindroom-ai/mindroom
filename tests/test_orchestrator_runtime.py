@@ -51,6 +51,7 @@ from mindroom.orchestrator import (
     _run_auxiliary_task_forever,
     _SignalAwareUvicornServer,
     _wait_for_runtime_completion,
+    _wait_for_runtime_shutdown_cleanup,
     main,
 )
 from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
@@ -569,6 +570,66 @@ class TestAgentBot(AgentBotTestBase):
 
         mock_orchestrator.stop.assert_awaited_once()
         mock_orchestrator.start.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_runtime_cleanup_finishes_requested_shutdown_after_repeated_signal_cancels(
+        self,
+    ) -> None:
+        """Repeated SIGINT cancellation must not abort cleanup started by the first signal."""
+        cleanup_started = asyncio.Event()
+        cleanup_released = asyncio.Event()
+
+        async def _cleanup() -> None:
+            cleanup_started.set()
+            await cleanup_released.wait()
+
+        cleanup_task = asyncio.create_task(_cleanup())
+        wait_task = asyncio.create_task(
+            _wait_for_runtime_shutdown_cleanup(
+                cleanup_task,
+                shutdown_was_requested=True,
+            ),
+        )
+        await asyncio.wait_for(cleanup_started.wait(), timeout=1)
+        await asyncio.sleep(0)
+        wait_task.cancel()
+        await asyncio.sleep(0)
+        wait_task.cancel()
+        cleanup_released.set()
+        await asyncio.wait_for(wait_task, timeout=1)
+
+        assert cleanup_task.done()
+
+    @pytest.mark.asyncio
+    async def test_runtime_cleanup_preserves_unrequested_cancellation_after_cleanup_failure(
+        self,
+    ) -> None:
+        """Cleanup failure must not replace cancellation from an embedding caller."""
+        cleanup_started = asyncio.Event()
+
+        async def _failing_cleanup() -> None:
+            cleanup_started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError as exc:
+                msg = "cleanup failed"
+                raise RuntimeError(msg) from exc
+
+        cleanup_task = asyncio.create_task(_failing_cleanup())
+        wait_task = asyncio.create_task(
+            _wait_for_runtime_shutdown_cleanup(
+                cleanup_task,
+                shutdown_was_requested=False,
+            ),
+        )
+        await asyncio.wait_for(cleanup_started.wait(), timeout=1)
+        await asyncio.sleep(0)
+        wait_task.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await wait_task
+        with pytest.raises(RuntimeError, match="cleanup failed"):
+            cleanup_task.result()
 
     @pytest.mark.asyncio
     async def test_orchestrator_main_fails_when_api_server_exits_unexpectedly(self, tmp_path: Path) -> None:

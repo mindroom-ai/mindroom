@@ -19,6 +19,7 @@ from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.config.models import CompactionOverrideConfig
 from mindroom.constants import (
     AI_RUN_METADATA_KEY,
+    DEFAULT_COMPACTION_TIMEOUT_SECONDS,
     MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY,
     MINDROOM_COMPACTION_METADATA_KEY,
     MINDROOM_MATRIX_HISTORY_METADATA_KEY,
@@ -61,14 +62,12 @@ async def test_compaction_call_timeout_raises_runtime_error() -> None:
             await asyncio.sleep(0.05)
             return ModelResponse(content="merged summary")
 
-    with (
-        patch("mindroom.history.summary_call.MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS", 0.01),
-        pytest.raises(RuntimeError, match=r"compaction summary timed out after 0.01s"),
-    ):
+    with pytest.raises(RuntimeError, match=r"compaction summary timed out after 0.01s"):
         await generate_compaction_summary(
             model=_SlowSummaryModel(id="summary-model", provider="fake"),
             summary_input="Current prompt",
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
+            timeout_seconds=0.01,
         )
 
 
@@ -81,6 +80,7 @@ async def test_compaction_summary_uses_configured_system_prompt() -> None:
         model=model,
         summary_input="Current prompt",
         summary_prompt="Custom compaction instructions.",
+        timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
     )
 
     assert model.seen_messages[0].role == "system"
@@ -111,14 +111,12 @@ async def test_compaction_call_timeout_returns_without_waiting_for_cancellation_
     model = _SlowToUnwindSummaryModel(model_id="summary-model", provider="fake")
     start = asyncio.get_running_loop().time()
 
-    with (
-        patch("mindroom.history.summary_call.MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS", 0.01),
-        pytest.raises(RuntimeError, match=r"compaction summary timed out after 0.01s"),
-    ):
+    with pytest.raises(RuntimeError, match=r"compaction summary timed out after 0.01s"):
         await generate_compaction_summary(
             model=model,
             summary_input="Current prompt",
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
+            timeout_seconds=0.01,
         )
 
     assert asyncio.get_running_loop().time() - start < 0.04
@@ -151,14 +149,12 @@ async def test_compaction_call_timeout_raises_even_when_provider_returns_after_c
 
     model = _SwallowingCancelSummaryModel(model_id="summary-model", provider="fake")
 
-    with (
-        patch("mindroom.history.summary_call.MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS", 0.01),
-        pytest.raises(RuntimeError, match=r"compaction summary timed out after 0.01s"),
-    ):
+    with pytest.raises(RuntimeError, match=r"compaction summary timed out after 0.01s"):
         await generate_compaction_summary(
             model=model,
             summary_input="Current prompt",
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
+            timeout_seconds=0.01,
         )
 
     await asyncio.wait_for(model.started.wait(), timeout=0.1)
@@ -180,6 +176,7 @@ async def test_compaction_provider_timeout_propagates_unchanged() -> None:
             model=_ProviderTimeoutModel(id="summary-model", provider="fake"),
             summary_input="Current prompt",
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
+            timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
         )
 
 
@@ -208,6 +205,7 @@ async def test_compaction_summary_cancels_model_task_when_outer_call_is_cancelle
             model=model,
             summary_input="Current prompt",
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
+            timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
         ),
     )
 
@@ -250,6 +248,7 @@ async def test_compaction_summary_outer_cancellation_returns_without_waiting_for
             model=model,
             summary_input="Current prompt",
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
+            timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
         ),
     )
 
@@ -291,6 +290,7 @@ async def test_compaction_summary_outer_cancellation_wins_over_provider_cleanup_
             model=model,
             summary_input="Current prompt",
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
+            timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
         ),
     )
 
@@ -332,7 +332,6 @@ async def test_compaction_timeout_cleanup_detaches_after_grace_window() -> None:
     model = _DetachedTimeoutCleanupSummaryModel(model_id="summary-model", provider="fake")
 
     with (
-        patch("mindroom.history.summary_call.MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS", 0.01),
         patch("mindroom.history.summary_call._COMPACTION_CANCEL_DRAIN_TIMEOUT_SECONDS", 0.01),
         pytest.raises(RuntimeError, match=r"compaction summary timed out after 0.01s"),
     ):
@@ -340,6 +339,7 @@ async def test_compaction_timeout_cleanup_detaches_after_grace_window() -> None:
             model=model,
             summary_input="Current prompt",
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
+            timeout_seconds=0.01,
         )
 
     await asyncio.wait_for(model.started.wait(), timeout=0.1)
@@ -362,7 +362,10 @@ async def test_compaction_call_timeout_falls_back_in_runtime(
 
     config, runtime_paths = _make_config(
         tmp_path,
-        compaction=CompactionOverrideConfig(enabled=True),
+        compaction=CompactionOverrideConfig(
+            enabled=True,
+            timeout_seconds=0.01,
+        ),
         context_window=64_000,
     )
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
@@ -384,7 +387,6 @@ async def test_compaction_call_timeout_falls_back_in_runtime(
             "mindroom.model_loading.get_model_instance",
             return_value=_SlowSummaryModel(id="summary-model", provider="fake"),
         ),
-        patch("mindroom.history.summary_call.MINDROOM_COMPACTION_CHUNK_TIMEOUT_SECONDS", 0.01),
         capture_logs() as logs,
     ):
         prepared = await prepare_history_for_run_for_test(

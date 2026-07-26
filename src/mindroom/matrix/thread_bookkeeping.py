@@ -15,7 +15,8 @@ Who may mutate thread state, and how:
    (``ThreadOutboundWritePolicy``, ``ThreadLiveWritePolicy``, ``ThreadSyncWritePolicy``),
    which all resolve impact through this module's ``ThreadMutationResolver``,
    apply it through ``mindroom.matrix.cache.thread_write_cache_ops.ThreadMutationCacheOps``,
-   and order every write through the per-room ``EventCacheWriteCoordinator`` barrier.
+   and order every write through the room or certified per-thread
+   ``EventCacheWriteCoordinator`` barrier.
    The only other thread-cache writer is the read-refill in
    ``mindroom.matrix.client_thread_history``: after an authoritative homeserver fetch it stores the
    snapshot through the guarded ``replace_thread_if_not_newer``, and it invalidates entries it proves

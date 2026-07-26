@@ -240,6 +240,7 @@ def _turn_store(bot: AgentBot | TeamBot) -> TurnStore:
 def _set_turn_store_tracker(bot: AgentBot | TeamBot, tracker: MagicMock) -> MagicMock:
     """Swap the private handled-turn ledger behind one turn store for test assertions."""
     stored_records: dict[str, TurnRecord] = {}
+    tracker.get_turn_record.return_value = None
 
     def update_handled_turn(
         lookup_event_ids: Sequence[str],

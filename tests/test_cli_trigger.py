@@ -10,7 +10,6 @@ from typing import cast
 
 import httpx
 import pytest
-from click.utils import strip_ansi
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PrivateFormat, PublicFormat
 from typer.testing import CliRunner
@@ -478,8 +477,7 @@ def test_trigger_send_rejects_data_json_that_is_not_object(tmp_path: Path) -> No
             "--data-json",
             "[]",
         ],
-        env={"FORCE_COLOR": "1"},
     )
 
     assert result.exit_code == 2
-    assert "--data-json must decode to a JSON object" in strip_ansi(result.output)
+    assert "--data-json must decode to a JSON object" in result.output

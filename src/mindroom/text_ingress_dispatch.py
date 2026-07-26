@@ -315,7 +315,10 @@ async def _blocked_before_plan(
     ):
         return True
 
-    may_be_superseded = prepared.dispatch.envelope.origin.may_be_superseded_by_newer_requester_turn
+    may_be_superseded = prepared.dispatch.envelope.origin.may_be_superseded_by_newer_requester_turn and all(
+        metadata.sender == requester_user_id
+        for metadata in (prepared.handled_turn.source_event_metadata or {}).values()
+    )
     if prepared.replay_guard.degraded:
         skips_turn = await controller._has_newer_unresponded_cached_thread_event(
             room_id=room.room_id,
@@ -324,7 +327,7 @@ async def _blocked_before_plan(
             thread_id=prepared.replay_guard.thread_id,
             may_be_superseded_by_newer_requester_turn=may_be_superseded,
         )
-        if not skips_turn:
+        if may_be_superseded and not skips_turn:
             controller.deps.logger.warning(
                 "Thread replay guard degraded; proceeding without negative newer-message proof",
                 event_id=prepared.event.event_id,
@@ -466,14 +469,14 @@ async def _apply_turn_plan(
         await asyncio.wait({started_wait, response_task}, return_when=asyncio.FIRST_COMPLETED)
     finally:
         started_wait.cancel()
+    # Surface pre-lock failures to the caller's containment; post-lock
+    # failures (including a fast failure racing the FIRST_COMPLETED wait)
+    # belong to the runner-owned task. Pre-lock CANCELLATION is
+    # deliberately NOT surfaced: this coroutine was not itself cancelled,
+    # and re-raising CancelledError here would corrupt the gate drain's
+    # own cancellation state. The queued-notice reservation still cancels
+    # in dispatch_text_message's finally, which is the cleanup contract.
     if response_task.done() and not response_task.cancelled() and not response_started.is_set():
-        # Surface pre-lock failures to the caller's containment; post-lock
-        # failures (including a fast failure racing the FIRST_COMPLETED wait)
-        # belong to the runner-owned task. Pre-lock CANCELLATION is
-        # deliberately NOT surfaced: this coroutine was not itself cancelled,
-        # and re-raising CancelledError here would corrupt the gate drain's
-        # own cancellation state. The queued-notice reservation still cancels
-        # in dispatch_text_message's finally, which is the cleanup contract.
         response_task.result()
 
 

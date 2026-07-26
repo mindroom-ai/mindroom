@@ -99,7 +99,30 @@ A durable thread snapshot is usable only when its state row exists, `validated_a
 
 A snapshot without its thread root or one still containing opaque `m.room.encrypted` payloads is rejected.
 
-A rejected or absent snapshot causes an authoritative homeserver room-history scan and guarded cache refill.
+A cache probe runs outside repair ownership, and only a rejected or absent snapshot enters an authoritative homeserver room-history scan and guarded cache refill.
+
+Every refill runs as one principal-scoped single-flight repair keyed by principal, room, thread, sidecar hydration, and stale-fallback policy.
+Concurrent callers with the same contract share one homeserver scan, while callers with incompatible hydration or stale-fallback contracts never share an outcome.
+Cancelling a waiting caller does not cancel the shared repair.
+
+Live and outbound thread events are retained as certified deltas before their ordered append begins, replayed into the reconstructed snapshot in canonical order, and forgotten once an append or an installed snapshot is proven to contain them.
+A replayed delta never replaces authoritative same-ID fetched state, so a redacted event stays redacted.
+Retained deltas expire after 60 seconds once no matching repair is active because any later scan already observes them.
+Authoritative departure detaches active repair ownership and clears retained deltas and failure state for that principal and room before any post-rejoin repair can begin.
+Late completion of detached work cannot restore the cleared failure state.
+
+The guarded replacement classifies its result as `stored`, `existing_usable`, `retryable_conflict`, `invalidated`, `writes_unavailable`, or `hard_failure`.
+A refill performs at most two reconstruction attempts and only retries `retryable_conflict` and `invalidated`; `existing_usable` serves the winning snapshot instead.
+A refill that cannot read an `existing_usable` winner returns its already-fetched homeserver history without performing a second scan.
+A refill that completes without installing a snapshot still returns its homeserver history, so reads stay fail-open.
+
+A repair that raises or reports `hard_failure` enters capped exponential backoff starting at one second and capped at 30 seconds, while a usable outcome clears prior failure state.
+An uncached `writes_unavailable` or stale-cache fallback completion does not arm backoff.
+Reads without a dispatch timeout bypass a retained backoff and perform a fresh authoritative reconstruction, so a throttle protecting cache writes never stalls a turn; dispatch-safe reads return a degraded result with `thread_read_error` `cache_repair_backoff` and let their caller fall back to a strict read.
+Bypassing preserves the failure count, so background repair stays suppressed for the remaining delay.
+A degraded dispatch proof for an unproven thread candidate also retries strict proof before it may demote the event to room level.
+
+Startup thread prewarm scans outside the live write coordinator so its bulk room scan cannot starve dispatch repairs.
 
 A refill whose reconstruction contains still-opaque encrypted evidence for the requested thread, or whose scan holds an opaque relation with unresolved thread impact, marks the thread stale and fails the read instead of certifying incomplete history.
 
@@ -113,7 +136,9 @@ The advisory read path may use a labelled stale-cache fallback when a required r
 
 Dispatch reads reject stale fallback and propagate the refill failure.
 
-Every completed read emits `matrix_cache_thread_history_refreshed` with `mode`, `cache_read_ms`, `homeserver_fetch_ms`, page and event counts, `cache_reject_reason`, `thread_read_source`, degradation state, and error state.
+Every completed cache or source fetch emits its own `matrix_cache_thread_history_refreshed` event with `mode`, `cache_read_ms`, `homeserver_fetch_ms`, page and event counts, `cache_reject_reason`, `thread_read_source`, degradation state, and error state.
+Refilled reads add `cache_store_outcome`, `cache_repair_attempts`, and `cache_repair_usable`; a read served by a winning concurrent snapshot reports `mode` `cache_hit_after_repair_conflict`.
+A dispatch read cut short by a coordinator timeout, fetch timeout, or repair backoff instead emits `matrix_cache_thread_read_degraded`; a repair-backoff event adds `cache_repair_backoff_seconds`.
 
 ## Disposable live audit
 
@@ -178,17 +203,11 @@ Hosted evidence describes the deployed service as a production baseline.
 
 PR-specific classification remains proven by the SQLite and PostgreSQL owning-seam tests unless the PR itself has been deployed through a separately authorized release.
 
-## Known non-owned lifecycle and encryption gaps
-
-Membership-loss cleanup is not owned by this contract track.
-
-A deterministic reproduction is to cache a joined-room event, deliver the same room under `rooms.leave`, and observe that the point row remains while no new leave-timeline event is admitted.
+## Known storage and encryption gaps
 
 Opaque encrypted thread evidence is owned by this contract track and fails closed.
 
 An opaque `m.room.encrypted` child with a clear thread-affecting relation marks only its thread stale under a non-incremental reason, a later clear incremental event cannot weaken that reason, and thread-history refresh rejects reconstructions that still contain the opaque evidence.
-
-The remaining gap requires coordinated lifecycle changes rather than an overlapping cache-contract workaround.
 
 Thread snapshot replacement currently owns point-row deletion through the duplicated storage layout, which belongs to the storage normalization track.
 
