@@ -44,7 +44,8 @@ Keyword mode scans markdown files directly.
 Semantic mode searches the agent's file-memory scope through a lazy embedding index and falls back to keyword search when embeddings are unavailable.
 Result metadata includes `search_mode` so callers can tell which path produced the result.
 File memory is already searchable on demand through `search_memories()`.
-It is not currently listed as a source in `search_knowledge_base`, whose source list only describes the corpora available through that tool.
+When its agent-scoped semantic index is ready, configured file memory is also listed as a read-only source in `search_knowledge_base`.
+That knowledge surface is semantic-only and does not provide keyword fallback, team-visible memory, or memory IDs.
 
 ### Configuration
 

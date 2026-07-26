@@ -61,7 +61,8 @@ from mindroom.knowledge.registry import (
 )
 from mindroom.knowledge.utils import KnowledgeAvailabilityDetail
 from mindroom.knowledge.watch import KnowledgeSourceWatcher
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+from mindroom.runtime_resolution import resolve_agent_runtime
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity, agent_workspace_root_path
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 from tests.knowledge_test_support import metadata_matches
 
@@ -368,6 +369,109 @@ def _identity(requester_id: str, *, agent_name: str = "helper") -> ToolExecution
         resolved_thread_id=None,
         session_id="session",
     )
+
+
+def _file_memory_config(tmp_path: Path, *agent_names: str) -> Config:
+    runtime_paths = test_runtime_paths(tmp_path)
+    return bind_runtime_paths(
+        Config(
+            agents={name: AgentConfig(display_name=name.title()) for name in agent_names},
+            models={},
+            memory={"backend": "file", "search": {"mode": "semantic"}},
+        ),
+        runtime_paths,
+    )
+
+
+def _scheduled_file_memory_overlay(
+    agent_name: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> tuple[str, Config]:
+    scheduler = MagicMock()
+    scheduler.is_refreshing.return_value = False
+
+    resolution = resolve_agent_knowledge_access(
+        agent_name,
+        config,
+        runtime_paths,
+        refresh_scheduler=scheduler,
+    )
+
+    assert resolution.knowledge is None
+    scheduler.schedule_refresh.assert_called_once()
+    call = scheduler.schedule_refresh.call_args
+    assert call is not None
+    base_id = call.args[0]
+    effective_config = call.kwargs["config"]
+    assert isinstance(base_id, str)
+    assert isinstance(effective_config, Config)
+    return base_id, effective_config
+
+
+@pytest.mark.asyncio
+async def test_file_memory_overlay_query_returns_memory_markdown_hit(tmp_path: Path) -> None:
+    """A published file-memory overlay should be queryable through agent knowledge."""
+    config = _file_memory_config(tmp_path, "helper")
+    runtime_paths = runtime_paths_for(config)
+    root = agent_workspace_root_path(runtime_paths.storage_root, "helper")
+    memory_file = root / "memory" / "notes.md"
+    memory_file.parent.mkdir(parents=True)
+    query_marker = "issue256-query-marker"
+    memory_file.write_text(f"{query_marker}\n", encoding="utf-8")
+
+    base_id, effective_config = _scheduled_file_memory_overlay("helper", config, runtime_paths)
+    await refresh_knowledge_binding(base_id, config=effective_config, runtime_paths=runtime_paths)
+
+    knowledge = resolve_agent_knowledge_access("helper", config, runtime_paths).knowledge
+    assert knowledge is not None
+    documents = knowledge.search(query_marker, max_results=5)
+
+    assert any(query_marker in document.content for document in documents)
+    assert any(document.meta_data.get("source_path") == "memory/notes.md" for document in documents)
+
+
+@pytest.mark.asyncio
+async def test_file_memory_knowledge_is_cross_agent_isolated(tmp_path: Path) -> None:
+    """Distinct agent workspaces must never expose each other's file-memory index."""
+    config = _file_memory_config(tmp_path, "alpha", "beta")
+    runtime_paths = runtime_paths_for(config)
+    alpha_runtime = resolve_agent_runtime("alpha", config, runtime_paths, execution_identity=None)
+    beta_runtime = resolve_agent_runtime("beta", config, runtime_paths, execution_identity=None)
+    assert alpha_runtime.file_memory_root is not None
+    assert beta_runtime.file_memory_root is not None
+    assert alpha_runtime.file_memory_root != beta_runtime.file_memory_root
+    assert not alpha_runtime.file_memory_root.is_symlink()
+    assert not beta_runtime.file_memory_root.is_symlink()
+    alpha_marker = "issue256-alpha-only-marker"
+    beta_marker = "issue256-beta-only-marker"
+    alpha_file = alpha_runtime.file_memory_root / "memory" / "notes.md"
+    beta_file = beta_runtime.file_memory_root / "memory" / "notes.md"
+    alpha_file.parent.mkdir(parents=True)
+    beta_file.parent.mkdir(parents=True)
+    alpha_file.write_text(f"{alpha_marker}\n", encoding="utf-8")
+    beta_file.write_text(f"{beta_marker}\n", encoding="utf-8")
+
+    alpha_base_id, alpha_config = _scheduled_file_memory_overlay("alpha", config, runtime_paths)
+    beta_base_id, beta_config = _scheduled_file_memory_overlay("beta", config, runtime_paths)
+    assert alpha_base_id != beta_base_id
+    assert alpha_config.knowledge_bases[alpha_base_id].path != beta_config.knowledge_bases[beta_base_id].path
+    await refresh_knowledge_binding(alpha_base_id, config=alpha_config, runtime_paths=runtime_paths)
+    await refresh_knowledge_binding(beta_base_id, config=beta_config, runtime_paths=runtime_paths)
+
+    alpha_knowledge = resolve_agent_knowledge_access("alpha", config, runtime_paths).knowledge
+    beta_knowledge = resolve_agent_knowledge_access("beta", config, runtime_paths).knowledge
+    assert alpha_knowledge is not None
+    assert beta_knowledge is not None
+    alpha_own = alpha_knowledge.search(alpha_marker, max_results=5)
+    beta_own = beta_knowledge.search(beta_marker, max_results=5)
+    alpha_cross = alpha_knowledge.search(beta_marker, max_results=5)
+    beta_cross = beta_knowledge.search(alpha_marker, max_results=5)
+
+    assert any(alpha_marker in document.content for document in alpha_own)
+    assert any(beta_marker in document.content for document in beta_own)
+    assert all(beta_marker not in document.content for document in alpha_cross)
+    assert all(alpha_marker not in document.content for document in beta_cross)
 
 
 def _set_git_tracked_files(manager: KnowledgeManager, *relative_paths: str) -> None:

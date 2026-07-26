@@ -15,6 +15,7 @@ from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
+from mindroom.file_memory_knowledge import resolve_file_memory_knowledge
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.utils import KnowledgeBaseAccessResolution
 from mindroom.memory import MemoryPromptParts
@@ -263,14 +264,15 @@ def config(storage_path: Path) -> Config:
 def test_semantic_memory_index_is_a_runtime_config_overlay(storage_path: Path, config: Config) -> None:
     """Synthetic file-memory indexes must not leak into authored config serialization."""
     root = storage_path / "workspace"
-    base_id = "file_memory_agent_general_test"
 
-    knowledge_config = semantic_file_search._memory_knowledge_config(
-        config,
-        base_id=base_id,
+    resolution = resolve_file_memory_knowledge(
+        scope_user_id="agent_general",
         root=root,
+        config=config,
         search_config=config.memory.search,
     )
+    knowledge_config = resolution.config
+    base_id = resolution.base_id
 
     assert knowledge_config.knowledge_bases[base_id].path == str(root.resolve())
     assert knowledge_config.runtime_knowledge_base_overlay(base_id) is knowledge_config.knowledge_bases[base_id]

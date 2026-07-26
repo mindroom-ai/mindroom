@@ -107,7 +107,8 @@ The `openclaw_compat` preset already expands to native shell, coding, duckduckgo
 Copy or sync your OpenClaw files into `agents/openclaw/workspace/` before using this config so `context_files`, file memory, and `search_memories` read the same canonical workspace.
 Direct external edits to daily memory files are picked up lazily on the next semantic memory search.
 File memory is already searchable on demand through `search_memories`.
-It is not currently listed as a source in `search_knowledge_base`.
+When its agent-scoped semantic index is ready, configured file memory is also listed as a read-only source in `search_knowledge_base`.
+Use `search_memories` for keyword fallback, team-visible memory, and memory IDs.
 Use `knowledge_bases` only for non-memory project documents that should be searchable as external knowledge.
 
 ## Recommended workspace layout

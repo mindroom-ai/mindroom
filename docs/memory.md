@@ -163,7 +163,8 @@ MindRoom already preloads `MEMORY.md` into the prompt, so the default avoids dup
 Semantic mode applies to the agent's own file-memory scope.
 Team-visible file memory is still keyword searched.
 File memory is already searchable on demand through `search_memories`.
-It is not currently listed as a source in `search_knowledge_base`, whose source list only describes the corpora available through that tool.
+When its agent-scoped semantic index is ready, configured file memory is also listed as a read-only source in `search_knowledge_base`.
+The knowledge surface is semantic-only and does not provide keyword fallback, team-visible memory, or memory IDs, so use `search_memories` when those capabilities matter.
 
 Per-agent override example:
 

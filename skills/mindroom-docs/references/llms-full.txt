@@ -9235,7 +9235,8 @@ Keyword mode scans markdown files directly.
 Semantic mode searches the agent's file-memory scope through a lazy embedding index and falls back to keyword search when embeddings are unavailable.
 Result metadata includes `search_mode` so callers can tell which path produced the result.
 File memory is already searchable on demand through `search_memories()`.
-It is not currently listed as a source in `search_knowledge_base`, whose source list only describes the corpora available through that tool.
+When its agent-scoped semantic index is ready, configured file memory is also listed as a read-only source in `search_knowledge_base`.
+That knowledge surface is semantic-only and does not provide keyword fallback, team-visible memory, or memory IDs.
 
 ### Configuration
 
@@ -11188,7 +11189,8 @@ The `openclaw_compat` preset already expands to native shell, coding, duckduckgo
 Copy or sync your OpenClaw files into `agents/openclaw/workspace/` before using this config so `context_files`, file memory, and `search_memories` read the same canonical workspace.
 Direct external edits to daily memory files are picked up lazily on the next semantic memory search.
 File memory is already searchable on demand through `search_memories`.
-It is not currently listed as a source in `search_knowledge_base`.
+When its agent-scoped semantic index is ready, configured file memory is also listed as a read-only source in `search_knowledge_base`.
+Use `search_memories` for keyword fallback, team-visible memory, and memory IDs.
 Use `knowledge_bases` only for non-memory project documents that should be searchable as external knowledge.
 
 ## Recommended workspace layout
@@ -13506,7 +13508,8 @@ MindRoom already preloads `MEMORY.md` into the prompt, so the default avoids dup
 Semantic mode applies to the agent's own file-memory scope.
 Team-visible file memory is still keyword searched.
 File memory is already searchable on demand through `search_memories`.
-It is not currently listed as a source in `search_knowledge_base`, whose source list only describes the corpora available through that tool.
+When its agent-scoped semantic index is ready, configured file memory is also listed as a read-only source in `search_knowledge_base`.
+The knowledge surface is semantic-only and does not provide keyword fallback, team-visible memory, or memory IDs, so use `search_memories` when those capabilities matter.
 
 Per-agent override example:
 

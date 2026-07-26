@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
 
 from mindroom.credentials import get_runtime_shared_credentials_manager
 from mindroom.embedding_errors import extract_classified_embedder_detail
+from mindroom.file_memory_knowledge import resolve_agent_file_memory_knowledge
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.redaction import embedded_http_userinfo
 from mindroom.knowledge.registry import (
@@ -417,7 +418,16 @@ def resolve_agent_knowledge_access(
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> _KnowledgeResolution:
     """Resolve configured knowledge base(s) with diagnostics for one agent."""
+    file_memory = resolve_agent_file_memory_knowledge(
+        agent_name,
+        config,
+        runtime_paths,
+        execution_identity,
+    )
+    effective_config = file_memory.config if file_memory is not None else config
     base_ids = _semantic_agent_knowledge_base_ids(agent_name, config)
+    if file_memory is not None:
+        base_ids = (*base_ids, file_memory.base_id)
     if not base_ids:
         return _KnowledgeResolution(knowledge=None)
 
@@ -427,7 +437,7 @@ def resolve_agent_knowledge_access(
     for base_id in base_ids:
         knowledge, availability, last_error = _resolve_base_knowledge(
             base_id,
-            config=config,
+            config=effective_config,
             runtime_paths=runtime_paths,
             refresh_scheduler=refresh_scheduler,
             execution_identity=execution_identity,

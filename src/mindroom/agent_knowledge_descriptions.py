@@ -55,10 +55,7 @@ def _knowledge_search_tool_description(sources: tuple[KnowledgeSourceDescription
     lines.extend(
         [
             "This list only describes sources available through search_knowledge_base.",
-            (
-                "Other tools may search other corpora; use search_memories for MindRoom memory "
-                "when that tool is available."
-            ),
+            "For resilient memory search, team-visible memory, and memory IDs, use search_memories.",
         ],
     )
     return "\n".join(lines)
