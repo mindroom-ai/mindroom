@@ -1579,6 +1579,8 @@ class TestExtractedModuleLoggerRebinding:
                 "event_id": "$event123",
                 "sender": "@user:localhost",
                 "origin_server_ts": 1234567890,
+                "room_id": "!room:localhost",
+                "type": "m.room.message",
                 "content": {
                     "msgtype": "m.text",
                     "body": "hello",

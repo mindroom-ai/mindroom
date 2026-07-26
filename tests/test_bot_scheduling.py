@@ -678,6 +678,8 @@ class TestCommandHandling:
                     "event_id": "$event123",
                     "sender": "@user:server",
                     "origin_server_ts": 1234567890,
+                    "room_id": "!test:server",
+                    "type": "m.room.message",
                     "content": {
                         "msgtype": "m.text",
                         "body": "!schedule in 5 minutes test",
@@ -1732,6 +1734,8 @@ class TestRouterSkipsSingleAgent:
                 "event_id": "$event_thread_follow_up",
                 "sender": "@user:localhost",
                 "origin_server_ts": 1234567890,
+                "room_id": "!test:server",
+                "type": "m.room.message",
                 "content": {
                     "msgtype": "m.text",
                     "body": "Following up on that",

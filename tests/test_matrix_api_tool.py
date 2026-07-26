@@ -373,6 +373,18 @@ async def test_matrix_api_send_event_plain_reply_to_threaded_target_records_thre
     ctx.conversation_cache.get_thread_id_for_event.side_effect = lambda room_id, event_id: (
         "$thread:localhost" if (room_id, event_id) == (ctx.room_id, "$thread-reply") else None
     )
+    ctx.conversation_cache.get_event.return_value = _event_response(
+        event_id="$thread-reply",
+        room_id=ctx.room_id,
+        content={
+            "body": "thread reply",
+            "msgtype": "m.text",
+            "m.relates_to": {
+                "event_id": "$thread:localhost",
+                "rel_type": "m.thread",
+            },
+        },
+    )
     content = {
         "body": "bridged reply",
         "msgtype": "m.text",

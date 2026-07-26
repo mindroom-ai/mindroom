@@ -984,6 +984,8 @@ class TestAgentBot(AgentBotTestBase):
                 "event_id": "$router_mention",
                 "sender": "@mindroom_router:localhost",
                 "origin_server_ts": 1234567890,
+                "room_id": "!test:localhost",
+                "type": "m.room.message",
                 "content": {
                     "msgtype": "m.text",
                     "body": "@calculator could you help with this?",

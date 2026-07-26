@@ -145,6 +145,7 @@ def _make_threaded_voice_event(
             "content": {
                 "body": "voice.ogg",
                 "msgtype": "m.audio",
+                "url": "mxc://localhost/voice",
                 "m.relates_to": {"rel_type": "m.thread", "event_id": thread_id},
             },
         },
@@ -407,13 +408,8 @@ async def test_voice_message_in_thread_continues_thread(
     }
     room.members_synced = True
 
-    voice_event = _make_voice_event(
+    voice_event = _make_threaded_voice_event(
         event_id="$voice456",
-        source={
-            "content": {
-                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
-            },
-        },
     )
 
     with (
@@ -547,13 +543,8 @@ async def test_voice_message_signals_active_turn_before_stt(mock_home_bot: Agent
     }
     room.members_synced = True
 
-    voice_event = _make_voice_event(
+    voice_event = _make_threaded_voice_event(
         event_id="$voice-blocked",
-        source={
-            "content": {
-                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
-            },
-        },
     )
     target = bot._turn_controller.deps.resolver.build_message_target(
         room_id=room.room_id,
