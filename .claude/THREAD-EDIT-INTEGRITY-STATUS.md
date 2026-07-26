@@ -6,9 +6,10 @@ Updated 2026-07-25 after correcting the exact-`09090b1ec` replacement-ancestry r
 
 - PR: `mindroom-ai/mindroom#1641`
 - Branch: `fix/thread-edit-integrity`
-- Latest published production commit before this correction: `6eea89ebf`
+- Latest production commit: `b7efe325d`
 - Current base and merge base: `f6190d4c2457381e63f40f99fb27e794ae8667b8`
-- This correction and its deterministic regressions are being committed together with this crash handoff.
+- The production and deterministic regression correction is pushed.
+- The tracked tree is clean apart from this crash-handoff successor.
 - Resolve local, remote, and PR heads before counting any exact-head gate.
 - Resolve and compare local, origin, and GitHub heads before counting any gate.
 - Three pre-existing untracked `.claude/TASK-*.md` notes are user-owned and must remain untouched.
@@ -64,7 +65,8 @@ Updated 2026-07-25 after correcting the exact-`09090b1ec` replacement-ancestry r
 - Ten wrong-sender, malformed, wrong-type, edit-of-edit, cache-certification, point-read, and SQLite/PostgreSQL index variants failed before this correction.
 - All exact claims were reproduced before implementation; the correction centralizes replacement validation in `thread_membership` and leaves storage/transport seams responsible only for source loading.
 - The withdrawn edit-index timestamp-poison claim remains excluded because it required direct inconsistent SQL writes outside production paths.
-- This correction adds `+196/-15` production lines, net `+181`; exact total branch counts must be refreshed after commit.
+- This correction adds `+196/-15` production lines, net `+181`.
+- Production source against current `main` is `+1899/-1178`, net `+721`.
 
 ## Validation already completed
 
@@ -103,8 +105,8 @@ Updated 2026-07-25 after correcting the exact-`09090b1ec` replacement-ancestry r
 
 ## Pending exact-head gates
 
-- Commit and push the current correction, then freeze its exact head.
-- Fresh CI must complete on the new exact head.
+- Commit and push this crash-handoff successor, then freeze its exact head.
+- Fresh CI must complete on that exact head.
 - A fresh independent native Codex correctness review is required on that exact head.
 - Exact-head PostgreSQL owning and stress selections are required.
 - Exact-head full pytest is required.
