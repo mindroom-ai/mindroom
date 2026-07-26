@@ -659,6 +659,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
         *,
         caller_label: str,
         coordinator_queue_wait_ms: float,
+        bypass_repair_backoff: bool,
     ) -> ThreadHistoryResult:
         return await self._fetch_thread_from_client(
             fetch_thread_history,
@@ -668,6 +669,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
             coordinator_queue_wait_ms=coordinator_queue_wait_ms,
             wants_full_history=True,
             allows_stale_fallback=True,
+            bypass_repair_backoff=bypass_repair_backoff,
         )
 
     async def _fetch_dispatch_thread_history_from_client(
@@ -677,6 +679,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
         *,
         caller_label: str,
         coordinator_queue_wait_ms: float,
+        bypass_repair_backoff: bool,
     ) -> ThreadHistoryResult:
         return await self._fetch_thread_from_client(
             fetch_dispatch_thread_history,
@@ -686,6 +689,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
             coordinator_queue_wait_ms=coordinator_queue_wait_ms,
             wants_full_history=True,
             allows_stale_fallback=False,
+            bypass_repair_backoff=bypass_repair_backoff,
         )
 
     async def _fetch_dispatch_thread_snapshot_from_client(
@@ -695,6 +699,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
         *,
         caller_label: str,
         coordinator_queue_wait_ms: float,
+        bypass_repair_backoff: bool,
     ) -> ThreadHistoryResult:
         return await self._fetch_thread_from_client(
             fetch_dispatch_thread_snapshot,
@@ -704,6 +709,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
             coordinator_queue_wait_ms=coordinator_queue_wait_ms,
             wants_full_history=False,
             allows_stale_fallback=False,
+            bypass_repair_backoff=bypass_repair_backoff,
         )
 
     @staticmethod
@@ -805,6 +811,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
         *,
         caller_label: str,
         coordinator_queue_wait_ms: float,
+        bypass_repair_backoff: bool,
     ) -> ThreadHistoryResult:
         """Refresh one thread from Matrix without accepting a cache hit or stale fallback."""
         await self._prepare_pending_thread_repair_deltas(room_id, thread_id)
@@ -814,6 +821,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
             cache_reject_diagnostics=None,
             wants_full_history=True,
             allows_stale_fallback=False,
+            bypass_repair_backoff=bypass_repair_backoff,
         )
         log_thread_history_refresh(
             room_id=room_id,
@@ -833,6 +841,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
         cache_reject_diagnostics: Mapping[str, str | int | float | bool] | None,
         wants_full_history: bool,
         allows_stale_fallback: bool,
+        bypass_repair_backoff: bool,
     ) -> ThreadHistoryResult:
         coordinator = self.runtime.event_cache_write_coordinator
         if coordinator is None:
@@ -889,6 +898,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
             hydrate_sidecars=wants_full_history,
             allow_stale_fallback=allows_stale_fallback,
             result_arms_backoff=self._thread_repair_result_arms_backoff,
+            bypass_failure_backoff=bypass_repair_backoff,
         )
 
     async def _fetch_thread_from_client(
@@ -901,6 +911,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
         coordinator_queue_wait_ms: float,
         wants_full_history: bool,
         allows_stale_fallback: bool,
+        bypass_repair_backoff: bool = False,
     ) -> ThreadHistoryResult:
         coordinator = self.runtime.event_cache_write_coordinator
         await self._prepare_pending_thread_repair_deltas(room_id, thread_id)
@@ -914,6 +925,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
                 cache_reject_diagnostics=cache_reject_diagnostics,
                 wants_full_history=wants_full_history,
                 allows_stale_fallback=allows_stale_fallback,
+                bypass_repair_backoff=bypass_repair_backoff,
             )
 
         return await fetcher(

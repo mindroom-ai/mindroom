@@ -16,7 +16,7 @@ Read-side invariants:
 3. Every cache-miss refill enters principal-scoped single-flight ownership on the same-thread barrier.
    ``ADVISORY_FULL``, ``STRICT_FULL``, and ``STRICT_SOURCE_REFRESH`` have no dispatch timeout; strict
    modes are intentionally not dispatch-safe because they may block for authoritative post-lock model
-   context or a direct source refresh.
+   context or a direct source refresh, but they never absorb a retained repair retry delay.
 
 4. A stale-cache thread tail is never used for MSC3440 latest-event fallback:
    ``get_latest_thread_event_id_if_needed`` falls back to the thread root instead.
@@ -100,6 +100,7 @@ class _ThreadHistoryFetcher(typing.Protocol):
         *,
         caller_label: str,
         coordinator_queue_wait_ms: float,
+        bypass_repair_backoff: bool,
     ) -> typing.Awaitable[ThreadHistoryResult]:
         """Fetch one thread from cache/source and attach refresh diagnostics."""
 
@@ -222,6 +223,7 @@ class ThreadReadPolicy:
             thread_id,
             caller_label=caller_label,
             coordinator_queue_wait_ms=coordinator_queue_wait_ms,
+            bypass_repair_backoff=False,
         )
 
     async def _load_untimed_thread_read(
@@ -233,21 +235,15 @@ class ThreadReadPolicy:
         caller_label: str,
         queue_wait_started: float,
     ) -> ThreadHistoryResult:
-        """Load one read that may wait, absorbing repair backoff instead of leaking it to callers."""
+        """Load one authoritative read without absorbing retained repair backoff."""
         coordinator_queue_wait_ms = elapsed_ms_since(queue_wait_started, clock=time.perf_counter)
-        while True:
-            try:
-                return await fetcher(
-                    room_id,
-                    thread_id,
-                    caller_label=caller_label,
-                    coordinator_queue_wait_ms=coordinator_queue_wait_ms,
-                )
-            except ThreadRepairBackoffError as exc:
-                # Reads without a dispatch timeout wait the throttle out rather than leak this
-                # internal signal into turn execution. Each pass sleeps before retrying, so a repair
-                # that keeps failing surfaces its own error instead of spinning.
-                await asyncio.sleep(exc.retry_after_seconds)
+        return await fetcher(
+            room_id,
+            thread_id,
+            caller_label=caller_label,
+            coordinator_queue_wait_ms=coordinator_queue_wait_ms,
+            bypass_repair_backoff=True,
+        )
 
     async def _load_dispatch_thread_read(
         self,

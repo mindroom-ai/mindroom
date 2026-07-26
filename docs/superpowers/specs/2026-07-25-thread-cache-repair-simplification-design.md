@@ -65,7 +65,7 @@ The backoff stores no thread history.
 Background repair is not scheduled while durable cache writes are unavailable.
 Contract-specific keys keep background snapshot failures from inheriting incompatible foreground caller policy.
 Dispatch reads continue to degrade immediately when their contract is inside backoff.
-Untimed reads continue to wait for their own contract's bounded retry deadline and then perform a fresh authoritative read.
+Untimed reads bypass the retained repair retry delay and immediately perform a fresh authoritative reconstruction with the same membership-guarded store attempt.
 Successful repair resets the exponential sequence.
 
 ## Membership Departure

@@ -108,14 +108,18 @@ class ThreadRepairRegistry:
         schedule: Callable[[Callable[[], Awaitable[T]]], asyncio.Task[T]],
         repair: Callable[[], Awaitable[T]],
         result_arms_backoff: Callable[[T], bool],
+        bypass_failure_backoff: bool = False,
     ) -> T:
-        """Join or start one shielded repair and update backoff from its outcome."""
+        """Join or start one shielded repair and update backoff from its outcome.
+
+        Authoritative untimed reads may bypass an existing delay while preserving its failure count.
+        """
         active = self._active_task(key)
         if active is not None:
             return cast("T", await asyncio.shield(active))
 
         retry_after_seconds = self.retry_after_seconds(key)
-        if retry_after_seconds > 0:
+        if retry_after_seconds > 0 and not bypass_failure_backoff:
             raise ThreadRepairBackoffError(retry_after_seconds)
 
         async def run_repair() -> T:

@@ -647,8 +647,12 @@ class EventCacheWriteCoordinator:
         hydrate_sidecars: bool,
         allow_stale_fallback: bool,
         result_arms_backoff: Callable[[T], bool],
+        bypass_failure_backoff: bool = False,
     ) -> T:
-        """Join or start one principal-scoped repair under the same-thread barrier."""
+        """Join or start one principal-scoped repair under the same-thread barrier.
+
+        Untimed reads may bypass a retained delay; dispatch and background repairs leave the default.
+        """
         return await self._thread_repairs.run(
             (coordination_scope, room_id, thread_id, hydrate_sidecars, allow_stale_fallback),
             schedule=lambda repair: typing.cast(
@@ -665,6 +669,7 @@ class EventCacheWriteCoordinator:
             ),
             repair=repair_coro_factory,
             result_arms_backoff=result_arms_backoff,
+            bypass_failure_backoff=bypass_failure_backoff,
         )
 
     def retain_thread_repair_delta(
