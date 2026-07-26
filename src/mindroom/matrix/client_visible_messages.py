@@ -255,10 +255,21 @@ async def bundled_replacement_body(
 ) -> str | None:
     """Return one canonical bundled replacement body using runtime-derived sender trust."""
     trusted_sender_ids = _resolved_trusted_sender_ids(config, runtime_paths, trusted_sender_ids)
+    bundled_event_ids = {
+        event_id
+        for candidate in replacements.bundled_replacement_candidates(event_source)
+        if isinstance((event_id := candidate.get("event_id")), str)
+    }
+    excluded_event_ids = (
+        await event_cache.redacted_event_ids(room_id, bundled_event_ids)
+        if event_cache is not None and room_id is not None
+        else ()
+    )
     for candidate in replacements.ordered_replacements(
         event_source,
         room_id=room_id,
         validator=valid_room_message_replacement,
+        excluded_event_ids=excluded_event_ids,
     ):
         body, _content = await extract_edit_body(
             candidate,

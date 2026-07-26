@@ -3639,6 +3639,42 @@ async def test_cached_room_get_event_network_fetch_merges_cached_latest_edit(
 
 
 @pytest.mark.asyncio
+async def test_cached_room_get_event_network_fetch_ignores_tombstoned_bundled_edit(
+    event_cache: ConversationEventCache,
+) -> None:
+    """A cache-miss point read must not resurrect a durably redacted bundled edit."""
+    room_id = "!room:localhost"
+    original_event = _make_text_event(
+        event_id="$reply",
+        sender="@agent:localhost",
+        body="Original reply",
+        server_timestamp=2000,
+        source_content={"body": "Original reply"},
+    )
+    bundled_edit = {
+        "event_id": "$reply_edit",
+        "sender": "@agent:localhost",
+        "origin_server_ts": 3000,
+        "type": "m.room.message",
+        "content": {
+            "body": "* Redacted reply",
+            "msgtype": "m.text",
+            "m.new_content": {"body": "Redacted reply", "msgtype": "m.text"},
+            "m.relates_to": {"rel_type": "m.replace", "event_id": "$reply"},
+        },
+    }
+    original_event.source["unsigned"] = {"m.relations": {"m.replace": bundled_edit}}
+    client = MagicMock()
+    client.room_get_event = AsyncMock(return_value=_make_room_get_event_response(original_event))
+
+    assert not await event_cache.redact_event(room_id, "$reply_edit")
+    response, _ = await _cached_room_get_event(client, event_cache, room_id, "$reply")
+
+    assert isinstance(response, nio.RoomGetEventResponse)
+    assert response.event.body == "Original reply"
+
+
+@pytest.mark.asyncio
 async def test_redacting_latest_edit_falls_back_to_previous_cached_edit(event_cache: ConversationEventCache) -> None:
     """Removing the newest edit should expose the previous cached visible state."""
     cache = event_cache

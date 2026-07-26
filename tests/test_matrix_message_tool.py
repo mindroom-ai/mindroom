@@ -2033,6 +2033,7 @@ async def test_matrix_message_room_threads_resolves_notice_root_without_replacem
         client=ctx.client,
         config=ctx.config,
         runtime_paths=ctx.runtime_paths,
+        event_cache=ctx.event_cache,
         room_id=ctx.room_id,
         trusted_sender_ids=ANY,
     )
@@ -2202,6 +2203,7 @@ async def test_matrix_message_room_threads_skips_malformed_roots() -> None:
         client=ctx.client,
         config=ctx.config,
         runtime_paths=ctx.runtime_paths,
+        event_cache=ctx.event_cache,
         room_id=ctx.room_id,
         trusted_sender_ids=ANY,
     )

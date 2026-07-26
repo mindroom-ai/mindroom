@@ -846,6 +846,57 @@ class TestResolvedMessageExtraction:
         assert preview == "Original root"
 
     @pytest.mark.asyncio
+    async def test_thread_root_body_preview_ignores_tombstoned_bundled_replacement(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Thread previews must not resurrect bundled replacements after durable redaction."""
+        room_id = "!room:localhost"
+        config = bind_runtime_paths(
+            Config(agents={"general": AgentConfig(display_name="General Agent")}),
+            test_runtime_paths(tmp_path),
+        )
+        cache = SqliteEventCache(tmp_path / "event-cache.db")
+        await cache.initialize()
+        event = _make_message_event(
+            body="Original root",
+            content={"msgtype": "m.text", "body": "Original root"},
+            event_id="$thread-root",
+            sender="@alice:example.com",
+        )
+        event.source["room_id"] = room_id
+        event.source["unsigned"] = {
+            "m.relations": {
+                "m.replace": {
+                    "event_id": "$thread-root-edit",
+                    "sender": "@alice:example.com",
+                    "origin_server_ts": 2000,
+                    "type": "m.room.message",
+                    "content": {
+                        "body": "* Redacted body",
+                        "msgtype": "m.text",
+                        "m.new_content": {"body": "Redacted body", "msgtype": "m.text"},
+                        "m.relates_to": {"rel_type": "m.replace", "event_id": "$thread-root"},
+                    },
+                },
+            },
+        }
+        try:
+            assert not await cache.redact_event(room_id, "$thread-root-edit")
+            preview = await thread_root_body_preview(
+                event,
+                client=_make_client(),
+                config=config,
+                runtime_paths=runtime_paths_for(config),
+                event_cache=cache,
+                room_id=room_id,
+            )
+        finally:
+            await cache.close()
+
+        assert preview == "Original root"
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize(
         ("latest_event_id", "latest_event_ts", "event_id", "event_ts", "expected_body"),
         [

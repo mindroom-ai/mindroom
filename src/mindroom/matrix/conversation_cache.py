@@ -57,7 +57,7 @@ from mindroom.matrix.media import (
 )
 from mindroom.matrix.membership_fence import UNCERTIFIED_MEMBERSHIP_EPOCH
 from mindroom.matrix.message_content import extract_edit_body
-from mindroom.matrix.replacements import replacement_content
+from mindroom.matrix.replacements import bundled_replacement_candidates, replacement_content
 from mindroom.matrix.thread_bookkeeping import ThreadMutationResolver
 from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
 from mindroom.matrix.thread_membership import resolve_event_thread_membership
@@ -278,7 +278,12 @@ async def _apply_cached_latest_edit(
     # A replacement can pass identity and envelope validation and still fail to resolve, for
     # example when its sidecar cannot be hydrated. Each such candidate is excluded and the cache
     # is asked for the next-newest one, so a broken newest edit never hides an older valid edit.
-    rejected_event_ids: set[str] = set()
+    bundled_event_ids = {
+        event_id
+        for candidate in bundled_replacement_candidates(event_source)
+        if isinstance((event_id := candidate.get("event_id")), str)
+    }
+    rejected_event_ids = set(await event_cache.redacted_event_ids(room_id, bundled_event_ids))
     while (
         latest_replacement := await event_cache.get_latest_edit(
             room_id,
