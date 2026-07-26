@@ -661,6 +661,29 @@ async def test_reference_model_detects_silently_dropped_write(
         )
 
 
+@pytest.mark.asyncio
+async def test_reference_model_does_not_resolve_edits_through_rejected_thread_appends(
+    tmp_path: Path,
+) -> None:
+    """A missing snapshot makes later root-targeted mutations unresolved in both models."""
+    scenario = FuzzScenario(
+        batches=(
+            (FuzzOperation(OperationKind.INVALIDATE_THREAD, 0, 0, 0, 0, 0),),
+            (FuzzOperation(OperationKind.THREADED_MESSAGE, 0, 0, 0, 0, 0),),
+            (FuzzOperation(OperationKind.EDIT, 0, 0, 1, 0, 1),),
+        ),
+        room_count=1,
+        thread_count=1,
+        verify_reference_model=True,
+    )
+
+    await run_scenario(
+        lambda: SqliteEventCache(tmp_path / "rejected-thread-append.db"),
+        scenario,
+        verify_restart=False,
+    )
+
+
 @pytest.mark.parametrize(
     ("current", "incoming", "expected"),
     [

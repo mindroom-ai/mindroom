@@ -463,7 +463,10 @@ class ReferenceCacheModel:
                 target = reply.get("event_id")
             if target is None:
                 target = relation.get("event_id")
-        return self.mappings.get((current_room_id, target)) if isinstance(target, str) else None
+        if not isinstance(target, str):
+            return None
+        target_key = (current_room_id, target)
+        return self.mappings.get(target_key) if target_key in self.events else None
 
     @staticmethod
     def _source_can_affect_thread(source: dict[str, Any]) -> bool:
