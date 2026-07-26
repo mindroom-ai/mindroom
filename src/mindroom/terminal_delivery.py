@@ -422,26 +422,32 @@ class TerminalDeliveryStore:
             self._write_locked()
             return claimed
 
-    def mark_delivered(self, delivery_id: str, *, reason: str = "delivered") -> None:
+    def mark_delivered(self, delivery_id: str, *, revision: int, reason: str = "delivered") -> None:
         """Settle one record as visibly delivered."""
-        self._settle(delivery_id, state="delivered", reason=reason)
+        self._settle(delivery_id, revision=revision, state="delivered", reason=reason)
 
-    def mark_superseded(self, delivery_id: str, *, reason: str) -> None:
+    def mark_superseded(self, delivery_id: str, *, revision: int, reason: str) -> None:
         """Settle one record that newer valid state replaced."""
-        self._settle(delivery_id, state="superseded", reason=reason)
+        self._settle(delivery_id, revision=revision, state="superseded", reason=reason)
 
-    def mark_dead_letter(self, delivery_id: str, *, reason: str) -> None:
+    def mark_dead_letter(self, delivery_id: str, *, revision: int, reason: str) -> None:
         """Settle one record that can never become visible."""
-        self._settle(delivery_id, state="dead_letter", reason=reason)
-        logger.error("terminal_delivery_dead_letter", agent=self.agent_name, delivery_reason=reason)
+        if self._settle(delivery_id, revision=revision, state="dead_letter", reason=reason):
+            logger.error("terminal_delivery_dead_letter", agent=self.agent_name, delivery_reason=reason)
 
-    def defer(self, delivery_id: str, *, reason: str, next_attempt_at: float) -> None:
+    def defer(self, delivery_id: str, *, revision: int, reason: str, next_attempt_at: float) -> None:
         """Return one record to the retry queue after a transient failure."""
-        self._requeue(delivery_id, reason=reason, next_attempt_at=next_attempt_at, count_attempt=True)
+        self._requeue(
+            delivery_id,
+            revision=revision,
+            reason=reason,
+            next_attempt_at=next_attempt_at,
+            count_attempt=True,
+        )
 
-    def release(self, delivery_id: str, *, reason: str) -> None:
+    def release(self, delivery_id: str, *, revision: int, reason: str) -> None:
         """Return one leased record to the queue without counting a failed attempt."""
-        self._requeue(delivery_id, reason=reason, next_attempt_at=None, count_attempt=False)
+        self._requeue(delivery_id, revision=revision, reason=reason, next_attempt_at=None, count_attempt=False)
 
     def supersede_sources(self, source_event_ids: Sequence[str], *, reason: str) -> tuple[str, ...]:
         """Settle unsettled records owned by any of the given source events."""
@@ -464,19 +470,20 @@ class TerminalDeliveryStore:
         reason: str,
     ) -> tuple[str, ...]:
         """Settle every unsettled record matching one predicate."""
-        settled = tuple(item.delivery_id for item in self.items() if not item.is_settled and matches(item))
-        for delivery_id in settled:
-            self.mark_superseded(delivery_id, reason=reason)
-        return settled
+        matched = tuple(item for item in self.items() if not item.is_settled and matches(item))
+        for item in matched:
+            self.mark_superseded(item.delivery_id, revision=item.revision, reason=reason)
+        return tuple(item.delivery_id for item in matched)
 
-    def _settle(self, delivery_id: str, *, state: TerminalDeliveryState, reason: str) -> None:
-        """Move one record into a terminal state."""
+    def _settle(self, delivery_id: str, *, revision: int, state: TerminalDeliveryState, reason: str) -> bool:
+        """Move one record into a terminal state, ignoring outcomes of stale revisions."""
         now = self.clock()
         with self._state.lock:
             self._ensure_loaded_locked()
             existing = self._state.items.get(delivery_id)
-            if existing is None or existing.is_settled:
-                return
+            if not self._owns_outcome(existing, revision=revision, transition=state):
+                return False
+            assert existing is not None
             self._state.items[delivery_id] = replace(
                 existing,
                 state=state,
@@ -485,22 +492,25 @@ class TerminalDeliveryStore:
                 lease_expires_at=None,
             )
             self._write_locked()
+            return True
 
     def _requeue(
         self,
         delivery_id: str,
         *,
+        revision: int,
         reason: str,
         next_attempt_at: float | None,
         count_attempt: bool,
     ) -> None:
-        """Return one record to the retry queue."""
+        """Return one record to the retry queue, ignoring outcomes of stale revisions."""
         now = self.clock()
         with self._state.lock:
             self._ensure_loaded_locked()
             existing = self._state.items.get(delivery_id)
-            if existing is None or existing.is_settled:
+            if not self._owns_outcome(existing, revision=revision, transition="retry_wait"):
                 return
+            assert existing is not None
             self._state.items[delivery_id] = replace(
                 existing,
                 state="retry_wait",
@@ -513,6 +523,33 @@ class TerminalDeliveryStore:
                 lease_expires_at=None,
             )
             self._write_locked()
+
+    def _owns_outcome(
+        self,
+        existing: PendingTerminalDelivery | None,
+        *,
+        revision: int,
+        transition: TerminalDeliveryState,
+    ) -> bool:
+        """Return whether one attempt outcome still applies to the current record.
+
+        A newer response turn replaces the row in place and bumps its revision
+        while an older attempt may still be in flight. Applying that older
+        outcome would settle content the regenerated turn never transmitted, so
+        every transition is scoped to the revision it was leased against.
+        """
+        if existing is None or existing.is_settled:
+            return False
+        if existing.revision == revision:
+            return True
+        logger.info(
+            "terminal_delivery_stale_revision_outcome_ignored",
+            agent=self.agent_name,
+            attempt_revision=revision,
+            current_revision=existing.revision,
+            transition=transition,
+        )
+        return False
 
     def _recover_leaked_attempts_locked(
         self,

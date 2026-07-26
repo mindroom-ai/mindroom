@@ -61,6 +61,9 @@ Ordering never uses wall-clock time.
 3. A redacted or missing target event settles the row as `superseded`; it is never recreated.
 4. A source-event redaction settles every row owned by that source.
 
+Every state transition is scoped to the revision it was leased against.
+A regeneration replaces the row in place while an older attempt may still be in flight; applying that older outcome would settle, charge, or reschedule content the newer turn never transmitted, so a stale-revision outcome is logged and ignored.
+
 ## Retry policy
 
 The immediate bounded retry in `client_delivery` runs first and is unchanged.
@@ -74,6 +77,8 @@ Exhausting that budget dead-letters the row with a loud log rather than looping,
 
 The worker starts during bot startup, right after the durable store is warmed, and stays idle until the bot is running with a live, synced client.
 It wakes on every applied sync response — limited-sync recovery closes its gaps while a sync is applied, which makes that the practical recovery-ready signal — and otherwise scans on a bounded interval, so correctness never depends on a single notification.
+A due row only shortens that wait once delivery can actually be attempted: during startup, where warmed rows are already due but the runtime is not ready, the loop parks on the wake event instead of spinning against work it may not run yet.
+Settling an attempt is shielded from cancellation so shutdown cannot discard an outcome that already happened.
 
 Attempts run under a global concurrency cap and a per-room ordering lock, so one blocked room cannot starve others and one room never has two concurrent terminal writes.
 Sends resolve the live client per attempt, so a replaced client or a config reload is picked up on the next attempt rather than retained.

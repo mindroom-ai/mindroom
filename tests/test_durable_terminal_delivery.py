@@ -138,7 +138,7 @@ class TestStore:
         store = _store(tmp_path)
         first = store.record(_intent())
         assert first is not None
-        store.defer(first.delivery_id, reason="edit_failed", next_attempt_at=9_999.0)
+        store.defer(first.delivery_id, revision=first.revision, reason="edit_failed", next_attempt_at=9_999.0)
 
         assert store.record(_intent()) is None
         stored = store.get(first.delivery_id)
@@ -215,12 +215,88 @@ class TestStore:
         store = _store(tmp_path)
         recorded = store.record(_intent())
         assert recorded is not None
-        store.mark_delivered(recorded.delivery_id)
+        store.mark_delivered(recorded.delivery_id, revision=recorded.revision)
 
         assert store.supersede_sources((SOURCE_EVENT_ID,), reason="source_event_redacted") == ()
         stored = store.get(recorded.delivery_id)
         assert stored is not None
         assert stored.state == "delivered"
+
+    def test_stale_revision_outcome_cannot_settle_a_regenerated_row(self, tmp_path: Path) -> None:
+        """An in-flight older attempt must not settle content the newer turn never sent."""
+        store = _store(tmp_path)
+        first = store.record(_intent(correlation_id="corr-1", body="ORIGINAL answer"))
+        assert first is not None
+        leased = store.claim_due(limit=1)[0]
+        regenerated = store.record(_intent(correlation_id="corr-2", body="REGENERATED answer"))
+        assert regenerated is not None
+
+        store.mark_delivered(leased.delivery_id, revision=leased.revision)
+
+        row = store.get(first.delivery_id)
+        assert row is not None
+        assert row.revision == 1
+        assert row.body == "REGENERATED answer"
+        # The regenerated body was never transmitted, so it must still be owed.
+        assert row.state == "pending"
+
+    @pytest.mark.parametrize(
+        "settle",
+        [
+            pytest.param(
+                lambda store, item: store.mark_delivered(item.delivery_id, revision=item.revision),
+                id="delivered",
+            ),
+            pytest.param(
+                lambda store, item: store.mark_dead_letter(item.delivery_id, revision=item.revision, reason="x"),
+                id="dead_letter",
+            ),
+            pytest.param(
+                lambda store, item: store.defer(
+                    item.delivery_id,
+                    revision=item.revision,
+                    reason="x",
+                    next_attempt_at=9e9,
+                ),
+                id="defer",
+            ),
+            pytest.param(
+                lambda store, item: store.release(item.delivery_id, revision=item.revision, reason="x"),
+                id="release",
+            ),
+        ],
+    )
+    def test_every_transition_is_revision_scoped(
+        self,
+        tmp_path: Path,
+        settle: Callable[[TerminalDeliveryStore, PendingTerminalDelivery], None],
+    ) -> None:
+        """No stale-revision transition may charge, settle, or reschedule a newer row."""
+        store = _store(tmp_path)
+        first = store.record(_intent(correlation_id="corr-1"))
+        assert first is not None
+        leased = store.claim_due(limit=1)[0]
+        store.record(_intent(correlation_id="corr-2"))
+
+        settle(store, leased)
+
+        row = store.get(first.delivery_id)
+        assert row is not None
+        assert (row.state, row.revision, row.attempts) == ("pending", 1, 0)
+
+    def test_release_cannot_resurrect_a_settled_row(self, tmp_path: Path) -> None:
+        """Shutdown releasing a lease must not push an already delivered row back to retry."""
+        store = _store(tmp_path)
+        recorded = store.record(_intent())
+        assert recorded is not None
+        leased = store.claim_due(limit=1)[0]
+        store.mark_delivered(leased.delivery_id, revision=leased.revision)
+
+        store.release(leased.delivery_id, revision=leased.revision, reason="worker_shutdown")
+
+        settled = store.get(recorded.delivery_id)
+        assert settled is not None
+        assert settled.state == "delivered"
 
     def test_claim_due_leases_only_due_rows(self, tmp_path: Path) -> None:
         """Rows scheduled in the future stay out of the claimed batch."""
@@ -230,7 +306,7 @@ class TestStore:
         later = store.record(_intent(target_event_id="$other", source_event_id="$other-source"))
         assert due is not None
         assert later is not None
-        store.defer(later.delivery_id, reason="edit_failed", next_attempt_at=clock.now + 30)
+        store.defer(later.delivery_id, revision=later.revision, reason="edit_failed", next_attempt_at=clock.now + 30)
 
         claimed = store.claim_due(limit=10)
 
@@ -277,7 +353,7 @@ class TestStore:
         assert recorded is not None
         store.claim_due(limit=1)
 
-        store.release(recorded.delivery_id, reason="worker_shutdown")
+        store.release(recorded.delivery_id, revision=recorded.revision, reason="worker_shutdown")
 
         stored = store.get(recorded.delivery_id)
         assert stored is not None
@@ -333,7 +409,7 @@ class TestStore:
         store = _store(tmp_path, clock)
         settled = store.record(_intent(target_event_id="$settled", source_event_id="$settled-source"))
         assert settled is not None
-        store.mark_delivered(settled.delivery_id)
+        store.mark_delivered(settled.delivery_id, revision=settled.revision)
         pending = store.record(_intent())
         assert pending is not None
 
@@ -560,6 +636,34 @@ class TestWorker:
         assert peak_per_room == 1
         assert completion_order == expected_order
         assert store.unsettled_items() == ()
+
+    @pytest.mark.asyncio
+    async def test_worker_does_not_spin_while_a_due_row_waits_for_readiness(self, tmp_path: Path) -> None:
+        """Startup leaves warmed rows due; the loop must park instead of busy-waiting."""
+        clock = _Clock()
+        store = _store(tmp_path, clock)
+        assert store.record(_intent()) is not None
+        iterations = 0
+
+        async def attempt(_item: PendingTerminalDelivery) -> TerminalDeliveryAttempt:
+            return TerminalDeliveryAttempt.delivered_now()
+
+        worker = _worker(store, attempt, clock=clock, is_ready=lambda: False)
+        original_wait = worker._wait_for_work
+
+        async def counted_wait() -> None:
+            nonlocal iterations
+            iterations += 1
+            await original_wait()
+
+        worker._wait_for_work = counted_wait
+        worker.start()
+        try:
+            await asyncio.sleep(0.2)
+        finally:
+            await worker.stop()
+
+        assert iterations <= 2
 
     @pytest.mark.asyncio
     async def test_wake_drains_without_waiting_for_the_poll_interval(self, tmp_path: Path) -> None:

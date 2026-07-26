@@ -74,7 +74,7 @@ class TerminalDeliveryWorker:
     _task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
     _wake: asyncio.Event = field(default_factory=asyncio.Event, init=False, repr=False)
     _room_locks: dict[str, _RoomOrderingLock] = field(default_factory=dict, init=False, repr=False)
-    _leased_delivery_ids: set[str] = field(default_factory=set, init=False, repr=False)
+    _leased_revisions: dict[str, int] = field(default_factory=dict, init=False, repr=False)
 
     @property
     def running(self) -> bool:
@@ -124,10 +124,16 @@ class TerminalDeliveryWorker:
                 self.deps.logger.exception("terminal_delivery_drain_failed")
 
     async def _wait_for_work(self) -> None:
-        """Wait for a wakeup or the next scheduled attempt, whichever comes first."""
+        """Wait for a wakeup or the next scheduled attempt, whichever comes first.
+
+        A due row only shortens the wait once delivery can actually be attempted.
+        While the runtime is not ready - the whole of bot startup, where warmed
+        rows are already due - the schedule is ignored and the loop parks on the
+        wake event, so it cannot spin against work it is not allowed to run yet.
+        """
         # Reading the schedule only touches already-warmed in-memory state, so it
         # stays on the loop; every mutating store call still runs off it.
-        timeout = self._seconds_until_next_attempt()
+        timeout = self._seconds_until_next_attempt() if self.deps.is_ready() else self.deps.poll_interval_seconds
         with contextlib.suppress(TimeoutError):
             await asyncio.wait_for(self._wake.wait(), timeout)
         self._wake.clear()
@@ -152,7 +158,7 @@ class TerminalDeliveryWorker:
             )
             if not batch:
                 break
-            self._leased_delivery_ids.update(item.delivery_id for item in batch)
+            self._leased_revisions.update((item.delivery_id, item.revision) for item in batch)
             await asyncio.gather(
                 *(self._attempt_with_limits(item, semaphore) for item in batch),
                 return_exceptions=False,
@@ -202,14 +208,21 @@ class TerminalDeliveryWorker:
         except Exception:
             self.deps.logger.exception("terminal_delivery_attempt_raised", **item.log_context)
             attempt = TerminalDeliveryAttempt.transient("attempt_exception")
-        await self._settle_attempt(item, attempt)
-        self._leased_delivery_ids.discard(item.delivery_id)
+        # Shutdown must not cancel the durable write of an outcome that already
+        # happened; a settled row would otherwise be released back to retry_wait.
+        await asyncio.shield(self._settle_attempt(item, attempt))
+        self._leased_revisions.pop(item.delivery_id, None)
 
     async def _settle_attempt(self, item: PendingTerminalDelivery, attempt: TerminalDeliveryAttempt) -> None:
         """Apply one attempt outcome to durable state."""
         store = self.deps.store
         if attempt.result == "delivered":
-            await asyncio.to_thread(store.mark_delivered, item.delivery_id, reason=attempt.reason)
+            await asyncio.to_thread(
+                store.mark_delivered,
+                item.delivery_id,
+                revision=item.revision,
+                reason=attempt.reason,
+            )
             self.deps.logger.info(
                 "terminal_delivery_recovered",
                 delivery_reason=attempt.reason,
@@ -217,7 +230,12 @@ class TerminalDeliveryWorker:
             )
             return
         if attempt.result == "superseded":
-            await asyncio.to_thread(store.mark_superseded, item.delivery_id, reason=attempt.reason)
+            await asyncio.to_thread(
+                store.mark_superseded,
+                item.delivery_id,
+                revision=item.revision,
+                reason=attempt.reason,
+            )
             self.deps.logger.info(
                 "terminal_delivery_superseded",
                 delivery_reason=attempt.reason,
@@ -229,6 +247,7 @@ class TerminalDeliveryWorker:
             await asyncio.to_thread(
                 store.mark_dead_letter,
                 item.delivery_id,
+                revision=item.revision,
                 reason=f"retry_budget_exhausted:{attempt.reason}",
             )
             return
@@ -236,6 +255,7 @@ class TerminalDeliveryWorker:
         await asyncio.to_thread(
             store.defer,
             item.delivery_id,
+            revision=item.revision,
             reason=attempt.reason,
             next_attempt_at=self.deps.wall_clock() + delay,
         )
@@ -254,10 +274,10 @@ class TerminalDeliveryWorker:
 
     async def _release_leases(self, *, reason: str) -> None:
         """Return every record this worker still holds to the retry queue."""
-        leased = tuple(self._leased_delivery_ids)
-        self._leased_delivery_ids.clear()
-        for delivery_id in leased:
-            await asyncio.to_thread(self.deps.store.release, delivery_id, reason=reason)
+        leased = tuple(self._leased_revisions.items())
+        self._leased_revisions.clear()
+        for delivery_id, revision in leased:
+            await asyncio.to_thread(self.deps.store.release, delivery_id, revision=revision, reason=reason)
 
 
 __all__ = [

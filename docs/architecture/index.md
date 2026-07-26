@@ -42,6 +42,7 @@ MindRoom's architecture consists of several key components working together.
 - [Matrix Integration](matrix.md) - How MindRoom connects to Matrix
 - [Agent Orchestration](orchestration.md) - How agents are managed
 - [Bot Runtime](bot-runtime.md) - The inbound turn pipeline and its module boundaries
+- [Durable Terminal Delivery](durable-terminal-delivery.md) - How a committed final response survives transient Matrix failure
 
 ## Key Internal Modules
 
@@ -78,6 +79,8 @@ MindRoom's architecture consists of several key components working together.
 | `post_response_effects.py` | Shared post-response effects after Matrix delivery |
 | `routing.py` | Intelligent agent or team selection when no entity is mentioned |
 | `streaming.py` | Streaming state machine: placeholder, progressive edits, tool traces, cancellation |
+| `terminal_delivery.py` | Durable pending terminal Matrix deliveries: state machine, precedence, store |
+| `terminal_delivery_worker.py` | Background retry worker draining durable terminal deliveries |
 | `media_inputs.py` | Shared media-input container passed across bot, teams, and AI layers |
 | `media_fallback.py` | Retries model requests without inline media when models reject media inputs |
 | `avatar_generation.py` | Generates and manages avatar assets for agents, rooms, and spaces |
