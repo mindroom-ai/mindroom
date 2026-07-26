@@ -3207,9 +3207,23 @@ async def test_get_room_threads_page_uses_single_threads_request() -> None:
             },
         },
     )
+    rich_reply_root = nio.RoomMessageText.from_dict(
+        {
+            "type": "m.room.message",
+            "event_id": "$rich_reply",
+            "room_id": "!room:localhost",
+            "sender": "@alice:localhost",
+            "origin_server_ts": 1239,
+            "content": {
+                "msgtype": "m.text",
+                "body": "Rich reply root",
+                "m.relates_to": {"m.in_reply_to": {"event_id": "$parent"}},
+            },
+        },
+    )
     response = RoomThreadsResponse(
         "!room:localhost",
-        [wrong_room_root, state_root, edit_root, reply_root, thread_root],
+        [wrong_room_root, state_root, edit_root, reply_root, rich_reply_root, thread_root],
         next_page,
     )
     client._send = AsyncMock(return_value=response)
@@ -3237,7 +3251,7 @@ async def test_get_room_threads_page_uses_single_threads_request() -> None:
         "/_matrix/client/v1/rooms/%21room%3Alocalhost/threads",
         response_data=("!room:localhost",),
     )
-    assert [event.event_id for event in thread_roots] == ["$thread_root"]
+    assert [event.event_id for event in thread_roots] == ["$rich_reply", "$thread_root"]
     assert next_token == next_page
 
 
@@ -3607,20 +3621,22 @@ class TestThreadHistoryCache:
         client.room_messages.assert_awaited_once()
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("rich_reply_root", [False, True])
     @pytest.mark.parametrize(
         ("has_thread_child", "expected_rejection"),
         [(False, "invalid_thread_membership"), (True, None)],
     )
     async def test_cache_certification_requires_real_thread_child_before_seeding_root(
         self,
+        rich_reply_root: bool,
         has_thread_child: bool,
         expected_rejection: str | None,
     ) -> None:
-        """A plain reply only inherits the thread once a real ``m.thread`` child proves the root.
+        """A root-capable event is certified only when a real ``m.thread`` child proves it.
 
-        Per MSC3440 a relation-free event becomes a thread root only when it has a real threaded
-        child. Treating the requested root as a member unconditionally would certify a payload of
-        nothing but the root and room-level replies to it as an authoritative thread snapshot.
+        Rich replies have no primary relation type, so they share the same root rule as plain
+        messages. Treating the requested root as a member unconditionally would certify a payload
+        of nothing but the root and room-level replies as an authoritative thread snapshot.
         """
         room_id = "!room:localhost"
         thread_id = "$thread_root"
@@ -3638,8 +3654,9 @@ class TestThreadHistoryCache:
                 "content": content,
             }
 
+        root_relation = {"m.in_reply_to": {"event_id": "$parent"}} if rich_reply_root else None
         event_sources: list[dict[str, object]] = [
-            source(thread_id, 1000),
+            source(thread_id, 1000, root_relation),
             source("$plain_reply", 3000, {"m.in_reply_to": {"event_id": thread_id}}),
         ]
         if has_thread_child:

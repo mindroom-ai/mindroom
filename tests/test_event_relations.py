@@ -129,7 +129,7 @@ class TestEventRelations:
         assert info.is_reply is True
         assert info.reply_to_event_id == "$reply_to_xyz"
         assert info.has_relations is True
-        assert info.can_be_thread_root is False
+        assert info.can_be_thread_root is True
 
         # Other types should be False
         assert info.is_edit is False

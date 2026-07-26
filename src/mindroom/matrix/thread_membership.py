@@ -12,11 +12,11 @@ Invariants enforced here (every resolver in the repo must go through this module
 1. An event is THREADED if and only if one of the following holds:
    it carries a native ``m.thread`` relation (``EventInfo.thread_id``);
    a relation walk from it reaches an event satisfying either of the above;
-   or the walk terminates at a relation-free event that is proven to have at least one real threaded child,
+   or the walk reaches an event without a primary relation type that has at least one real threaded child,
    in which case that terminal event is itself the thread root.
    Local history graphs validate replacement membership through the original event rather than treating
    replacement content as independent proof.
-   Per MSC3440 only relation-free events (``can_be_thread_root``) may become roots.
+   Per MSC3440 only events without a primary relation type (``can_be_thread_root``) may become roots.
 
 2. The relation walk follows ``EventInfo.next_related_event_id``: edit original, then reaction target,
    then ``m.reference`` target, then reply target.
@@ -36,7 +36,7 @@ Invariants enforced here (every resolver in the repo must go through this module
 
 5. Child proof and relation ancestry accept only ``m.room.message`` and ``m.room.encrypted`` events.
    Child proof also excludes the candidate root itself and edits of the root: an ``m.replace`` of a
-   relation-free event does not make that event a thread root.
+   root-capable event does not make that event a thread root.
 
 6. A root proof built from thread history whose read source is the explicit degraded fallback
    (``THREAD_HISTORY_SOURCE_DEGRADED``, i.e. an empty fail-open read) is PROOF_UNAVAILABLE, never
@@ -253,17 +253,16 @@ async def resolve_event_thread_membership(
     explicit_thread_id = event_info.thread_id
     if explicit_thread_id is not None:
         return ThreadResolution.threaded(explicit_thread_id)
+    if allow_current_root and event_id is not None and event_info.can_be_thread_root:
+        proof = await access.prove_thread_root(room_id, event_id)
+        if proof.state is not _ThreadRootProofState.NOT_A_THREAD_ROOT:
+            return _resolution_from_root_proof(event_id, proof)
     related_event_id = event_info.next_related_event_id("")
     if related_event_id is not None:
         return await resolve_related_event_thread_membership(
             room_id,
             related_event_id,
             access=access,
-        )
-    if allow_current_root and event_id is not None and event_info.can_be_thread_root:
-        return _resolution_from_root_proof(
-            event_id,
-            await access.prove_thread_root(room_id, event_id),
         )
     return ThreadResolution.room_level()
 
@@ -389,7 +388,7 @@ def page_event_info_counts_as_thread_child_proof(
 def local_events_prove_thread_root(thread_root_id: str, event_infos: Mapping[str, EventInfo]) -> bool:
     """Return whether local event facts alone prove one candidate is a real thread root.
 
-    Per MSC3440 a relation-free event becomes a root only once it has a real ``m.thread`` child.
+    Per MSC3440 a root-capable event becomes a root only once it has a real ``m.thread`` child.
     Callers seeding a root into a local resolution must prove it here first, otherwise a plain
     reply to that event would inherit thread membership the thread never actually established.
     """

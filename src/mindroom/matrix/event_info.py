@@ -203,9 +203,9 @@ def _analyze_event_relations(event_source: dict | None) -> EventInfo:
     reply_to_event_id = reply_to_event_id_from_content(content)
     is_reply = reply_to_event_id is not None
 
-    # Determine if this event can be a thread root (per MSC3440)
-    # An event can only be a thread root if it has NO relations
-    can_be_thread_root = not has_relations
+    # MSC3440 excludes only events with a primary relation type. Rich replies carry
+    # ``m.in_reply_to`` without ``rel_type`` and may therefore become thread roots.
+    can_be_thread_root = relation_type is None
 
     return EventInfo(
         event_type=event_type,

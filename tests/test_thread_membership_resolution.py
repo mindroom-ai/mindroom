@@ -518,6 +518,47 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         assert resolution.thread_id == thread_root_id
 
     @pytest.mark.asyncio
+    async def test_rich_reply_root_proof_precedes_its_reply_ancestry(self) -> None:
+        """A proven rich-reply root owns its thread instead of inheriting its parent's."""
+        room_id = "!test:localhost"
+        rich_reply_id = "$rich_reply:localhost"
+        rich_reply_info = EventInfo.from_event(
+            {
+                "type": "m.room.message",
+                "content": {
+                    "body": "Rich reply root",
+                    "msgtype": "m.text",
+                    "m.relates_to": {"m.in_reply_to": {"event_id": "$parent:localhost"}},
+                },
+            },
+        )
+
+        async def lookup_thread_id(_room_id: str, _event_id: str) -> str | None:
+            return None
+
+        async def fetch_event_info(_room_id: str, event_id: str) -> EventInfo | None:
+            raise AssertionError(event_id)
+
+        async def prove_thread_root(_room_id: str, event_id: str) -> ThreadRootProof:
+            assert event_id == rich_reply_id
+            return ThreadRootProof.proven()
+
+        resolution = await resolve_event_thread_membership(
+            room_id,
+            rich_reply_info,
+            event_id=rich_reply_id,
+            allow_current_root=True,
+            access=ThreadMembershipAccess(
+                lookup_thread_id=lookup_thread_id,
+                fetch_event_info=fetch_event_info,
+                prove_thread_root=prove_thread_root,
+            ),
+        )
+
+        assert resolution.state is ThreadResolutionState.THREADED
+        assert resolution.thread_id == rich_reply_id
+
+    @pytest.mark.asyncio
     async def test_resolve_event_thread_membership_follows_reaction_target_transitively(
         self,
     ) -> None:

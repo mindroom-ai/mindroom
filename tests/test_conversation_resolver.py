@@ -167,7 +167,7 @@ async def test_reply_to_proven_thread_root_joins_that_thread(config: Config) -> 
 
 @pytest.mark.asyncio
 async def test_reply_to_plain_message_demotes_to_room_level(config: Config) -> None:
-    """Replying to a childless event stays room-level with a room-level delivery target."""
+    """A root-capable rich reply starts its own response thread even when its parent is room-level."""
     resolver = _resolver(config)
 
     result = await resolver.extract_dispatch_context(_room(), _reply_event())
@@ -176,9 +176,8 @@ async def test_reply_to_plain_message_demotes_to_room_level(config: Config) -> N
     assert result.context.thread_id is None
     assert result.thread_context is not None
     assert result.thread_context.candidate_thread_root_id is None
-    # A reply event carries a relation, so per MSC3440 it cannot become a thread root itself.
     assert result.thread_context.stable_target.source_thread_id is None
-    assert result.thread_context.stable_target.resolved_thread_id is None
+    assert result.thread_context.stable_target.resolved_thread_id == _EVENT_ID
     assert result.thread_context.stable_target.reply_to_event_id == _EVENT_ID
 
 
@@ -257,6 +256,22 @@ def test_build_message_target_starts_thread_at_rootable_room_message(config: Con
     """A room-level message that can be a thread root becomes the new thread root."""
     resolver = _resolver(config)
     event = _event({"body": "plain"})
+
+    target = resolver.build_message_target(
+        room_id=_ROOM_ID,
+        thread_id=None,
+        reply_to_event_id=_EVENT_ID,
+        event_source=event.source,
+    )
+
+    assert target.source_thread_id is None
+    assert target.resolved_thread_id == _EVENT_ID
+
+
+def test_build_message_target_starts_thread_at_rootable_rich_reply(config: Config) -> None:
+    """A rich reply without a primary relation type may become a new thread root."""
+    resolver = _resolver(config)
+    event = _reply_event()
 
     target = resolver.build_message_target(
         room_id=_ROOM_ID,
