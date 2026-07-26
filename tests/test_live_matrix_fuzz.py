@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import fcntl
 import json
 import threading
-import time
+from contextlib import contextmanager
 from dataclasses import replace
+from http import HTTPStatus
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 
@@ -25,7 +28,151 @@ from scripts.testing.fuzz_live_matrix import (
     saturation_scenario,
 )
 
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+
 LIMITED_SYNC_REPRODUCER = Path(__file__).parent / "fixtures" / "matrix_fuzz" / "limited_sync_concurrent_branch.json"
+
+
+class _MatrixVersionsHandler(BaseHTTPRequestHandler):
+    """Serve the one endpoint used by the live-stack registry probe."""
+
+    def do_GET(self) -> None:
+        if self.path == "/_matrix/client/versions":
+            server = cast("_ControlledVersionsHTTPServer", self.server)
+            server.probe_started.set()
+            if not server.allow_response.wait(timeout=5):
+                self.send_error(HTTPStatus.GATEWAY_TIMEOUT)
+                return
+            body = b"{}"
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        self.send_error(HTTPStatus.NOT_FOUND)
+
+    def log_message(self, format: str, *args: Any) -> None:  # noqa: A002, ANN401
+        """Keep local probe requests out of test output."""
+
+
+class _ControlledVersionsHTTPServer(ThreadingHTTPServer):
+    """Expose when a real versions probe reaches the local endpoint."""
+
+    def __init__(self) -> None:
+        super().__init__(("127.0.0.1", 0), _MatrixVersionsHandler)
+        self.probe_started = threading.Event()
+        self.allow_response = threading.Event()
+
+
+class _MatrixVersionsServer:
+    """Controllable local endpoint for registry and startup-lock tests."""
+
+    def __init__(self) -> None:
+        self.server = _ControlledVersionsHTTPServer()
+        self.thread: threading.Thread | None = None
+
+    @property
+    def port(self) -> int:
+        return self.server.server_address[1]
+
+    def start(self) -> None:
+        if self.thread is not None:
+            return
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+
+    @property
+    def probe_started(self) -> threading.Event:
+        return self.server.probe_started
+
+    def allow_responses(self) -> None:
+        self.server.allow_response.set()
+
+    def close(self) -> None:
+        self.allow_responses()
+        if self.thread is not None:
+            self.server.shutdown()
+            self.thread.join(timeout=2)
+        self.server.server_close()
+
+
+class _StartupCommandHarness:
+    """Model deployer registry writes while the real startup lock runs."""
+
+    def __init__(
+        self,
+        *,
+        registry: Path,
+        versions: _MatrixVersionsServer,
+        first_instance_name: str,
+    ) -> None:
+        self.registry = registry
+        self.versions = versions
+        self.first_instance_name = first_instance_name
+        self.registry_state: dict[str, dict[str, object]] = {}
+        self.registry_guard = threading.Lock()
+        self.first_starting = threading.Event()
+        self.commands: list[tuple[str, ...]] = []
+
+    def _write_registry(self) -> None:
+        self.registry.write_text(
+            json.dumps({"instances": self.registry_state}),
+            encoding="utf-8",
+        )
+
+    def run_command(self, *command: str) -> str:
+        self.commands.append(command)
+        action = command[1]
+        instance_name = command[2]
+        if action == "local-instances-create":
+            with self.registry_guard:
+                self.registry_state[instance_name] = {
+                    "domain": f"{instance_name}.example",
+                    "matrix_port": self.versions.port,
+                }
+                self._write_registry()
+        elif action == "local-instances-start-matrix":
+            if instance_name == self.first_instance_name:
+                self.first_starting.set()
+            self.versions.start()
+        elif action == "local-instances-remove":
+            with self.registry_guard:
+                self.registry_state.pop(instance_name, None)
+                self._write_registry()
+        return ""
+
+
+class _StartupLockTracker:
+    """Expose the second lock attempt without replacing file-lock behavior."""
+
+    def __init__(self, real_lock: Any, lock_path: Path) -> None:  # noqa: ANN401
+        self.real_lock = real_lock
+        self.lock_path = lock_path
+        self.attempts = 0
+        self.attempt_guard = threading.Lock()
+        self.second_attempted = threading.Event()
+
+    @contextmanager
+    def __call__(self, _lock_path: Path) -> Iterator[None]:
+        with self.attempt_guard:
+            self.attempts += 1
+            if self.attempts == 2:
+                self.second_attempted.set()
+        with self.real_lock(self.lock_path):
+            yield
+
+
+def _start_homeserver(
+    stack: fuzz_live_matrix.ManagedTuwunelStack,
+    name: str,
+    errors: dict[str, BaseException],
+) -> None:
+    try:
+        stack._start_homeserver()
+    except BaseException as error:
+        errors[name] = error
 
 
 def _recovery_scenario_with_sources(
@@ -412,83 +559,101 @@ def test_instance_registry_read_fails_closed_when_malformed(
         fuzz_live_matrix._active_fuzz_instances()
 
 
-def test_live_stack_serializes_probe_reservation_and_readiness(  # noqa: PLR0915
+def test_active_fuzz_instances_reads_registry_and_probes_real_endpoint(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A second starter must observe the first stack only after it becomes live."""
-    first = object.__new__(fuzz_live_matrix.ManagedTuwunelStack)
-    second = object.__new__(fuzz_live_matrix.ManagedTuwunelStack)
-    for stack, name in ((first, "fuzz-first"), (second, "fuzz-second")):
-        stack.instance_name = name
-        stack.namespace = name
-        stack._created = False
+    """Registry records become active only through their real versions endpoint."""
+    versions = _MatrixVersionsServer()
+    registry = tmp_path / "instances.json"
+    versions.allow_responses()
+    versions.start()
+    registry.write_text(
+        json.dumps(
+            {
+                "instances": {
+                    "fuzz-live": {
+                        "domain": "live.example",
+                        "matrix_port": versions.port,
+                    },
+                    "not-fuzz": {
+                        "domain": "ignored.example",
+                        "matrix_port": versions.port,
+                    },
+                },
+            },
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(fuzz_live_matrix, "INSTANCE_REGISTRY", registry)
+    try:
+        assert fuzz_live_matrix._active_fuzz_instances() == ("fuzz-live",)
+    finally:
+        versions.close()
 
-    first_waiting = threading.Event()
-    allow_first_ready = threading.Event()
-    first_ready = threading.Event()
-    second_started = threading.Event()
-    second_finished = threading.Event()
+
+def test_live_stack_holds_startup_lock_until_versions_endpoint_is_ready(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A second starter must probe the first only after its endpoint is ready."""
+    first = fuzz_live_matrix.ManagedTuwunelStack()
+    second = fuzz_live_matrix.ManagedTuwunelStack()
+    versions = _MatrixVersionsServer()
+    registry = tmp_path / "instances.json"
+    harness = _StartupCommandHarness(
+        registry=registry,
+        versions=versions,
+        first_instance_name=first.instance_name,
+    )
+    lock_tracker = _StartupLockTracker(
+        fuzz_live_matrix.advisory_file_lock,
+        tmp_path / "live-fuzz.lock",
+    )
     errors: dict[str, BaseException] = {}
 
-    monkeypatch.setattr(fuzz_live_matrix, "LIVE_FUZZ_LOCK_PATH", tmp_path / "live-fuzz.lock")
-    monkeypatch.setattr(
-        fuzz_live_matrix,
-        "_read_instance_registry",
-        lambda: {
-            "instances": {
-                "fuzz-first": {"matrix_port": 18001, "domain": "first.example"},
-                "fuzz-second": {"matrix_port": 18002, "domain": "second.example"},
-            },
-        },
-    )
-    monkeypatch.setattr(
-        fuzz_live_matrix,
-        "_active_fuzz_instances",
-        lambda: ("fuzz-first",) if first_ready.is_set() else (),
-    )
-    commands: list[tuple[str, ...]] = []
-    monkeypatch.setattr(fuzz_live_matrix, "_run_command", lambda *command: commands.append(command))
+    monkeypatch.setattr(fuzz_live_matrix, "INSTANCE_REGISTRY", registry)
+    monkeypatch.setattr(fuzz_live_matrix, "advisory_file_lock", lock_tracker)
+    monkeypatch.setattr(fuzz_live_matrix, "_run_command", harness.run_command)
 
-    def wait_for_url(stack: fuzz_live_matrix.ManagedTuwunelStack, _url: str, *, timeout: float) -> None:
-        assert timeout == 30
-        if stack is first:
-            first_waiting.set()
-            assert allow_first_ready.wait(timeout=2)
-            first_ready.set()
+    first_thread = threading.Thread(target=_start_homeserver, args=(first, "first", errors))
+    second_thread = threading.Thread(target=_start_homeserver, args=(second, "second", errors))
+    try:
+        first_thread.start()
+        assert harness.first_starting.wait(timeout=2)
+        assert versions.probe_started.wait(timeout=2)
+        with (
+            lock_tracker.lock_path.open("a", encoding="utf-8") as lock_file,
+            pytest.raises(BlockingIOError),
+        ):
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        second_thread.start()
+        assert lock_tracker.second_attempted.wait(timeout=2)
+        versions.allow_responses()
+        first_thread.join(timeout=2)
+        second_thread.join(timeout=2)
 
-    monkeypatch.setattr(fuzz_live_matrix.ManagedTuwunelStack, "_wait_for_url", wait_for_url)
-
-    def start(stack: fuzz_live_matrix.ManagedTuwunelStack, name: str) -> None:
-        try:
-            if stack is second:
-                second_started.set()
-            stack._start_homeserver()
-        except BaseException as error:
-            errors[name] = error
-        finally:
-            if stack is second:
-                second_finished.set()
-
-    first_thread = threading.Thread(target=start, args=(first, "first"))
-    second_thread = threading.Thread(target=start, args=(second, "second"))
-    first_thread.start()
-    assert first_waiting.wait(timeout=2)
-    second_thread.start()
-    assert second_started.wait(timeout=2)
-    assert not second_finished.wait(timeout=0.05)
-    allow_first_ready.set()
-    first_thread.join(timeout=2)
-    second_thread.join(timeout=2)
-
-    assert not first_thread.is_alive()
-    assert not second_thread.is_alive()
-    assert "first" not in errors
-    assert isinstance(errors.get("second"), RuntimeError)
-    assert str(errors["second"]) == "live fuzz server already active: fuzz-first"
-    assert first.preexisting_fuzz_servers == 0
-    assert second.preexisting_fuzz_servers == 1
-    assert ("just", "local-instances-create", "fuzz-second", "tuwunel") not in commands
+        assert not first_thread.is_alive()
+        assert not second_thread.is_alive()
+        assert "first" not in errors
+        assert isinstance(errors.get("second"), RuntimeError)
+        assert str(errors["second"]) == f"live fuzz server already active: {first.instance_name}"
+        assert first.preexisting_fuzz_servers == 0
+        assert second.preexisting_fuzz_servers == 1
+        assert (
+            "just",
+            "local-instances-create",
+            second.instance_name,
+            "tuwunel",
+        ) not in harness.commands
+    finally:
+        versions.allow_responses()
+        for thread in (first_thread, second_thread):
+            if thread.ident is not None:
+                thread.join(timeout=2)
+        first.close()
+        second.close()
+        versions.close()
 
 
 def test_saturation_scenario_matches_original_two_phase_workload() -> None:
@@ -1113,16 +1278,19 @@ async def test_exact_reply_deadline_bounds_a_stalled_sync(
 
     oracle = ExactReplyOracle(cast("LiveMatrixClient", Client()), "@agent:example")
     oracle.expect("root:0", "$source")
+    sync_cancelled = asyncio.Event()
 
     async def stall_sync(*, timeout_ms: int, allow_limited: bool = False) -> None:
         del timeout_ms, allow_limited
-        await asyncio.Event().wait()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            sync_cancelled.set()
 
     monkeypatch.setattr(oracle, "_sync_once", stall_sync)
-    started = time.monotonic()
     with pytest.raises(AssertionError, match="timed out waiting for exact agent replies"):
         await oracle.wait_until_exact(deadline_seconds=0.01, settle_seconds=0)
-    assert time.monotonic() - started < 0.2
+    assert sync_cancelled.is_set()
 
 
 @pytest.mark.asyncio
