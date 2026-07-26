@@ -63,14 +63,14 @@ def _cached_event_transition(
     )
     if not same_envelope or rooms_conflict:
         return "conflict"
-    if is_provisional_outbound_event(existing):
-        same_type_and_content = (existing.get("type"), existing.get("content")) == (
-            candidate.get("type"),
-            candidate.get("content"),
-        )
-        if is_provisional_outbound_event(candidate):
-            return "accept" if same_type_and_content else "conflict"
-        return "accept" if existing.get("type") == candidate.get("type") else "conflict"
+    existing_is_provisional = is_provisional_outbound_event(existing)
+    candidate_is_provisional = is_provisional_outbound_event(candidate)
+    if existing_is_provisional or candidate_is_provisional:
+        same_type = existing.get("type") == candidate.get("type")
+        if existing_is_provisional:
+            compatible_content = not candidate_is_provisional or existing.get("content") == candidate.get("content")
+            return "accept" if same_type and compatible_content else "conflict"
+        return "ignore" if same_type else "conflict"
     if existing.get("origin_server_ts") != candidate.get("origin_server_ts"):
         return "conflict"
     existing_is_encrypted = existing.get("type") == "m.room.encrypted"
@@ -156,7 +156,12 @@ def select_latest_cached_edit(
     if not replacements:
         return None
     latest = replacements[0]
-    return CachedEventRow(event=latest, cached_at=next((row.cached_at for row in rows if row.event == latest), None))
+    latest_event_id = latest["event_id"]
+    cached_at = max(
+        (row.cached_at for row in rows if row.event.get("event_id") == latest_event_id and row.cached_at is not None),
+        default=None,
+    )
+    return CachedEventRow(event=latest, cached_at=cached_at)
 
 
 def decode_cached_event(

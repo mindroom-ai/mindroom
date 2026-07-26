@@ -246,7 +246,14 @@ def _snapshot_lookup_result(
 ) -> _SnapshotLookupResult:
     """Resolve one cached event and optional edit into a visible snapshot outcome."""
     latest_replacement = None if latest_edit is None else latest_edit.event
-    visible_cached_at = latest_edit.cached_at if latest_edit and latest_edit.cached_at is not None else cached_at
+    visible_cached_at = max(
+        (
+            observed_at
+            for observed_at in (cached_at, latest_edit.cached_at if latest_edit else None)
+            if observed_at is not None
+        ),
+        default=None,
+    )
     if (
         thread_id is None
         and runtime_started_at is not None

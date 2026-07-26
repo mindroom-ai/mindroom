@@ -926,11 +926,14 @@ class TestMatrixConversationCacheThreadReads:
         client.room_get_event.assert_not_awaited()
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("sync_echo_first", [False, True])
     async def test_outbound_send_sync_echo_replaces_synthetic_payload_without_duplication(
         self,
         event_cache: ConversationEventCache,
+        *,
+        sync_echo_first: bool,
     ) -> None:
-        """A canonical clear sync echo should improve the locally synthesized point-cache row."""
+        """A canonical sync echo must win regardless of advisory outbound bookkeeping order."""
         room_id = "!room:localhost"
         event_id = "$message:localhost"
         client = _make_client_mock(user_id="@agent:localhost")
@@ -954,12 +957,12 @@ class TestMatrixConversationCacheThreadReads:
             join={room_id: MagicMock(timeline=MagicMock(events=[sync_echo], limited=False))},
         )
 
-        access.notify_outbound_message(
-            room_id,
-            event_id,
-            {"body": "synthetic local row", "msgtype": "m.text"},
-        )
-        await asyncio.gather(*access.cache_sync_timeline(response))
+        if sync_echo_first:
+            await asyncio.gather(*access.cache_sync_timeline(response))
+            await _wait_for_room_cache_idle(access.runtime.event_cache_write_coordinator)
+        access.notify_outbound_message(room_id, event_id, {"body": "synthetic local row", "msgtype": "m.text"})
+        if not sync_echo_first:
+            await asyncio.gather(*access.cache_sync_timeline(response))
         await _wait_for_room_cache_idle(access.runtime.event_cache_write_coordinator)
         cached_event = await event_cache.get_event(room_id, event_id)
         recent_events = await event_cache.get_recent_room_events(

@@ -956,6 +956,63 @@ async def test_room_scope_keeps_visible_edit_cached_in_current_runtime(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("fresh_representation", ["bundled", "explicit"])
+async def test_room_scope_uses_freshest_equivalent_edit_representation(
+    event_cache_factory: Callable[[], ConversationEventCache],
+    *,
+    fresh_representation: str,
+) -> None:
+    """Equivalent explicit and bundled copies both refresh one visible edit."""
+    room_id = "!room:localhost"
+    original = _message_event(
+        event_id="$room-message",
+        sender="@agent:localhost",
+        body="Working...",
+        origin_server_ts=2000,
+    )
+    explicit_edit = _message_event(
+        event_id="$room-message-edit",
+        sender="@agent:localhost",
+        body="* Working...",
+        origin_server_ts=3000,
+        relates_to={"rel_type": "m.replace", "event_id": "$room-message"},
+        new_content={"body": "Done"},
+    )
+    bundled_edit = {**explicit_edit, "room_id": room_id}
+    original_with_bundle = {
+        **original,
+        "unsigned": {"m.relations": {"m.replace": bundled_edit}},
+    }
+
+    cache = event_cache_factory()
+    await cache.initialize()
+    try:
+        initial_original = original_with_bundle if fresh_representation == "explicit" else original
+        initial_events = [("$room-message", room_id, initial_original)]
+        if fresh_representation == "bundled":
+            initial_events.append(("$room-message-edit", room_id, explicit_edit))
+        await cache.store_events_batch(initial_events)
+        runtime_started_at = time.time()
+        fresh_event = original_with_bundle if fresh_representation == "bundled" else explicit_edit
+        await cache.store_events_batch([(fresh_event["event_id"], room_id, fresh_event)])
+    finally:
+        await cache.close()
+
+    snapshot = await _read_snapshot(
+        event_cache_factory,
+        room_id=room_id,
+        thread_id=None,
+        sender="@agent:localhost",
+        runtime_started_at=runtime_started_at,
+    )
+
+    assert snapshot == AgentMessageSnapshot(
+        content={"body": "Done", "msgtype": "m.text"},
+        origin_server_ts=2000,
+    )
+
+
+@pytest.mark.asyncio
 async def test_room_scope_does_not_fall_back_to_older_fresh_message_when_latest_is_stale(
     event_cache_factory: Callable[[], ConversationEventCache],
 ) -> None:
