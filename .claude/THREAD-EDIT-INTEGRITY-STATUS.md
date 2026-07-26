@@ -1,17 +1,18 @@
 # Thread edit integrity gate status
 
-Updated 2026-07-25 after merging current `main` and reconciling its bounded cache-repair architecture.
+Updated 2026-07-25 after correcting the two malformed-relation blockers on exact current `main`.
 
 ## Exact target
 
 - PR: `mindroom-ai/mindroom#1641`
 - Branch: `fix/thread-edit-integrity`
-- Latest production commit: `4cb69803f`
-- Current base and merge base: `2cc8389ec513a8ed518700396e0802e3c2bb8cb1`
-- Latest pushed integration commit: `7c8adfb41e70080215678e5cbae6be47489dcf86`
-- This crash-handoff update is the docs-only successor; resolve local, remote, and PR heads before counting a gate.
-- The malformed-relation follow-ups and current-main synchronization are pushed.
-- The tracked tree is clean apart from this crash-handoff successor.
+- Latest production commit: `239e9203b28350c43a4afde42d3fd58f11e0ee6a`
+- Current base and merge base: `e95fbe9a4bc069340fd36f333f3d7424657e1056`
+- Latest integration commit: `6a7b3f473b089e283648cdc392df6e4fbf28b801`
+- Latest pushed code head: `239e9203b28350c43a4afde42d3fd58f11e0ee6a`.
+- This crash-handoff update will be the docs-only successor; resolve local, remote, and PR heads before counting a gate.
+- The negative-root-proof follow-up, exact-current-main synchronization, and malformed-relation correction are pushed.
+- The tracked tree will be clean after this crash-handoff successor is committed.
 - Resolve local, remote, and PR heads before counting any exact-head gate.
 - Resolve and compare local, origin, and GitHub heads before counting any gate.
 - Three pre-existing untracked `.claude/TASK-*.md` notes are user-owned and must remain untouched.
@@ -49,6 +50,13 @@ Updated 2026-07-25 after merging current `main` and reconciling its bounded cach
 - Seven conflicts were reconciled by retaining main's repair outcomes and live-delta replay while keeping #1641's strict room, timeline, event-envelope, and membership certification.
 - A new TDD regression proves a wrong-room homeserver row is never installed into the durable cache through the new repair loop.
 - Four incomplete main repair fixtures now use complete Matrix timeline envelopes; production validation was not weakened.
+- `5b1486aa8` preserves room-level thread history after proving a candidate is not itself a thread root.
+- `6a7b3f473` merges exact current `main` without conflict and preserves the canonical replacement and thread-membership architecture unchanged.
+- Exact current `main` includes PR #1673 and the exact history for PR #668.
+- PR #1671 is not present in this main head and was not introduced.
+- `239e9203b` rejects parsed `nio.BadEvent` room-scan entries before they can supply reply ancestry.
+- `239e9203b` reuses raw relation sources for metadata only after canonical room, timeline, event-type, and plaintext-envelope validation.
+- The validated memo preserves the single-fetch contract while preventing malformed replacement originals from being reparsed into thread ancestry.
 
 ## Reconciled review status
 
@@ -82,12 +90,17 @@ Updated 2026-07-25 after merging current `main` and reconciling its bounded cach
 - All four claims reproduced as RED regressions before implementation and pass after `9c25053bf` plus `4cb69803f`.
 - The same review rejected a suspected edit-of-edit root-proof claim because it did not reproduce.
 - Exact-`ac144420b` review, CI, full-suite, and static evidence are stale after the production corrections and current-main merge.
+- The fresh exact-`5f2c9ed49` correctness review found two additional malformed-source gaps in cold room scans and shared replacement/source memoization.
+- Both claims reproduced as RED full-resolution, sync-graph, SQLite, and PostgreSQL regressions before implementation.
+- The first attempted split metadata cache over-fetched valid sources and broke existing access contracts; root-cause tracing replaced it with validated source reuse rather than fixture churn or a production fallback.
+- The exact-`5f2c9ed49` review and all earlier approvals are stale after `239e9203b`.
 - The withdrawn edit-index timestamp-poison claim remains excluded because it required direct inconsistent SQL writes outside production paths.
 - This correction adds `+196/-15` production lines, net `+181`.
-- Production source against current `main` is `+1960/-1179`, net `+781`.
+- Production source against current `main` is `+1970/-1180`, net `+790`.
 - The full-suite follow-up adds `+28/-4` production lines, net `+24`.
 - The malformed mutation correction adds `+18/-6` production lines, net `+12`.
 - The degraded replay follow-up adds `+16/-18` production lines, net `-2`.
+- The latest malformed-relation correction adds `+10/-1` production lines, net `+9`.
 
 ## Validation already completed
 
@@ -134,11 +147,18 @@ Updated 2026-07-25 after merging current `main` and reconciling its bounded cach
 - The merged history/cache owning cluster passes `473` tests, including SQLite and PostgreSQL.
 - Main's new repair, backfill, backend, parallelism, read-guard, and conversation-resolution cluster passes `120` tests.
 - The merge commit hooks pass Ruff, formatting, `ty`, Vulture, Tach, module privacy, and generated-documentation checks.
+- Exact-main synchronization passes `128` focused chunking, resumable-refresh, and thread-membership tests.
+- Ruff, format, and `ty` pass for every incoming-main file plus the latest thread-membership correction.
+- `git diff --check` passes after the exact-main merge.
+- Five new cold-scan, sync-graph, negative-proof, SQLite, and PostgreSQL variants failed before their owning fixes and pass afterward.
+- The complete five-file history, membership, mutation, context, and snapshot owning cluster passes `324` tests after the correction.
+- The exact independent reviewer probe now retains only the valid root and child; the malformed ancestor, its edit, and its indirect reply are excluded.
+- Focused Ruff, formatting, `ty`, Vulture, Tach, module-privacy, and commit hooks pass for `239e9203b`.
 - Git author was verified as `Bas Nijholt <bas@nijho.lt>` before every new commit.
 
 ## Pending exact-head gates
 
-- Commit and push this crash-handoff successor, then freeze the resulting exact head.
+- Commit and push this crash-handoff successor, then freeze its exact head.
 - Fresh CI must complete on the final exact head.
 - A fresh independent native Codex correctness review is required on the final exact head.
 - Exact-head PostgreSQL owning and stress selections are required.
