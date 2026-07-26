@@ -1059,6 +1059,53 @@ async def test_room_scope_plain_original_refresh_does_not_revive_stale_edit(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("invalid_event_id", [[], {}], ids=["list", "mapping"])
+async def test_room_scope_ignores_unhashable_bundled_edit_event_id(
+    event_cache_factory: Callable[[], ConversationEventCache],
+    *,
+    invalid_event_id: object,
+) -> None:
+    """Malformed bundled identities cannot crash room-snapshot lookup."""
+    room_id = "!room:localhost"
+    original = _message_event(
+        event_id="$room-message",
+        sender="@agent:localhost",
+        body="Working...",
+        origin_server_ts=2000,
+    )
+    bundled_edit = _message_event(
+        event_id="$ignored",
+        sender="@agent:localhost",
+        body="* Working...",
+        origin_server_ts=3000,
+        relates_to={"rel_type": "m.replace", "event_id": "$room-message"},
+        new_content={"body": "Done"},
+    )
+    bundled_edit["event_id"] = invalid_event_id
+    original["unsigned"] = {"m.relations": {"m.replace": bundled_edit}}
+
+    cache = event_cache_factory()
+    await cache.initialize()
+    try:
+        await cache.store_events_batch([("$room-message", room_id, original)])
+    finally:
+        await cache.close()
+
+    snapshot = await _read_snapshot(
+        event_cache_factory,
+        room_id=room_id,
+        thread_id=None,
+        sender="@agent:localhost",
+        runtime_started_at=0.0,
+    )
+
+    assert snapshot == AgentMessageSnapshot(
+        content={"body": "Working...", "msgtype": "m.text"},
+        origin_server_ts=2000,
+    )
+
+
+@pytest.mark.asyncio
 async def test_room_scope_does_not_fall_back_to_older_fresh_message_when_latest_is_stale(
     event_cache_factory: Callable[[], ConversationEventCache],
 ) -> None:

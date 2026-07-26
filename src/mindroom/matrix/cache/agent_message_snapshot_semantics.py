@@ -246,9 +246,9 @@ def _snapshot_lookup_result(
 ) -> _SnapshotLookupResult:
     """Resolve one cached event and optional edit into a visible snapshot outcome."""
     latest_replacement = None if latest_edit is None else latest_edit.event
-    bundled_event_ids = {candidate.get("event_id") for candidate in bundled_replacement_candidates(event)}
-    original_observed_selected_edit = (
-        latest_replacement is None or latest_replacement.get("event_id") in bundled_event_ids
+    original_observed_selected_edit = latest_replacement is None or any(
+        candidate.get("event_id") == latest_replacement["event_id"]
+        for candidate in bundled_replacement_candidates(event)
     )
     visible_cached_at = max(
         (
