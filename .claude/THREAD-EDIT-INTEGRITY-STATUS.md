@@ -1,14 +1,15 @@
 # Thread edit integrity gate status
 
-Updated 2026-07-25 after the exact-`708ebfffa` malformed-relation follow-up and current-main sync.
+Updated 2026-07-25 after merging current `main` and reconciling its bounded cache-repair architecture.
 
 ## Exact target
 
 - PR: `mindroom-ai/mindroom#1641`
 - Branch: `fix/thread-edit-integrity`
 - Latest production commit: `4cb69803f`
-- Current base and merge base: `5d149adb71a71770d60544c6a5f00b3e863bcdc8`
-- Current pushed head: `708ebfffa3c5c5eab1e897637aabd8cd7a32219c`
+- Current base and merge base: `2cc8389ec513a8ed518700396e0802e3c2bb8cb1`
+- Latest pushed integration commit: `7c8adfb41e70080215678e5cbae6be47489dcf86`
+- This crash-handoff update is the docs-only successor; resolve local, remote, and PR heads before counting a gate.
 - The malformed-relation follow-ups and current-main synchronization are pushed.
 - The tracked tree is clean apart from this crash-handoff successor.
 - Resolve local, remote, and PR heads before counting any exact-head gate.
@@ -44,6 +45,10 @@ Updated 2026-07-25 after the exact-`708ebfffa` malformed-relation follow-up and 
 - `9c25053bf` rejects malformed successful point lookups, malformed sync relations, and malformed cached child proof before mutation ancestry can trust them.
 - `4cb69803f` centralizes valid thread-relation source admission in `matrix.media` and applies it to degraded replay, preventing malformed cached relations from suppressing a valid turn.
 - `708ebfffa` synchronizes current `origin/main` without conflict after the two TDD corrections.
+- `7c8adfb41` merges current `main`, including the bounded concurrent thread-cache repair from PR #1656.
+- Seven conflicts were reconciled by retaining main's repair outcomes and live-delta replay while keeping #1641's strict room, timeline, event-envelope, and membership certification.
+- A new TDD regression proves a wrong-room homeserver row is never installed into the durable cache through the new repair loop.
+- Four incomplete main repair fixtures now use complete Matrix timeline envelopes; production validation was not weakened.
 
 ## Reconciled review status
 
@@ -79,7 +84,7 @@ Updated 2026-07-25 after the exact-`708ebfffa` malformed-relation follow-up and 
 - Exact-`ac144420b` review, CI, full-suite, and static evidence are stale after the production corrections and current-main merge.
 - The withdrawn edit-index timestamp-poison claim remains excluded because it required direct inconsistent SQL writes outside production paths.
 - This correction adds `+196/-15` production lines, net `+181`.
-- Production source against current `main` is `+1937/-1178`, net `+759`.
+- Production source against current `main` is `+1960/-1179`, net `+781`.
 - The full-suite follow-up adds `+28/-4` production lines, net `+24`.
 - The malformed mutation correction adds `+18/-6` production lines, net `+12`.
 - The degraded replay follow-up adds `+16/-18` production lines, net `-2`.
@@ -124,7 +129,11 @@ Updated 2026-07-25 after the exact-`708ebfffa` malformed-relation follow-up and 
 - The four malformed-relation cases failed before implementation and their nine state, wrong-room, malformed, point, sync, root-proof, and replay variants pass afterward.
 - The expanded live-coalescing, mutation, membership, read-guard, tag, and media owning selection passes after synchronizing current `main`.
 - Ruff, format, `ty`, Tach dependencies/interfaces, module privacy, focused pre-commit, and diff checks pass for both malformed-relation commits.
-- Exact-`ac144420b` full pytest passed `12000` tests with `54` skipped before the production correction; it is baseline evidence only and must be rerun on `708ebfffa`.
+- Exact-`5f2c9ed49` full pytest passed `12014` tests with `54` skipped before current `main` advanced; it is historical evidence only.
+- The wrong-room repair-loop regression failed before integration and passes after the store guard.
+- The merged history/cache owning cluster passes `473` tests, including SQLite and PostgreSQL.
+- Main's new repair, backfill, backend, parallelism, read-guard, and conversation-resolution cluster passes `120` tests.
+- The merge commit hooks pass Ruff, formatting, `ty`, Vulture, Tach, module privacy, and generated-documentation checks.
 - Git author was verified as `Bas Nijholt <bas@nijho.lt>` before every new commit.
 
 ## Pending exact-head gates
