@@ -1,14 +1,13 @@
 # Thread edit integrity gate status
 
-Updated 2026-07-25 after verifying the remote exact-`0b927ee66` round-two review and correcting its remaining blockers.
+Updated 2026-07-25 after correcting the exact-`3e0575aa7` review and CI blockers.
 
 ## Exact target
 
 - PR: `mindroom-ai/mindroom#1641`
 - Branch: `fix/thread-edit-integrity`
-- Latest production commit: `27a57ffd0f6525228a9b6e6192f0198648f8a523`
+- Latest production commit and current head: `0f439bd2a9a9d2d8fa7e3a30ef42f4c8b4e38766`
 - Current base and merge base: `c1f812a1e15b3c6be05f0cf2720b44431d844087`
-- Current branch and PR head contain only crash-handoff commits after the latest production commit.
 - The production, test, and documentation corrections are pushed.
 - Tracked working tree is clean.
 - Resolve local, remote, and PR heads before counting any exact-head gate.
@@ -27,6 +26,8 @@ Updated 2026-07-25 after verifying the remote exact-`0b927ee66` round-two review
 - `8c4b3b1be` also requires current-room message-capable timeline scope before raw cached relations can suppress a turn.
 - `27a57ffd0` proves a related rich reply is not already a thread root before following its reply ancestry.
 - `27a57ffd0` also covers the trusted-automation rich-reply fallback and corrects cache documentation that still described removed read-time payload/index guards and recent-event cursors.
+- `e14938185` proves current rich-reply root status before accepting inherited indexes, gives batch projection the same current-root semantics, and preserves mutation-time inherited-index proof.
+- `0f439bd2a` rejects invalid successful point lookups and legacy wrong-room cache rows in snapshot and replay consumers while retaining edits as non-visible snapshot ancestry nodes.
 
 ## Reconciled review status
 
@@ -38,9 +39,10 @@ Updated 2026-07-25 after verifying the remote exact-`0b927ee66` round-two review
 - The remote exact-`0b927ee66` `REVIEW2.md` correctly found that a proven rich-reply root reached mid-walk inherited its parent's thread.
 - The mid-walk bug reproduced on the pushed predecessor, and the fix moves the existing proof before ancestry with zero net production-line growth.
 - One fresh exact-`d91751bc1` reviewer independently found the same stale cache-documentation contract; the other approved with no finding.
+- Two exact-`3e0575aa7` native reviewers reproduced stale inherited root precedence, missing batch root promotion, invalid successful lookup fallback, wrong-room replay/snapshot reads, and replacement-node snapshot ancestry.
+- Every exact-`3e0575aa7` finding is corrected in `e14938185` and `0f439bd2a`; those old review verdicts and CI results are now stale.
 - The withdrawn edit-index timestamp-poison claim remains excluded because it required direct inconsistent SQL writes outside production paths.
-- Production source against current `main` is `+1489/-1109`, net `+380`.
-- This is 109 net production lines smaller than the reviewed `+474` baseline and 61 lines smaller than the reconciled review estimate.
+- Production source against current `main` is `+1517/-1132`, net `+385`.
 
 ## Validation already completed
 
@@ -52,14 +54,16 @@ Updated 2026-07-25 after verifying the remote exact-`0b927ee66` round-two review
 - All `18` exact failed tests plus one legacy wrong-room read regression pass after test correction.
 - Expanded owning suites pass across SQLite and PostgreSQL after the state-event fixes.
 - The complete eight-file rich-root, membership, tag, mode, mutation, sync, write-coordination, and coalescing selection passes after the mid-walk correction.
+- The exact five GitHub pytest failures on `3e0575aa7` now pass with corrected production-shaped root-proof and cross-room fixtures.
+- The seven affected owning files pass together, including SQLite and PostgreSQL snapshot regressions for legacy wrong-room rows and reply-to-edit ancestry.
 - Changed-file pre-commit passes, including Ruff, formatting, `ty`, Vulture, Tach, module privacy, and generated documentation checks.
 - Ruff, format, `ty`, Vulture, Tach, module privacy, and normal commit hooks pass.
 - Git author was verified as `Bas Nijholt <bas@nijho.lt>` before every new commit.
 
 ## Pending exact-head gates
 
-- GitHub pytest is red only on stale head `0b927ee66`; every other completed check there is green.
-- Fresh CI is active on the new correction head.
+- GitHub pytest is red only on stale head `3e0575aa7`; every other completed check there was green.
+- Fresh CI is active on exact `0f439bd2a`.
 - A fresh independent native Codex correctness review is required on that exact head.
 - Exact-head PostgreSQL owning and stress selections are required.
 - Exact-head full pytest is required.
