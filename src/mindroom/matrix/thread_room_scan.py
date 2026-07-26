@@ -17,7 +17,7 @@ import nio
 from nio.responses import RoomGetEventError
 
 from mindroom.matrix.client_thread_history import fetch_thread_event_sources_via_room_messages
-from mindroom.matrix.event_info import EventInfo
+from mindroom.matrix.event_info import EventInfo, event_source_is_timeline_in_room
 from mindroom.matrix.thread_membership import ThreadMembershipAccess, room_scan_thread_membership_access
 
 if TYPE_CHECKING:
@@ -49,12 +49,16 @@ async def _scan_thread_event_sources(
 def _event_info_from_lookup_response(
     response: _EventLookupResult,
     *,
+    room_id: str,
     event_id: str,
     strict: bool,
 ) -> EventInfo | None:
     """Normalize one room-get-event style response into EventInfo when available."""
     if isinstance(response, nio.RoomGetEventResponse):
-        return EventInfo.from_event(response.event.source)
+        event_source = response.event.source
+        if not event_source_is_timeline_in_room(event_source, room_id):
+            return None
+        return EventInfo.from_event(event_source)
     if not strict:
         return None
     if isinstance(response, nio.RoomGetEventError) and response.status_code == "M_NOT_FOUND":
@@ -86,6 +90,7 @@ async def fetch_event_info_for_client(
     response = await client.room_get_event(room_id, event_id)
     return _event_info_from_lookup_response(
         response,
+        room_id=room_id,
         event_id=event_id,
         strict=strict,
     )
@@ -102,6 +107,7 @@ async def fetch_event_info_from_conversation_cache(
     response = await conversation_cache.get_event(room_id, event_id)
     return _event_info_from_lookup_response(
         response,
+        room_id=room_id,
         event_id=event_id,
         strict=strict,
     )

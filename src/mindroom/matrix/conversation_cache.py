@@ -47,6 +47,7 @@ from mindroom.matrix.client_thread_history import (
 from mindroom.matrix.event_info import (
     EventInfo,
     event_source_is_state_event,
+    event_source_is_timeline_in_room,
     event_source_matches_room,
 )
 from mindroom.matrix.media import (
@@ -659,7 +660,10 @@ class MatrixConversationCache(ConversationCacheProtocol):
         )
         if not isinstance(response, nio.RoomGetEventResponse):
             return None
-        return EventInfo.from_event(response.event.source)
+        event_source = response.event.source
+        if not event_source_is_timeline_in_room(event_source, room_id):
+            return None
+        return EventInfo.from_event(event_source)
 
     async def _fetch_thread_history_from_client(
         self,

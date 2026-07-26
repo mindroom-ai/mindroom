@@ -30,7 +30,7 @@ from mindroom.entity_resolution import entity_identity_registry
 from mindroom.matrix.cache.thread_history_result import ThreadHistoryResult
 from mindroom.matrix.cache.thread_reads import ThreadReadMode
 from mindroom.matrix.client_delivery import cached_room as matrix_cached_room
-from mindroom.matrix.event_info import EventInfo
+from mindroom.matrix.event_info import EventInfo, event_source_is_timeline_in_room
 from mindroom.matrix.media import MatrixMediaEvent, is_audio_message_event, is_image_message_event
 from mindroom.matrix.message_content import resolve_event_source_content
 from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
@@ -636,7 +636,10 @@ class ConversationResolver:
             )
             msg = f"Failed to resolve related Matrix event {event_id}: {detail}"
             raise RuntimeError(msg)
-        return EventInfo.from_event(target_event.event.source)
+        event_source = target_event.event.source
+        if not event_source_is_timeline_in_room(event_source, room_id):
+            return None
+        return EventInfo.from_event(event_source)
 
     async def _resolve_thread_context(
         self,

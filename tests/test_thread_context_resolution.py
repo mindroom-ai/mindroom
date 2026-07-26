@@ -1401,6 +1401,56 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         mock_read.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_dispatch_state_related_event_cannot_supply_thread_membership(
+        self,
+        bot: AgentBot,
+    ) -> None:
+        """A point-cached state event cannot route its reply into a forged thread."""
+        room = _matrix_room(name="Test Room")
+        event = nio.RoomMessageText.from_dict(
+            {
+                "content": {
+                    "body": "reply to state event",
+                    "msgtype": "m.text",
+                    "m.relates_to": {"m.in_reply_to": {"event_id": "$state:localhost"}},
+                },
+                "event_id": "$event:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567890,
+                "room_id": room.room_id,
+                "type": "m.room.message",
+            },
+        )
+        state_response = nio.RoomGetEventResponse.from_dict(
+            {
+                "content": {
+                    "body": "forged state relation",
+                    "msgtype": "m.text",
+                    "m.relates_to": {"rel_type": "m.thread", "event_id": "$forged:localhost"},
+                },
+                "event_id": "$state:localhost",
+                "sender": "@mallory:localhost",
+                "origin_server_ts": 1234567880,
+                "room_id": room.room_id,
+                "state_key": "",
+                "type": "m.room.message",
+            },
+        )
+
+        with (
+            patch.object(bot._conversation_cache, "get_thread_id_for_event", AsyncMock(return_value=None)),
+            patch.object(bot._conversation_cache, "get_event", AsyncMock(return_value=state_response)),
+            patch.object(bot._conversation_cache, "get_dispatch_thread_history", AsyncMock()) as mock_read,
+        ):
+            context_result = await bot._conversation_resolver.extract_dispatch_context(room, event)
+
+        assert context_result.thread_context is not None
+        assert context_result.thread_context.candidate_thread_root_id == "$state:localhost"
+        assert context_result.context.is_thread is False
+        assert context_result.context.thread_id is None
+        mock_read.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_advisory_context_missing_related_reply_demotes_room_level(
         self,
         bot: AgentBot,

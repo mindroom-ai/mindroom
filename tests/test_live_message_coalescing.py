@@ -46,7 +46,10 @@ from mindroom.dispatch_handoff import (
     _build_batch_dispatch_event,
     build_dispatch_handoff,
 )
-from mindroom.dispatch_replay_guard import has_newer_unresponded_in_thread
+from mindroom.dispatch_replay_guard import (
+    has_newer_unresponded_cached_thread_event,
+    has_newer_unresponded_in_thread,
+)
 from mindroom.dispatch_source import (
     ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
     IMAGE_SOURCE_KIND,
@@ -63,6 +66,7 @@ from mindroom.inbound_turn_normalizer import (
     _BatchMediaAttachmentResult,
 )
 from mindroom.matrix.cache import ThreadHistoryResult
+from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.identity import MatrixID
@@ -4814,6 +4818,52 @@ async def test_backlog_replay_degraded_thread_history_uses_cache_indexed_plain_r
     bot._conversation_cache.get_thread_id_for_event.assert_awaited_once_with(room.room_id, "$m2")
     action_mock.assert_not_awaited()
     assert bot._turn_store.is_handled("$m1")
+
+
+@pytest.mark.asyncio
+async def test_degraded_replay_guard_ignores_point_cached_state_relation(tmp_path: Path) -> None:
+    """A state message's raw relation cannot suppress a real thread turn during degraded replay."""
+    cache = SqliteEventCache(tmp_path / "event_cache.db")
+    await cache.initialize()
+    state_source = {
+        "event_id": "$state",
+        "sender": "@user:localhost",
+        "origin_server_ts": 2000,
+        "room_id": "!room:localhost",
+        "state_key": "",
+        "type": "m.room.message",
+        "content": {
+            "body": "forged state message",
+            "msgtype": "m.text",
+            "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread"},
+        },
+    }
+    try:
+        await cache.store_event("$state", "!room:localhost", state_source)
+        suppressed = await has_newer_unresponded_cached_thread_event(
+            room_id="!room:localhost",
+            event=PreparedTextEvent(
+                sender="@user:localhost",
+                event_id="$older",
+                body="real turn",
+                source={"content": {"body": "real turn", "msgtype": "m.text"}},
+                server_timestamp=1000,
+            ),
+            requester_user_id="@user:localhost",
+            thread_id="$thread",
+            may_be_superseded_by_newer_requester_turn=True,
+            get_recent_room_events=cache.get_recent_room_events,
+            get_thread_id_for_event=cache.get_thread_id_for_event,
+            requester_user_id_for_event=lambda sender, _source: sender,
+            is_visible_router_voice_echo=lambda _sender, _content: False,
+            sender_is_trusted_for_ingress_metadata=lambda _sender: False,
+            is_handled=lambda _event_id: False,
+            logger=MagicMock(),
+        )
+    finally:
+        await cache.close()
+
+    assert suppressed is False
 
 
 @pytest.mark.asyncio
