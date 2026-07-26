@@ -572,6 +572,14 @@ def _sizing_log_fields(*, kind: CompactionEstimateKind, estimate: int, budget_to
     }
 
 
+def _effective_compaction_timeout_seconds(model: Model, configured_timeout_seconds: float) -> float:
+    """Return the timeout Claude provider tuning will enforce for one request."""
+    claude_model = as_anthropic_claude(model)
+    if claude_model is None or claude_model.timeout is None:
+        return configured_timeout_seconds
+    return min(float(claude_model.timeout), configured_timeout_seconds)
+
+
 async def _generate_compaction_summary_with_retry(  # noqa: PLR0915
     *,
     model: Model,
@@ -615,6 +623,7 @@ async def _generate_compaction_summary_with_retry(  # noqa: PLR0915
     attempt = 1
     while True:
         summary_input_estimate = token_estimator(summary_input)
+        effective_timeout_seconds = _effective_compaction_timeout_seconds(model, timeout_seconds)
         started = asyncio.get_running_loop().time()
         logger.info(
             "Compaction summary chunk request",
@@ -626,6 +635,7 @@ async def _generate_compaction_summary_with_retry(  # noqa: PLR0915
             included_runs=len(included_runs),
             **_sizing_log_fields(kind=estimate_kind, estimate=summary_input_estimate, budget_tokens=budget),
             timeout_seconds=timeout_seconds,
+            effective_timeout_seconds=effective_timeout_seconds,
         )
         try:
             summary = await generate_compaction_summary(
@@ -646,6 +656,7 @@ async def _generate_compaction_summary_with_retry(  # noqa: PLR0915
                 included_runs=len(included_runs),
                 **_sizing_log_fields(kind=estimate_kind, estimate=summary_input_estimate, budget_tokens=budget),
                 timeout_seconds=timeout_seconds,
+                effective_timeout_seconds=effective_timeout_seconds,
                 duration_ms=duration_ms,
                 error=str(exc) or type(exc).__name__,
             )
@@ -729,6 +740,7 @@ async def _generate_compaction_summary_with_retry(  # noqa: PLR0915
             included_runs=len(included_runs),
             **_sizing_log_fields(kind=estimate_kind, estimate=summary_input_estimate, budget_tokens=budget),
             timeout_seconds=timeout_seconds,
+            effective_timeout_seconds=effective_timeout_seconds,
             duration_ms=duration_ms,
         )
         return _GeneratedSummaryChunk(

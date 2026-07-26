@@ -1564,6 +1564,44 @@ async def test_retry_helper_switches_to_fallback_once_with_unchanged_prompt_and_
 
 
 @pytest.mark.asyncio
+async def test_retry_helper_logs_requested_and_effective_claude_timeouts() -> None:
+    run = _completed_run("run-1")
+    model = _RecordingClaude(id="claude-sonnet-5", timeout=300.0)
+    generate_summary = AsyncMock(
+        return_value=SessionSummary(summary="summary", updated_at=datetime.now(UTC)),
+    )
+    logger_mock = MagicMock()
+
+    with (
+        patch("mindroom.history.compaction.generate_compaction_summary", new=generate_summary),
+        patch("mindroom.history.compaction.logger", logger_mock),
+    ):
+        await _generate_compaction_summary_with_retry(
+            model=model,
+            model_name="summary-model",
+            previous_summary=None,
+            compactable_runs=[run],
+            initial_summary_input="original request",
+            initial_included_runs=[run],
+            summary_input_budget=4_000,
+            session_id="session-1",
+            scope=_SCOPE,
+            history_settings=_HISTORY_SETTINGS,
+            summary_prompt=COMPACTION_SUMMARY_PROMPT,
+            token_estimator=lambda _value: 2_000,
+            estimate_kind="o200k_base_tokens",
+            timeout_seconds=600.0,
+        )
+
+    request_log = next(
+        call for call in logger_mock.info.call_args_list if call.args[0] == "Compaction summary chunk request"
+    )
+    assert request_log.kwargs["timeout_seconds"] == 600.0
+    assert request_log.kwargs["effective_timeout_seconds"] == 300.0
+    assert generate_summary.await_args.kwargs["timeout_seconds"] == 600.0
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "fallback_error",
     [
