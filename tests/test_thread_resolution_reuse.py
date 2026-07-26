@@ -755,8 +755,8 @@ class TestFetchPathIntegration:
         assert second.diagnostics["thread_resolution_reuse"] == "incremental"
 
     @pytest.mark.asyncio
-    async def test_point_payload_upgrade_forces_full_resolution(self, tmp_path: Path) -> None:
-        """A changed lookup payload is detected even when its thread-index row is unchanged."""
+    async def test_point_metadata_refresh_forces_full_resolution(self, tmp_path: Path) -> None:
+        """Changed unsigned metadata is detected even when the thread-index row is unchanged."""
         from mindroom.matrix.cache.sqlite_event_cache import SqliteEventCache  # noqa: PLC0415
 
         cache = SqliteEventCache(tmp_path / "event_cache.db")
@@ -770,13 +770,13 @@ class TestFetchPathIntegration:
         reuse = ThreadResolutionReuseCache()
         try:
             await fetch_thread_history(client, ROOM, THREAD, event_cache=cache, resolution_reuse=reuse)
-            updated = _message_row("$m1", 2000, "updated")
+            updated = {**rows[1], "unsigned": {"age": 0}}
             await cache.store_event("$m1", ROOM, updated, expected_membership_epoch=0)
             second = await fetch_thread_history(client, ROOM, THREAD, event_cache=cache, resolution_reuse=reuse)
         finally:
             await cache.close()
 
-        assert [message.body for message in second] == ["root", "updated"]
+        assert [message.body for message in second] == ["root", "original"]
         assert second.diagnostics["thread_resolution_reuse"] == "full"
 
     @pytest.mark.asyncio
