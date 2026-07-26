@@ -25,7 +25,6 @@ from mindroom.hooks import (
     FinalResponseDraft,
     FinalResponseTransformContext,
     HookContextSupport,
-    MessageEnvelope,
     ResponseDraft,
     ResponseResult,
     emit,
@@ -41,7 +40,7 @@ from mindroom.matrix.client_delivery import (
 )
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import build_message_content
-from mindroom.response_identity import ResponseIdentity
+from mindroom.response_identity import ResponseIdentity  # noqa: TC001
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
 from mindroom.streaming import (
     StreamingResponse,
@@ -351,21 +350,10 @@ class DeliveryGateway:
 
     async def owned_terminal_delivery_for_turn(
         self,
-        *,
-        response_kind: str,
-        response_envelope: MessageEnvelope,
-        correlation_id: str,
-        source_event_ids: tuple[str, ...],
+        identity: ResponseIdentity,
     ) -> PendingTerminalDelivery | None:
-        """Build the canonical response identity at the delivery boundary."""
-        return await self.deps.terminal_delivery_coordinator.owned_delivery(
-            ResponseIdentity(
-                response_kind=response_kind,
-                response_envelope=response_envelope,
-                correlation_id=correlation_id,
-                source_event_ids=source_event_ids,
-            ),
-        )
+        """Return durable target ownership for one canonical response identity."""
+        return await self.deps.terminal_delivery_coordinator.owned_delivery(identity)
 
     @staticmethod
     def _cancelled_error_failure_reason(error: asyncio.CancelledError) -> str:

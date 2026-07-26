@@ -74,26 +74,8 @@ class TerminalDeliveryIntent:
 class PendingTerminalDelivery:
     """Runtime view of one canonical TurnRecord checkpoint."""
 
-    turn_record: TurnRecord
-
-    @property
-    def checkpoint(self) -> TerminalEditCheckpoint:
-        """Return the required frozen checkpoint."""
-        checkpoint = self.turn_record.terminal_edit_checkpoint
-        assert checkpoint is not None
-        return checkpoint
-
-    @property
-    def target_event_id(self) -> str:
-        """Return the visible edit target."""
-        target_event_id = self.turn_record.response_event_id
-        assert target_event_id is not None
-        return target_event_id
-
-    @property
-    def target_was_placeholder(self) -> bool:
-        """Return whether the terminal edit replaces a thinking placeholder."""
-        return self.checkpoint.target_was_placeholder
+    target_event_id: str
+    target_was_placeholder: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -175,7 +157,12 @@ class TerminalDeliveryCoordinator:
             self.deps.turn_store.terminal_checkpoint_for_sources,
             source_event_ids,
         )
-        return PendingTerminalDelivery(record) if record is not None else None
+        if record is None:
+            return None
+        checkpoint = record.terminal_edit_checkpoint
+        assert checkpoint is not None
+        assert record.response_event_id is not None
+        return PendingTerminalDelivery(record.response_event_id, checkpoint.target_was_placeholder)
 
     async def commit_and_attempt(self, intent: TerminalDeliveryIntent) -> TerminalDeliveryCommit:
         """Commit exact content durably before the first Matrix edit."""

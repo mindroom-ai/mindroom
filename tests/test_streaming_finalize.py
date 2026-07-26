@@ -675,26 +675,22 @@ async def test_terminal_persist_failure_handles_placeholder_only_after_failure_e
 
 
 @pytest.mark.asyncio
-async def test_terminal_owner_gateway_builds_canonical_identity(tmp_path: Path) -> None:
-    """Ingress callers cross the delivery boundary without constructing its identity type."""
+async def test_terminal_owner_gateway_passes_canonical_identity(tmp_path: Path) -> None:
+    """Ingress callers pass one canonical identity through the delivery boundary."""
     gateway = _delivery_gateway(tmp_path)
     owner = MagicMock()
     gateway.deps.terminal_delivery_coordinator.owned_delivery.return_value = owner
-    envelope = _envelope()
-
-    result = await gateway.owned_terminal_delivery_for_turn(
+    identity = ResponseIdentity(
         response_kind="agent",
-        response_envelope=envelope,
+        response_envelope=_envelope(),
         correlation_id="$correlation",
         source_event_ids=("$first", "$second"),
     )
 
+    result = await gateway.owned_terminal_delivery_for_turn(identity)
+
     assert result is owner
-    identity = gateway.deps.terminal_delivery_coordinator.owned_delivery.await_args.args[0]
-    assert identity.response_kind == "agent"
-    assert identity.response_envelope == envelope
-    assert identity.correlation_id == "$correlation"
-    assert identity.source_event_ids == ("$first", "$second")
+    gateway.deps.terminal_delivery_coordinator.owned_delivery.assert_awaited_once_with(identity)
 
 
 @pytest.mark.asyncio
