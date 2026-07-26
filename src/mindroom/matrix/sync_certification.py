@@ -52,6 +52,9 @@ class SyncCertificationDecision:
     clear_saved_token: bool = False
     reset_client_token: bool = False
     reason: str | None = None
+    # Rewind the client here to re-deliver the batches a failed callback left
+    # unfinished. ``reset_client_token`` is the since-less form of the same ask.
+    replay_from_token: str | None = None
 
 
 def _uncertain_decision(

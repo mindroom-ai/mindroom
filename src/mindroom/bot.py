@@ -168,7 +168,7 @@ def _create_task_wrapper(
     callback: Callable[..., Awaitable[None]],
     *,
     owner: BotRuntimeState | None = None,
-    on_error: Callable[[], None] | None = None,
+    sync_cache_trust: SyncCacheTrust | None = None,
 ) -> Callable[..., Awaitable[None]]:
     """Create a wrapper that runs the callback as a background task.
 
@@ -178,6 +178,11 @@ def _create_task_wrapper(
     """
 
     async def wrapper(*args: object, **kwargs: object) -> None:
+        # Take the dispatch ticket here, while the sync response that carries
+        # this event is still being handed out: the task below may outlive many
+        # later batches, and only this position can replay the one it belongs to.
+        dispatch = sync_cache_trust.dispatch_callback() if sync_cache_trust is not None else None
+
         # Create the task but don't await it - let it run in background
         async def error_handler() -> None:
             try:
@@ -186,8 +191,8 @@ def _create_task_wrapper(
                 # Task was cancelled, this is expected during shutdown
                 pass
             except Exception:
-                if on_error is not None:
-                    on_error()
+                if sync_cache_trust is not None:
+                    sync_cache_trust.mark_callback_failed(dispatch)
                 elif owner is not None:
                     owner.mark_callback_failed()
                 # Log the exception with full traceback
@@ -1076,8 +1081,12 @@ class AgentBot:
             cache_result=cache_result,
             first_sync=first_sync,
         )
-        if decision.reset_client_token and self.client is not None:
+        if self.client is None:
+            return decision
+        if decision.reset_client_token:
             cast("Any", self.client).next_batch = None
+        elif decision.replay_from_token is not None:
+            cast("Any", self.client).next_batch = decision.replay_from_token
         return decision
 
     def seconds_since_last_sync_activity(self) -> float | None:
@@ -1103,6 +1112,7 @@ class AgentBot:
             if not isinstance(event, nio.RoomMemberEvent):
                 return
             hooks_armed_at_delivery = self._first_sync_done and self._room_member_join_hooks_armed
+            dispatch = self._sync_cache_trust.dispatch_callback()
 
             async def error_handler() -> None:
                 try:
@@ -1114,7 +1124,7 @@ class AgentBot:
                 except asyncio.CancelledError:
                     pass
                 except Exception:
-                    self._sync_cache_trust.mark_callback_failed()
+                    self._sync_cache_trust.mark_callback_failed(dispatch)
                     logger.exception("Error in event callback")
 
             create_background_task(error_handler(), owner=self._runtime_view)
@@ -1177,6 +1187,9 @@ class AgentBot:
         first_sync_response = not self._first_sync_done
         room_member_join_hooks_were_armed = self._room_member_join_hooks_armed
         room_member_join_hook_plan = _RoomMemberJoinSyncHookPlan()
+        # Taken before this response can certify, so a side effect that fails
+        # replays the batch it belongs to rather than the one it produced.
+        dispatch = self._sync_cache_trust.dispatch_callback()
         self.last_sync_time = mark_matrix_sync_success(self.agent_name)
         self._last_sync_monotonic = time.monotonic()
 
@@ -1223,10 +1236,10 @@ class AgentBot:
                 room_member_join_hook_plan=room_member_join_hook_plan,
             )
         except asyncio.CancelledError:
-            self._sync_cache_trust.mark_callback_failed()
+            self._sync_cache_trust.mark_callback_failed(dispatch)
             raise
         except Exception:
-            self._sync_cache_trust.mark_callback_failed()
+            self._sync_cache_trust.mark_callback_failed(dispatch)
             raise
         if self._calls_reconcile_pending:
             self._calls_reconcile_pending = False
@@ -1306,7 +1319,6 @@ class AgentBot:
 
     def _register_call_manager_callbacks(self, client: nio.AsyncClient) -> None:
         """Build the optional call manager and wire its Matrix callbacks."""
-        callback_failed = self._sync_cache_trust.mark_callback_failed
         self._call_manager = maybe_build_call_manager(
             agent_name=self.agent_name,
             config=self.config,
@@ -1320,7 +1332,7 @@ class AgentBot:
             _create_task_wrapper(
                 self._on_room_membership_event,
                 owner=self._runtime_view,
-                on_error=callback_failed,
+                sync_cache_trust=self._sync_cache_trust,
             ),
             nio.RoomMemberEvent,
         )
@@ -1330,7 +1342,7 @@ class AgentBot:
             _create_task_wrapper(
                 self._call_manager.on_room_event,
                 owner=self._runtime_view,
-                on_error=callback_failed,
+                sync_cache_trust=self._sync_cache_trust,
             ),
             nio.UnknownEvent,
         )
@@ -1338,7 +1350,7 @@ class AgentBot:
             _create_task_wrapper(  # ty: ignore[invalid-argument-type]  # matrix-nio callback types are too strict here
                 self._call_manager.on_to_device_event,
                 owner=self._runtime_view,
-                on_error=callback_failed,
+                sync_cache_trust=self._sync_cache_trust,
             ),
             AuthenticatedToDeviceEvent,
         )
@@ -1444,16 +1456,23 @@ class AgentBot:
             await asyncio.to_thread(interactive.init_persistence, self.runtime_paths.storage_root)
             client = self.client
             assert client is not None
-            callback_failed = self._sync_cache_trust.mark_callback_failed
 
             # Register event callbacks - wrap them to run as background tasks
             # This ensures the sync loop is never blocked, allowing stop reactions to work
             client.add_event_callback(
-                _create_task_wrapper(self._on_invite, owner=self._runtime_view, on_error=callback_failed),
+                _create_task_wrapper(
+                    self._on_invite,
+                    owner=self._runtime_view,
+                    sync_cache_trust=self._sync_cache_trust,
+                ),
                 nio.InviteEvent,  # ty: ignore[invalid-argument-type]  # InviteEvent doesn't inherit Event
             )
             client.add_event_callback(
-                _create_task_wrapper(self._on_message, owner=self._runtime_view, on_error=callback_failed),
+                _create_task_wrapper(
+                    self._on_message,
+                    owner=self._runtime_view,
+                    sync_cache_trust=self._sync_cache_trust,
+                ),
                 nio.RoomMessageText,
             )
             client.add_event_callback(
@@ -1461,7 +1480,11 @@ class AgentBot:
                 nio.RedactionEvent,
             )
             client.add_event_callback(
-                _create_task_wrapper(self._on_reaction, owner=self._runtime_view, on_error=callback_failed),
+                _create_task_wrapper(
+                    self._on_reaction,
+                    owner=self._runtime_view,
+                    sync_cache_trust=self._sync_cache_trust,
+                ),
                 nio.ReactionEvent,
             )
 
@@ -1469,7 +1492,7 @@ class AgentBot:
             media_callback = _create_task_wrapper(
                 self._on_media_message,
                 owner=self._runtime_view,
-                on_error=callback_failed,
+                sync_cache_trust=self._sync_cache_trust,
             )
             for event_type in MATRIX_MEDIA_EVENT_TYPES:
                 client.add_event_callback(media_callback, event_type)
@@ -1477,7 +1500,7 @@ class AgentBot:
                 _create_task_wrapper(
                     self._on_unknown_event,
                     owner=self._runtime_view,
-                    on_error=callback_failed,
+                    sync_cache_trust=self._sync_cache_trust,
                 ),
                 nio.UnknownEvent,
             )
@@ -1485,7 +1508,7 @@ class AgentBot:
                 _create_task_wrapper(
                     self._on_decryption_failure,
                     owner=self._runtime_view,
-                    on_error=callback_failed,
+                    sync_cache_trust=self._sync_cache_trust,
                 ),
                 nio.MegolmEvent,
             )
@@ -1498,7 +1521,7 @@ class AgentBot:
                 callback_wrapper=lambda callback: _create_task_wrapper(
                     callback,
                     owner=self._runtime_view,
-                    on_error=callback_failed,
+                    sync_cache_trust=self._sync_cache_trust,
                 ),
             )
             await self._set_presence_with_model_info()
@@ -1720,7 +1743,7 @@ class AgentBot:
             owner=self._runtime_view,
             shutdown_intent=shutdown_intent,
         )
-        callback_failure_count = self._runtime_view.callback_failure_count
+        callback_failure_count = self._sync_cache_trust.outstanding_callback_failures
         if (
             background_tasks_completed
             and drain_result.completed

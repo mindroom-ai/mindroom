@@ -1110,7 +1110,7 @@ async def test_callback_failure_clears_saved_checkpoint_immediately(tmp_path: Pa
     callback = _create_task_wrapper(
         failing_callback,
         owner=bot._runtime_view,
-        on_error=bot._sync_cache_trust.mark_callback_failed,
+        sync_cache_trust=bot._sync_cache_trust,
     )
     await callback()
     await wait_for_background_tasks(timeout=0.5, owner=bot._runtime_view)

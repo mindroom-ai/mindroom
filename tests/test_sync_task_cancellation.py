@@ -1125,6 +1125,7 @@ async def test_full_state_only_after_successful_first_sync() -> None:
     bot.rooms = []
     bot.client = FakeClient()
     bot.orchestrator = None
+    bot._sync_cache_trust = MagicMock()
     bot._runtime_view = BotRuntimeState(
         client=bot.client,
         config=MagicMock(spec=Config),
@@ -1263,6 +1264,7 @@ async def test_sliding_sync_response_marks_sync_success() -> None:
     bot._calls_reconcile_pending = False
     bot._room_member_join_hooks_armed = False
     bot.orchestrator = None
+    bot._sync_cache_trust = MagicMock()
 
     await AgentBot._on_sync_response(bot, nio.SlidingSyncResponse("pos"))
 
