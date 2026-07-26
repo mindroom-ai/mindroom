@@ -104,6 +104,23 @@ def test_checkpoint_codec_round_trip_and_absent_legacy_field() -> None:
     assert legacy.terminal_edit_checkpoint is None
 
 
+def test_settled_terminal_delivery_receipt_round_trips_in_ledger() -> None:
+    record = TurnRecord.create(
+        ["$source"],
+        response_event_id="$visible",
+        correlation_id="corr-1",
+        settled_terminal_delivery_correlation_id="corr-1",
+    )
+
+    decoded = TurnRecordCodec.from_ledger_record(
+        "$source",
+        TurnRecordCodec.to_ledger_record(record),
+    )
+
+    assert decoded is not None
+    assert decoded.settled_terminal_delivery_correlation_id == "corr-1"
+
+
 def test_checkpoint_commit_sets_canonical_terminal_authority_before_restart(
     tmp_path: Path,
 ) -> None:
@@ -123,6 +140,98 @@ def test_checkpoint_commit_sets_canonical_terminal_authority_before_restart(
     assert committed.terminal_edit_checkpoint == _checkpoint()
     restarted = _store(tmp_path).get_turn_record("$source")
     assert restarted == committed
+
+
+def test_completed_turn_commits_newer_same_target_regeneration_checkpoint(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    pending = store.record_pending_turn(_pending_turn())
+    assert pending is not None
+    store.record_turn(replace(pending, completed=True, response_event_id="$visible"))
+    completed = store.get_turn_record("$source")
+    assert completed is not None
+    candidate = replace(
+        completed,
+        correlation_id="$edit",
+        source_event_revisions={"$source": (1, "$edit")},
+    )
+    edit_checkpoint = replace(
+        _checkpoint(),
+        transaction_id="mindroom-terminal-edit-episode",
+        correlation_id="$edit",
+        target_was_placeholder=False,
+    )
+
+    committed = store.commit_terminal_checkpoint(
+        completed,
+        response_event_id="$visible",
+        checkpoint=edit_checkpoint,
+        regeneration_turn_record=candidate,
+    )
+
+    assert committed is not None
+    assert committed.response_event_id == "$visible"
+    assert committed.terminal_edit_checkpoint == edit_checkpoint
+
+
+def test_completed_turn_rejects_checkpoint_for_unrelated_regeneration_target(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    pending = store.record_pending_turn(_pending_turn())
+    assert pending is not None
+    store.record_turn(replace(pending, completed=True, response_event_id="$visible"))
+    completed = store.get_turn_record("$source")
+    assert completed is not None
+
+    committed = store.commit_terminal_checkpoint(
+        completed,
+        response_event_id="$visible",
+        checkpoint=replace(
+            _checkpoint(),
+            correlation_id="$edit",
+            target_was_placeholder=False,
+        ),
+        regeneration_turn_record=replace(
+            completed,
+            response_event_id="$other-visible",
+            correlation_id="$edit",
+            source_event_revisions={"$source": (1, "$edit")},
+        ),
+    )
+
+    assert committed is None
+    assert store.get_turn_record("$source") == completed
+
+
+def test_completed_regeneration_episode_cannot_rearm_old_finalization(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    pending = store.record_pending_turn(_pending_turn())
+    assert pending is not None
+    completed_edit = replace(
+        pending,
+        completed=True,
+        response_event_id="$visible",
+        correlation_id="$edit",
+        source_event_revisions={"$source": (1, "$edit")},
+    )
+    store.record_turn(completed_edit)
+    completed_edit = store.get_turn_record("$source")
+    assert completed_edit is not None
+
+    assert (
+        store.commit_terminal_checkpoint(
+            completed_edit,
+            response_event_id="$visible",
+            checkpoint=replace(
+                _checkpoint(),
+                transaction_id="mindroom-terminal-duplicate-edit",
+                correlation_id="$edit",
+                target_was_placeholder=False,
+            ),
+            regeneration_turn_record=completed_edit,
+        )
+        is None
+    )
 
 
 def test_checkpoint_scan_returns_each_canonical_turn_once(tmp_path: Path) -> None:
@@ -205,6 +314,73 @@ def test_checkpoint_clear_requires_matching_transaction_and_lifecycle_convergenc
 
     assert cleared is not None
     assert cleared.terminal_edit_checkpoint is None
+    assert cleared.settled_terminal_delivery_correlation_id == _checkpoint().correlation_id
+
+
+@pytest.mark.parametrize("frozen_time", [100.0, 0.0], ids=["equal", "regressed"])
+def test_checkpoint_lifecycle_cas_advances_without_wall_clock_order(
+    tmp_path: Path,
+    frozen_time: float,
+) -> None:
+    store = _store(tmp_path)
+    pending = store.record_pending_turn(_pending_turn())
+    assert pending is not None
+
+    with patch("mindroom.handled_turns.time.time", return_value=frozen_time):
+        committed = store.commit_terminal_checkpoint(
+            pending,
+            response_event_id="$visible",
+            checkpoint=_checkpoint(),
+        )
+        assert committed is not None
+        claimed = store.update_terminal_checkpoint(
+            committed,
+            expected_transaction_id=_checkpoint().transaction_id,
+            update=lambda checkpoint: replace(
+                checkpoint,
+                after_response_claimed=True,
+                interactive_completed=True,
+            ),
+        )
+        assert claimed is not None
+        cleared = store.clear_terminal_checkpoint(
+            claimed,
+            expected_transaction_id=_checkpoint().transaction_id,
+        )
+
+    assert cleared is not None
+    assert cleared.terminal_edit_checkpoint is None
+
+
+@pytest.mark.parametrize("redacted_event_id", ["$source", "$visible"], ids=["source", "target"])
+def test_redaction_cas_advances_when_wall_clock_regresses(
+    tmp_path: Path,
+    redacted_event_id: str,
+) -> None:
+    store = _store(tmp_path)
+    pending = store.record_pending_turn(_pending_turn())
+    assert pending is not None
+    committed = store.commit_terminal_checkpoint(
+        pending,
+        response_event_id="$visible",
+        checkpoint=_checkpoint(),
+    )
+    assert committed is not None
+
+    with patch("mindroom.handled_turns.time.time", return_value=0.0):
+        store.mark_source_redacted(redacted_event_id)
+
+    owner = store.get_turn_record("$source")
+    assert owner is not None
+    if redacted_event_id == "$source":
+        assert owner.redacted_source_event_ids == ("$source",)
+        assert owner.terminal_edit_checkpoint is not None
+    else:
+        assert owner.terminal_edit_checkpoint is None
+        assert owner.response_event_id is None
+        tombstone = store.get_turn_record("$visible")
+        assert tombstone is not None
+        assert tombstone.redacted_source_event_ids == ("$visible",)
 
 
 def test_record_turn_merge_and_pruning_retain_unsettled_checkpoint(tmp_path: Path) -> None:

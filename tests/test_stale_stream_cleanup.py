@@ -72,6 +72,10 @@ USER_ID = "@user:example.com"
 OTHER_USER_ID = "@other-user:example.com"
 
 
+async def _no_pending_terminal_deliveries(_room_id: str) -> frozenset[str]:
+    return frozenset()
+
+
 def _make_config(tmp_path: Path) -> Config:
     runtime_paths = test_runtime_paths(tmp_path)
     config = bind_runtime_paths(
@@ -260,7 +264,7 @@ async def _run_cleanup(
         return await cleanup_stale_streaming_room(
             client,
             room_id=ROOM_ID,
-            actors={BOT_USER_ID: StaleStreamCleanupActor(client, None, lambda _room_id: frozenset())},
+            actors={BOT_USER_ID: StaleStreamCleanupActor(client, None, _no_pending_terminal_deliveries)},
             bot_user_ids={BOT_USER_ID} if bot_user_ids is None else bot_user_ids,
             config=config,
             runtime_paths=runtime_paths_for(config),
@@ -2177,7 +2181,7 @@ async def test_targeted_recovery_scans_only_handoff_rooms_without_a_clock_cutoff
     """Replacement recovery must exclude unrelated rooms and preserve the Matrix clock domain."""
     config = _make_config(tmp_path)
     client = make_matrix_client_mock(user_id=BOT_USER_ID)
-    actors = {BOT_USER_ID: StaleStreamCleanupActor(client, MagicMock(), lambda _room_id: frozenset())}
+    actors = {BOT_USER_ID: StaleStreamCleanupActor(client, MagicMock(), _no_pending_terminal_deliveries)}
 
     with (
         patch(
@@ -2249,7 +2253,7 @@ async def test_failed_targeted_room_scan_remains_unscanned_for_retry(tmp_path: P
     """A transient room-history failure must leave the claimed handoff retryable."""
     config = _make_config(tmp_path)
     client = make_matrix_client_mock(user_id=BOT_USER_ID)
-    actors = {BOT_USER_ID: StaleStreamCleanupActor(client, MagicMock(), lambda _room_id: frozenset())}
+    actors = {BOT_USER_ID: StaleStreamCleanupActor(client, MagicMock(), _no_pending_terminal_deliveries)}
 
     with (
         patch(
@@ -3140,8 +3144,8 @@ async def test_recovery_scans_unique_rooms_and_resumes_before_slow_rooms_finish(
     router_client = make_matrix_client_mock(user_id=router_user_id)
     agent_client = make_matrix_client_mock(user_id=BOT_USER_ID)
     actors = {
-        router_user_id: StaleStreamCleanupActor(router_client, MagicMock(), lambda _room_id: frozenset()),
-        BOT_USER_ID: StaleStreamCleanupActor(agent_client, MagicMock(), lambda _room_id: frozenset()),
+        router_user_id: StaleStreamCleanupActor(router_client, MagicMock(), _no_pending_terminal_deliveries),
+        BOT_USER_ID: StaleStreamCleanupActor(agent_client, MagicMock(), _no_pending_terminal_deliveries),
     }
     slow_room_started = asyncio.Event()
     release_slow_room = asyncio.Event()
@@ -3240,7 +3244,7 @@ async def test_recovery_resumes_all_51_rooms_even_when_newest_room_finishes_last
         "@actual_router:localhost": StaleStreamCleanupActor(
             router_client,
             MagicMock(),
-            lambda _room_id: frozenset(),
+            _no_pending_terminal_deliveries,
         ),
     }
     room_ids = [f"!room-{index}:example.com" for index in range(51)]
@@ -3309,7 +3313,7 @@ async def test_recovery_without_resume_client_still_cleans_rooms(tmp_path: Path)
     config = _make_config(tmp_path)
     config.defaults.auto_resume_after_restart = True
     client = make_matrix_client_mock(user_id=BOT_USER_ID)
-    actors = {BOT_USER_ID: StaleStreamCleanupActor(client, MagicMock(), lambda _room_id: frozenset())}
+    actors = {BOT_USER_ID: StaleStreamCleanupActor(client, MagicMock(), _no_pending_terminal_deliveries)}
     interrupted = InterruptedThread(
         room_id=ROOM_ID,
         thread_id="$thread",
@@ -3352,8 +3356,8 @@ async def test_shared_room_cleanup_routes_edits_through_each_message_owner(tmp_p
     first_client = make_matrix_client_mock(user_id=BOT_USER_ID)
     second_client = make_matrix_client_mock(user_id=OTHER_BOT_USER_ID)
     actors = {
-        BOT_USER_ID: StaleStreamCleanupActor(first_client, MagicMock(), lambda _room_id: frozenset()),
-        OTHER_BOT_USER_ID: StaleStreamCleanupActor(second_client, MagicMock(), lambda _room_id: frozenset()),
+        BOT_USER_ID: StaleStreamCleanupActor(first_client, MagicMock(), _no_pending_terminal_deliveries),
+        OTHER_BOT_USER_ID: StaleStreamCleanupActor(second_client, MagicMock(), _no_pending_terminal_deliveries),
     }
     scanned_state = stale_stream_cleanup_module._ScannedRoomMessageStates(
         message_states={

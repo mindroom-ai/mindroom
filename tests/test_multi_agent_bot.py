@@ -47,6 +47,7 @@ from tests.bot_helpers import (
 from tests.conftest import (
     TEST_PASSWORD,
     drain_coalescing,
+    mark_response_ready,
     runtime_paths_for,
     unwrap_extracted_collaborator,
     wrap_extracted_collaborators,
@@ -561,6 +562,7 @@ class TestAgentBot(AgentBotTestBase):
         )
         bot.client = AsyncMock()
         _install_runtime_cache_support(bot)
+        mark_response_ready(bot)
 
         # Mock presence check to return user online when streaming is enabled
         # We need to create a proper mock response that will be returned by get_presence
@@ -1134,6 +1136,7 @@ class TestAgentBot(AgentBotTestBase):
             enable_streaming=enable_streaming,
         )
         _install_runtime_cache_support(bot)
+        mark_response_ready(bot)
         bot.client = AsyncMock()
 
         # Mock orchestrator with agent_bots

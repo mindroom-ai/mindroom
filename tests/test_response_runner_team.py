@@ -54,8 +54,10 @@ from tests.conftest import (
     TEST_PASSWORD,
     delivered_matrix_event,
     delivered_matrix_side_effect,
+    mark_response_ready,
     message_origin,
     patch_response_runner_module,
+    record_pending_response_turn,
     replace_delivery_gateway_deps,
     request_envelope,
     runtime_paths_for,
@@ -113,6 +115,7 @@ class TestAgentBot(AgentBotTestBase):
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
         _install_runtime_cache_support(bot)
+        mark_response_ready(bot)
         bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [before_hook, after_hook])])
         bot.orchestrator = MagicMock(
             current_config=config,
@@ -120,6 +123,14 @@ class TestAgentBot(AgentBotTestBase):
             runtime_paths=runtime_paths_for(config),
         )
         matrix_ids = entity_ids(config, runtime_paths_for(config))
+        request = ResponseRequest(
+            thread_history=[],
+            user_id="@user:localhost",
+            prompt="team prompt",
+            response_envelope=_hook_envelope(body="team prompt", source_event_id="$team-root"),
+            correlation_id="corr-team",
+        )
+        record_pending_response_turn(bot, request)
         with (
             patch(
                 "mindroom.delivery_gateway.send_message_result",
@@ -136,13 +147,7 @@ class TestAgentBot(AgentBotTestBase):
             ),
         ):
             resolution = await bot._response_runner.generate_team_response_helper(
-                ResponseRequest(
-                    thread_history=[],
-                    user_id="@user:localhost",
-                    prompt="team prompt",
-                    response_envelope=_hook_envelope(body="team prompt", source_event_id="$team-root"),
-                    correlation_id="corr-team",
-                ),
+                request,
                 team_agents=[matrix_ids["calculator"], matrix_ids["general"]],
                 team_mode="collaborate",
             )
@@ -164,6 +169,7 @@ class TestAgentBot(AgentBotTestBase):
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
         _install_runtime_cache_support(bot)
+        mark_response_ready(bot)
         bot.orchestrator = MagicMock(
             current_config=config,
             config=config,
@@ -171,6 +177,14 @@ class TestAgentBot(AgentBotTestBase):
         )
         matrix_ids = entity_ids(config, runtime_paths_for(config))
         bot._conversation_state_writer.create_storage = MagicMock(return_value=MagicMock())
+        request = ResponseRequest(
+            thread_history=[],
+            user_id="@user:localhost",
+            prompt="team prompt",
+            response_envelope=_hook_envelope(body="team prompt", source_event_id="$team-root"),
+            correlation_id="corr-team",
+        )
+        record_pending_response_turn(bot, request)
         with (
             patch(
                 "mindroom.delivery_gateway.send_message_result",
@@ -187,13 +201,7 @@ class TestAgentBot(AgentBotTestBase):
             ),
         ):
             resolution = await bot._response_runner.generate_team_response_helper(
-                ResponseRequest(
-                    thread_history=[],
-                    user_id="@user:localhost",
-                    prompt="team prompt",
-                    response_envelope=_hook_envelope(body="team prompt", source_event_id="$team-root"),
-                    correlation_id="corr-team",
-                ),
+                request,
                 team_agents=[matrix_ids["calculator"], matrix_ids["general"]],
                 team_mode="collaborate",
             )
@@ -212,6 +220,7 @@ class TestAgentBot(AgentBotTestBase):
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
         _install_runtime_cache_support(bot)
+        mark_response_ready(bot)
         bot.orchestrator = MagicMock(
             current_config=config,
             config=config,
@@ -219,6 +228,18 @@ class TestAgentBot(AgentBotTestBase):
         )
         matrix_ids = entity_ids(config, runtime_paths_for(config))
         mock_team_response = AsyncMock(return_value="Team reply")
+        request = ResponseRequest(
+            thread_history=[],
+            user_id="@user:localhost",
+            prompt="Summarize the latest invoice.",
+            model_prompt="Available attachment IDs: att_invoice. Use tool calls to inspect or process them.",
+            response_envelope=_hook_envelope(
+                body="Summarize the latest invoice.",
+                source_event_id="$team-root",
+            ),
+            correlation_id="corr-team",
+        )
+        record_pending_response_turn(bot, request)
 
         with (
             patch(
@@ -236,17 +257,7 @@ class TestAgentBot(AgentBotTestBase):
             ),
         ):
             resolution = await bot._response_runner.generate_team_response_helper(
-                ResponseRequest(
-                    thread_history=[],
-                    user_id="@user:localhost",
-                    prompt="Summarize the latest invoice.",
-                    model_prompt="Available attachment IDs: att_invoice. Use tool calls to inspect or process them.",
-                    response_envelope=_hook_envelope(
-                        body="Summarize the latest invoice.",
-                        source_event_id="$team-root",
-                    ),
-                    correlation_id="corr-team",
-                ),
+                request,
                 team_agents=[matrix_ids["calculator"], matrix_ids["general"]],
                 team_mode="collaborate",
             )
@@ -271,6 +282,7 @@ class TestAgentBot(AgentBotTestBase):
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
         _install_runtime_cache_support(bot)
+        mark_response_ready(bot)
         bot.orchestrator = MagicMock(
             current_config=config,
             config=config,
@@ -279,6 +291,18 @@ class TestAgentBot(AgentBotTestBase):
         matrix_ids = entity_ids(config, runtime_paths_for(config))
         mock_team_response = AsyncMock(return_value="Team reply")
         timestamped_prompt = "[2026-03-20 08:15 PDT] What time is it?"
+        request = ResponseRequest(
+            thread_history=[],
+            user_id="@user:localhost",
+            prompt="What time is it?",
+            model_prompt=timestamped_prompt,
+            response_envelope=_hook_envelope(
+                body="What time is it?",
+                source_event_id="$team-root",
+            ),
+            correlation_id="corr-team",
+        )
+        record_pending_response_turn(bot, request)
 
         with (
             patch(
@@ -296,17 +320,7 @@ class TestAgentBot(AgentBotTestBase):
             ),
         ):
             resolution = await bot._response_runner.generate_team_response_helper(
-                ResponseRequest(
-                    thread_history=[],
-                    user_id="@user:localhost",
-                    prompt="What time is it?",
-                    model_prompt=timestamped_prompt,
-                    response_envelope=_hook_envelope(
-                        body="What time is it?",
-                        source_event_id="$team-root",
-                    ),
-                    correlation_id="corr-team",
-                ),
+                request,
                 team_agents=[matrix_ids["calculator"], matrix_ids["general"]],
                 team_mode="collaborate",
             )
@@ -339,6 +353,7 @@ class TestAgentBot(AgentBotTestBase):
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
         bot.client = AsyncMock()
         _install_runtime_cache_support(bot)
+        mark_response_ready(bot)
         bot.orchestrator = MagicMock(
             current_config=config,
             config=config,
@@ -363,6 +378,14 @@ class TestAgentBot(AgentBotTestBase):
             ),
         )
         history = ThreadHistoryResult([], is_full_history=True)
+        request = ResponseRequest(
+            thread_history=[],
+            user_id="@user:localhost",
+            prompt="team prompt",
+            response_envelope=envelope,
+            correlation_id="corr-team",
+        )
+        record_pending_response_turn(bot, request)
 
         with (
             patch(
@@ -382,13 +405,7 @@ class TestAgentBot(AgentBotTestBase):
             ),
         ):
             resolution = await bot._response_runner.generate_team_response_helper(
-                ResponseRequest(
-                    thread_history=[],
-                    user_id="@user:localhost",
-                    prompt="team prompt",
-                    response_envelope=envelope,
-                    correlation_id="corr-team",
-                ),
+                request,
                 team_agents=[matrix_ids["calculator"], matrix_ids["general"]],
                 team_mode="collaborate",
             )
@@ -421,6 +438,7 @@ class TestAgentBot(AgentBotTestBase):
         _wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
         _install_runtime_cache_support(bot)
+        mark_response_ready(bot)
         bot.orchestrator = MagicMock(
             current_config=config,
             config=config,
@@ -582,6 +600,7 @@ class TestAgentBot(AgentBotTestBase):
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
         _install_runtime_cache_support(bot)
+        mark_response_ready(bot)
         bot.orchestrator = MagicMock(
             current_config=config,
             config=config,
@@ -591,6 +610,19 @@ class TestAgentBot(AgentBotTestBase):
         interactive_response = """```interactive
 {"question":"Choose","options":[{"emoji":"✅","label":"Yes","value":"yes"}]}
 ```"""
+        request = ResponseRequest(
+            thread_history=[],
+            user_id="@user:localhost",
+            prompt="team prompt",
+            response_envelope=request_envelope(
+                room_id="!test:localhost",
+                reply_to_event_id="$team-root",
+                prompt="team prompt",
+                user_id="@user:localhost",
+                agent_name=bot.agent_name,
+            ),
+        )
+        record_pending_response_turn(bot, request)
         with (
             patch_response_runner_module(
                 typing_indicator=_noop_typing_indicator,
@@ -609,18 +641,7 @@ class TestAgentBot(AgentBotTestBase):
             patch("mindroom.bot.interactive.add_reaction_buttons", new_callable=AsyncMock) as mock_add_buttons,
         ):
             resolution = await bot._response_runner.generate_team_response_helper(
-                ResponseRequest(
-                    thread_history=[],
-                    user_id="@user:localhost",
-                    prompt="team prompt",
-                    response_envelope=request_envelope(
-                        room_id="!test:localhost",
-                        reply_to_event_id="$team-root",
-                        prompt="team prompt",
-                        user_id="@user:localhost",
-                        agent_name=bot.agent_name,
-                    ),
-                ),
+                request,
                 team_agents=[matrix_ids["calculator"], matrix_ids["general"]],
                 team_mode="collaborate",
             )

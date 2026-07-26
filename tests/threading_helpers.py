@@ -582,6 +582,8 @@ class ThreadingBehaviorTestBase:
         bot.event_cache = _runtime_event_cache()
         bot.event_cache_write_coordinator = _install_runtime_write_coordinator(bot)
         bot.startup_thread_prewarm_registry = StartupThreadPrewarmRegistry()
+        bot.running = True
+        bot._first_sync_done = True
 
         # Initialize components that depend on client
 

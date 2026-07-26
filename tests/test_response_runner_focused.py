@@ -310,6 +310,7 @@ async def test_begin_locked_turn_suppresses_source_redacted_before_response_regi
     prepared_request = await runner._begin_locked_turn(
         request,
         resolved_target=target,
+        response_kind="ai",
         history_scope=runner.deps.state_writer.history_scope(),
         execution_identity=runner.deps.tool_runtime.build_execution_identity(
             target=target,
@@ -350,6 +351,7 @@ async def test_begin_locked_turn_waits_for_cancelled_source_preparation(tmp_path
         runner._begin_locked_turn(
             request,
             resolved_target=target,
+            response_kind="ai",
             history_scope=runner.deps.state_writer.history_scope(),
             execution_identity=runner.deps.tool_runtime.build_execution_identity(
                 target=target,
@@ -397,6 +399,7 @@ async def test_begin_locked_turn_settles_external_placeholder_when_source_is_red
     prepared_request = await runner._begin_locked_turn(
         request,
         resolved_target=target,
+        response_kind="ai",
         history_scope=runner.deps.state_writer.history_scope(),
         execution_identity=runner.deps.tool_runtime.build_execution_identity(
             target=target,
@@ -456,6 +459,7 @@ async def test_begin_locked_turn_excludes_early_placeholder_from_refreshed_histo
     prepared_request = await runner._begin_locked_turn(
         request,
         resolved_target=target,
+        response_kind="ai",
         history_scope=runner.deps.state_writer.history_scope(),
         execution_identity=runner.deps.tool_runtime.build_execution_identity(
             target=target,

@@ -89,8 +89,10 @@ from tests.bot_helpers import (
 from tests.conftest import (
     delivered_matrix_event,
     delivered_matrix_side_effect,
+    mark_response_ready,
     message_origin,
     patch_response_runner_module,
+    record_pending_response_turn,
     replace_delivery_gateway_deps,
     request_envelope,
     runtime_paths_for,
@@ -2287,6 +2289,7 @@ class TestAgentBot(AgentBotTestBase):
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
         _install_runtime_cache_support(bot)
+        mark_response_ready(bot)
         bot._knowledge_access_support.resolve_for_agent = MagicMock(return_value=_KnowledgeResolution(knowledge=None))
         thread_history = [
             _visible_message(
@@ -2297,6 +2300,20 @@ class TestAgentBot(AgentBotTestBase):
             )
             for i in range(4)
         ]
+        request = ResponseRequest(
+            prompt="Summarize this thread",
+            thread_history=thread_history,
+            user_id="@alice:localhost",
+            response_envelope=request_envelope(
+                room_id="!test:localhost",
+                reply_to_event_id="$event",
+                thread_id="$thread",
+                prompt="Summarize this thread",
+                user_id="@alice:localhost",
+                agent_name=bot.agent_name,
+            ),
+        )
+        record_pending_response_turn(bot, request)
 
         with (
             patch("mindroom.response_runner.typing_indicator", _noop_typing_indicator),
@@ -2327,21 +2344,7 @@ class TestAgentBot(AgentBotTestBase):
                 new_callable=AsyncMock,
             ) as mock_thread_summary,
         ):
-            await bot._response_runner.generate_response(
-                ResponseRequest(
-                    prompt="Summarize this thread",
-                    thread_history=thread_history,
-                    user_id="@alice:localhost",
-                    response_envelope=request_envelope(
-                        room_id="!test:localhost",
-                        reply_to_event_id="$event",
-                        thread_id="$thread",
-                        prompt="Summarize this thread",
-                        user_id="@alice:localhost",
-                        agent_name=bot.agent_name,
-                    ),
-                ),
-            )
+            await bot._response_runner.generate_response(request)
 
         if scheduled_tasks:
             await asyncio.gather(*scheduled_tasks)
@@ -2359,9 +2362,7 @@ class TestAgentBot(AgentBotTestBase):
         assert summary_kwargs["runtime_paths"] is bot.runtime_paths
         assert summary_kwargs["conversation_cache"] is bot._conversation_cache
         assert summary_kwargs["entity_name"] == bot.agent_name
-        assert summary_kwargs["raise_on_failure"] is True
-        assert callable(summary_kwargs["frozen_delivery"])
-        assert "thread_summary_!test:localhost_$thread" not in scheduled_names
+        assert "thread_summary_!test:localhost_$thread" in scheduled_names
 
     @pytest.mark.asyncio
     async def test_generate_response_keeps_first_turn_follow_up_effects_in_new_thread(

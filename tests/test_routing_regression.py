@@ -39,6 +39,7 @@ from tests.conftest import (
     install_runtime_cache_support,
     make_matrix_client_mock,
     make_visible_message,
+    mark_response_ready,
     message_origin,
     runtime_paths_for,
     test_runtime_paths,
@@ -140,7 +141,8 @@ def setup_test_bot(
         enable_streaming=enable_streaming,
     )
     bot.client = make_matrix_client_mock(user_id=agent.user_id)
-    return install_runtime_cache_support(bot)
+    install_runtime_cache_support(bot)
+    return mark_response_ready(bot)
 
 
 @pytest.mark.asyncio

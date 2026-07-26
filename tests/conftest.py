@@ -50,6 +50,7 @@ from mindroom.delivery_gateway import DeliveryGateway, EditTextRequest, FinalDel
 from mindroom.dispatch_source import ScheduledHistoryBudget
 from mindroom.edit_regenerator import EditRegenerator
 from mindroom.final_delivery import FinalDeliveryOutcome
+from mindroom.handled_turns import TurnRecord
 from mindroom.history.runtime import (
     ScopeSessionContext,
     _resolve_history_scope,
@@ -178,6 +179,7 @@ __all__ = [
     "make_event_cache_write_coordinator_mock",
     "make_matrix_client_mock",
     "make_visible_message",
+    "mark_response_ready",
     "message_origin",
     "normalize_console_output",
     "orchestrator_runtime_paths",
@@ -186,6 +188,7 @@ __all__ = [
     "prepare_history_for_run_for_test",
     "prepare_payload_via_seam",
     "prepared_dispatch_result",
+    "record_pending_response_turn",
     "replace_delivery_gateway_deps",
     "replace_edit_regenerator_deps",
     "replace_response_runner_deps",
@@ -865,6 +868,33 @@ def install_runtime_cache_support(bot: RuntimeBot) -> RuntimeBot:
     return bot
 
 
+def mark_response_ready(bot: RuntimeBot) -> RuntimeBot:
+    """Mark one test bot ready for terminal response delivery."""
+    bot.running = True
+    bot._first_sync_done = True
+    sync_bot_runtime_state(bot)
+    return bot
+
+
+def record_pending_response_turn(bot: RuntimeBot, request: ResponseRequest) -> TurnRecord:
+    """Seed the durable authority normally owned by the ingress pipeline."""
+    source_event_ids = request.source_event_ids or (request.response_envelope.source_event_id,)
+    correlation_id = request.correlation_id or request.reply_to_event_id or request.response_envelope.source_event_id
+    pending = unwrap_extracted_collaborator(bot._turn_store).record_pending_turn(
+        TurnRecord.create(
+            source_event_ids,
+            completed=False,
+            response_owner=bot.agent_name,
+            requester_id=request.user_id,
+            correlation_id=correlation_id,
+            history_scope=None,
+            conversation_target=request.response_envelope.target,
+        ),
+    )
+    assert pending is not None
+    return pending
+
+
 def install_call_manager_mock(bot: RuntimeBot, call_manager: object | None) -> None:
     """Install a call-manager fake through the shared test seam."""
     bot._call_manager = cast("CallManager | None", call_manager)
@@ -1102,7 +1132,7 @@ def terminal_delivery_coordinator_for(
     )
     coordinator.redact = AsyncMock()
     coordinator.owned_delivery = AsyncMock(return_value=None)
-    coordinator.pending_target_event_ids = MagicMock(return_value=frozenset())
+    coordinator.pending_target_event_ids = AsyncMock(return_value=frozenset())
     return coordinator
 
 

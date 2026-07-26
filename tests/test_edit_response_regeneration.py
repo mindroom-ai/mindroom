@@ -15,6 +15,7 @@ import pytest
 from agno.db.base import SessionType
 from agno.media import Audio
 from agno.run.agent import RunOutput
+from agno.run.base import RunStatus
 from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
@@ -56,6 +57,7 @@ from tests.conftest import (
     install_generate_response_mock,
     install_runtime_cache_support,
     make_matrix_client_mock,
+    mark_response_ready,
     patch_response_runner_module,
     replace_edit_regenerator_deps,
     replace_turn_controller_deps,
@@ -172,9 +174,12 @@ def _record_handled_turn(
     *,
     response_event_id: str | None = None,
     source_event_prompts: dict[str, str] | None = None,
+    source_event_revisions: dict[str, tuple[int, str]] | None = None,
+    suppressed_source_event_revisions: dict[str, tuple[int, str]] | None = None,
     source_event_metadata: dict[str, SourceEventMetadata] | None = None,
     response_owner: str | None = None,
     requester_id: str | None = "@user:example.com",
+    correlation_id: str | None = None,
     history_scope: HistoryScope | None = None,
     conversation_target: MessageTarget | None = None,
 ) -> None:
@@ -185,9 +190,12 @@ def _record_handled_turn(
             response_event_id=response_event_id,
             visible_echo_event_id=response_event_id,
             source_event_prompts=source_event_prompts,
+            source_event_revisions=source_event_revisions,
+            suppressed_source_event_revisions=suppressed_source_event_revisions,
             source_event_metadata=source_event_metadata,
             response_owner=response_owner,
             requester_id=requester_id,
+            correlation_id=correlation_id,
             history_scope=history_scope,
             conversation_target=conversation_target,
         ),
@@ -203,6 +211,38 @@ def _source_metadata_records(*source_event_ids: str) -> dict[str, dict[str, obje
         source_event_id: metadata.to_record()
         for source_event_id, metadata in _source_metadata(*source_event_ids).items()
     }
+
+
+def _edit_event(
+    *,
+    original_event_id: str = "$original:example.com",
+    edit_event_id: str = "$edit:example.com",
+    body: str = "updated original question",
+    timestamp: int = 1000001,
+) -> nio.RoomMessageText:
+    """Build one text edit with matching parsed and raw content."""
+    source = {
+        "content": {
+            "body": f"* {body}",
+            "msgtype": "m.text",
+            "m.new_content": {
+                "body": body,
+                "msgtype": "m.text",
+            },
+            "m.relates_to": {
+                "event_id": original_event_id,
+                "rel_type": "m.replace",
+            },
+        },
+        "event_id": edit_event_id,
+        "sender": "@user:example.com",
+        "origin_server_ts": timestamp,
+        "type": "m.room.message",
+        "room_id": "!test:example.com",
+    }
+    event = nio.RoomMessageText.from_dict(source)
+    event.source = source
+    return event
 
 
 def _tagged_prompt(source_event_ids: tuple[str, ...], prompts: dict[str, str]) -> str:
@@ -345,6 +385,7 @@ async def test_bot_regenerates_response_on_edit(tmp_path: Path) -> None:
 
     replace_edit_regenerator_deps(bot)
     replace_turn_policy_deps(bot)
+    mark_response_ready(bot)
 
     # Mock logger
     bot.logger = MagicMock()
@@ -1876,9 +1917,12 @@ async def test_handle_message_edit_does_not_mark_regeneration_success_when_exist
         )
 
         mock_generate_response.assert_awaited_once()
-        turn_store.record_turn.assert_called_once()
-        assert turn_store.record_turn.call_args.args[0].response_event_id == "$response:example.com"
+        turn_store.record_turn.assert_not_called()
         assert _response_event_id(bot, "$original:example.com") == "$response:example.com"
+        persisted = turn_store.get_turn_record("$original:example.com")
+        assert persisted is not None
+        assert persisted.correlation_id != "$edit:example.com"
+        assert persisted.source_event_revisions is None
         mock_remove_run.assert_called_once()
 
 
@@ -2334,6 +2378,261 @@ async def test_handle_message_edit_recovers_missing_ledger_row_from_interrupted_
     assert repaired.response_owner == "test_agent"
     assert repaired.history_scope == history_scope
     assert repaired.conversation_target == conversation_target
+
+
+@pytest.mark.asyncio
+async def test_interrupted_recovery_keeps_edit_revision_uncommitted_until_terminal_checkpoint(
+    tmp_path: Path,
+) -> None:
+    """Interrupted run metadata may recover context but not claim an undelivered edit."""
+    agent_user = AgentMatrixUser(
+        agent_name="test_agent",
+        user_id="@mindroom_test_agent:example.com",
+        display_name="Test Agent",
+        password="test_password",  # noqa: S106
+    )
+    config = _test_config(tmp_path)
+    bot = AgentBot(
+        agent_user=agent_user,
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        rooms=["!test:example.com"],
+    )
+    bot.client = make_matrix_client_mock(user_id=agent_user.user_id)
+    replace_edit_regenerator_deps(bot)
+    mark_response_ready(bot)
+    bot.logger = MagicMock()
+
+    source_event_id = "$original:example.com"
+    response_event_id = "$partial-response:example.com"
+    edit_revision = (1000001, "$edit:example.com")
+    target = MessageTarget.resolve("!test:example.com", None, source_event_id)
+    history_scope = _agent_history_scope("test_agent")
+    _record_handled_turn(
+        bot._turn_store,
+        [source_event_id],
+        response_event_id=response_event_id,
+        source_event_prompts={source_event_id: "original question"},
+        source_event_metadata=_source_metadata(source_event_id),
+        response_owner="test_agent",
+        history_scope=history_scope,
+        conversation_target=target,
+    )
+
+    session_id = create_session_id("!test:example.com", None)
+    interrupted_run = _build_interrupted_replay_run(
+        snapshot=build_interrupted_replay_snapshot(
+            user_message="updated original question",
+            user_message_is_structured=False,
+            partial_text="Half done",
+            completed_tools=[],
+            interrupted_tools=[],
+            run_metadata={
+                MATRIX_TURN_SCHEMA_VERSION_METADATA_KEY: TurnRecordCodec.schema_version(),
+                MATRIX_EVENT_ID_METADATA_KEY: source_event_id,
+                MATRIX_SOURCE_EVENT_IDS_METADATA_KEY: [source_event_id],
+                "matrix_source_event_prompts": {
+                    source_event_id: "updated original question",
+                },
+                "matrix_source_event_revisions": {
+                    source_event_id: list(edit_revision),
+                },
+                MATRIX_SOURCE_EVENT_METADATA_KEY: _source_metadata_records(source_event_id),
+                "correlation_id": edit_revision[1],
+                **_run_response_context_metadata(
+                    response_owner="test_agent",
+                    history_scope=history_scope,
+                    conversation_target=target,
+                ),
+            },
+            response_event_id=response_event_id,
+        ),
+        run_id="run-interrupted",
+        scope_id="test_agent",
+        session_id=session_id,
+        is_team=False,
+    )
+    storage = _FakeAgentStorage(
+        session=AgentSession(
+            session_id=session_id,
+            agent_id="test_agent",
+            runs=[interrupted_run],
+        ),
+    )
+    room = nio.MatrixRoom(room_id="!test:example.com", own_user_id=agent_user.user_id)
+    edit_event = _edit_event()
+    mock_ai_response = AsyncMock(return_value="Regenerated answer")
+    mock_terminal_edit = AsyncMock(side_effect=delivered_matrix_side_effect("$terminal-edit:example.com"))
+
+    with (
+        patch.object(bot._conversation_state_writer, "create_storage", return_value=storage),
+        patch.object(bot._conversation_resolver, "extract_message_context", new_callable=AsyncMock) as mock_context,
+        patch("mindroom.turn_store.remove_run_by_event_id", return_value=True),
+        patch_response_runner_module(
+            should_use_streaming=AsyncMock(return_value=False),
+            ai_response=mock_ai_response,
+        ),
+        patch("mindroom.terminal_delivery.send_message_result", new=mock_terminal_edit),
+    ):
+        mock_context.return_value = MagicMock(
+            am_i_mentioned=False,
+            is_thread=False,
+            thread_id=None,
+            thread_history=[],
+            mentioned_agents=[],
+            has_non_agent_mentions=False,
+            requires_model_history_refresh=False,
+        )
+
+        await bot._edit_regenerator.handle_message_edit(
+            room,
+            edit_event,
+            EventInfo.from_event(edit_event.source),
+            requester_user_id=edit_event.sender,
+        )
+
+    mock_ai_response.assert_awaited_once()
+    mock_terminal_edit.assert_awaited_once()
+    committed = bot._turn_store.get_turn_record(source_event_id)
+    assert committed is not None
+    assert committed.source_event_revisions == {source_event_id: edit_revision}
+    assert committed.correlation_id == edit_revision[1]
+    assert committed.terminal_edit_checkpoint is None
+    assert committed.settled_terminal_delivery_correlation_id == edit_revision[1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("interrupted_history", [False, True])
+async def test_equal_revision_retry_is_decided_by_locked_persisted_history(
+    tmp_path: Path,
+    *,
+    interrupted_history: bool,
+) -> None:
+    """Only an equal-revision edit whose persisted run is interrupted may reach the model."""
+    agent_user = AgentMatrixUser(
+        agent_name="test_agent",
+        user_id="@mindroom_test_agent:example.com",
+        display_name="Test Agent",
+        password="test_password",  # noqa: S106
+    )
+    config = _test_config(tmp_path)
+    bot = AgentBot(
+        agent_user=agent_user,
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        rooms=["!test:example.com"],
+    )
+    bot.client = make_matrix_client_mock(user_id=agent_user.user_id)
+    replace_edit_regenerator_deps(bot)
+    mark_response_ready(bot)
+    bot.logger = MagicMock()
+
+    source_event_id = "$original:example.com"
+    response_event_id = "$response:example.com"
+    edit_revision = (1000001, "$edit:example.com")
+    target = MessageTarget.resolve("!test:example.com", None, source_event_id)
+    history_scope = _agent_history_scope("test_agent")
+    _record_handled_turn(
+        bot._turn_store,
+        [source_event_id],
+        response_event_id=response_event_id,
+        source_event_prompts={source_event_id: "updated original question"},
+        source_event_revisions={source_event_id: edit_revision},
+        source_event_metadata=_source_metadata(source_event_id),
+        response_owner="test_agent",
+        correlation_id=edit_revision[1],
+        history_scope=history_scope,
+        conversation_target=target,
+    )
+
+    session_id = create_session_id("!test:example.com", None)
+    run_metadata = {
+        MATRIX_TURN_SCHEMA_VERSION_METADATA_KEY: TurnRecordCodec.schema_version(),
+        MATRIX_EVENT_ID_METADATA_KEY: source_event_id,
+        MATRIX_SOURCE_EVENT_IDS_METADATA_KEY: [source_event_id],
+        "matrix_source_event_prompts": {
+            source_event_id: "updated original question",
+        },
+        "matrix_source_event_revisions": {
+            source_event_id: list(edit_revision),
+        },
+        MATRIX_SOURCE_EVENT_METADATA_KEY: _source_metadata_records(source_event_id),
+        "correlation_id": edit_revision[1],
+        "matrix_response_event_id": response_event_id,
+        **_run_response_context_metadata(
+            response_owner="test_agent",
+            history_scope=history_scope,
+            conversation_target=target,
+        ),
+    }
+    persisted_run = (
+        _build_interrupted_replay_run(
+            snapshot=build_interrupted_replay_snapshot(
+                user_message="updated original question",
+                user_message_is_structured=False,
+                partial_text="Half done",
+                completed_tools=[],
+                interrupted_tools=[],
+                run_metadata=run_metadata,
+                response_event_id=response_event_id,
+            ),
+            run_id="run-interrupted",
+            scope_id="test_agent",
+            session_id=session_id,
+            is_team=False,
+        )
+        if interrupted_history
+        else RunOutput(
+            run_id="run-completed",
+            session_id=session_id,
+            agent_id="test_agent",
+            status=RunStatus.completed,
+            content="Completed answer",
+            metadata=run_metadata,
+        )
+    )
+    storage = _FakeAgentStorage(
+        session=AgentSession(
+            session_id=session_id,
+            agent_id="test_agent",
+            runs=[persisted_run],
+        ),
+    )
+    room = nio.MatrixRoom(room_id="!test:example.com", own_user_id=agent_user.user_id)
+    edit_event = _edit_event()
+    mock_ai_response = AsyncMock(return_value="Regenerated answer")
+
+    with (
+        patch.object(bot._conversation_state_writer, "create_storage", return_value=storage),
+        patch.object(bot._conversation_resolver, "extract_message_context", new_callable=AsyncMock) as mock_context,
+        patch("mindroom.turn_store.remove_run_by_event_id", return_value=True) as mock_remove_run,
+        patch_response_runner_module(
+            should_use_streaming=AsyncMock(return_value=False),
+            ai_response=mock_ai_response,
+        ),
+        patch("mindroom.terminal_delivery.send_message_result", new=AsyncMock()),
+    ):
+        mock_context.return_value = MagicMock(
+            am_i_mentioned=False,
+            is_thread=False,
+            thread_id=None,
+            thread_history=[],
+            mentioned_agents=[],
+            has_non_agent_mentions=False,
+            requires_model_history_refresh=False,
+        )
+
+        await bot._edit_regenerator.handle_message_edit(
+            room,
+            edit_event,
+            EventInfo.from_event(edit_event.source),
+            requester_user_id=edit_event.sender,
+        )
+
+    assert mock_ai_response.await_count == int(interrupted_history)
+    assert mock_remove_run.call_count == int(interrupted_history)
 
 
 @pytest.mark.asyncio

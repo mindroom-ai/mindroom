@@ -46,6 +46,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome
 from mindroom.response_lifecycle import ResponseLifecycle, ResponseLifecycleDeps
 from mindroom.response_runner import ResponseRequest
+from mindroom.terminal_delivery import TerminalDeliveryCommit
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -638,6 +639,15 @@ async def test_deliver_final_delivery_failure_emits_cancelled_hook(
 
     registry = HookRegistry.from_plugins([_plugin("test-delivery-failure", [on_cancelled])])
     config, response_hooks = _response_hook_service(tmp_path, registry)
+    response_hooks.hook_context.runtime.client = make_matrix_client_mock(user_id="@mindroom_code:localhost")
+    terminal_delivery_coordinator = terminal_delivery_coordinator_for(runtime_paths_for(config), "code")
+    terminal_delivery_coordinator.commit_and_attempt.return_value = TerminalDeliveryCommit(
+        status="deferred",
+        reason="edit_failed",
+        lifecycle_managed=False,
+    )
+    resolver = MagicMock()
+    resolver.deps.conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value=None)
     gateway = DeliveryGateway(
         DeliveryGatewayDeps(
             runtime=response_hooks.hook_context.runtime,
@@ -645,9 +655,9 @@ async def test_deliver_final_delivery_failure_emits_cancelled_hook(
             agent_name="code",
             logger=get_logger("tests.delivery"),
             redact_message_event=AsyncMock(return_value=True),
-            resolver=MagicMock(),
+            resolver=resolver,
             response_hooks=response_hooks,
-            terminal_delivery_coordinator=terminal_delivery_coordinator_for(runtime_paths_for(config), "code"),
+            terminal_delivery_coordinator=terminal_delivery_coordinator,
         ),
     )
 
@@ -676,6 +686,11 @@ async def test_deliver_final_delivery_failure_emits_cancelled_hook(
                 extra_content=None,
             ),
         )
+
+    if existing_event_id is None:
+        terminal_delivery_coordinator.commit_and_attempt.assert_not_awaited()
+    else:
+        terminal_delivery_coordinator.commit_and_attempt.assert_awaited_once()
 
     lifecycle = _response_lifecycle(
         response_hooks,
@@ -721,6 +736,8 @@ async def test_final_only_provider_runs_before_response_then_after_response_once
     registry = HookRegistry.from_plugins([_plugin("test-final-only-provider", [before, after, on_cancelled])])
     config, response_hooks = _response_hook_service(tmp_path, registry)
     response_hooks.hook_context.runtime.client = make_matrix_client_mock(user_id="@mindroom_code:localhost")
+    resolver = MagicMock()
+    resolver.deps.conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value=None)
     gateway = DeliveryGateway(
         DeliveryGatewayDeps(
             runtime=response_hooks.hook_context.runtime,
@@ -728,12 +745,11 @@ async def test_final_only_provider_runs_before_response_then_after_response_once
             agent_name="code",
             logger=get_logger("tests.delivery"),
             redact_message_event=AsyncMock(return_value=True),
-            resolver=MagicMock(),
+            resolver=resolver,
             response_hooks=response_hooks,
             terminal_delivery_coordinator=terminal_delivery_coordinator_for(runtime_paths_for(config), "code"),
         ),
     )
-    object.__setattr__(gateway, "_prepare_terminal_delivery_intent", AsyncMock(return_value=MagicMock()))
 
     outcome = await gateway.finalize_streamed_response(
         FinalizeStreamedResponseRequest(

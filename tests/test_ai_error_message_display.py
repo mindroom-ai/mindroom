@@ -34,6 +34,8 @@ from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
     install_runtime_cache_support,
+    mark_response_ready,
+    record_pending_response_turn,
     replace_delivery_gateway_deps,
     replace_response_runner_deps,
     request_envelope,
@@ -78,6 +80,7 @@ def _mock_bot(tmp_path: Path) -> AgentBot:
     bot.enable_streaming = True
     bot.orchestrator = None
     install_runtime_cache_support(bot)
+    mark_response_ready(bot)
     bot._conversation_resolver.build_message_target = MagicMock(
         return_value=MessageTarget.resolve("!room:localhost", None, None, room_mode=True),
     )
@@ -194,9 +197,9 @@ class TestAIErrorDisplay:
             error_msg = "[test_agent] 🔴 Authentication failed. Please check your API key configuration."
             mock_ai.return_value = error_msg
 
-            await bot._response_runner.process_and_respond(
-                _response_request(existing_event_id="$thinking_msg"),
-            )
+            request = _response_request(existing_event_id="$thinking_msg")
+            record_pending_response_turn(bot, request)
+            await bot._response_runner.process_and_respond(request)
 
             assert len(edited_messages) == 1
             event_id, text = edited_messages[0]
@@ -566,13 +569,14 @@ class TestAIErrorDisplay:
                 _build_response_runner(bot)
                 mock_ai.return_value = error_msg
 
-                await bot._response_runner.process_and_respond(
-                    _response_request(
-                        prompt="Help me",
-                        existing_event_id=f"$thinking_{index}",
-                        correlation_id=f"error-{index}",
-                    ),
+                request = _response_request(
+                    reply_to_event_id=f"$user_msg_{index}",
+                    prompt="Help me",
+                    existing_event_id=f"$thinking_{index}",
+                    correlation_id=f"error-{index}",
                 )
+                record_pending_response_turn(bot, request)
+                await bot._response_runner.process_and_respond(request)
 
                 assert len(edited_messages) == 1
                 displayed_msg = edited_messages[0]

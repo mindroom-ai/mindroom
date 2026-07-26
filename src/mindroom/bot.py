@@ -495,6 +495,7 @@ class AgentBot:
                 conversation_cache=self._conversation_cache,
                 response_hooks=response_hooks,
                 post_response_effects=self._post_response_effects_support,
+                redact_message_event=self._redact_message_event,
                 is_ready=self._terminal_delivery_ready,
                 logger=self.logger,
             ),
@@ -611,9 +612,9 @@ class AgentBot:
             and self._runtime_view.client is not None
         )
 
-    def pending_terminal_delivery_event_ids(self, room_id: str | None = None) -> frozenset[str]:
+    async def pending_terminal_delivery_event_ids(self, room_id: str | None = None) -> frozenset[str]:
         """Return visible event IDs owned by outstanding TurnRecord checkpoints."""
-        return self._terminal_delivery_coordinator.pending_target_event_ids(room_id)
+        return await self._terminal_delivery_coordinator.pending_target_event_ids(room_id)
 
     async def _wait_until_coalesced_dispatch_allowed(self, key: CoalescingKey) -> None:
         """Hold active follow-up dispatch until the response lock for its target is idle."""

@@ -19,12 +19,20 @@ from mindroom.final_delivery import FinalDeliveryOutcome
 from mindroom.history.types import HistoryScope
 from mindroom.response_runner import PostLockRequestPreparationError, ResponseRequest, ResponseRunner
 from mindroom.sync_restart_retry import InterruptedTurnRooms, interrupted_source_needs_retry
-from tests.conftest import delivered_matrix_event, request_envelope, unwrap_extracted_collaborator
+from mindroom.terminal_delivery import PendingTerminalDelivery
+from tests.conftest import (
+    delivered_matrix_event,
+    record_pending_response_turn,
+    request_envelope,
+    unwrap_extracted_collaborator,
+)
 from tests.response_runner_helpers import _bot, _plain_request, _target
 
 if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
+
+    from mindroom.response_identity import ResponseIdentity
 
 
 def _stored_run(
@@ -173,6 +181,7 @@ async def test_team_resolution_fallback_obeys_locked_retry_guard(tmp_path: Path,
         existing_event_id="$existing",
         sync_restart_retry_source_event_id="$source",
     )
+    record_pending_response_turn(bot, request)
 
     edit_message = AsyncMock(return_value=delivered_matrix_event("$edit"))
     with (
@@ -214,6 +223,7 @@ async def test_team_resolution_fallback_sync_restart_keeps_durable_owner(tmp_pat
         sync_restart_retry_source_event_id="$source",
         on_sync_restart_cancelled=lambda: retries.append("retry"),
     )
+    record_pending_response_turn(bot, request)
     edit_message = AsyncMock(
         side_effect=[asyncio.CancelledError("sync_restart"), delivered_matrix_event("$cancelled")],
     )
@@ -232,7 +242,31 @@ async def test_team_resolution_fallback_sync_restart_keeps_durable_owner(tmp_pat
     assert response == "$existing"
     assert retries == []
     assert edit_message.await_count == 1
-    assert bot.pending_terminal_delivery_event_ids() == frozenset({"$existing"})
+    assert await bot.pending_terminal_delivery_event_ids() == frozenset({"$existing"})
+
+
+@pytest.mark.asyncio
+async def test_agent_replay_uses_ai_terminal_delivery_identity(tmp_path: Path) -> None:
+    """An agent replay must adopt its deferred ``ai`` checkpoint before generation."""
+    bot = _bot(tmp_path)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    target = _target(reply_to_event_id="$source")
+    request = _plain_request(target, source_event_id="$source")
+
+    async def owned_delivery(
+        _gateway: object,
+        identity: ResponseIdentity,
+    ) -> PendingTerminalDelivery:
+        assert identity.response_kind == "ai"
+        return PendingTerminalDelivery("$existing", target_was_placeholder=False)
+
+    with patch.object(
+        type(runner.deps.delivery_gateway),
+        "owned_terminal_delivery_for_turn",
+        new=owned_delivery,
+    ):
+        assert await runner.generate_response(request) == "$existing"
+    bot.client.room_send.assert_not_awaited()
 
 
 def _request(on_sync_restart_cancelled: Callable[[], None] | None = None) -> ResponseRequest:
@@ -253,18 +287,24 @@ def _cancelled_outcome(*, failure_reason: str, visible: bool = True) -> FinalDel
     )
 
 
-def _notify(
+async def _notify(
     runner: ResponseRunner,
     request: ResponseRequest,
     outcome: FinalDeliveryOutcome,
 ) -> None:
-    runner._notify_sync_restart_cancelled(request, outcome)
+    runner.deps.delivery_gateway.owned_terminal_delivery_for_turn = AsyncMock(return_value=None)
+    await runner._notify_sync_restart_cancelled(
+        request,
+        outcome,
+        runner._response_identity(request, response_kind="agent"),
+    )
 
 
-def test_notify_fires_for_marked_handled_sync_restart_cancellation() -> None:
+@pytest.mark.asyncio
+async def test_notify_fires_for_marked_handled_sync_restart_cancellation() -> None:
     """A sync-restart cancellation that left a visible note must report itself."""
     calls: list[str] = []
-    _notify(
+    await _notify(
         ResponseRunner(deps=MagicMock()),
         _request(on_sync_restart_cancelled=lambda: calls.append("retry")),
         _cancelled_outcome(failure_reason="sync_restart_cancelled"),
@@ -272,22 +312,24 @@ def test_notify_fires_for_marked_handled_sync_restart_cancellation() -> None:
     assert calls == ["retry"]
 
 
-def test_notify_ignores_user_stop_and_unmarked_turns() -> None:
+@pytest.mark.asyncio
+async def test_notify_ignores_user_stop_and_unmarked_turns() -> None:
     """User stops and turns without a visible note must not request a retry."""
     calls: list[str] = []
     runner = ResponseRunner(deps=MagicMock())
     request = _request(on_sync_restart_cancelled=lambda: calls.append("retry"))
 
-    _notify(runner, request, _cancelled_outcome(failure_reason="cancelled_by_user"))
-    _notify(runner, request, _cancelled_outcome(failure_reason="sync_restart_cancelled", visible=False))
+    await _notify(runner, request, _cancelled_outcome(failure_reason="cancelled_by_user"))
+    await _notify(runner, request, _cancelled_outcome(failure_reason="sync_restart_cancelled", visible=False))
 
     assert calls == []
 
 
-def test_notify_uses_only_the_canonical_final_delivery_outcome() -> None:
+@pytest.mark.asyncio
+async def test_notify_uses_only_the_canonical_final_delivery_outcome() -> None:
     """Transient cancellation state must not retry a turn whose final outcome completed."""
     calls: list[str] = []
-    _notify(
+    await _notify(
         ResponseRunner(deps=MagicMock()),
         _request(on_sync_restart_cancelled=lambda: calls.append("retry")),
         FinalDeliveryOutcome(
@@ -320,7 +362,8 @@ def test_interrupted_turn_rooms_collect_every_interrupted_room() -> None:
     assert rooms.pending_room_ids == {"!one:localhost", "!two:localhost"}
 
 
-def test_bot_replacement_cancellation_records_the_interrupted_room() -> None:
+@pytest.mark.asyncio
+async def test_bot_replacement_cancellation_records_the_interrupted_room() -> None:
     """The dispatch seam hands a replacement-cancelled turn to room-scoped recovery."""
     rooms = InterruptedTurnRooms()
     runner = ResponseRunner(deps=MagicMock())
@@ -328,7 +371,7 @@ def test_bot_replacement_cancellation_records_the_interrupted_room() -> None:
     def record_interrupted_turn() -> None:
         rooms.register("$source", room_id="!room:localhost")
 
-    _notify(
+    await _notify(
         runner,
         _request(on_sync_restart_cancelled=record_interrupted_turn),
         _cancelled_outcome(failure_reason="sync_restart_cancelled"),
@@ -346,7 +389,7 @@ async def test_user_stopped_response_is_not_recovered() -> None:
     def record_interrupted_turn() -> None:
         rooms.register("$source", room_id="!room:localhost")
 
-    _notify(
+    await _notify(
         runner,
         _request(on_sync_restart_cancelled=record_interrupted_turn),
         _cancelled_outcome(failure_reason="cancelled_by_user"),

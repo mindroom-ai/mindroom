@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -85,6 +86,7 @@ def _intent(
     target_event_id: str = TARGET,
     room_id: str = ROOM,
     interactive: bool = False,
+    correlation_id: str = "corr-1",
 ) -> TerminalDeliveryIntent:
     return TerminalDeliveryIntent(
         target_event_id=target_event_id,
@@ -92,7 +94,7 @@ def _intent(
         identity=ResponseIdentity(
             response_kind="ai",
             response_envelope=_envelope(room_id=room_id, source_event_id=source_event_id),
-            correlation_id="corr-1",
+            correlation_id=correlation_id,
             source_event_ids=(source_event_id,),
         ),
         interactive_metadata=_metadata() if interactive else None,
@@ -146,11 +148,12 @@ def _coordinator(
     resolved_effects = effects or _Effects()
     coordinator = TerminalDeliveryCoordinator(
         TerminalDeliveryCoordinatorDeps(
-            runtime=SimpleNamespace(client=AsyncMock()),
+            runtime=SimpleNamespace(client=AsyncMock() if ready else None),
             turn_store=store,
             conversation_cache=MagicMock(notify_outbound_message=MagicMock()),
             response_hooks=hooks,
             post_response_effects=resolved_effects,  # type: ignore[arg-type]
+            redact_message_event=AsyncMock(return_value=True),
             is_ready=lambda: ready,
             logger=MagicMock(),
             poll_interval_seconds=0.01,
@@ -185,6 +188,55 @@ async def test_checkpoint_is_durable_before_first_matrix_attempt(tmp_path: Path)
 
 
 @pytest.mark.asyncio
+async def test_old_checkpoint_does_not_own_a_newer_response_episode(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    blocked, _hooks, _effects = _coordinator(store, ready=False)
+    assert (await blocked.commit_and_attempt(_intent())).status == "deferred"
+
+    old_owner = await blocked.owned_delivery(_intent().identity)
+    new_owner = await blocked.owned_delivery(_intent(correlation_id="$new-edit").identity)
+
+    assert old_owner is not None
+    assert new_owner is None
+
+
+@pytest.mark.asyncio
+async def test_cleared_delivery_still_owns_the_same_response_episode(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    coordinator, _hooks, _effects = _coordinator(store)
+    intent = _intent()
+
+    with patch("mindroom.terminal_delivery.send_message_result", return_value=_delivered()):
+        assert (await coordinator.commit_and_attempt(intent)).status == "delivered"
+
+    assert store.terminal_checkpoint_records() == ()
+    restarted, _hooks, _effects = _coordinator(_store(tmp_path))
+    owner = await restarted.owned_delivery(intent.identity)
+    assert owner is not None
+    assert owner.target_event_id == TARGET
+    assert owner.target_was_placeholder is False
+
+
+@pytest.mark.asyncio
+async def test_plain_completed_turn_is_not_a_terminal_delivery_receipt(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    pending = store.get_turn_record(SOURCE)
+    assert pending is not None
+    store.record_turn(
+        replace(
+            pending,
+            completed=True,
+            response_event_id=TARGET,
+        ),
+    )
+    completed = store.get_turn_record(SOURCE)
+    assert completed is not None
+    coordinator, _hooks, _effects = _coordinator(store)
+
+    assert await coordinator.owned_delivery(_intent().identity) is None
+
+
+@pytest.mark.asyncio
 async def test_persist_failure_leaves_thinking_and_never_calls_matrix(tmp_path: Path) -> None:
     store = _store(tmp_path)
     coordinator, _hooks, _effects = _coordinator(store)
@@ -199,6 +251,26 @@ async def test_persist_failure_leaves_thinking_and_never_calls_matrix(tmp_path: 
 
     send.assert_not_awaited()
     assert store.terminal_checkpoint_records() == ()
+
+
+@pytest.mark.asyncio
+async def test_post_transport_persist_failure_stays_lifecycle_managed(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    coordinator, hooks, _effects = _coordinator(store)
+    send = AsyncMock(return_value=_delivered())
+
+    with (
+        patch.object(store, "update_terminal_checkpoint", side_effect=OSError("disk full")),
+        patch("mindroom.terminal_delivery.send_message_result", send),
+    ):
+        result = await coordinator.commit_and_attempt(_intent())
+
+    assert result.status == "deferred"
+    assert result.reason == "lifecycle_persist_failed"
+    assert result.lifecycle_managed
+    send.assert_awaited_once()
+    hooks.emit_after_response.assert_not_awaited()
+    assert len(store.terminal_checkpoint_records()) == 1
 
 
 @pytest.mark.asyncio
@@ -221,6 +293,45 @@ async def test_restart_retries_exact_wire_content_and_transaction(tmp_path: Path
     assert call.kwargs["content_is_prepared"] is True
     assert call.kwargs["transaction_id"]
     assert restarted.terminal_checkpoint_records() == ()
+
+
+@pytest.mark.asyncio
+async def test_retry_isolates_malformed_checkpoint_and_delivers_valid_sibling(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    _record_pending(store, source_event_id="$valid-source", room_id="!valid:localhost")
+    blocked, _hooks, _effects = _coordinator(store, ready=False)
+    assert (await blocked.commit_and_attempt(_intent())).status == "deferred"
+    assert (
+        await blocked.commit_and_attempt(
+            _intent(
+                source_event_id="$valid-source",
+                target_event_id="$valid-target",
+                room_id="!valid:localhost",
+            ),
+        )
+    ).status == "deferred"
+    malformed = store.get_turn_record(SOURCE)
+    assert malformed is not None
+    malformed_checkpoint = malformed.terminal_edit_checkpoint
+    assert malformed_checkpoint is not None
+    malformed = store.update_terminal_checkpoint(
+        malformed,
+        expected_transaction_id=malformed_checkpoint.transaction_id,
+        update=lambda checkpoint: replace(
+            checkpoint,
+            response_envelope={"source_event_id": SOURCE},
+        ),
+    )
+    assert malformed is not None
+    active, _hooks, _effects = _coordinator(store)
+
+    with patch("mindroom.terminal_delivery.send_message_result", return_value=_delivered()) as send:
+        await active.retry_pending()
+
+    send.assert_awaited_once()
+    remaining = store.terminal_checkpoint_records()
+    assert len(remaining) == 1
+    assert remaining[0].source_event_ids == (SOURCE,)
 
 
 @pytest.mark.asyncio
@@ -351,6 +462,97 @@ async def test_retry_pending_is_bounded_but_one_stalled_turn_does_not_block_othe
 
 
 @pytest.mark.asyncio
+async def test_retry_pending_gives_a_healthy_room_a_slot_before_same_room_backlog(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    limited_room = "!limited:localhost"
+    healthy_room = "!healthy:localhost"
+    turns: list[tuple[str, str, str]] = []
+    for index in range(8):
+        source = f"$limited-source-{index}"
+        target = f"$limited-target-{index}"
+        _record_pending(store, source_event_id=source, room_id=limited_room)
+        turns.append((source, target, limited_room))
+    _record_pending(store, source_event_id="$healthy-source", room_id=healthy_room)
+    turns.append(("$healthy-source", "$healthy-target", healthy_room))
+    blocked, _hooks, _effects = _coordinator(store, ready=False)
+    for source, target, room_id in turns:
+        assert (
+            await blocked.commit_and_attempt(
+                _intent(source_event_id=source, target_event_id=target, room_id=room_id),
+            )
+        ).status == "deferred"
+
+    active, _hooks, _effects = _coordinator(store)
+    limited_started = 0
+    healthy_started = asyncio.Event()
+    release_limited = asyncio.Event()
+
+    async def room_send(_client: object, room_id: str, *_args: object, **_kwargs: object) -> DeliveredMatrixEvent:
+        nonlocal limited_started
+        if room_id == limited_room:
+            limited_started += 1
+            await release_limited.wait()
+        else:
+            healthy_started.set()
+        return _delivered()
+
+    with patch("mindroom.terminal_delivery.send_message_result", side_effect=room_send):
+        retry = asyncio.create_task(active.retry_pending())
+        try:
+            await asyncio.wait_for(healthy_started.wait(), timeout=0.5)
+            assert limited_started == 1
+        finally:
+            release_limited.set()
+            await retry
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_read_contention_does_not_block_event_loop(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    blocked, _hooks, _effects = _coordinator(store, ready=False)
+    assert (await blocked.commit_and_attempt(_intent())).status == "deferred"
+    [record] = store.terminal_checkpoint_records()
+    active, _hooks, _effects = _coordinator(store, ready=False)
+    lock_acquired = threading.Event()
+    release_lock = threading.Event()
+    heartbeat_seen = threading.Event()
+    heartbeat_before_release: list[bool] = []
+
+    def hold_ledger_lock() -> None:
+        with store._ledger._state.lock:
+            lock_acquired.set()
+            assert release_lock.wait(timeout=5)
+
+    holder = threading.Thread(target=hold_ledger_lock)
+    holder.start()
+    assert lock_acquired.wait(timeout=5)
+
+    async def heartbeat() -> None:
+        await asyncio.sleep(0.01)
+        heartbeat_seen.set()
+
+    heartbeat_task = asyncio.create_task(heartbeat())
+
+    def inspect_and_release() -> None:
+        heartbeat_before_release.append(heartbeat_seen.is_set())
+        release_lock.set()
+
+    timer = threading.Timer(0.1, inspect_and_release)
+    timer.start()
+    try:
+        await active._attempt_locked(record)
+        await heartbeat_task
+    finally:
+        release_lock.set()
+        timer.join()
+        holder.join()
+
+    assert heartbeat_before_release == [True]
+
+
+@pytest.mark.asyncio
 async def test_after_response_identity_excludes_discovery_aliases(tmp_path: Path) -> None:
     store = _store(tmp_path)
     _record_pending(store, discovery_event_ids=("$relay-alias",))
@@ -381,6 +583,96 @@ async def test_redaction_before_commit_prevents_network_and_effects(
     assert result.status == "superseded"
     send.assert_not_awaited()
     hooks.emit_after_response.assert_not_awaited()
+    assert effects.keys == []
+
+
+@pytest.mark.asyncio
+async def test_deferred_checkpoint_source_redaction_retries_target_cleanup_after_restart(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    blocked, hooks, effects = _coordinator(store, ready=False)
+    send = AsyncMock()
+    with patch("mindroom.terminal_delivery.send_message_result", send):
+        assert (await blocked.commit_and_attempt(_intent())).status == "deferred"
+        await blocked.redact(room_id=ROOM, event_id=SOURCE)
+
+    send.assert_not_awaited()
+    blocked.deps.redact_message_event.assert_not_awaited()
+    [debt] = store.terminal_checkpoint_records()
+    assert debt.redacted_source_event_ids == (SOURCE,)
+    assert debt.response_event_id == TARGET
+    hooks.emit_after_response.assert_not_awaited()
+    assert effects.keys == []
+
+
+@pytest.mark.asyncio
+async def test_source_redaction_cleanup_network_error_keeps_debt_without_escaping(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    coordinator, hooks, effects = _coordinator(store)
+    with patch("mindroom.terminal_delivery.send_message_result", return_value=None):
+        assert (await coordinator.commit_and_attempt(_intent())).status == "deferred"
+
+    coordinator.deps.redact_message_event.side_effect = OSError("homeserver unavailable")
+    await coordinator.redact(room_id=ROOM, event_id=SOURCE)
+
+    [debt] = store.terminal_checkpoint_records()
+    assert debt.redacted_source_event_ids == (SOURCE,)
+    assert debt.response_event_id == TARGET
+    hooks.emit_after_response.assert_not_awaited()
+    assert effects.keys == []
+
+    restarted = _store(tmp_path)
+    active, hooks, effects = _coordinator(restarted)
+    send = AsyncMock()
+    with patch("mindroom.terminal_delivery.send_message_result", send):
+        await active.retry_pending()
+
+    send.assert_not_awaited()
+    active.deps.redact_message_event.assert_awaited_once_with(
+        room_id=ROOM,
+        event_id=TARGET,
+        reason="Source event was redacted",
+    )
+    owner = restarted.get_turn_record(SOURCE)
+    assert owner is not None
+    assert owner.terminal_edit_checkpoint is None
+    assert owner.response_event_id is None
+    hooks.emit_after_response.assert_not_awaited()
+    assert effects.keys == []
+
+
+@pytest.mark.asyncio
+async def test_source_redaction_during_transport_removes_accepted_target(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    coordinator, hooks, effects = _coordinator(store)
+    send_started = asyncio.Event()
+    release_send = asyncio.Event()
+
+    async def blocked_send(*_args: object, **_kwargs: object) -> DeliveredMatrixEvent:
+        send_started.set()
+        await release_send.wait()
+        return _delivered()
+
+    with patch("mindroom.terminal_delivery.send_message_result", side_effect=blocked_send):
+        delivery = asyncio.create_task(coordinator.commit_and_attempt(_intent()))
+        await send_started.wait()
+        redaction = asyncio.create_task(coordinator.redact(room_id=ROOM, event_id=SOURCE))
+        await asyncio.sleep(0)
+        assert not redaction.done()
+        release_send.set()
+        assert (await delivery).status == "delivered"
+        await redaction
+
+    coordinator.deps.redact_message_event.assert_awaited_once()
+    owner = store.get_turn_record(SOURCE)
+    assert owner is not None
+    assert owner.redacted_source_event_ids == (SOURCE,)
+    assert owner.response_event_id is None
+    assert owner.terminal_edit_checkpoint is None
+    hooks.emit_after_response.assert_awaited_once()
     assert effects.keys == []
 
 
@@ -438,3 +730,37 @@ async def test_stop_cancels_inflight_network_before_effects_and_keeps_checkpoint
     hooks.emit_after_response.assert_not_awaited()
     assert effects.keys == []
     assert len(store.terminal_checkpoint_records()) == 1
+
+
+@pytest.mark.asyncio
+async def test_wake_during_retry_scan_triggers_an_immediate_second_scan(tmp_path: Path) -> None:
+    coordinator, _hooks, _effects = _coordinator(_store(tmp_path))
+    coordinator.deps = replace(coordinator.deps, poll_interval_seconds=60)
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    second_scan = asyncio.Event()
+    calls = 0
+
+    async def retry_pending() -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            entered.set()
+            await release.wait()
+        elif calls == 2:
+            second_scan.set()
+
+    coordinator.retry_pending = retry_pending  # type: ignore[method-assign]
+    worker = asyncio.create_task(coordinator._run())
+    try:
+        await entered.wait()
+        coordinator.wake(reason="checkpoint-added-during-scan")
+        release.set()
+        async with asyncio.timeout(1):
+            await second_scan.wait()
+    finally:
+        worker.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await worker
+
+    assert calls == 2

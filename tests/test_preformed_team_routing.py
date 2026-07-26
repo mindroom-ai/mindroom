@@ -31,7 +31,9 @@ from tests.conftest import (
     install_runtime_cache_support,
     make_matrix_client_mock,
     make_visible_message,
+    mark_response_ready,
     patch_response_runner_module,
+    record_pending_response_turn,
     request_envelope,
     runtime_paths_for,
     test_runtime_paths,
@@ -170,6 +172,7 @@ async def test_preformed_team_bot_responds_when_mentioned(config_with_team: Conf
     )
     bot.client = _make_matrix_client_mock()
     install_runtime_cache_support(bot)
+    mark_response_ready(bot)
 
     async def fake_team_response(*_args: Any, **_kwargs: Any) -> str:  # noqa: ANN401
         return "🤝 Team Response (a1, a2):\n\n**a1**: ok\n\n**a2**: ok"
@@ -233,6 +236,7 @@ async def test_preformed_team_bot_schedules_memory_save_for_all_file_members(
     )
     bot.client = _make_matrix_client_mock()
     install_runtime_cache_support(bot)
+    mark_response_ready(bot)
     bot.orchestrator = MagicMock()
 
     store_calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
@@ -317,8 +321,23 @@ async def test_preformed_team_rejection_edits_existing_message(config_with_team:
     )
     bot.client = _make_matrix_client_mock()
     install_runtime_cache_support(bot)
+    mark_response_ready(bot)
     bot.orchestrator = MagicMock()
     bot.orchestrator.agent_bots = {"a1": MagicMock()}
+    request = ResponseRequest(
+        prompt="@t1 please retry",
+        thread_history=[],
+        existing_event_id="$existing_response",
+        user_id="@user:localhost",
+        response_envelope=request_envelope(
+            room_id="!room:localhost",
+            reply_to_event_id="$evt1",
+            prompt="@t1 please retry",
+            user_id="@user:localhost",
+            agent_name=bot.agent_name,
+        ),
+    )
+    record_pending_response_turn(bot, request)
 
     with patch(
         "mindroom.terminal_delivery.send_message_result",
@@ -329,21 +348,7 @@ async def test_preformed_team_rejection_edits_existing_message(config_with_team:
             ),
         ),
     ) as mock_edit:
-        resolution = await bot._run_regenerated_response(
-            ResponseRequest(
-                prompt="@t1 please retry",
-                thread_history=[],
-                existing_event_id="$existing_response",
-                user_id="@user:localhost",
-                response_envelope=request_envelope(
-                    room_id="!room:localhost",
-                    reply_to_event_id="$evt1",
-                    prompt="@t1 please retry",
-                    user_id="@user:localhost",
-                    agent_name=bot.agent_name,
-                ),
-            ),
-        )
+        resolution = await bot._run_regenerated_response(request)
 
     assert resolution == "$existing_response"
     edit_content = mock_edit.await_args.args[2]

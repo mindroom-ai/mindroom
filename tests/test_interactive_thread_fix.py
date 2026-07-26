@@ -29,6 +29,8 @@ from tests.conftest import (
     delivered_matrix_side_effect,
     install_runtime_cache_support,
     make_matrix_client_mock,
+    mark_response_ready,
+    record_pending_response_turn,
     request_envelope,
     runtime_paths_for,
     test_runtime_paths,
@@ -126,6 +128,7 @@ async def test_interactive_question_preserves_thread_root_in_streaming(tmp_path:
         client.room_send.return_value = _room_send_response("$agent_message_id")
         bot.client = client
         install_runtime_cache_support(bot)
+        mark_response_ready(bot)
 
         room_id = "!test:localhost"
         user_message_id = "$user_original_message"
@@ -236,25 +239,26 @@ async def test_interactive_question_preserves_thread_root_in_non_streaming(tmp_p
         client.room_send.return_value = _room_send_response("$agent_response_id")
         bot.client = client
         install_runtime_cache_support(bot)
+        mark_response_ready(bot)
 
         room_id = "!test:localhost"
         user_message_id = "$user_thread_start"
         thread_id = user_message_id
-        resolution = await bot._response_runner.generate_response(
-            ResponseRequest(
+        request = ResponseRequest(
+            prompt="Test prompt",
+            thread_history=[],
+            user_id="@user:localhost",
+            response_envelope=request_envelope(
+                room_id=room_id,
+                reply_to_event_id=user_message_id,
+                thread_id=thread_id,
                 prompt="Test prompt",
-                thread_history=[],
                 user_id="@user:localhost",
-                response_envelope=request_envelope(
-                    room_id=room_id,
-                    reply_to_event_id=user_message_id,
-                    thread_id=thread_id,
-                    prompt="Test prompt",
-                    user_id="@user:localhost",
-                    agent_name="general",
-                ),
+                agent_name="general",
             ),
         )
+        record_pending_response_turn(bot, request)
+        resolution = await bot._response_runner.generate_response(request)
         if scheduled_tasks:
             await asyncio.gather(*scheduled_tasks)
 

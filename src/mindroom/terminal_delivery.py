@@ -18,16 +18,21 @@ from mindroom.handled_turns import TerminalEditCheckpoint, TurnRecord
 from mindroom.hooks import MessageEnvelope
 from mindroom.interactive import InteractiveMetadata
 from mindroom.matrix.client_delivery import send_message_result
-from mindroom.message_target import MessageTarget  # noqa: F401
+
+# Pydantic resolves these annotations from module globals when rebuilding the envelope adapter.
+from mindroom.message_target import MessageTarget  # noqa: TC001
 from mindroom.response_identity import ResponseIdentity
+
+# Pydantic also needs the nested turn-origin annotation names in this module namespace.
 from mindroom.turn_origin import SenderKind, TurnIntent, TurnOrigin, TurnTrust  # noqa: F401
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable
+    from collections.abc import AsyncIterator, Awaitable, Callable
 
     import structlog
 
     from mindroom.delivery_gateway import ResponseHookService
+    from mindroom.matrix.client_delivery import DeliveredMatrixEvent
     from mindroom.matrix.conversation_cache import ConversationCacheProtocol
     from mindroom.post_response_effects import PostResponseEffectsSupport
     from mindroom.runtime_protocols import SupportsClientConfig
@@ -96,6 +101,7 @@ class TerminalDeliveryCoordinatorDeps:
     conversation_cache: ConversationCacheProtocol
     response_hooks: ResponseHookService
     post_response_effects: PostResponseEffectsSupport
+    redact_message_event: Callable[..., Awaitable[bool]]
     is_ready: Callable[[], bool]
     logger: structlog.stdlib.BoundLogger
     poll_interval_seconds: float = 15.0
@@ -138,11 +144,12 @@ class TerminalDeliveryCoordinator:
         del reason
         self._wake_event.set()
 
-    def pending_target_event_ids(self, room_id: str | None = None) -> frozenset[str]:
+    async def pending_target_event_ids(self, room_id: str | None = None) -> frozenset[str]:
         """Return visible events protected from stale-stream cleanup."""
+        records = await asyncio.to_thread(self.deps.turn_store.terminal_checkpoint_records)
         return frozenset(
             record.response_event_id
-            for record in self.deps.turn_store.terminal_checkpoint_records()
+            for record in records
             if record.response_event_id is not None
             and (
                 room_id is None
@@ -151,23 +158,34 @@ class TerminalDeliveryCoordinator:
         )
 
     async def owned_delivery(self, identity: ResponseIdentity) -> PendingTerminalDelivery | None:
-        """Return a checkpoint only when all replay IDs belong to one owner."""
+        """Return a durable outcome only when all replay IDs belong to one episode."""
         source_event_ids = identity.source_event_ids or (identity.response_envelope.source_event_id,)
-        record = await asyncio.to_thread(
-            self.deps.turn_store.terminal_checkpoint_for_sources,
-            source_event_ids,
-        )
-        if record is None:
+        record = await asyncio.to_thread(self._turn_for_sources, source_event_ids)
+        if record is None or record.response_event_id is None:
             return None
         checkpoint = record.terminal_edit_checkpoint
-        assert checkpoint is not None
-        assert record.response_event_id is not None
-        return PendingTerminalDelivery(record.response_event_id, checkpoint.target_was_placeholder)
+        if checkpoint is not None:
+            if (
+                checkpoint.correlation_id != identity.correlation_id
+                or checkpoint.response_kind != identity.response_kind
+            ):
+                return None
+            return PendingTerminalDelivery(record.response_event_id, checkpoint.target_was_placeholder)
+        if (
+            not record.completed
+            or record.settled_terminal_delivery_correlation_id != identity.correlation_id
+            or record.response_owner != identity.response_envelope.agent_name
+        ):
+            return None
+        # A cleared checkpoint means transport and lifecycle effects converged.
+        # Retaining episode ownership prevents a sync-restart retry from racing
+        # the final checkpoint clear and duplicating the already-delivered turn.
+        return PendingTerminalDelivery(record.response_event_id, target_was_placeholder=False)
 
     async def commit_and_attempt(self, intent: TerminalDeliveryIntent) -> TerminalDeliveryCommit:
         """Commit exact content durably before the first Matrix edit."""
         source_event_ids = intent.identity.source_event_ids or (intent.identity.response_envelope.source_event_id,)
-        authority = self._turn_for_sources(source_event_ids)
+        authority = await asyncio.to_thread(self._turn_for_sources, source_event_ids)
         if authority is None:
             return TerminalDeliveryCommit("superseded", "turn_authority_missing")
         checkpoint = TerminalEditCheckpoint(
@@ -190,6 +208,7 @@ class TerminalDeliveryCoordinator:
                 authority,
                 response_event_id=intent.target_event_id,
                 checkpoint=checkpoint,
+                regeneration_turn_record=intent.identity.regeneration_turn_record,
             )
             if committed is None:
                 return TerminalDeliveryCommit("superseded", "checkpoint_rejected")
@@ -199,24 +218,69 @@ class TerminalDeliveryCoordinator:
         """Attempt every unique checkpoint once."""
         records = await asyncio.to_thread(self.deps.turn_store.terminal_checkpoint_records)
         semaphore = asyncio.Semaphore(_MAX_RETRY_CONCURRENCY)
+        records_by_room: dict[str, list[TurnRecord]] = {}
+        for record in records:
+            room_key = (
+                record.conversation_target.room_id
+                if record.conversation_target is not None
+                else f"turn:{json.dumps(record.indexed_event_ids, separators=(',', ':'))}"
+            )
+            records_by_room.setdefault(room_key, []).append(record)
 
-        async def retry(record: TurnRecord) -> None:
-            target_event_id = record.response_event_id
-            if target_event_id is None:
-                return
-            async with semaphore, self._locked(record, target_event_id):
-                await self._attempt_locked(record)
+        async def retry_room(room_records: list[TurnRecord]) -> None:
+            for record in room_records:
+                target_event_id = record.response_event_id
+                if target_event_id is None:
+                    continue
+                try:
+                    async with semaphore, self._locked(record, target_event_id):
+                        await self._attempt_locked(record)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    self.deps.logger.exception(
+                        "terminal_checkpoint_attempt_failed",
+                        source_event_ids=record.source_event_ids,
+                        target_event_id=target_event_id,
+                    )
 
         async with asyncio.TaskGroup() as retries:
-            for record in records:
-                retries.create_task(retry(record))
+            for room_records in records_by_room.values():
+                retries.create_task(retry_room(room_records))
 
     async def redact(self, *, room_id: str, event_id: str) -> None:
         """Tombstone source or target and clear its checkpoint under shared locks."""
-        del room_id
-        owner = self.deps.turn_store.turn_for_event(event_id)
-        async with self._locked(owner, event_id):
-            await _durable_call(self.deps.turn_store.mark_source_redacted, event_id)
+        owner = await asyncio.to_thread(self.deps.turn_store.turn_for_event, event_id)
+        if owner is not None and owner.conversation_target is not None and owner.conversation_target.room_id != room_id:
+            return
+        checkpoint = owner.terminal_edit_checkpoint if owner is not None else None
+        target_event_id = (
+            owner.response_event_id
+            if owner is not None and event_id in owner.indexed_event_ids and checkpoint is not None
+            else None
+        )
+        async with self._locked(
+            owner,
+            event_id,
+            additional_event_ids=((target_event_id,) if target_event_id is not None else ()),
+        ):
+            redacted = await _durable_call(
+                self.deps.turn_store.mark_source_redacted,
+                event_id,
+                fallback_terminal_checkpoint=checkpoint,
+                fallback_response_event_id=target_event_id,
+            )
+            if redacted is not None and redacted.terminal_edit_checkpoint is not None:
+                try:
+                    await self._attempt_locked(redacted)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    self.deps.logger.exception(
+                        "terminal_checkpoint_redaction_cleanup_failed",
+                        source_event_id=event_id,
+                        target_event_id=redacted.response_event_id,
+                    )
 
     def _turn_for_sources(self, source_event_ids: tuple[str, ...]) -> TurnRecord | None:
         records = tuple(self.deps.turn_store.get_turn_record(event_id) for event_id in source_event_ids)
@@ -226,8 +290,11 @@ class TerminalDeliveryCoordinator:
         owner = next(iter(owners.values()))
         return owner if set(source_event_ids).issubset(owner.indexed_event_ids) else None
 
-    async def _attempt_locked(self, record: TurnRecord) -> TerminalDeliveryCommit:  # noqa: PLR0911
-        current = self.deps.turn_store.terminal_checkpoint_for_sources(record.indexed_event_ids)
+    async def _attempt_locked(self, record: TurnRecord) -> TerminalDeliveryCommit:
+        current = await asyncio.to_thread(
+            self.deps.turn_store.terminal_checkpoint_for_sources,
+            record.indexed_event_ids,
+        )
         checkpoint = record.terminal_edit_checkpoint
         if (
             current is None
@@ -237,9 +304,11 @@ class TerminalDeliveryCoordinator:
         ):
             return TerminalDeliveryCommit("superseded", "checkpoint_replaced")
         client = self.deps.runtime.client
-        if self._stopping or not self.deps.is_ready() or client is None:
+        if self._stopping or client is None or not self.deps.is_ready():
             return TerminalDeliveryCommit("deferred", "matrix_not_ready")
         target = _load_envelope(checkpoint.response_envelope).target
+        if current.redacted_source_event_ids:
+            return await self._cleanup_redacted_checkpoint(current, checkpoint, target)
         delivered = await send_message_result(
             client,
             target.room_id,
@@ -252,26 +321,83 @@ class TerminalDeliveryCoordinator:
             return TerminalDeliveryCommit("deferred", "edit_failed")
         if self._stopping:
             raise asyncio.CancelledError
-        current = self.deps.turn_store.terminal_checkpoint_for_sources(record.indexed_event_ids)
-        if current is None or current.terminal_edit_checkpoint is None:
-            return TerminalDeliveryCommit("superseded", "checkpoint_redacted")
-        self.deps.conversation_cache.notify_outbound_message(
-            target.room_id,
-            delivered.event_id,
-            delivered.content_sent,
+        return await self._finalize_accepted_delivery(record, checkpoint, target, delivered)
+
+    async def _cleanup_redacted_checkpoint(
+        self,
+        current: TurnRecord,
+        checkpoint: TerminalEditCheckpoint,
+        target: MessageTarget,
+    ) -> TerminalDeliveryCommit:
+        """Remove a visible target whose source was redacted."""
+        cleaned = await self.deps.redact_message_event(
+            room_id=target.room_id,
+            event_id=cast("str", current.response_event_id),
+            reason="Source event was redacted",
         )
-        current = await self._claim_after_response(current)
-        if current is None:
-            return TerminalDeliveryCommit("superseded", "checkpoint_redacted")
-        current = await self._complete_interactive(current)
-        if current is None:
-            latest = self.deps.turn_store.terminal_checkpoint_for_sources(record.indexed_event_ids)
-            return TerminalDeliveryCommit("deferred" if latest is not None else "superseded", "interactive_failed")
-        cleared = await _durable_call(
-            self.deps.turn_store.clear_terminal_checkpoint,
-            current,
-            expected_transaction_id=checkpoint.transaction_id,
+        if not cleaned:
+            return TerminalDeliveryCommit("deferred", "source_redaction_cleanup_failed")
+        try:
+            cleared = await _durable_call(
+                self.deps.turn_store.clear_redacted_terminal_checkpoint,
+                current,
+                expected_transaction_id=checkpoint.transaction_id,
+            )
+        except OSError:
+            self.deps.logger.exception(
+                "terminal_checkpoint_redaction_cleanup_persist_failed",
+                transaction_id=checkpoint.transaction_id,
+            )
+            return TerminalDeliveryCommit("deferred", "lifecycle_persist_failed")
+        return TerminalDeliveryCommit(
+            "superseded" if cleared is not None else "deferred",
+            "source_redacted_cleanup" if cleared is not None else "checkpoint_clear_rejected",
         )
+
+    async def _finalize_accepted_delivery(
+        self,
+        record: TurnRecord,
+        checkpoint: TerminalEditCheckpoint,
+        target: MessageTarget,
+        delivered: DeliveredMatrixEvent,
+    ) -> TerminalDeliveryCommit:
+        """Converge lifecycle effects after Matrix accepted the terminal edit."""
+        try:
+            current = await asyncio.to_thread(
+                self.deps.turn_store.terminal_checkpoint_for_sources,
+                record.indexed_event_ids,
+            )
+            if current is None or current.terminal_edit_checkpoint is None:
+                return TerminalDeliveryCommit("superseded", "checkpoint_redacted")
+            self.deps.conversation_cache.notify_outbound_message(
+                target.room_id,
+                delivered.event_id,
+                delivered.content_sent,
+            )
+            claimed = await self._claim_after_response(current)
+            if claimed is None:
+                return TerminalDeliveryCommit("superseded", "checkpoint_redacted")
+            completed = await self._complete_interactive(claimed)
+            if completed is None:
+                latest = await asyncio.to_thread(
+                    self.deps.turn_store.terminal_checkpoint_for_sources,
+                    record.indexed_event_ids,
+                )
+                return TerminalDeliveryCommit(
+                    "deferred" if latest is not None else "superseded",
+                    "interactive_failed",
+                )
+            cleared = await _durable_call(
+                self.deps.turn_store.clear_terminal_checkpoint,
+                completed,
+                expected_transaction_id=checkpoint.transaction_id,
+            )
+        except OSError:
+            self.deps.logger.exception(
+                "terminal_checkpoint_lifecycle_persist_failed",
+                transaction_id=checkpoint.transaction_id,
+            )
+            return TerminalDeliveryCommit("deferred", "lifecycle_persist_failed")
         if cleared is None:
             return TerminalDeliveryCommit("superseded", "checkpoint_clear_rejected")
         return TerminalDeliveryCommit("delivered", "delivered")
@@ -335,8 +461,10 @@ class TerminalDeliveryCoordinator:
         self,
         record: TurnRecord | None,
         event_id: str,
+        *,
+        additional_event_ids: tuple[str, ...] = (),
     ) -> AsyncIterator[None]:
-        keys = {f"event:{event_id}"}
+        keys = {f"event:{event_id}", *(f"event:{extra_event_id}" for extra_event_id in additional_event_ids)}
         if record is not None:
             keys.add(f"turn:{json.dumps(record.indexed_event_ids, separators=(',', ':'))}")
         locks = [self._locks.setdefault(key, asyncio.Lock()) for key in sorted(keys)]
@@ -352,13 +480,13 @@ class TerminalDeliveryCoordinator:
 
     async def _run(self) -> None:
         while True:
+            self._wake_event.clear()
             try:
                 await self.retry_pending()
             except asyncio.CancelledError:
                 raise
             except Exception:
                 self.deps.logger.exception("terminal_checkpoint_retry_failed")
-            self._wake_event.clear()
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(
                     self._wake_event.wait(),

@@ -21,6 +21,7 @@ from tests.conftest import (
     drain_coalescing,
     install_runtime_cache_support,
     make_matrix_client_mock,
+    mark_response_ready,
     replace_edit_regenerator_deps,
     runtime_paths_for,
     test_runtime_paths,
@@ -75,6 +76,7 @@ def setup_test_bot(
     )
     bot.client = _make_matrix_client_mock()
     install_runtime_cache_support(bot)
+    mark_response_ready(bot)
     bot._conversation_cache.get_thread_history = AsyncMock(return_value=thread_history_result([], is_full_history=True))
     bot._conversation_cache.get_dispatch_thread_history = AsyncMock(
         return_value=thread_history_result([], is_full_history=True),

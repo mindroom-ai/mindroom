@@ -188,6 +188,7 @@ class TurnRecord:
     history_scope: HistoryScope | None = None
     conversation_target: MessageTarget | None = None
     terminal_edit_checkpoint: TerminalEditCheckpoint | None = None
+    settled_terminal_delivery_correlation_id: str | None = None
     timestamp: float = 0.0
 
     def __post_init__(self) -> None:
@@ -265,6 +266,11 @@ class TurnRecord:
             if isinstance(self.terminal_edit_checkpoint, TerminalEditCheckpoint)
             else None,
         )
+        object.__setattr__(
+            self,
+            "settled_terminal_delivery_correlation_id",
+            _normalize_string(self.settled_terminal_delivery_correlation_id),
+        )
         object.__setattr__(self, "timestamp", normalized_timestamp)
 
     @classmethod
@@ -289,6 +295,7 @@ class TurnRecord:
         history_scope: HistoryScope | None = None,
         conversation_target: MessageTarget | None = None,
         terminal_edit_checkpoint: TerminalEditCheckpoint | None = None,
+        settled_terminal_delivery_correlation_id: str | None = None,
         timestamp: float = 0.0,
     ) -> TurnRecord:
         """Create a record while accepting sequence and mapping inputs from runtime flows."""
@@ -314,6 +321,7 @@ class TurnRecord:
             history_scope=history_scope,
             conversation_target=conversation_target,
             terminal_edit_checkpoint=terminal_edit_checkpoint,
+            settled_terminal_delivery_correlation_id=settled_terminal_delivery_correlation_id,
             timestamp=timestamp,
         )
 
@@ -356,6 +364,7 @@ class TurnRecordCodec:
             "pending_redaction_cleanup_event_ids": list(record.pending_redaction_cleanup_event_ids),
             "response_event_id": record.response_event_id,
             "completed": record.completed,
+            "settled_terminal_delivery_correlation_id": (record.settled_terminal_delivery_correlation_id),
             "timestamp": record.timestamp,
         }
         if record.discovery_event_ids:
@@ -450,6 +459,9 @@ class TurnRecordCodec:
             history_scope=HistoryScope.from_metadata(record.get("history_scope")),
             conversation_target=MessageTarget.from_metadata(record.get("conversation_target")),
             terminal_edit_checkpoint=terminal_edit_checkpoint,
+            settled_terminal_delivery_correlation_id=_normalize_string(
+                record.get("settled_terminal_delivery_correlation_id"),
+            ),
             timestamp=float(timestamp),
         )
         if event_id not in turn_record.indexed_event_ids:
@@ -795,7 +807,17 @@ class HandledTurnLedger:
             working_records = dict(self._responses)
             candidates: list[TurnRecord] = []
             for candidate in raw_candidates:
-                resolved = _resolve_turn_record(candidate, working_records)
+                same_identity_timestamps = (
+                    record.timestamp for record in working_records.values() if same_turn_identity(record, candidate)
+                )
+                newest_same_identity_timestamp = max(same_identity_timestamps, default=float("-inf"))
+                normalized_candidate = candidate
+                if normalized_candidate.timestamp <= newest_same_identity_timestamp:
+                    normalized_candidate = replace(
+                        candidate,
+                        timestamp=math.nextafter(newest_same_identity_timestamp, math.inf),
+                    )
+                resolved = _resolve_turn_record(normalized_candidate, working_records)
                 if resolved is None:
                     continue
                 candidates.append(resolved)

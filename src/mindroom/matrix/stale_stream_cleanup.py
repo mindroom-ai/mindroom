@@ -62,7 +62,7 @@ from mindroom.streaming import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Iterable, Sequence
+    from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Sequence
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -111,7 +111,7 @@ class StaleStreamCleanupActor:
 
     client: nio.AsyncClient
     conversation_cache: ConversationCacheProtocol | None
-    pending_terminal_delivery_event_ids: Callable[[str], frozenset[str]]
+    pending_terminal_delivery_event_ids: Callable[[str], Awaitable[frozenset[str]]]
 
 
 @dataclass(frozen=True)
@@ -576,7 +576,7 @@ async def _process_stale_room_candidate(
         scan_policy=scan_policy,
     ):
         return False, None
-    if target_event_id in actor.pending_terminal_delivery_event_ids(room_id):
+    if target_event_id in await actor.pending_terminal_delivery_event_ids(room_id):
         # A durable terminal delivery already owns this message. Writing an
         # interruption note over it would clobber a committed final response and
         # auto-resuming would duplicate a turn that has already been answered.

@@ -30,6 +30,7 @@ from tests.conftest import (
     drain_coalescing,
     install_runtime_cache_support,
     make_matrix_client_mock,
+    mark_response_ready,
     patch_response_runner_module,
     runtime_paths_for,
 )
@@ -122,6 +123,7 @@ async def test_agent_processes_direct_mention(  # noqa: PLR0915
         bot = AgentBot(mock_calculator_agent, tmp_path, config, runtime_paths_for(config), rooms=[test_room_id])
         bot.client = mock_client
         install_runtime_cache_support(bot)
+        mark_response_ready(bot)
         bot._conversation_cache.get_thread_history = AsyncMock(
             return_value=thread_history_result([], is_full_history=True),
         )
@@ -314,6 +316,7 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
             enable_streaming=False,
         )
         install_runtime_cache_support(bot)
+        mark_response_ready(bot)
 
         # Mock orchestrator
         mock_orchestrator = MagicMock()

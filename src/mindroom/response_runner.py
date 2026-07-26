@@ -106,6 +106,7 @@ if TYPE_CHECKING:
     from mindroom.conversation_resolver import ConversationResolver
     from mindroom.conversation_state_writer import ConversationStateWriter
     from mindroom.dispatch_source import ScheduledHistoryBudget
+    from mindroom.handled_turns import TurnRecord
     from mindroom.history.types import HistoryScope
     from mindroom.hooks import MessageEnvelope
     from mindroom.knowledge import KnowledgeAccessSupport
@@ -335,6 +336,7 @@ class ResponseRequest:
     sync_restart_retry_source_event_id: str | None = None
     on_deferred_outcome_handled: Callable[[str], None] | None = None
     recovered_terminal_delivery: bool = False
+    regeneration_turn_record: TurnRecord | None = None
 
     @property
     def room_id(self) -> str:
@@ -1104,6 +1106,7 @@ class ResponseRunner:
             response_envelope=request.response_envelope,
             correlation_id=self._correlation_id_for_request(request),
             source_event_ids=request.source_event_ids or (request.response_envelope.source_event_id,),
+            regeneration_turn_record=request.regeneration_turn_record,
         )
 
     def _agent_turn_context(
@@ -1145,10 +1148,11 @@ class ResponseRunner:
             scheduled_history_budget=request.scheduled_history_budget,
         )
 
-    def _notify_sync_restart_cancelled(
+    async def _notify_sync_restart_cancelled(
         self,
         request: ResponseRequest,
         final_outcome: FinalDeliveryOutcome,
+        identity: ResponseIdentity,
     ) -> None:
         """Tell the dispatcher when a bot replacement interrupted a marked-handled turn.
 
@@ -1164,6 +1168,8 @@ class ResponseRunner:
             return
         if cancel_source_from_failure_reason(final_outcome.failure_reason) != "sync_restart":
             return
+        if await self.deps.delivery_gateway.owned_terminal_delivery_for_turn(identity) is not None:
+            return
         request.on_sync_restart_cancelled()
 
     async def _begin_locked_turn(
@@ -1173,6 +1179,7 @@ class ResponseRunner:
         resolved_target: MessageTarget,
         history_scope: HistoryScope,
         execution_identity: ToolExecutionIdentity,
+        response_kind: str,
         placeholder_message: str | None = None,
         early_placeholder_state: _EarlyPlaceholderState | None = None,
     ) -> ResponseRequest | None:
@@ -1201,16 +1208,13 @@ class ResponseRunner:
                         cancel_source="interrupted",
                         identity=self._response_identity(
                             request,
-                            response_kind="team" if history_scope.kind == "team" else "agent",
+                            response_kind=response_kind,
                         ),
                     ),
                 )
             return None
         owned_delivery = await self.deps.delivery_gateway.owned_terminal_delivery_for_turn(
-            self._response_identity(
-                request,
-                response_kind="team" if history_scope.kind == "team" else "agent",
-            ),
+            self._response_identity(request, response_kind=response_kind),
         )
         if owned_delivery is not None:
             request = replace(
@@ -1507,7 +1511,7 @@ class ResponseRunner:
             post_response_outcome=build_post_response_outcome(final_delivery_outcome),
             post_response_deps=post_response_deps,
         )
-        self._notify_sync_restart_cancelled(request, final_outcome)
+        await self._notify_sync_restart_cancelled(request, final_outcome, lifecycle.identity)
         if deferred_error is not None:
             if final_outcome.mark_handled and request.on_deferred_outcome_handled is not None:
                 response_event_id = final_outcome.final_visible_event_id
@@ -1552,6 +1556,7 @@ class ResponseRunner:
             resolved_target=resolved_target,
             history_scope=resolved_history_scope,
             execution_identity=resolved_execution_identity,
+            response_kind=response_kind,
         )
         if prepared_request is None:
             return None
@@ -1648,6 +1653,7 @@ class ResponseRunner:
             resolved_target=resolved_target,
             history_scope=session_scope,
             execution_identity=retry_execution_identity,
+            response_kind="team",
             placeholder_message="🤝 Team Response: Thinking...",
             early_placeholder_state=placeholder_state,
         )
@@ -2831,6 +2837,7 @@ class ResponseRunner:
             resolved_target=resolved_target,
             history_scope=history_scope,
             execution_identity=execution_identity,
+            response_kind="ai",
             placeholder_message="Thinking...",
             early_placeholder_state=placeholder_state,
         )

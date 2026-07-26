@@ -82,6 +82,7 @@ from tests.conftest import (
     drain_coalescing,
     install_runtime_cache_support,
     make_matrix_client_mock,
+    mark_response_ready,
     message_origin,
     patch_response_runner_module,
     replace_response_runner_deps,
@@ -333,6 +334,7 @@ class TestStreamingBehavior:
             runtime_paths=runtime_paths_for(config),
         )
         install_runtime_cache_support(helper_bot)
+        mark_response_ready(helper_bot)
         helper_bot.client = _make_matrix_client_mock()
 
         # Mock orchestrator
@@ -352,6 +354,7 @@ class TestStreamingBehavior:
             runtime_paths=runtime_paths_for(config),
         )
         install_runtime_cache_support(calc_bot)
+        mark_response_ready(calc_bot)
         calc_bot.client = _make_matrix_client_mock()
 
         # Mock orchestrator
@@ -473,6 +476,7 @@ class TestStreamingBehavior:
             runtime_paths=runtime_paths_for(config),
         )
         install_runtime_cache_support(calc_bot)
+        mark_response_ready(calc_bot)
         calc_bot.client = _make_matrix_client_mock()
 
         # Mock orchestrator

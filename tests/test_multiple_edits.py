@@ -21,6 +21,7 @@ from tests.conftest import (
     drain_coalescing,
     install_runtime_cache_support,
     make_matrix_client_mock,
+    mark_response_ready,
     replace_edit_regenerator_deps,
     runtime_paths_for,
     test_runtime_paths,
@@ -36,7 +37,7 @@ def _delivery_resolution(response_event_id: str | None) -> str | None:
 
 
 @pytest.mark.asyncio
-async def test_agent_regenerates_on_multiple_edits(tmp_path: Path) -> None:
+async def test_agent_regenerates_on_multiple_edits(tmp_path: Path) -> None:  # noqa: PLR0915
     """Test that agents regenerate their response on each consecutive edit."""
     # Set up agent and bot
     agent_user = AgentMatrixUser(
@@ -74,6 +75,7 @@ async def test_agent_regenerates_on_multiple_edits(tmp_path: Path) -> None:
 
     bot.client = make_matrix_client_mock(user_id="@mindroom_test:localhost")
     install_runtime_cache_support(bot)
+    mark_response_ready(bot)
     bot._conversation_cache.get_thread_history = AsyncMock(return_value=thread_history_result([], is_full_history=True))
     bot._conversation_cache.get_dispatch_thread_history = AsyncMock(
         return_value=thread_history_result([], is_full_history=True),

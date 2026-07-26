@@ -955,11 +955,9 @@ depends_on = [
 [[modules]]
 path = "mindroom.terminal_delivery"
 depends_on = [
-    "mindroom.durable_write",
-    "mindroom.file_locks",
+    "mindroom.handled_turns",
     "mindroom.hooks",
     "mindroom.interactive",
-    "mindroom.logging_config",
     "mindroom.matrix.client_delivery",
     "mindroom.message_target",
     "mindroom.response_identity",
@@ -2779,6 +2777,7 @@ depends_on = [
     "mindroom.scheduling",
     "mindroom.sync_restart_retry",
     "mindroom.teams",
+    "mindroom.terminal_delivery",
     "mindroom.timestamp_formatting",
     "mindroom.tool_approval",
     "mindroom.tool_system.dynamic_toolkits",
@@ -2786,7 +2785,6 @@ depends_on = [
     "mindroom.tool_system.worker_routing",
     "mindroom.turn_controller",
     "mindroom.turn_policy",
-    "mindroom.terminal_delivery",
     "mindroom.turn_store",
 ]
 
@@ -3303,7 +3301,6 @@ depends_on = [
     "mindroom.matrix.client_delivery",
     "mindroom.model_instance_checks",
     "mindroom.model_loading",
-    "mindroom.response_identity",
     "mindroom.thread_tag_vocabulary",
     "mindroom.thread_tags",
 ]
@@ -3349,7 +3346,6 @@ depends_on = [
 path = "mindroom.post_response_effects"
 depends_on = [
     "mindroom.matrix.conversation_cache",
-    "mindroom.response_identity",
     "mindroom.runtime_protocols",
     "mindroom.thread_summary",
 ]

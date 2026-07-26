@@ -305,6 +305,7 @@ class EditRegenerator:
             source_event_prompts=prompt_map,
             source_event_revisions=revisions,
             suppressed_source_event_revisions=suppressed_revisions,
+            correlation_id=driving_edit.revision[1],
         )
         target = record.conversation_target
         assert target is not None
@@ -350,11 +351,7 @@ class EditRegenerator:
                 ),
                 on_sync_restart_cancelled=record_interrupted_turn,
                 sync_restart_retry_source_event_id=retry_source_event_id,
-                on_deferred_outcome_handled=lambda response_event_id: (
-                    self.deps.turn_store.record_turn(replace(record, response_event_id=response_event_id))
-                    if applied
-                    else None
-                ),
+                regeneration_turn_record=record,
             ),
             record,
             applied,
@@ -404,9 +401,6 @@ class EditRegenerator:
             if regenerated_event_id is not None:
                 if not applied:
                     return
-                self.deps.turn_store.record_turn(
-                    replace(record, response_event_id=regenerated_event_id),
-                )
                 self._discard(mailbox, applied)
                 continue
             fresh_record = self.deps.turn_store.get_turn_record(latest.original_event_id)
