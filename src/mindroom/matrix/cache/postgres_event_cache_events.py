@@ -12,6 +12,7 @@ from .event_cache_events import (
     bundled_replacement_event_ids,
     cache_rows_were_deleted,
     cached_event_owns_mxc,
+    conflicting_cached_bundled_event_ids,
     decode_cached_event,
     event_edit_rows,
     event_mxc_urls,
@@ -173,11 +174,18 @@ async def load_latest_edit_row(
 ) -> CachedEventRow | None:
     """Select the latest edit across explicit rows and bundled metadata."""
     original_event_id = original.get("event_id")
+    bundled_event_ids = bundled_replacement_event_ids(original)
     rejected_event_ids = frozenset(excluded_event_ids) | await redacted_event_ids(
         db,
         namespace,
         room_id,
-        event_ids=bundled_replacement_event_ids(original),
+        event_ids=bundled_event_ids,
+    )
+    rejected_event_ids |= await _load_conflicting_bundled_event_ids(
+        db,
+        namespace=namespace,
+        room_id=room_id,
+        original=original,
     )
     cursor = db.cursor(name="mindroom_latest_edit")
     await cursor.execute(
@@ -199,15 +207,41 @@ async def load_latest_edit_row(
     )
     try:
         rows = [decode_cached_event(event_json=row[0], cached_at=row[1]) async for row in cursor]
-        return select_latest_cached_edit(
-            original,
-            rows,
-            room_id=room_id,
-            validator=validator,
-            excluded_event_ids=rejected_event_ids,
-        )
     finally:
         await cursor.close()
+    return select_latest_cached_edit(
+        original,
+        rows,
+        room_id=room_id,
+        validator=validator,
+        excluded_event_ids=rejected_event_ids,
+    )
+
+
+async def _load_conflicting_bundled_event_ids(
+    db: AsyncConnection,
+    *,
+    namespace: str,
+    room_id: str,
+    original: dict[str, Any],
+) -> frozenset[str]:
+    """Return bundled IDs contradicted by cached immutable event observations."""
+    bundled_event_ids = bundled_replacement_event_ids(original)
+    if not bundled_event_ids:
+        return frozenset()
+    rows = await fetchall(
+        db,
+        """
+        SELECT event_json
+        FROM mindroom_event_cache_events
+        WHERE namespace = %s AND room_id = %s AND event_id = ANY(%s)
+        """,
+        (namespace, room_id, sorted(bundled_event_ids)),
+    )
+    return conflicting_cached_bundled_event_ids(
+        original,
+        (decode_cached_event(event_json=row[0]).event for row in rows),
+    )
 
 
 async def load_mxc_text(

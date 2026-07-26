@@ -12,6 +12,7 @@ from .event_cache_events import (
     bundled_replacement_event_ids,
     cache_rows_were_deleted,
     cached_event_owns_mxc,
+    conflicting_cached_bundled_event_ids,
     decode_cached_event,
     event_edit_rows,
     event_mxc_urls,
@@ -179,11 +180,18 @@ async def load_latest_edit_row(
 ) -> CachedEventRow | None:
     """Select the latest edit across explicit rows and bundled metadata."""
     original_event_id = original.get("event_id")
+    bundled_event_ids = bundled_replacement_event_ids(original)
     rejected_event_ids = frozenset(excluded_event_ids) | await redacted_event_ids(
         db,
         principal_id,
         room_id,
-        event_ids=bundled_replacement_event_ids(original),
+        event_ids=bundled_event_ids,
+    )
+    rejected_event_ids |= await _load_conflicting_bundled_event_ids(
+        db,
+        principal_id=principal_id,
+        room_id=room_id,
+        original=original,
     )
     cursor = await db.execute(
         """
@@ -204,12 +212,41 @@ async def load_latest_edit_row(
     )
     try:
         rows = [decode_cached_event(event_json=row[0], cached_at=row[1]) for row in await cursor.fetchall()]
-        return select_latest_cached_edit(
+    finally:
+        await cursor.close()
+    return select_latest_cached_edit(
+        original,
+        rows,
+        room_id=room_id,
+        validator=validator,
+        excluded_event_ids=rejected_event_ids,
+    )
+
+
+async def _load_conflicting_bundled_event_ids(
+    db: aiosqlite.Connection,
+    *,
+    principal_id: str,
+    room_id: str,
+    original: dict[str, Any],
+) -> frozenset[str]:
+    """Return bundled IDs contradicted by cached immutable event observations."""
+    bundled_event_ids = sorted(bundled_replacement_event_ids(original))
+    if not bundled_event_ids:
+        return frozenset()
+    placeholders = ",".join("?" for _event_id in bundled_event_ids)
+    cursor = await db.execute(
+        f"""
+        SELECT event_json
+        FROM events
+        WHERE principal_id = ? AND room_id = ? AND event_id IN ({placeholders})
+        """,  # noqa: S608
+        (principal_id, room_id, *bundled_event_ids),
+    )
+    try:
+        return conflicting_cached_bundled_event_ids(
             original,
-            rows,
-            room_id=room_id,
-            validator=validator,
-            excluded_event_ids=rejected_event_ids,
+            (decode_cached_event(event_json=row[0]).event for row in await cursor.fetchall()),
         )
     finally:
         await cursor.close()

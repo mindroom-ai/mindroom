@@ -43,7 +43,7 @@ from mindroom.matrix.client_thread_history import (
     RetainedThreadEventSourceProvider,
     fetch_thread_history,
 )
-from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
+from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage, thread_root_body_preview
 from mindroom.matrix.conversation_cache import MatrixConversationCache, _cached_room_get_event
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.media import valid_room_message_replacement
@@ -2184,6 +2184,8 @@ def _clear_payload(
     event_id: str,
     *,
     body: str = "clear",
+    sender: str = "@user:localhost",
+    room_id: str | None = None,
     thread_root_id: str | None = None,
     edit_of: str | None = None,
     origin_server_ts: int = 1000,
@@ -2195,13 +2197,49 @@ def _clear_payload(
         content["body"] = f"* {body}"
         content["m.new_content"] = {"body": body, "msgtype": "m.text"}
         content["m.relates_to"] = {"rel_type": "m.replace", "event_id": edit_of}
-    return {
+    payload: dict[str, object] = {
         "event_id": event_id,
-        "sender": "@user:localhost",
+        "sender": sender,
         "origin_server_ts": origin_server_ts,
         "type": "m.room.message",
         "content": content,
     }
+    if room_id is not None:
+        payload["room_id"] = room_id
+    return payload
+
+
+def _make_text_event_with_bundled_edit(
+    *,
+    room_id: str,
+    event_id: str,
+    sender: str,
+    body: str,
+    edit_id: str,
+    edited_body: str,
+) -> MagicMock:
+    """Return one complete text event carrying a clear bundled replacement."""
+    event = _make_text_event(
+        event_id=event_id,
+        sender=sender,
+        body=body,
+        server_timestamp=2000,
+        source_content={"body": body},
+    )
+    event.source["room_id"] = room_id
+    event.source["unsigned"] = {
+        "m.relations": {
+            "m.replace": _clear_payload(
+                edit_id,
+                body=edited_body,
+                sender=sender,
+                room_id=room_id,
+                edit_of=event_id,
+                origin_server_ts=3000,
+            ),
+        },
+    }
+    return event
 
 
 def _opaque_payload(
@@ -2590,6 +2628,103 @@ async def test_conflicting_cached_and_bundled_newest_edit_falls_back_to_older(
     )
     assert snapshot is not None
     assert snapshot.content["body"] == "Older valid"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("with_older_valid_edit", [False, True])
+async def test_unstored_bundled_original_rejects_cached_cross_target_identity(
+    event_cache: ConversationEventCache,
+    with_older_valid_edit: bool,
+) -> None:
+    """A cached edit identity for another target must not validate an unstored bundle."""
+    room_id = "!room:localhost"
+    original_id = "$original:localhost"
+    other_target_id = "$other:localhost"
+    conflict_id = "$conflict:localhost"
+    older_id = "$older:localhost"
+    original = _clear_payload(
+        original_id,
+        body="Original",
+        room_id=room_id,
+        origin_server_ts=1000,
+    )
+    bundled_conflict = _clear_payload(
+        conflict_id,
+        body="Bundled forged",
+        room_id=room_id,
+        edit_of=original_id,
+        origin_server_ts=3000,
+    )
+    original["unsigned"] = {"m.relations": {"m.replace": bundled_conflict}}
+    cached_conflict = _clear_payload(
+        conflict_id,
+        body="Cached other target",
+        room_id=room_id,
+        edit_of=other_target_id,
+        origin_server_ts=3000,
+    )
+    cache_rows = [(conflict_id, room_id, cached_conflict)]
+    if with_older_valid_edit:
+        older = _clear_payload(
+            older_id,
+            body="Older valid",
+            room_id=room_id,
+            edit_of=original_id,
+            origin_server_ts=2000,
+        )
+        cache_rows.append((older_id, room_id, older))
+    await event_cache.store_events_batch(cache_rows)
+
+    assert await event_cache.get_event(room_id, original_id) is None
+    latest = await event_cache.get_latest_edit(
+        room_id,
+        original,
+        validator=valid_room_message_replacement,
+    )
+
+    if with_older_valid_edit:
+        assert latest is not None
+        assert latest["event_id"] == older_id
+        assert latest["content"]["m.new_content"]["body"] == "Older valid"
+    else:
+        assert latest is None
+
+
+@pytest.mark.asyncio
+async def test_unstored_bundled_original_accepts_cached_encrypted_representation(
+    event_cache: ConversationEventCache,
+) -> None:
+    """A cached ciphertext view must not make its clear bundled replacement contradictory."""
+    room_id = "!room:localhost"
+    original_id = "$original:localhost"
+    edit_id = "$edit:localhost"
+    original = _clear_payload(
+        original_id,
+        body="Original",
+        room_id=room_id,
+        origin_server_ts=1000,
+    )
+    clear_edit = _clear_payload(
+        edit_id,
+        body="Bundled clear",
+        room_id=room_id,
+        edit_of=original_id,
+        origin_server_ts=3000,
+    )
+    original["unsigned"] = {"m.relations": {"m.replace": clear_edit}}
+    encrypted_edit = _opaque_payload(edit_id, origin_server_ts=3000)
+    encrypted_edit["room_id"] = room_id
+    await event_cache.store_event(edit_id, room_id, encrypted_edit)
+
+    latest = await event_cache.get_latest_edit(
+        room_id,
+        original,
+        validator=valid_room_message_replacement,
+    )
+
+    assert latest is not None
+    assert latest["event_id"] == edit_id
+    assert latest["content"]["m.new_content"]["body"] == "Bundled clear"
 
 
 @pytest.mark.asyncio
@@ -4691,6 +4826,118 @@ async def test_cached_room_get_event_network_fetch_merges_cached_latest_edit(
     assert response.event.event_id == "$reply"
     assert response.event.body == "Final reply"
     client.room_get_event.assert_awaited_once_with("!room:localhost", "$reply")
+
+
+@pytest.mark.asyncio
+async def test_cached_room_get_event_first_fetch_rejects_cached_cross_target_bundle(
+    event_cache: ConversationEventCache,
+) -> None:
+    """A first network point read must not expose a conflicting bundled edit once."""
+    room_id = "!room:localhost"
+    original_id = "$reply"
+    conflict_id = "$reply_edit"
+    original_event = _make_text_event_with_bundled_edit(
+        room_id=room_id,
+        event_id=original_id,
+        sender="@agent:localhost",
+        body="Original reply",
+        edit_id=conflict_id,
+        edited_body="Bundled forged",
+    )
+    cached_conflict = _clear_payload(
+        conflict_id,
+        body="Cached other target",
+        sender="@agent:localhost",
+        room_id=room_id,
+        edit_of="$other",
+        origin_server_ts=3000,
+    )
+    await event_cache.store_event(conflict_id, room_id, cached_conflict)
+    client = MagicMock()
+    client.room_get_event = AsyncMock(return_value=_make_room_get_event_response(original_event))
+
+    response, fetched_source = await _cached_room_get_event(client, event_cache, room_id, original_id)
+
+    assert isinstance(response, nio.RoomGetEventResponse)
+    assert response.event.body == "Original reply"
+    assert fetched_source == original_event.source
+    assert await event_cache.get_event(room_id, original_id) is None
+
+
+@pytest.mark.asyncio
+async def test_thread_root_preview_rejects_cached_cross_target_bundled_identity(
+    tmp_path: Path,
+    event_cache: ConversationEventCache,
+) -> None:
+    """A bundled preview must compare its edit identity with cached point payloads."""
+    room_id = "!room:localhost"
+    original_id = "$root"
+    conflict_id = "$root_edit"
+    original_event = _make_text_event_with_bundled_edit(
+        room_id=room_id,
+        event_id=original_id,
+        sender="@agent:localhost",
+        body="Original root",
+        edit_id=conflict_id,
+        edited_body="Bundled forged",
+    )
+    cached_conflict = _clear_payload(
+        conflict_id,
+        body="Cached other target",
+        sender="@agent:localhost",
+        room_id=room_id,
+        edit_of="$other",
+        origin_server_ts=3000,
+    )
+    await event_cache.store_event(conflict_id, room_id, cached_conflict)
+    client = MagicMock()
+    conversation_cache = _conversation_cache_for_thread_reads(tmp_path, event_cache, client=client)
+
+    preview = await thread_root_body_preview(
+        original_event,
+        client=client,
+        config=conversation_cache.runtime.config,
+        runtime_paths=conversation_cache.runtime.runtime_paths,
+        event_cache=event_cache,
+        room_id=room_id,
+    )
+
+    assert preview == "Original root"
+
+
+@pytest.mark.asyncio
+async def test_thread_root_preview_accepts_cached_encrypted_edit_representation(
+    tmp_path: Path,
+    event_cache: ConversationEventCache,
+) -> None:
+    """A cached ciphertext view must not hide its clear bundled preview."""
+    room_id = "!room:localhost"
+    original_id = "$root"
+    edit_id = "$root_edit"
+    original_event = _make_text_event_with_bundled_edit(
+        room_id=room_id,
+        event_id=original_id,
+        sender="@user:localhost",
+        body="Original root",
+        edit_id=edit_id,
+        edited_body="Bundled clear",
+    )
+    encrypted_edit = _opaque_payload(edit_id, origin_server_ts=3000)
+    encrypted_edit["room_id"] = room_id
+    await event_cache.store_event(edit_id, room_id, encrypted_edit)
+    client = MagicMock()
+    conversation_cache = _conversation_cache_for_thread_reads(tmp_path, event_cache, client=client)
+
+    preview = await thread_root_body_preview(
+        original_event,
+        client=client,
+        config=conversation_cache.runtime.config,
+        runtime_paths=conversation_cache.runtime.runtime_paths,
+        event_cache=event_cache,
+        room_id=room_id,
+    )
+
+    assert preview == "Bundled clear"
 
 
 @pytest.mark.asyncio

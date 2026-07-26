@@ -80,6 +80,27 @@ def _cached_event_transition(
     return "conflict" if event_representations_conflict(existing, candidate) else "accept"
 
 
+def conflicting_cached_bundled_event_ids(
+    original: Mapping[str, Any],
+    cached_events: Iterable[Mapping[str, Any]],
+) -> frozenset[str]:
+    """Return bundled IDs contradicted by cached immutable event observations."""
+    bundled_by_event_id: dict[str, list[dict[str, Any]]] = {}
+    for bundled in bundled_replacement_candidates(original):
+        event_id = bundled.get("event_id")
+        if isinstance(event_id, str) and event_id:
+            bundled_by_event_id.setdefault(event_id, []).append(bundled)
+    return frozenset(
+        event_id
+        for cached_event in cached_events
+        if isinstance((event_id := cached_event.get("event_id")), str)
+        if event_id in bundled_by_event_id
+        if any(
+            _cached_event_transition(cached_event, bundled) == "conflict" for bundled in bundled_by_event_id[event_id]
+        )
+    )
+
+
 def _observe_cached_event_identity(
     observed: dict[str, dict[str, Any]],
     conflicting_event_ids: set[str],

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import tempfile
 from pathlib import Path
-from typing import cast
+from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -16,6 +16,7 @@ import mindroom.tools  # noqa: F401
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.custom_tools.matrix_room import MatrixRoomTools
+from mindroom.matrix import replacements
 from mindroom.matrix.client import RoomThreadsPageError
 from mindroom.message_target import MessageTarget
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
@@ -27,6 +28,9 @@ from tests.conftest import (
     runtime_paths_for,
     test_runtime_paths,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Collection
 
 _NEXT_BATCH_PAGE_TOKEN = "next_batch"  # noqa: S105
 _THREAD_PAGE_TOKEN = "tok123"  # noqa: S105
@@ -50,6 +54,24 @@ def _make_context(
     client = AsyncMock()
     client.rooms = {}
     client.user_id = "@mindroom_general:localhost"
+    event_cache = make_event_cache_mock()
+
+    async def get_latest_edit(
+        selected_room_id: str,
+        original: dict[str, Any],
+        *,
+        validator: replacements.ReplacementValidator,
+        excluded_event_ids: Collection[str] = (),
+    ) -> dict[str, Any] | None:
+        candidates = replacements.ordered_replacements(
+            original,
+            room_id=selected_room_id,
+            validator=validator,
+            excluded_event_ids=excluded_event_ids,
+        )
+        return candidates[0] if candidates else None
+
+    event_cache.get_latest_edit.side_effect = get_latest_edit
     return ToolRuntimeContext(
         agent_name="general",
         target=MessageTarget.resolve(
@@ -61,7 +83,7 @@ def _make_context(
         client=client,
         config=config,
         runtime_paths=runtime_paths_for(config),
-        event_cache=make_event_cache_mock(),
+        event_cache=event_cache,
         conversation_cache=make_conversation_cache_mock(),
         room=None,
     )

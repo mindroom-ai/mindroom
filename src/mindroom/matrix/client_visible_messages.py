@@ -262,13 +262,17 @@ async def bundled_replacement_body(
         for candidate in replacements.bundled_replacement_candidates(event_source)
         if isinstance((event_id := candidate.get("event_id")), str)
     }
-    excluded_event_ids = await event_cache.redacted_event_ids(room_id, bundled_event_ids)
-    for candidate in replacements.ordered_replacements(
-        event_source,
-        room_id=room_id,
-        validator=valid_room_message_replacement,
-        excluded_event_ids=excluded_event_ids,
-    ):
+    if not bundled_event_ids:
+        return None
+    excluded_event_ids = set(await event_cache.redacted_event_ids(room_id, bundled_event_ids))
+    while (
+        candidate := await event_cache.get_latest_edit(
+            room_id,
+            dict(event_source),
+            validator=valid_room_message_replacement,
+            excluded_event_ids=excluded_event_ids,
+        )
+    ) is not None:
         body, _content = await extract_edit_body(
             candidate,
             client,
@@ -279,6 +283,7 @@ async def bundled_replacement_body(
         )
         if body is not None:
             return body
+        excluded_event_ids.add(candidate["event_id"])
     return None
 
 
