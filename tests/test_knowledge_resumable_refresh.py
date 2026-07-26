@@ -380,6 +380,11 @@ def _write_corpus(docs_path: Path, count: int, *, body: str = "content") -> list
     return names
 
 
+def _overlapping_body(tokens: int) -> str:
+    """Return text whose chunks all differ, so batched requests cannot dedupe them away."""
+    return " ".join(f"token{index:04d}" for index in range(tokens))
+
+
 def _candidate_collections() -> list[str]:
     return sorted(name for name in _FakeVectorDb.store if "_candidate_" in name)
 
@@ -2812,11 +2817,6 @@ async def test_oversized_file_still_indexes_and_publishes(
     assert state.indexed_count == 4
     stored = sorted(record.metadata["source_path"] for record in _FakeVectorDb.store[state.collection])
     assert "huge.md" in stored
-
-
-def _overlapping_body(tokens: int) -> str:
-    """Return text whose chunks differ, so batched requests cannot dedupe away."""
-    return " ".join(f"token{index:04d}" for index in range(tokens))
 
 
 def test_moderate_overlap_is_still_batch_prefetched(tmp_path: Path) -> None:

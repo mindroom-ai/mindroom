@@ -51,23 +51,23 @@ def test_zero_overlap_keeps_the_source_size_as_its_bound(chunk_size: int) -> Non
     assert strategy.max_chunk_text_bytes(8_000_000) == 8_000_000
 
 
-def test_moderate_overlap_admits_realistically_sized_files() -> None:
-    """A 10% overlap must stay cheap enough for ordinary files to be prefetched."""
+def test_moderate_overlap_expands_by_a_small_factor() -> None:
+    """A 10% overlap must stay cheap enough for ordinary files to be admitted."""
     strategy = SafeFixedSizeChunking(chunk_size=1_000, overlap=100)
 
-    # Two megabytes of source still fit an eight-megabyte prefetch budget.
-    assert strategy.max_chunk_text_bytes(2_000_000) <= 8_000_000
+    assert strategy.max_chunk_text_bytes(2_000_000) <= 2 * 2_000_000
 
 
 def test_near_total_overlap_bound_reflects_the_real_amplification() -> None:
     """Overlap one below the chunk size really does multiply a small file."""
     content = "x" * 4_000
+    source_bytes = len(content.encode("utf-8"))
 
     emitted, bound = _emitted_and_bound(content, chunk_size=128, overlap=127)
 
-    assert emitted > 100 * len(content), "the pathological case stopped amplifying"
+    assert emitted > 100 * source_bytes, "the pathological case stopped amplifying"
     assert emitted <= bound
-    assert bound <= 128 * len(content)
+    assert bound <= 128 * source_bytes
 
 
 _SCENARIOS = {
