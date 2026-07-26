@@ -4081,7 +4081,9 @@ expose = [
     "fetch_dispatch_thread_snapshot",
     "fetch_thread_history",
     "get_room_threads_page",
+    "log_thread_history_refresh",
     "refresh_thread_history_from_source",
+    "thread_history_refresh_mode",
     "untrusted_cached_thread_ids",
 ]
 from = ["mindroom.matrix.client_thread_history"]

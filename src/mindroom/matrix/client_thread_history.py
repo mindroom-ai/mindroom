@@ -211,7 +211,7 @@ def _thread_history_result(
     return thread_history_result(history, is_full_history=is_full_history, diagnostics=diagnostics)
 
 
-def _log_thread_history_refresh(
+def log_thread_history_refresh(
     *,
     room_id: str,
     thread_id: str,
@@ -240,6 +240,18 @@ def _log_thread_history_refresh(
         thread_read_degraded=diagnostics.get(THREAD_HISTORY_DEGRADED_DIAGNOSTIC, False),
         thread_read_error=diagnostics.get(THREAD_HISTORY_ERROR_DIAGNOSTIC),
     )
+
+
+def thread_history_refresh_mode(result: ThreadHistoryResult, *, cache_hit: bool) -> str:
+    """Classify one completed public read from its authoritative diagnostics."""
+    if cache_hit:
+        return "cache_hit"
+    if (
+        result.diagnostics.get(THREAD_HISTORY_SOURCE_DIAGNOSTIC) == THREAD_HISTORY_SOURCE_CACHE
+        and result.diagnostics.get("cache_store_outcome") == ThreadCacheReplaceOutcome.EXISTING_USABLE.value
+    ):
+        return "cache_hit_after_repair_conflict"
+    return "full_scan"
 
 
 class RoomThreadsPageError(ValueError):
@@ -1181,11 +1193,9 @@ async def _stale_history_after_refresh_error(
     fetch_error: Exception,
     cache_reject_diagnostics: Mapping[str, str | int | float | bool] | None,
     trusted_sender_ids: Collection[str],
-    caller_label: str,
-    coordinator_queue_wait_ms: float,
 ) -> ThreadHistoryResult | None:
-    """Load and log the optional stale-cache fallback after a refresh failure."""
-    stale_history = await _load_stale_cached_thread_history(
+    """Load the optional stale-cache fallback after a refresh failure."""
+    return await _load_stale_cached_thread_history(
         client,
         room_id=room_id,
         thread_id=thread_id,
@@ -1195,17 +1205,6 @@ async def _stale_history_after_refresh_error(
         cache_reject_diagnostics=cache_reject_diagnostics,
         trusted_sender_ids=trusted_sender_ids,
     )
-    if stale_history is None:
-        return None
-    _log_thread_history_refresh(
-        room_id=room_id,
-        thread_id=thread_id,
-        caller_label=caller_label,
-        mode="full_scan",
-        diagnostics=stale_history.diagnostics,
-        coordinator_queue_wait_ms=coordinator_queue_wait_ms,
-    )
-    return stale_history
 
 
 async def _cache_store_rejection_outcome(
@@ -1361,8 +1360,6 @@ async def refresh_thread_history_from_source(
     allow_stale_fallback: bool = True,
     cache_reject_diagnostics: Mapping[str, str | int | float | bool] | None = None,
     trusted_sender_ids: Collection[str] = (),
-    caller_label: str = "unknown",
-    coordinator_queue_wait_ms: float = 0.0,
     retained_event_sources: RetainedThreadEventSourceProvider | None = None,
 ) -> ThreadHistoryResult:
     """Fetch fresh thread history from Matrix and repopulate the advisory cache."""
@@ -1397,8 +1394,6 @@ async def refresh_thread_history_from_source(
                     fetch_error=exc,
                     cache_reject_diagnostics=cache_reject_diagnostics,
                     trusted_sender_ids=trusted_sender_ids,
-                    caller_label=caller_label,
-                    coordinator_queue_wait_ms=coordinator_queue_wait_ms,
                 )
                 if allow_stale_fallback
                 else None
@@ -1419,7 +1414,7 @@ async def refresh_thread_history_from_source(
             repair_attempt=repair_attempts,
         )
         if attempt.existing_history is not None:
-            result = _thread_history_result(
+            return _thread_history_result(
                 list(attempt.existing_history),
                 is_full_history=hydrate_sidecars,
                 diagnostics={
@@ -1429,15 +1424,6 @@ async def refresh_thread_history_from_source(
                     "cache_repair_usable": True,
                 },
             )
-            _log_thread_history_refresh(
-                room_id=room_id,
-                thread_id=thread_id,
-                caller_label=caller_label,
-                mode="cache_hit_after_repair_conflict",
-                diagnostics=result.diagnostics,
-                coordinator_queue_wait_ms=coordinator_queue_wait_ms,
-            )
-            return result
         if not attempt.retryable or repair_attempts == _MAX_THREAD_REPAIR_ATTEMPTS:
             break
         logger.warning(
@@ -1460,7 +1446,7 @@ async def refresh_thread_history_from_source(
             cache_store_outcome=attempt.cache_store_outcome,
             cache_repair_attempts=repair_attempts,
         )
-    result = _homeserver_thread_history_result(
+    return _homeserver_thread_history_result(
         fetch_result,
         hydrate_sidecars=hydrate_sidecars,
         cache_store_outcome=attempt.cache_store_outcome,
@@ -1468,15 +1454,6 @@ async def refresh_thread_history_from_source(
         cache_repair_usable=attempt.usable,
         cache_reject_diagnostics=cache_reject_diagnostics,
     )
-    _log_thread_history_refresh(
-        room_id=room_id,
-        thread_id=thread_id,
-        caller_label=caller_label,
-        mode="full_scan",
-        diagnostics=result.diagnostics,
-        coordinator_queue_wait_ms=coordinator_queue_wait_ms,
-    )
-    return result
 
 
 async def _store_thread_history_cache(
@@ -1624,6 +1601,7 @@ async def _fetch_thread_history_with_cache_policy(
 ) -> ThreadHistoryResult:
     """Serve one trusted cache hit or delegate only the required refill."""
     cache_reject_diagnostics: dict[str, str | int | float | bool] | None = None
+    cached_history: ThreadHistoryResult | None = None
     try:
         cached_history, cache_reject_diagnostics = await _load_cached_thread_history_if_usable(
             client,
@@ -1641,31 +1619,30 @@ async def _fetch_thread_history_with_cache_policy(
             thread_id=thread_id,
             error=str(exc),
         )
+    if cached_history is not None:
+        result = cached_history
+    elif refill is not None:
+        result = await refill(cache_reject_diagnostics)
     else:
-        if cached_history is not None:
-            _log_thread_history_refresh(
-                room_id=room_id,
-                thread_id=thread_id,
-                caller_label=caller_label,
-                mode="cache_hit",
-                diagnostics=cached_history.diagnostics,
-                coordinator_queue_wait_ms=coordinator_queue_wait_ms,
-            )
-            return cached_history
-    if refill is not None:
-        return await refill(cache_reject_diagnostics)
-    return await refresh_thread_history_from_source(
-        client,
-        room_id,
-        thread_id,
-        event_cache,
-        hydrate_sidecars=hydrate_sidecars,
-        allow_stale_fallback=allow_stale_fallback,
-        cache_reject_diagnostics=cache_reject_diagnostics,
-        trusted_sender_ids=trusted_sender_ids,
+        result = await refresh_thread_history_from_source(
+            client,
+            room_id,
+            thread_id,
+            event_cache,
+            hydrate_sidecars=hydrate_sidecars,
+            allow_stale_fallback=allow_stale_fallback,
+            cache_reject_diagnostics=cache_reject_diagnostics,
+            trusted_sender_ids=trusted_sender_ids,
+        )
+    log_thread_history_refresh(
+        room_id=room_id,
+        thread_id=thread_id,
         caller_label=caller_label,
+        mode=thread_history_refresh_mode(result, cache_hit=cached_history is not None),
+        diagnostics=result.diagnostics,
         coordinator_queue_wait_ms=coordinator_queue_wait_ms,
     )
+    return result
 
 
 async def fetch_thread_history(
@@ -2304,6 +2281,8 @@ __all__ = [
     "fetch_thread_event_sources_via_room_messages",
     "fetch_thread_history",
     "get_room_threads_page",
+    "log_thread_history_refresh",
     "refresh_thread_history_from_source",
+    "thread_history_refresh_mode",
     "untrusted_cached_thread_ids",
 ]

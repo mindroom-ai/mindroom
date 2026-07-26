@@ -629,6 +629,116 @@ async def test_advisory_joiner_keeps_stale_fallback_from_strict_owner_failure(tm
 
 
 @pytest.mark.asyncio
+async def test_shared_repair_logs_completion_for_each_caller(tmp_path: Path) -> None:  # noqa: PLR0915
+    """Every caller should own completion telemetry even when one refill is shared."""
+    event_cache = SqliteEventCache(tmp_path / "event_cache.db")
+    await event_cache.initialize()
+    conversation_cache = _conversation_cache_for_thread_reads(tmp_path, event_cache, client=MagicMock())
+    coordinator = EventCacheWriteCoordinator(logger=MagicMock())
+    conversation_cache.runtime.event_cache_write_coordinator = coordinator
+    fetch_started = asyncio.Event()
+    release_fetch = asyncio.Event()
+    both_callers_waiting = asyncio.Event()
+    release_idle_wait = asyncio.Event()
+    both_callers_entered_repair = asyncio.Event()
+    fetch_count = 0
+    idle_wait_count = 0
+    repair_call_count = 0
+    root = ResolvedVisibleMessage.synthetic(
+        sender="@user:localhost",
+        body="root",
+        event_id="$thread:localhost",
+        content={"body": "root"},
+    )
+
+    async def fetch_snapshot(*_args: object, **_kwargs: object) -> object:
+        nonlocal fetch_count
+        fetch_count += 1
+        fetch_started.set()
+        await release_fetch.wait()
+        return MagicMock(
+            history=[root],
+            event_sources=[_clear_payload("$thread:localhost", body="root")],
+            fetch_ms=1.0,
+            room_scan_pages=1,
+            scanned_event_count=1,
+            resolution_ms=1.0,
+            sidecar_hydration_ms=0.0,
+        )
+
+    wait_for_thread_idle = coordinator.wait_for_thread_idle
+    run_thread_repair = coordinator.run_thread_repair
+
+    async def observed_wait_for_thread_idle(*args: object, **kwargs: object) -> None:
+        nonlocal idle_wait_count
+        await wait_for_thread_idle(*args, **kwargs)
+        idle_wait_count += 1
+        if idle_wait_count == 2:
+            both_callers_waiting.set()
+        await release_idle_wait.wait()
+
+    async def observed_run_thread_repair(
+        room_id: str,
+        thread_id: str,
+        repair: Callable[[], Awaitable[ThreadHistoryResult]],
+        **kwargs: object,
+    ) -> ThreadRepairRunResult[ThreadHistoryResult]:
+        nonlocal repair_call_count
+        repair_call_count += 1
+        if repair_call_count == 2:
+            both_callers_entered_repair.set()
+        return await run_thread_repair(room_id, thread_id, repair, **kwargs)
+
+    telemetry_logger = MagicMock()
+    try:
+        with (
+            patch("mindroom.matrix.client_thread_history.logger", telemetry_logger),
+            patch.object(coordinator, "wait_for_thread_idle", side_effect=observed_wait_for_thread_idle),
+            patch.object(coordinator, "run_thread_repair", side_effect=observed_run_thread_repair),
+            patch(
+                "mindroom.matrix.client_thread_history._fetch_thread_history_with_events",
+                AsyncMock(side_effect=fetch_snapshot),
+            ),
+        ):
+            first = asyncio.create_task(
+                conversation_cache.get_thread_history(
+                    "!room:localhost",
+                    "$thread:localhost",
+                    caller_label="first_reader",
+                ),
+            )
+            second = asyncio.create_task(
+                conversation_cache.get_thread_history(
+                    "!room:localhost",
+                    "$thread:localhost",
+                    caller_label="second_reader",
+                ),
+            )
+            await asyncio.wait_for(both_callers_waiting.wait(), timeout=1.0)
+            release_idle_wait.set()
+            await asyncio.wait_for(fetch_started.wait(), timeout=1.0)
+            await asyncio.wait_for(both_callers_entered_repair.wait(), timeout=1.0)
+            release_fetch.set()
+            await asyncio.gather(first, second)
+    finally:
+        release_idle_wait.set()
+        release_fetch.set()
+        await coordinator.close()
+        await event_cache.close()
+
+    refresh_logs = [
+        call
+        for call in telemetry_logger.info.call_args_list
+        if call.args and call.args[0] == "matrix_cache_thread_history_refreshed"
+    ]
+    assert fetch_count == 1
+    assert [call.kwargs["caller_label"] for call in refresh_logs] == [
+        "first_reader",
+        "second_reader",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_dispatch_thread_read_degrades_when_fetcher_stalls(
     tmp_path: Path,
 ) -> None:

@@ -130,7 +130,6 @@ async def _fetch_thread_payload(
             event_cache,
             allow_stale_fallback=False,
             trusted_sender_ids=trusted_sender_ids,
-            caller_label="thread_export",
         )
     return thread_payload(
         room=room,

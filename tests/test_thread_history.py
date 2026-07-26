@@ -3780,6 +3780,10 @@ class TestThreadHistoryCache:
         with (
             patch.object(matrix_client_module, "logger", logger),
             patch(
+                "mindroom.matrix.client_thread_history._load_cached_thread_history_if_usable",
+                new=AsyncMock(return_value=(None, None)),
+            ),
+            patch(
                 "mindroom.matrix.client_thread_history._fetch_thread_history_with_events",
                 new=AsyncMock(side_effect=RuntimeError("homeserver unavailable")),
             ),
@@ -3788,7 +3792,7 @@ class TestThreadHistoryCache:
                 new=AsyncMock(return_value=stale_history),
             ),
         ):
-            history = await matrix_client_module.refresh_thread_history_from_source(
+            history = await matrix_client_module.fetch_thread_history(
                 AsyncMock(),
                 "!room:localhost",
                 "$thread_root",

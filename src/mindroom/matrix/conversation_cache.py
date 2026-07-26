@@ -45,7 +45,9 @@ from mindroom.matrix.client_thread_history import (
     fetch_dispatch_thread_snapshot,
     fetch_thread_history,
     get_room_threads_page,
+    log_thread_history_refresh,
     refresh_thread_history_from_source,
+    thread_history_refresh_mode,
     untrusted_cached_thread_ids,
 )
 from mindroom.matrix.event_info import EventInfo
@@ -817,15 +819,22 @@ class MatrixConversationCache(ConversationCacheProtocol):
                     thread_id,
                     retained_event_sources=retained_event_sources,
                 )
-        return await self._refill_thread_from_client(
+        result = await self._refill_thread_from_client(
             room_id,
             thread_id,
             cache_reject_diagnostics=None,
-            caller_label=caller_label,
-            coordinator_queue_wait_ms=coordinator_queue_wait_ms,
             wants_full_history=True,
             allows_stale_fallback=False,
         )
+        log_thread_history_refresh(
+            room_id=room_id,
+            thread_id=thread_id,
+            caller_label=caller_label,
+            mode=thread_history_refresh_mode(result, cache_hit=False),
+            diagnostics=result.diagnostics,
+            coordinator_queue_wait_ms=coordinator_queue_wait_ms,
+        )
+        return result
 
     async def _refill_thread_from_client(
         self,
@@ -833,8 +842,6 @@ class MatrixConversationCache(ConversationCacheProtocol):
         thread_id: str,
         *,
         cache_reject_diagnostics: Mapping[str, str | int | float | bool] | None,
-        caller_label: str,
-        coordinator_queue_wait_ms: float,
         wants_full_history: bool,
         allows_stale_fallback: bool,
     ) -> ThreadHistoryResult:
@@ -849,8 +856,6 @@ class MatrixConversationCache(ConversationCacheProtocol):
                 allow_stale_fallback=allows_stale_fallback,
                 cache_reject_diagnostics=cache_reject_diagnostics,
                 trusted_sender_ids=self._trusted_sender_ids(),
-                caller_label=caller_label,
-                coordinator_queue_wait_ms=coordinator_queue_wait_ms,
             )
 
         principal_id = self.runtime.event_cache.principal_id
@@ -873,8 +878,6 @@ class MatrixConversationCache(ConversationCacheProtocol):
                 allow_stale_fallback=allows_stale_fallback,
                 cache_reject_diagnostics=cache_reject_diagnostics,
                 trusted_sender_ids=self._trusted_sender_ids(),
-                caller_label=caller_label,
-                coordinator_queue_wait_ms=coordinator_queue_wait_ms,
                 retained_event_sources=retained_event_source_provider,
             )
             if self._thread_repair_result_is_usable(result):
@@ -933,8 +936,6 @@ class MatrixConversationCache(ConversationCacheProtocol):
                 room_id,
                 thread_id,
                 cache_reject_diagnostics=cache_reject_diagnostics,
-                caller_label=caller_label,
-                coordinator_queue_wait_ms=coordinator_queue_wait_ms,
                 wants_full_history=wants_full_history,
                 allows_stale_fallback=allows_stale_fallback,
             )
