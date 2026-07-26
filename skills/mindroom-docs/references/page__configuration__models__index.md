@@ -17,6 +17,7 @@ Models define the AI providers and model IDs used by agents.
 - `cerebras` - Cerebras-hosted models
 - `deepseek` - DeepSeek models
 - `zai` - Z.ai GLM models
+- `synthetic` - Built-in Lorem Ipsum model for local conversations and load generation
 
 ## Model Config Fields
 
@@ -121,6 +122,38 @@ models:
     extra_kwargs:
       base_url: http://localhost:8080/v1
 ```
+
+## Built-In Synthetic Model
+
+Use `provider: synthetic` to exercise normal MindRoom conversations without an API key or model server.
+The model streams a seeded random amount of Lorem Ipsum at a fixed character rate.
+When the agent has the `shell` tool, the model occasionally calls `run_shell_command` with `echo hi` and then continues its response.
+
+```yaml
+models:
+  synthetic:
+    provider: synthetic
+    id: lorem-ipsum
+    extra_kwargs:
+      seed: 1
+      min_response_chars: 320
+      max_response_chars: 960
+      chunk_chars: 40
+      chars_per_second: 80
+      tool_call_probability: 0.2
+
+agents:
+  load_test:
+    display_name: Load Test
+    role: Generate synthetic traffic.
+    model: synthetic
+    tools: [shell]
+    rooms: [lobby]
+```
+
+Tag `@load_test` in Lobby to receive a streamed synthetic reply through the same Matrix path as any other agent.
+Set `tool_call_probability: 1` to force the shell call on every turn, or `0` to disable tool calls.
+Changing `seed` changes the repeatable response length, split point, and tool-call choice for each conversation history.
 
 ## OpenAI API Models
 
@@ -257,6 +290,7 @@ You can tune compaction behavior with these settings:
 - Use `replay_window_tokens` to keep persisted replay and required-compaction planning within a smaller operational window without presenting that smaller value as the provider's request limit.
 - Use `reserve_tokens` to leave hard-budget headroom for the current prompt and output.
 - Use `model` to choose the summary model, and `fallback_model` to name a different model config retried once when the summary model refuses for safeguards; the same input is reused when it fits, otherwise it is rebuilt under the fallback model's own context budget, and after success that model serves the remaining chunks.
+- Use `timeout_seconds` to bound each primary, retry, or fallback summary request; it defaults to 600 seconds, while an explicitly shorter provider timeout remains the stricter cap.
 
 When the active runtime model window is known, replay safety uses the smaller of it and `replay_window_tokens`.
 When that model window is unknown, an explicit `replay_window_tokens` still supplies the replay-planning window.

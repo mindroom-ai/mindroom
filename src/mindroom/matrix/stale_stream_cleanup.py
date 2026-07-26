@@ -44,7 +44,6 @@ from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import build_message_content, markdown_to_html
 from mindroom.matrix.message_content import extract_and_resolve_message, extract_edit_body
 from mindroom.matrix.thread_diagnostics import (
-    THREAD_HISTORY_SOURCE_CACHE,
     THREAD_HISTORY_SOURCE_DIAGNOSTIC,
     THREAD_HISTORY_SOURCE_HOMESERVER,
     is_thread_history_degraded,
@@ -331,12 +330,24 @@ async def _auto_resume_interrupted_threads(
     resumed_count = 0
     delay_due = delay_before_first
     for interrupted_thread in candidate_threads:
-        if not await _auto_resume_candidate_is_resumable(
+        if interrupted_thread.original_sender_id is None:
+            logger.warning(
+                "Skipping auto-resume because requester identity could not be resolved",
+                room_id=interrupted_thread.room_id,
+                thread_id=interrupted_thread.thread_id,
+                target_event_id=interrupted_thread.target_event_id,
+            )
+            continue
+        if not _auto_resume_history_is_certifiable(interrupted_thread, root_outcomes):
+            continue
+        if delay_due:
+            await asyncio.sleep(delay)
+            delay_due = False
+        if not await _interrupted_target_remains_latest_human_work(
             interrupted_thread,
             config=config,
             runtime_paths=runtime_paths,
             conversation_cache=conversation_cache,
-            root_outcomes=root_outcomes,
         ):
             continue
         try:
@@ -345,16 +356,6 @@ async def _auto_resume_interrupted_threads(
                 config=config,
                 runtime_paths=runtime_paths,
             )
-            if delay_due:
-                await asyncio.sleep(delay)
-                delay_due = False
-                if not await _interrupted_target_remains_latest_human_work(
-                    interrupted_thread,
-                    config=config,
-                    runtime_paths=runtime_paths,
-                    conversation_cache=conversation_cache,
-                ):
-                    continue
             delay_due = True
             delivered = await send_message_result(client, interrupted_thread.room_id, content)
             if delivered is not None:
@@ -389,33 +390,6 @@ async def _auto_resume_interrupted_threads(
             )
 
     return resumed_count
-
-
-async def _auto_resume_candidate_is_resumable(
-    interrupted_thread: _InterruptedThread,
-    *,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    conversation_cache: ConversationCacheProtocol | None,
-    root_outcomes: Mapping[tuple[str, str], StartupRootOutcome],
-) -> bool:
-    """Return whether one candidate passes every fail-closed guard before a resume is sent."""
-    if interrupted_thread.original_sender_id is None:
-        logger.warning(
-            "Skipping auto-resume because requester identity could not be resolved",
-            room_id=interrupted_thread.room_id,
-            thread_id=interrupted_thread.thread_id,
-            target_event_id=interrupted_thread.target_event_id,
-        )
-        return False
-    if not _auto_resume_history_is_certifiable(interrupted_thread, root_outcomes):
-        return False
-    return await _interrupted_target_remains_latest_human_work(
-        interrupted_thread,
-        config=config,
-        runtime_paths=runtime_paths,
-        conversation_cache=conversation_cache,
-    )
 
 
 async def _certify_auto_resume_thread_histories(
@@ -492,7 +466,7 @@ async def _interrupted_target_remains_latest_human_work(
         return False
 
     try:
-        history = await conversation_cache.get_strict_thread_history(
+        history = await conversation_cache.refresh_strict_thread_history_from_source(
             interrupted_thread.room_id,
             interrupted_thread.thread_id,
             caller_label="startup_auto_resume_freshness",
@@ -532,7 +506,7 @@ def _authoritative_history_after_target(
     if not history.is_full_history or is_thread_history_degraded(history):
         msg = "Thread history is incomplete or degraded"
         raise ValueError(msg)
-    if history_source not in {THREAD_HISTORY_SOURCE_CACHE, THREAD_HISTORY_SOURCE_HOMESERVER}:
+    if history_source != THREAD_HISTORY_SOURCE_HOMESERVER:
         msg = f"Non-authoritative thread history source: {history_source!r}"
         raise ValueError(msg)
     target_index = next(

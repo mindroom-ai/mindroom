@@ -1,8 +1,7 @@
 """Tests for the shared per-room startup thread-history operation.
 
-These cover the coalescing contract directly on ``StartupRoomHistoryCoordinator`` and end to end
-through the conversation-cache facade and stale-stream auto-resume, where the pre-fix code paid one
-homeserver room walk per interrupted thread.
+These cover the coalescing contract directly on ``StartupRoomHistoryCoordinator`` and through the
+conversation-cache facade and stale-stream auto-resume startup-certification path.
 """
 
 from __future__ import annotations
@@ -612,8 +611,8 @@ def _interrupted(root_id: str, target_event_id: str, *, timestamp_ms: int) -> In
 
 
 @pytest.mark.asyncio
-async def test_fifty_interrupted_threads_pay_one_room_scan(tmp_path: Path) -> None:
-    """Auto-resume freshness for many interrupted threads must not walk the room once per thread."""
+async def test_fifty_interrupted_threads_share_one_startup_certification_scan(tmp_path: Path) -> None:
+    """Many interrupted threads must share one startup-certification room scan."""
     config = _auto_resume_config(tmp_path)
     thread_count = 50
     root_ids = [f"$root-{index:02d}:localhost" for index in range(thread_count)]
@@ -638,10 +637,16 @@ async def test_fifty_interrupted_threads_pay_one_room_scan(tmp_path: Path) -> No
     ]
 
     async with _conversation_cache_scope(tmp_path, client=client) as (conversation_cache, _event_cache):
-        with patch(
-            "mindroom.matrix.stale_stream_cleanup.send_message_result",
-            new=AsyncMock(side_effect=delivered_matrix_side_effect("$auto-resume")),
-        ) as send_resume:
+        with (
+            patch(
+                "mindroom.matrix.stale_stream_cleanup._interrupted_target_remains_latest_human_work",
+                new=AsyncMock(return_value=True),
+            ) as refresh_freshness,
+            patch(
+                "mindroom.matrix.stale_stream_cleanup.send_message_result",
+                new=AsyncMock(side_effect=delivered_matrix_side_effect("$auto-resume")),
+            ) as send_resume,
+        ):
             resumed_count = await auto_resume_interrupted_threads(
                 client,
                 interrupted,
@@ -653,7 +658,7 @@ async def test_fifty_interrupted_threads_pay_one_room_scan(tmp_path: Path) -> No
 
     assert resumed_count == thread_count
     assert send_resume.await_count == thread_count
-    # One shared room walk instead of one reconstruction per interrupted thread.
+    assert refresh_freshness.await_count == thread_count
     assert client.room_messages.await_count == 1
 
 
@@ -665,8 +670,8 @@ async def test_uncertified_thread_history_skips_auto_resume(tmp_path: Path) -> N
     conversation_cache.ensure_startup_thread_history = AsyncMock(
         return_value={"$root:localhost": StartupRootOutcome.TRUNCATED},
     )
-    conversation_cache.get_strict_thread_history = AsyncMock(
-        side_effect=AssertionError("an uncertified root must not start its own reconstruction"),
+    conversation_cache.refresh_strict_thread_history_from_source = AsyncMock(
+        side_effect=AssertionError("an uncertified root must not start its own source refresh"),
     )
 
     with patch(
@@ -683,6 +688,7 @@ async def test_uncertified_thread_history_skips_auto_resume(tmp_path: Path) -> N
         )
 
     assert resumed_count == 0
+    conversation_cache.refresh_strict_thread_history_from_source.assert_not_awaited()
     send_resume.assert_not_awaited()
 
 
@@ -692,7 +698,7 @@ async def test_certification_failure_falls_back_to_the_per_thread_freshness_read
     config = _auto_resume_config(tmp_path)
     conversation_cache = AsyncMock()
     conversation_cache.ensure_startup_thread_history = AsyncMock(side_effect=RuntimeError("coordinator down"))
-    conversation_cache.get_strict_thread_history = AsyncMock(
+    conversation_cache.refresh_strict_thread_history_from_source = AsyncMock(
         side_effect=RuntimeError("history unavailable"),
     )
 
@@ -710,6 +716,6 @@ async def test_certification_failure_falls_back_to_the_per_thread_freshness_read
         )
 
     # Fail open to the per-thread read, which itself stays fail-closed on an unusable history.
-    conversation_cache.get_strict_thread_history.assert_awaited_once()
+    conversation_cache.refresh_strict_thread_history_from_source.assert_awaited_once()
     assert resumed_count == 0
     send_resume.assert_not_awaited()

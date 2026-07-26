@@ -81,6 +81,7 @@ def resolve_history_execution_plan(
         static_prompt_tokens=static_prompt_tokens,
         replay_budget_tokens=replay_budget_tokens,
         summary_input_budget_tokens=summary_input_budget_tokens,
+        compaction_timeout_seconds=compaction_config.timeout_seconds,
         unavailable_reason=unavailable_reason,
         hard_replay_budget_tokens=hard_replay_budget_tokens,
         compaction_fallback_model_name=compaction_config.fallback_model,

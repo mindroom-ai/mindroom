@@ -606,6 +606,7 @@ async def _run_scope_compaction(
         replay_window_tokens=execution_plan.replay_window_tokens,
         threshold_tokens=execution_plan.trigger_threshold_tokens,
         summary_prompt=config.get_prompt("COMPACTION_SUMMARY_PROMPT"),
+        summary_timeout_seconds=execution_plan.compaction_timeout_seconds,
         fallback_summary_model=fallback_model,
         fallback_summary_model_name=fallback_model_name if fallback_model is not None else None,
         fallback_summary_input_budget=fallback_summary_input_budget if fallback_model is not None else None,

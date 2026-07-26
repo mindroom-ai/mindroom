@@ -7,6 +7,8 @@ from typing import TYPE_CHECKING, Any
 
 import nio
 
+from mindroom.matrix.cache.thread_cache_state import ThreadCacheReplaceOutcome
+
 if TYPE_CHECKING:
     from mindroom.matrix.cache import ConversationEventCache
 
@@ -29,7 +31,7 @@ async def replace_thread_unconditionally(
         fetch_started_at=float("inf"),
         validated_at=timestamp,
     )
-    assert replaced
+    assert replaced is ThreadCacheReplaceOutcome.STORED
 
 
 def raw_nio_event(event_source: dict[str, Any]) -> nio.Event:

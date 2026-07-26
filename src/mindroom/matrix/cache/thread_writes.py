@@ -224,6 +224,11 @@ async def _apply_thread_message_mutation(
             raise_on_failure=raise_on_cache_write_failure,
         )
         return False
+    cache_ops.retain_thread_repair_delta(
+        room_id,
+        impact.thread_id,
+        event_source,
+    )
     await cache_ops.invalidate_known_thread(
         room_id,
         impact.thread_id,
@@ -519,6 +524,11 @@ class ThreadOutboundWritePolicy:
                 stream_status=stream_status,
             )
             if thread_id is not None:
+                self._cache_ops.retain_thread_repair_delta(
+                    room_id,
+                    thread_id,
+                    normalized_event_source,
+                )
                 self._emit_outbound_schedule_timing(
                     barrier_kind="thread",
                     event_type=event_type,
@@ -897,6 +907,7 @@ class ThreadLiveWritePolicy:
         thread_id = impact.thread_id
         assert thread_id is not None
         event_source = normalize_nio_event_for_cache(event)
+        self._cache_ops.retain_thread_repair_delta(room_id, thread_id, event_source)
 
         async def append_and_invalidate() -> bool:
             return await _apply_thread_message_mutation(
@@ -930,6 +941,7 @@ class ThreadLiveWritePolicy:
         assert impact.thread_id is not None
         thread_id = impact.thread_id
         event_source = normalize_nio_event_for_cache(event)
+        self._cache_ops.retain_thread_repair_delta(room_id, thread_id, event_source)
         queue_started = time.perf_counter()
         append_metrics: dict[str, str | int | float | bool] = {}
 

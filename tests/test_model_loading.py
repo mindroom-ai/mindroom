@@ -17,6 +17,7 @@ from mindroom.openai_models import (
     MindRoomOpenAIResponses,
     MindRoomOpenRouter,
 )
+from mindroom.synthetic_model import SyntheticModel
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 if TYPE_CHECKING:
@@ -71,6 +72,32 @@ def test_openai_wire_providers_use_replay_compatible_models(tmp_path: Path) -> N
     for provider, model_cls in expected.items():
         model = get_model_instance(config, runtime_paths_for(config), provider)
         assert isinstance(model, model_cls), provider
+
+
+def test_synthetic_provider_loads_without_credentials(tmp_path: Path) -> None:
+    """Synthetic models load locally with their configured generation settings."""
+    config = bind_runtime_paths(
+        Config(
+            models={
+                "load": ModelConfig(
+                    provider="synthetic",
+                    id="lorem-ipsum",
+                    extra_kwargs={
+                        "min_response_chars": 128,
+                        "max_response_chars": 128,
+                        "chars_per_second": 0,
+                    },
+                ),
+            },
+        ),
+        test_runtime_paths(tmp_path),
+    )
+
+    model = get_model_instance(config, runtime_paths_for(config), "load")
+
+    assert isinstance(model, SyntheticModel)
+    assert model.min_response_chars == 128
+    assert model.max_response_chars == 128
 
 
 def test_vertexai_claude_gets_explicit_timeout_so_large_outputs_can_run_non_streaming(tmp_path: Path) -> None:
