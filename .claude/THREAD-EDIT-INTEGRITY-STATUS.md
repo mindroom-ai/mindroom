@@ -6,12 +6,12 @@ Updated 2026-07-25 after classifying the exact-`0b927ee66` full-suite failures a
 
 - PR: `mindroom-ai/mindroom#1641`
 - Branch: `fix/thread-edit-integrity`
-- Latest production commit: `b27420c70a226960e09a5c189085fa02492f6ccc`
+- Latest production commit: `8c4b3b1be541004c6503718db1aa222abd0db6aa`
 - Current base and merge base: `c1f812a1e15b3c6be05f0cf2720b44431d844087`
-- Local candidate head is `8c4b3b1be541004c6503718db1aa222abd0db6aa`.
-- Published branch head remains `0b927ee660f2ccb68c4dcc1130b7bcdb6a581216` until the candidate is pushed.
+- Current branch and PR head contain only crash-handoff commits after the latest production commit.
+- The production and test corrections are pushed.
 - Tracked working tree is clean.
-- No exact-head gate counts until the local candidate and this refreshed handoff are pushed.
+- Resolve local, remote, and PR heads before counting any exact-head gate.
 - Resolve and compare local, origin, and GitHub heads before counting any gate.
 - Three pre-existing untracked `.claude/TASK-*.md` notes are user-owned and must remain untouched.
 
@@ -51,8 +51,8 @@ Updated 2026-07-25 after classifying the exact-`0b927ee66` full-suite failures a
 
 ## Pending exact-head gates
 
-- GitHub pytest is red on stale head `0b927ee66`; every other completed check is green.
-- Push the validated correction before restarting CI and review.
+- GitHub pytest is red only on stale head `0b927ee66`; every other completed check there is green.
+- Fresh CI and review are active on the new handoff-containing head.
 - A fresh independent native Codex correctness review is required on that exact head.
 - Exact-head PostgreSQL owning and stress selections are required.
 - Exact-head full pytest is required.
