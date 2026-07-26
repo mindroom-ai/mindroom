@@ -1345,7 +1345,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             queued_update_started.set()
 
         with patch(
-            "mindroom.matrix.conversation_cache.fetch_thread_history",
+            "mindroom.matrix.conversation_cache.refresh_thread_history_from_source",
             new=AsyncMock(side_effect=slow_refresh),
         ):
             refresh_task = asyncio.create_task(access.get_thread_history("!test:localhost", "$thread:localhost"))
