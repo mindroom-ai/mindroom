@@ -29,7 +29,10 @@ def bundled_replacement_candidates(event: Mapping[str, Any]) -> list[dict[str, A
     bundled = relations.get("m.replace") if isinstance(relations, Mapping) else None
     if not isinstance(bundled, Mapping):
         return []
-    candidates = bundled.get("latest_event"), bundled.get("event"), bundled
+    nested_candidates = bundled.get("latest_event"), bundled.get("event")
+    candidates = (
+        nested_candidates if any(isinstance(candidate, Mapping) for candidate in nested_candidates) else (bundled,)
+    )
     return [dict(candidate) for candidate in candidates if isinstance(candidate, Mapping)]
 
 
