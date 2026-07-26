@@ -1967,7 +1967,8 @@ class ExactReplyOracle:
         self.wrong_thread_roots: dict[str, set[tuple[str, str | None]]] = defaultdict(set)
         self.malformed_response_ids: set[str] = set()
         self.response_event_by_ref: dict[str, str] = {}
-        self.latest_reply_bodies: dict[str, tuple[int, str, str]] = {}
+        self.latest_reply_bodies: dict[str, tuple[int, int, str]] = {}
+        self._reply_body_write_sequence = 0
         self.reply_events_with_edits: set[str] = set()
         self.response_edit_targets: dict[str, str] = {}
         self.response_edit_bodies: dict[str, str] = {}
@@ -2311,7 +2312,8 @@ class ExactReplyOracle:
             return
         raw_timestamp = event.get("origin_server_ts")
         timestamp = raw_timestamp if isinstance(raw_timestamp, int) else 0
-        candidate = (timestamp, event_id, body)
+        self._reply_body_write_sequence += 1
+        candidate = (timestamp, self._reply_body_write_sequence, body)
         current = self.latest_reply_bodies.get(response_event_id)
         if is_edit:
             if response_event_id not in self.reply_events_with_edits or current is None or candidate[:2] >= current[:2]:
@@ -3413,8 +3415,8 @@ class LiveFuzzRunner:
     ) -> str:
         """Return the newest original or edit body for one response."""
         original_body = ""
-        edit_candidates: list[tuple[int, str, str]] = []
-        for event in events:
+        edit_candidates: list[tuple[int, int, str]] = []
+        for write_sequence, event in enumerate(events):
             event_id = event.get("event_id")
             content = event.get("content")
             if not isinstance(event_id, str) or not isinstance(content, dict):
@@ -3434,10 +3436,10 @@ class LiveFuzzRunner:
             if isinstance(body, str):
                 timestamp = event.get("origin_server_ts")
                 if is_edit:
-                    edit_candidates.append((timestamp if isinstance(timestamp, int) else 0, event_id, body))
+                    edit_candidates.append((timestamp if isinstance(timestamp, int) else 0, write_sequence, body))
                 else:
                     original_body = body
-        return max(edit_candidates, default=(0, "", original_body))[2]
+        return max(edit_candidates, default=(0, 0, original_body))[2]
 
     async def _run_batches(
         self,

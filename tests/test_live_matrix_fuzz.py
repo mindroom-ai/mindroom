@@ -1312,8 +1312,8 @@ async def test_exact_reply_oracle_requires_completed_streaming_body() -> None:
 
 
 @pytest.mark.asyncio
-async def test_equal_timestamp_edits_use_event_id_not_ingestion_order() -> None:
-    """Backward pagination order must not change Matrix edit selection."""
+async def test_exact_reply_oracle_equal_timestamp_edits_use_ingestion_order() -> None:
+    """The later accepted edit must win when Matrix timestamps are equal."""
     client = LiveMatrixClient("http://matrix.invalid", "!room:example")
     oracle = ExactReplyOracle(client, "@agent:example")
     try:
@@ -1321,26 +1321,33 @@ async def test_equal_timestamp_edits_use_event_id_not_ingestion_order() -> None:
         original["origin_server_ts"] = 101
         oracle._ingest_event(original)
         oracle._ingest_event(
-            _agent_edit_event("$response", "newer", event_id="$edit-z", timestamp=101),
+            _agent_edit_event("$response", "older", event_id="$edit-z", timestamp=101),
         )
         oracle._ingest_event(
-            _agent_edit_event("$response", "older", event_id="$edit-a", timestamp=101),
+            _agent_edit_event("$response", "newer", event_id="$edit-a", timestamp=101),
         )
 
         assert oracle.latest_reply_bodies["$response"][2] == "newer"
-        assert (
-            fuzz_live_matrix.LiveFuzzRunner._latest_event_body(
-                (
-                    original,
-                    _agent_edit_event("$response", "newer", event_id="$edit-z", timestamp=101),
-                    _agent_edit_event("$response", "older", event_id="$edit-a", timestamp=101),
-                ),
-                "$response",
-            )
-            == "newer"
-        )
     finally:
         await client.close()
+
+
+def test_live_fuzz_runner_equal_timestamp_edits_use_write_order() -> None:
+    """The collection oracle must use observed write order for equal timestamps."""
+    original = _agent_reply_event("$source", "$response", "Thinking...")
+    original["origin_server_ts"] = 101
+
+    assert (
+        fuzz_live_matrix.LiveFuzzRunner._latest_event_body(
+            (
+                original,
+                _agent_edit_event("$response", "older", event_id="$edit-z", timestamp=101),
+                _agent_edit_event("$response", "newer", event_id="$edit-a", timestamp=101),
+            ),
+            "$response",
+        )
+        == "newer"
+    )
 
 
 @pytest.mark.asyncio
