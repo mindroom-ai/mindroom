@@ -294,6 +294,7 @@ class ReferenceCacheModel:
     """Independent semantic model for deterministic cache state-machine traces."""
 
     events: dict[tuple[str, str], dict[str, Any]]
+    event_write_sequences: dict[tuple[str, str], int]
     mappings: dict[tuple[str, str], str]
     threads: dict[tuple[str, str], dict[str, tuple[int, int]]]
     tombstones: set[tuple[str, str]]
@@ -302,6 +303,7 @@ class ReferenceCacheModel:
     room_reasons: dict[str, str]
     room_invalidated_at: dict[str, int]
     clock: int = 0
+    event_write_sequence: int = 0
     thread_write_sequence: int = 0
 
     @classmethod
@@ -309,6 +311,7 @@ class ReferenceCacheModel:
         """Create an empty reference state without consulting a cache backend."""
         return cls(
             events={},
+            event_write_sequences={},
             mappings={},
             threads={},
             tombstones=set(),
@@ -433,6 +436,8 @@ class ReferenceCacheModel:
         ):
             return False
         self.events[key] = source
+        self.event_write_sequence += 1
+        self.event_write_sequences[key] = self.event_write_sequence
         return True
 
     def _resolve_source_thread(self, source: dict[str, Any]) -> str | None:
@@ -499,6 +504,7 @@ class ReferenceCacheModel:
 
     def _delete_event(self, current_room_id: str, event_id: str) -> None:
         self.events.pop((current_room_id, event_id), None)
+        self.event_write_sequences.pop((current_room_id, event_id), None)
         mapped_thread_id = self.mappings.pop((current_room_id, event_id), None)
         affected_thread_ids = {mapped_thread_id} if mapped_thread_id is not None else set()
         for (event_room_id, current_thread_id), members in self.threads.items():
@@ -603,6 +609,7 @@ class ReferenceCacheModel:
         for key in tuple(self.events):
             if key[0] == current_room_id:
                 self.events.pop(key)
+                self.event_write_sequences.pop(key)
         for key in tuple(self.mappings):
             if key[0] == current_room_id:
                 self.mappings.pop(key)
@@ -622,7 +629,7 @@ class ReferenceCacheModel:
         *,
         sender: str | None = None,
     ) -> dict[str, Any] | None:
-        """Select a valid surviving edit by the Matrix timestamp/event-ID order."""
+        """Select a valid surviving edit by timestamp and accepted write order."""
         candidates = [
             event
             for (event_room_id, _event_id), event in self.events.items()
@@ -634,7 +641,12 @@ class ReferenceCacheModel:
             candidates,
             key=lambda event: (
                 cast("int", event["origin_server_ts"]),
-                cast("str", event["event_id"]),
+                self.event_write_sequences[
+                    (
+                        current_room_id,
+                        cast("str", event["event_id"]),
+                    )
+                ],
             ),
             default=None,
         )

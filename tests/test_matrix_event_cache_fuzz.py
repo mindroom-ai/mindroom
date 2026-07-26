@@ -205,6 +205,30 @@ async def test_every_operation_kind_has_deterministic_reference_coverage(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_reference_model_uses_write_order_for_equal_timestamp_edits(tmp_path: Path) -> None:
+    """A later equal-timestamp edit wins even when its event ID sorts lower."""
+    original = FuzzOperation(OperationKind.THREADED_MESSAGE, 0, 0, 0, 0, 0)
+    first_edit = FuzzOperation(OperationKind.EDIT, 0, 0, 9, 0, 8)
+    later_edit = FuzzOperation(OperationKind.EDIT, 0, 0, 1, 0, 8)
+    first_source = edit_source(first_edit)
+    later_source = edit_source(later_edit)
+    assert first_source["origin_server_ts"] == later_source["origin_server_ts"]
+    assert first_source["event_id"] > later_source["event_id"]
+    scenario = FuzzScenario(
+        batches=((original,), (first_edit,), (later_edit,)),
+        room_count=1,
+        thread_count=1,
+        verify_reference_model=True,
+    )
+
+    await run_scenario(
+        lambda: SqliteEventCache(tmp_path / "equal-timestamp-edit-order.db"),
+        scenario,
+        verify_restart=False,
+    )
+
+
+@pytest.mark.asyncio
 async def test_reference_model_rejects_tombstoned_replay_and_cleans_invalidated_mapping(tmp_path: Path) -> None:
     """Rejected replay and full invalidation cannot leave model-only indexes."""
     message = FuzzOperation(OperationKind.THREADED_MESSAGE, 0, 0, 0, 0, 0)
