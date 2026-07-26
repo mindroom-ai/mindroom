@@ -559,6 +559,7 @@ class KnowledgeManager:
     _persisted_collection_missing_on_init: bool = field(default=False, init=False, repr=False)
     _max_concurrent_file_indexes: int = field(init=False, repr=False)
     _embedding_retry_count: int = field(default=0, init=False, repr=False)
+    _file_index_errors: dict[str, str] = field(default_factory=dict, init=False, repr=False)
     _embedder_failure_streak: int = field(default=0, init=False, repr=False)
     _global_embedder_failure: str | None = field(default=None, init=False, repr=False)
 
@@ -1270,8 +1271,10 @@ class KnowledgeManager:
             )
         except Exception as exc:
             classified = classified_embedder_error(exc)
+            error = classified or f"knowledge indexing failed ({type(exc).__name__})"
             if self._last_file_index_error is None:
-                self._last_file_index_error = classified or f"knowledge indexing failed ({type(exc).__name__})"
+                self._last_file_index_error = error
+            self._file_index_errors[relative_path] = error
             self._record_embedder_rejection(classified)
             logger.exception("Failed to index knowledge file", base_id=self.base_id, path=str(resolved_path))
             return False
@@ -1295,6 +1298,7 @@ class KnowledgeManager:
             async with self._state_lock:
                 self._indexed_files.add(relative_path)
                 self._indexed_signatures[relative_path] = (source_mtime_ns, source_size, source_digest)
+        self._file_index_errors.pop(relative_path, None)
         self._note_embedder_success()
         # DEBUG, not INFO: a large corpus is 10^5 of these lines per refresh.
         # Operators get periodic aggregate progress instead.
@@ -1343,7 +1347,6 @@ class KnowledgeManager:
         request is issued once per remaining file.
         """
         if classified is None:
-            self._embedder_failure_streak = 0
             return
         self._embedder_failure_streak += 1
         if is_embedder_auth_failure_detail(classified):
@@ -1689,7 +1692,9 @@ class KnowledgeManager:
                 base_id=self.base_id,
                 collection=checkpoint.collection,
             )
-            await self._delete_candidate_collection(checkpoint.collection)
+            if not await self._delete_candidate_collection(checkpoint.collection):
+                msg = "Failed to discard incompatible knowledge candidate"
+                raise RuntimeError(msg)
             await asyncio.to_thread(delete_candidate_checkpoint, self._base_storage_path)
             checkpoint = None
 
@@ -1779,8 +1784,10 @@ class KnowledgeManager:
         checkpoint = await asyncio.to_thread(load_candidate_checkpoint, self._base_storage_path)
         if checkpoint is None:
             return
-        if checkpoint.collection != published_collection:
-            await self._delete_candidate_collection(checkpoint.collection)
+        if checkpoint.collection != published_collection and not await self._delete_candidate_collection(
+            checkpoint.collection,
+        ):
+            return
         await asyncio.to_thread(delete_candidate_checkpoint, self._base_storage_path)
         logger.info(
             "Discarded knowledge candidate superseded by an unchanged published index",
@@ -1789,7 +1796,7 @@ class KnowledgeManager:
             completed=len(checkpoint.completed),
         )
 
-    async def _delete_candidate_collection(self, collection_name: str) -> None:
+    async def _delete_candidate_collection(self, collection_name: str) -> bool:
         try:
             await asyncio.to_thread(self._build_vector_db(collection_name).delete)
         except Exception:
@@ -1799,6 +1806,8 @@ class KnowledgeManager:
                 collection=collection_name,
                 exc_info=True,
             )
+            return False
+        return True
 
     async def _file_signatures_for(self, files: Sequence[Path]) -> dict[str, tuple[_FileSignature, Path]]:
         """Return current signatures for the listed files, skipping vanished ones."""
@@ -1946,7 +1955,7 @@ class KnowledgeManager:
                 previous = run.failed.get(relative_path)
                 failure = CandidateFailure(
                     attempts=(previous.attempts if previous is not None else 0) + 1,
-                    last_error=self._last_file_index_error,
+                    last_error=self._file_index_errors.get(relative_path),
                     last_attempt_at=datetime.now(tz=UTC).isoformat(),
                 )
                 run.failed[relative_path] = failure
@@ -1996,6 +2005,7 @@ class KnowledgeManager:
             self._last_refresh_error = None
             self._last_file_index_error = None
             self._embedding_retry_count = 0
+            self._file_index_errors.clear()
             self._embedder_failure_streak = 0
             self._global_embedder_failure = None
             run = await self._open_candidate_run()

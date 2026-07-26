@@ -13286,7 +13286,7 @@ The web dashboard provides a Knowledge tab for managing knowledge bases without 
 - Configure Git sync settings
 - Upload and remove files for non-Git-backed bases
 - Trigger a full reindex or Git sync on demand
-- Monitor indexing status (file count vs. indexed count, plus in-progress candidate progress when a build is running)
+- Monitor published indexing status (file count vs. indexed count)
 - Assign knowledge bases to agents from the Agents tab
 
 ## API Endpoints

@@ -49,7 +49,7 @@ class EmbeddingRetryPolicy:
         # Full-width jitter around the base delay keeps many workers from
         # retrying against a recovering endpoint in lockstep.
         jitter = clamped * self.jitter_ratio * (2.0 * jitter_unit - 1.0)
-        return max(clamped + jitter, 0.0)
+        return min(max(clamped + jitter, 0.0), self.max_backoff_seconds)
 
 
 async def run_with_embedding_retry(

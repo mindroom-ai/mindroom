@@ -575,6 +575,28 @@ async def test_exhausted_transient_retries_keep_candidate_and_resume_only_unreso
 
 
 @pytest.mark.asyncio
+async def test_candidate_failures_record_each_files_actual_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Concurrent file failures must not all inherit the run's first error."""
+    docs_path = tmp_path / "docs"
+    _write_corpus(docs_path, 3)
+    config = _config(tmp_path, docs_path)
+    runtime_paths = runtime_paths_for(config)
+    embedder = _use_non_batching_embedder(monkeypatch)
+    embedder.failures["content 0"] = [EmbedderRequestError("embedder request failed (HTTP 400)")]
+    embedder.failures["content 2"] = [EmbedderRequestError("embedder returned an empty vector")]
+
+    await _manager(config).reindex_all()
+
+    checkpoint = load_candidate_checkpoint(_storage_path(config, runtime_paths))
+    assert checkpoint is not None
+    assert checkpoint.failed["doc0000.md"].last_error == "embedder request failed (HTTP 400)"
+    assert checkpoint.failed["doc0002.md"].last_error == "embedder returned an empty vector"
+
+
+@pytest.mark.asyncio
 async def test_permanent_embedding_failure_never_publishes_and_reports_classified_error(
     tmp_path: Path,
     embedder: _RecordingEmbedder,
@@ -642,6 +664,7 @@ def test_retry_backoff_honors_retry_after_and_stays_bounded() -> None:
     assert policy.backoff_seconds(1, retry_after_seconds=1000.0, jitter_unit=0.5) == 10.0
     assert policy.backoff_seconds(1, retry_after_seconds=None, jitter_unit=0.0) == 0.5
     assert policy.backoff_seconds(1, retry_after_seconds=None, jitter_unit=1.0) == 1.5
+    assert policy.backoff_seconds(9, retry_after_seconds=None, jitter_unit=1.0) == 10.0
 
 
 @pytest.mark.asyncio
@@ -1106,6 +1129,27 @@ async def test_status_reports_candidate_progress_separately_from_published_count
     assert status.candidate.completed_count == 3
     assert status.candidate.failed_count == 1
     assert status.candidate.status == "failed"
+
+
+def test_status_omits_candidate_built_under_incompatible_settings(tmp_path: Path) -> None:
+    """Progress from an old embedder configuration is not the current build."""
+    docs_path = tmp_path / "docs"
+    _write_corpus(docs_path, 2)
+    config = _config(tmp_path, docs_path)
+    runtime_paths = runtime_paths_for(config)
+    manager = _manager(config)
+    save_candidate_checkpoint(
+        _storage_path(config, runtime_paths),
+        CandidateCheckpoint(
+            collection="incompatible-candidate",
+            settings=replace(manager._indexing_settings, embedder_model="different-model"),
+            completed={"doc0000.md": (1, 1, "digest")},
+        ),
+    )
+
+    status = get_knowledge_index_status("docs", config=config, runtime_paths=runtime_paths)
+
+    assert status.candidate is None
 
 
 @pytest.mark.asyncio
@@ -2265,6 +2309,24 @@ async def test_repeated_non_auth_rejections_stop_the_refresh(
     assert manager._global_embedder_failure is not None
 
 
+def test_unrelated_failure_does_not_reset_embedder_rejection_streak(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only a successful embedding proves that repeated provider failures are not global."""
+    monkeypatch.setattr(knowledge_manager_module, "_GLOBAL_EMBEDDER_FAILURE_STREAK", 2)
+    docs_path = tmp_path / "docs"
+    _write_corpus(docs_path, 1)
+    manager = _manager(_config(tmp_path, docs_path))
+    rejection = "embedder request failed (HTTP 404)"
+
+    manager._record_embedder_rejection(rejection)
+    manager._record_embedder_rejection(None)
+    manager._record_embedder_rejection(rejection)
+
+    assert manager._global_embedder_failure == rejection
+
+
 @pytest.mark.asyncio
 async def test_a_few_bad_files_do_not_stop_an_otherwise_healthy_refresh(
     tmp_path: Path,
@@ -2367,14 +2429,36 @@ async def test_journal_compaction_bound_survives_restart(
     try:
         await _manager(config).reindex_all()
         # Simulate a hard kill: journal entries exist with no compaction.
-        append_candidate_journal(storage, removed=[f"ghost{index}.md" for index in range(9)])
+        ghost_entries = [(f"ghost{index}.md", (index, 1, f"digest-{index}")) for index in range(9)]
+        append_candidate_journal(storage, completed=ghost_entries)
 
         checkpoint = load_candidate_checkpoint(storage)
         assert checkpoint is not None
         assert checkpoint.replayed_journal_entries == 9
 
-        run = await _manager(config)._open_candidate_run()
+        manager = _manager(config)
+        run = await manager._open_candidate_run()
         assert run.journal_appends == 9, "a resumed run restarted the compaction count"
+        final_path = docs_path / "doc0007.md"
+        assert await original_index(
+            manager,
+            final_path,
+            upsert=True,
+            knowledge=run.knowledge,
+            indexed_files=run.completed_paths,
+            indexed_signatures=run.completed,
+        )
+        await manager._persist_candidate_batch(run, (final_path,))
+        assert run.journal_appends == 10
+
+        await manager._compact_candidate_checkpoint(run)
+
+        assert not _candidate_journal_path(storage).exists(), "threshold-crossing write did not compact the journal"
+        reloaded = load_candidate_checkpoint(storage)
+        assert reloaded is not None
+        assert "doc0007.md" in reloaded.completed
+        assert {path for path, _signature in ghost_entries} <= set(reloaded.completed)
+        assert reloaded.replayed_journal_entries == 0
     finally:
         KnowledgeManager._index_file_locked = original_index  # type: ignore[method-assign]
 
@@ -2414,6 +2498,55 @@ async def test_unchanged_publish_discards_an_orphaned_candidate(
     assert load_candidate_checkpoint(_storage_path(config, runtime_paths)) is None, "orphan checkpoint survived"
     assert orphan not in _FakeVectorDb.store, "orphan collection survived"
     assert published_collection in _FakeVectorDb.store
+
+
+@pytest.mark.asyncio
+async def test_unchanged_publish_retries_orphan_cleanup_after_delete_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A transient collection-delete failure must retain the checkpoint for retry."""
+    docs_path = tmp_path / "docs"
+    _write_corpus(docs_path, 3)
+    config = _config(tmp_path, docs_path)
+    runtime_paths = runtime_paths_for(config)
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    published_collection = _published_state(config, runtime_paths).collection
+    orphan = f"{published_collection}_orphan"
+    _FakeVectorDb.store[orphan] = []
+    storage = _storage_path(config, runtime_paths)
+    save_candidate_checkpoint(
+        storage,
+        CandidateCheckpoint(
+            collection=orphan,
+            settings=_manager(config)._indexing_settings,
+            completed={"doc0000.md": (1, 1, "digest")},
+        ),
+    )
+    original_delete = _FakeVectorDb.delete
+    attempts = 0
+
+    def _fail_once(self: _FakeVectorDb) -> bool:
+        nonlocal attempts
+        if self.collection_name == orphan and attempts == 0:
+            attempts += 1
+            message = "temporary delete failure"
+            raise OSError(message)
+        return original_delete(self)
+
+    monkeypatch.setattr(_FakeVectorDb, "delete", _fail_once)
+
+    first = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+
+    assert first.index_published is True
+    assert load_candidate_checkpoint(storage) is not None
+    assert orphan in _FakeVectorDb.store
+
+    second = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+
+    assert second.index_published is True
+    assert load_candidate_checkpoint(storage) is None
+    assert orphan not in _FakeVectorDb.store
 
 
 def test_prefetch_text_is_bounded_by_bytes_not_only_file_count(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

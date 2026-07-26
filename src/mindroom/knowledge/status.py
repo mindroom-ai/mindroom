@@ -77,7 +77,7 @@ def _indexed_count_for_state(
 
 def _candidate_status_for_key(key: registry.PublishedIndexKey) -> KnowledgeCandidateStatus | None:
     checkpoint = load_candidate_checkpoint(registry.published_index_storage_path(key))
-    if checkpoint is None:
+    if checkpoint is None or checkpoint.settings != key.indexing_settings:
         return None
     return KnowledgeCandidateStatus(
         collection=checkpoint.collection,
