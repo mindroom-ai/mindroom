@@ -1013,6 +1013,52 @@ async def test_room_scope_uses_freshest_equivalent_edit_representation(
 
 
 @pytest.mark.asyncio
+async def test_room_scope_plain_original_refresh_does_not_revive_stale_edit(
+    event_cache_factory: Callable[[], ConversationEventCache],
+) -> None:
+    """Refreshing an original alone does not observe its old explicit edit."""
+    room_id = "!room:localhost"
+    original = _message_event(
+        event_id="$room-message",
+        sender="@agent:localhost",
+        body="Working...",
+        origin_server_ts=2000,
+    )
+    edit = _message_event(
+        event_id="$room-message-edit",
+        sender="@agent:localhost",
+        body="* Working...",
+        origin_server_ts=3000,
+        relates_to={"rel_type": "m.replace", "event_id": "$room-message"},
+        new_content={"body": "Done"},
+    )
+
+    cache = event_cache_factory()
+    await cache.initialize()
+    try:
+        await cache.store_events_batch(
+            [
+                ("$room-message", room_id, original),
+                ("$room-message-edit", room_id, edit),
+            ],
+        )
+        runtime_started_at = time.time()
+        await cache.store_events_batch([("$room-message", room_id, original)])
+    finally:
+        await cache.close()
+
+    snapshot = await _read_snapshot(
+        event_cache_factory,
+        room_id=room_id,
+        thread_id=None,
+        sender="@agent:localhost",
+        runtime_started_at=runtime_started_at,
+    )
+
+    assert snapshot is None
+
+
+@pytest.mark.asyncio
 async def test_room_scope_does_not_fall_back_to_older_fresh_message_when_latest_is_stale(
     event_cache_factory: Callable[[], ConversationEventCache],
 ) -> None:
