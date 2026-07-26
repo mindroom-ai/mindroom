@@ -168,6 +168,12 @@ def _intent(
             thread_summary_entity_name="helper",
         ),
         body=body,
+        wire_content={
+            "msgtype": "m.text",
+            "body": f"* {body}",
+            "m.new_content": {"msgtype": "m.text", "body": body},
+            "m.relates_to": {"rel_type": "m.replace", "event_id": target_event_id},
+        },
         correlation_id=correlation_id,
         tool_trace=(ToolTraceEntry(type="tool_call_completed", tool_name="shell", args_preview="ls"),),
         extra_content={STREAM_STATUS_KEY: STREAM_STATUS_COMPLETED},
@@ -240,6 +246,7 @@ class TestStore:
                 source_event_ids=(SOURCE_EVENT_ID,),
                 lifecycle=_intent().lifecycle,
                 body="final",
+                wire_content={"msgtype": "m.text", "body": "final"},
                 extra_content={"bad": object()},
             ),
         )
@@ -528,6 +535,8 @@ class TestStore:
             "lifecycle",
             "revision",
             "body",
+            "wire_content",
+            "transaction_id",
             "correlation_id",
             "tool_trace",
             "extra_content",
@@ -672,6 +681,13 @@ class TestWorker:
 
         assert delays == [1.0, 2.0, 4.0, 8.0, 8.0]
 
+    def test_backoff_clamps_before_exponentiating(self, tmp_path: Path) -> None:
+        """Corrupt or ancient attempt counts cannot overflow backoff calculation."""
+        clock = _Clock()
+        worker = _worker(_store(tmp_path, clock), AsyncMock(), clock=clock)
+
+        assert worker._backoff_seconds(1_000_000) == 8.0
+
     @pytest.mark.asyncio
     async def test_a_committed_answer_is_never_abandoned_for_taking_too_long(self, tmp_path: Path) -> None:
         """A long outage must not discard the outcome; retries continue at capped backoff."""
@@ -782,6 +798,54 @@ class TestWorker:
         assert peak_per_room == 1
         assert completion_order == expected_order
         assert store.unsettled_items() == ()
+
+    @pytest.mark.asyncio
+    async def test_same_room_waiters_do_not_consume_global_slots(self, tmp_path: Path) -> None:
+        """Queued work for one room cannot starve an independent room."""
+        clock = _Clock()
+        store = _store(tmp_path, clock)
+        for index in range(3):
+            assert (
+                store.record(
+                    _intent(
+                        room_id="!busy:localhost",
+                        source_event_id=f"$busy-{index}",
+                        target_event_id=f"$busy-placeholder-{index}",
+                    ),
+                )
+                is not None
+            )
+            clock.advance(0.001)
+        assert (
+            store.record(
+                _intent(
+                    room_id="!other:localhost",
+                    source_event_id="$other",
+                    target_event_id="$other-placeholder",
+                ),
+            )
+            is not None
+        )
+        busy_started = asyncio.Event()
+        release_busy = asyncio.Event()
+        other_started = asyncio.Event()
+
+        async def attempt(item: PendingTerminalDelivery) -> TerminalDeliveryAttempt:
+            if item.target.room_id == "!busy:localhost" and not busy_started.is_set():
+                busy_started.set()
+                await release_busy.wait()
+            if item.target.room_id == "!other:localhost":
+                other_started.set()
+            return TerminalDeliveryAttempt.delivered_now()
+
+        drain = asyncio.create_task(_worker(store, attempt, clock=clock, max_concurrency=2).drain_once())
+        await busy_started.wait()
+        try:
+            async with asyncio.timeout(0.1):
+                await other_started.wait()
+        finally:
+            release_busy.set()
+            await drain
 
     @pytest.mark.asyncio
     async def test_worker_does_not_spin_while_a_due_row_waits_for_readiness(self, tmp_path: Path) -> None:
@@ -956,7 +1020,9 @@ def _gateway(
         emit_cancelled_response=AsyncMock(),
     )
     resolver = MagicMock()
-    resolver.deps.conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(return_value=None)
+    resolver.deps.conversation_cache.get_latest_thread_event_id_if_needed = AsyncMock(
+        return_value=target.resolved_thread_id,
+    )
     resolver.deps.conversation_cache.notify_outbound_message = MagicMock()
     gateway = DeliveryGateway(
         DeliveryGatewayDeps(
@@ -1328,6 +1394,146 @@ class TestGatewaySeam:
         assert (first.result, second.result) == ("delivered", "delivered")
         assert {call.kwargs["tx_id"] for call in client.room_send.await_args_list} == {item.transaction_id}
         assert len({call.kwargs["content"]["m.new_content"]["body"] for call in client.room_send.await_args_list}) == 1
+
+    @pytest.mark.asyncio
+    async def test_oversized_retry_reuses_persisted_prepared_wire_payload(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """An oversized durable edit uploads once, then restart retries exact frozen bytes."""
+        target = MessageTarget.resolve(ROOM_ID, None, SOURCE_EVENT_ID)
+        client = make_matrix_client_mock()
+        client.room_send = AsyncMock(return_value=nio.RoomSendResponse.from_dict({"event_id": "$sent"}, ROOM_ID))
+        upload_sidecar = AsyncMock(
+            return_value=(
+                "mxc://localhost/frozen-sidecar",
+                {"size": 100_000, "mimetype": "application/json"},
+            ),
+        )
+        monkeypatch.setattr("mindroom.matrix.large_messages.upload_json_sidecar", upload_sidecar)
+        gateway, store = _gateway(tmp_path=tmp_path, client=client, target=target)
+        assert store is not None
+        recorded = await gateway.record_pending_terminal_delivery(
+            target=target,
+            target_event_id=PLACEHOLDER_EVENT_ID,
+            identity=_identity(target),
+            body="large answer " + ("x" * 40_000),
+            tool_trace=None,
+            extra_content=None,
+            interactive_metadata=None,
+        )
+        assert recorded is not None
+
+        _reset_terminal_delivery_store_runtime()
+        restarted_gateway, restarted_store = _gateway(tmp_path=tmp_path, client=client, target=target)
+        assert restarted_store is not None
+        restarted_store.warm()
+        item = restarted_store.unsettled_items()[0]
+        first = await restarted_gateway.attempt_pending_terminal_delivery(item)
+        second = await restarted_gateway.attempt_pending_terminal_delivery(item)
+
+        assert (first.result, second.result) == ("delivered", "delivered")
+        assert upload_sidecar.await_count == 1
+        assert (
+            len({json.dumps(call.kwargs["content"], sort_keys=True) for call in client.room_send.await_args_list}) == 1
+        )
+        assert {call.kwargs["tx_id"] for call in client.room_send.await_args_list} == {item.transaction_id}
+
+    @pytest.mark.asyncio
+    async def test_stale_revision_never_reaches_matrix(self, tmp_path: Path) -> None:
+        """A replacement committed before an old attempt prevents the old body from sending."""
+        target = MessageTarget.resolve(ROOM_ID, None, SOURCE_EVENT_ID)
+        client = make_matrix_client_mock()
+        client.room_send = AsyncMock(return_value=nio.RoomSendResponse.from_dict({"event_id": "$sent"}, ROOM_ID))
+        gateway, store = _gateway(tmp_path=tmp_path, client=client, target=target)
+        assert store is not None
+        old = await gateway.record_pending_terminal_delivery(
+            target=target,
+            target_event_id=PLACEHOLDER_EVENT_ID,
+            identity=_identity(target, correlation_id="corr-old"),
+            body="old body",
+            tool_trace=None,
+            extra_content=None,
+            interactive_metadata=None,
+        )
+        replacement = await gateway.record_pending_terminal_delivery(
+            target=target,
+            target_event_id=PLACEHOLDER_EVENT_ID,
+            identity=_identity(target, correlation_id="corr-new"),
+            body="new body",
+            tool_trace=None,
+            extra_content=None,
+            interactive_metadata=None,
+        )
+        assert old is not None
+        assert replacement is not None
+
+        attempt = await gateway.attempt_pending_terminal_delivery(old)
+
+        assert (attempt.result, attempt.reason) == ("superseded", "stale_revision")
+        client.room_send.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_replacement_waits_for_in_flight_revision(self, tmp_path: Path) -> None:
+        """Replacement recording and sending one target are serialized."""
+        target = MessageTarget.resolve(ROOM_ID, None, SOURCE_EVENT_ID)
+        client = make_matrix_client_mock()
+        inspection_started = asyncio.Event()
+        release_inspection = asyncio.Event()
+
+        async def inspect_target(_room_id: str, _event_id: str) -> object:
+            inspection_started.set()
+            await release_inspection.wait()
+            return nio.RoomGetEventResponse.from_dict(
+                {
+                    "event_id": PLACEHOLDER_EVENT_ID,
+                    "sender": "@helper:localhost",
+                    "origin_server_ts": 1,
+                    "type": "m.room.message",
+                    "room_id": ROOM_ID,
+                    "content": {"msgtype": "m.text", "body": "placeholder"},
+                },
+            )
+
+        client.room_get_event = AsyncMock(side_effect=inspect_target)
+        client.room_send = AsyncMock(return_value=nio.RoomSendResponse.from_dict({"event_id": "$sent"}, ROOM_ID))
+        gateway, store = _gateway(tmp_path=tmp_path, client=client, target=target)
+        assert store is not None
+        old = await gateway.record_pending_terminal_delivery(
+            target=target,
+            target_event_id=PLACEHOLDER_EVENT_ID,
+            identity=_identity(target, correlation_id="corr-old"),
+            body="old body",
+            tool_trace=None,
+            extra_content=None,
+            interactive_metadata=None,
+        )
+        assert old is not None
+
+        attempt_task = asyncio.create_task(gateway.attempt_pending_terminal_delivery(old))
+        await inspection_started.wait()
+        replacement_task = asyncio.create_task(
+            gateway.record_pending_terminal_delivery(
+                target=target,
+                target_event_id=PLACEHOLDER_EVENT_ID,
+                identity=_identity(target, correlation_id="corr-new"),
+                body="new body",
+                tool_trace=None,
+                extra_content=None,
+                interactive_metadata=None,
+            ),
+        )
+        await asyncio.sleep(0)
+        assert not replacement_task.done()
+
+        release_inspection.set()
+        attempt = await attempt_task
+        replacement = await replacement_task
+
+        assert attempt.result == "delivered"
+        assert replacement is not None
+        assert replacement.revision == old.revision + 1
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(

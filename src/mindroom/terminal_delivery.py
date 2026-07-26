@@ -44,7 +44,7 @@ if typing.TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-TERMINAL_DELIVERY_SCHEMA_VERSION = 3
+TERMINAL_DELIVERY_SCHEMA_VERSION = 4
 _SCHEMA_VERSION_KEY = "schema_version"
 _ITEMS_KEY = "items"
 
@@ -92,6 +92,7 @@ class TerminalDeliveryIntent:
     source_event_ids: tuple[str, ...]
     lifecycle: TerminalDeliveryLifecycleFacts
     body: str
+    wire_content: Mapping[str, Any]
     correlation_id: str | None = None
     tool_trace: tuple[ToolTraceEntry, ...] = ()
     extra_content: Mapping[str, Any] | None = None
@@ -132,6 +133,8 @@ class PendingTerminalDelivery:
     lifecycle: TerminalDeliveryLifecycleFacts
     revision: int
     body: str
+    wire_content: Mapping[str, Any]
+    transaction_id: str
     correlation_id: str | None
     tool_trace: tuple[ToolTraceEntry, ...]
     extra_content: Mapping[str, Any] | None
@@ -143,11 +146,6 @@ class PendingTerminalDelivery:
     next_attempt_at: float
     last_error: str | None = None
     lease_expires_at: float | None = None
-
-    @property
-    def transaction_id(self) -> str:
-        """Return the deterministic Matrix transaction ID for this exact revision."""
-        return f"mindroom-td-{self.delivery_id}-{self.revision}"
 
     @property
     def log_context(self) -> dict[str, object]:
@@ -166,6 +164,8 @@ class PendingTerminalDelivery:
             "lifecycle": self.lifecycle.to_record(),
             "revision": self.revision,
             "body": self.body,
+            "wire_content": dict(self.wire_content),
+            "transaction_id": self.transaction_id,
             "correlation_id": self.correlation_id,
             "tool_trace": [
                 {
@@ -203,6 +203,8 @@ class PendingTerminalDelivery:
         state = record.get("state")
         revision = record.get("revision")
         body = record.get("body")
+        wire_content = _string_keyed_dict(record.get("wire_content"))
+        transaction_id = _optional_string(record.get("transaction_id"))
         attempts = record.get("attempts")
         if (
             delivery_id is None
@@ -214,6 +216,8 @@ class PendingTerminalDelivery:
             or state not in typing.get_args(TerminalDeliveryState)
             or not _is_int(revision)
             or not isinstance(body, str)
+            or wire_content is None
+            or transaction_id is None
             or not _is_int(attempts)
         ):
             return None
@@ -227,6 +231,8 @@ class PendingTerminalDelivery:
             lifecycle=lifecycle,
             revision=typing.cast("int", revision),
             body=body,
+            wire_content=wire_content,
+            transaction_id=transaction_id,
             correlation_id=_optional_string(record.get("correlation_id")),
             tool_trace=_tool_trace_from_record(record.get("tool_trace")),
             extra_content=_string_keyed_dict(record.get("extra_content")),
@@ -306,7 +312,8 @@ class TerminalDeliveryStore:
         is stale against what is already recorded for the same visible target.
         """
         extra_content = _json_safe_mapping(intent.extra_content)
-        if extra_content is _UNSERIALIZABLE:
+        wire_content = _json_safe_mapping(intent.wire_content)
+        if extra_content is _UNSERIALIZABLE or wire_content is _UNSERIALIZABLE or wire_content is None:
             logger.error("terminal_delivery_intent_not_serializable", agent=self.agent_name)
             return None
         now = self.clock()
@@ -321,6 +328,7 @@ class TerminalDeliveryStore:
                     existing_state=existing.state,
                 )
                 return None
+            revision = 0 if existing is None else existing.revision + 1
             candidate = PendingTerminalDelivery(
                 delivery_id=delivery_id,
                 agent_name=intent.agent_name,
@@ -329,8 +337,10 @@ class TerminalDeliveryStore:
                 anchor_event_id=intent.anchor_event_id,
                 source_event_ids=tuple(intent.source_event_ids),
                 lifecycle=intent.lifecycle,
-                revision=0 if existing is None else existing.revision + 1,
+                revision=revision,
                 body=intent.body,
+                wire_content=typing.cast("Mapping[str, Any]", wire_content),
+                transaction_id=f"mindroom-td-{delivery_id}-{revision}",
                 correlation_id=intent.correlation_id,
                 tool_trace=tuple(intent.tool_trace),
                 extra_content=typing.cast("Mapping[str, Any] | None", extra_content),

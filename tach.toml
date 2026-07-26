@@ -4079,9 +4079,11 @@ expose = [
     "can_send_to_encrypted_room",
     "cached_room",
     "edit_message_result",
+    "prepare_message_content",
     "send_audio_message",
     "send_file_message",
     "send_message_result",
+    "send_prepared_message_result",
     "send_runtime_encrypted_media_message",
 ]
 from = ["mindroom.matrix.client_delivery"]

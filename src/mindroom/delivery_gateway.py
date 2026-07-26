@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from html import escape as html_escape
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -32,7 +33,14 @@ from mindroom.hooks import (
     emit_final_response_transform,
     emit_transform,
 )
-from mindroom.matrix.client_delivery import build_threaded_edit_content, edit_message_result, send_message_result
+from mindroom.matrix.client_delivery import (
+    build_edit_event_content,
+    build_threaded_edit_content,
+    edit_message_result,
+    prepare_message_content,
+    send_message_result,
+    send_prepared_message_result,
+)
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import build_message_content
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
@@ -332,6 +340,34 @@ class DeliveryGatewayDeps:
     terminal_delivery_store: TerminalDeliveryStore | None = None
 
 
+@dataclass
+class _TerminalDeliveryLock:
+    """Serialize one target's replacement recording and delivery."""
+
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    holders: int = 0
+
+
+@dataclass
+class _TerminalDeliveryLocks:
+    """Own short-lived per-delivery locks without retaining completed targets."""
+
+    entries: dict[str, _TerminalDeliveryLock] = field(default_factory=dict)
+
+    @asynccontextmanager
+    async def hold(self, delivery_id: str) -> AsyncIterator[None]:
+        """Hold one delivery lock, including time spent queued for it."""
+        entry = self.entries.setdefault(delivery_id, _TerminalDeliveryLock())
+        entry.holders += 1
+        try:
+            async with entry.lock:
+                yield
+        finally:
+            entry.holders -= 1
+            if entry.holders == 0 and self.entries.get(delivery_id) is entry:
+                del self.entries[delivery_id]
+
+
 @dataclass(frozen=True)
 class FinalizeStreamedResponseRequest:
     """Parameters for finalizing one streamed Matrix response."""
@@ -351,6 +387,11 @@ class DeliveryGateway:
     """Send, edit, redact, and finalize visible Matrix responses."""
 
     deps: DeliveryGatewayDeps
+    _terminal_delivery_locks: _TerminalDeliveryLocks = field(
+        default_factory=_TerminalDeliveryLocks,
+        compare=False,
+        repr=False,
+    )
 
     def _client(self) -> nio.AsyncClient:
         """Return the current Matrix client required for delivery."""
@@ -504,12 +545,30 @@ class DeliveryGateway:
         can fall back to their previous visible failure handling otherwise.
         """
         store = self.deps.terminal_delivery_store
-        if store is None or not body.strip():
+        client = self.deps.runtime.client
+        if store is None or client is None or not body.strip():
             return None
         # The repaired edit must publish the terminal status even when the
         # carried content still describes an in-progress stream.
         durable_extra_content = dict(extra_content or {})
         durable_extra_content[constants.STREAM_STATUS_KEY] = constants.STREAM_STATUS_COMPLETED
+        edit_request = EditTextRequest(
+            target=target,
+            event_id=target_event_id,
+            new_text=body,
+            tool_trace=tool_trace,
+            extra_content=durable_extra_content,
+        )
+        new_content = await self._build_edit_content(edit_request)
+        wire_content = await prepare_message_content(
+            client,
+            target.room_id,
+            build_edit_event_content(
+                event_id=target_event_id,
+                new_content=new_content,
+                new_text=body,
+            ),
+        )
         intent = TerminalDeliveryIntent(
             agent_name=self.deps.agent_name,
             target=target,
@@ -527,11 +586,13 @@ class DeliveryGateway:
                 thread_summary_entity_name=self.deps.agent_name,
             ),
             body=body,
+            wire_content=wire_content,
             correlation_id=identity.correlation_id,
             tool_trace=tuple(tool_trace or ()),
             extra_content=durable_extra_content,
         )
-        recorded = await asyncio.to_thread(store.record, intent)
+        async with self._terminal_delivery_locks.hold(intent.delivery_id):
+            recorded = await asyncio.to_thread(store.record, intent)
         if recorded is None:
             return None
         self.deps.logger.warning(
@@ -544,22 +605,42 @@ class DeliveryGateway:
 
     async def attempt_pending_terminal_delivery(self, item: PendingTerminalDelivery) -> TerminalDeliveryAttempt:
         """Try once to make one durable terminal outcome visible, and classify the result."""
-        if self.deps.runtime.client is None:
-            return TerminalDeliveryAttempt.transient("matrix_client_unavailable")
-        target_state = await self._inspect_terminal_target(item.target.room_id, item.target_event_id)
-        if target_state in {"missing", "redacted"}:
-            return TerminalDeliveryAttempt.superseded(f"target_event_{target_state}")
-        edited = await self.edit_text(
-            EditTextRequest(
-                target=item.target,
-                event_id=item.target_event_id,
-                new_text=item.body,
-                tool_trace=list(item.tool_trace) or None,
-                extra_content=dict(item.extra_content) if item.extra_content else None,
+        store = self.deps.terminal_delivery_store
+        if store is None:
+            return TerminalDeliveryAttempt.transient("terminal_delivery_store_unavailable")
+        async with self._terminal_delivery_locks.hold(item.delivery_id):
+            current = await asyncio.to_thread(store.get, item.delivery_id)
+            if current is None or current.revision != item.revision:
+                return TerminalDeliveryAttempt.superseded("stale_revision")
+            if self.deps.runtime.client is None:
+                return TerminalDeliveryAttempt.transient("matrix_client_unavailable")
+            target_state = await self._inspect_terminal_target(item.target.room_id, item.target_event_id)
+            if target_state in {"missing", "redacted"}:
+                return TerminalDeliveryAttempt.superseded(f"target_event_{target_state}")
+            client = self._client()
+            delivered = await send_prepared_message_result(
+                client,
+                item.target.room_id,
+                dict(item.wire_content),
+                operation="edit_message",
                 transaction_id=item.transaction_id,
-            ),
+            )
+            if delivered is not None:
+                self.deps.resolver.deps.conversation_cache.notify_outbound_message(
+                    item.target.room_id,
+                    delivered.event_id,
+                    delivered.content_sent,
+                )
+                self.deps.logger.info(
+                    "Edited message",
+                    event_id=item.target_event_id,
+                    **item.target.log_context,
+                )
+        return (
+            TerminalDeliveryAttempt.delivered_now()
+            if delivered is not None
+            else TerminalDeliveryAttempt.transient("edit_failed")
         )
-        return TerminalDeliveryAttempt.delivered_now() if edited else TerminalDeliveryAttempt.transient("edit_failed")
 
     async def _inspect_terminal_target(  # noqa: PLR0911
         self,
@@ -694,9 +775,8 @@ class DeliveryGateway:
         )
         return None
 
-    async def edit_text(self, request: EditTextRequest) -> bool:
-        """Edit one existing response message."""
-        client = self._client()
+    async def _build_edit_content(self, request: EditTextRequest) -> dict[str, Any]:
+        """Build the replacement body before its Matrix edit envelope."""
         config = self.deps.runtime.config
         target = request.target
         if (
@@ -707,7 +787,7 @@ class DeliveryGateway:
             )
             == "room"
         ):
-            content = format_message_with_mentions(
+            return format_message_with_mentions(
                 config,
                 self.deps.runtime_paths,
                 request.new_text,
@@ -715,24 +795,26 @@ class DeliveryGateway:
                 tool_trace=request.tool_trace,
                 extra_content=request.extra_content,
             )
-        else:
-            latest_thread_event_id = (
-                await self.deps.resolver.deps.conversation_cache.get_latest_thread_event_id_if_needed(
-                    target.room_id,
-                    target.resolved_thread_id,
-                    caller_label="delivery_edit_text",
-                )
-            )
-            content = build_threaded_edit_content(
-                new_text=request.new_text,
-                thread_id=target.resolved_thread_id,
-                config=config,
-                runtime_paths=self.deps.runtime_paths,
-                tool_trace=request.tool_trace,
-                extra_content=request.extra_content,
-                latest_thread_event_id=latest_thread_event_id,
-            )
+        latest_thread_event_id = await self.deps.resolver.deps.conversation_cache.get_latest_thread_event_id_if_needed(
+            target.room_id,
+            target.resolved_thread_id,
+            caller_label="delivery_edit_text",
+        )
+        return build_threaded_edit_content(
+            new_text=request.new_text,
+            thread_id=target.resolved_thread_id,
+            config=config,
+            runtime_paths=self.deps.runtime_paths,
+            tool_trace=request.tool_trace,
+            extra_content=request.extra_content,
+            latest_thread_event_id=latest_thread_event_id,
+        )
 
+    async def edit_text(self, request: EditTextRequest) -> bool:
+        """Edit one existing response message."""
+        client = self._client()
+        target = request.target
+        content = await self._build_edit_content(request)
         failure_reason = "edit_message_result returned None"
         try:
             delivered = await edit_message_result(

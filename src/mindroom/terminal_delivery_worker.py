@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import math
 import random
 import time
 from dataclasses import dataclass, field
@@ -191,7 +192,7 @@ class TerminalDeliveryWorker:
             self._room_locks[room_id] = room_lock
         room_lock.holders += 1
         try:
-            async with semaphore, room_lock.lock:
+            async with room_lock.lock, semaphore:
                 await self._attempt_once(item)
         finally:
             room_lock.holders -= 1
@@ -266,8 +267,13 @@ class TerminalDeliveryWorker:
 
     def _backoff_seconds(self, attempts: int) -> float:
         """Return exponential backoff with jitter, bounded above."""
-        exponential = self.deps.initial_backoff_seconds * (2 ** max(0, attempts - 1))
-        bounded = min(exponential, self.deps.max_backoff_seconds)
+        initial = self.deps.initial_backoff_seconds
+        maximum = self.deps.max_backoff_seconds
+        if initial <= 0 or maximum <= 0:
+            return 0.0
+        cap_exponent = max(0, math.ceil(math.log2(maximum / initial)))
+        exponent = min(max(0, attempts - 1), cap_exponent)
+        bounded = min(initial * (2**exponent), maximum)
         return bounded * (0.5 + 0.5 * self.deps.jitter())
 
     async def _release_leases(self, *, reason: str) -> None:
