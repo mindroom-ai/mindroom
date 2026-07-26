@@ -1,20 +1,17 @@
 # Thread edit integrity gate status
 
-Updated 2026-07-26 after correcting invalid transitive batch ancestry and opaque encrypted replacements.
+Updated 2026-07-26 after correcting opaque replacement impact and synchronizing current main.
 
 ## Exact target
 
 - PR: `mindroom-ai/mindroom#1641`
 - Branch: `fix/thread-edit-integrity`
-- Latest production commit: `658e4766455f001a8c1066cb58ae0fdc8882c3be`
-- Current base and merge base: `e95fbe9a4bc069340fd36f333f3d7424657e1056`
-- Latest integration commit: `6a7b3f473b089e283648cdc392df6e4fbf28b801`
-- Latest pushed code head: `658e4766455f001a8c1066cb58ae0fdc8882c3be`.
-- This crash-handoff update will be the docs-only successor; resolve local, remote, and PR heads after it is pushed before counting a gate.
-- Commit `658e47664` is pushed and replaces every earlier exact-head gate.
-- The tracked tree is clean except three user-owned untracked task notes.
-- Resolve local, remote, and PR heads before counting any exact-head gate.
-- Resolve and compare local, origin, and GitHub heads before counting any gate.
+- Latest production commit: `0ec0b3007a7d1d45aad33d9327497938d049a237`
+- Current base and merge base: `858282afc77adb480fa06cd9e4057d511ff861d5`
+- Latest integration commit before this handoff-only successor: `0d77e1b7475d31d0a644b1bb02c22a6c33533228`
+- A commit cannot contain its own SHA, so this file does not claim that its stored parent is the exact gate head.
+- Resolve local `HEAD`, `origin/fix/thread-edit-integrity`, and GitHub PR `headRefOid` live and require all three values to match before counting any gate.
+- The tracked tree is clean; three user-owned task notes and preserved test artifacts are untracked.
 - Three pre-existing untracked `.claude/TASK-*.md` notes are user-owned and must remain untouched.
 
 ## Current correction set
@@ -213,7 +210,7 @@ Updated 2026-07-26 after correcting invalid transitive batch ancestry and opaque
 
 ## Pending exact-head gates
 
-- Commit and push this crash-handoff successor after `658e47664`, then freeze its exact head.
+- Commit and push this crash-handoff-only successor, resolve its exact SHA live, and freeze that resolved head.
 - Fresh CI must complete on the final exact head.
 - A fresh independent native Codex correctness review is required on the final exact head.
 - Exact-head PostgreSQL owning and stress selections are required.
@@ -242,10 +239,14 @@ Updated 2026-07-26 after correcting invalid transitive batch ancestry and opaque
 - The complete affected selection passes `520` tests with zero failures, errors, or skips across SQLite and PostgreSQL.
 - Evidence is preserved in `artifacts/pr1641-round5/owning.xml`.
 - Ruff, formatting, `ty`, Tach dependencies/interfaces, `git diff --check`, all-file pre-commit, and commit hooks pass.
-- Production source against current `main` is `+2165/-1200`, net `+965`.
+- Production source against current `main` is `+2163/-1195`, net `+968`.
 - Exact-`6b10f81e2` full pytest completed with twelve unrelated timing/resource failures while many independent full and PostgreSQL jobs saturated the host.
 - Eleven of those failures passed an isolated serial rerun before the final PostgreSQL fanout was intentionally stopped after this production correction made that run stale.
 - Every predecessor review, CI, full-suite, static, PostgreSQL, and live claim is historical after `0ec0b3007`.
+- Exact integrated parent `0d77e1b74` passed every GitHub check.
+- Its NixOS full run passed `12145` tests with `68` skips and failed only six current-main release tests whose fixture hardcodes `/usr/bin:/bin`, which excludes the NixOS Bash path.
+- Its macOS full run passed `12163` tests with `54` skips and hit two unrelated timing/terminal-wrap assertions; both pass serially at fixed width.
+- This handoff-only commit invalidates those exact-head results and requires fresh final-head gates.
 - Fresh exact-head CI, independent native Codex review, PostgreSQL/full/Tach/all-file validation, and real-Tuwunel validation remain mandatory.
 - The living handoff remains tracked until every exact-head gate passes.
 - Merge gate remains closed.
