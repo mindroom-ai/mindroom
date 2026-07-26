@@ -116,6 +116,10 @@ from .scheduling import (
 from .startup_errors import PermanentStartupError
 from .sync_restart_retry import InterruptedTurnRooms
 from .terminal_delivery import TerminalDeliveryStore
+from .terminal_delivery_replay import (
+    TerminalDeliveryLifecycleReplayer,
+    TerminalDeliveryLifecycleReplayerDeps,
+)
 from .terminal_delivery_worker import TerminalDeliveryWorker, TerminalDeliveryWorkerDeps
 from .turn_controller import TurnController, TurnControllerDeps
 from .turn_policy import IngressHookRunner, TurnPolicy, TurnPolicyDeps
@@ -480,14 +484,6 @@ class AgentBot:
                 terminal_delivery_store=self._terminal_delivery_store,
             ),
         )
-        self._terminal_delivery_worker = TerminalDeliveryWorker(
-            TerminalDeliveryWorkerDeps(
-                store=self._terminal_delivery_store,
-                attempt=self._delivery_gateway.attempt_pending_terminal_delivery,
-                is_ready=self._terminal_delivery_ready,
-                logger=self.logger,
-            ),
-        )
         self._tool_runtime_support = ToolRuntimeSupport(
             runtime=self._runtime_view,
             logger=self.logger,
@@ -513,6 +509,22 @@ class AgentBot:
             runtime_paths=self.runtime_paths,
             delivery_gateway=self._delivery_gateway,
             conversation_cache=self._conversation_cache,
+        )
+        terminal_delivery_lifecycle = TerminalDeliveryLifecycleReplayer(
+            TerminalDeliveryLifecycleReplayerDeps(
+                response_hooks=self._delivery_gateway.deps.response_hooks,
+                post_response_effects=self._post_response_effects_support,
+                logger=self.logger,
+            ),
+        )
+        self._terminal_delivery_worker = TerminalDeliveryWorker(
+            TerminalDeliveryWorkerDeps(
+                store=self._terminal_delivery_store,
+                attempt=self._delivery_gateway.attempt_pending_terminal_delivery,
+                complete_lifecycle=terminal_delivery_lifecycle.complete,
+                is_ready=self._terminal_delivery_ready,
+                logger=self.logger,
+            ),
         )
         self._ingress_hook_runner = IngressHookRunner(
             hook_context=self._hook_context_support,

@@ -1438,6 +1438,7 @@ class TurnController:
                 user_id=user_id,
                 attachment_ids=selection_attachment_ids or None,
                 response_envelope=response_envelope,
+                source_event_ids=selection_handled_turn.indexed_event_ids,
                 matrix_run_metadata=selection_matrix_run_metadata,
                 prepare_source_turn=lambda: self.deps.turn_store.prepare_response_for_redactions(
                     target=response_target,
@@ -1791,6 +1792,7 @@ class TurnController:
                             prompt=event.body,
                             user_id=dispatch.requester_user_id,
                             response_envelope=dispatch.envelope,
+                            source_event_ids=handled_turn.indexed_event_ids,
                             correlation_id=dispatch.correlation_id,
                             matrix_run_metadata=matrix_run_metadata,
                             requires_model_history_refresh=dispatch.context.requires_model_history_refresh,
@@ -1818,6 +1820,7 @@ class TurnController:
                             prompt=event.body,
                             user_id=dispatch.requester_user_id,
                             response_envelope=dispatch.envelope,
+                            source_event_ids=handled_turn.indexed_event_ids,
                             correlation_id=dispatch.correlation_id,
                             matrix_run_metadata=matrix_run_metadata,
                             requires_model_history_refresh=dispatch.context.requires_model_history_refresh,

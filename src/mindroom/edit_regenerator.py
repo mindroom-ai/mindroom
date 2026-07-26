@@ -329,6 +329,9 @@ class EditRegenerator:
                 thread_history=driving_edit.context.thread_history,
                 prompt=prompt,
                 response_envelope=driving_edit.envelope,
+                source_event_ids=tuple(
+                    dict.fromkeys((*record.replay_source_event_ids, driving_edit.original_event_id)),
+                ),
                 existing_event_id=record.response_event_id,
                 user_id=requester_id,
                 correlation_id=driving_edit.revision[1],

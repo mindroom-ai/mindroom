@@ -512,7 +512,7 @@ class ResponseLifecycle:
                         delivery_kind=final_delivery_outcome.delivery_kind,
                         continue_on_cancelled=True,
                     )
-            else:
+            elif not final_delivery_outcome.deferred_terminal_delivery:
                 await self.deps.response_hooks.emit_cancelled_response(
                     identity=self.identity,
                     visible_response_event_id=response_event_id,

@@ -54,6 +54,7 @@ class TerminalDeliveryWorkerDeps:
 
     store: TerminalDeliveryStore
     attempt: Callable[[PendingTerminalDelivery], Awaitable[TerminalDeliveryAttempt]]
+    complete_lifecycle: Callable[[PendingTerminalDelivery], Awaitable[None]]
     is_ready: Callable[[], bool]
     logger: structlog.stdlib.BoundLogger = field(default_factory=lambda: logger)
     wall_clock: Callable[[], float] = time.time
@@ -219,6 +220,7 @@ class TerminalDeliveryWorker:
         """Apply one attempt outcome to durable state."""
         store = self.deps.store
         if attempt.result == "delivered":
+            await self.deps.complete_lifecycle(item)
             await asyncio.to_thread(
                 store.mark_delivered,
                 item.delivery_id,

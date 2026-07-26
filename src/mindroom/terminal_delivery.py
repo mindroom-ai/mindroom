@@ -37,6 +37,7 @@ from mindroom.durable_write import write_json_file_durable
 from mindroom.file_locks import advisory_file_lock
 from mindroom.logging_config import get_logger
 from mindroom.message_target import MessageTarget
+from mindroom.terminal_delivery_lifecycle import TerminalDeliveryLifecycleFacts
 from mindroom.tool_system.events import ToolTraceEntry
 
 if typing.TYPE_CHECKING:
@@ -44,7 +45,7 @@ if typing.TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-TERMINAL_DELIVERY_SCHEMA_VERSION = 1
+TERMINAL_DELIVERY_SCHEMA_VERSION = 2
 _SCHEMA_VERSION_KEY = "schema_version"
 _ITEMS_KEY = "items"
 
@@ -93,6 +94,7 @@ class TerminalDeliveryIntent:
     target_event_id: str
     anchor_event_id: str
     source_event_ids: tuple[str, ...]
+    lifecycle: TerminalDeliveryLifecycleFacts
     body: str
     correlation_id: str | None = None
     tool_trace: tuple[ToolTraceEntry, ...] = ()
@@ -131,6 +133,7 @@ class PendingTerminalDelivery:
     target_event_id: str
     anchor_event_id: str
     source_event_ids: tuple[str, ...]
+    lifecycle: TerminalDeliveryLifecycleFacts
     revision: int
     body: str
     correlation_id: str | None
@@ -174,6 +177,7 @@ class PendingTerminalDelivery:
             "target_event_id": self.target_event_id,
             "anchor_event_id": self.anchor_event_id,
             "source_event_ids": list(self.source_event_ids),
+            "lifecycle": self.lifecycle.to_record(),
             "revision": self.revision,
             "body": self.body,
             "correlation_id": self.correlation_id,
@@ -210,6 +214,7 @@ class PendingTerminalDelivery:
         target_event_id = _optional_string(record.get("target_event_id"))
         anchor_event_id = _optional_string(record.get("anchor_event_id"))
         target = MessageTarget.from_metadata(record.get("target"))
+        lifecycle = TerminalDeliveryLifecycleFacts.from_record(record.get("lifecycle"))
         state = record.get("state")
         revision = record.get("revision")
         body = record.get("body")
@@ -220,6 +225,7 @@ class PendingTerminalDelivery:
             or target_event_id is None
             or anchor_event_id is None
             or target is None
+            or lifecycle is None
             or state not in typing.get_args(TerminalDeliveryState)
             or not _is_int(revision)
             or not isinstance(body, str)
@@ -233,6 +239,7 @@ class PendingTerminalDelivery:
             target_event_id=target_event_id,
             anchor_event_id=anchor_event_id,
             source_event_ids=_string_tuple(record.get("source_event_ids")),
+            lifecycle=lifecycle,
             revision=typing.cast("int", revision),
             body=body,
             correlation_id=_optional_string(record.get("correlation_id")),
@@ -337,6 +344,7 @@ class TerminalDeliveryStore:
                 target_event_id=intent.target_event_id,
                 anchor_event_id=intent.anchor_event_id,
                 source_event_ids=tuple(intent.source_event_ids),
+                lifecycle=intent.lifecycle,
                 revision=0 if existing is None else existing.revision + 1,
                 body=intent.body,
                 correlation_id=intent.correlation_id,

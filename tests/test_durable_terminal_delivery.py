@@ -30,8 +30,10 @@ from mindroom.delivery_gateway import (
 from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.hooks import MessageEnvelope
+from mindroom.interactive import InteractiveMetadata
 from mindroom.matrix.stale_stream_cleanup import StaleStreamCleanupActor, recover_stale_streaming_messages
 from mindroom.message_target import MessageTarget
+from mindroom.post_response_effects import PostResponseEffectsDeps, PostResponseEffectsSupport
 from mindroom.redacted_turn_cleanup import RedactedTurnCleanup, RedactedTurnCleanupDeps
 from mindroom.terminal_delivery import (
     TERMINAL_DELIVERY_SCHEMA_VERSION,
@@ -41,13 +43,18 @@ from mindroom.terminal_delivery import (
     TerminalDeliveryStore,
     _reset_terminal_delivery_store_runtime,
 )
+from mindroom.terminal_delivery_lifecycle import TerminalDeliveryLifecycleFacts
+from mindroom.terminal_delivery_replay import (
+    TerminalDeliveryLifecycleReplayer,
+    TerminalDeliveryLifecycleReplayerDeps,
+)
 from mindroom.terminal_delivery_worker import TerminalDeliveryWorker, TerminalDeliveryWorkerDeps
 from mindroom.tool_system.events import ToolTraceEntry
 from tests.conftest import bind_runtime_paths, make_matrix_client_mock, message_origin, test_runtime_paths
 from tests.event_cache_test_support import raw_nio_redaction
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Iterator
     from pathlib import Path
 
     import structlog
@@ -74,8 +81,34 @@ class _Clock:
         self.now += seconds
 
 
+class _PostEffectRecorder:
+    """Real callback recorder for success-only post-response effects."""
+
+    def __init__(self) -> None:
+        self.interactive: list[tuple[str, MessageTarget, InteractiveMetadata]] = []
+        self.thread_summaries: list[tuple[str, str, str | None]] = []
+
+    async def register_interactive(
+        self,
+        event_id: str,
+        target: MessageTarget,
+        metadata: InteractiveMetadata,
+    ) -> None:
+        self.interactive.append((event_id, target, metadata))
+
+    def build_deps(self, **_kwargs: object) -> PostResponseEffectsDeps:
+        return PostResponseEffectsDeps(
+            logger=MagicMock(),
+            register_interactive=self.register_interactive,
+            should_queue_thread_summary=lambda _room_id, _thread_id, _hint: True,
+            queue_thread_summary=lambda room_id, thread_id, entity_name: self.thread_summaries.append(
+                (room_id, thread_id, entity_name),
+            ),
+        )
+
+
 @pytest.fixture(autouse=True)
-def _clean_store_runtime() -> None:
+def _clean_store_runtime() -> Iterator[None]:
     """Keep process-wide durable store state from leaking between tests."""
     _reset_terminal_delivery_store_runtime()
     yield
@@ -105,12 +138,34 @@ def _intent(
     source_event_id: str = SOURCE_EVENT_ID,
     room_id: str = ROOM_ID,
 ) -> TerminalDeliveryIntent:
+    target = MessageTarget.resolve(room_id, None, source_event_id)
+    envelope = MessageEnvelope(
+        source_event_id=source_event_id,
+        target=target,
+        body="source prompt",
+        attachment_ids=(),
+        mentioned_agents=(),
+        agent_name="helper",
+        origin=message_origin(
+            sender_id="@user:localhost",
+            requester_id="@user:localhost",
+            source_kind=MESSAGE_SOURCE_KIND,
+        ),
+    )
     return TerminalDeliveryIntent(
         agent_name="helper",
-        target=MessageTarget.resolve(room_id, None, source_event_id),
+        target=target,
         target_event_id=target_event_id,
         anchor_event_id=source_event_id,
         source_event_ids=(source_event_id,),
+        lifecycle=TerminalDeliveryLifecycleFacts(
+            response_kind="ai",
+            correlation_id=correlation_id,
+            response_envelope=envelope,
+            interactive_metadata=None,
+            thread_summary_message_count_hint=None,
+            thread_summary_entity_name="helper",
+        ),
         body=body,
         correlation_id=correlation_id,
         tool_trace=(ToolTraceEntry(type="tool_call_completed", tool_name="shell", args_preview="ls"),),
@@ -182,6 +237,7 @@ class TestStore:
                 target_event_id=PLACEHOLDER_EVENT_ID,
                 anchor_event_id=SOURCE_EVENT_ID,
                 source_event_ids=(SOURCE_EVENT_ID,),
+                lifecycle=_intent().lifecycle,
                 body="final",
                 extra_content={"bad": object()},
             ),
@@ -410,8 +466,8 @@ class TestStore:
         persisted = json.loads(store.store_file.read_text(encoding="utf-8"))["items"]
         assert list(persisted) == [pending.delivery_id]
 
-    def test_persisted_record_carries_only_what_the_edit_needs(self, tmp_path: Path) -> None:
-        """Transport credentials reachable at record time never enter the durable row."""
+    def test_persisted_record_carries_only_repair_and_lifecycle_facts(self, tmp_path: Path) -> None:
+        """Transport credentials and live collaborators never enter the durable row."""
         store = _store(tmp_path)
         recorded = store.record(_intent(body="answer referencing nothing secret"))
         assert recorded is not None
@@ -423,13 +479,14 @@ class TestStore:
         for secret in ("syt_", "Bearer ", "AsyncClient(", "access_token"):
             assert secret not in raw
         row = json.loads(raw)["items"][recorded.delivery_id]
-        assert set(row) <= {
+        assert set(row) == {
             "delivery_id",
             "agent_name",
             "target",
             "target_event_id",
             "anchor_event_id",
             "source_event_ids",
+            "lifecycle",
             "revision",
             "body",
             "correlation_id",
@@ -445,6 +502,38 @@ class TestStore:
             "lease_expires_at",
             "settled_reason",
         }
+        lifecycle = row["lifecycle"]
+        assert set(lifecycle) == {
+            "response_kind",
+            "correlation_id",
+            "response_envelope",
+            "interactive_metadata",
+            "thread_summary_message_count_hint",
+            "thread_summary_entity_name",
+        }
+        assert set(lifecycle["response_envelope"]) == {
+            "source_event_id",
+            "target",
+            "body",
+            "attachment_ids",
+            "mentioned_agents",
+            "agent_name",
+            "origin",
+            "hook_source",
+            "message_received_depth",
+            "dispatch_policy_source_kind",
+        }
+        assert set(lifecycle["response_envelope"]["origin"]) == {
+            "transport_sender_id",
+            "requester_id",
+            "sender_entity_name",
+            "requester_entity_name",
+            "sender_kind",
+            "requester_kind",
+            "intent",
+            "source_kind",
+            "trust",
+        }
 
 
 def _worker(
@@ -455,11 +544,16 @@ def _worker(
     max_concurrency: int = 4,
     is_ready: Callable[[], bool] | None = None,
     poll_interval_seconds: float = 600.0,
+    complete_lifecycle: Callable[[PendingTerminalDelivery], Awaitable[None]] | None = None,
 ) -> TerminalDeliveryWorker:
+    async def noop_complete_lifecycle(_item: PendingTerminalDelivery) -> None:
+        return
+
     return TerminalDeliveryWorker(
         TerminalDeliveryWorkerDeps(
             store=store,
             attempt=attempt,
+            complete_lifecycle=complete_lifecycle or noop_complete_lifecycle,
             is_ready=is_ready or (lambda: True),
             logger=MagicMock(),
             wall_clock=clock,
@@ -781,11 +875,17 @@ def _envelope(target: MessageTarget) -> MessageEnvelope:
     )
 
 
-def _identity(target: MessageTarget, *, correlation_id: str = "corr-durable") -> ResponseIdentity:
+def _identity(
+    target: MessageTarget,
+    *,
+    correlation_id: str = "corr-durable",
+    source_event_ids: tuple[str, ...] = (SOURCE_EVENT_ID,),
+) -> ResponseIdentity:
     return ResponseIdentity(
         response_kind="ai",
         response_envelope=_envelope(target),
         correlation_id=correlation_id,
+        source_event_ids=source_event_ids,
     )
 
 
@@ -888,6 +988,26 @@ class TestGatewaySeam:
         assert FINAL_BODY in pending[0].body
         # A carried in-progress status never survives into the repaired edit.
         assert (pending[0].extra_content or {})[STREAM_STATUS_KEY] == STREAM_STATUS_COMPLETED
+
+    @pytest.mark.asyncio
+    async def test_pending_delivery_persists_every_coalesced_source_event(self, tmp_path: Path) -> None:
+        """Redacting any source in a coalesced prompt must cancel its pending answer."""
+        target = MessageTarget.resolve(ROOM_ID, None, SOURCE_EVENT_ID)
+        gateway, store = _gateway(tmp_path=tmp_path, client=make_matrix_client_mock(), target=target)
+        assert store is not None
+
+        await gateway.record_pending_terminal_delivery(
+            target=target,
+            target_event_id=PLACEHOLDER_EVENT_ID,
+            identity=_identity(target, source_event_ids=(SOURCE_EVENT_ID, "$source-2", "$source-3")),
+            body=FINAL_BODY,
+            tool_trace=None,
+            extra_content=None,
+            interactive_metadata=None,
+        )
+
+        [pending] = store.unsettled_items()
+        assert pending.source_event_ids == (SOURCE_EVENT_ID, "$source-2", "$source-3")
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -1026,6 +1146,132 @@ class TestGatewaySeam:
         assert sent_content["m.relates_to"] == {"event_id": PLACEHOLDER_EVENT_ID, "rel_type": "m.replace"}
         assert FINAL_BODY in sent_content["m.new_content"]["body"]
         assert recovered_client.room_send.await_args.kwargs["tx_id"] == item.transaction_id
+
+    @pytest.mark.asyncio
+    async def test_restart_repair_emits_success_hook_once(self, tmp_path: Path) -> None:
+        """Repair must finish normal response lifecycle instead of only editing Matrix."""
+        target = MessageTarget.resolve(ROOM_ID, None, SOURCE_EVENT_ID)
+        first_gateway, first_store = _gateway(
+            tmp_path=tmp_path,
+            client=make_matrix_client_mock(),
+            target=target,
+        )
+        await first_gateway.record_pending_terminal_delivery(
+            target=target,
+            target_event_id=PLACEHOLDER_EVENT_ID,
+            identity=_identity(target),
+            body=FINAL_BODY,
+            tool_trace=None,
+            extra_content=None,
+            interactive_metadata=None,
+        )
+        assert first_store is not None
+
+        _reset_terminal_delivery_store_runtime()
+        recovered_client = make_matrix_client_mock()
+        recovered_client.room_send = AsyncMock(
+            return_value=nio.RoomSendResponse.from_dict({"event_id": "$repair-edit"}, ROOM_ID),
+        )
+        restarted_gateway, restarted_store = _gateway(
+            tmp_path=tmp_path,
+            client=recovered_client,
+            target=target,
+        )
+        assert restarted_store is not None
+        restarted_store.warm()
+
+        lifecycle = TerminalDeliveryLifecycleReplayer(
+            TerminalDeliveryLifecycleReplayerDeps(
+                response_hooks=restarted_gateway.deps.response_hooks,
+                post_response_effects=PostResponseEffectsSupport(
+                    runtime=restarted_gateway.deps.runtime,
+                    logger=restarted_gateway.deps.logger,
+                    runtime_paths=restarted_gateway.deps.runtime_paths,
+                    delivery_gateway=restarted_gateway,
+                    conversation_cache=restarted_gateway.deps.resolver.deps.conversation_cache,
+                ),
+                logger=restarted_gateway.deps.logger,
+            ),
+        )
+        worker = _worker(
+            restarted_store,
+            restarted_gateway.attempt_pending_terminal_delivery,
+            clock=_Clock(),
+            complete_lifecycle=lifecycle.complete,
+        )
+
+        assert await worker.drain_once() == 1
+        restarted_gateway.deps.response_hooks.emit_after_response.assert_awaited_once_with(
+            identity=_identity(target),
+            response_text=FINAL_BODY,
+            response_event_id=PLACEHOLDER_EVENT_ID,
+            delivery_kind="edited",
+            continue_on_cancelled=True,
+        )
+        assert restarted_store.items() == ()
+
+    @pytest.mark.asyncio
+    async def test_restart_repair_replays_interactive_and_thread_summary_effects_once(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Restart repair retains ordinary successful post-response obligations."""
+        target = MessageTarget.resolve(ROOM_ID, "$thread", SOURCE_EVENT_ID)
+        metadata = InteractiveMetadata.from_parts(
+            {"1": "approve"},
+            [{"key": "1", "label": "Approve"}],
+            question_text="Approve?",
+        )
+        assert metadata is not None
+        gateway, store = _gateway(tmp_path=tmp_path, client=make_matrix_client_mock(), target=target)
+        assert store is not None
+        await gateway.record_pending_terminal_delivery(
+            target=target,
+            target_event_id=PLACEHOLDER_EVENT_ID,
+            identity=ResponseIdentity(
+                response_kind="ai",
+                response_envelope=_envelope(target),
+                correlation_id="corr-durable",
+                source_event_ids=(SOURCE_EVENT_ID, "$source-2"),
+                thread_summary_message_count_hint=7,
+            ),
+            body="Approve?\n\nReact with an emoji or type the number to respond.",
+            tool_trace=None,
+            extra_content=None,
+            interactive_metadata=metadata,
+        )
+
+        _reset_terminal_delivery_store_runtime()
+        client = make_matrix_client_mock()
+        client.room_send = AsyncMock(
+            return_value=nio.RoomSendResponse.from_dict({"event_id": "$repair-edit"}, ROOM_ID),
+        )
+        restarted_gateway, restarted_store = _gateway(tmp_path=tmp_path, client=client, target=target)
+        assert restarted_store is not None
+        restarted_store.warm()
+        restarted_gateway.deps.resolver.deps.conversation_cache.get_latest_thread_event_id_if_needed.return_value = (
+            "$latest"
+        )
+        effects = _PostEffectRecorder()
+        lifecycle = TerminalDeliveryLifecycleReplayer(
+            TerminalDeliveryLifecycleReplayerDeps(
+                response_hooks=restarted_gateway.deps.response_hooks,
+                post_response_effects=effects,
+                logger=restarted_gateway.deps.logger,
+            ),
+        )
+        worker = _worker(
+            restarted_store,
+            restarted_gateway.attempt_pending_terminal_delivery,
+            clock=_Clock(restarted_store.clock()),
+            complete_lifecycle=lifecycle.complete,
+        )
+
+        assert await worker.drain_once() == 1
+        _reset_terminal_delivery_store_runtime()
+        assert _store(tmp_path).warm() == ()
+        assert effects.interactive == [(PLACEHOLDER_EVENT_ID, target, metadata)]
+        assert effects.thread_summaries == [(ROOM_ID, "$thread", "helper")]
 
     @pytest.mark.asyncio
     async def test_repeating_the_same_attempt_reuses_one_transaction(self, tmp_path: Path) -> None:

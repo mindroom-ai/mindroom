@@ -50,6 +50,7 @@ from mindroom.terminal_delivery import (
     TerminalDeliveryIntent,
     TerminalDeliveryStore,
 )
+from mindroom.terminal_delivery_lifecycle import TerminalDeliveryLifecycleFacts
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
@@ -100,6 +101,8 @@ class ResponseIdentity:
     response_kind: str
     response_envelope: MessageEnvelope
     correlation_id: str
+    source_event_ids: tuple[str, ...] = ()
+    thread_summary_message_count_hint: int | None = None
 
 
 @dataclass
@@ -460,6 +463,7 @@ class DeliveryGateway:
                 final_visible_body=_PLACEHOLDER_DELIVERY_FAILURE_TEXT,
                 delivery_kind="edited",
                 failure_reason=request.failure_reason,
+                deferred_terminal_delivery=request.failure_reason == _DURABLE_TERMINAL_RETRY_FAILURE_REASON,
                 tool_trace=tuple(request.tool_trace or ()),
                 extra_content=failure_extra_content,
             )
@@ -478,6 +482,7 @@ class DeliveryGateway:
             event_id=request.event_id,
             is_visible_response=True,
             failure_reason=request.failure_reason,
+            deferred_terminal_delivery=request.failure_reason == _DURABLE_TERMINAL_RETRY_FAILURE_REASON,
             tool_trace=tuple(request.tool_trace or ()),
             extra_content=failure_extra_content,
         )
@@ -491,6 +496,7 @@ class DeliveryGateway:
         body: str,
         tool_trace: list[ToolTraceEntry] | None,
         extra_content: dict[str, Any] | None,
+        interactive_metadata: interactive.InteractiveMetadata | None,
     ) -> PendingTerminalDelivery | None:
         """Persist one committed terminal outcome that Matrix transport could not deliver.
 
@@ -509,7 +515,17 @@ class DeliveryGateway:
             target=target,
             target_event_id=target_event_id,
             anchor_event_id=identity.response_envelope.source_event_id,
-            source_event_ids=(identity.response_envelope.source_event_id,),
+            source_event_ids=tuple(
+                dict.fromkeys(identity.source_event_ids or (identity.response_envelope.source_event_id,)),
+            ),
+            lifecycle=TerminalDeliveryLifecycleFacts(
+                response_kind=identity.response_kind,
+                correlation_id=identity.correlation_id,
+                response_envelope=identity.response_envelope,
+                interactive_metadata=interactive_metadata,
+                thread_summary_message_count_hint=identity.thread_summary_message_count_hint,
+                thread_summary_entity_name=self.deps.agent_name,
+            ),
             body=body,
             correlation_id=identity.correlation_id,
             tool_trace=tuple(tool_trace or ()),
@@ -602,13 +618,15 @@ class DeliveryGateway:
             or not _is_placeholder_delivery_failure(failure_reason)
         ):
             return None
+        interactive_response = interactive.parse_and_format_interactive(canonical_body, extract_mapping=True)
         return await self.record_pending_terminal_delivery(
             target=request.target,
             target_event_id=target_event_id,
             identity=request.identity,
-            body=interactive.parse_and_format_interactive(canonical_body, extract_mapping=True).formatted_text,
+            body=interactive_response.formatted_text,
             tool_trace=request.tool_trace,
             extra_content=request.extra_content,
+            interactive_metadata=interactive_response.interactive_metadata,
         )
 
     async def send_text(self, request: SendTextRequest) -> str | None:
@@ -897,6 +915,7 @@ class DeliveryGateway:
                 body=display_text,
                 tool_trace=draft.tool_trace,
                 extra_content=draft.extra_content,
+                interactive_metadata=interactive_response.interactive_metadata,
             )
             # The visible repair still runs even once a durable row exists. Recording
             # does not classify the failure, so a permanently rejected edit would
@@ -922,6 +941,7 @@ class DeliveryGateway:
                     event_id=request.existing_event_id,
                     is_visible_response=True,
                     failure_reason=_DURABLE_TERMINAL_RETRY_FAILURE_REASON,
+                    deferred_terminal_delivery=True,
                     tool_trace=tuple(draft.tool_trace or ()),
                     extra_content=draft.extra_content,
                 )
@@ -1543,6 +1563,7 @@ class DeliveryGateway:
                         failure_reason=(
                             _DURABLE_TERMINAL_RETRY_FAILURE_REASON if pending_delivery is not None else failure_reason
                         ),
+                        deferred_terminal_delivery=pending_delivery is not None,
                         tool_trace=tuple(request.tool_trace or ()),
                         extra_content=request.extra_content,
                     )

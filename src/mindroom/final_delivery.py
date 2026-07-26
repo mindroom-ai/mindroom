@@ -45,6 +45,7 @@ class FinalDeliveryOutcome:  # noqa: D101
     final_visible_body: str | None = None
     delivery_kind: _VisibleDeliveryKind | None = None
     failure_reason: str | None = None
+    deferred_terminal_delivery: bool = False
     suppressed: bool = False
     tool_trace: tuple[ToolTraceEntry, ...] = ()
     extra_content: dict[str, Any] | None = None
