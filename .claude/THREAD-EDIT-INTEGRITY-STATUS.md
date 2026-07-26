@@ -4,7 +4,7 @@
 
 - PR: `https://github.com/mindroom-ai/mindroom/pull/1641`
 - Branch: `fix/thread-edit-integrity`
-- Published candidate before this review round: `4e925fbae10de9f795bfd25ce2a3b44c25cf8454`
+- Published implementation head: `e3c38f43d`
 - Base and merge-base: `858282afc77adb480fa06cd9e4057d511ff861d5`
 - Git author required before every commit: `Bas Nijholt <bas@nijho.lt>`
 - Never amend, force-push, merge, or use temporary directories for durable work.
@@ -17,15 +17,20 @@ Real Tuwunel has not run on `4e925fbae`.
 
 ## Active review round
 
-Fresh exact-head review reported four candidate blockers that must be independently reproduced before production edits:
+Fresh exact-`4e925fbae` review reported four blockers.
+All were independently reproduced before production edits:
 
 1. Full-history ordering retains stale opaque or provisional representations after a canonical same-ID upgrade.
 2. Generic visible resolution observes top-level identities before bundled identities, allowing one edit ID to target two originals.
 3. Room-history scan has the same bundled-identity gap before per-thread grouping.
 4. Cache batch admission derives indexes and sidecar ownership from intermediate accepted representations instead of one final canonical representation.
 
-Use strict RED-GREEN TDD for every confirmed blocker.
-Keep one shared identity-canonicalization source of truth and avoid backend-specific workarounds.
+An additional SQLite/PostgreSQL probe confirmed latest-edit reads did not compare incoming bundles with cached bundled identities under other originals.
+The RED matrix failed 14 deterministic cases before production changes.
+Commit `e3c38f43d` centralizes final top-level-plus-bundled identity reconciliation and makes all 18 new cases pass across full resolution, room scan, generic visible resolution, SQLite, and PostgreSQL.
+The owning suites passed for `test_thread_history.py`, `test_event_cache.py`, `test_stale_stream_cleanup.py`, `test_event_cache_backends.py`, and `test_matrix_cache_interaction_contract.py`.
+Ruff, ty, Tach, pre-commit on changed files, and `git diff --check` pass.
+Production delta for this correction is net `+37` lines; the cache redaction helper moved to the shared replacement seam.
 
 ## Final gates
 
