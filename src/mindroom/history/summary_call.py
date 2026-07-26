@@ -217,7 +217,7 @@ def effective_summary_timeout_seconds(model: Model, *, timeout_seconds: float) -
     claude_model = as_anthropic_claude(model)
     if claude_model is None or not claude_model.timeout:
         return timeout_seconds
-    return min(float(claude_model.timeout), timeout_seconds)
+    return min(claude_model.timeout, timeout_seconds)
 
 
 def configure_summary_model(model: Model, *, timeout_seconds: float) -> Model:

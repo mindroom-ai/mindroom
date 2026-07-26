@@ -128,14 +128,14 @@ const DEFAULT_INHERITED_TOOLS = ["scheduler"] as const;
 // clear semantics. Keep in sync with CompactionOverrideConfig in the backend:
 // authoring any of these marks the override as authored, which the backend
 // resolves to enabled compaction.
-const COMPACTION_NON_MODEL_FIELDS = [
+const COMPACTION_NON_MODEL_FIELDS: readonly (keyof CompactionConfig)[] = [
   "enabled",
   "threshold_tokens",
   "threshold_percent",
   "replay_window_tokens",
   "reserve_tokens",
   "timeout_seconds",
-] as const satisfies readonly (keyof CompactionConfig)[];
+];
 
 function hasAuthoredNonModelCompactionField(
   compaction: CompactionConfig,

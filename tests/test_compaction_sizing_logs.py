@@ -45,7 +45,6 @@ async def _rewrite_with_summary_model(
     summary_model: Model,
 ) -> _CompactionRewriteResult | None:
     return await _rewrite_working_session_for_compaction(
-        summary_timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
         storage=storage,
         persisted_session=working_session,
         working_session=working_session,
@@ -62,6 +61,7 @@ async def _rewrite_with_summary_model(
         runs_before=len(working_session.runs or []),
         threshold_tokens=None,
         summary_prompt=COMPACTION_SUMMARY_PROMPT,
+        summary_timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
         lifecycle_notice_event_id=None,
         progress_callback=None,
         collect_compaction_hook_messages=False,

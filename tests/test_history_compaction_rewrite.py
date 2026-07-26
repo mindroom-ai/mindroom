@@ -98,7 +98,6 @@ async def _rewrite_single_run(
     progress_callback: Callable[[CompactionLifecycleProgress], Awaitable[None]] | None = None,
 ) -> _CompactionRewriteResult | None:
     return await _rewrite_working_session_for_compaction(
-        summary_timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
         storage=storage,
         persisted_session=working_session,
         working_session=working_session,
@@ -124,6 +123,7 @@ async def _rewrite_single_run(
         runs_before=len(working_session.runs or []),
         threshold_tokens=None,
         summary_prompt=COMPACTION_SUMMARY_PROMPT,
+        summary_timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
         lifecycle_notice_event_id=None,
         progress_callback=progress_callback,
         collect_compaction_hook_messages=False,
@@ -802,7 +802,6 @@ async def test_compact_scope_history_emits_before_hook_for_each_persisted_chunk(
         ),
     ):
         outcome = await compact_scope_history(
-            summary_timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
             storage=storage,
             session=session,
             scope=scope,
@@ -815,6 +814,7 @@ async def test_compact_scope_history_emits_before_hook_for_each_persisted_chunk(
             replay_window_tokens=16_000,
             threshold_tokens=1,
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
+            summary_timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
         )
 
     assert outcome is not None
@@ -1409,7 +1409,6 @@ async def test_rewrite_working_session_for_compaction_strips_stale_replay_fields
         new=AsyncMock(return_value=SessionSummary(summary=summary_text, updated_at=datetime.now(UTC))),
     ):
         rewrite_result = await _rewrite_working_session_for_compaction(
-            summary_timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
             storage=storage,
             persisted_session=working_session,
             working_session=working_session,
@@ -1429,6 +1428,7 @@ async def test_rewrite_working_session_for_compaction_strips_stale_replay_fields
             runs_before=2,
             threshold_tokens=None,
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
+            summary_timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
             lifecycle_notice_event_id=None,
             progress_callback=None,
             collect_compaction_hook_messages=False,
@@ -1468,7 +1468,6 @@ async def test_compact_scope_history_ignores_runs_without_stable_ids(
         new=AsyncMock(return_value=SessionSummary(summary="summary", updated_at=datetime.now(UTC))),
     ) as mock_generate:
         outcome = await compact_scope_history(
-            summary_timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
             storage=storage,
             session=working_session,
             summary_model=FakeModel(id="summary-model", provider="fake"),
@@ -1484,6 +1483,7 @@ async def test_compact_scope_history_ignores_runs_without_stable_ids(
             replay_window_tokens=64_000,
             threshold_tokens=None,
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
+            summary_timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
         )
 
     assert outcome is None
@@ -1563,7 +1563,6 @@ async def test_compact_scope_history_persists_sanitized_remaining_runs(tmp_path:
         new=AsyncMock(return_value=SessionSummary(summary=summary_text, updated_at=datetime.now(UTC))),
     ):
         outcome = await compact_scope_history(
-            summary_timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
             storage=storage,
             session=session,
             scope=scope,
@@ -1579,6 +1578,7 @@ async def test_compact_scope_history_persists_sanitized_remaining_runs(tmp_path:
             replay_window_tokens=16_000,
             threshold_tokens=1,
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
+            summary_timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
         )
 
     assert outcome is not None
@@ -1661,7 +1661,6 @@ async def test_rewrite_working_session_emits_progress_after_persisted_chunks(tmp
         new=AsyncMock(return_value=SessionSummary(summary="merged summary", updated_at=datetime.now(UTC))),
     ):
         rewrite_result = await _rewrite_working_session_for_compaction(
-            summary_timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
             storage=storage,
             persisted_session=working_session,
             working_session=working_session,
@@ -1678,6 +1677,7 @@ async def test_rewrite_working_session_emits_progress_after_persisted_chunks(tmp
             runs_before=2,
             threshold_tokens=None,
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
+            summary_timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
             lifecycle_notice_event_id="$notice",
             progress_callback=record_progress,
             collect_compaction_hook_messages=False,

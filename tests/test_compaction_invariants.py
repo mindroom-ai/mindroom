@@ -428,7 +428,6 @@ async def test_chunk_progress_survives_interruption_and_restart(tmp_path: Path) 
         pytest.raises(RuntimeError, match="provider exploded"),
     ):
         await compact_scope_history(
-            summary_timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
             storage=storage,
             session=session,
             scope=_SCOPE,
@@ -441,6 +440,7 @@ async def test_chunk_progress_survives_interruption_and_restart(tmp_path: Path) 
             replay_window_tokens=64_000,
             threshold_tokens=None,
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
+            summary_timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
         )
 
     interrupted = get_agent_session(storage, "session-1")
@@ -547,13 +547,24 @@ def test_configure_summary_model_tunes_vertexai_claude() -> None:
     assert model.client_params == {"max_retries": 0}
 
 
+def test_effective_summary_timeout_resolves_every_provider_timeout_shape() -> None:
+    without_authored_timeout = Claude(id="claude-sonnet-5")
+    shorter_authored_timeout = Claude(id="claude-sonnet-5", timeout=300.0)
+    longer_authored_timeout = Claude(id="claude-sonnet-5", timeout=900.0)
+    non_claude_model = FakeModel(id="test-model", provider="fake")
+
+    assert effective_summary_timeout_seconds(without_authored_timeout, timeout_seconds=480.0) == 480.0
+    assert effective_summary_timeout_seconds(shorter_authored_timeout, timeout_seconds=480.0) == 300.0
+    assert effective_summary_timeout_seconds(longer_authored_timeout, timeout_seconds=480.0) == 480.0
+    assert effective_summary_timeout_seconds(non_claude_model, timeout_seconds=480.0) == 480.0
+
+
 def test_configure_summary_model_applies_the_resolved_compaction_timeout() -> None:
     model = Claude(id="claude-sonnet-5")
 
-    configure_summary_model(model, timeout_seconds=90.0)
+    configure_summary_model(model, timeout_seconds=480.0)
 
-    assert model.timeout == 90.0
-    assert effective_summary_timeout_seconds(model, timeout_seconds=90.0) == 90.0
+    assert model.timeout == 480.0
 
 
 def test_configure_summary_model_keeps_a_shorter_authored_provider_timeout() -> None:
@@ -564,9 +575,7 @@ def test_configure_summary_model_keeps_a_shorter_authored_provider_timeout() -> 
         timeout=300.0,
     )
 
-    assert effective_summary_timeout_seconds(model, timeout_seconds=600.0) == 300.0
-
-    configure_summary_model(model, timeout_seconds=600.0)
+    configure_summary_model(model, timeout_seconds=480.0)
 
     assert model.timeout == 300.0
 
@@ -587,7 +596,6 @@ def test_configure_summary_model_leaves_unknown_providers_untouched() -> None:
 
     assert configured is model
     assert model == FakeModel(id="test-model", provider="fake")
-    assert effective_summary_timeout_seconds(model, timeout_seconds=600.0) == 600.0
 
 
 @pytest.mark.asyncio
@@ -602,10 +610,10 @@ async def test_generate_compaction_summary_applies_tuning_and_request_shape() ->
     )
 
     summary = await generate_compaction_summary(
-        timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
         model=model,
         summary_input="conversation payload",
         summary_prompt="Summarize the conversation.",
+        timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
     )
 
     assert summary.summary == "recorded summary"
@@ -625,7 +633,6 @@ async def test_generate_compaction_summary_applies_tuning_and_request_shape() ->
 async def test_generate_compaction_summary_rejects_output_cap_truncation() -> None:
     with pytest.raises(RuntimeError, match="output token limit"):
         await generate_compaction_summary(
-            timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
             model=_RecordingClaude(
                 id="claude-sonnet-5",
                 max_tokens=64_000,
@@ -636,6 +643,7 @@ async def test_generate_compaction_summary_rejects_output_cap_truncation() -> No
             ),
             summary_input="conversation payload",
             summary_prompt="Summarize the conversation.",
+            timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
         )
 
 
@@ -643,7 +651,6 @@ async def test_generate_compaction_summary_rejects_output_cap_truncation() -> No
 async def test_generate_compaction_summary_uses_configured_output_cap() -> None:
     with pytest.raises(RuntimeError, match="output token limit"):
         await generate_compaction_summary(
-            timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
             model=_RecordingClaude(
                 id="claude-sonnet-5",
                 max_tokens=1_024,
@@ -651,13 +658,13 @@ async def test_generate_compaction_summary_uses_configured_output_cap() -> None:
             ),
             summary_input="conversation payload",
             summary_prompt="Summarize the conversation.",
+            timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
         )
 
 
 @pytest.mark.asyncio
 async def test_generate_compaction_summary_allows_claude_summary_below_output_cap() -> None:
     summary = await generate_compaction_summary(
-        timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
         model=_RecordingClaude(
             id="claude-sonnet-5",
             max_tokens=64_000,
@@ -668,6 +675,7 @@ async def test_generate_compaction_summary_allows_claude_summary_below_output_ca
         ),
         summary_input="conversation payload",
         summary_prompt="Summarize the conversation.",
+        timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
     )
 
     assert summary.summary == "durable summary ended cleanly."
@@ -676,7 +684,6 @@ async def test_generate_compaction_summary_allows_claude_summary_below_output_ca
 @pytest.mark.asyncio
 async def test_generate_compaction_summary_allows_full_history_summary_above_four_k() -> None:
     summary = await generate_compaction_summary(
-        timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
         model=_RecordingClaude(
             id="claude-sonnet-5",
             max_tokens=8192,
@@ -687,6 +694,7 @@ async def test_generate_compaction_summary_allows_full_history_summary_above_fou
         ),
         summary_input="conversation payload",
         summary_prompt="Summarize the conversation.",
+        timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
     )
 
     assert summary.summary == "durable full-history summary ended cleanly."
@@ -704,10 +712,10 @@ async def test_generate_compaction_summary_uses_claude_default_output_cap() -> N
 
     with pytest.raises(RuntimeError, match="output token limit"):
         await generate_compaction_summary(
-            timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
             model=model,
             summary_input="conversation payload",
             summary_prompt="Summarize the conversation.",
+            timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
         )
 
 
@@ -718,10 +726,10 @@ async def test_generate_compaction_summary_allows_unknown_provider_without_outpu
             return ModelResponse(content="durable summary ended cleanly.", output_tokens=64_001)
 
     summary = await generate_compaction_summary(
-        timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
         model=_UncappedSummaryModel(id="summary-model", provider="fake"),
         summary_input="conversation payload",
         summary_prompt="Summarize the conversation.",
+        timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
     )
 
     assert summary.summary == "durable summary ended cleanly."
@@ -1181,7 +1189,6 @@ async def test_retry_helper_propagates_original_error_when_rebuilt_input_is_not_
         pytest.raises(CompactionSummaryOutputLimitError) as raised,
     ):
         await _generate_compaction_summary_with_retry(
-            timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
             model=FakeModel(id="summary-model", provider="fake"),
             model_name="summary-model",
             previous_summary=None,
@@ -1193,6 +1200,7 @@ async def test_retry_helper_propagates_original_error_when_rebuilt_input_is_not_
             scope=_SCOPE,
             history_settings=_HISTORY_SETTINGS,
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
+            timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
             token_estimator=lambda _value: 2_000,
             estimate_kind="o200k_base_tokens",
         )
@@ -1222,7 +1230,6 @@ async def test_retry_helper_honors_transient_fallthrough_for_shrink_message_at_f
         patch("mindroom.history.compaction.asyncio.sleep", new=retry_sleep),
     ):
         generated = await _generate_compaction_summary_with_retry(
-            timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
             model=FakeModel(id="summary-model", provider="fake"),
             model_name="summary-model",
             previous_summary=None,
@@ -1234,6 +1241,7 @@ async def test_retry_helper_honors_transient_fallthrough_for_shrink_message_at_f
             scope=_SCOPE,
             history_settings=_HISTORY_SETTINGS,
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
+            timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
             token_estimator=lambda _value: COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS,
             estimate_kind="o200k_base_tokens",
         )
@@ -1278,7 +1286,6 @@ async def test_retry_helper_shrinks_around_a_large_durable_summary() -> None:
 
     with patch("mindroom.history.compaction.generate_compaction_summary", new=generate_summary):
         generated = await _generate_compaction_summary_with_retry(
-            timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
             model=FakeModel(id="summary-model", provider="fake"),
             model_name="summary-model",
             previous_summary=previous_summary,
@@ -1290,6 +1297,7 @@ async def test_retry_helper_shrinks_around_a_large_durable_summary() -> None:
             scope=_SCOPE,
             history_settings=_HISTORY_SETTINGS,
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
+            timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
             token_estimator=_chars_per_token_estimator,
             estimate_kind="o200k_base_tokens",
         )
@@ -1325,7 +1333,6 @@ async def test_retry_helper_propagates_error_when_no_smaller_progress_input_exis
         pytest.raises(CompactionSummaryOutputLimitError) as raised,
     ):
         await _generate_compaction_summary_with_retry(
-            timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
             model=FakeModel(id="summary-model", provider="fake"),
             model_name="summary-model",
             previous_summary=previous_summary,
@@ -1337,6 +1344,7 @@ async def test_retry_helper_propagates_error_when_no_smaller_progress_input_exis
             scope=_SCOPE,
             history_settings=_HISTORY_SETTINGS,
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
+            timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
             token_estimator=_chars_per_token_estimator,
             estimate_kind="o200k_base_tokens",
         )
@@ -1354,7 +1362,6 @@ async def test_generate_compaction_summary_empty_result_raises_typed_error_with_
         match=r"returned no result \(output_tokens=0, has_reasoning=False\)",
     ):
         await generate_compaction_summary(
-            timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
             model=_RecordingClaude(
                 id="claude-sonnet-5",
                 max_tokens=64_000,
@@ -1362,6 +1369,7 @@ async def test_generate_compaction_summary_empty_result_raises_typed_error_with_
             ),
             summary_input="conversation payload",
             summary_prompt="Summarize the conversation.",
+            timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
         )
 
 
@@ -1443,7 +1451,6 @@ async def test_claude_compaction_splits_dense_preserved_metadata_before_the_inpu
         new=AsyncMock(side_effect=record_summary),
     ):
         outcome = await compact_scope_history(
-            summary_timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
             storage=storage,
             session=session,
             scope=_SCOPE,
@@ -1456,6 +1463,7 @@ async def test_claude_compaction_splits_dense_preserved_metadata_before_the_inpu
             replay_window_tokens=200_000,
             threshold_tokens=None,
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
+            summary_timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
         )
 
     assert outcome is not None
@@ -1500,7 +1508,6 @@ async def test_compaction_retries_empty_summary_result_with_smaller_input(tmp_pa
         new=AsyncMock(side_effect=flaky_summary),
     ):
         outcome = await compact_scope_history(
-            summary_timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
             storage=storage,
             session=session,
             scope=_SCOPE,
@@ -1513,6 +1520,7 @@ async def test_compaction_retries_empty_summary_result_with_smaller_input(tmp_pa
             replay_window_tokens=64_000,
             threshold_tokens=None,
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
+            summary_timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
         )
 
     assert outcome is not None
@@ -1631,15 +1639,15 @@ async def test_retry_helper_logs_requested_and_effective_claude_timeouts() -> No
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
             token_estimator=lambda _value: 2_000,
             estimate_kind="o200k_base_tokens",
-            timeout_seconds=600.0,
+            timeout_seconds=480.0,
         )
 
     request_log = next(
         call for call in logger_mock.info.call_args_list if call.args[0] == "Compaction summary chunk request"
     )
-    assert request_log.kwargs["timeout_seconds"] == 600.0
+    assert request_log.kwargs["timeout_seconds"] == 480.0
     assert request_log.kwargs["effective_timeout_seconds"] == 300.0
-    assert generate_summary.await_args.kwargs["timeout_seconds"] == 600.0
+    assert generate_summary.await_args.kwargs["timeout_seconds"] == 480.0
 
 
 @pytest.mark.asyncio
@@ -1664,7 +1672,6 @@ async def test_retry_helper_propagates_fallback_refusal_or_failure(fallback_erro
         pytest.raises(type(fallback_error)) as raised,
     ):
         await _generate_compaction_summary_with_retry(
-            timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
             model=primary,
             model_name="summary-model",
             previous_summary=None,
@@ -1676,6 +1683,7 @@ async def test_retry_helper_propagates_fallback_refusal_or_failure(fallback_erro
             scope=_SCOPE,
             history_settings=_HISTORY_SETTINGS,
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
+            timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
             token_estimator=lambda _value: 2_000,
             estimate_kind="o200k_base_tokens",
             fallback_model=fallback,
@@ -1709,7 +1717,6 @@ async def test_retry_helper_refusal_after_transient_retry_propagates_within_atte
         pytest.raises(ModelSafeguardRefusalError) as raised,
     ):
         await _generate_compaction_summary_with_retry(
-            timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
             model=primary,
             model_name="summary-model",
             previous_summary=None,
@@ -1721,6 +1728,7 @@ async def test_retry_helper_refusal_after_transient_retry_propagates_within_atte
             scope=_SCOPE,
             history_settings=_HISTORY_SETTINGS,
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
+            timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
             token_estimator=lambda _value: 2_000,
             estimate_kind="o200k_base_tokens",
             fallback_model=fallback,
@@ -1763,7 +1771,6 @@ async def test_compaction_fallback_serves_later_chunks_state_and_outcome(tmp_pat
         new=AsyncMock(side_effect=flaky_summary),
     ):
         outcome = await compact_scope_history(
-            summary_timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
             storage=storage,
             session=session,
             scope=_SCOPE,
@@ -1776,6 +1783,7 @@ async def test_compaction_fallback_serves_later_chunks_state_and_outcome(tmp_pat
             replay_window_tokens=64_000,
             threshold_tokens=None,
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
+            summary_timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
             fallback_summary_model=fallback,
             fallback_summary_model_name="fallback-model",
             fallback_summary_input_budget=10_000,
@@ -1824,7 +1832,6 @@ async def test_small_refused_summary_request_fails_without_identical_retry_or_pe
         pytest.raises(ModelSafeguardRefusalError, match="provider-specific refusal wording"),
     ):
         await compact_scope_history(
-            summary_timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
             storage=storage,
             session=session,
             scope=_SCOPE,
@@ -1837,6 +1844,7 @@ async def test_small_refused_summary_request_fails_without_identical_retry_or_pe
             replay_window_tokens=64_000,
             threshold_tokens=None,
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
+            summary_timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
         )
 
     assert len(attempts) == 1
@@ -1878,7 +1886,6 @@ async def test_minimum_available_budget_can_issue_smaller_degradation_retry(tmp_
         ) as build_summary_input_spy,
     ):
         outcome = await compact_scope_history(
-            summary_timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
             storage=storage,
             session=session,
             scope=_SCOPE,
@@ -1891,6 +1898,7 @@ async def test_minimum_available_budget_can_issue_smaller_degradation_retry(tmp_
             replay_window_tokens=64_000,
             threshold_tokens=None,
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
+            summary_timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
         )
 
     assert outcome is not None
@@ -1928,7 +1936,6 @@ async def test_near_cap_durable_summary_with_tiny_budget_is_unavailable_without_
         new=generate_summary,
     ):
         outcome = await compact_scope_history(
-            summary_timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
             storage=storage,
             session=session,
             scope=_SCOPE,
@@ -1941,6 +1948,7 @@ async def test_near_cap_durable_summary_with_tiny_budget_is_unavailable_without_
             replay_window_tokens=summary_input_budget,
             threshold_tokens=None,
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
+            summary_timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
         )
 
     assert outcome is None
@@ -2074,7 +2082,6 @@ async def test_compaction_retries_transient_provider_error_at_same_budget(
         patch("mindroom.history.compaction.asyncio.sleep", new=retry_sleep),
     ):
         outcome = await compact_scope_history(
-            summary_timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
             storage=storage,
             session=session,
             scope=_SCOPE,
@@ -2087,6 +2094,7 @@ async def test_compaction_retries_transient_provider_error_at_same_budget(
             replay_window_tokens=64_000,
             threshold_tokens=None,
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
+            summary_timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
         )
 
     assert outcome is not None

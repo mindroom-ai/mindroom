@@ -64,10 +64,10 @@ async def test_compaction_call_timeout_raises_runtime_error() -> None:
 
     with pytest.raises(RuntimeError, match=r"compaction summary timed out after 0.01s"):
         await generate_compaction_summary(
-            timeout_seconds=0.01,
             model=_SlowSummaryModel(id="summary-model", provider="fake"),
             summary_input="Current prompt",
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
+            timeout_seconds=0.01,
         )
 
 
@@ -77,10 +77,10 @@ async def test_compaction_summary_uses_configured_system_prompt() -> None:
     model = RecordingModel(id="summary-model", provider="fake")
 
     await generate_compaction_summary(
-        timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
         model=model,
         summary_input="Current prompt",
         summary_prompt="Custom compaction instructions.",
+        timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
     )
 
     assert model.seen_messages[0].role == "system"
@@ -113,10 +113,10 @@ async def test_compaction_call_timeout_returns_without_waiting_for_cancellation_
 
     with pytest.raises(RuntimeError, match=r"compaction summary timed out after 0.01s"):
         await generate_compaction_summary(
-            timeout_seconds=0.01,
             model=model,
             summary_input="Current prompt",
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
+            timeout_seconds=0.01,
         )
 
     assert asyncio.get_running_loop().time() - start < 0.04
@@ -151,10 +151,10 @@ async def test_compaction_call_timeout_raises_even_when_provider_returns_after_c
 
     with pytest.raises(RuntimeError, match=r"compaction summary timed out after 0.01s"):
         await generate_compaction_summary(
-            timeout_seconds=0.01,
             model=model,
             summary_input="Current prompt",
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
+            timeout_seconds=0.01,
         )
 
     await asyncio.wait_for(model.started.wait(), timeout=0.1)
@@ -173,10 +173,10 @@ async def test_compaction_provider_timeout_propagates_unchanged() -> None:
 
     with pytest.raises(TimeoutError, match="provider timeout"):
         await generate_compaction_summary(
-            timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
             model=_ProviderTimeoutModel(id="summary-model", provider="fake"),
             summary_input="Current prompt",
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
+            timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
         )
 
 
@@ -202,10 +202,10 @@ async def test_compaction_summary_cancels_model_task_when_outer_call_is_cancelle
     model = _BlockingSummaryModel(model_id="summary-model", provider="fake")
     summary_task = asyncio.create_task(
         generate_compaction_summary(
-            timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
             model=model,
             summary_input="Current prompt",
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
+            timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
         ),
     )
 
@@ -245,10 +245,10 @@ async def test_compaction_summary_outer_cancellation_returns_without_waiting_for
     model = _SlowCancelCleanupSummaryModel(model_id="summary-model", provider="fake")
     summary_task = asyncio.create_task(
         generate_compaction_summary(
-            timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
             model=model,
             summary_input="Current prompt",
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
+            timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
         ),
     )
 
@@ -287,10 +287,10 @@ async def test_compaction_summary_outer_cancellation_wins_over_provider_cleanup_
     model = _CleanupErrorSummaryModel(model_id="summary-model", provider="fake")
     summary_task = asyncio.create_task(
         generate_compaction_summary(
-            timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
             model=model,
             summary_input="Current prompt",
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
+            timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
         ),
     )
 
@@ -336,10 +336,10 @@ async def test_compaction_timeout_cleanup_detaches_after_grace_window() -> None:
         pytest.raises(RuntimeError, match=r"compaction summary timed out after 0.01s"),
     ):
         await generate_compaction_summary(
-            timeout_seconds=0.01,
             model=model,
             summary_input="Current prompt",
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
+            timeout_seconds=0.01,
         )
 
     await asyncio.wait_for(model.started.wait(), timeout=0.1)
