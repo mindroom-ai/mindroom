@@ -1,14 +1,14 @@
 # Thread edit integrity gate status
 
-Updated 2026-07-26 after quarantining conflicting immutable event payloads.
+Updated 2026-07-26 after preserving canonical cache observations across arrival orders.
 
 ## Exact target
 
 - PR: `mindroom-ai/mindroom#1641`
 - Branch: `fix/thread-edit-integrity`
-- Latest production commit: `974c34573e192628a8d8a9962543cf94afa4bb85`
+- Latest production commit: `3c6a1d2a08fdf750d6fb5def75fe21f67b8c7f14`
 - Current base and merge base: `858282afc77adb480fa06cd9e4057d511ff861d5`
-- Latest integration commit before the next handoff-only successor: `974c34573e192628a8d8a9962543cf94afa4bb85`
+- Latest integration commit before the next handoff-only successor: `3c6a1d2a08fdf750d6fb5def75fe21f67b8c7f14`
 - A commit cannot contain its own SHA, so this file does not claim that its stored parent is the exact gate head.
 - Resolve local `HEAD`, `origin/fix/thread-edit-integrity`, and GitHub PR `headRefOid` live and require all three values to match before counting any gate.
 - The tracked tree is clean; three user-owned task notes and preserved test artifacts are untracked.
@@ -43,6 +43,8 @@ Updated 2026-07-26 after quarantining conflicting immutable event payloads.
 - `974c34573` quarantines sequential conflicting clear payloads for one immutable event ID across point rows, edit indexes, snapshots, restart, and retry.
 - `974c34573` prevents deletion of the last nested bundled edit from promoting wrapper metadata and rejects bundled previews of malformed originals.
 - `974c34573` preserves the one legitimate clear-payload exception: a trusted local outbound placeholder may yield to its canonical sync echo, while an input-spoofed marker is stripped.
+- `3c6a1d2a0` preserves a canonical sync echo when delayed advisory outbound bookkeeping arrives afterward.
+- `3c6a1d2a0` carries selected-edit cache provenance by immutable event ID and uses the freshest equivalent explicit or bundled observation for room-snapshot freshness.
 - The current correction requires canonical replacement validity before an edit may supply thread ancestry in point, scan, cache-certification, snapshot, cleanup, or mutation paths.
 - The current correction rejects malformed `m.room.message` point events and cache rows before their raw relations can create durable thread indexes.
 - Known invalid edits resolve room-level; unavailable replacement ancestry remains indeterminate so mutation writes fail closed.
@@ -322,5 +324,24 @@ Updated 2026-07-26 after quarantining conflicting immutable event payloads.
 - Total production source against current main is `+2425/-1226`, net `+1199`.
 - Every predecessor review, CI, PostgreSQL, full-suite, all-file, and real-Tuwunel result is historical after `974c34573`.
 - Fresh exact-head Codex review and CI are active.
+- Exact-head PostgreSQL stress, full pytest, Tach, all-file pre-commit, and isolated real-Tuwunel remain mandatory.
+- Merge gate remains closed; never merge from this task.
+
+## Production-3c6a canonical observation correction
+
+- Production correction commit is `3c6a1d2a08fdf750d6fb5def75fe21f67b8c7f14`.
+- Resolve the handoff successor live; this tracked file deliberately does not claim its own commit SHA.
+- Base and merge base remain current `main` `858282afc77adb480fa06cd9e4057d511ff861d5`.
+- Two exact-`fc40b743e` reviewers independently reproduced the same two blockers.
+- A canonical sync echo cached before delayed trusted provisional bookkeeping was quarantined instead of retained.
+- Equivalent explicit and bundled copies of the selected edit could lose their fresh observation time and make a current room snapshot return `None`.
+- Both claims failed deterministic SQLite and PostgreSQL regressions before implementation.
+- The regressions cover both canonical/provisional arrival orders and both fresh explicit/old bundled and fresh bundled/old explicit edit representations.
+- The final nine-file owning selection passes `783` tests with zero failures, errors, or skips across SQLite and PostgreSQL.
+- Changed-file pre-commit, Tach dependencies/interfaces, Ruff, formatting, `ty`, Vulture, module privacy, commit hooks, and diff checks pass.
+- This correction changes production by `+22/-10`, net `+12`.
+- Total production source against current main is `+2437/-1226`, net `+1211`.
+- Every predecessor review, CI, PostgreSQL, full-suite, all-file, and real-Tuwunel result is historical after `3c6a1d2a0`.
+- Fresh exact-head Codex review and CI are required.
 - Exact-head PostgreSQL stress, full pytest, Tach, all-file pre-commit, and isolated real-Tuwunel remain mandatory.
 - Merge gate remains closed; never merge from this task.
