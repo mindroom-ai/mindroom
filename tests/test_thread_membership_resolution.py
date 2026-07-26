@@ -954,15 +954,18 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         """A definitive non-root proof must beat advisory inherited membership."""
         room_id = "!test:localhost"
         candidate_root_id = "$candidate_root:localhost"
-        candidate_root_info = EventInfo.from_event(
-            {
-                "type": "m.room.message",
-                "content": {
-                    "body": "Candidate root",
-                    "msgtype": "m.text",
-                },
+        candidate_root_source = {
+            "event_id": candidate_root_id,
+            "room_id": room_id,
+            "sender": "@user:localhost",
+            "origin_server_ts": 1000,
+            "type": "m.room.message",
+            "content": {
+                "body": "Candidate root",
+                "msgtype": "m.text",
             },
-        )
+        }
+        candidate_root_info = EventInfo.from_event(candidate_root_source)
 
         async def lookup_thread_id(_room_id: str, event_id: str) -> str | None:
             return "$stale_thread:localhost" if event_id == candidate_root_id else None
@@ -974,6 +977,9 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             assert event_id == candidate_root_id
             return ThreadRootProof.not_a_thread_root()
 
+        async def fetch_event_source(_room_id: str, event_id: str) -> dict[str, object] | None:
+            return candidate_root_source if event_id == candidate_root_id else None
+
         resolution = await resolve_related_event_thread_membership(
             room_id,
             candidate_root_id,
@@ -981,6 +987,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 lookup_thread_id=lookup_thread_id,
                 fetch_event_info=fetch_event_info,
                 prove_thread_root=prove_thread_root,
+                fetch_event_source=fetch_event_source,
             ),
         )
 

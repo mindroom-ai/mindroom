@@ -496,6 +496,25 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 room_id="!test:localhost",
             ),
         )
+        bot.client.room_get_event = AsyncMock(
+            return_value=nio.RoomGetEventResponse.from_dict(
+                {
+                    "content": {
+                        "body": "thread message",
+                        "msgtype": "m.text",
+                        "m.relates_to": {
+                            "rel_type": "m.thread",
+                            "event_id": "$thread_root:localhost",
+                        },
+                    },
+                    "event_id": "$thread_msg:localhost",
+                    "sender": "@user:localhost",
+                    "origin_server_ts": 1234567889,
+                    "room_id": room.room_id,
+                    "type": "m.room.message",
+                },
+            ),
+        )
 
         with (
             patch(

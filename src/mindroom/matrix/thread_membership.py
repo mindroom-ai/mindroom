@@ -313,6 +313,27 @@ def _resolution_from_root_proof(
     )
 
 
+async def _advisory_index_remains_usable(
+    room_id: str,
+    event_id: str,
+    *,
+    indexed_thread_id: str | None,
+    event_info: EventInfo,
+    definitively_not_a_root: bool,
+    access: ThreadMembershipAccess,
+) -> bool:
+    """Keep an indexed membership unless current source evidence proves it stale."""
+    if indexed_thread_id is None or event_info.is_edit:
+        return False
+    if not definitively_not_a_root or access.fetch_event_source is None:
+        return True
+    try:
+        event_source = await access.fetch_event_source(room_id, event_id)
+    except Exception:
+        return True
+    return event_source is None
+
+
 async def resolve_event_thread_membership(
     room_id: str,
     event_info: EventInfo,
@@ -371,7 +392,7 @@ async def resolve_event_thread_membership(
     return resolution
 
 
-async def resolve_related_event_thread_membership(
+async def resolve_related_event_thread_membership(  # noqa: C901
     room_id: str,
     related_event_id: str,
     *,
@@ -386,6 +407,8 @@ async def resolve_related_event_thread_membership(
         if current_event_id in visited_event_ids:
             break
         visited_event_ids.add(current_event_id)
+
+        indexed_thread_id = await access.lookup_thread_id(room_id, current_event_id)
 
         try:
             related_event_info = await access.fetch_event_info(room_id, current_event_id)
@@ -406,12 +429,14 @@ async def resolve_related_event_thread_membership(
             resolution = ThreadResolution.threaded(thread_id)
             break
 
+        definitively_not_a_root = False
         if related_event_info.can_be_thread_root:
             proof = await access.prove_thread_root(room_id, current_event_id)
             if proof.state is not _ThreadRootProofState.NOT_A_THREAD_ROOT:
                 resolution = _resolution_from_root_proof(current_event_id, proof)
                 break
             resolution = ThreadResolution.room_level(thread_history=proof.thread_history)
+            definitively_not_a_root = True
 
         try:
             next_target = await _validated_next_related_event_target(
@@ -427,6 +452,17 @@ async def resolve_related_event_thread_membership(
         if next_target is not None:
             current_event_id = next_target
             continue
+        if await _advisory_index_remains_usable(
+            room_id,
+            current_event_id,
+            indexed_thread_id=indexed_thread_id,
+            event_info=related_event_info,
+            definitively_not_a_root=definitively_not_a_root,
+            access=access,
+        ):
+            assert indexed_thread_id is not None
+            resolution = ThreadResolution.threaded(indexed_thread_id)
+            break
         break
 
     return resolution

@@ -178,11 +178,27 @@ async def test_threaded_event_resolves_explicit_thread_root(config: Config) -> N
 
 
 @pytest.mark.asyncio
-async def test_reply_chain_falls_back_to_cached_thread_membership(config: Config) -> None:
-    """A plain reply inherits the thread of its parent through the cached thread index."""
+async def test_reply_chain_uses_parent_thread_relation(config: Config) -> None:
+    """A plain reply inherits the explicit thread relation carried by its parent."""
     cache = make_conversation_cache_mock()
     cache.get_thread_id_for_event = AsyncMock(
         side_effect=lambda _room_id, event_id: _THREAD_ROOT if event_id == _PARENT else None,
+    )
+    cache.get_event = AsyncMock(
+        return_value=nio.RoomGetEventResponse.from_dict(
+            {
+                "content": {
+                    "body": "thread parent",
+                    "msgtype": "m.text",
+                    "m.relates_to": {"rel_type": "m.thread", "event_id": _THREAD_ROOT},
+                },
+                "event_id": _PARENT,
+                "sender": _SENDER,
+                "origin_server_ts": 999_999,
+                "room_id": _ROOM_ID,
+                "type": "m.room.message",
+            },
+        ),
     )
     resolver = _resolver(config, conversation_cache=cache)
 

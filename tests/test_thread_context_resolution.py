@@ -299,6 +299,29 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             ) as mock_lookup,
             patch.object(
                 bot._conversation_cache,
+                "get_event",
+                AsyncMock(
+                    return_value=nio.RoomGetEventResponse.from_dict(
+                        {
+                            "content": {
+                                "body": "Thread message",
+                                "msgtype": "m.text",
+                                "m.relates_to": {
+                                    "rel_type": "m.thread",
+                                    "event_id": "$thread_root:localhost",
+                                },
+                            },
+                            "event_id": "$thread_msg:localhost",
+                            "sender": "@user:localhost",
+                            "origin_server_ts": 1234567895,
+                            "room_id": room.room_id,
+                            "type": "m.room.message",
+                        },
+                    ),
+                ),
+            ),
+            patch.object(
+                bot._conversation_cache,
                 "get_thread_history",
                 _thread_history_lookup("$thread_root:localhost", expected_history),
             ) as mock_fetch,
@@ -310,7 +333,6 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         assert context.thread_history == expected_history
         mock_lookup.assert_awaited_once_with(room.room_id, "$thread_msg:localhost")
         assert [history_call.args for history_call in mock_fetch.await_args_list] == [
-            (room.room_id, "$thread_msg:localhost"),
             (room.room_id, "$thread_root:localhost"),
         ]
 
@@ -1231,6 +1253,29 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             ),
             patch.object(
                 bot._conversation_cache,
+                "get_event",
+                AsyncMock(
+                    return_value=nio.RoomGetEventResponse.from_dict(
+                        {
+                            "content": {
+                                "body": "Plain reply",
+                                "msgtype": "m.text",
+                                "m.relates_to": {
+                                    "rel_type": "m.thread",
+                                    "event_id": "$thread_root:localhost",
+                                },
+                            },
+                            "event_id": "$plain1:localhost",
+                            "sender": "@user:localhost",
+                            "origin_server_ts": 1234567889,
+                            "room_id": room.room_id,
+                            "type": "m.room.message",
+                        },
+                    ),
+                ),
+            ),
+            patch.object(
+                bot._conversation_cache,
                 "get_dispatch_thread_history",
                 _thread_history_lookup("$thread_root:localhost", dispatch_history),
             ) as mock_read,
@@ -1242,7 +1287,6 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         assert context.thread_id == "$thread_root:localhost"
         assert context.requires_model_history_refresh is False
         assert [history_call.args for history_call in mock_read.await_args_list] == [
-            (room.room_id, "$plain1:localhost"),
             (room.room_id, "$thread_root:localhost"),
         ]
 
