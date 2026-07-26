@@ -1707,12 +1707,10 @@ async def test_postgres_initialization_does_not_deadlock_with_namespace_operatio
         namespace=namespace,
     )
     observer = await psycopg.AsyncConnection.connect(postgres_event_cache_url)
-    operation_holds_namespace = asyncio.Event()
+    operation_holds_conflicting_table_lock = asyncio.Event()
     initializer_waits_for_namespace = asyncio.Event()
 
     async def write_while_initialization_waits(db: psycopg.AsyncConnection) -> None:
-        operation_holds_namespace.set()
-        await initializer_waits_for_namespace.wait()
         await db.execute(
             """
             INSERT INTO mindroom_event_cache_events(
@@ -1727,6 +1725,8 @@ async def test_postgres_initialization_does_not_deadlock_with_namespace_operatio
             """,
             (namespace, "$overlap", room_id, 1, "{}", 1.0),
         )
+        operation_holds_conflicting_table_lock.set()
+        await initializer_waits_for_namespace.wait()
 
     async def run_namespace_operation() -> None:
         await operation_cache._operation(
@@ -1767,7 +1767,7 @@ async def test_postgres_initialization_does_not_deadlock_with_namespace_operatio
             await operation_cache.initialize()
 
             operation_task = asyncio.create_task(run_namespace_operation())
-            await operation_holds_namespace.wait()
+            await operation_holds_conflicting_table_lock.wait()
             initialization_task = asyncio.create_task(initializing_cache.initialize())
             await wait_for_initializer_namespace_lock()
             initializer_waits_for_namespace.set()
