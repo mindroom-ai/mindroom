@@ -55,6 +55,7 @@ from mindroom.matrix.thread_projection import (
     ordered_event_ids_from_scanned_event_sources,
     resolve_thread_ids_for_event_infos,
 )
+from mindroom.runtime_generation_lease import runtime_generation_owner_stopped
 from mindroom.streaming import (
     INTERRUPTED_RESPONSE_NOTE,
     RESTART_INTERRUPTED_RESPONSE_NOTE,
@@ -110,9 +111,6 @@ class StaleStreamCleanupActor:
     # latest content carries this stamp are live current-generation output and
     # must never be repaired, regardless of clocks or live-task snapshots.
     runtime_generation: str
-    # Positive lifecycle proof collected only after the owning bot completed
-    # its shutdown drain and closed its client.
-    stopped_runtime_generations: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -572,7 +570,7 @@ async def _process_stale_room_candidate(
         return False, None
     if scan_policy.terminal_interrupted_only and not _has_resumable_interrupted_note(state):
         return False, None
-    if not _has_cleanup_authority(state, actor=actor):
+    if not _has_cleanup_authority(state, actor=actor, runtime_paths=runtime_paths):
         return False, None
     if _is_cleanup_candidate(state):
         return await _cleanup_candidate_message(
@@ -1741,12 +1739,20 @@ def _interrupted_thread_from_terminal_state(
     )
 
 
-def _has_cleanup_authority(state: _MessageState, *, actor: StaleStreamCleanupActor) -> bool:
+def _has_cleanup_authority(
+    state: _MessageState,
+    *,
+    actor: StaleStreamCleanupActor,
+    runtime_paths: RuntimePaths,
+) -> bool:
     """Require positive stopped-owner proof before repairing stamped output."""
     latest_generation = (state.latest_content or {}).get(STREAM_GENERATION_KEY)
     if not isinstance(latest_generation, str):
         return True
-    return latest_generation != actor.runtime_generation and latest_generation in actor.stopped_runtime_generations
+    return latest_generation != actor.runtime_generation and runtime_generation_owner_stopped(
+        runtime_paths,
+        latest_generation,
+    )
 
 
 def _is_cleanup_candidate(state: _MessageState) -> bool:

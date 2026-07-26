@@ -1094,7 +1094,6 @@ class _MultiAgentOrchestrator:
                 client=bot.client,
                 conversation_cache=bot._conversation_cache,
                 runtime_generation=bot.runtime_generation,
-                stopped_runtime_generations=bot.stopped_runtime_generations,
             )
         if not actors:
             return

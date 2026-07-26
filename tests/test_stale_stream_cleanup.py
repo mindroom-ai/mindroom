@@ -5,6 +5,9 @@ from __future__ import annotations
 import asyncio
 import importlib
 import json
+import os
+import signal
+import sys
 from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
@@ -48,6 +51,7 @@ from mindroom.matrix.stale_stream_cleanup import (
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.thread_projection import latest_visible_thread_event_id_by_thread
 from mindroom.orchestrator import _MultiAgentOrchestrator
+from mindroom.runtime_generation_lease import runtime_generation_owner_stopped
 from mindroom.streaming import build_cancelled_response_update, build_restart_interrupted_body
 from mindroom.tool_system.events import _TOOL_TRACE_KEY
 from tests.conftest import (
@@ -255,7 +259,6 @@ async def _run_cleanup(
     now_ms: int = NOW_MS,
     terminal_interrupted_only: bool = False,
     runtime_generation: str = RUNTIME_GENERATION,
-    stopped_runtime_generations: frozenset[str] = frozenset(),
 ) -> tuple[int, list[InterruptedThread]]:
     client.user_id = BOT_USER_ID
     assert joined_rooms == [ROOM_ID]
@@ -268,7 +271,6 @@ async def _run_cleanup(
                     client,
                     None,
                     runtime_generation=runtime_generation,
-                    stopped_runtime_generations=stopped_runtime_generations,
                 ),
             },
             bot_user_ids={BOT_USER_ID} if bot_user_ids is None else bot_user_ids,
@@ -2249,9 +2251,108 @@ async def test_foreign_generation_stamp_without_stopped_owner_proof_is_not_clean
 
 
 @pytest.mark.asyncio
+async def test_crashed_foreign_runtime_generation_is_cleaned_after_lease_release(tmp_path: Path) -> None:
+    """A process-held generation lease protects live work and releases on SIGKILL."""
+    config = _make_config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    child_code = """
+import signal
+import sys
+from pathlib import Path
+
+from mindroom.bot_runtime_view import BotRuntimeState
+from mindroom.config.main import Config
+from mindroom.constants import RuntimePaths
+
+root = Path(sys.argv[1])
+state = BotRuntimeState(
+    client=None,
+    config=Config(),
+    runtime_paths=RuntimePaths(
+        config_path=root / "config.yaml",
+        config_dir=root,
+        env_path=root / ".env",
+        storage_root=root,
+    ),
+    enable_streaming=False,
+    orchestrator=None,
+    event_cache=None,
+    event_cache_write_coordinator=None,
+)
+state.mark_runtime_started()
+print(state.runtime_generation, flush=True)
+signal.pause()
+"""
+    process = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-c",
+        child_code,
+        str(runtime_paths.storage_root),
+        stdout=asyncio.subprocess.PIPE,
+    )
+    assert process.stdout is not None
+    generation = (await process.stdout.readline()).decode().strip()
+    assert generation
+
+    client = _make_client()
+    client.rooms = _joined_room_cache()
+    client.room_messages.return_value = _room_messages_response(
+        _make_message_event(
+            event_id="$crashed-leftover",
+            body="Working ⋯",
+            timestamp_ms=NOW_MS - (STALE_AGE_MS + 5_000),
+            extra_content={
+                STREAM_STATUS_KEY: "streaming",
+                stale_stream_cleanup_module.STREAM_GENERATION_KEY: generation,
+            },
+        ),
+    )
+
+    try:
+        with patch(
+            "mindroom.matrix.stale_stream_cleanup.edit_message_result",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit")),
+        ) as edit_result:
+            cleaned_while_live, _interrupted = await _run_cleanup(
+                client,
+                config,
+                joined_rooms=[ROOM_ID],
+                runtime_generation="gen-current",
+            )
+            os.kill(process.pid, signal.SIGKILL)
+            assert await asyncio.wait_for(process.wait(), timeout=10) == -signal.SIGKILL
+            cleaned_after_crash, _interrupted = await _run_cleanup(
+                client,
+                config,
+                joined_rooms=[ROOM_ID],
+                runtime_generation="gen-current",
+            )
+    finally:
+        if process.returncode is None:
+            os.kill(process.pid, signal.SIGKILL)
+            await asyncio.wait_for(process.wait(), timeout=10)
+
+    assert cleaned_while_live == 0
+    assert cleaned_after_crash == 1
+    edit_result.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_stopped_prior_generation_stamp_is_cleaned(tmp_path: Path) -> None:
     """A generation recorded after shutdown is safe to repair."""
     config = _make_config(tmp_path)
+    prior_runtime = BotRuntimeState(
+        client=None,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        enable_streaming=False,
+        orchestrator=None,
+        event_cache=None,
+        event_cache_write_coordinator=None,
+    )
+    prior_runtime.mark_runtime_started()
+    prior_generation = prior_runtime.runtime_generation
+    prior_runtime.mark_runtime_stopped()
     client = _make_client()
     client.rooms = _joined_room_cache()
     client.room_messages.return_value = _room_messages_response(
@@ -2261,7 +2362,7 @@ async def test_stopped_prior_generation_stamp_is_cleaned(tmp_path: Path) -> None
             timestamp_ms=NOW_MS - (STALE_AGE_MS + 5_000),
             extra_content={
                 STREAM_STATUS_KEY: "streaming",
-                stale_stream_cleanup_module.STREAM_GENERATION_KEY: "gen-previous",
+                stale_stream_cleanup_module.STREAM_GENERATION_KEY: prior_generation,
             },
         ),
     )
@@ -2275,7 +2376,6 @@ async def test_stopped_prior_generation_stamp_is_cleaned(tmp_path: Path) -> None
             config,
             joined_rooms=[ROOM_ID],
             runtime_generation="gen-current",
-            stopped_runtime_generations=frozenset({"gen-previous"}),
         )
 
     assert cleaned == 1
@@ -2313,45 +2413,53 @@ async def test_fresh_unstamped_legacy_stream_is_repaired(tmp_path: Path) -> None
     edit_result.assert_awaited_once()
 
 
-def test_runtime_generation_rotates_on_same_object_restart() -> None:
+def test_runtime_generation_rotates_on_same_object_restart(tmp_path: Path) -> None:
     """mark_runtime_started rotates the generation so prior-run streams stay repairable.
 
     The orchestrator reuses bot objects across stop()/start(), so without
     rotation an interrupted stream from the previous run would carry the
     current generation and be falsely protected from cleanup forever.
     """
+    config = _make_config(tmp_path)
     state = BotRuntimeState(
         client=None,
-        config=MagicMock(),
-        runtime_paths=MagicMock(),
+        config=config,
+        runtime_paths=runtime_paths_for(config),
         enable_streaming=False,
         orchestrator=None,
         event_cache=None,
         event_cache_write_coordinator=None,
     )
+    state.mark_runtime_started()
     first_generation = state.runtime_generation
-
+    state.mark_runtime_stopped()
     state.mark_runtime_started()
 
     assert state.runtime_generation != first_generation
+    state.mark_runtime_stopped()
 
 
-def test_stopped_runtime_generation_requires_explicit_shutdown_proof() -> None:
-    """Only the stop lifecycle records a generation as no longer live."""
+def test_stopped_runtime_generation_requires_explicit_shutdown_proof(tmp_path: Path) -> None:
+    """Only a released durable lease proves that a generation is no longer live."""
+    config = _make_config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
     state = BotRuntimeState(
         client=None,
-        config=MagicMock(),
-        runtime_paths=MagicMock(),
+        config=config,
+        runtime_paths=runtime_paths,
         enable_streaming=False,
         orchestrator=None,
         event_cache=None,
         event_cache_write_coordinator=None,
     )
+    state.mark_runtime_started()
     generation = state.runtime_generation
+
+    assert not runtime_generation_owner_stopped(runtime_paths, generation)
 
     state.mark_runtime_stopped()
 
-    assert state.stopped_runtime_generations == {generation}
+    assert runtime_generation_owner_stopped(runtime_paths, generation)
 
 
 @pytest.mark.asyncio
@@ -3654,7 +3762,6 @@ async def test_orchestrator_recovery_uses_router_for_resume_and_all_started_bots
     router_bot.agent_user = MagicMock(user_id="@mindroom_router:example.com")
     router_bot._conversation_cache = MagicMock()
     router_bot.runtime_generation = "router-generation"
-    router_bot.stopped_runtime_generations = frozenset({"router-stopped"})
     agent_client = AsyncMock(spec=nio.AsyncClient)
     agent_bot = MagicMock()
     agent_bot.agent_name = "test_agent"
@@ -3662,7 +3769,6 @@ async def test_orchestrator_recovery_uses_router_for_resume_and_all_started_bots
     agent_bot.agent_user = MagicMock(user_id=BOT_USER_ID)
     agent_bot._conversation_cache = MagicMock()
     agent_bot.runtime_generation = "agent-generation"
-    agent_bot.stopped_runtime_generations = frozenset({"agent-stopped"})
     orchestrator.agent_bots = {ROUTER_AGENT_NAME: router_bot, "test_agent": agent_bot}
 
     with patch(
@@ -3682,8 +3788,6 @@ async def test_orchestrator_recovery_uses_router_for_resume_and_all_started_bots
     assert actors[BOT_USER_ID].client is agent_client
     assert actors["@mindroom_router:example.com"].runtime_generation == "router-generation"
     assert actors[BOT_USER_ID].runtime_generation == "agent-generation"
-    assert actors["@mindroom_router:example.com"].stopped_runtime_generations == frozenset({"router-stopped"})
-    assert actors[BOT_USER_ID].stopped_runtime_generations == frozenset({"agent-stopped"})
     assert mock_recover.await_args.kwargs["resume_client"] is router_client
     assert mock_recover.await_args.kwargs["resume_conversation_cache"] is router_bot._conversation_cache
     assert mock_recover.await_args.kwargs["config"] == config

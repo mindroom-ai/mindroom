@@ -623,11 +623,6 @@ class AgentBot:
         return self._runtime_view.runtime_generation
 
     @property
-    def stopped_runtime_generations(self) -> frozenset[str]:
-        """Generations this bot instance positively stopped."""
-        return frozenset(self._runtime_view.stopped_runtime_generations)
-
-    @property
     def client(self) -> nio.AsyncClient | None:
         """Return the current Matrix client."""
         return self._runtime_view.client
