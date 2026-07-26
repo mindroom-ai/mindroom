@@ -1596,8 +1596,9 @@ class TestExtractedModuleLoggerRebinding:
             event,
             event_info=EventInfo.from_event(event.source),
         )
+        await bot.event_cache_write_coordinator.close()
 
-        original_logger.warning.assert_called_once_with(
+        original_logger.warning.assert_any_call(
             "Failed to append thread event to cache",
             room_id="!room:localhost",
             thread_id="$threadroot",
@@ -1605,6 +1606,14 @@ class TestExtractedModuleLoggerRebinding:
             context="live",
             error="cache write failed",
         )
+        original_logger.warning.assert_any_call(
+            "Background thread cache repair failed",
+            room_id="!room:localhost",
+            thread_id="$threadroot",
+            error_type="RuntimeError",
+            error="Matrix client is not ready for conversation cache",
+        )
+        assert original_logger.warning.call_count == 2
         rebound_logger.warning.assert_not_called()
 
     def test_conversation_resolver_fetch_path_uses_conversation_cache_api(
