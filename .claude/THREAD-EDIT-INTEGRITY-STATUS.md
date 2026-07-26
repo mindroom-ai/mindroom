@@ -1,17 +1,17 @@
 # Thread edit integrity gate status
 
-Updated 2026-07-25 after correcting the two malformed-relation blockers on exact current `main`.
+Updated 2026-07-25 after correcting exact-lookup identity, invalid explicit-thread, and incremental-reuse blockers.
 
 ## Exact target
 
 - PR: `mindroom-ai/mindroom#1641`
 - Branch: `fix/thread-edit-integrity`
-- Latest production commit: `239e9203b28350c43a4afde42d3fd58f11e0ee6a`
+- Latest production commit: `6c5fb3247c852b8f120988bdd3787bb0a0fb4bc5`
 - Current base and merge base: `e95fbe9a4bc069340fd36f333f3d7424657e1056`
 - Latest integration commit: `6a7b3f473b089e283648cdc392df6e4fbf28b801`
-- Latest pushed code head: `239e9203b28350c43a4afde42d3fd58f11e0ee6a`.
-- This crash-handoff update will be the docs-only successor; resolve local, remote, and PR heads before counting a gate.
-- The negative-root-proof follow-up, exact-current-main synchronization, and malformed-relation correction are pushed.
+- Latest pushed code head: `239e9203b28350c43a4afde42d3fd58f11e0ee6a`; `6c5fb3247` is the locally committed validated successor awaiting push.
+- This crash-handoff update will be the docs-only successor; resolve local, remote, and PR heads after both commits are pushed before counting a gate.
+- The negative-root-proof follow-up, exact-current-main synchronization, and malformed-relation correction are pushed; the exact-lookup correction is committed locally.
 - The tracked tree will be clean after this crash-handoff successor is committed.
 - Resolve local, remote, and PR heads before counting any exact-head gate.
 - Resolve and compare local, origin, and GitHub heads before counting any gate.
@@ -57,6 +57,9 @@ Updated 2026-07-25 after correcting the two malformed-relation blockers on exact
 - `239e9203b` rejects parsed `nio.BadEvent` room-scan entries before they can supply reply ancestry.
 - `239e9203b` reuses raw relation sources for metadata only after canonical room, timeline, event-type, and plaintext-envelope validation.
 - The validated memo preserves the single-fetch contract while preventing malformed replacement originals from being reparsed into thread ancestry.
+- `6c5fb3247` requires a successful point lookup to return the exact requested event ID before metadata or raw ancestry is admitted.
+- `6c5fb3247` makes canonical explicit-thread resolution validate the current event's room, timeline, type, and plaintext envelope, and removes the live-mutation shortcut around that policy.
+- `6c5fb3247` makes append-only reuse enforce the same message-envelope and replacement-validity rules as full cache certification.
 
 ## Reconciled review status
 
@@ -94,13 +97,18 @@ Updated 2026-07-25 after correcting the two malformed-relation blockers on exact
 - Both claims reproduced as RED full-resolution, sync-graph, SQLite, and PostgreSQL regressions before implementation.
 - The first attempted split metadata cache over-fetched valid sources and broke existing access contracts; root-cause tracing replaced it with validated source reuse rather than fixture churn or a production fallback.
 - The exact-`5f2c9ed49` review and all earlier approvals are stale after `239e9203b`.
+- Two fresh exact-`6c4fa7d1d` reviewers found three blockers: mismatched point responses could be memoized under the requested event ID, invalid current events could supply explicit thread membership, and malformed or invalid replacement suffixes could bypass full cache certification through incremental reuse.
+- All three claims reproduced independently before implementation.
+- Fifteen new regression variants failed before `6c5fb3247` and pass afterward.
+- The exact-`6c4fa7d1d` reviews, CI, static checks, and live evidence are stale after `6c5fb3247`.
 - The withdrawn edit-index timestamp-poison claim remains excluded because it required direct inconsistent SQL writes outside production paths.
 - This correction adds `+196/-15` production lines, net `+181`.
-- Production source against current `main` is `+1970/-1180`, net `+790`.
+- Production source against current `main` is `+2026/-1185`, net `+841`.
 - The full-suite follow-up adds `+28/-4` production lines, net `+24`.
 - The malformed mutation correction adds `+18/-6` production lines, net `+12`.
 - The degraded replay follow-up adds `+16/-18` production lines, net `-2`.
 - The latest malformed-relation correction adds `+10/-1` production lines, net `+9`.
+- The exact-lookup, explicit-thread, and incremental-reuse correction adds `+76/-25` production lines, net `+51`.
 
 ## Validation already completed
 
@@ -154,11 +162,14 @@ Updated 2026-07-25 after correcting the two malformed-relation blockers on exact
 - The complete five-file history, membership, mutation, context, and snapshot owning cluster passes `324` tests after the correction.
 - The exact independent reviewer probe now retains only the valid root and child; the malformed ancestor, its edit, and its indirect reply are excluded.
 - Focused Ruff, formatting, `ty`, Vulture, Tach, module-privacy, and commit hooks pass for `239e9203b`.
+- The fifteen exact-lookup, invalid-current-source, and suffix-validity regression variants pass after `6c5fb3247`.
+- The six-file thread history, tag, membership, mutation, reuse, and SQLite/PostgreSQL snapshot cluster passes after `6c5fb3247`.
+- Changed-file pre-commit, explicit Tach dependencies/interfaces, and `git diff --check` pass after `6c5fb3247`.
 - Git author was verified as `Bas Nijholt <bas@nijho.lt>` before every new commit.
 
 ## Pending exact-head gates
 
-- Commit and push this crash-handoff successor, then freeze its exact head.
+- Commit and push this crash-handoff successor after `6c5fb3247`, then freeze its exact head.
 - Fresh CI must complete on the final exact head.
 - A fresh independent native Codex correctness review is required on the final exact head.
 - Exact-head PostgreSQL owning and stress selections are required.
