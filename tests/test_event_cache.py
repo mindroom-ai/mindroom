@@ -141,6 +141,9 @@ def _make_text_event(
     normalized_content = dict(source_content)
     normalized_content.setdefault("msgtype", "m.text")
     event.source = {
+        "event_id": event_id,
+        "sender": sender,
+        "origin_server_ts": server_timestamp,
         "type": "m.room.message",
         "content": normalized_content,
     }
