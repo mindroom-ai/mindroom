@@ -1029,10 +1029,10 @@ def _marker_fingerprint(markers: frozenset[str]) -> int:
 class _ModelHandler(BaseHTTPRequestHandler):
     """Small deterministic OpenAI-compatible endpoint for live transport tests.
 
-    When ``slow_call_modulus`` is positive, every ``slow_call_modulus``-th call
-    streams ``slow_stream_segments`` segments with ``slow_stream_delay`` between
-    chunks after an initial ``first_token_delay`` — a deterministic mix of fast
-    turns and long 100+-replacement streams that mutations can race against.
+    When ``slow_call_modulus`` is positive, marker fingerprints divisible by it
+    stream ``slow_stream_segments`` segments with ``slow_stream_delay`` between
+    chunks after an initial ``first_token_delay``.
+    Marker-free calls are always fast.
     """
 
     protocol_version = "HTTP/1.1"
@@ -2994,13 +2994,19 @@ class FinalStateAuditor:
         self._assert_sync_view_parity(events, sent_records, replies)
         ledger_metrics: dict[str, int] = {}
         if self.ledger_path is not None:
+            if not self.ledger_path.exists():
+                msg = f"handled-turn ledger missing at {self.ledger_path}"
+                raise AssertionError(msg)
+            records = read_ledger_records(self.ledger_path, strict=True)
             redacted_sources = set(redacted) & set(self.oracle.expected_sources)
             ledger_metrics = self._assert_ledger_attribution(
                 replies,
+                records=records,
                 redacted_source_event_ids=redacted_sources,
             )
             self._assert_model_saw_current_sources(
                 events,
+                records=records,
                 redacted_source_event_ids=redacted_sources,
             )
         else:
@@ -3239,6 +3245,7 @@ class FinalStateAuditor:
         self,
         replies: Mapping[str, set[str]],
         *,
+        records: Mapping[str, TurnRecord] | None = None,
         redacted_source_event_ids: Collection[str] = (),
     ) -> dict[str, int]:
         """Every required source must present its own durable terminal record.
@@ -3254,10 +3261,11 @@ class FinalStateAuditor:
         """
         assert self.ledger_path is not None
         oracle = self.oracle
-        if not self.ledger_path.exists():
-            msg = f"handled-turn ledger missing at {self.ledger_path}"
-            raise AssertionError(msg)
-        records = read_ledger_records(self.ledger_path, strict=True)
+        if records is None:
+            if not self.ledger_path.exists():
+                msg = f"handled-turn ledger missing at {self.ledger_path}"
+                raise AssertionError(msg)
+            records = read_ledger_records(self.ledger_path, strict=True)
 
         problems: list[str] = []
         harness_redacted = set(redacted_source_event_ids)
@@ -3445,6 +3453,7 @@ class FinalStateAuditor:
         self,
         events: Mapping[str, Mapping[str, Any]],
         *,
+        records: Mapping[str, TurnRecord] | None = None,
         redacted_source_event_ids: Collection[str] = (),
     ) -> None:
         """Every response-backed turn must be generated from its sources' current bodies.
@@ -3468,7 +3477,8 @@ class FinalStateAuditor:
         checked against it and cannot waive a marker by themselves.
         """
         assert self.ledger_path is not None
-        records = read_ledger_records(self.ledger_path, strict=True)
+        if records is None:
+            records = read_ledger_records(self.ledger_path, strict=True)
         expected_sources = self.oracle.expected_sources
         problems: list[str] = []
         harness_redacted = set(redacted_source_event_ids)
@@ -4962,11 +4972,8 @@ def _required_mindroom_revision() -> str:
     return revision
 
 
-def _prepare_nio_overlay(path: Path | None) -> NioOverlay:
+def _prepare_nio_overlay(path: Path) -> NioOverlay:
     """Fail closed before stack startup unless nio has a clean exact checkout."""
-    if path is None:
-        msg = "live fuzz requires --nio-overlay pointing to a clean exact mindroom-nio Git checkout"
-        raise RuntimeError(msg)
     root = path.resolve()
     module_path = root / "src" / "nio" / "__init__.py"
     if not module_path.is_file():
@@ -5560,9 +5567,7 @@ def main() -> None:
         raise
 
     def snapshot_runtime_evidence() -> None:
-        nonlocal provenance
         _persist_run_bundle(bundle, stack, runner_holder.get("runner"))
-        provenance = stack.revalidate_runtime_provenance()
 
     try:
         stack.close(

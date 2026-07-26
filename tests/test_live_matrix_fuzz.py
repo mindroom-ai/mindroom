@@ -13,6 +13,7 @@ from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
+from unittest.mock import AsyncMock
 
 from mindroom.constants import SOURCE_KIND_KEY
 from mindroom.dispatch_source import AUTO_RESUME_MESSAGE, TRUSTED_INTERNAL_RELAY_SOURCE_KIND
@@ -1083,8 +1084,14 @@ def test_chaos_validation_requires_checkpoint_before_cold_restart() -> None:
 def test_legacy_trace_without_client_fields_still_loads() -> None:
     """Traces recorded before the chaos profile keep replaying unchanged."""
     legacy = live_scenario_from_seed(3, steps=40, thread_count=4, restart_interval=0)
-    payload = legacy.to_json()
-    stripped = payload.replace('"client": 0,\n          ', "").replace('"client_count": 1,\n  ', "")
+    payload = json.loads(legacy.to_json())
+    payload.pop("client_count")
+    for batch in payload["batches"]:
+        for operation in batch:
+            operation.pop("client")
+    stripped = json.dumps(payload)
+    assert '"client"' not in stripped
+    assert '"client_count"' not in stripped
     scenario = LiveFuzzScenario.from_json(stripped)
 
     assert scenario == legacy
@@ -2131,6 +2138,45 @@ def test_strict_ledger_read_rejects_incomplete_record(tmp_path: Path) -> None:
     assert live_fuzz.read_ledger_records(ledger_path) == {}
     with pytest.raises(AssertionError, match=r"\$pending.*incomplete"):
         live_fuzz.read_ledger_records(ledger_path, strict=True)
+
+
+@pytest.mark.asyncio
+async def test_final_audit_reuses_one_ledger_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One audit uses one durable snapshot for every ledger assertion."""
+    client = LiveMatrixClient("http://matrix.invalid", "!room:example")
+    client.paginate_room = AsyncMock(return_value=[])
+    oracle = ExactReplyOracle(client, "@agent:example")
+    ledger_path = tmp_path / "general_responded.json"
+    _write_ledger(ledger_path, {})
+    auditor = FinalStateAuditor(
+        client,
+        oracle,
+        agent_id="@agent:example",
+        expected_body_for=_short_body_for,
+        ledger_path=ledger_path,
+    )
+    reads = 0
+    original_read = live_fuzz.read_ledger_records
+
+    def count_reads(path: Path, *, strict: bool = False) -> dict[str, TurnRecord]:
+        nonlocal reads
+        reads += 1
+        return original_read(path, strict=strict)
+
+    monkeypatch.setattr(live_fuzz, "read_ledger_records", count_reads)
+    try:
+        await auditor.audit(
+            room_ids={"!room:example"},
+            sent_records=(),
+            redacted_targets={},
+        )
+    finally:
+        await client.close()
+
+    assert reads == 1
 
 
 def test_strict_ledger_read_accepts_clean_redaction_tombstone(tmp_path: Path) -> None:
@@ -3183,7 +3229,7 @@ def _prepared_stack(tmp_path: Path, *, log_text: str = "mindroom line\n") -> _Fa
     storage = tmp_path / "mindroom_data"
     (storage / "tracking").mkdir(parents=True)
     ledger = storage / "tracking" / "general_responded.json"
-    ledger.write_text(json.dumps({"schema_version": TurnRecordCodec.schema_version(), "turns": {}}), encoding="utf-8")
+    _write_ledger(ledger, {})
     log_path = tmp_path / "mindroom.log"
     log_path.write_text(log_text, encoding="utf-8")
     return _FakeStack(storage, log_path)
@@ -3231,8 +3277,10 @@ async def test_failure_bundle_persists_evidence_and_survives_teardown(tmp_path: 
         _persist_failure_bundle(bundle, stack, runner, AssertionError("reply invariant failed"))
     finally:
         await oracle.client.close()
+        _ModelHandler.reset_observations()
 
     # Teardown deletes the stack's temp storage; the bundle must not point into it.
+    assert _ModelHandler.observations_snapshot() == {}
     shutil.rmtree(tmp_path / "mindroom_data")
 
     directory = bundle.directory
@@ -3301,12 +3349,6 @@ def test_successful_run_discards_its_failure_bundle(tmp_path: Path) -> None:
     assert not bundle.directory.exists()
     # A second discard is a no-op, not an error, so success cleanup is idempotent.
     bundle.discard()
-
-
-def test_nio_overlay_preflight_rejects_missing_checkout() -> None:
-    """A gate-quality run cannot reach stack creation without an explicit overlay."""
-    with pytest.raises(RuntimeError, match="requires --nio-overlay"):
-        _prepare_nio_overlay(None)
 
 
 def test_stack_rejects_missing_nio_overlay_before_live_setup(
@@ -5984,11 +6026,11 @@ def test_main_stop_interrupt_preserves_primary_and_closes_stack(
     assert "KeyboardInterrupt" in cleanup_files[0].read_text(encoding="utf-8")
 
 
-def test_main_rechecks_sources_at_teardown_and_receipt_boundaries(
+def test_main_rechecks_sources_after_teardown_before_receipt(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """PASS revalidates after runtime work and again after teardown."""
+    """PASS revalidates final sources after teardown and before its receipt."""
     args = SimpleNamespace(
         artifact_root=tmp_path / "artifacts",
         failure_log=None,
@@ -6065,7 +6107,6 @@ def test_main_rechecks_sources_at_teardown_and_receipt_boundaries(
         "diagnostics",
         "stop",
         "snapshot",
-        "revalidate",
         "teardown",
         "revalidate",
         "receipt",
