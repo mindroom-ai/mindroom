@@ -307,9 +307,10 @@ Updated 2026-07-26 after quarantining conflicting immutable event payloads.
 - Fresh exact-head native Codex review, CI, PostgreSQL/full/Tach/all-file validation, and real-Tuwunel validation are mandatory.
 - Merge gate remains closed.
 
-## Exact-974c immutable event correction
+## Production-974c immutable event correction
 
-- Local, remote, and GitHub PR heads match `974c34573e192628a8d8a9962543cf94afa4bb85`.
+- Production correction commit is `974c34573e192628a8d8a9962543cf94afa4bb85`.
+- Resolve the handoff successor live; this tracked file deliberately does not claim its own commit SHA.
 - Base and merge base remain current `main` `858282afc77adb480fa06cd9e4057d511ff861d5`.
 - Two exact-`825444e8b` reviewers independently reproduced four blockers: invalid newest explicit/bundled identity hiding an older valid edit, last-nested-edit redaction promoting wrapper metadata, sequential same-ID clear payload mutation, and malformed originals gaining a synthesized bundled preview.
 - Every claim failed a deterministic regression before its owning fix.
