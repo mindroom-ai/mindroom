@@ -1096,8 +1096,8 @@ async def test_callback_failure_prevents_certified_shutdown_checkpoint(tmp_path:
 
 
 @pytest.mark.asyncio
-async def test_callback_failure_clears_saved_checkpoint_immediately(tmp_path: Path) -> None:
-    """A failed Matrix callback must clear already-persisted sync continuity."""
+async def test_callback_failure_holds_saved_checkpoint_at_the_replay_floor(tmp_path: Path) -> None:
+    """A failed Matrix callback must hold durable continuity where its batch replays from."""
     bot = _agent_bot(tmp_path)
     save_sync_token(tmp_path, bot.agent_name, "s_before_failure", cache_generation=_CACHE_GENERATION)
     bot._sync_cache_trust.state = SyncTrustState.CERTIFIED
@@ -1118,7 +1118,9 @@ async def test_callback_failure_clears_saved_checkpoint_immediately(tmp_path: Pa
     assert bot._runtime_view.callback_failure_count == 1
     assert bot._sync_cache_trust.state is SyncTrustState.UNCERTAIN
     assert bot._sync_cache_trust.checkpoint is None
-    assert _load_sync_token_value(tmp_path, bot.agent_name) is None
+    # Kept, not cleared: restarting here resumes before the failed batch and
+    # re-delivers it, which is the same repair the in-process replay performs.
+    assert _load_sync_token_value(tmp_path, bot.agent_name) == "s_before_failure"
 
 
 @pytest.mark.asyncio
@@ -1143,7 +1145,7 @@ async def test_room_member_callback_failure_prevents_certified_checkpoint(tmp_pa
     assert bot._runtime_view.callback_failure_count == 1
     assert bot._sync_cache_trust.state is SyncTrustState.UNCERTAIN
     assert bot._sync_cache_trust.checkpoint is None
-    assert _load_sync_token_value(tmp_path, bot.agent_name) is None
+    assert _load_sync_token_value(tmp_path, bot.agent_name) == "s_before_member_failure"
 
 
 @pytest.mark.asyncio

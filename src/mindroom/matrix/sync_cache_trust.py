@@ -52,8 +52,15 @@ class SyncCacheTrust:
     # Lifetime failures this trust bound to a batch, to tell them apart from the
     # ones only the runtime counted.
     _attributed_failures: int = field(default=0, init=False, repr=False)
+    # Callback tickets handed out and not yet resolved either way.
+    _inflight_dispatches: set[int] = field(default_factory=set, init=False, repr=False)
     # Inclusive dispatch-sequence range covered by the replay currently in flight.
     _replay_window: tuple[int, int] | None = field(default=None, init=False, repr=False)
+    # A replay whose delta is durable, still waiting on the callbacks it dispatched:
+    # (replayed_from, requested_at, replayed_through).
+    _pending_repair: tuple[int, int, int] | None = field(default=None, init=False, repr=False)
+    # Set while cached rows have been dropped, so no old position may be resumed.
+    _scope_invalidated: bool = field(default=False, init=False, repr=False)
     # Positions already rewound to. A position is never retried, so a callback
     # that fails on every delivery cannot hold the sync loop on one token.
     _replayed_positions: set[str | None] = field(default_factory=set, init=False, repr=False)
@@ -70,7 +77,10 @@ class SyncCacheTrust:
         # purges the untrusted rows, so no earlier batch is left unaccounted for.
         self._failed_dispatches.clear()
         self._replayed_positions.clear()
+        self._inflight_dispatches.clear()
         self._replay_window = None
+        self._pending_repair = None
+        self._scope_invalidated = False
         self._attributed_failures = self.runtime.callback_failure_count
 
         loaded = self._load_valid_checkpoint()
@@ -132,6 +142,9 @@ class SyncCacheTrust:
         """Invalidate continuity before principal- or room-owned rows are removed."""
         self.state = SyncTrustState.UNCERTAIN
         self.checkpoint = None
+        # Rows are about to disappear, so no earlier position stays resumable and
+        # a callback failure must not put one back until something recertifies.
+        self._scope_invalidated = True
         if self._clear_saved():
             return True
         self._record_callback_failure(self.dispatch_callback())
@@ -139,10 +152,21 @@ class SyncCacheTrust:
         self.logger.warning("matrix_cache_scope_cleanup_deferred_until_checkpoint_replay")
         return False
 
+    def _replay_floor(self) -> str | None:
+        """Return the newest position the cache is provably complete through."""
+        if self.checkpoint is not None:
+            return self.checkpoint.token
+        return self._certified_token
+
     def dispatch_callback(self) -> SyncCallbackDispatch:
         """Bind a callback about to run to the checkpoint that replays its batch."""
         self._dispatch_sequence += 1
-        return SyncCallbackDispatch(sequence=self._dispatch_sequence, replay_token=self._certified_token)
+        self._inflight_dispatches.add(self._dispatch_sequence)
+        return SyncCallbackDispatch(sequence=self._dispatch_sequence, replay_token=self._replay_floor())
+
+    def mark_callback_finished(self, dispatch: SyncCallbackDispatch) -> None:
+        """Release a callback ticket that ran to completion without poisoning trust."""
+        self._inflight_dispatches.discard(dispatch.sequence)
 
     @property
     def outstanding_callback_failures(self) -> int:
@@ -163,13 +187,36 @@ class SyncCacheTrust:
         which is only correct for callbacks that cannot outlive their batch.
         """
         self._record_callback_failure(dispatch if dispatch is not None else self.dispatch_callback())
-        self.invalidate_for_cache_scope_cleanup()
+        self.state = SyncTrustState.UNCERTAIN
+        self.checkpoint = None
+        self._preserve_replay_floor()
 
     def _record_callback_failure(self, dispatch: SyncCallbackDispatch) -> None:
         """Track one failed callback against the batch that has to be re-delivered."""
         self.runtime.mark_callback_failed()
         self._attributed_failures += 1
+        self._inflight_dispatches.discard(dispatch.sequence)
         self._failed_dispatches[dispatch.sequence] = dispatch.replay_token
+
+    def _preserve_replay_floor(self) -> None:
+        """Hold durable continuity at the position the failed batches replay from.
+
+        Keeping it lets a restart resume there and re-deliver the batch, which
+        is the same repair the in-process replay performs.  A later checkpoint
+        would not cover the failed batch, so it is rewound rather than kept.
+        """
+        unattributed = self.runtime.callback_failure_count - self._attributed_failures
+        floor = None if unattributed > 0 or self._scope_invalidated else self._earliest_failed_floor()
+        if floor is None:
+            self._clear_saved()
+            return
+        self.save(SyncCheckpoint(floor))
+
+    def _earliest_failed_floor(self) -> str | None:
+        """Return the replay position of the oldest failure still outstanding."""
+        if not self._failed_dispatches:
+            return None
+        return self._failed_dispatches[min(self._failed_dispatches)]
 
     def certify_response(
         self,
@@ -201,7 +248,7 @@ class SyncCacheTrust:
 
     def _request_callback_replay(self, decision: SyncCertificationDecision) -> SyncCertificationDecision:
         """Ask the sync loop to re-deliver the batches a failed callback left unfinished."""
-        if not self._failed_dispatches or decision.reset_client_token:
+        if not self._failed_dispatches or decision.reset_client_token or self._pending_repair is not None:
             return decision
         sequence = min(self._failed_dispatches)
         token = self._failed_dispatches[sequence]
@@ -222,12 +269,32 @@ class SyncCacheTrust:
         return replace(decision, replay_from_token=token)
 
     def _repair_replayed_callback_failures(self, decision: SyncCertificationDecision) -> None:
-        """Forget the failures whose batches this certified replay re-delivered."""
+        """Forget the failures whose batches a certified replay re-delivered."""
+        self._resolve_pending_repair()
         window = self._replay_window
         self._replay_window = None
         if window is None or decision.state is not SyncTrustState.CERTIFIED:
             return
-        replayed_from, requested_at = window
+        # The replay's delta is durable, but the callbacks it just handed out
+        # are still running. Their batch is the one being vouched for, so the
+        # repair waits for them instead of trusting the write alone.
+        self._pending_repair = (*window, self._dispatch_sequence)
+        self._resolve_pending_repair()
+
+    def _resolve_pending_repair(self) -> None:
+        """Complete a held repair once the replay's own callbacks have all landed."""
+        if self._pending_repair is None:
+            return
+        replayed_from, requested_at, replayed_through = self._pending_repair
+        replay_batch = range(requested_at + 1, replayed_through + 1)
+        if any(sequence in self._inflight_dispatches for sequence in replay_batch):
+            return
+        self._pending_repair = None
+        if any(sequence in self._failed_dispatches for sequence in replay_batch):
+            # The replay re-delivered the batch and a callback failed again, so
+            # it proves nothing. The newer failure carries its own replay.
+            self.logger.warning("matrix_sync_callback_replay_failed_again")
+            return
         repaired = [sequence for sequence in self._failed_dispatches if replayed_from <= sequence <= requested_at]
         for sequence in repaired:
             del self._failed_dispatches[sequence]
@@ -256,7 +323,7 @@ class SyncCacheTrust:
         if callback_failure_count:
             self.state = SyncTrustState.UNCERTAIN
             self.checkpoint = None
-            self._clear_saved()
+            self._preserve_replay_floor()
             self.logger.warning(
                 "matrix_sync_certification_uncertain",
                 reason="callback_failed",
@@ -270,6 +337,7 @@ class SyncCacheTrust:
             self._clear_saved()
         if decision.checkpoint_to_save is not None:
             self._certified_token = decision.checkpoint_to_save.token
+            self._scope_invalidated = False
             self.save(decision.checkpoint_to_save)
         if decision.reason is not None:
             diagnostics = sync_cache_write_diagnostics(cache_result) if cache_result is not None else {}

@@ -191,12 +191,15 @@ def _create_task_wrapper(
                 # Task was cancelled, this is expected during shutdown
                 pass
             except Exception:
-                if sync_cache_trust is not None:
+                if sync_cache_trust is not None and dispatch is not None:
                     sync_cache_trust.mark_callback_failed(dispatch)
                 elif owner is not None:
                     owner.mark_callback_failed()
                 # Log the exception with full traceback
                 logger.exception("Error in event callback")
+            finally:
+                if sync_cache_trust is not None and dispatch is not None:
+                    sync_cache_trust.mark_callback_finished(dispatch)
 
         # Keep a strong reference via background task registry.
         create_background_task(error_handler(), owner=owner)
@@ -1126,6 +1129,8 @@ class AgentBot:
                 except Exception:
                     self._sync_cache_trust.mark_callback_failed(dispatch)
                     logger.exception("Error in event callback")
+                finally:
+                    self._sync_cache_trust.mark_callback_finished(dispatch)
 
             create_background_task(error_handler(), owner=self._runtime_view)
 
@@ -1188,68 +1193,72 @@ class AgentBot:
         room_member_join_hooks_were_armed = self._room_member_join_hooks_armed
         room_member_join_hook_plan = _RoomMemberJoinSyncHookPlan()
         # Taken before this response can certify, so a side effect that fails
-        # replays the batch it belongs to rather than the one it produced.
+        # replays the batch it belongs to rather than the one it produced. Until
+        # it is released, no replay may be certified as repaired.
         dispatch = self._sync_cache_trust.dispatch_callback()
-        self.last_sync_time = mark_matrix_sync_success(self.agent_name)
-        self._last_sync_monotonic = time.monotonic()
+        try:
+            self.last_sync_time = mark_matrix_sync_success(self.agent_name)
+            self._last_sync_monotonic = time.monotonic()
 
-        if self._sync_shutting_down:
-            return
+            if self._sync_shutting_down:
+                return
 
-        if isinstance(_response, nio.SyncResponse):
-            await self._apply_own_room_membership_from_sync(_response)
-            restored_token_first_sync_response = (
-                first_sync_response and self._sync_cache_trust.state is SyncTrustState.PENDING
-            )
-            try:
-                cache_result = await self._conversation_cache.cache_sync_timeline_for_certification(_response)
-            except asyncio.CancelledError as exc:
-                cache_result = SyncCacheWriteResult(complete=False, errors=(exc,))
-                self._certify_sync_response(
+            if isinstance(_response, nio.SyncResponse):
+                await self._apply_own_room_membership_from_sync(_response)
+                restored_token_first_sync_response = (
+                    first_sync_response and self._sync_cache_trust.state is SyncTrustState.PENDING
+                )
+                try:
+                    cache_result = await self._conversation_cache.cache_sync_timeline_for_certification(_response)
+                except asyncio.CancelledError as exc:
+                    cache_result = SyncCacheWriteResult(complete=False, errors=(exc,))
+                    self._certify_sync_response(
+                        next_batch=_response.next_batch,
+                        cache_result=cache_result,
+                        first_sync=first_sync_response,
+                    )
+                    raise
+                decision = self._certify_sync_response(
                     next_batch=_response.next_batch,
                     cache_result=cache_result,
                     first_sync=first_sync_response,
                 )
-                raise
-            decision = self._certify_sync_response(
-                next_batch=_response.next_batch,
-                cache_result=cache_result,
-                first_sync=first_sync_response,
-            )
-            room_member_join_hook_plan = self._room_member_join_sync_hook_plan(
-                first_sync_response=first_sync_response,
-                restored_token_first_sync_response=restored_token_first_sync_response,
-                hooks_were_armed=room_member_join_hooks_were_armed,
-                decision=decision,
-            )
-        elif isinstance(_response, nio.SlidingSyncResponse):
-            # Sliding sync never certifies the classic checkpoint, but the
-            # account's own kicks and bans still must fence and purge rooms.
-            await self._apply_own_room_membership_from_sliding_sync(_response)
-        self._first_sync_done = True
-        self._room_member_join_hooks_armed = room_member_join_hook_plan.arm_after_response
-
-        try:
-            await self._run_sync_response_side_effects(
-                _response,
-                first_sync_response=first_sync_response,
-                room_member_join_hook_plan=room_member_join_hook_plan,
-            )
-        except asyncio.CancelledError:
-            self._sync_cache_trust.mark_callback_failed(dispatch)
-            raise
-        except Exception:
-            self._sync_cache_trust.mark_callback_failed(dispatch)
-            raise
-        if self._calls_reconcile_pending:
-            self._calls_reconcile_pending = False
-            call_manager = self._call_manager
-            if call_manager is not None:
-                create_background_task(
-                    call_manager.reconcile_joined_rooms(),
-                    name=f"matrix_rtc_reconcile_{self.agent_name}",
-                    owner=self._runtime_view,
+                room_member_join_hook_plan = self._room_member_join_sync_hook_plan(
+                    first_sync_response=first_sync_response,
+                    restored_token_first_sync_response=restored_token_first_sync_response,
+                    hooks_were_armed=room_member_join_hooks_were_armed,
+                    decision=decision,
                 )
+            elif isinstance(_response, nio.SlidingSyncResponse):
+                # Sliding sync never certifies the classic checkpoint, but the
+                # account's own kicks and bans still must fence and purge rooms.
+                await self._apply_own_room_membership_from_sliding_sync(_response)
+            self._first_sync_done = True
+            self._room_member_join_hooks_armed = room_member_join_hook_plan.arm_after_response
+
+            try:
+                await self._run_sync_response_side_effects(
+                    _response,
+                    first_sync_response=first_sync_response,
+                    room_member_join_hook_plan=room_member_join_hook_plan,
+                )
+            except asyncio.CancelledError:
+                self._sync_cache_trust.mark_callback_failed(dispatch)
+                raise
+            except Exception:
+                self._sync_cache_trust.mark_callback_failed(dispatch)
+                raise
+            if self._calls_reconcile_pending:
+                self._calls_reconcile_pending = False
+                call_manager = self._call_manager
+                if call_manager is not None:
+                    create_background_task(
+                        call_manager.reconcile_joined_rooms(),
+                        name=f"matrix_rtc_reconcile_{self.agent_name}",
+                        owner=self._runtime_view,
+                    )
+        finally:
+            self._sync_cache_trust.mark_callback_finished(dispatch)
 
     async def _on_sync_error(self, _response: nio.SyncError) -> None:
         """Update the watchdog clock on sync errors without marking cache state fresh."""

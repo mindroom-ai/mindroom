@@ -110,6 +110,120 @@ def test_callback_failure_blocks_later_certification(tmp_path: Path) -> None:
     assert load_sync_checkpoint(tmp_path, "code") is None
 
 
+def test_callback_failure_keeps_durable_continuity_at_the_replay_floor(tmp_path: Path) -> None:
+    """The checkpoint the failed batch replays from must survive the failure."""
+    trust, _cache, _runtime = _trust(tmp_path)
+    trust.certify_response(
+        next_batch="s_certified",
+        cache_result=SyncCacheWriteResult(complete=True),
+        first_sync=False,
+    )
+
+    trust.mark_callback_failed()
+
+    assert trust.state is SyncTrustState.UNCERTAIN
+    assert trust.checkpoint is None
+    assert load_sync_checkpoint(tmp_path, "code") == SyncCheckpoint(
+        token="s_certified",  # noqa: S106
+        cache_generation=_GENERATION,
+    )
+
+
+def test_callback_failure_rewinds_durable_continuity_behind_its_batch(tmp_path: Path) -> None:
+    """A later checkpoint cannot stand: it does not cover the batch that failed."""
+    trust, _cache, _runtime = _trust(tmp_path)
+    trust.certify_response(
+        next_batch="s_before_batch",
+        cache_result=SyncCacheWriteResult(complete=True),
+        first_sync=False,
+    )
+    dispatch = trust.dispatch_callback()
+    trust.certify_response(
+        next_batch="s_after_batch",
+        cache_result=SyncCacheWriteResult(complete=True),
+        first_sync=False,
+    )
+
+    trust.mark_callback_failed(dispatch)
+
+    assert load_sync_checkpoint(tmp_path, "code") == SyncCheckpoint(
+        token="s_before_batch",  # noqa: S106
+        cache_generation=_GENERATION,
+    )
+
+
+def test_scope_cleanup_is_not_undone_by_a_later_callback_failure(tmp_path: Path) -> None:
+    """Rows removed for a departed room make the old position unresumable for good."""
+    trust, _cache, _runtime = _trust(tmp_path)
+    trust.certify_response(
+        next_batch="s_certified",
+        cache_result=SyncCacheWriteResult(complete=True),
+        first_sync=False,
+    )
+    trust.invalidate_for_cache_scope_cleanup()
+
+    trust.mark_callback_failed()
+
+    assert load_sync_checkpoint(tmp_path, "code") is None
+
+
+def test_unattributed_failure_clears_durable_continuity(tmp_path: Path) -> None:
+    """A failure with no known batch could sit anywhere, so nothing may be resumed."""
+    trust, _cache, runtime = _trust(tmp_path)
+    trust.certify_response(
+        next_batch="s_certified",
+        cache_result=SyncCacheWriteResult(complete=True),
+        first_sync=False,
+    )
+    runtime.mark_callback_failed()
+
+    trust.certify_response(
+        next_batch="s_after_failure",
+        cache_result=SyncCacheWriteResult(complete=True),
+        first_sync=False,
+    )
+
+    assert load_sync_checkpoint(tmp_path, "code") is None
+
+
+def test_replay_is_not_repaired_until_its_own_callbacks_finish(tmp_path: Path) -> None:
+    """A certified replay proves the write, not the callbacks it dispatched."""
+    trust, _cache, _runtime = _trust(tmp_path)
+    trust.certify_response(
+        next_batch="s_certified",
+        cache_result=SyncCacheWriteResult(complete=True),
+        first_sync=False,
+    )
+    trust.mark_callback_failed()
+    trust.certify_response(
+        next_batch="s_after_failure",
+        cache_result=SyncCacheWriteResult(complete=True),
+        first_sync=False,
+    )
+    replay_callback = trust.dispatch_callback()
+
+    still_running = trust.certify_response(
+        next_batch="s_replayed",
+        cache_result=SyncCacheWriteResult(complete=True),
+        first_sync=False,
+    )
+    held_state = trust.state
+    held_failures = trust.outstanding_callback_failures
+    trust.mark_callback_finished(replay_callback)
+    finished = trust.certify_response(
+        next_batch="s_after_replay",
+        cache_result=SyncCacheWriteResult(complete=True),
+        first_sync=False,
+    )
+
+    assert still_running.state is SyncTrustState.CERTIFIED
+    assert held_state is SyncTrustState.UNCERTAIN
+    assert held_failures == 1
+    assert finished.state is SyncTrustState.CERTIFIED
+    assert trust.state is SyncTrustState.CERTIFIED
+    assert trust.outstanding_callback_failures == 0
+
+
 def test_callback_failure_clears_once_its_batch_is_replayed(tmp_path: Path) -> None:
     """Replaying the batch behind a callback failure must restore certification."""
     trust, _cache, _runtime = _trust(tmp_path)
@@ -204,8 +318,8 @@ def test_runtime_only_callback_failure_still_blocks_certification(tmp_path: Path
     assert trust.state is SyncTrustState.UNCERTAIN
 
 
-def test_callback_failure_after_the_rewind_is_not_repaired_by_it(tmp_path: Path) -> None:
-    """A replay only covers the batches dispatched before it was requested."""
+def test_callback_failure_during_the_replay_repairs_nothing(tmp_path: Path) -> None:
+    """A replay whose own callback fails proves nothing, not even for the older batch."""
     trust, _cache, _runtime = _trust(tmp_path)
     trust.certify_response(
         next_batch="s_certified",
@@ -229,8 +343,11 @@ def test_callback_failure_after_the_rewind_is_not_repaired_by_it(tmp_path: Path)
 
     assert replayed.state is SyncTrustState.CERTIFIED
     assert trust.state is SyncTrustState.UNCERTAIN
-    assert trust.outstanding_callback_failures == 1
-    assert load_sync_checkpoint(tmp_path, "code") is None
+    assert trust.outstanding_callback_failures == 2
+    assert load_sync_checkpoint(tmp_path, "code") == SyncCheckpoint(
+        token="s_certified",  # noqa: S106
+        cache_generation=_GENERATION,
+    )
 
 
 def test_repeated_failure_at_the_same_position_stops_replaying(tmp_path: Path) -> None:
