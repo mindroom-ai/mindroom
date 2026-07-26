@@ -1,18 +1,18 @@
 # Thread edit integrity gate status
 
-Updated 2026-07-25 after correcting exact-lookup identity, invalid explicit-thread, and incremental-reuse blockers.
+Updated 2026-07-25 after correcting exact-lookup cache poisoning, malformed relation targets, and encrypted-envelope admission.
 
 ## Exact target
 
 - PR: `mindroom-ai/mindroom#1641`
 - Branch: `fix/thread-edit-integrity`
-- Latest production commit: `6c5fb3247c852b8f120988bdd3787bb0a0fb4bc5`
+- Latest production commit: `d0897e9a6f95f4126138c8014cc50ff483e05c0f`
 - Current base and merge base: `e95fbe9a4bc069340fd36f333f3d7424657e1056`
 - Latest integration commit: `6a7b3f473b089e283648cdc392df6e4fbf28b801`
-- Latest pushed code head: `239e9203b28350c43a4afde42d3fd58f11e0ee6a`; `6c5fb3247` is the locally committed validated successor awaiting push.
-- This crash-handoff update will be the docs-only successor; resolve local, remote, and PR heads after both commits are pushed before counting a gate.
-- The negative-root-proof follow-up, exact-current-main synchronization, and malformed-relation correction are pushed; the exact-lookup correction is committed locally.
-- The tracked tree will be clean after this crash-handoff successor is committed.
+- Latest pushed code head: `d0897e9a6f95f4126138c8014cc50ff483e05c0f`.
+- This crash-handoff update will be the docs-only successor; resolve local, remote, and PR heads after it is pushed before counting a gate.
+- Commits `7a0c2f118` and `d0897e9a6` are pushed and replace every exact-`fd48530f7` gate.
+- The tracked tree is clean except three user-owned untracked task notes.
 - Resolve local, remote, and PR heads before counting any exact-head gate.
 - Resolve and compare local, origin, and GitHub heads before counting any gate.
 - Three pre-existing untracked `.claude/TASK-*.md` notes are user-owned and must remain untouched.
@@ -60,6 +60,10 @@ Updated 2026-07-25 after correcting exact-lookup identity, invalid explicit-thre
 - `6c5fb3247` requires a successful point lookup to return the exact requested event ID before metadata or raw ancestry is admitted.
 - `6c5fb3247` makes canonical explicit-thread resolution validate the current event's room, timeline, type, and plaintext envelope, and removes the live-mutation shortcut around that policy.
 - `6c5fb3247` makes append-only reuse enforce the same message-envelope and replacement-validity rules as full cache certification.
+- `7a0c2f118` gives intended-valid tests complete Matrix timeline envelopes instead of weakening production validation.
+- `d0897e9a6` rejects successful point responses whose returned event ID differs from the requested ID before normalization or persistence.
+- `d0897e9a6` normalizes relation targets to non-empty strings, rejects self-thread relations, and keeps malformed replacements non-visible.
+- `d0897e9a6` requires nio-valid Megolm envelopes before encrypted relations can affect thread membership while preserving valid non-message raw-only events.
 
 ## Reconciled review status
 
@@ -101,6 +105,10 @@ Updated 2026-07-25 after correcting exact-lookup identity, invalid explicit-thre
 - All three claims reproduced independently before implementation.
 - Fifteen new regression variants failed before `6c5fb3247` and pass afterward.
 - The exact-`6c4fa7d1d` reviews, CI, static checks, and live evidence are stale after `6c5fb3247`.
+- Two fresh exact-`fd48530f7` reviewers reproduced network lookup cache poisoning, malformed/empty/self relation targets, malformed replacements becoming visible, and malformed encrypted relations.
+- Every claim failed a deterministic regression before implementation.
+- The exact prior twenty full-suite failures now pass after production-shaped fixture correction; both SQLite and PostgreSQL point-cache poison regressions pass.
+- Every exact-`fd48530f7` review, CI, full-suite, static, and live result is stale after `d0897e9a6`.
 - The withdrawn edit-index timestamp-poison claim remains excluded because it required direct inconsistent SQL writes outside production paths.
 - This correction adds `+196/-15` production lines, net `+181`.
 - Production source against current `main` is `+2026/-1185`, net `+841`.
@@ -109,6 +117,8 @@ Updated 2026-07-25 after correcting exact-lookup identity, invalid explicit-thre
 - The degraded replay follow-up adds `+16/-18` production lines, net `-2`.
 - The latest malformed-relation correction adds `+10/-1` production lines, net `+9`.
 - The exact-lookup, explicit-thread, and incremental-reuse correction adds `+76/-25` production lines, net `+51`.
+- The exact-`fd48530f7` follow-up adds `+67/-24` production lines, net `+43`.
+- Production source against current `main` is now `+2072/-1188`, net `+884`.
 
 ## Validation already completed
 
@@ -165,11 +175,14 @@ Updated 2026-07-25 after correcting exact-lookup identity, invalid explicit-thre
 - The fifteen exact-lookup, invalid-current-source, and suffix-validity regression variants pass after `6c5fb3247`.
 - The six-file thread history, tag, membership, mutation, reuse, and SQLite/PostgreSQL snapshot cluster passes after `6c5fb3247`.
 - Changed-file pre-commit, explicit Tach dependencies/interfaces, and `git diff --check` pass after `6c5fb3247`.
+- The exact prior twenty failures pass together, including the SQLite/PostgreSQL non-message boundary.
+- Thirty new cache-poison, malformed target, self-thread, encrypted-envelope, malformed-edit, and non-message boundary variants pass across SQLite and PostgreSQL.
+- Changed-file pre-commit, Tach, module privacy, and commit hooks pass after `d0897e9a6`.
 - Git author was verified as `Bas Nijholt <bas@nijho.lt>` before every new commit.
 
 ## Pending exact-head gates
 
-- Commit and push this crash-handoff successor after `6c5fb3247`, then freeze its exact head.
+- Commit and push this crash-handoff successor after `d0897e9a6`, then freeze its exact head.
 - Fresh CI must complete on the final exact head.
 - A fresh independent native Codex correctness review is required on the final exact head.
 - Exact-head PostgreSQL owning and stress selections are required.
