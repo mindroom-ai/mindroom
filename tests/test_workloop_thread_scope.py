@@ -61,6 +61,7 @@ from tests.conftest import (
     make_event_cache_mock,
     message_origin,
     runtime_paths_for,
+    terminal_delivery_store_for,
     test_runtime_paths,
 )
 
@@ -753,6 +754,7 @@ async def test_late_after_response_cancellation_still_runs_workloop_cleanup(
             redact_message_event=AsyncMock(return_value=True),
             resolver=MagicMock(),
             response_hooks=ResponseHookService(hook_context=hook_context),
+            terminal_delivery_store=terminal_delivery_store_for(loaded_workloop.runtime_paths, "code"),
         ),
     )
 

@@ -86,6 +86,7 @@ from mindroom.response_payload_preparation import (
 )
 from mindroom.response_runner import PostLockRequestPreparationError, ResponseRequest, ResponseRunner
 from mindroom.runtime_support import StartupThreadPrewarmRegistry
+from mindroom.terminal_delivery import TerminalDeliveryStore
 from mindroom.thread_utils import decide_agent_response
 from mindroom.turn_controller import TurnController, _DispatchPreparation, _ReplayGuardContext
 from mindroom.turn_origin import TurnOrigin, classify_turn_origin
@@ -1080,6 +1081,14 @@ def runtime_paths_for(config: Config) -> RuntimePaths:
         msg = "Test config is missing bound RuntimePaths"
         raise KeyError(msg)
     return runtime_paths
+
+
+def terminal_delivery_store_for(runtime_paths: RuntimePaths, agent_name: str) -> TerminalDeliveryStore:
+    """Build the required terminal-delivery store for one test gateway."""
+    return TerminalDeliveryStore(
+        agent_name=agent_name,
+        base_path=runtime_paths.storage_root / "tracking",
+    )
 
 
 def create_mock_room(

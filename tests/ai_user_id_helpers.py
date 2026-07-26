@@ -419,6 +419,7 @@ def _build_response_runner(
             redact_message_event=AsyncMock(return_value=True),
             resolver=bot._conversation_resolver,
             response_hooks=response_hook_service,
+            terminal_delivery_store=bot._terminal_delivery_store,
         ),
     )
     _set_gateway_method(

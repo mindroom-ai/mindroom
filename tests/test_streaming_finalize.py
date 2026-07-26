@@ -18,6 +18,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import STREAM_STATUS_ERROR, STREAM_STATUS_KEY
 from mindroom.delivery_gateway import (
+    _DURABLE_TERMINAL_RETRY_FAILURE_REASON,
     DeliveryGateway,
     DeliveryGatewayDeps,
     FinalDeliveryRequest,
@@ -43,6 +44,7 @@ from tests.conftest import (
     make_matrix_client_mock,
     message_origin,
     runtime_paths_for,
+    terminal_delivery_store_for,
     test_runtime_paths,
 )
 
@@ -86,6 +88,18 @@ async def _empty_async_iter() -> AsyncIterator[None]:
 async def _empty_stream() -> AsyncIterator[str]:
     if False:
         yield ""
+
+
+def _resolver() -> SimpleNamespace:
+    """Build the delivery resolver seam used by gateway tests."""
+    return SimpleNamespace(
+        deps=SimpleNamespace(
+            conversation_cache=SimpleNamespace(
+                get_latest_thread_event_id_if_needed=AsyncMock(return_value=None),
+                notify_outbound_message=Mock(),
+            ),
+        ),
+    )
 
 
 def _streaming_response(config: Config) -> StreamingResponse:
@@ -136,15 +150,9 @@ def _delivery_gateway(tmp_path: Path) -> DeliveryGateway:
             agent_name="code",
             logger=Mock(),
             redact_message_event=AsyncMock(return_value=True),
-            resolver=SimpleNamespace(
-                deps=SimpleNamespace(
-                    conversation_cache=SimpleNamespace(
-                        get_latest_thread_event_id_if_needed=AsyncMock(return_value=None),
-                        notify_outbound_message=Mock(),
-                    ),
-                ),
-            ),
+            resolver=_resolver(),
             response_hooks=response_hooks,
+            terminal_delivery_store=terminal_delivery_store_for(runtime_paths_for(config), "code"),
         ),
     )
 
@@ -403,8 +411,9 @@ async def test_transport_failed_terminal_update_drops_committed_interactive_meta
             agent_name="code",
             logger=get_logger("tests.delivery"),
             redact_message_event=AsyncMock(return_value=True),
-            resolver=Mock(),
+            resolver=_resolver(),
             response_hooks=response_hooks,
+            terminal_delivery_store=terminal_delivery_store_for(runtime_paths_for(config), "code"),
         ),
     )
 
@@ -433,7 +442,7 @@ async def test_transport_failed_terminal_update_drops_committed_interactive_meta
 async def test_transport_failed_terminal_update_ignores_hidden_canonical_interactive_metadata(
     tmp_path: Path,
 ) -> None:
-    """Preserved visible streamed replies must not register interactive metadata from hidden canonical content."""
+    """The currently visible partial body does not expose deferred interactive metadata."""
     config = _config(tmp_path)
     response_hooks = SimpleNamespace(
         apply_before_response=AsyncMock(),
@@ -448,8 +457,9 @@ async def test_transport_failed_terminal_update_ignores_hidden_canonical_interac
             agent_name="code",
             logger=get_logger("tests.delivery"),
             redact_message_event=AsyncMock(return_value=True),
-            resolver=Mock(),
+            resolver=_resolver(),
             response_hooks=response_hooks,
+            terminal_delivery_store=terminal_delivery_store_for(runtime_paths_for(config), "code"),
         ),
     )
 
@@ -476,7 +486,8 @@ async def test_transport_failed_terminal_update_ignores_hidden_canonical_interac
     )
 
     assert outcome.terminal_status == "error"
-    assert outcome.failure_reason == "terminal_update_failed"
+    assert outcome.failure_reason == _DURABLE_TERMINAL_RETRY_FAILURE_REASON
+    assert outcome.deferred_terminal_delivery
     assert outcome.final_visible_body == "visible plain text"
     assert dict(outcome.option_map or {}) == {}
     assert list(outcome.options_list or ()) == []
@@ -631,8 +642,9 @@ async def test_streaming_placeholder_delivery_failure_stays_terminal_when_failur
             agent_name="code",
             logger=logger,
             redact_message_event=AsyncMock(return_value=True),
-            resolver=Mock(),
+            resolver=_resolver(),
             response_hooks=response_hooks,
+            terminal_delivery_store=terminal_delivery_store_for(runtime_paths_for(config), "code"),
         ),
     )
     object.__setattr__(gateway, "edit_text", AsyncMock(return_value=False))
@@ -810,8 +822,9 @@ async def test_streamed_interactive_final_reply_registers_reactions_on_root_even
             agent_name="code",
             logger=get_logger("tests.delivery"),
             redact_message_event=AsyncMock(return_value=True),
-            resolver=Mock(),
+            resolver=_resolver(),
             response_hooks=response_hooks,
+            terminal_delivery_store=terminal_delivery_store_for(runtime_paths_for(config), "code"),
         ),
     )
 
@@ -942,8 +955,9 @@ async def test_streamed_interactive_metadata_survives_unparseable_canonical_fina
             agent_name="code",
             logger=get_logger("tests.delivery"),
             redact_message_event=AsyncMock(return_value=True),
-            resolver=Mock(),
+            resolver=_resolver(),
             response_hooks=response_hooks,
+            terminal_delivery_store=terminal_delivery_store_for(runtime_paths_for(config), "code"),
         ),
     )
 
@@ -1005,8 +1019,9 @@ async def test_final_response_transform_failure_keeps_visible_stream_text(tmp_pa
             agent_name="code",
             logger=get_logger("tests.delivery"),
             redact_message_event=AsyncMock(return_value=True),
-            resolver=Mock(),
+            resolver=_resolver(),
             response_hooks=response_hooks,
+            terminal_delivery_store=terminal_delivery_store_for(runtime_paths_for(config), "code"),
         ),
     )
     object.__setattr__(gateway, "edit_text", AsyncMock(return_value=False))
@@ -1082,8 +1097,9 @@ async def test_finalize_streamed_response_restart_interruption_preserves_cancell
             agent_name="code",
             logger=get_logger("tests.delivery"),
             redact_message_event=AsyncMock(return_value=True),
-            resolver=Mock(),
+            resolver=_resolver(),
             response_hooks=response_hooks,
+            terminal_delivery_store=terminal_delivery_store_for(runtime_paths_for(config), "code"),
         ),
     )
 

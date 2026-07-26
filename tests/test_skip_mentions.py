@@ -38,6 +38,7 @@ from tests.conftest import (
     message_origin,
     runtime_paths_for,
     sync_bot_runtime_state,
+    terminal_delivery_store_for,
     test_runtime_paths,
 )
 from tests.identity_helpers import entity_ids, persist_entity_accounts
@@ -309,6 +310,7 @@ def _gateway_with_mocks(tmp_path: Path) -> tuple[DeliveryGateway, AsyncMock, Asy
                 deps=SimpleNamespace(conversation_cache=conversation_cache),
             ),
             response_hooks=response_hooks,
+            terminal_delivery_store=terminal_delivery_store_for(runtime_paths, "email_agent"),
         ),
     )
     return gateway, before_hooks, after_hooks

@@ -151,6 +151,8 @@ Matrix sync callback
 | `shell_supervisor.py` | Worker-local shell supervisor process owning background shell handles across sandbox request subprocesses |
 | `streaming.py` | Streaming state machine: placeholder, progressive edits, tool traces, cancellation |
 | `terminal_delivery.py` | Durable pending terminal Matrix deliveries: state machine, precedence, store |
+| `terminal_delivery_lifecycle.py` | Typed persisted response-lifecycle facts for durable repair |
+| `terminal_delivery_replay.py` | Success-only response-lifecycle replay after durable repair |
 | `terminal_delivery_worker.py` | Background retry worker draining durable terminal deliveries |
 | `prompts.py` | Built-in prompt defaults and prompt override registry |
 | `attachments.py` | Attachment persistence, registration, and context-scoped resolution |

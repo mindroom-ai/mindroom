@@ -996,11 +996,10 @@ def _gateway(
     tmp_path: Path,
     client: nio.AsyncClient,
     target: MessageTarget,
-    with_store: bool = True,
     logger: structlog.stdlib.BoundLogger | None = None,
-) -> tuple[DeliveryGateway, TerminalDeliveryStore | None]:
+) -> tuple[DeliveryGateway, TerminalDeliveryStore]:
     config, runtime_paths = _config(tmp_path)
-    store = TerminalDeliveryStore(agent_name="helper", base_path=tmp_path / "tracking") if with_store else None
+    store = TerminalDeliveryStore(agent_name="helper", base_path=tmp_path / "tracking")
     envelope = _envelope(target)
     response_hooks = SimpleNamespace(
         apply_before_response=AsyncMock(
@@ -1201,27 +1200,6 @@ class TestGatewaySeam:
         assert any("Response delivery failed" in body for body in edits)
 
     @pytest.mark.asyncio
-    async def test_no_durable_store_keeps_the_previous_failure_behaviour(self, tmp_path: Path) -> None:
-        """Without a store the gateway still finalizes a failed placeholder visibly."""
-        target = MessageTarget.resolve(ROOM_ID, None, SOURCE_EVENT_ID)
-        client = make_matrix_client_mock()
-        client.room_send = AsyncMock(side_effect=SendRetryError("Room timeline recovery is still pending."))
-        gateway, _store_none = _gateway(tmp_path=tmp_path, client=client, target=target, with_store=False)
-
-        outcome = await gateway.deliver_final(
-            FinalDeliveryRequest(
-                target=target,
-                existing_event_id=PLACEHOLDER_EVENT_ID,
-                response_text=FINAL_BODY,
-                identity=_identity(target),
-                tool_trace=None,
-                extra_content=None,
-                existing_event_is_placeholder=True,
-            ),
-        )
-
-        assert outcome.failure_reason == "delivery_failed"
-
     @pytest.mark.asyncio
     async def test_pending_final_lands_after_recovery_and_survives_restart(self, tmp_path: Path) -> None:
         """A pending final reloads after restart and the active bot makes it visible."""

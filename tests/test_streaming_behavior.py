@@ -87,6 +87,7 @@ from tests.conftest import (
     replace_response_runner_deps,
     request_envelope,
     runtime_paths_for,
+    terminal_delivery_store_for,
     test_runtime_paths,
 )
 from tests.identity_helpers import persist_entity_accounts
@@ -4051,6 +4052,7 @@ class TestStreamingBehavior:
                 redact_message_event=AsyncMock(return_value=True),
                 resolver=MagicMock(),
                 response_hooks=response_hooks,
+                terminal_delivery_store=terminal_delivery_store_for(runtime_paths_for(self.config), "helper"),
             ),
         )
         object.__setattr__(gateway, "edit_text", AsyncMock(return_value=True))
@@ -4153,6 +4155,7 @@ class TestStreamingBehavior:
                 redact_message_event=AsyncMock(return_value=True),
                 resolver=MagicMock(),
                 response_hooks=response_hooks,
+                terminal_delivery_store=terminal_delivery_store_for(runtime_paths_for(self.config), "helper"),
             ),
         )
         outcome = await gateway.finalize_streamed_response(
@@ -4257,6 +4260,7 @@ class TestStreamingBehavior:
                 redact_message_event=AsyncMock(return_value=True),
                 resolver=MagicMock(),
                 response_hooks=response_hooks,
+                terminal_delivery_store=terminal_delivery_store_for(runtime_paths_for(self.config), "helper"),
             ),
         )
 

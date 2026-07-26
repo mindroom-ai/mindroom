@@ -76,6 +76,8 @@ MindRoom's architecture consists of several key components working together.
 | `routing.py` | Intelligent agent or team selection when no entity is mentioned |
 | `streaming.py` | Streaming state machine: placeholder, progressive edits, tool traces, cancellation |
 | `terminal_delivery.py` | Durable pending terminal Matrix deliveries: state machine, precedence, store |
+| `terminal_delivery_lifecycle.py` | Typed persisted response-lifecycle facts for durable repair |
+| `terminal_delivery_replay.py` | Success-only response-lifecycle replay after durable repair |
 | `terminal_delivery_worker.py` | Background retry worker draining durable terminal deliveries |
 | `media_inputs.py` | Shared media-input container passed across bot, teams, and AI layers |
 | `media_fallback.py` | Retries model requests without inline media when models reject media inputs |

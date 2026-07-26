@@ -337,7 +337,7 @@ class DeliveryGatewayDeps:
     redact_message_event: Callable[..., Awaitable[bool]]
     resolver: ConversationResolver
     response_hooks: ResponseHookService
-    terminal_delivery_store: TerminalDeliveryStore | None = None
+    terminal_delivery_store: TerminalDeliveryStore
 
 
 @dataclass
@@ -546,7 +546,7 @@ class DeliveryGateway:
         """
         store = self.deps.terminal_delivery_store
         client = self.deps.runtime.client
-        if store is None or client is None or not body.strip():
+        if client is None or not body.strip():
             return None
         # The repaired edit must publish the terminal status even when the
         # carried content still describes an in-progress stream.
@@ -606,8 +606,6 @@ class DeliveryGateway:
     async def attempt_pending_terminal_delivery(self, item: PendingTerminalDelivery) -> TerminalDeliveryAttempt:
         """Try once to make one durable terminal outcome visible, and classify the result."""
         store = self.deps.terminal_delivery_store
-        if store is None:
-            return TerminalDeliveryAttempt.transient("terminal_delivery_store_unavailable")
         async with self._terminal_delivery_locks.hold(item.delivery_id):
             current = await asyncio.to_thread(store.get, item.delivery_id)
             if current is None or current.revision != item.revision:
