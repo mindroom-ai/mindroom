@@ -1167,11 +1167,6 @@ class _ThreadCacheRefillAttempt:
     cache_repair_usable: bool
     existing_history: ThreadHistoryResult | None = None
 
-    @property
-    def retryable(self) -> bool:
-        """Return whether another bounded reconstruction may still install a snapshot."""
-        return self.replace_outcome.retryable
-
 
 async def _fetch_thread_repair_snapshot(
     client: nio.AsyncClient,
@@ -1429,7 +1424,7 @@ async def refresh_thread_history_from_source(
                 caller_label=caller_label,
                 coordinator_queue_wait_ms=coordinator_queue_wait_ms,
             )
-        if not attempt.retryable or repair_attempts == _MAX_THREAD_REPAIR_ATTEMPTS:
+        if not attempt.replace_outcome.retryable or repair_attempts == _MAX_THREAD_REPAIR_ATTEMPTS:
             break
         logger.warning(
             "Retrying thread cache repair after guarded replacement conflict",

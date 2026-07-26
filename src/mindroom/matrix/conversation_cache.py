@@ -732,14 +732,20 @@ class MatrixConversationCache(ConversationCacheProtocol):
             return None
         return self._event_ids(event_sources or ())
 
-    async def _prepare_retained_thread_repair_deltas(
+    async def _prepare_pending_thread_repair_deltas(
         self,
         room_id: str,
         thread_id: str,
-        *,
-        retained_event_sources: Collection[dict[str, Any]],
     ) -> None:
-        """Force a refill when certified retained deltas are not yet in raw cache."""
+        """Force a refill when pending repair deltas are not yet in raw cache."""
+        coordinator = self.runtime.event_cache_write_coordinator
+        if coordinator is None:
+            return
+        retained_event_sources = coordinator.pending_thread_repair_deltas(
+            room_id,
+            thread_id,
+            coordination_scope=self.runtime.event_cache.principal_id,
+        )
         retained_event_ids = self._event_ids(retained_event_sources)
         if not retained_event_ids:
             return
@@ -801,20 +807,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
         coordinator_queue_wait_ms: float,
     ) -> ThreadHistoryResult:
         """Refresh one thread from Matrix without accepting a cache hit or stale fallback."""
-        coordinator = self.runtime.event_cache_write_coordinator
-        if coordinator is not None:
-            principal_id = self.runtime.event_cache.principal_id
-            retained_event_sources = coordinator.pending_thread_repair_deltas(
-                room_id,
-                thread_id,
-                coordination_scope=principal_id,
-            )
-            if retained_event_sources:
-                await self._prepare_retained_thread_repair_deltas(
-                    room_id,
-                    thread_id,
-                    retained_event_sources=retained_event_sources,
-                )
+        await self._prepare_pending_thread_repair_deltas(room_id, thread_id)
         result = await self._refill_thread_from_client(
             room_id,
             thread_id,
@@ -910,19 +903,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
         allows_stale_fallback: bool,
     ) -> ThreadHistoryResult:
         coordinator = self.runtime.event_cache_write_coordinator
-        if coordinator is not None:
-            principal_id = self.runtime.event_cache.principal_id
-            retained_event_sources = coordinator.pending_thread_repair_deltas(
-                room_id,
-                thread_id,
-                coordination_scope=principal_id,
-            )
-            if retained_event_sources:
-                await self._prepare_retained_thread_repair_deltas(
-                    room_id,
-                    thread_id,
-                    retained_event_sources=retained_event_sources,
-                )
+        await self._prepare_pending_thread_repair_deltas(room_id, thread_id)
 
         async def refill(
             cache_reject_diagnostics: Mapping[str, str | int | float | bool] | None,
