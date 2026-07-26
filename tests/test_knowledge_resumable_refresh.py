@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Protocol
 import pytest
 from agno.knowledge.document.base import Document
 from agno.knowledge.embedder.base import Embedder
+from chromadb.errors import NotFoundError
 from structlog.testing import capture_logs
 
 import mindroom.knowledge.manager as knowledge_manager_module
@@ -121,6 +122,9 @@ class _FakeCollection:
 
 class _FakeClient:
     def get_collection(self, name: str) -> _FakeCollection:
+        if name not in _FakeVectorDb.store:
+            message = f"Collection {name!r} does not exist"
+            raise NotFoundError(message)
         return _FakeCollection(name)
 
     def list_collections(self) -> list[str]:
@@ -142,7 +146,9 @@ class _FakeVectorDb:
         self.store.setdefault(self.collection_name, [])
 
     def delete(self) -> bool:
-        self.store.pop(self.collection_name, None)
+        if self.collection_name not in self.store:
+            return False
+        self.store.pop(self.collection_name)
         return True
 
     def search(self, *, query: str, limit: int, filters: object = None) -> list[Document]:
@@ -331,14 +337,26 @@ def fake_vector_store(
 # --------------------------------------------------------------------------
 
 
-def _config(tmp_path: Path, docs_path: Path, *, chunk_size: int = 5000) -> Config:
+def _config(
+    tmp_path: Path,
+    docs_path: Path,
+    *,
+    chunk_size: int = 5000,
+    chunk_overlap: int = 0,
+) -> Config:
     runtime_paths = test_runtime_paths(tmp_path)
     return bind_runtime_paths(
         Config(
             agents={"helper": AgentConfig(display_name="Helper", knowledge_bases=["docs"])},
             models={},
             memory={},
-            knowledge_bases={"docs": KnowledgeBaseConfig(path=str(docs_path), chunk_size=chunk_size)},
+            knowledge_bases={
+                "docs": KnowledgeBaseConfig(
+                    path=str(docs_path),
+                    chunk_size=chunk_size,
+                    chunk_overlap=chunk_overlap,
+                ),
+            },
         ),
         runtime_paths,
     )
@@ -728,6 +746,67 @@ async def test_incompatible_settings_start_a_clean_candidate_and_keep_published_
     assert run.checkpoint.collection != stale_candidate
     assert stale_candidate not in _FakeVectorDb.store, "incompatible candidate is discarded"
     assert published_collection in _FakeVectorDb.store, "published index is not touched"
+
+
+@pytest.mark.asyncio
+async def test_incompatible_candidate_delete_failure_does_not_block_refresh(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stale candidate cannot make a base permanently unrefreshable."""
+    docs_path = tmp_path / "docs"
+    _write_corpus(docs_path, 3)
+    config = _config(tmp_path, docs_path)
+    runtime_paths = runtime_paths_for(config)
+    manager = _manager(config)
+    stale_candidate = f"{manager._default_collection_name()}_candidate_stale"
+    _FakeVectorDb.store[stale_candidate] = []
+    save_candidate_checkpoint(
+        _storage_path(config, runtime_paths),
+        CandidateCheckpoint(
+            collection=stale_candidate,
+            settings=replace(manager._indexing_settings, embedder_model="old-model"),
+        ),
+    )
+    original_delete = _FakeVectorDb.delete
+    attempts = 0
+
+    def _fail_once(self: _FakeVectorDb) -> bool:
+        nonlocal attempts
+        if self.collection_name == stale_candidate and attempts == 0:
+            attempts += 1
+            return False
+        return original_delete(self)
+
+    monkeypatch.setattr(_FakeVectorDb, "delete", _fail_once)
+
+    run = await manager._open_candidate_run()
+
+    assert run.checkpoint.collection != stale_candidate
+    assert stale_candidate not in _FakeVectorDb.store, "candidate GC did not retry the transient failure"
+
+
+@pytest.mark.asyncio
+async def test_incompatible_missing_candidate_is_already_deleted(tmp_path: Path) -> None:
+    """A crash before candidate creation must not poison later settings changes."""
+    docs_path = tmp_path / "docs"
+    _write_corpus(docs_path, 3)
+    config = _config(tmp_path, docs_path)
+    runtime_paths = runtime_paths_for(config)
+    manager = _manager(config)
+    missing_candidate = f"{manager._default_collection_name()}_candidate_missing"
+    save_candidate_checkpoint(
+        _storage_path(config, runtime_paths),
+        CandidateCheckpoint(
+            collection=missing_candidate,
+            settings=replace(manager._indexing_settings, embedder_model="old-model"),
+        ),
+    )
+
+    run = await manager._open_candidate_run()
+
+    assert run.checkpoint.collection != missing_candidate
+    assert run.resumed is False
 
 
 # --------------------------------------------------------------------------
@@ -2606,6 +2685,33 @@ def test_single_oversized_file_is_never_read_into_the_prefetch_budget(
     assert texts, "smaller files behind the oversized one were skipped too"
 
 
+def test_prefetch_skips_overlap_that_can_expand_past_the_byte_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Near-total overlap must not amplify one small source into unbounded text."""
+    monkeypatch.setattr(knowledge_manager_module, "_MAX_PREFETCH_TEXT_BYTES", 4_000)
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    source = docs_path / "overlap.md"
+    source.write_text("x" * 4_000, encoding="utf-8")
+    config = _config(tmp_path, docs_path, chunk_size=128, chunk_overlap=127)
+    manager = _manager(config)
+    read_files: list[str] = []
+    original_chunk = KnowledgeManager._chunk_texts_for_prefetch
+
+    def _record_read(self: KnowledgeManager, resolved_path: Path) -> tuple[str, ...]:
+        read_files.append(resolved_path.name)
+        return original_chunk(self, resolved_path)
+
+    monkeypatch.setattr(KnowledgeManager, "_chunk_texts_for_prefetch", _record_read)
+
+    texts = manager._chunk_texts_for_batch([source])
+
+    assert texts == []
+    assert read_files == [], "overlapping source was materialized before prefetch declined it"
+
+
 @pytest.mark.asyncio
 async def test_oversized_file_still_indexes_and_publishes(
     tmp_path: Path,
@@ -2631,30 +2737,13 @@ async def test_oversized_file_still_indexes_and_publishes(
     assert "huge.md" in stored
 
 
-def test_overlapping_chunks_skip_prefetch_entirely(tmp_path: Path) -> None:
-    """Overlap re-emits the same bytes, so file size stops bounding chunk memory.
-
-    At chunk_size=128 with overlap=127 a 4 KB file yields thousands of chunks
-    totalling far more than the source, which no pre-read size check can bound.
-    """
-    docs_path = tmp_path / "docs"
-    docs_path.mkdir()
-    source = docs_path / "overlapped.md"
-    source.write_text("x" * 4_000, encoding="utf-8")
-    config = _config(tmp_path, docs_path, chunk_size=128)
-    config.knowledge_bases["docs"].chunk_overlap = 127
-
-    assert _manager(config)._chunk_texts_for_batch([source]) == []
-
-
 @pytest.mark.asyncio
 async def test_overlapping_chunks_still_index_and_publish(tmp_path: Path, embedder: _RecordingEmbedder) -> None:
     """Skipping prefetch for overlapping chunks must not skip indexing."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
     (docs_path / "overlapped.md").write_text("y" * 600, encoding="utf-8")
-    config = _config(tmp_path, docs_path, chunk_size=128)
-    config.knowledge_bases["docs"].chunk_overlap = 64
+    config = _config(tmp_path, docs_path, chunk_size=128, chunk_overlap=64)
     runtime_paths = runtime_paths_for(config)
 
     assert await _manager(config).reindex_all() == 1

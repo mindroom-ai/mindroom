@@ -19,6 +19,7 @@ from agno.knowledge.reader import ReaderFactory
 from agno.knowledge.reader.markdown_reader import MarkdownReader
 from agno.knowledge.reader.text_reader import TextReader
 from agno.vectordb.chroma import ChromaDb
+from chromadb.errors import NotFoundError
 
 from mindroom.chunking import SafeFixedSizeChunking
 from mindroom.constants import (
@@ -301,18 +302,6 @@ class _PermanentEmbeddingError(Exception):
 
 def _raise_cancelled() -> NoReturn:
     raise asyncio.CancelledError
-
-
-def _content_identity(signature: _FileSignature) -> tuple[int, str]:
-    """Return the part of a signature that describes content, not bookkeeping.
-
-    Git checkouts, clones and archive restores rewrite mtimes without touching
-    bytes. Treating a new mtime as a content change would delete and re-embed
-    work the digest proves is still valid, which is exactly what resume exists
-    to avoid.
-    """
-    _source_mtime_ns, source_size, source_digest = signature
-    return source_size, source_digest
 
 
 def _iter_file_batches(files: Sequence[Path], batch_size: int) -> Iterator[list[Path]]:
@@ -1388,6 +1377,10 @@ class KnowledgeManager:
     def _chunk_texts_for_batch(self, files: Sequence[Path]) -> list[str]:
         """Return chunk texts to prefetch, stopping at the memory budget.
 
+        Overlapping chunks duplicate source text, so their fully materialized
+        size cannot be bounded from the source-file size alone. Those bases use
+        the normal per-file embedding path instead.
+
         The size check has to precede the read: chunking materializes a file's
         entire content, so a budget consulted afterwards cannot stop a single
         oversized file from blowing the bound. A file that cannot fit the
@@ -1627,15 +1620,10 @@ class KnowledgeManager:
 
     def _candidate_paths_with_vectors(
         self,
-        knowledge: Knowledge,
+        vector_db: ChromaDb,
         relative_paths: Sequence[str],
     ) -> set[str]:
         """Return which of the given source paths actually have candidate vectors."""
-        vector_db = knowledge.vector_db
-        if not isinstance(vector_db, ChromaDb):
-            return set(relative_paths)
-        if not vector_db.exists():
-            return set()
         collection = vector_db.client.get_collection(name=vector_db.collection_name)
         result = collection.get(
             where={_SOURCE_PATH_KEY: {"$in": list(relative_paths)}},
@@ -1666,7 +1654,7 @@ class KnowledgeManager:
         missing: set[str] = set()
         for start in range(0, len(verifiable), _VECTOR_VERIFY_BATCH):
             batch = verifiable[start : start + _VECTOR_VERIFY_BATCH]
-            found = await asyncio.to_thread(self._candidate_paths_with_vectors, run.knowledge, batch)
+            found = await asyncio.to_thread(self._candidate_paths_with_vectors, run.vector_db, batch)
             missing.update(set(batch) - found)
             run.verified.update(found)
         return missing
@@ -1786,9 +1774,9 @@ class KnowledgeManager:
         index and returns before the candidate is ever opened, so nothing else
         can reach that state: the checkpoint and its collection would otherwise
         sit on disk indefinitely.
+        Retiring it discards partial forced-rebuild progress, so a later forced
+        rebuild starts from zero.
         """
-        if not _semantic_indexing_enabled(self.config, self.base_id):
-            return
         checkpoint = await asyncio.to_thread(load_candidate_checkpoint, self._base_storage_path)
         if checkpoint is None:
             return
@@ -1813,11 +1801,8 @@ class KnowledgeManager:
         returned when the collection simply was not there, which is the
         outcome we want, so the two are told apart by probing existence.
         """
-        vector_db = self._build_vector_db(collection_name)
         try:
-            deleted = await asyncio.to_thread(vector_db.delete)
-            if not deleted:
-                deleted = not await asyncio.to_thread(vector_db.exists)
+            deleted = await asyncio.to_thread(self._delete_candidate_collection_sync, collection_name)
         except Exception:
             logger.warning(
                 "Failed to delete knowledge candidate collection",
@@ -1826,13 +1811,25 @@ class KnowledgeManager:
                 exc_info=True,
             )
             return False
-        if not deleted:
-            logger.warning(
-                "Vector store did not delete knowledge candidate collection",
-                base_id=self.base_id,
-                collection=collection_name,
-            )
-        return deleted
+        if deleted:
+            return True
+        logger.warning(
+            "Knowledge candidate collection still exists after deletion failed",
+            base_id=self.base_id,
+            collection=collection_name,
+        )
+        return False
+
+    def _delete_candidate_collection_sync(self, collection_name: str) -> bool:
+        """Delete one candidate, treating an already-absent collection as success."""
+        vector_db = self._build_vector_db(collection_name)
+        if vector_db.delete():
+            return True
+        try:
+            vector_db.client.get_collection(name=vector_db.collection_name)
+        except NotFoundError:
+            return True
+        return False
 
     async def _file_signatures_for(self, files: Sequence[Path]) -> dict[str, tuple[_FileSignature, Path]]:
         """Return current signatures for the listed files, skipping vanished ones."""
@@ -1857,7 +1854,7 @@ class KnowledgeManager:
                 signatures[relative_path] = (signature, file_path)
         return signatures
 
-    def _delete_candidate_vectors(self, knowledge: Knowledge, relative_paths: Sequence[str]) -> None:
+    def _delete_candidate_vectors(self, vector_db: ChromaDb, relative_paths: Sequence[str]) -> None:
         """Delete vectors for many source paths in one vector-store round trip.
 
         Agno's ``delete_by_metadata`` wraps values in ``$eq`` and so can only
@@ -1865,13 +1862,6 @@ class KnowledgeManager:
         thread hop and one get+delete per file. The collection accepts ``$in``
         directly, the same seam the vector verification query already uses.
         """
-        vector_db = knowledge.vector_db
-        if not isinstance(vector_db, ChromaDb):
-            for relative_path in relative_paths:
-                knowledge.remove_vectors_by_metadata({_SOURCE_PATH_KEY: relative_path})
-            return
-        if not vector_db.exists():
-            return
         collection = vector_db.client.get_collection(name=vector_db.collection_name)
         for start in range(0, len(relative_paths), _VECTOR_VERIFY_BATCH):
             batch = list(relative_paths[start : start + _VECTOR_VERIFY_BATCH])
@@ -1881,7 +1871,7 @@ class KnowledgeManager:
         """Remove candidate vectors and checkpoint entries for gone or stale paths."""
         if not relative_paths:
             return
-        await asyncio.to_thread(self._delete_candidate_vectors, run.knowledge, relative_paths)
+        await asyncio.to_thread(self._delete_candidate_vectors, run.vector_db, relative_paths)
         for relative_path in relative_paths:
             run.completed.pop(relative_path, None)
             run.completed_paths.discard(relative_path)
@@ -1935,7 +1925,9 @@ class KnowledgeManager:
         for relative_path in run.completed_paths & present:
             recorded = run.completed.get(relative_path)
             current = signatures[relative_path][0]
-            if recorded is None or _content_identity(recorded) != _content_identity(current):
+            # Git checkouts and archive restores may change only mtime. Size and
+            # digest are the content identity that decides whether vectors survive.
+            if recorded is None or recorded[1:] != current[1:]:
                 changed.add(relative_path)
             elif recorded != current:
                 # Same bytes, new mtime: keep the vectors and adopt the new
