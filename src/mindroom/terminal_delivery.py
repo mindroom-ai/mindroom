@@ -11,7 +11,6 @@ State machine (see ``docs/architecture/durable-terminal-delivery.md``)::
 
     record ---> pending ---> attempting ---> delivered
                   ^             |  |  |
-                  |             |  |  +---> dead_letter   (retry budget, capacity)
                   |             |  +------> superseded    (newer turn, redacted target)
                   +-- retry_wait <-+        (transient failure, backoff)
 
@@ -45,19 +44,16 @@ if typing.TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-TERMINAL_DELIVERY_SCHEMA_VERSION = 2
+TERMINAL_DELIVERY_SCHEMA_VERSION = 3
 _SCHEMA_VERSION_KEY = "schema_version"
 _ITEMS_KEY = "items"
 
-TerminalDeliveryState = Literal["pending", "attempting", "retry_wait", "dead_letter"]
+TerminalDeliveryState = Literal["pending", "attempting", "retry_wait"]
 TerminalDeliveryAttemptResult = Literal["delivered", "transient", "superseded"]
 
 # One process owns semantic ordering for an entity, so a lease only has to
 # outlive a single attempt; anything longer is a crash and must be recovered.
 DEFAULT_ATTEMPT_LEASE_SECONDS = 120.0
-# A hard cap keeps a pathological outage from growing the file without bound.
-_MAX_UNSETTLED_ITEMS = 2000
-
 # Identifies the current process for lease ownership across restarts.
 RUNTIME_GENERATION = uuid4().hex
 
@@ -147,16 +143,6 @@ class PendingTerminalDelivery:
     next_attempt_at: float
     last_error: str | None = None
     lease_expires_at: float | None = None
-    settled_reason: str | None = None
-
-    @property
-    def is_settled(self) -> bool:
-        """Return whether this record has reached a terminal state.
-
-        A delivered or superseded row is deleted outright, so the only settled
-        state that survives on disk is the one an operator still needs to see.
-        """
-        return self.state == "dead_letter"
 
     @property
     def transaction_id(self) -> str:
@@ -200,7 +186,6 @@ class PendingTerminalDelivery:
             "next_attempt_at": self.next_attempt_at,
             "last_error": self.last_error,
             "lease_expires_at": self.lease_expires_at,
-            "settled_reason": self.settled_reason,
         }
 
     @classmethod
@@ -253,7 +238,6 @@ class PendingTerminalDelivery:
             next_attempt_at=_float_or(record.get("next_attempt_at"), 0.0),
             last_error=_optional_string(record.get("last_error")),
             lease_expires_at=_optional_float(record.get("lease_expires_at")),
-            settled_reason=_optional_string(record.get("settled_reason")),
         )
 
 
@@ -358,7 +342,6 @@ class TerminalDeliveryStore:
                 next_attempt_at=now,
             )
             self._state.items[delivery_id] = candidate
-            self._enforce_unsettled_bound_locked()
             self._write_locked()
         logger.warning("terminal_delivery_pending_recorded", agent=self.agent_name, **candidate.log_context)
         return candidate
@@ -377,14 +360,12 @@ class TerminalDeliveryStore:
 
     def unsettled_items(self) -> tuple[PendingTerminalDelivery, ...]:
         """Return every record that still owes a delivery attempt."""
-        return tuple(item for item in self.items() if not item.is_settled)
+        return self.items()
 
     def pending_target_event_ids(self, room_id: str | None = None) -> frozenset[str]:
         """Return visible event IDs a durable terminal delivery still owns."""
         return frozenset(
-            item.target_event_id
-            for item in self.items()
-            if not item.is_settled and (room_id is None or item.target.room_id == room_id)
+            item.target_event_id for item in self.items() if room_id is None or item.target.room_id == room_id
         )
 
     def claim_due(self, *, limit: int) -> tuple[PendingTerminalDelivery, ...]:
@@ -463,10 +444,21 @@ class TerminalDeliveryStore:
         reason: str,
     ) -> tuple[str, ...]:
         """Settle every unsettled record matching one predicate."""
-        matched = tuple(item for item in self.items() if not item.is_settled and matches(item))
-        for item in matched:
-            self.mark_superseded(item.delivery_id, revision=item.revision, reason=reason)
-        return tuple(item.delivery_id for item in matched)
+        with self._state.lock:
+            self._ensure_loaded_locked()
+            matched_ids = tuple(delivery_id for delivery_id, item in list(self._state.items.items()) if matches(item))
+            if not matched_ids:
+                return ()
+            for delivery_id in matched_ids:
+                del self._state.items[delivery_id]
+            self._write_locked()
+        logger.debug(
+            "terminal_delivery_matches_superseded",
+            agent=self.agent_name,
+            delivery_reason=reason,
+            superseded_count=len(matched_ids),
+        )
+        return matched_ids
 
     def _discard(self, delivery_id: str, *, revision: int, reason: str) -> None:
         """Remove one finished record so the outbox only holds outstanding work."""
@@ -523,7 +515,7 @@ class TerminalDeliveryStore:
         outcome would settle content the regenerated turn never transmitted, so
         every transition is scoped to the revision it was leased against.
         """
-        if existing is None or existing.is_settled:
+        if existing is None:
             return False
         if existing.revision == revision:
             return True
@@ -573,26 +565,6 @@ class TerminalDeliveryStore:
                 recovery_reason=reason,
             )
         return tuple(recovered)
-
-    def _enforce_unsettled_bound_locked(self) -> None:
-        """Dead-letter the oldest unsettled records once the backlog cap is exceeded."""
-        unsettled = sorted(
-            (item for item in self._state.items.values() if not item.is_settled),
-            key=lambda item: (item.created_at, item.delivery_id),
-        )
-        overflow = len(unsettled) - _MAX_UNSETTLED_ITEMS
-        if overflow <= 0:
-            return
-        now = self.clock()
-        for item in unsettled[:overflow]:
-            self._state.items[item.delivery_id] = replace(
-                item,
-                state="dead_letter",
-                updated_at=now,
-                settled_reason="backlog_capacity_exceeded",
-                lease_expires_at=None,
-            )
-        logger.error("terminal_delivery_backlog_capacity_exceeded", agent=self.agent_name, dropped_count=overflow)
 
     def _ensure_loaded_locked(self, *, force: bool = False) -> None:
         """Load durable records into shared memory while the state lock is held."""

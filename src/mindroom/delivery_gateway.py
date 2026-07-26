@@ -532,7 +532,7 @@ class DeliveryGateway:
             extra_content=durable_extra_content,
         )
         recorded = await asyncio.to_thread(store.record, intent)
-        if recorded is None or recorded.is_settled:
+        if recorded is None:
             return None
         self.deps.logger.warning(
             "Persisted terminal delivery for durable retry",

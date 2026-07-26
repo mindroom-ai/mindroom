@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Literal
 from unittest.mock import AsyncMock, MagicMock
@@ -264,6 +265,22 @@ class TestStore:
         )
         assert store.unsettled_items() == ()
 
+    def test_source_redaction_atomically_removes_a_racing_replacement(self, tmp_path: Path) -> None:
+        """A replacement recorded during matching cannot escape source redaction."""
+        store = _store(tmp_path)
+        recorded = store.record(_intent(correlation_id="corr-1", body="old"))
+        assert recorded is not None
+
+        class ReplaceDuringMatch:
+            def __iter__(self) -> object:
+                replacement = store.record(_intent(correlation_id="corr-2", body="new"))
+                assert replacement is not None
+                return iter((SOURCE_EVENT_ID,))
+
+        store.supersede_sources(ReplaceDuringMatch(), reason="source_event_redacted")  # type: ignore[arg-type]
+
+        assert store.items() == ()
+
     def test_delivered_rows_are_not_resurrected(self, tmp_path: Path) -> None:
         """Superseding never reopens a row whose outcome already landed."""
         store = _store(tmp_path)
@@ -466,6 +483,28 @@ class TestStore:
         persisted = json.loads(store.store_file.read_text(encoding="utf-8"))["items"]
         assert list(persisted) == [pending.delivery_id]
 
+    def test_more_than_two_thousand_committed_outcomes_remain_retryable(self, tmp_path: Path) -> None:
+        """Backlog pressure must never convert committed answers into settled rows."""
+        store = _store(tmp_path)
+        template = store.record(_intent(target_event_id="$target-0", source_event_id="$source-0"))
+        assert template is not None
+        with store._state.lock:
+            store._state.items = {
+                f"delivery-{index}": replace(
+                    template,
+                    delivery_id=f"delivery-{index}",
+                    target_event_id=f"$target-{index}",
+                    source_event_ids=(f"$source-{index}",),
+                    created_at=float(index),
+                )
+                for index in range(2_000)
+            }
+
+        extra = store.record(_intent(target_event_id="$target-extra", source_event_id="$source-extra"))
+
+        assert extra is not None
+        assert len(store.unsettled_items()) == 2_001
+
     def test_persisted_record_carries_only_repair_and_lifecycle_facts(self, tmp_path: Path) -> None:
         """Transport credentials and live collaborators never enter the durable row."""
         store = _store(tmp_path)
@@ -500,7 +539,6 @@ class TestStore:
             "next_attempt_at",
             "last_error",
             "lease_expires_at",
-            "settled_reason",
         }
         lifecycle = row["lifecycle"]
         assert set(lifecycle) == {
@@ -1425,6 +1463,52 @@ class TestRuntimeInteractions:
 
         assert store.unsettled_items() == ()
         assert store.items() == ()
+
+    @pytest.mark.asyncio
+    async def test_store_failure_still_sanitizes_conversation_cache(self) -> None:
+        """Durable cancellation errors propagate only after advisory cache cleanup."""
+
+        class FailingTerminalStore:
+            def supersede_sources(self, _source_event_ids: object, *, reason: str) -> None:
+                assert reason == "source_event_redacted"
+                error = OSError("durable store unavailable")
+                raise error
+
+        class TurnStoreStub:
+            def mark_source_redacted(self, source_event_id: str) -> None:
+                assert source_event_id == SOURCE_EVENT_ID
+
+        class ConversationCacheStub:
+            def __init__(self) -> None:
+                self.redacted: list[str] = []
+
+            async def apply_redaction(self, _room: str, event: nio.RedactionEvent) -> None:
+                self.redacted.append(event.redacts)
+
+        conversation_cache = ConversationCacheStub()
+        cleanup = RedactedTurnCleanup(
+            RedactedTurnCleanupDeps(
+                conversation_cache=conversation_cache,  # type: ignore[arg-type]
+                turn_store=TurnStoreStub(),  # type: ignore[arg-type]
+                terminal_delivery_store=FailingTerminalStore(),  # type: ignore[arg-type]
+            ),
+        )
+        room = MagicMock()
+        room.room_id = ROOM_ID
+        event = raw_nio_redaction(
+            {
+                "type": "m.room.redaction",
+                "event_id": "$redaction",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1,
+            },
+            redacts=SOURCE_EVENT_ID,
+        )
+
+        with pytest.raises(OSError, match="durable store unavailable"):
+            await cleanup.handle(room, event)
+
+        assert conversation_cache.redacted == [SOURCE_EVENT_ID]
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("auto_resume", [False, True])
