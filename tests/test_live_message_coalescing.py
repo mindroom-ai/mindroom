@@ -3312,7 +3312,7 @@ def test_room_resolved_voice_batch_clears_stale_primary_thread_relation() -> Non
 
 
 def test_room_level_batch_preserves_plain_reply_relation_without_thread_target() -> None:
-    """Room-level batches should preserve plain reply shape without adding thread targeting."""
+    """Room-level batches preserve a root-capable rich reply without adding thread targeting."""
     room = _make_room()
     typed_reply = _reply_event(
         event_id="$typed",
@@ -3329,7 +3329,7 @@ def test_room_level_batch_preserves_plain_reply_relation_without_thread_target()
 
     assert isinstance(handoff.event, PreparedTextEvent)
     assert handoff.event.source["content"]["m.relates_to"] == {"m.in_reply_to": {"event_id": "$voice"}}
-    assert not EventInfo.from_event(handoff.event.source).can_be_thread_root
+    assert EventInfo.from_event(handoff.event.source).can_be_thread_root
 
 
 def test_room_level_batch_preserves_mentions_while_removing_stale_thread_relation() -> None:
@@ -3356,7 +3356,7 @@ def test_room_level_batch_preserves_mentions_while_removing_stale_thread_relatio
 
 
 def test_room_level_mention_batch_preserves_plain_reply_relation() -> None:
-    """Mention metadata must preserve plain reply shape without reintroducing thread targeting."""
+    """Mention metadata must preserve root-capable rich replies without explicit thread targeting."""
     room = _make_room()
     typed_reply = _reply_event(
         event_id="$typed",
@@ -3376,7 +3376,7 @@ def test_room_level_mention_batch_preserves_plain_reply_relation() -> None:
     content = handoff.event.source["content"]
     assert content["m.relates_to"] == {"m.in_reply_to": {"event_id": "$old-reply"}}
     assert content["m.mentions"] == {"user_ids": ["@agent:localhost"]}
-    assert not EventInfo.from_event(handoff.event.source).can_be_thread_root
+    assert EventInfo.from_event(handoff.event.source).can_be_thread_root
 
 
 @pytest.mark.asyncio

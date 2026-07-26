@@ -843,11 +843,12 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
 
     @pytest.mark.asyncio
     async def test_cache_sync_timeline_appends_threaded_edits_to_cached_threads(self, bot: AgentBot) -> None:
-        """Sync timeline writes should append threaded edits using the thread root from m.new_content."""
+        """Sync writes should append edits using the original's cached thread, not m.new_content."""
         event_cache = _runtime_event_cache()
         event_cache.store_events_batch = AsyncMock()
         event_cache.append_event = AsyncMock(return_value=False)
         event_cache.redact_event = AsyncMock()
+        event_cache.get_thread_id_for_event = AsyncMock(return_value="$thread_root:localhost")
         bot.event_cache = event_cache
         _install_runtime_write_coordinator(bot)
 
@@ -859,7 +860,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                     "m.new_content": {
                         "body": "Updated thread reply",
                         "msgtype": "m.text",
-                        "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root:localhost"},
+                        "m.relates_to": {"rel_type": "m.thread", "event_id": "$forged_root:localhost"},
                     },
                     "m.relates_to": {"rel_type": "m.replace", "event_id": "$thread_msg:localhost"},
                 },
@@ -885,6 +886,10 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         assert append_args[0] == "!test:localhost"
         assert append_args[1] == "$thread_root:localhost"
         assert append_args[2]["event_id"] == "$thread_edit:localhost"
+        event_cache.get_thread_id_for_event.assert_awaited_once_with(
+            "!test:localhost",
+            "$thread_msg:localhost",
+        )
 
     @pytest.mark.asyncio
     async def test_cache_sync_timeline_appends_edits_via_cached_thread_lookup(self, bot: AgentBot) -> None:

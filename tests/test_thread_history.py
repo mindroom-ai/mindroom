@@ -1281,7 +1281,7 @@ class TestThreadHistory:
         ("invalidity", "expected_rejection"),
         [
             ("state", "cache_missing_thread_root"),
-            ("other-room", None),
+            ("other-room", "cache_rows_missing"),
             ("relation", "cache_missing_thread_root"),
         ],
     )
@@ -1340,6 +1340,26 @@ class TestThreadHistory:
         ]
         assert history.diagnostics[THREAD_HISTORY_SOURCE_DIAGNOSTIC] == THREAD_HISTORY_SOURCE_HOMESERVER
         assert history.diagnostics.get(THREAD_HISTORY_CACHE_REJECT_REASON_DIAGNOSTIC) == expected_rejection
+
+    @pytest.mark.asyncio
+    async def test_cache_certification_rejects_legacy_wrong_room_rows(self) -> None:
+        """Read certification must reject wrong-room rows left by an older cache writer."""
+        rejection = await matrix_client_module._thread_history_cache_rejection_reason(
+            [
+                {
+                    "event_id": "$thread_root",
+                    "room_id": "!other:localhost",
+                    "sender": "@alice:localhost",
+                    "origin_server_ts": 1000,
+                    "type": "m.room.message",
+                    "content": {"body": "Poison", "msgtype": "m.text"},
+                },
+            ],
+            room_id="!room:localhost",
+            thread_id="$thread_root",
+        )
+
+        assert rejection == "invalid_event_scope"
 
     @pytest.mark.asyncio
     async def test_thread_resolution_ignores_state_message_original_and_edit(self) -> None:

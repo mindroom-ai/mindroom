@@ -620,8 +620,8 @@ class TestMatrixConversationCacheThreadReads:
         event_cache.append_event.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_notify_outbound_event_threaded_edit_uses_claimed_thread_barrier(self) -> None:
-        """Outbound threaded edits should use the claimed thread barrier instead of the room barrier."""
+    async def test_notify_outbound_event_threaded_edit_uses_reserved_thread_barrier(self) -> None:
+        """Outbound threaded edits should use the reserved thread barrier instead of m.new_content."""
         coordinator = _runtime_write_coordinator()
         event_cache = _runtime_event_cache()
         client = _make_client_mock(user_id="@agent:localhost")
@@ -648,6 +648,11 @@ class TestMatrixConversationCacheThreadReads:
             thread_invalidation_started.set()
 
         event_cache.mark_thread_stale = AsyncMock(side_effect=mark_thread_stale)
+        access.reserve_outbound_thread(
+            "!room:localhost",
+            "$thread-message:localhost",
+            "$claimed-thread:localhost",
+        )
         sibling_thread_task = coordinator.queue_thread_update(
             "!room:localhost",
             "$sibling-thread:localhost",
@@ -669,7 +674,7 @@ class TestMatrixConversationCacheThreadReads:
                     "m.new_content": {
                         "body": "updated",
                         "msgtype": "m.text",
-                        "m.relates_to": {"rel_type": "m.thread", "event_id": "$claimed-thread:localhost"},
+                        "m.relates_to": {"rel_type": "m.thread", "event_id": "$forged-thread:localhost"},
                     },
                     "m.relates_to": {"rel_type": "m.replace", "event_id": "$thread-message:localhost"},
                 },
