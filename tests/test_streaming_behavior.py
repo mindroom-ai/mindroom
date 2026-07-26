@@ -1948,6 +1948,8 @@ class TestStreamingBehavior:
             _client: object,
             _room_id: str,
             content: dict[str, object],
+            *,
+            retry_sync_recovery: bool = False,  # noqa: ARG001
         ) -> DeliveredMatrixEvent:
             delivered_contents.append(dict(content))
             return DeliveredMatrixEvent(event_id="$sent", content_sent=dict(content))
@@ -1958,6 +1960,8 @@ class TestStreamingBehavior:
             _event_id: str,
             new_content: dict[str, object],
             _new_text: str,
+            *,
+            retry_sync_recovery: bool = False,  # noqa: ARG001
         ) -> DeliveredMatrixEvent:
             delivered_contents.append(dict(new_content))
             return DeliveredMatrixEvent(event_id="$edit", content_sent=dict(new_content))

@@ -578,11 +578,11 @@ async def test_command_shaped_bypass_source_resolution_failure_is_not_command_te
         TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
     ],
 )
-async def test_duplicate_command_shaped_bypass_sources_both_reach_resolution_failure(
+async def test_duplicate_command_shaped_bypass_source_is_claimed_before_resolution(
     tmp_path: Path,
     source_kind: str,
 ) -> None:
-    """Replay dedup cannot consume synthetic command-shaped text as command control."""
+    """A replay cannot enter resolution while the first synthetic turn owns it."""
     bot = _make_bot(tmp_path, agent_name="router")
     room = _make_room()
     event = _text_event(
@@ -611,12 +611,15 @@ async def test_duplicate_command_shaped_bypass_sources_both_reach_resolution_fai
         patch.object(bot._delivery_gateway, "send_text", new=send_text_mock),
     ):
         first = asyncio.create_task(bot._turn_controller.handle_text_event(room, event))
+        await _wait_for(lambda: resolve_mock.await_count == 1)
         second = asyncio.create_task(bot._turn_controller.handle_text_event(room, event))
-        await _wait_for(lambda: resolve_mock.await_count == 2)
+        await asyncio.sleep(0)
+        assert resolve_mock.await_count == 1
         release_resolution.set()
         outcomes = await asyncio.gather(first, second, return_exceptions=True)
 
-    assert all(isinstance(outcome, ThreadMembershipLookupError) for outcome in outcomes)
+    assert isinstance(outcomes[0], ThreadMembershipLookupError)
+    assert outcomes[1] is None
     send_text_mock.assert_not_awaited()
     assert not bot._turn_store.is_handled("$synthetic")
     assert not bot._turn_store.is_claimed_in_flight("$synthetic")
