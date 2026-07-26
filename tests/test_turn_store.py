@@ -1133,6 +1133,51 @@ def test_turn_record_codec_preserves_physical_source_ownership_when_alias_id_col
     assert recovered.requester_id_for_source(relay_event_id) == "@bob:example.org"
 
 
+def test_physical_source_membership_outranks_alias_when_metadata_is_partial() -> None:
+    """A missing physical metadata row must fail closed instead of resolving through a relay alias."""
+    relay_event_id = "$relay"
+    human_event_id = "$human"
+    turn_record = TurnRecord.create(
+        [relay_event_id, human_event_id],
+        source_event_metadata={
+            relay_event_id: SourceEventMetadata(
+                sender="@bob:example.org",
+                discovery_event_id=human_event_id,
+            ),
+        },
+        requester_id="@bob:example.org",
+    )
+
+    assert turn_record.prompt_source_event_id(human_event_id) == human_event_id
+    assert turn_record.requester_id_for_source(human_event_id) is None
+
+
+def test_redacted_physical_source_does_not_tombstone_colliding_relay_alias() -> None:
+    """Redacting a physical source must retain the sibling relay and its prompt."""
+    relay_event_id = "$relay"
+    human_event_id = "$human"
+    turn_record = TurnRecord.create(
+        [relay_event_id, human_event_id],
+        redacted_source_event_ids=[human_event_id],
+        source_event_prompts={
+            relay_event_id: "routed prompt",
+            human_event_id: "physical prompt",
+        },
+        source_event_metadata={
+            relay_event_id: SourceEventMetadata(
+                sender="@bob:example.org",
+                discovery_event_id=human_event_id,
+            ),
+            human_event_id: SourceEventMetadata(sender="@alice:example.org"),
+        },
+        requester_id="@bob:example.org",
+    )
+
+    assert turn_record.prompt_source_event_id(human_event_id) == human_event_id
+    assert turn_record.replay_source_event_ids == (relay_event_id,)
+    assert turn_record.source_event_prompts == {relay_event_id: "routed prompt"}
+
+
 def test_turn_record_codecs_preserve_explicit_unknown_source_ownership() -> None:
     """An explicit empty source map must survive persistence and disable singleton fallback."""
     event_id = "$source"

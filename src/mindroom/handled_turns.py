@@ -79,11 +79,15 @@ class SourceEventMetadata:
 SourceEventRevision = tuple[int, str]
 
 
-def _prompt_source_event_id(source_event_metadata: Mapping[str, SourceEventMetadata] | None, event_id: str) -> str:
+def _prompt_source_event_id(
+    source_event_ids: tuple[str, ...],
+    source_event_metadata: Mapping[str, SourceEventMetadata] | None,
+    event_id: str,
+) -> str:
     """Return the physical prompt owner for a source or discovery alias."""
-    metadata_by_source = source_event_metadata or {}
-    if event_id in metadata_by_source:
+    if event_id in source_event_ids:
         return event_id
+    metadata_by_source = source_event_metadata or {}
     for source_id, metadata in metadata_by_source.items():
         if metadata.discovery_event_id == event_id:
             return source_id
@@ -150,7 +154,8 @@ class TurnRecord:
             source_event_ids,
             self.source_event_prompts,
             excluded_event_ids={
-                _prompt_source_event_id(source_event_metadata, event_id) for event_id in redacted_source_event_ids
+                _prompt_source_event_id(source_event_ids, source_event_metadata, event_id)
+                for event_id in redacted_source_event_ids
             },
         )
         source_event_revisions = _immutable_source_event_revisions(
@@ -243,7 +248,7 @@ class TurnRecord:
 
     def prompt_source_event_id(self, event_id: str) -> str:
         """Return the physical prompt owner for a source or discovery alias."""
-        return _prompt_source_event_id(self.source_event_metadata, event_id)
+        return _prompt_source_event_id(self.source_event_ids, self.source_event_metadata, event_id)
 
     def requester_id_for_source(self, event_id: str) -> str | None:
         """Return the exact requester for one source, or None when the record cannot prove one.

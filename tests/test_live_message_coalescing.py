@@ -4345,7 +4345,12 @@ async def test_backlog_replay_respects_coalesced_source_ownership(
 
 
 @pytest.mark.asyncio
-async def test_backlog_replay_fails_closed_when_physical_source_collides_with_alias(tmp_path: Path) -> None:
+@pytest.mark.parametrize("include_physical_metadata", [False, True])
+async def test_backlog_replay_fails_closed_when_physical_source_collides_with_alias(
+    tmp_path: Path,
+    *,
+    include_physical_metadata: bool,
+) -> None:
     """A relay alias cannot hide a differently owned physical source during whole-turn suppression."""
     bot = _make_bot(tmp_path)
     room = _make_room()
@@ -4378,15 +4383,17 @@ async def test_backlog_replay_fails_closed_when_physical_source_collides_with_al
             ),
         ],
     )
+    source_event_metadata = {
+        relay_event_id: SourceEventMetadata(
+            sender="@bob:localhost",
+            discovery_event_id=human_event_id,
+        ),
+    }
+    if include_physical_metadata:
+        source_event_metadata[human_event_id] = SourceEventMetadata(sender="@alice:localhost")
     handled_turn = TurnRecord.create(
         [relay_event_id, human_event_id],
-        source_event_metadata={
-            relay_event_id: SourceEventMetadata(
-                sender="@bob:localhost",
-                discovery_event_id=human_event_id,
-            ),
-            human_event_id: SourceEventMetadata(sender="@alice:localhost"),
-        },
+        source_event_metadata=source_event_metadata,
         requester_id="@bob:localhost",
     )
     plan_turn = AsyncMock(return_value=_DispatchPlan(kind="ignore"))
