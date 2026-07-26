@@ -911,7 +911,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
         coordinator_queue_wait_ms: float,
         wants_full_history: bool,
         allows_stale_fallback: bool,
-        bypass_repair_backoff: bool = False,
+        bypass_repair_backoff: bool,
     ) -> ThreadHistoryResult:
         coordinator = self.runtime.event_cache_write_coordinator
         await self._prepare_pending_thread_repair_deltas(room_id, thread_id)
@@ -967,6 +967,8 @@ class MatrixConversationCache(ConversationCacheProtocol):
                     coordinator_queue_wait_ms=0.0,
                     wants_full_history=False,
                     allows_stale_fallback=False,
+                    # Speculative work is the one caller the retained delay is meant to suppress.
+                    bypass_repair_backoff=False,
                 )
             except ThreadRepairBackoffError as exc:
                 self.logger.debug(

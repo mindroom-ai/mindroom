@@ -216,33 +216,16 @@ class ThreadReadPolicy:
         fetcher: _ThreadHistoryFetcher,
         caller_label: str,
         queue_wait_started: float,
+        bypass_repair_backoff: bool,
     ) -> ThreadHistoryResult:
+        """Load one read, letting untimed authoritative modes skip a retained repair delay."""
         coordinator_queue_wait_ms = elapsed_ms_since(queue_wait_started, clock=time.perf_counter)
         return await fetcher(
             room_id,
             thread_id,
             caller_label=caller_label,
             coordinator_queue_wait_ms=coordinator_queue_wait_ms,
-            bypass_repair_backoff=False,
-        )
-
-    async def _load_untimed_thread_read(
-        self,
-        room_id: str,
-        thread_id: str,
-        *,
-        fetcher: _ThreadHistoryFetcher,
-        caller_label: str,
-        queue_wait_started: float,
-    ) -> ThreadHistoryResult:
-        """Load one authoritative read without absorbing retained repair backoff."""
-        coordinator_queue_wait_ms = elapsed_ms_since(queue_wait_started, clock=time.perf_counter)
-        return await fetcher(
-            room_id,
-            thread_id,
-            caller_label=caller_label,
-            coordinator_queue_wait_ms=coordinator_queue_wait_ms,
-            bypass_repair_backoff=True,
+            bypass_repair_backoff=bypass_repair_backoff,
         )
 
     async def _load_dispatch_thread_read(
@@ -277,6 +260,7 @@ class ThreadReadPolicy:
                     fetcher=fetcher,
                     caller_label=caller_label,
                     queue_wait_started=queue_wait_started,
+                    bypass_repair_backoff=False,
                 ),
                 timeout=remaining_timeout,
             )
@@ -342,12 +326,13 @@ class ThreadReadPolicy:
                 dispatch_timeout_seconds=dispatch_timeout_seconds,
             )
         await self._wait_for_pending_thread_cache_updates(room_id, thread_id)
-        return await self._load_untimed_thread_read(
+        return await self._load_thread_read(
             room_id,
             thread_id,
             fetcher=fetcher,
             caller_label=caller_label,
             queue_wait_started=queue_wait_started,
+            bypass_repair_backoff=True,
         )
 
     async def get_latest_thread_event_id_if_needed(

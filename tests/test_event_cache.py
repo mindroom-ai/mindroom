@@ -1294,6 +1294,7 @@ async def test_stored_repair_releases_replayed_delta_filtered_by_redaction(tmp_p
             coordinator_queue_wait_ms=0.0,
             wants_full_history=True,
             allows_stale_fallback=False,
+            bypass_repair_backoff=False,
         )
 
     assert result.is_full_history is True

@@ -1590,9 +1590,11 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             *,
             caller_label: str,
             coordinator_queue_wait_ms: float,
+            bypass_repair_backoff: bool,
         ) -> ThreadHistoryResult:
             assert caller_label == "unknown"
             assert coordinator_queue_wait_ms >= 0.0
+            assert bypass_repair_backoff is True
             fetch_started.set()
             return thread_history_result(
                 [_message(event_id="$thread-a:localhost", body="Root")],
