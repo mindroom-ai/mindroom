@@ -28,7 +28,10 @@ def _representative_config() -> Config:
                 model="summary-model",
                 num_history_runs=7,
                 max_tool_calls_from_history=3,
-                compaction=CompactionOverrideConfig(threshold_percent=0.6),
+                compaction=CompactionOverrideConfig(
+                    threshold_percent=0.6,
+                    timeout_seconds=75.0,
+                ),
                 memory_backend="file",
                 memory_search=AgentMemorySearchConfig(mode="semantic"),
                 tools=[
@@ -69,6 +72,7 @@ def _representative_config() -> Config:
                 replay_window_tokens=24_000,
                 reserve_tokens=2_048,
                 model="summary-model",
+                timeout_seconds=420.0,
             ),
         ),
         models={
@@ -111,10 +115,12 @@ def test_compaction_resolution() -> None:
     assert merged.replay_window_tokens == 24_000
     assert merged.reserve_tokens == 2_048
     assert merged.model == "summary-model"
+    assert merged.timeout_seconds == 75.0
 
     disabled = config.resolve_entity("overriding_team").compaction_config
     assert disabled.enabled is False
     assert disabled.threshold_tokens == 12_000
+    assert disabled.timeout_seconds == 420.0
 
     for inheriting_scope in ("inheriting_agent", "inheriting_team", None):
         inherited = config.resolve_entity(inheriting_scope).compaction_config
@@ -124,6 +130,7 @@ def test_compaction_resolution() -> None:
             replay_window_tokens=24_000,
             reserve_tokens=2_048,
             model="summary-model",
+            timeout_seconds=420.0,
         )
         assert config.resolve_entity(inheriting_scope).has_authored_compaction_config is True
 

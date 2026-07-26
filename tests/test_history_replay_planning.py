@@ -252,6 +252,7 @@ def test_resolved_compaction_config_merges_authored_overrides(tmp_path: Path) ->
                     display_name="Test Agent",
                     compaction=CompactionOverrideConfig(
                         threshold_percent=0.6,
+                        timeout_seconds=75.0,
                     ),
                 ),
             },
@@ -262,6 +263,7 @@ def test_resolved_compaction_config_merges_authored_overrides(tmp_path: Path) ->
                     threshold_tokens=12_000,
                     reserve_tokens=2_048,
                     model="summary-model",
+                    timeout_seconds=420.0,
                 ),
             ),
             models={
@@ -287,6 +289,17 @@ def test_resolved_compaction_config_merges_authored_overrides(tmp_path: Path) ->
     assert resolved.threshold_percent == 0.6
     assert resolved.reserve_tokens == 2_048
     assert resolved.model == "summary-model"
+    assert resolved.timeout_seconds == 75.0
+
+
+def test_compaction_timeout_defaults_to_ten_minutes_and_must_be_positive() -> None:
+    assert CompactionConfig().timeout_seconds == 600.0
+
+    with pytest.raises(ValueError, match="greater than 0"):
+        CompactionConfig(timeout_seconds=0)
+
+    with pytest.raises(ValueError, match="greater than 0"):
+        CompactionOverrideConfig(timeout_seconds=-1)
 
 
 def test_authored_empty_defaults_compaction_enables_destructive_compaction(tmp_path: Path) -> None:
