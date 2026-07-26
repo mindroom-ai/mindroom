@@ -8,9 +8,10 @@ Updated 2026-07-25 after classifying the exact-`0b927ee66` full-suite failures a
 - Branch: `fix/thread-edit-integrity`
 - Latest production commit: `b27420c70a226960e09a5c189085fa02492f6ccc`
 - Current base and merge base: `c1f812a1e15b3c6be05f0cf2720b44431d844087`
-- Published branch head is `0b927ee660f2ccb68c4dcc1130b7bcdb6a581216`.
-- The working tree contains an uncommitted narrow production and test correction atop that head.
-- No exact-head gate counts until that correction is committed and pushed.
+- Local candidate head is `8c4b3b1be541004c6503718db1aa222abd0db6aa`.
+- Published branch head remains `0b927ee660f2ccb68c4dcc1130b7bcdb6a581216` until the candidate is pushed.
+- Tracked working tree is clean.
+- No exact-head gate counts until the local candidate and this refreshed handoff are pushed.
 - Resolve and compare local, origin, and GitHub heads before counting any gate.
 - Three pre-existing untracked `.claude/TASK-*.md` notes are user-owned and must remain untouched.
 
@@ -21,9 +22,9 @@ Updated 2026-07-25 after classifying the exact-`0b927ee66` full-suite failures a
 - `1a7ed86de` prevents durable edit tombstones from resurfacing through cache-miss point reads or thread previews.
 - `b27420c70` rejects explicit wrong-room payloads at the shared cache-write seam, restores SQL-level recent-event limits, and removes unreachable payload/index guards.
 - `42c316201` synchronizes current `main`, including merged startup auto-resume and mixed-requester replay corrections.
-- The pending correction updates eighteen stale test contracts and incomplete fixtures after the canonical edit-identity and rich-reply-root fixes.
-- The pending production correction rejects state and wrong-room point-event envelopes before they can supply relation ancestry.
-- The pending replay correction requires current-room message-capable timeline scope before raw cached relations can suppress a turn.
+- `7f3891d6d` updates eighteen stale test contracts and incomplete fixtures after the canonical edit-identity and rich-reply-root fixes.
+- `8c4b3b1be` rejects state and wrong-room point-event envelopes before they can supply relation ancestry.
+- `8c4b3b1be` also requires current-room message-capable timeline scope before raw cached relations can suppress a turn.
 
 ## Reconciled review status
 
@@ -33,7 +34,7 @@ Updated 2026-07-25 after classifying the exact-`0b927ee66` full-suite failures a
 - Claude's exact-`0b927ee66` red-suite report is valid about the eighteen failures but wrong that legacy wrong-room rows now flow through; read certification still rejects them.
 - A fresh native Codex review found two additional state-event relation gaps, and both reproduced deterministically before correction.
 - The withdrawn edit-index timestamp-poison claim remains excluded because it required direct inconsistent SQL writes outside production paths.
-- Production source against current `main` is `+1461/-1096`, net `+365`.
+- Production source against current `main` is `+1483/-1103`, net `+380`.
 - This is 109 net production lines smaller than the reviewed `+474` baseline and 61 lines smaller than the reconciled review estimate.
 
 ## Validation already completed
@@ -51,7 +52,7 @@ Updated 2026-07-25 after classifying the exact-`0b927ee66` full-suite failures a
 ## Pending exact-head gates
 
 - GitHub pytest is red on stale head `0b927ee66`; every other completed check is green.
-- Commit and push the validated correction before restarting CI and review.
+- Push the validated correction before restarting CI and review.
 - A fresh independent native Codex correctness review is required on that exact head.
 - Exact-head PostgreSQL owning and stress selections are required.
 - Exact-head full pytest is required.
