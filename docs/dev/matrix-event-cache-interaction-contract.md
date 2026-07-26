@@ -118,7 +118,8 @@ A refill that completes without installing a snapshot still returns its homeserv
 
 A repair that raises or reports `hard_failure` enters capped exponential backoff starting at one second and capped at 30 seconds, while a usable outcome clears prior failure state.
 An uncached `writes_unavailable` or stale-cache fallback completion does not arm backoff.
-Reads without a dispatch timeout wait that backoff out; dispatch-safe reads return a degraded result with `thread_read_error` `cache_repair_backoff` and let their caller fall back to a strict read.
+Reads without a dispatch timeout bypass a retained backoff and perform a fresh authoritative reconstruction, so a throttle protecting cache writes never stalls a turn; dispatch-safe reads return a degraded result with `thread_read_error` `cache_repair_backoff` and let their caller fall back to a strict read.
+Bypassing preserves the failure count, so background repair stays suppressed for the remaining delay.
 A degraded dispatch proof for an unproven thread candidate also retries strict proof before it may demote the event to room level.
 
 Startup thread prewarm scans outside the live write coordinator so its bulk room scan cannot starve dispatch repairs.
