@@ -4,7 +4,7 @@
 
 - PR: `#1641`
 - Branch: `fix/thread-edit-integrity`
-- Published head before this correction: `d84284c2002a5d8c1351c74b0d62fc4943458a4b`
+- Current local, remote, and GitHub head: `e77d32752a33e41ef724f87e7f5efd077ea4c257`
 - Current base and merge-base: `858282afc77adb480fa06cd9e4057d511ff861d5`
 - Never amend, force-push, merge, or store durable evidence in a temporary directory.
 - Preserve the three untracked `.claude/TASK-*` files and `artifacts/`.
@@ -33,13 +33,14 @@ The append path had the same ID-only acknowledgement race after incremental reva
 - Four adjacent membership/resolver/thread-context suites: passed.
 - Ruff, ty, Tach, and `git diff --check`: passed.
 - Fresh reviewers found no fourth blocker in the dirty correction.
+- Aggregation and redacted-identity commit: `a4ac722121db7f92f03658259e0543a0afc7da43`.
+- Exact-acknowledgement commit: `e77d32752a33e41ef724f87e7f5efd077ea4c257`.
 
 ## Remaining sequence
 
-1. Commit the identity/aggregation correction and exact-ack correction separately with Bas author identity.
-2. Push normally and update the PR body plus external campaign ledgers to the exact new head.
-3. Run fresh exact-head independent Codex correctness review and ingest every current GitHub comment.
-4. Run full pytest, explicit PostgreSQL backend stress, all-file pre-commit, Tach, and CI on one unchanged head.
-5. Delete this living handoff in a final commit, then restart every exact-head approval and validation invalidated by that commit.
-6. Run the preserved real-Tuwunel gate last on that exact unchanged final head and retain all evidence.
-7. Never merge.
+1. Update the PR body to this exact head and run fresh exact-head independent Codex correctness review.
+2. Ingest every current GitHub comment.
+3. Run full pytest, explicit PostgreSQL backend stress, all-file pre-commit, Tach, and CI on one unchanged head.
+4. Delete this living handoff in a final commit, then restart every exact-head approval and validation invalidated by that commit.
+5. Run the preserved real-Tuwunel gate last on that exact unchanged final head and retain all evidence.
+6. Never merge.
