@@ -318,20 +318,11 @@ async def test_failing_repair_enters_bounded_backoff_without_hot_retry() -> None
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "outcome",
-    [
-        ThreadCacheReplaceOutcome.HARD_FAILURE,
-        ThreadCacheReplaceOutcome.WRITES_UNAVAILABLE,
-    ],
-)
-async def test_unusable_repair_outcome_enters_backoff_without_reusing_history(
-    outcome: ThreadCacheReplaceOutcome,
-) -> None:
-    """A failed install should throttle retries without caching reconstructed history."""
+async def test_hard_failure_enters_backoff_without_reusing_history() -> None:
+    """A persistent store failure should throttle retries without caching reconstructed history."""
     now = 10.0
     registry = ThreadRepairRegistry(failure_backoff_seconds=2.0, clock=lambda: now)
-    repair = AsyncMock(return_value=outcome)
+    repair = AsyncMock(return_value=ThreadCacheReplaceOutcome.HARD_FAILURE)
     key = ("@agent:localhost", "!room:localhost", "$thread", True, False)
 
     first = await registry.run(
@@ -348,7 +339,7 @@ async def test_unusable_repair_outcome_enters_backoff_without_reusing_history(
             result_arms_backoff=lambda result: not result.usable,
         )
 
-    assert first.value is outcome
+    assert first.value is ThreadCacheReplaceOutcome.HARD_FAILURE
     repair.assert_awaited_once()
 
     now = 12.0
@@ -359,8 +350,33 @@ async def test_unusable_repair_outcome_enters_backoff_without_reusing_history(
         result_arms_backoff=lambda result: not result.usable,
     )
 
-    assert second.value is outcome
+    assert second.value is ThreadCacheReplaceOutcome.HARD_FAILURE
     assert second.joined is False
+    assert repair.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_writes_unavailable_completion_does_not_arm_backoff() -> None:
+    """A disabled cache should allow each strict caller to attempt an uncached read."""
+    registry = ThreadRepairRegistry(failure_backoff_seconds=2.0)
+    repair = AsyncMock(return_value=ThreadCacheReplaceOutcome.WRITES_UNAVAILABLE)
+    key = ("@agent:localhost", "!room:localhost", "$thread", False, False)
+
+    first = await registry.run(
+        key,
+        schedule=_schedule,
+        repair=repair,
+        result_arms_backoff=lambda result: result is ThreadCacheReplaceOutcome.HARD_FAILURE,
+    )
+    second = await registry.run(
+        key,
+        schedule=_schedule,
+        repair=repair,
+        result_arms_backoff=lambda result: result is ThreadCacheReplaceOutcome.HARD_FAILURE,
+    )
+
+    assert first.value is ThreadCacheReplaceOutcome.WRITES_UNAVAILABLE
+    assert second.value is ThreadCacheReplaceOutcome.WRITES_UNAVAILABLE
     assert repair.await_count == 2
 
 

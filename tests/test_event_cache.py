@@ -738,6 +738,67 @@ async def test_shared_repair_logs_completion_for_each_caller(tmp_path: Path) -> 
     ]
 
 
+def test_missing_thread_repair_skips_when_writes_unavailable(tmp_path: Path) -> None:
+    """A disabled durable cache should not launch futile background refill work."""
+    event_cache = MagicMock()
+    event_cache.principal_id = "@agent:localhost"
+    event_cache.durable_writes_available = False
+    conversation_cache = _conversation_cache_for_thread_reads(tmp_path, event_cache, client=MagicMock())
+    coordinator = MagicMock()
+    coordinator.run_thread_repair = AsyncMock()
+    conversation_cache.runtime.event_cache_write_coordinator = coordinator
+
+    with patch("mindroom.matrix.conversation_cache.create_background_task") as create_task:
+        conversation_cache._schedule_missing_thread_repair("!room:localhost", "$thread:localhost")
+
+    if create_task.called:
+        create_task.call_args.args[0].close()
+    create_task.assert_not_called()
+    coordinator.run_thread_repair.assert_not_awaited()
+
+
+def test_only_persistent_thread_repair_failure_arms_backoff(tmp_path: Path) -> None:
+    """Unavailable writes should stay uncached without throttling later strict reads."""
+    conversation_cache = _conversation_cache_for_thread_reads(tmp_path, MagicMock(), client=MagicMock())
+    writes_unavailable = thread_history_result(
+        [],
+        is_full_history=True,
+        diagnostics={
+            "cache_store_outcome": ThreadCacheReplaceOutcome.WRITES_UNAVAILABLE.value,
+            "cache_repair_usable": False,
+        },
+    )
+    hard_failure = thread_history_result(
+        [],
+        is_full_history=True,
+        diagnostics={
+            "cache_store_outcome": ThreadCacheReplaceOutcome.HARD_FAILURE.value,
+            "cache_repair_usable": False,
+        },
+    )
+    skipped_snapshot = thread_history_result(
+        [],
+        is_full_history=True,
+        diagnostics={
+            "cache_store_outcome": "skipped_missing_thread_root",
+            "cache_repair_usable": False,
+        },
+    )
+    stale_fallback = thread_history_result(
+        [],
+        is_full_history=True,
+        diagnostics={
+            THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_STALE_CACHE,
+            "cache_repair_usable": False,
+        },
+    )
+
+    assert conversation_cache._thread_repair_result_arms_backoff(writes_unavailable) is False
+    assert conversation_cache._thread_repair_result_arms_backoff(skipped_snapshot) is False
+    assert conversation_cache._thread_repair_result_arms_backoff(stale_fallback) is False
+    assert conversation_cache._thread_repair_result_arms_backoff(hard_failure) is True
+
+
 @pytest.mark.asyncio
 async def test_dispatch_thread_read_degrades_when_fetcher_stalls(
     tmp_path: Path,

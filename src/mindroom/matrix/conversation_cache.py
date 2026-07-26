@@ -899,7 +899,7 @@ class MatrixConversationCache(ConversationCacheProtocol):
             coordination_scope=principal_id,
             hydrate_sidecars=wants_full_history,
             allow_stale_fallback=allows_stale_fallback,
-            result_arms_backoff=lambda result: not self._thread_repair_result_is_usable(result),
+            result_arms_backoff=self._thread_repair_result_arms_backoff,
         )
         return repair_run.value
 
@@ -958,10 +958,15 @@ class MatrixConversationCache(ConversationCacheProtocol):
         source = result.diagnostics.get(THREAD_HISTORY_SOURCE_DIAGNOSTIC)
         return source == THREAD_HISTORY_SOURCE_CACHE or result.diagnostics.get("cache_repair_usable") is True
 
+    @staticmethod
+    def _thread_repair_result_arms_backoff(result: ThreadHistoryResult) -> bool:
+        """Return whether one persistent failure should throttle later refills."""
+        return result.diagnostics.get("cache_store_outcome") == ThreadCacheReplaceOutcome.HARD_FAILURE.value
+
     def _schedule_missing_thread_repair(self, room_id: str, thread_id: str) -> None:
         """Schedule bounded background repair after an append finds no snapshot."""
         coordinator = self.runtime.event_cache_write_coordinator
-        if coordinator is None:
+        if coordinator is None or not self.runtime.event_cache.durable_writes_available:
             return
 
         async def repair() -> None:
@@ -982,8 +987,6 @@ class MatrixConversationCache(ConversationCacheProtocol):
                     thread_id=thread_id,
                     retry_after_seconds=exc.retry_after_seconds,
                 )
-            except asyncio.CancelledError:
-                raise
             except Exception as exc:
                 self.logger.warning(
                     "Background thread cache repair failed",
