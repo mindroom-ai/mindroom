@@ -162,6 +162,18 @@ def update_last_summary_count(room_id: str, thread_id: str, message_count: int) 
         _last_summary_counts[cache_key] = message_count
 
 
+def _record_summary_count_after_delivery(
+    room_id: str,
+    thread_id: str,
+    message_count: int,
+    *,
+    payload_was_frozen: bool,
+) -> None:
+    """Advance the threshold only after an observable Matrix delivery."""
+    if not payload_was_frozen:
+        update_last_summary_count(room_id, thread_id, message_count)
+
+
 def _next_threshold(
     last_summarized_count: int,
     *,
@@ -857,4 +869,9 @@ async def maybe_generate_thread_summary(  # noqa: C901
             raise RuntimeError(msg)
         # Record after the delivery attempt so cancellation cannot leave a
         # partially delivered initial enrichment marked complete.
-        update_last_summary_count(room_id, thread_id, message_count)
+        _record_summary_count_after_delivery(
+            room_id,
+            thread_id,
+            message_count,
+            payload_was_frozen=frozen_delivery is not None,
+        )

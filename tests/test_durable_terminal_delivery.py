@@ -20,6 +20,7 @@ from mindroom.matrix.client import DeliveredMatrixEvent
 from mindroom.message_target import MessageTarget
 from mindroom.response_identity import FrozenThreadSummary, ResponseIdentity
 from mindroom.terminal_delivery import (
+    PendingTerminalDelivery,
     TerminalDeliveryCoordinator,
     TerminalDeliveryCoordinatorDeps,
     TerminalDeliveryIntent,
@@ -52,6 +53,7 @@ class _Effects:
         self.fail_interactive = False
         self.fail_summary = False
         self.fail_summary_delivery = False
+        self.summary_eligible = True
 
     async def register_interactive_delivery(self, **kwargs: object) -> None:
         key = str(kwargs["idempotency_key"])
@@ -61,9 +63,8 @@ class _Effects:
             message = "reaction failed"
             raise OSError(message)
 
-    @staticmethod
-    def should_queue_thread_summary(_room: str, _thread: str, _hint: int | None) -> bool:
-        return True
+    def should_queue_thread_summary(self, _room: str, _thread: str, _hint: int | None) -> bool:
+        return self.summary_eligible
 
     async def prepare_thread_summary(
         self,
@@ -256,6 +257,18 @@ def test_malformed_row_does_not_discard_valid_sibling(tmp_path: Path) -> None:
     assert _store(tmp_path).warm() == (valid,)
 
 
+def test_row_read_error_fails_warm_without_forgetting_committed_work(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    item = store.record(_intent())
+    assert item is not None
+
+    with (
+        patch("pathlib.Path.read_text", side_effect=OSError("input/output error")),
+        pytest.raises(OSError, match="input/output error"),
+    ):
+        _store(tmp_path).warm()
+
+
 def test_malformed_retry_timestamp_does_not_poison_valid_sibling(tmp_path: Path) -> None:
     store = _store(tmp_path)
     valid = store.record(_intent())
@@ -310,6 +323,37 @@ async def test_first_attempt_and_retry_use_identical_wire_payload_and_transactio
     assert [call.args[2] for call in sends.await_args_list] == [dict(item.wire_content), dict(item.wire_content)]
     assert {call.kwargs["transaction_id"] for call in sends.await_args_list} == {item.transaction_id}
     assert all(call.kwargs["content_is_prepared"] for call in sends.await_args_list)
+
+
+@pytest.mark.asyncio
+async def test_cancelled_first_attempt_returns_durable_ownership_for_retry(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    coordinator, hooks = _coordinator(store)
+    send_started = asyncio.Event()
+    attempt_count = 0
+
+    async def send(*_args: object, **_kwargs: object) -> DeliveredMatrixEvent:
+        nonlocal attempt_count
+        attempt_count += 1
+        if attempt_count == 1:
+            send_started.set()
+            await asyncio.Event().wait()
+        return _delivered()
+
+    with patch("mindroom.terminal_delivery.send_message_result", new=send):
+        attempt = asyncio.create_task(coordinator.commit_and_attempt(_intent()))
+        await send_started.wait()
+        attempt.cancel()
+        commit = await attempt
+
+        assert commit.pending is not None
+        assert commit.status == "deferred"
+        assert commit.reason == "cancelled"
+        await coordinator._drain_item(commit.pending)
+
+    assert not attempt.cancelled()
+    assert attempt_count == 2
+    hooks.emit_after_response.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -443,6 +487,60 @@ async def test_slow_lifecycle_does_not_block_another_delivery_transport(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_due_drain_keeps_other_rooms_moving_with_more_than_one_batch(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    coordinator, _hooks = _coordinator(store)
+    for index in range(9):
+        item = store.record(
+            replace(
+                _intent(
+                    correlation_id=f"corr-{index}",
+                    target=_target(f"!room-{index}:localhost"),
+                ),
+                target_event_id=f"$visible-{index}",
+            ),
+        )
+        assert item is not None
+
+    all_due = store.due(limit=9)
+    blocked_id = all_due[0].delivery_id
+    ninth_id = all_due[8].delivery_id
+    blocked = asyncio.Event()
+    release = asyncio.Event()
+    ninth_finished = asyncio.Event()
+    active = 0
+    max_active = 0
+
+    async def drain_item(item: PendingTerminalDelivery) -> None:
+        nonlocal active, max_active
+        delivery_id = item.delivery_id
+        active += 1
+        max_active = max(max_active, active)
+        try:
+            if delivery_id == blocked_id:
+                blocked.set()
+                await release.wait()
+            else:
+                await asyncio.sleep(0)
+            if delivery_id == ninth_id:
+                ninth_finished.set()
+        finally:
+            active -= 1
+
+    coordinator._drain_item = drain_item  # type: ignore[method-assign]
+    draining = asyncio.create_task(coordinator.drain_once())
+    await blocked.wait()
+    try:
+        await asyncio.wait_for(ninth_finished.wait(), 0.5)
+    finally:
+        release.set()
+        drained = await draining
+
+    assert drained == 9
+    assert 1 < max_active <= 8
+
+
+@pytest.mark.asyncio
 async def test_failed_redaction_persistence_remains_fail_closed(tmp_path: Path) -> None:
     store = _store(tmp_path)
     coordinator, _hooks = _coordinator(store)
@@ -539,6 +637,79 @@ async def test_summary_retry_reuses_persisted_payload_and_transaction(tmp_path: 
 
 
 @pytest.mark.asyncio
+async def test_persisted_summary_retry_bypasses_changed_eligibility(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    effects = _Effects()
+    effects.fail_summary_delivery = True
+    coordinator, _hooks = _coordinator(store, effects=effects)
+
+    with patch("mindroom.terminal_delivery.send_message_result", new=AsyncMock(return_value=_delivered())):
+        commit = await coordinator.commit_and_attempt(_intent())
+        assert commit.pending is not None
+        pending = store.get(commit.pending.delivery_id)
+        assert pending is not None
+        assert pending.thread_summary is not None
+        effects.summary_eligible = False
+        await coordinator._drain_item(pending)
+
+    assert effects.summary_prepares == 1
+    assert len(effects.summary_payloads) == 2
+    [receipt] = store.items()
+    assert receipt.settled
+
+
+@pytest.mark.asyncio
+async def test_failed_frozen_summary_reserves_thread_across_concurrent_delivery(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    effects = _Effects()
+    coordinator, _hooks = _coordinator(store, effects=effects)
+    first_summary_started = asyncio.Event()
+    release_first_summary = asyncio.Event()
+    second_summary_delivered = asyncio.Event()
+    summary_calls = 0
+
+    async def deliver_summary(
+        _room: str,
+        _thread: str,
+        frozen: FrozenThreadSummary,
+        *,
+        transaction_id: str,
+    ) -> None:
+        nonlocal summary_calls
+        effects.summary_keys.append(transaction_id)
+        effects.summary_payloads.append(frozen)
+        summary_calls += 1
+        if summary_calls == 1:
+            first_summary_started.set()
+            await release_first_summary.wait()
+            message = "summary delivery failed"
+            raise OSError(message)
+        second_summary_delivered.set()
+
+    effects.deliver_thread_summary = deliver_summary  # type: ignore[method-assign]
+    second_intent = replace(
+        _intent(correlation_id="corr-2"),
+        target_event_id="$visible-2",
+    )
+    with patch("mindroom.terminal_delivery.send_message_result", new=AsyncMock(return_value=_delivered())):
+        first_attempt = asyncio.create_task(coordinator.commit_and_attempt(_intent()))
+        await first_summary_started.wait()
+        second_attempt = asyncio.create_task(coordinator.commit_and_attempt(second_intent))
+        await asyncio.sleep(0.05)
+        try:
+            assert effects.summary_prepares == 1
+            assert not second_summary_delivered.is_set()
+        finally:
+            release_first_summary.set()
+        first, second = await asyncio.gather(first_attempt, second_attempt)
+
+    assert first.pending is not None
+    assert second.pending is not None
+    assert effects.summary_prepares == 1
+    assert len(effects.summary_payloads) == 1
+
+
+@pytest.mark.asyncio
 async def test_cancelled_retry_safe_lifecycle_claim_is_released(tmp_path: Path) -> None:
     store = _store(tmp_path)
     effects = _Effects()
@@ -612,3 +783,15 @@ async def test_stop_awaits_shielded_settlement(tmp_path: Path) -> None:
     assert not stopping.done()
     finish.set()
     await stopping
+
+
+@pytest.mark.asyncio
+async def test_completed_delivery_lock_is_released_from_registry(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    coordinator, _hooks = _coordinator(store)
+
+    with patch("mindroom.terminal_delivery.send_message_result", new=AsyncMock(return_value=_delivered())):
+        commit = await coordinator.commit_and_attempt(_intent())
+
+    assert commit.item is not None
+    assert commit.item.delivery_id not in coordinator._locks

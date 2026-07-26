@@ -12,6 +12,7 @@ from collections import deque
 from collections.abc import Mapping  # noqa: TC003
 from dataclasses import asdict, dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Literal, cast
+from weakref import WeakValueDictionary
 
 from pydantic import TypeAdapter
 
@@ -39,6 +40,7 @@ logger = get_logger(__name__)
 
 TERMINAL_DELIVERY_SCHEMA_VERSION = 7
 DEFAULT_POLL_INTERVAL_SECONDS = 15.0
+_MAX_DRAIN_WORKERS = 8
 _ITEM_ADAPTER: TypeAdapter[PendingTerminalDelivery] | None = None
 
 TerminalDeliveryStatus = Literal["delivered", "deferred", "superseded"]
@@ -177,7 +179,7 @@ class TerminalDeliveryStore:
             item.target_event_id for item in self.items() if room_id is None or item.target.room_id == room_id
         )
 
-    def due(self, *, limit: int) -> tuple[PendingTerminalDelivery, ...]:
+    def due(self, *, limit: int | None = None) -> tuple[PendingTerminalDelivery, ...]:
         """Read due work round-robin across rooms."""
         due = sorted(
             (item for item in self.items() if item.next_attempt_at <= self.clock()),
@@ -187,11 +189,23 @@ class TerminalDeliveryStore:
         for item in due:
             by_room.setdefault(item.target.room_id, deque()).append(item)
         selected: list[PendingTerminalDelivery] = []
-        while len(selected) < limit and any(by_room.values()):
+        while (limit is None or len(selected) < limit) and any(by_room.values()):
             for queue in by_room.values():
-                if queue and len(selected) < limit:
+                if queue and (limit is None or len(selected) < limit):
                     selected.append(queue.popleft())
         return tuple(selected)
+
+    def thread_summary_owner(self, *, room_id: str, thread_id: str) -> str | None:
+        """Return the stable owner of one outstanding frozen thread summary."""
+        candidates = (
+            item.delivery_id
+            for item in self.items()
+            if item.target.room_id == room_id
+            and item.target.resolved_thread_id == thread_id
+            and item.thread_summary is not None
+            and "thread_summary" not in item.completed_lifecycle_steps
+        )
+        return min(candidates, default=None)
 
     def update(
         self,
@@ -248,7 +262,7 @@ class TerminalDeliveryStore:
                     if row_file != self._row_file(item.delivery_id):
                         message = "terminal delivery row filename mismatch"
                         raise ValueError(message)  # noqa: TRY301
-                except (OSError, ValueError, TypeError, KeyError, AttributeError):
+                except (ValueError, TypeError, KeyError, AttributeError):
                     logger.warning("terminal_delivery_row_dropped", agent=self.agent_name, exc_info=True)
                     continue
                 items[item.delivery_id] = item
@@ -347,7 +361,8 @@ class TerminalDeliveryCoordinator:
     """Single authority for durable terminal transport and retryable success effects."""
 
     deps: TerminalDeliveryCoordinatorDeps
-    _locks: dict[str, asyncio.Lock] = field(default_factory=dict, init=False)
+    _locks: WeakValueDictionary[str, asyncio.Lock] = field(default_factory=WeakValueDictionary, init=False)
+    _summary_locks: WeakValueDictionary[str, asyncio.Lock] = field(default_factory=WeakValueDictionary, init=False)
     _wake: asyncio.Event = field(default_factory=asyncio.Event, init=False)
     _task: asyncio.Task[None] | None = field(default=None, init=False)
     _settlement: asyncio.Task[None] | None = field(default=None, init=False)
@@ -391,19 +406,22 @@ class TerminalDeliveryCoordinator:
                 return TerminalDeliveryCommit(None, "superseded", "redacted")
             if item.settled:
                 return TerminalDeliveryCommit(item, "delivered", "settled_receipt")
-            status, reason = (
-                ("delivered", "transport_already_delivered")
-                if item.transport_delivered
-                else await self._attempt_locked(item)
-            )
+            status: TerminalDeliveryStatus = "deferred"
+            reason = "cancelled"
             try:
+                status, reason = (
+                    ("delivered", "transport_already_delivered")
+                    if item.transport_delivered
+                    else await self._attempt_locked(item)
+                )
                 await self._settle_locked(item, status, self.store.clock())
+                current = await asyncio.to_thread(self.store.get, item.delivery_id)
             except asyncio.CancelledError:
+                self.wake(reason="first_attempt_cancelled")
                 return TerminalDeliveryCommit(item, status, reason)
             except Exception:
                 self.deps.logger.exception("terminal_delivery_first_attempt_raised", **item.log_context)
-                return TerminalDeliveryCommit(item, status, reason)
-            current = await asyncio.to_thread(self.store.get, item.delivery_id)
+                return TerminalDeliveryCommit(item, status, "attempt_raised")
             return TerminalDeliveryCommit(current or item, status, reason)
 
     async def redact(self, *, room_id: str, event_id: str) -> None:
@@ -422,16 +440,42 @@ class TerminalDeliveryCoordinator:
         return self.store.pending_target_event_ids(room_id)
 
     async def drain_once(self) -> int:
-        """Drain one room-diverse due batch sequentially."""
-        due = await asyncio.to_thread(self.store.due, limit=8)
-        for item in due:
-            self._settlement = asyncio.create_task(
-                self._drain_item(item),
-                name=f"terminal_delivery_settle_{item.delivery_id}",
-            )
+        """Drain all currently due rooms with bounded per-room workers."""
+        due = await asyncio.to_thread(self.store.due)
+        if not due:
+            return 0
+        settlement = asyncio.create_task(
+            self._drain_due(due),
+            name="terminal_delivery_settle_due",
+        )
+        self._settlement = settlement
+        try:
             await asyncio.shield(self._settlement)
-            self._settlement = None
+        finally:
+            if settlement.done():
+                self._settlement = None
         return len(due)
+
+    async def _drain_due(self, due: tuple[PendingTerminalDelivery, ...]) -> None:
+        by_room: dict[str, deque[PendingTerminalDelivery]] = {}
+        for item in due:
+            by_room.setdefault(item.target.room_id, deque()).append(item)
+        room_queue: asyncio.Queue[deque[PendingTerminalDelivery]] = asyncio.Queue()
+        for room_items in by_room.values():
+            room_queue.put_nowait(room_items)
+
+        async def drain_rooms() -> None:
+            while True:
+                try:
+                    room_items = room_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    return
+                for item in room_items:
+                    await self._drain_item(item)
+
+        async with asyncio.TaskGroup() as workers:
+            for _index in range(min(_MAX_DRAIN_WORKERS, len(by_room))):
+                workers.create_task(drain_rooms())
 
     async def _drain_item(self, item: PendingTerminalDelivery) -> None:
         async with self._lock_for(item.delivery_id):
@@ -466,7 +510,8 @@ class TerminalDeliveryCoordinator:
             self._wake.clear()
             if self.deps.is_ready():
                 try:
-                    await self.drain_once()
+                    while self.deps.is_ready() and await self.drain_once():
+                        pass
                 except asyncio.CancelledError:
                     raise
                 except Exception:
@@ -617,32 +662,39 @@ class TerminalDeliveryCoordinator:
         item: PendingTerminalDelivery,
     ) -> PendingTerminalDelivery | None:
         thread_id = item.target.resolved_thread_id
-        if thread_id is None or not self.deps.post_response_effects.should_queue_thread_summary(
-            item.target.room_id,
-            thread_id,
-            item.identity.thread_summary_message_count_hint,
-        ):
+        if thread_id is None:
             return item
+        summary_key = f"{item.target.room_id}\x1f{thread_id}"
+        async with self._summary_lock_for(summary_key):
+            return await self._complete_thread_summary_locked(item, thread_id)
+
+    async def _complete_thread_summary_locked(
+        self,
+        item: PendingTerminalDelivery,
+        thread_id: str,
+    ) -> PendingTerminalDelivery | None:
         frozen = item.thread_summary
+        owner = await asyncio.to_thread(
+            self.store.thread_summary_owner,
+            room_id=item.target.room_id,
+            thread_id=thread_id,
+        )
+        if owner is not None and owner != item.delivery_id:
+            return None
         if frozen is None:
-            frozen = await self.deps.post_response_effects.prepare_thread_summary(
+            if not self.deps.post_response_effects.should_queue_thread_summary(
                 item.target.room_id,
                 thread_id,
-                item.identity.response_envelope.agent_name,
-            )
-            if frozen is None:
+                item.identity.thread_summary_message_count_hint,
+            ):
                 return item
-            if not await self._is_current_and_live(item):
-                return None
-            updated = await asyncio.to_thread(
-                self.store.update,
-                item.delivery_id,
-                revision=item.revision,
-                thread_summary=frozen,
-            )
+            updated = await self._freeze_thread_summary(item, thread_id)
             if updated is None:
                 return None
             item = updated
+            frozen = item.thread_summary
+            if frozen is None:
+                return item
         if not await self._is_current_and_live(item):
             return None
         await self.deps.post_response_effects.deliver_thread_summary(
@@ -652,6 +704,27 @@ class TerminalDeliveryCoordinator:
             transaction_id=f"mindroom-summary-{item.delivery_id}-{item.revision}",
         )
         return item
+
+    async def _freeze_thread_summary(
+        self,
+        item: PendingTerminalDelivery,
+        thread_id: str,
+    ) -> PendingTerminalDelivery | None:
+        frozen = await self.deps.post_response_effects.prepare_thread_summary(
+            item.target.room_id,
+            thread_id,
+            item.identity.response_envelope.agent_name,
+        )
+        if frozen is None:
+            return item
+        if not await self._is_current_and_live(item):
+            return None
+        return await asyncio.to_thread(
+            self.store.update,
+            item.delivery_id,
+            revision=item.revision,
+            thread_summary=frozen,
+        )
 
     async def _is_current_and_live(self, item: PendingTerminalDelivery) -> bool:
         current = await asyncio.to_thread(self.store.get, item.delivery_id)
@@ -673,7 +746,18 @@ class TerminalDeliveryCoordinator:
         )
 
     def _lock_for(self, delivery_id: str) -> asyncio.Lock:
-        return self._locks.setdefault(delivery_id, asyncio.Lock())
+        lock = self._locks.get(delivery_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._locks[delivery_id] = lock
+        return lock
+
+    def _summary_lock_for(self, summary_key: str) -> asyncio.Lock:
+        lock = self._summary_locks.get(summary_key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._summary_locks[summary_key] = lock
+        return lock
 
 
 __all__ = [

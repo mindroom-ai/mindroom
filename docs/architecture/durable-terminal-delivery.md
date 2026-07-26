@@ -21,13 +21,16 @@ The exact prepared Matrix payload is persisted before the first transport attemp
 This preparation includes any large-message sidecar reference, so a retry never uploads the body again.
 Every revision has one deterministic Matrix transaction ID, and every retry reuses that ID and the persisted payload.
 
-The per-entity JSON file is written with an fsynced temporary file, atomic replacement, directory fsync, and an advisory lock.
-Store mutations build a candidate snapshot, persist it, and publish it to process memory only after the write succeeds.
+Each delivery row has an independent JSON file written with an fsynced temporary file, atomic replacement, and directory fsync.
+Store mutations persist only the affected row and publish it to process memory only after the write succeeds.
 A failed write therefore leaves both durable and in-memory state unchanged.
 
 Rows have no durable attempt lease.
 One process owns one retry loop, and the stable transaction ID makes replay after a crash safe.
-Due rows are selected round-robin across rooms and retried indefinitely with bounded exponential backoff.
+Due rows are selected round-robin across rooms and assigned to at most eight workers.
+Each worker serializes one room at a time, while unrelated rooms continue independently and every row already due remains eligible for the same drain.
+The retry loop immediately scans again after productive drains, so work that became due during a drain does not wait for the poll interval.
+Deferred rows retry indefinitely with bounded exponential backoff.
 Wakeups after sync recovery reduce latency, while periodic polling preserves correctness when a wakeup is missed.
 
 ## Identity and precedence
@@ -52,15 +55,17 @@ The after-response hook is claimed before invocation and is therefore explicitly
 Interactive registration and thread summaries use stable idempotency identities and are checkpointed only after their observable work succeeds.
 Interactive persistence failures and Matrix reaction failures raise back to the authority instead of being logged as success.
 Durable thread-summary execution is awaited, uses a deterministic Matrix transaction ID, and treats history, generation, or send failure as retryable.
-Once transport and all lifecycle steps are settled, the row is deleted.
+The exact frozen summary bypasses later volatile eligibility checks, and its delivered message count advances only after Matrix accepts the frozen payload.
+One outstanding frozen summary owns its thread until delivery succeeds or its row is removed, preventing concurrent responses from preparing competing summaries.
+Once transport and all lifecycle steps are settled, the row remains as a receipt until the outer handled-turn ledger is durably flushed for every source.
 
-Shutdown cancels transport work but awaits any shielded settlement that already has a transport result.
+Shutdown cancels the retry loop but awaits any shielded settlement batch already in progress.
 
 ## Recovery and cleanup
 
 Startup loads every valid pending row.
 A malformed individual row is dropped without discarding valid siblings.
-An unreadable or wrong-schema top-level file is quarantined.
+An unreadable row propagates its I/O failure instead of publishing an incomplete in-memory snapshot.
 Stale-stream cleanup skips visible events still owned by durable terminal delivery, so it cannot overwrite a committed answer with an interruption notice.
 
 ## Retention

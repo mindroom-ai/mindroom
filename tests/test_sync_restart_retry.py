@@ -191,8 +191,8 @@ async def test_team_resolution_fallback_obeys_locked_retry_guard(tmp_path: Path,
 
 
 @pytest.mark.asyncio
-async def test_team_resolution_fallback_sync_restart_registers_retry(tmp_path: Path) -> None:
-    """Cancellation while editing a fallback reason must retain the edit for retry."""
+async def test_team_resolution_fallback_sync_restart_keeps_durable_owner(tmp_path: Path) -> None:
+    """Cancellation after durable commit must not register a competing response retry."""
     bot = _bot(tmp_path)
     runner = unwrap_extracted_collaborator(bot._response_runner)
     target = _target(reply_to_event_id="$source")
@@ -230,8 +230,9 @@ async def test_team_resolution_fallback_sync_restart_registers_retry(tmp_path: P
         )
 
     assert response == "$existing"
-    assert retries == ["retry"]
+    assert retries == []
     assert edit_message.await_count == 1
+    assert bot.pending_terminal_delivery_event_ids() == frozenset({"$existing"})
 
 
 def _request(on_sync_restart_cancelled: Callable[[], None] | None = None) -> ResponseRequest:
