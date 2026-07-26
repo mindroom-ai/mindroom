@@ -2182,6 +2182,47 @@ async def test_cleanup_exact_edit_fetch_follows_valid_original_ancestry() -> Non
     ]
 
 
+@pytest.mark.asyncio
+async def test_cleanup_exact_edit_fetch_rejects_malformed_original() -> None:
+    """A malformed fetched original must not supply requester ancestry."""
+    edit = _make_message_event(
+        event_id="$edit",
+        body="* edited",
+        timestamp_ms=NOW_MS,
+        relates_to={"rel_type": "m.replace", "event_id": "$original"},
+        new_content={"body": "edited", "msgtype": "m.text"},
+    )
+    original = nio.Event.parse_event(
+        {
+            "content": {
+                "body": "original",
+                "m.relates_to": {"m.in_reply_to": {"event_id": "$attacker-chosen-requester"}},
+            },
+            "event_id": "$original",
+            "sender": BOT_USER_ID,
+            "origin_server_ts": NOW_MS - 1,
+            "type": "m.room.message",
+            "room_id": ROOM_ID,
+        },
+    )
+    assert isinstance(original, nio.BadEvent)
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.room_get_event.side_effect = [
+        _room_get_event_response(edit),
+        _room_get_event_response(original),
+    ]
+
+    message_data = await stale_stream_cleanup_module._fetch_message_data_for_event_id(
+        client,
+        room_id=ROOM_ID,
+        event_id="$edit",
+        fetched_message_data_by_event_id={},
+        trusted_sender_ids=set(),
+    )
+
+    assert message_data is None
+
+
 @pytest.mark.parametrize("target_kind", ["wrong-sender", "edit-of-edit"])
 @pytest.mark.asyncio
 async def test_cleanup_exact_edit_fetch_rejects_invalid_original(

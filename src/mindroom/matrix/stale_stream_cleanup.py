@@ -1327,7 +1327,7 @@ def _validated_fetched_room_message(
     *,
     room_id: str,
     event_id: str,
-) -> tuple[nio.Event, dict[str, object], str] | None:
+) -> tuple[nio.RoomMessage, dict[str, object], str] | None:
     """Return one exact room-scoped timeline message response."""
     if not isinstance(response, nio.RoomGetEventResponse):
         return None
@@ -1335,7 +1335,8 @@ def _validated_fetched_room_message(
     event_source = event.source if isinstance(event.source, dict) else None
     sender = event.sender if isinstance(event.sender, str) else None
     if (
-        event_source is None
+        not isinstance(event, nio.RoomMessage)
+        or event_source is None
         or sender is None
         or event_source.get("event_id") != event_id
         or event_source.get("sender") != sender
