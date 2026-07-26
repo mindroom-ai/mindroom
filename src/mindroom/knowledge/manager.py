@@ -1385,23 +1385,41 @@ class KnowledgeManager:
     def _chunk_texts_for_batch(self, files: Sequence[Path]) -> list[str]:
         """Return chunk texts to prefetch, stopping at the memory budget.
 
-        Files past the budget are simply not prefetched; their chunks are
-        embedded by the normal per-file path, so the only cost of the bound is
-        speed, never correctness.
+        The size check has to precede the read: chunking materializes a file's
+        entire content, so a budget consulted afterwards cannot stop a single
+        oversized file from blowing the bound. A file that cannot fit the
+        remaining budget is skipped rather than ending the pass, so smaller
+        files behind it still benefit.
+
+        Skipped files are simply not prefetched; their chunks are embedded by
+        the normal per-file path, so the only cost of the bound is speed,
+        never correctness.
         """
         chunk_texts: list[str] = []
-        budget = _MAX_PREFETCH_TEXT_BYTES
+        remaining = _MAX_PREFETCH_TEXT_BYTES
+        skipped = 0
         for resolved_path in files:
+            if remaining <= 0:
+                break
+            try:
+                source_size = resolved_path.stat().st_size
+            except OSError:
+                continue
+            if source_size > remaining:
+                skipped += 1
+                continue
             for text in self._chunk_texts_for_prefetch(resolved_path):
                 chunk_texts.append(text)
-                budget -= len(text.encode("utf-8"))
-            if budget <= 0:
-                logger.debug(
-                    "Stopped embedding prefetch at the memory budget",
-                    base_id=self.base_id,
-                    chunks=len(chunk_texts),
-                )
-                break
+                remaining -= len(text.encode("utf-8"))
+                if remaining <= 0:
+                    break
+        if skipped or remaining <= 0:
+            logger.debug(
+                "Bounded embedding prefetch at the memory budget",
+                base_id=self.base_id,
+                chunks=len(chunk_texts),
+                skipped_files=skipped,
+            )
         return chunk_texts
 
     async def _prefetch_batch_embeddings(

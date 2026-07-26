@@ -2434,3 +2434,64 @@ def test_prefetch_text_is_bounded_by_bytes_not_only_file_count(tmp_path: Path, m
     assert texts, "prefetch produced nothing at all"
     assert total_bytes <= 4_000 + 2_000, f"prefetch held {total_bytes} bytes past its budget"
     assert len(texts) < len(files), "every file was read despite the byte budget"
+
+
+def test_single_oversized_file_is_never_read_into_the_prefetch_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One huge file must not blow the prefetch bound on its own.
+
+    Chunking materializes a file's whole content, so checking the budget after
+    reading cannot bound anything: a single oversized document exceeds it by
+    however large it happens to be.
+    """
+    monkeypatch.setattr(knowledge_manager_module, "_MAX_PREFETCH_TEXT_BYTES", 4_000)
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    huge = docs_path / "huge.md"
+    huge.write_text("y" * 200_000, encoding="utf-8")
+    small = [docs_path / f"small{index}.md" for index in range(3)]
+    for path in small:
+        path.write_text("z" * 500, encoding="utf-8")
+    config = _config(tmp_path, docs_path, chunk_size=100_000)
+    read_files: list[str] = []
+    original_chunk = KnowledgeManager._chunk_texts_for_prefetch
+
+    def _record_read(self: KnowledgeManager, resolved_path: Path) -> tuple[str, ...]:
+        read_files.append(resolved_path.name)
+        return original_chunk(self, resolved_path)
+
+    monkeypatch.setattr(KnowledgeManager, "_chunk_texts_for_prefetch", _record_read)
+
+    texts = _manager(config)._chunk_texts_for_batch([huge, *small])
+
+    assert "huge.md" not in read_files, "the oversized file was read despite exceeding the budget"
+    total_bytes = sum(len(text.encode("utf-8")) for text in texts)
+    assert total_bytes <= 4_000, f"prefetch held {total_bytes} bytes past its budget"
+    assert texts, "smaller files behind the oversized one were skipped too"
+
+
+@pytest.mark.asyncio
+async def test_oversized_file_still_indexes_and_publishes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Skipping a file for prefetch must never skip indexing it."""
+    monkeypatch.setattr(knowledge_manager_module, "_MAX_PREFETCH_TEXT_BYTES", 1_000)
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    (docs_path / "huge.md").write_text("y" * 50_000, encoding="utf-8")
+    for index in range(3):
+        (docs_path / f"small{index}.md").write_text(f"small body {index}", encoding="utf-8")
+    config = _config(tmp_path, docs_path, chunk_size=100_000)
+    runtime_paths = runtime_paths_for(config)
+
+    assert await _manager(config).reindex_all() == 4
+
+    state = _published_state(config, runtime_paths)
+    assert state is not None
+    assert state.status == "complete"
+    assert state.indexed_count == 4
+    stored = sorted(record.metadata["source_path"] for record in _FakeVectorDb.store[state.collection])
+    assert "huge.md" in stored
