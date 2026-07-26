@@ -69,6 +69,7 @@ from mindroom.post_response_effects import (
     apply_post_response_effects,
 )
 from mindroom.prompts import QUEUED_MESSAGE_NOTICE_TEXT
+from mindroom.response_identity import ResponseIdentity
 from mindroom.response_lifecycle import _QueuedMessageState
 from mindroom.response_payload_preparation import DispatchPayloadInputs, ResponsePayloadPreparation
 from mindroom.response_runner import (
@@ -110,7 +111,8 @@ class _ReservationLike(Protocol):
 
 
 class _NoopResponseLifecycle:
-    def __init__(self) -> None:
+    def __init__(self, identity: ResponseIdentity) -> None:
+        self.identity = identity
         self.session_thread_ids: list[str | None] = []
 
     def setup_session_watch(self, **kwargs: object) -> object:
@@ -1356,7 +1358,11 @@ async def test_generate_response_uses_post_lock_reproof_target(tmp_path: Path) -
         )
 
     with (
-        patch.object(coordinator, "_build_lifecycle", MagicMock(return_value=_NoopResponseLifecycle())),
+        patch.object(
+            coordinator,
+            "_build_lifecycle",
+            MagicMock(side_effect=lambda *, identity, request: _NoopResponseLifecycle(identity)),  # noqa: ARG005
+        ),
         patch.object(
             coordinator,
             "run_cancellable_response",
@@ -1433,9 +1439,11 @@ async def test_generate_response_keeps_locked_target_when_payload_preparation_re
 
     def fake_build_lifecycle(**kwargs: object) -> _NoopResponseLifecycle:
         request = kwargs["request"]
+        identity = kwargs["identity"]
         assert isinstance(request, ResponseRequest)
+        assert isinstance(identity, ResponseIdentity)
         observed_lifecycle_targets.append(request.response_envelope.target)
-        return _NoopResponseLifecycle()
+        return _NoopResponseLifecycle(identity)
 
     with (
         patch.object(coordinator, "_build_lifecycle", MagicMock(side_effect=fake_build_lifecycle)),
@@ -1487,7 +1495,13 @@ async def test_generate_team_response_uses_post_lock_reproof_target(tmp_path: Pa
     bot.orchestrator = MagicMock()
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
     stable_target = MessageTarget.resolve("!room:localhost", None, "$event", room_mode=True)
-    lifecycle = _NoopResponseLifecycle()
+    request = ResponseRequest(
+        thread_history=[],
+        prompt="hello",
+        user_id="@user:localhost",
+        response_envelope=_envelope(source_event_id="$event", target=stable_target),
+    )
+    lifecycle = _NoopResponseLifecycle(coordinator._response_identity(request, response_kind="team"))
     observed_run_targets: list[MessageTarget] = []
     observed_delivery_targets: list[MessageTarget] = []
 
@@ -1524,12 +1538,7 @@ async def test_generate_team_response_uses_post_lock_reproof_target(tmp_path: Pa
         patch("mindroom.response_runner.team_response", AsyncMock(return_value="team ok")),
     ):
         result = await coordinator.generate_team_response_helper(
-            ResponseRequest(
-                thread_history=[],
-                prompt="hello",
-                user_id="@user:localhost",
-                response_envelope=_envelope(source_event_id="$event", target=stable_target),
-            ),
+            request,
             team_agents=[],
             team_mode="coordinate",
         )
@@ -1556,7 +1565,14 @@ async def test_generate_team_response_keeps_locked_target_when_payload_preparati
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
     stable_target = MessageTarget.resolve("!room:localhost", None, "$event", room_mode=True)
     retarget = MessageTarget.resolve("!room:localhost", "$other_thread", "$event")
-    lifecycle = _NoopResponseLifecycle()
+    request = ResponseRequest(
+        thread_history=[],
+        prompt="hello",
+        user_id="@user:localhost",
+        response_envelope=_envelope(source_event_id="$event", target=stable_target),
+        payload_preparation=_payload_preparation(stable_target),
+    )
+    lifecycle = _NoopResponseLifecycle(coordinator._response_identity(request, response_kind="team"))
     observed_run_targets: list[MessageTarget] = []
     observed_delivery_targets: list[MessageTarget] = []
 
@@ -1605,13 +1621,7 @@ async def test_generate_team_response_keeps_locked_target_when_payload_preparati
         patch("mindroom.response_runner.team_response", AsyncMock(return_value="team ok")),
     ):
         result = await coordinator.generate_team_response_helper(
-            ResponseRequest(
-                thread_history=[],
-                prompt="hello",
-                user_id="@user:localhost",
-                response_envelope=_envelope(source_event_id="$event", target=stable_target),
-                payload_preparation=_payload_preparation(stable_target),
-            ),
+            request,
             team_agents=[],
             team_mode="coordinate",
         )

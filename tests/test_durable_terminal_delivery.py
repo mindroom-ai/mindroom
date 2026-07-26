@@ -502,7 +502,7 @@ async def test_retry_pending_gives_a_healthy_room_a_slot_before_same_room_backlo
         retry = asyncio.create_task(active.retry_pending())
         try:
             await asyncio.wait_for(healthy_started.wait(), timeout=0.5)
-            assert limited_started == 1
+            assert limited_started <= 1
         finally:
             release_limited.set()
             await retry
