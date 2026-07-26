@@ -8,7 +8,6 @@ import json
 import os
 import signal
 import sys
-from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock, Mock, call, patch
@@ -2298,15 +2297,26 @@ signal.pause()
     client.rooms = _joined_room_cache()
     client.room_messages.return_value = _room_messages_response(
         _make_message_event(
-            event_id="$crashed-leftover",
-            body="Working ⋯",
+            event_id="$crashed-leftover-1",
+            body="Working on the first response ⋯",
             timestamp_ms=NOW_MS - (STALE_AGE_MS + 5_000),
             extra_content={
                 STREAM_STATUS_KEY: "streaming",
                 stale_stream_cleanup_module.STREAM_GENERATION_KEY: generation,
             },
         ),
+        _make_message_event(
+            event_id="$crashed-leftover-2",
+            body="Working on the second response ⋯",
+            timestamp_ms=NOW_MS - (STALE_AGE_MS + 4_000),
+            extra_content={
+                STREAM_STATUS_KEY: "streaming",
+                stale_stream_cleanup_module.STREAM_GENERATION_KEY: generation,
+            },
+        ),
     )
+    lease_directory = runtime_paths.storage_root / "tracking" / "runtime_generation_leases"
+    retired_at_ns = 1_000_000_000
 
     try:
         with patch(
@@ -2321,25 +2331,67 @@ signal.pause()
             )
             os.kill(process.pid, signal.SIGKILL)
             assert await asyncio.wait_for(process.wait(), timeout=10) == -signal.SIGKILL
-            cleaned_after_crash, _interrupted = await _run_cleanup(
-                client,
-                config,
-                joined_rooms=[ROOM_ID],
-                runtime_generation="gen-current",
+            with patch("mindroom.runtime_generation_lease.time.time_ns", return_value=retired_at_ns):
+                cleaned_after_crash, _interrupted = await _run_cleanup(
+                    client,
+                    config,
+                    joined_rooms=[ROOM_ID],
+                    runtime_generation="gen-current",
+                )
+            client.room_messages.return_value = _room_messages_response(
+                _make_message_event(
+                    event_id="$late-room-leftover",
+                    body="Working in a later-discovered room ⋯",
+                    timestamp_ms=NOW_MS - (STALE_AGE_MS + 3_000),
+                    extra_content={
+                        STREAM_STATUS_KEY: "streaming",
+                        stale_stream_cleanup_module.STREAM_GENERATION_KEY: generation,
+                    },
+                ),
             )
+            with patch(
+                "mindroom.runtime_generation_lease.time.time_ns",
+                return_value=retired_at_ns + 60 * 60 * 1_000_000_000,
+            ):
+                cleaned_by_later_recovery, _interrupted = await _run_cleanup(
+                    client,
+                    config,
+                    joined_rooms=[ROOM_ID],
+                    runtime_generation="gen-current",
+                )
     finally:
         if process.returncode is None:
             os.kill(process.pid, signal.SIGKILL)
             await asyncio.wait_for(process.wait(), timeout=10)
 
     assert cleaned_while_live == 0
-    assert cleaned_after_crash == 1
-    edit_result.assert_awaited_once()
+    assert cleaned_after_crash == 2
+    assert cleaned_by_later_recovery == 1
+    assert len(list(lease_directory.glob("*.lock"))) == 1
+    assert edit_result.await_count == 3
+
+    with patch(
+        "mindroom.runtime_generation_lease.time.time_ns",
+        return_value=retired_at_ns + 7 * 60 * 60 * 1_000_000_000,
+    ):
+        later_runtime = BotRuntimeState(
+            client=None,
+            config=config,
+            runtime_paths=runtime_paths,
+            enable_streaming=False,
+            orchestrator=None,
+            event_cache=None,
+            event_cache_write_coordinator=None,
+        )
+        later_runtime.mark_runtime_started()
+        later_runtime.mark_runtime_stopped()
+
+    assert list(lease_directory.glob("*.lock")) == []
 
 
 @pytest.mark.asyncio
-async def test_stopped_prior_generation_stamp_is_cleaned(tmp_path: Path) -> None:
-    """A generation recorded after shutdown is safe to repair."""
+async def test_orderly_stopped_generation_has_no_crash_cleanup_proof(tmp_path: Path) -> None:
+    """An orderly stop removes its lease instead of leaving stale crash proof."""
     config = _make_config(tmp_path)
     prior_runtime = BotRuntimeState(
         client=None,
@@ -2378,8 +2430,8 @@ async def test_stopped_prior_generation_stamp_is_cleaned(tmp_path: Path) -> None
             runtime_generation="gen-current",
         )
 
-    assert cleaned == 1
-    edit_result.assert_awaited_once()
+    assert cleaned == 0
+    edit_result.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -2439,10 +2491,11 @@ def test_runtime_generation_rotates_on_same_object_restart(tmp_path: Path) -> No
     state.mark_runtime_stopped()
 
 
-def test_stopped_runtime_generation_requires_explicit_shutdown_proof(tmp_path: Path) -> None:
-    """Only a released durable lease proves that a generation is no longer live."""
+def test_orderly_runtime_cycles_do_not_accumulate_generation_leases(tmp_path: Path) -> None:
+    """Repeated orderly starts and stops leave no per-generation lease files."""
     config = _make_config(tmp_path)
     runtime_paths = runtime_paths_for(config)
+    lease_directory = runtime_paths.storage_root / "tracking" / "runtime_generation_leases"
     state = BotRuntimeState(
         client=None,
         config=config,
@@ -2452,14 +2505,57 @@ def test_stopped_runtime_generation_requires_explicit_shutdown_proof(tmp_path: P
         event_cache=None,
         event_cache_write_coordinator=None,
     )
-    state.mark_runtime_started()
-    generation = state.runtime_generation
 
-    assert not runtime_generation_owner_stopped(runtime_paths, generation)
+    for _ in range(5):
+        state.mark_runtime_started()
+        generation = state.runtime_generation
 
-    state.mark_runtime_stopped()
+        assert not runtime_generation_owner_stopped(runtime_paths, generation)
+        assert len(list(lease_directory.glob("*.lock"))) == 1
 
-    assert runtime_generation_owner_stopped(runtime_paths, generation)
+        state.mark_runtime_stopped()
+        assert not runtime_generation_owner_stopped(runtime_paths, generation)
+        assert list(lease_directory.glob("*.lock")) == []
+
+
+def test_long_lived_active_generation_lease_is_not_age_pruned(tmp_path: Path) -> None:
+    """Retention pruning must never remove a lease still locked by its live owner."""
+    config = _make_config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    first_runtime = BotRuntimeState(
+        client=None,
+        config=config,
+        runtime_paths=runtime_paths,
+        enable_streaming=False,
+        orchestrator=None,
+        event_cache=None,
+        event_cache_write_coordinator=None,
+    )
+    second_runtime = BotRuntimeState(
+        client=None,
+        config=config,
+        runtime_paths=runtime_paths,
+        enable_streaming=False,
+        orchestrator=None,
+        event_cache=None,
+        event_cache_write_coordinator=None,
+    )
+    started_at_ns = 1_000_000_000
+
+    with patch("mindroom.runtime_generation_lease.time.time_ns", return_value=started_at_ns):
+        first_runtime.mark_runtime_started()
+    first_generation = first_runtime.runtime_generation
+
+    with patch(
+        "mindroom.runtime_generation_lease.time.time_ns",
+        return_value=started_at_ns + 7 * 60 * 60 * 1_000_000_000,
+    ):
+        second_runtime.mark_runtime_started()
+
+    assert not runtime_generation_owner_stopped(runtime_paths, first_generation)
+
+    second_runtime.mark_runtime_stopped()
+    first_runtime.mark_runtime_stopped()
 
 
 @pytest.mark.asyncio
@@ -3677,74 +3773,6 @@ async def test_shared_room_cleanup_routes_edits_through_each_message_owner(tmp_p
     assert cleaned_count == 2
     assert interrupted == []
     assert [call.args[0] for call in cleanup_candidate.await_args_list] == [first_client, second_client]
-
-
-@pytest.mark.asyncio
-async def test_orchestrator_runs_two_recovery_waves_around_room_setup(tmp_path: Path) -> None:
-    """Startup should recover current rooms and then rooms joined during setup."""
-    config = _make_config(tmp_path)
-    config.defaults.auto_resume_after_restart = True
-    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
-    orchestrator.config = config
-
-    router_bot = MagicMock()
-    router_bot.agent_name = ROUTER_AGENT_NAME
-    router_bot.try_start = AsyncMock(return_value=True)
-    router_bot.stop = AsyncMock()
-    router_bot.running = True
-    router_bot.client = AsyncMock(spec=nio.AsyncClient)
-    router_bot.agent_user = MagicMock(user_id="@mindroom_router:example.com")
-    orchestrator.agent_bots = {ROUTER_AGENT_NAME: router_bot}
-
-    call_order: list[str] = []
-    recovery_finished = asyncio.Event()
-
-    async def _wait_for_homeserver(*_args: object, **_kwargs: object) -> None:
-        call_order.append("wait")
-
-    async def _setup_rooms(_: list[object]) -> None:
-        call_order.append("setup")
-
-    async def _recover(
-        _: list[object],
-        __: Config,
-        scanned_room_ids: set[str],
-    ) -> None:
-        call_order.append("recover")
-        if scanned_room_ids:
-            recovery_finished.set()
-        else:
-            scanned_room_ids.add(ROOM_ID)
-
-    ready = asyncio.Event()
-
-    def _mark_ready() -> None:
-        ready.set()
-
-    def _start_sync_task(_: str, __: object) -> None:
-        call_order.append("sync")
-
-    with (
-        patch("mindroom.orchestrator.wait_for_matrix_homeserver", side_effect=_wait_for_homeserver),
-        patch.object(orchestrator, "_setup_rooms_and_memberships", side_effect=_setup_rooms),
-        patch.object(orchestrator, "_recover_stale_streams_after_restart", side_effect=_recover),
-        patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
-        patch.object(orchestrator, "_start_sync_task", side_effect=_start_sync_task),
-        patch("mindroom.orchestrator.set_runtime_ready", side_effect=_mark_ready),
-    ):
-        runtime_task = asyncio.create_task(orchestrator.start())
-        try:
-            await asyncio.wait_for(ready.wait(), timeout=1.0)
-            await asyncio.wait_for(recovery_finished.wait(), timeout=1.0)
-            await orchestrator.stop()
-            await asyncio.wait_for(runtime_task, timeout=1.0)
-        finally:
-            if not runtime_task.done():
-                runtime_task.cancel()
-                with suppress(asyncio.CancelledError):
-                    await runtime_task
-
-    assert call_order == ["wait", "sync", "recover", "setup", "recover"]
 
 
 @pytest.mark.asyncio

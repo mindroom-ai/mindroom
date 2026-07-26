@@ -15,13 +15,14 @@ async def _wait_for_controller(controller: StartupMaintenanceController) -> None
 
 
 @pytest.mark.asyncio
-async def test_startup_maintenance_scans_rooms_joined_during_concurrent_setup() -> None:
+async def test_startup_maintenance_runs_two_recovery_waves_around_concurrent_room_setup() -> None:
     """Maintenance should overlap setup with recovery and then scan newly joined rooms."""
     call_order: list[str] = []
     bots = [MagicMock()]
     config = MagicMock()
     joined_room_ids = {"!initial:example.com"}
     recovery_waves: list[set[str]] = []
+    scanned_room_id_sets: list[set[str]] = []
     initial_rooms_discovered = asyncio.Event()
     room_setup_finished = asyncio.Event()
 
@@ -32,6 +33,7 @@ async def test_startup_maintenance_scans_rooms_joined_during_concurrent_setup() 
     ) -> None:
         assert started_bots == bots
         assert recovery_config is config
+        scanned_room_id_sets.append(scanned_room_ids)
         newly_joined_room_ids = joined_room_ids - scanned_room_ids
         scanned_room_ids.update(newly_joined_room_ids)
         recovery_waves.append(newly_joined_room_ids)
@@ -68,6 +70,7 @@ async def test_startup_maintenance_scans_rooms_joined_during_concurrent_setup() 
         {"!initial:example.com"},
         {"!joined-during-setup:example.com"},
     ]
+    assert scanned_room_id_sets[0] is scanned_room_id_sets[1]
     assert call_order == ["recover-1", "setup", "recover-2", "support", "approval_ready"]
 
 

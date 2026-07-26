@@ -5,6 +5,7 @@ from __future__ import annotations
 import fcntl
 import hashlib
 import os
+import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -15,6 +16,17 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
 _LEASE_DIRECTORY = "runtime_generation_leases"
+_RETIRED_AT_PREFIX = "retired_at_ns="
+RUNTIME_GENERATION_PROOF_RETENTION_SECONDS = 6 * 60 * 60
+_RETIRED_LEASE_RETENTION_NS = RUNTIME_GENERATION_PROOF_RETENTION_SECONDS * 1_000_000_000
+
+
+@dataclass(frozen=True)
+class _LeaseRecord:
+    """Durable runtime-generation lease state."""
+
+    generation: str
+    retired_at_ns: int | None
 
 
 def _generation_lease_path(runtime_paths: RuntimePaths, generation: str) -> Path:
@@ -28,15 +40,21 @@ class RuntimeGenerationLease:
     """Exclusive process-held lease for one runtime generation."""
 
     generation: str
+    _lease_path: Path
     _lock_file: TextIO | None
 
     def release(self) -> None:
-        """Release this runtime generation lease while retaining its durable proof file."""
-        if self._lock_file is None:
+        """Release and remove this orderly-stopped runtime generation lease."""
+        lock_file = self._lock_file
+        if lock_file is None:
             return
-        fcntl.flock(self._lock_file.fileno(), fcntl.LOCK_UN)
-        self._lock_file.close()
         self._lock_file = None
+        try:
+            if _path_references_lock_file(self._lease_path, lock_file):
+                self._lease_path.unlink()
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+            lock_file.close()
 
 
 def acquire_runtime_generation_lease(
@@ -46,18 +64,15 @@ def acquire_runtime_generation_lease(
     """Acquire and durably identify the process-held lease for one generation."""
     lease_path = _generation_lease_path(runtime_paths, generation)
     lease_path.parent.mkdir(parents=True, exist_ok=True)
+    _retire_and_prune_unlocked_leases(lease_path.parent, now_ns=time.time_ns())
     lock_file = lease_path.open("a+", encoding="utf-8")
     try:
         fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        lock_file.seek(0)
-        lock_file.truncate()
-        lock_file.write(generation)
-        lock_file.flush()
-        os.fsync(lock_file.fileno())
+        _write_lease_record(lock_file, _LeaseRecord(generation=generation, retired_at_ns=None))
     except BaseException:
         lock_file.close()
         raise
-    return RuntimeGenerationLease(generation=generation, _lock_file=lock_file)
+    return RuntimeGenerationLease(generation=generation, _lease_path=lease_path, _lock_file=lock_file)
 
 
 def runtime_generation_owner_stopped(
@@ -78,8 +93,114 @@ def runtime_generation_owner_stopped(
         except BlockingIOError:
             return False
         acquired = True
-        lock_file.seek(0)
-        return lock_file.read() == generation
+        return _retire_or_validate_stopped_owner(
+            lease_path,
+            lock_file,
+            generation=generation,
+            now_ns=time.time_ns(),
+        )
+    finally:
+        if acquired:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        lock_file.close()
+
+
+def _path_references_lock_file(lease_path: Path, lock_file: TextIO) -> bool:
+    """Return whether the lease path still names the locked file descriptor."""
+    try:
+        path_stat = lease_path.stat()
+    except FileNotFoundError:
+        return False
+    file_stat = os.fstat(lock_file.fileno())
+    return (path_stat.st_dev, path_stat.st_ino) == (file_stat.st_dev, file_stat.st_ino)
+
+
+def _retire_or_validate_stopped_owner(
+    lease_path: Path,
+    lock_file: TextIO,
+    *,
+    generation: str,
+    now_ns: int,
+) -> bool:
+    """Retire a newly stopped owner or validate its retained proof."""
+    if not _path_references_lock_file(lease_path, lock_file):
+        return False
+    record = _read_lease_record(lock_file)
+    if record is None or record.generation != generation:
+        return False
+    if record.retired_at_ns is None:
+        _write_lease_record(
+            lock_file,
+            _LeaseRecord(generation=generation, retired_at_ns=now_ns),
+        )
+        return True
+    if now_ns - record.retired_at_ns <= _RETIRED_LEASE_RETENTION_NS:
+        return True
+    lease_path.unlink()
+    return False
+
+
+def _read_lease_record(lock_file: TextIO) -> _LeaseRecord | None:
+    """Read one active or retired lease record."""
+    lock_file.seek(0)
+    lines = lock_file.read().splitlines()
+    if not lines or not lines[0]:
+        return None
+    if len(lines) == 1:
+        return _LeaseRecord(generation=lines[0], retired_at_ns=None)
+    if len(lines) != 2 or not lines[1].startswith(_RETIRED_AT_PREFIX):
+        return None
+    retired_at_value = lines[1].removeprefix(_RETIRED_AT_PREFIX)
+    try:
+        retired_at_ns = int(retired_at_value)
+    except ValueError:
+        return None
+    return _LeaseRecord(generation=lines[0], retired_at_ns=retired_at_ns)
+
+
+def _write_lease_record(lock_file: TextIO, record: _LeaseRecord) -> None:
+    """Persist one active or retired lease record through its locked descriptor."""
+    body = record.generation
+    if record.retired_at_ns is not None:
+        body = f"{body}\n{_RETIRED_AT_PREFIX}{record.retired_at_ns}"
+    lock_file.seek(0)
+    lock_file.truncate()
+    lock_file.write(body)
+    lock_file.flush()
+    os.fsync(lock_file.fileno())
+
+
+def _retire_and_prune_unlocked_leases(lease_directory: Path, *, now_ns: int) -> None:
+    """Retire crashed leases and prune only expired unlocked proofs."""
+    for lease_path in lease_directory.glob("*.lock"):
+        _retire_or_prune_unlocked_lease(lease_path, now_ns=now_ns)
+
+
+def _retire_or_prune_unlocked_lease(lease_path: Path, *, now_ns: int) -> None:
+    """Retire or prune one unlocked lease without touching a live owner."""
+    try:
+        lock_file = lease_path.open("r+", encoding="utf-8")
+    except FileNotFoundError:
+        return
+    acquired = False
+    try:
+        try:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return
+        acquired = True
+        if not _path_references_lock_file(lease_path, lock_file):
+            return
+        record = _read_lease_record(lock_file)
+        if record is None:
+            lease_path.unlink()
+        elif record.retired_at_ns is None:
+            _write_lease_record(
+                lock_file,
+                _LeaseRecord(generation=record.generation, retired_at_ns=now_ns),
+            )
+        elif now_ns - record.retired_at_ns > _RETIRED_LEASE_RETENTION_NS:
+            lease_path.unlink()
     finally:
         if acquired:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)

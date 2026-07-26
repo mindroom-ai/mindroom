@@ -55,7 +55,10 @@ from mindroom.matrix.thread_projection import (
     ordered_event_ids_from_scanned_event_sources,
     resolve_thread_ids_for_event_infos,
 )
-from mindroom.runtime_generation_lease import runtime_generation_owner_stopped
+from mindroom.runtime_generation_lease import (
+    RUNTIME_GENERATION_PROOF_RETENTION_SECONDS,
+    runtime_generation_owner_stopped,
+)
 from mindroom.streaming import (
     INTERRUPTED_RESPONSE_NOTE,
     RESTART_INTERRUPTED_RESPONSE_NOTE,
@@ -76,7 +79,7 @@ _ROOM_HISTORY_PAGE_SIZE = 100
 # Restart cleanup should only edit active-looking messages from the current
 # outage window. Explicit terminal interrupted notes may still be auto-resumed
 # later because they are already user-visible interrupted outcomes.
-_STALE_STREAM_LOOKBACK_MS = 6 * 60 * 60 * 1000
+_STALE_STREAM_LOOKBACK_MS = RUNTIME_GENERATION_PROOF_RETENTION_SECONDS * 1000
 _RATE_LIMIT_DELAY_SECONDS = 0.15
 _RECOVERY_ROOM_CONCURRENCY = 8
 _STOP_REACTION_KEYS = frozenset({"🛑", "⏹️"})
