@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Collection, Iterable, Mapping
+from copy import deepcopy
 from operator import itemgetter
 from typing import Any, Literal
 
@@ -39,6 +40,43 @@ def bundled_replacement_candidates(event: Mapping[str, Any]) -> list[dict[str, A
         nested_candidates if any(isinstance(candidate, Mapping) for candidate in nested_candidates) else (bundled,)
     )
     return [dict(candidate) for candidate in candidates if isinstance(candidate, Mapping)]
+
+
+def without_bundled_replacement_event_ids(
+    event: dict[str, Any],
+    excluded_event_ids: Collection[str],
+) -> dict[str, Any]:
+    """Remove excluded bundled identities while preserving surviving candidates."""
+    if not excluded_event_ids:
+        return event
+    excluded = frozenset(excluded_event_ids)
+    bundled_ids = {
+        candidate_id
+        for candidate in bundled_replacement_candidates(event)
+        if isinstance(candidate_id := candidate.get("event_id"), str)
+    }
+    if bundled_ids.isdisjoint(excluded):
+        return event
+    sanitized = deepcopy(event)
+    unsigned = sanitized.get("unsigned")
+    relations = unsigned.get("m.relations") if isinstance(unsigned, dict) else None
+    bundled = relations.get("m.replace") if isinstance(relations, dict) else None
+    if not isinstance(relations, dict) or not isinstance(bundled, dict):
+        return event
+    nested_keys = ("latest_event", "event")
+    had_nested_candidate = any(isinstance(bundled.get(key), Mapping) for key in nested_keys)
+    for key in nested_keys:
+        nested = bundled.get(key)
+        if isinstance(nested, Mapping) and nested.get("event_id") in excluded:
+            del bundled[key]
+    if had_nested_candidate and not any(isinstance(bundled.get(key), Mapping) for key in nested_keys):
+        del relations["m.replace"]
+        return sanitized
+    if bundled.get("event_id") in excluded:
+        del bundled["event_id"]
+    if not any(isinstance(candidate.get("event_id"), str) for candidate in bundled_replacement_candidates(sanitized)):
+        del relations["m.replace"]
+    return sanitized
 
 
 def replacement_content(original: Mapping[str, object], new: Mapping[str, object]) -> dict[str, object]:
@@ -142,14 +180,16 @@ def _replacement_candidates_by_identity(
     return candidates_by_event_id, conflicting_event_ids
 
 
-def conflicting_replacement_event_ids(
+def canonical_event_sources(
     event_sources: Iterable[Mapping[str, Any]],
     *,
     room_id: str | None,
-) -> frozenset[str]:
-    """Return edit IDs whose explicit and bundled representations conflict globally."""
+) -> tuple[list[dict[str, Any]], frozenset[str]]:
+    """Return one final room-scoped top-level view per event ID after observing bundles."""
     observed: dict[str, dict[str, Any]] = {}
     conflicting_event_ids: set[str] = set()
+    ordered_top_level_event_ids: list[str] = []
+    seen_top_level_event_ids: set[str] = set()
     for event_source in event_sources:
         observe_event_representation(
             observed,
@@ -157,6 +197,15 @@ def conflicting_replacement_event_ids(
             event_source,
             room_id=room_id,
         )
+        event_id = event_source.get("event_id")
+        if (
+            isinstance(event_id, str)
+            and event_id
+            and event_source_is_timeline_in_room(event_source, room_id)
+            and event_id not in seen_top_level_event_ids
+        ):
+            ordered_top_level_event_ids.append(event_id)
+            seen_top_level_event_ids.add(event_id)
         for bundled in bundled_replacement_candidates(event_source):
             observe_event_representation(
                 observed,
@@ -165,7 +214,15 @@ def conflicting_replacement_event_ids(
                 room_id=room_id,
                 container=event_source,
             )
-    return frozenset(conflicting_event_ids)
+    conflicts = frozenset(conflicting_event_ids)
+    return (
+        [
+            without_bundled_replacement_event_ids(observed[event_id], conflicts)
+            for event_id in ordered_top_level_event_ids
+            if event_id in observed and event_id not in conflicts
+        ],
+        conflicts,
+    )
 
 
 def _deduplicated_replacement_candidates(

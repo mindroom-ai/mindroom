@@ -234,9 +234,21 @@ async def _load_conflicting_bundled_event_ids(
         """
         SELECT event_json
         FROM mindroom_event_cache_events
-        WHERE namespace = %s AND room_id = %s AND event_id = ANY(%s)
+        WHERE namespace = %s AND room_id = %s AND (
+            event_id = ANY(%s)
+            OR event_json::jsonb #>> '{unsigned,m.relations,m.replace,event_id}' = ANY(%s)
+            OR event_json::jsonb #>> '{unsigned,m.relations,m.replace,latest_event,event_id}' = ANY(%s)
+            OR event_json::jsonb #>> '{unsigned,m.relations,m.replace,event,event_id}' = ANY(%s)
+        )
         """,
-        (namespace, room_id, sorted(bundled_event_ids)),
+        (
+            namespace,
+            room_id,
+            sorted(bundled_event_ids),
+            sorted(bundled_event_ids),
+            sorted(bundled_event_ids),
+            sorted(bundled_event_ids),
+        ),
     )
     return conflicting_cached_bundled_event_ids(
         original,

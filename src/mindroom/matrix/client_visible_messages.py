@@ -13,11 +13,14 @@ from mindroom.matrix import replacements
 from mindroom.matrix.cache.event_normalization import normalize_nio_event_for_cache
 from mindroom.matrix.event_info import (
     EventInfo,
-    event_source_is_timeline_in_room,
     origin_server_ts_from_event_source,
     reply_to_event_id_from_content,
 )
-from mindroom.matrix.media import valid_room_message_event_source, valid_room_message_replacement
+from mindroom.matrix.media import (
+    parse_room_message_event_source,
+    valid_room_message_event_source,
+    valid_room_message_replacement,
+)
 from mindroom.matrix.message_content import extract_and_resolve_message, extract_edit_body, resolve_event_source_content
 from mindroom.matrix.visible_body import visible_body_from_event_source
 
@@ -452,32 +455,14 @@ async def resolve_latest_visible_messages(
     """Resolve the latest visible message state by original event ID for a set of message events."""
     messages_by_event_id: dict[str, ResolvedVisibleMessage] = {}
     edit_candidates_by_original_event_id: ThreadEditCandidatesByOriginalEventId = {}
-    observed_sources: dict[str, dict[str, Any]] = {}
-    conflicting_event_ids: set[str] = set()
-    canonical_events: dict[
-        str,
-        tuple[nio.RoomMessageText | nio.RoomMessageNotice, dict[str, Any]],
-    ] = {}
-
-    for event in events:
-        event_source = normalize_nio_event_for_cache(event)
-        if (sender is not None and event.sender != sender) or not event_source_is_timeline_in_room(
-            event_source,
-            room_id,
-        ):
+    canonical_sources, _conflicting_event_ids = replacements.canonical_event_sources(
+        (normalize_nio_event_for_cache(event) for event in events),
+        room_id=room_id,
+    )
+    for event_source in canonical_sources:
+        event = parse_room_message_event_source(event_source)
+        if not isinstance(event, _VISIBLE_ROOM_MESSAGE_EVENT_TYPES):
             continue
-        transition = replacements.observe_event_representation(
-            observed_sources,
-            conflicting_event_ids,
-            event_source,
-            room_id=room_id,
-        )
-        if transition == "accept":
-            canonical_events[event.event_id] = event, event_source
-        elif transition == "conflict":
-            canonical_events.pop(event.event_id, None)
-
-    for event, event_source in canonical_events.values():
         event_info = EventInfo.from_event(event_source)
         if record_thread_edit_candidate(
             event_source,
@@ -485,7 +470,7 @@ async def resolve_latest_visible_messages(
         ):
             continue
 
-        if event.event_id in messages_by_event_id:
+        if (sender is not None and event.sender != sender) or event.event_id in messages_by_event_id:
             continue
 
         bundled_candidates = replacements.bundled_replacement_candidates(event_source)

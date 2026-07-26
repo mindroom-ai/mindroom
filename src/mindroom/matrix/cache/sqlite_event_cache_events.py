@@ -239,9 +239,30 @@ async def _load_conflicting_bundled_event_ids(
         f"""
         SELECT event_json
         FROM events
-        WHERE principal_id = ? AND room_id = ? AND event_id IN ({placeholders})
+        WHERE principal_id = ? AND room_id = ? AND (
+            event_id IN ({placeholders})
+            OR json_extract(
+                event_json,
+                '$.unsigned."m.relations"."m.replace".event_id'
+            ) IN ({placeholders})
+            OR json_extract(
+                event_json,
+                '$.unsigned."m.relations"."m.replace".latest_event.event_id'
+            ) IN ({placeholders})
+            OR json_extract(
+                event_json,
+                '$.unsigned."m.relations"."m.replace".event.event_id'
+            ) IN ({placeholders})
+        )
         """,  # noqa: S608
-        (principal_id, room_id, *bundled_event_ids),
+        (
+            principal_id,
+            room_id,
+            *bundled_event_ids,
+            *bundled_event_ids,
+            *bundled_event_ids,
+            *bundled_event_ids,
+        ),
     )
     try:
         return conflicting_cached_bundled_event_ids(

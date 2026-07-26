@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Awaitable, Callable, Mapping
-from copy import deepcopy
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -19,11 +17,12 @@ from mindroom.matrix.replacements import (
     bundled_replacement_candidates,
     observe_event_representation,
     ordered_replacements,
+    without_bundled_replacement_event_ids,
 )
 from mindroom.matrix.sidecar_content import sidecar_mxc_url
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Sequence
+    from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 
 _EDITABLE_EVENT_TYPES = frozenset({"m.room.message", "io.mindroom.tool_approval"})
 
@@ -61,7 +60,7 @@ def conflicting_cached_bundled_event_ids(
     observed: dict[str, dict[str, Any]] = {}
     conflicting_event_ids: set[str] = set()
     for cached_event in cached_events:
-        observe_event_representation(
+        _observe_cached_event_and_bundles(
             observed,
             conflicting_event_ids,
             cached_event,
@@ -133,9 +132,10 @@ async def safe_cached_event_transitions(
 ) -> tuple[list[SerializedCachedEvent], list[SerializedCachedEvent]]:
     """Return payload-writable and thread-indexable events after durable quarantine."""
     observed: dict[str, dict[str, Any]] = {}
-    writable: list[SerializedCachedEvent] = []
-    indexable: list[SerializedCachedEvent] = []
     conflicting_event_ids: set[str] = set()
+    accepted_top_level_event_ids: set[str] = set()
+    ordered_top_level_event_ids: list[str] = []
+    seen_top_level_event_ids: set[str] = set()
 
     for existing_event in existing.values():
         _observe_cached_event_and_bundles(
@@ -154,10 +154,17 @@ async def safe_cached_event_transitions(
         )
         if transition is None:
             continue
-        if transition != "conflict" and event.event_id not in conflicting_event_ids:
-            indexable.append(event)
-            if transition == "accept":
-                writable.append(event)
+        if event.event_id not in seen_top_level_event_ids:
+            ordered_top_level_event_ids.append(event.event_id)
+            seen_top_level_event_ids.add(event.event_id)
+        if transition == "accept":
+            accepted_top_level_event_ids.add(event.event_id)
+    indexable = [
+        serialize_cached_event(event_id, observed[event_id])
+        for event_id in ordered_top_level_event_ids
+        if event_id in observed and event_id not in conflicting_event_ids
+    ]
+    writable = [event for event in indexable if event.event_id in accepted_top_level_event_ids]
     if not conflicting_event_ids:
         return writable, indexable
     for event_id in sorted(conflicting_event_ids):
@@ -365,24 +372,7 @@ def _without_tombstoned_bundled_replacements(
     redacted_event_ids: frozenset[str],
 ) -> dict[str, Any]:
     """Return one event whose bundled aggregation keeps only untombstoned canonical shapes."""
-    sanitized = deepcopy(event)
-    relations = sanitized["unsigned"]["m.relations"]
-    bundled = relations["m.replace"]
-    nested_keys = ("latest_event", "event")
-    had_nested_candidate = any(isinstance(bundled.get(key), Mapping) for key in nested_keys)
-    for key in nested_keys:
-        nested = bundled.get(key)
-        if isinstance(nested, Mapping) and nested.get("event_id") in redacted_event_ids:
-            del bundled[key]
-    if had_nested_candidate and not any(isinstance(bundled.get(key), Mapping) for key in nested_keys):
-        del relations["m.replace"]
-        return sanitized
-    if bundled.get("event_id") in redacted_event_ids:
-        # The wrapper identity matters only for direct replacement shapes without nested events.
-        del bundled["event_id"]
-    if not bundled_replacement_event_ids(sanitized):
-        del relations["m.replace"]
-    return sanitized
+    return without_bundled_replacement_event_ids(event, redacted_event_ids)
 
 
 def scrub_bundled_replacement_json(event_json: str, event_id: str) -> str:

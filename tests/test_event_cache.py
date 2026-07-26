@@ -2358,6 +2358,75 @@ async def test_duplicate_ids_in_one_batch_converge_on_clear_payload(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("upgrade_kind", ["encrypted", "provisional"])
+@pytest.mark.parametrize("batch_order", [("stale", "canonical"), ("canonical", "stale")])
+async def test_duplicate_ids_in_one_batch_derive_only_final_canonical_state(
+    event_cache: ConversationEventCache,
+    upgrade_kind: str,
+    batch_order: tuple[str, str],
+) -> None:
+    """Intermediate same-ID representations cannot leave derived cache state."""
+    room_id = "!room:localhost"
+    event_id = "$same:localhost"
+    old_root_id = "$old-root:localhost"
+    new_root_id = "$new-root:localhost"
+    old_mxc = "mxc://server/old"
+    new_mxc = "mxc://server/new"
+
+    canonical = _clear_payload(
+        event_id,
+        body="canonical",
+        room_id=room_id,
+        thread_root_id=new_root_id,
+    )
+    canonical["content"].update(
+        {
+            "msgtype": "m.file",
+            "url": new_mxc,
+            "io.mindroom.long_text": {
+                "version": 2,
+                "encoding": "matrix_event_content_json",
+            },
+        },
+    )
+    if upgrade_kind == "encrypted":
+        stale = _opaque_payload(event_id, thread_root_id=old_root_id)
+        stale["room_id"] = room_id
+    else:
+        stale = _clear_payload(
+            event_id,
+            body="provisional",
+            room_id=room_id,
+            thread_root_id=old_root_id,
+        )
+        stale["content"].update(
+            {
+                "msgtype": "m.file",
+                "url": old_mxc,
+                "io.mindroom.long_text": {
+                    "version": 2,
+                    "encoding": "matrix_event_content_json",
+                },
+            },
+        )
+        stale = event_normalization.mark_provisional_outbound_event(stale)
+    payloads = {"stale": stale, "canonical": canonical}
+
+    await event_cache.store_events_batch(
+        [(event_id, room_id, payloads[payload_kind]) for payload_kind in batch_order],
+    )
+
+    cached = await event_cache.get_event(room_id, event_id)
+    assert cached is not None
+    assert cached["content"]["body"] == "canonical"
+    assert await event_cache.get_thread_id_for_event(room_id, event_id) == new_root_id
+    assert await event_cache.get_thread_id_for_event(room_id, new_root_id) == new_root_id
+    assert await event_cache.get_thread_id_for_event(room_id, old_root_id) is None
+    assert not await event_cache.store_mxc_text(room_id, event_id, old_mxc, "stale")
+    assert await event_cache.store_mxc_text(room_id, event_id, new_mxc, "canonical")
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("promotion_write", ["point_store", "thread_append"])
 async def test_promoting_indexed_rich_reply_root_invalidates_old_parent_snapshot(
     event_cache: ConversationEventCache,
@@ -2818,6 +2887,52 @@ async def test_unstored_bundled_original_rejects_cached_cross_target_identity(
         assert latest["content"]["m.new_content"]["body"] == "Older valid"
     else:
         assert latest is None
+
+
+@pytest.mark.asyncio
+async def test_unstored_bundle_rejects_conflicting_cached_bundle_identity(
+    event_cache: ConversationEventCache,
+) -> None:
+    """Cached bundled identities must conflict with incoming bundled identities."""
+    room_id = "!room:localhost"
+    sender = "@user:localhost"
+    edit_id = "$same-edit:localhost"
+
+    def original(event_id: str, body: str, edited_body: str) -> dict[str, object]:
+        event = _clear_payload(
+            event_id,
+            body=body,
+            sender=sender,
+            room_id=room_id,
+            origin_server_ts=1000,
+        )
+        event["unsigned"] = {
+            "m.relations": {
+                "m.replace": _clear_payload(
+                    edit_id,
+                    body=edited_body,
+                    sender=sender,
+                    room_id=room_id,
+                    edit_of=event_id,
+                    origin_server_ts=2000,
+                ),
+            },
+        }
+        return event
+
+    cached_other = original("$other:localhost", "Other", "Cached other")
+    incoming = original("$wanted:localhost", "Wanted", "Forged wanted")
+    await event_cache.store_event("$other:localhost", room_id, cached_other)
+
+    assert await event_cache.get_event(room_id, edit_id) is None
+    assert (
+        await event_cache.get_latest_edit(
+            room_id,
+            incoming,
+            validator=valid_room_message_replacement,
+        )
+        is None
+    )
 
 
 @pytest.mark.asyncio

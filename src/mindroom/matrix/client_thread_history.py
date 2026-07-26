@@ -95,7 +95,7 @@ from mindroom.matrix.message_content import (
 )
 from mindroom.matrix.replacements import (
     bundled_replacement_candidates,
-    conflicting_replacement_event_ids,
+    canonical_event_sources,
     is_valid_replacement,
     observe_event_representation,
     ordered_replacements,
@@ -439,10 +439,8 @@ async def _resolve_thread_history_from_event_sources_timed(
             if isinstance(candidate_id := candidate.get("event_id"), str)
         },
     )
-    room_event_sources = [
-        event_source for event_source in event_sources if event_source_is_timeline_in_room(event_source, room_id)
-    ]
-    redacted_event_ids |= conflicting_replacement_event_ids(room_event_sources, room_id=room_id)
+    room_event_sources, conflicting_event_ids = canonical_event_sources(event_sources, room_id=room_id)
+    redacted_event_ids |= conflicting_event_ids
     eligible_event_sources = [
         event_source
         for event_source in room_event_sources
@@ -1937,6 +1935,30 @@ def _record_scanned_room_message_source(
     return event.event_id
 
 
+def _canonical_scanned_room_sources(
+    scanned_message_sources: Mapping[str, dict[str, Any]],
+    *,
+    room_id: str,
+) -> tuple[dict[str, dict[str, Any]], ThreadEditCandidatesByOriginalEventId]:
+    """Collapse one room scan to final identities and rebuild explicit edit buckets."""
+    canonical_sources, _conflicting_event_ids = canonical_event_sources(
+        scanned_message_sources.values(),
+        room_id=room_id,
+    )
+    canonical_by_event_id = {
+        event_id: event_source
+        for event_source in canonical_sources
+        if isinstance(event_id := event_source.get("event_id"), str)
+    }
+    edit_candidates: ThreadEditCandidatesByOriginalEventId = {}
+    for event_source in canonical_sources:
+        record_thread_edit_candidate(
+            event_source,
+            edit_candidates_by_original_event_id=edit_candidates,
+        )
+    return canonical_by_event_id, edit_candidates
+
+
 async def fetch_thread_event_sources_via_room_messages(
     client: nio.AsyncClient,
     room_id: str,
@@ -2179,6 +2201,10 @@ async def _bulk_scan_thread_event_sources(
             break
         from_token = response.end
 
+    scanned_message_sources, edit_candidates_by_original_event_id = _canonical_scanned_room_sources(
+        scanned_message_sources,
+        room_id=room_id,
+    )
     remaining_root_ids.update(root_id for root_id in thread_root_ids if root_id not in scanned_message_sources)
     thread_event_sources, unresolved_opaque_event_ids = await _group_scanned_sources_by_thread(
         room_id=room_id,

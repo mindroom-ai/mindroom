@@ -338,6 +338,98 @@ class TestThreadHistory:
         ]
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("upgrade_kind", ["encrypted", "provisional"])
+    @pytest.mark.parametrize("representation_order", ["stale-first", "canonical-first"])
+    async def test_canonical_identity_upgrade_removes_stale_ordering_evidence(
+        self,
+        upgrade_kind: str,
+        representation_order: str,
+    ) -> None:
+        """Only the final canonical view of one event may contribute reply ancestry."""
+        room_id = "!room:localhost"
+        root_id = "$root:localhost"
+        sender = "@alice:localhost"
+
+        def message(
+            event_id: str,
+            body: str,
+            *,
+            timestamp: int,
+            relation: dict[str, object] | None = None,
+        ) -> dict[str, object]:
+            content: dict[str, object] = {"body": body, "msgtype": "m.text"}
+            if relation is not None:
+                content["m.relates_to"] = relation
+            return {
+                "event_id": event_id,
+                "room_id": room_id,
+                "sender": sender,
+                "origin_server_ts": timestamp,
+                "type": "m.room.message",
+                "content": content,
+            }
+
+        root = message(root_id, "Root", timestamp=1000)
+        first = message(
+            "$a:localhost",
+            "First",
+            timestamp=2000,
+            relation={"rel_type": "m.thread", "event_id": root_id},
+        )
+        canonical = message(
+            "$b:localhost",
+            "Canonical",
+            timestamp=2000,
+            relation={"rel_type": "m.thread", "event_id": root_id},
+        )
+        stale_relation = {
+            "rel_type": "m.thread",
+            "event_id": root_id,
+            "m.in_reply_to": {"event_id": "$a:localhost"},
+        }
+        if upgrade_kind == "encrypted":
+            stale = {
+                "event_id": "$b:localhost",
+                "room_id": room_id,
+                "sender": sender,
+                "origin_server_ts": 2000,
+                "type": "m.room.encrypted",
+                "content": {
+                    "algorithm": "m.megolm.v1.aes-sha2",
+                    "ciphertext": "opaque",
+                    "device_id": "DEVICE",
+                    "sender_key": "sender-key",
+                    "session_id": "session",
+                    "m.relates_to": stale_relation,
+                },
+            }
+        else:
+            stale = message(
+                "$b:localhost",
+                "Provisional",
+                timestamp=2000,
+                relation=stale_relation,
+            )
+            stale["io.mindroom.provisional_outbound"] = True
+        duplicate_representations = [stale, canonical] if representation_order == "stale-first" else [canonical, stale]
+
+        resolution = await _resolve_thread_history_from_event_sources_timed(
+            AsyncMock(),
+            room_id=room_id,
+            thread_id=root_id,
+            event_sources=[root, *duplicate_representations, first],
+            hydrate_sidecars=False,
+            event_cache=_event_cache(),
+        )
+
+        assert [message.event_id for message in resolution.messages] == [
+            root_id,
+            "$b:localhost",
+            "$a:localhost",
+        ]
+        assert resolution.related_event_id_by_event_id == {}
+
+    @pytest.mark.asyncio
     async def test_conflicting_replacement_identity_across_originals_is_rejected(
         self,
         tmp_path: Path,
@@ -2421,6 +2513,61 @@ class TestThreadHistory:
         assert resolved["$root"].body == "Root"
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("representation_order", ["bundle-first", "explicit-first"])
+    async def test_visible_resolution_rejects_cross_target_bundled_identity(
+        self,
+        representation_order: str,
+    ) -> None:
+        """Bundled and explicit views of one edit ID cannot target two originals."""
+        room_id = "!room:localhost"
+        edit_id = "$same"
+
+        def edit(target: str, body: str) -> MagicMock:
+            return self._make_text_event(
+                event_id=edit_id,
+                sender="@alice:localhost",
+                body=f"* {body}",
+                server_timestamp=3000,
+                source_content={
+                    "body": f"* {body}",
+                    "m.new_content": {"body": body, "msgtype": "m.text"},
+                    "m.relates_to": {"rel_type": "m.replace", "event_id": target},
+                },
+            )
+
+        first = self._make_text_event(
+            event_id="$first",
+            sender="@alice:localhost",
+            body="First",
+            server_timestamp=1000,
+            source_content={"body": "First"},
+        )
+        bundled_edit = _event_source_for_cache(edit("$first", "Forged first"))
+        first.source["unsigned"] = {"m.relations": {"m.replace": bundled_edit}}
+        second = self._make_text_event(
+            event_id="$second",
+            sender="@alice:localhost",
+            body="Second",
+            server_timestamp=2000,
+            source_content={"body": "Second"},
+        )
+        explicit_edit = edit("$second", "Forged second")
+        ordered_events = (
+            [first, second, explicit_edit] if representation_order == "bundle-first" else [explicit_edit, first, second]
+        )
+
+        resolved = await resolve_latest_visible_messages(
+            ordered_events,
+            AsyncMock(),
+            room_id=room_id,
+        )
+
+        assert [(event_id, message.body, message.latest_event_id) for event_id, message in resolved.items()] == [
+            ("$first", "First", "$first"),
+            ("$second", "Second", "$second"),
+        ]
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize("representation_order", ["visible-first", "edit-first"])
     async def test_room_scan_rejects_one_identity_in_message_and_edit_roles(
         self,
@@ -2471,6 +2618,64 @@ class TestThreadHistory:
         history = await fetch_thread_history(
             client,
             "!room:localhost",
+            "$root",
+        )
+
+        assert [(message.event_id, message.body, message.latest_event_id) for message in history] == [
+            ("$root", "Root", "$root"),
+        ]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("representation_order", ["bundle-first", "explicit-first"])
+    async def test_room_scan_rejects_cross_target_bundled_identity(
+        self,
+        representation_order: str,
+    ) -> None:
+        """Room-wide identity evidence must be reconciled before per-thread grouping."""
+        client = AsyncMock()
+        room_id = "!room:localhost"
+        root = self._make_text_event(
+            event_id="$root",
+            sender="@alice:localhost",
+            body="Root",
+            server_timestamp=1000,
+            source_content={"body": "Root"},
+        )
+        bundled_edit = self._make_text_event(
+            event_id="$same",
+            sender="@alice:localhost",
+            body="* Forged root",
+            server_timestamp=3000,
+            source_content={
+                "body": "* Forged root",
+                "m.new_content": {"body": "Forged root", "msgtype": "m.text"},
+                "m.relates_to": {"rel_type": "m.replace", "event_id": "$root"},
+            },
+        )
+        root.source["unsigned"] = {
+            "m.relations": {
+                "m.replace": _event_source_for_cache(bundled_edit),
+            },
+        }
+        explicit_edit = self._make_text_event(
+            event_id="$same",
+            sender="@alice:localhost",
+            body="* Other",
+            server_timestamp=3000,
+            source_content={
+                "body": "* Other",
+                "m.new_content": {"body": "Other", "msgtype": "m.text"},
+                "m.relates_to": {"rel_type": "m.replace", "event_id": "$other"},
+            },
+        )
+        response = MagicMock(spec=nio.RoomMessagesResponse)
+        response.chunk = [root, explicit_edit] if representation_order == "bundle-first" else [explicit_edit, root]
+        response.end = None
+        client.room_messages.return_value = response
+
+        history = await fetch_thread_history(
+            client,
+            room_id,
             "$root",
         )
 

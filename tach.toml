@@ -4025,11 +4025,12 @@ from = ["mindroom.matrix.event_identity"]
 expose = [
     "ReplacementValidator",
     "bundled_replacement_candidates",
-    "conflicting_replacement_event_ids",
+    "canonical_event_sources",
     "is_valid_replacement",
     "observe_event_representation",
     "ordered_replacements",
     "replacement_content",
+    "without_bundled_replacement_event_ids",
 ]
 from = ["mindroom.matrix.replacements"]
 
