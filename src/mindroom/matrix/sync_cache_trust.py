@@ -128,8 +128,11 @@ class SyncCacheTrust:
             cache_result=cache_result,
             first_sync=first_sync,
         )
-        limited_timeline = bool(cache_result.limited_room_ids)
-        if limited_timeline and not self._awaiting_initial_window:
+        # Only a gap the Matrix client could not close costs a replay. A gap it
+        # backfilled has already delivered its events through the timeline
+        # callbacks, so dropping the position would re-read every joined room
+        # to recover nothing.
+        if cache_result.unrecovered_room_ids and not self._awaiting_initial_window:
             decision = replace(decision, reset_client_token=True)
         self._apply_decision(decision, cache_result=cache_result)
         # Re-arm from applied trust, not from the decision: _apply_decision rejects

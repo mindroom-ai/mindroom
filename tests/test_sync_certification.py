@@ -103,6 +103,7 @@ def test_sync_cache_write_diagnostics_explains_uncertainty() -> None:
         "cache_write_complete": False,
         "cache_write_certified": False,
         "cache_limited_room_count": 1,
+        "cache_unrecovered_room_count": 1,
         "cache_error_count": 1,
         "cache_runtime_available": False,
         "cache_task_count": 3,
@@ -151,3 +152,16 @@ def test_unknown_pos_clears_saved_and_client_token() -> None:
     assert decision.clear_saved_token is True
     assert decision.reset_client_token is True
     assert decision.reason == "unknown_pos"
+
+
+def test_unrecovered_room_ids_counts_only_proven_recoveries() -> None:
+    """Only a limited room the client proved it backfilled stops counting as open."""
+    result = SyncCacheWriteResult(
+        complete=False,
+        limited_room_ids=("!open:localhost", "!closed:localhost"),
+        recovered_room_ids=("!closed:localhost", "!never-limited:localhost"),
+    )
+
+    assert result.unrecovered_room_ids == ("!open:localhost",)
+    # A backfilled gap is still a gap for certification purposes.
+    assert result.certified is False

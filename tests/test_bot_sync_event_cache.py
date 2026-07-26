@@ -406,6 +406,48 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         )
 
     @pytest.mark.asyncio
+    async def test_recovered_limited_sync_keeps_the_client_position(self, bot: AgentBot) -> None:
+        """A gap the Matrix client backfilled must not drop the position it already holds."""
+        room_id = "!test:localhost"
+        _save_certified_sync_token(bot, "s_before_gap")
+        bot._runtime_view.mark_runtime_started()
+        bot._sync_cache_trust.state = SyncTrustState.CERTIFIED
+        bot.client.next_batch = "s_after_gap"
+        sync_response = self._sync_response(
+            {room_id: MagicMock(timeline=MagicMock(events=[], limited=True))},
+        )
+        sync_response.recovered_room_ids = frozenset({room_id})
+
+        await self._run_sync_response_without_startup_side_effects(bot, sync_response)
+
+        assert bot.client.next_batch == "s_after_gap"
+        # The delta still came through a gap, so it certifies nothing on its own.
+        assert bot._sync_cache_trust.state is SyncTrustState.UNCERTAIN
+        assert _load_sync_token_value(bot.storage_path, bot.agent_name) is None
+        bot.event_cache.mark_room_threads_stale.assert_awaited_once_with(
+            room_id,
+            reason="limited_sync_timeline",
+        )
+
+    @pytest.mark.asyncio
+    async def test_unrecovered_limited_sync_still_drops_the_client_position(self, bot: AgentBot) -> None:
+        """A gap left open must keep costing the since-less replay that guards the cache."""
+        room_id = "!test:localhost"
+        _save_certified_sync_token(bot, "s_before_gap")
+        bot._runtime_view.mark_runtime_started()
+        bot._sync_cache_trust.state = SyncTrustState.CERTIFIED
+        bot.client.next_batch = "s_after_gap"
+        sync_response = self._sync_response(
+            {room_id: MagicMock(timeline=MagicMock(events=[], limited=True))},
+        )
+        sync_response.recovered_room_ids = frozenset()
+
+        await self._run_sync_response_without_startup_side_effects(bot, sync_response)
+
+        assert bot.client.next_batch is None
+        assert bot._sync_cache_trust.state is SyncTrustState.UNCERTAIN
+
+    @pytest.mark.asyncio
     async def test_limited_sync_marks_room_stale_before_admitting_partial_events(self, bot: AgentBot) -> None:
         """The durable room stale marker must land before any partial timeline event is admitted."""
         room_id = "!room:localhost"
@@ -436,6 +478,37 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         )
         call_names = [name for name, _args, _kwargs in event_cache.mock_calls]
         assert call_names.index("mark_room_threads_stale") < call_names.index("store_events_batch")
+
+    @pytest.mark.asyncio
+    async def test_recovered_limited_room_reaches_certification_as_recovered(self, bot: AgentBot) -> None:
+        """A gap the Matrix client closed must be reported as recovered, not merely limited."""
+        room_id = "!room:localhost"
+        event_cache = _runtime_event_cache()
+        bot.event_cache = event_cache
+        _install_runtime_write_coordinator(bot)
+        response = self._sync_response({room_id: MagicMock(timeline=MagicMock(events=[], limited=True))})
+        response.recovered_room_ids = frozenset({room_id})
+
+        result = await bot._conversation_cache.cache_sync_timeline_for_certification(response)
+
+        assert result.limited_room_ids == (room_id,)
+        assert result.recovered_room_ids == (room_id,)
+        assert result.unrecovered_room_ids == ()
+
+    @pytest.mark.asyncio
+    async def test_client_that_reports_no_recovery_leaves_the_room_unrecovered(self, bot: AgentBot) -> None:
+        """A client that cannot prove a gap closed must be read as not having closed it."""
+        room_id = "!room:localhost"
+        event_cache = _runtime_event_cache()
+        bot.event_cache = event_cache
+        _install_runtime_write_coordinator(bot)
+
+        result = await bot._conversation_cache.cache_sync_timeline_for_certification(
+            self._sync_response({room_id: MagicMock(timeline=MagicMock(events=[], limited=True))}),
+        )
+
+        assert result.recovered_room_ids == ()
+        assert result.unrecovered_room_ids == (room_id,)
 
     @pytest.mark.asyncio
     async def test_limited_sync_stale_marker_failure_fails_certification_closed(self, bot: AgentBot) -> None:

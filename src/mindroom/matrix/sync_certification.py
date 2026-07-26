@@ -36,10 +36,24 @@ class SyncCacheWriteResult:
     runtime_available: bool | None = None
     task_count: int | None = None
     runtime_diagnostics: dict[str, object] | None = None
+    # Limited rooms the Matrix client proved it backfilled. Empty by default, so
+    # a client that reports nothing leaves every gap counted as still open.
+    recovered_room_ids: tuple[str, ...] = ()
+
+    @property
+    def unrecovered_room_ids(self) -> tuple[str, ...]:
+        """Return limited rooms whose timeline gap was never proven closed."""
+        recovered = set(self.recovered_room_ids)
+        return tuple(room_id for room_id in self.limited_room_ids if room_id not in recovered)
 
     @property
     def certified(self) -> bool:
-        """Return whether this result proves the sync delta reached durable cache."""
+        """Return whether this result proves the sync delta reached durable cache.
+
+        A backfilled gap still fails certification: the events it recovered
+        reach the cache through timeline callbacks, not through this response,
+        so this write alone does not prove the delta is durable.
+        """
         return self.complete and not self.limited_room_ids and not self.errors
 
 
@@ -121,6 +135,7 @@ def sync_cache_write_diagnostics(cache_result: SyncCacheWriteResult) -> dict[str
         "cache_write_complete": cache_result.complete,
         "cache_write_certified": cache_result.certified,
         "cache_limited_room_count": len(cache_result.limited_room_ids),
+        "cache_unrecovered_room_count": len(cache_result.unrecovered_room_ids),
         "cache_error_count": len(cache_result.errors),
     }
     if cache_result.runtime_available is not None:

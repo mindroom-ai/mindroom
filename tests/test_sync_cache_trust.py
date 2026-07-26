@@ -364,3 +364,63 @@ def test_saved_retry_token_requires_current_generation(
     save_sync_token(tmp_path, "code", "s_saved", cache_generation=saved_generation)
 
     assert trust.retry_token() == expected
+
+
+def test_recovered_limited_response_keeps_the_client_position(tmp_path: Path) -> None:
+    """A gap Matrix recovery closed must not cost a since-less replay."""
+    trust, _cache, _runtime = _trust(tmp_path)
+    trust.state = SyncTrustState.CERTIFIED
+
+    decision = trust.certify_response(
+        next_batch="s_recovered",
+        cache_result=SyncCacheWriteResult(
+            complete=False,
+            limited_room_ids=("!room:localhost",),
+            recovered_room_ids=("!room:localhost",),
+        ),
+        first_sync=False,
+    )
+
+    assert decision.reset_client_token is False
+    # The delta still went through a gap, so it certifies nothing.
+    assert trust.state is SyncTrustState.UNCERTAIN
+    assert load_sync_checkpoint(tmp_path, "code") is None
+
+
+def test_partially_recovered_response_still_resets_sync_continuity(tmp_path: Path) -> None:
+    """One room left unrecovered is enough to distrust the position."""
+    trust, _cache, _runtime = _trust(tmp_path)
+    trust.state = SyncTrustState.CERTIFIED
+
+    decision = trust.certify_response(
+        next_batch="s_partial",
+        cache_result=SyncCacheWriteResult(
+            complete=False,
+            limited_room_ids=("!recovered:localhost", "!open:localhost"),
+            recovered_room_ids=("!recovered:localhost",),
+        ),
+        first_sync=False,
+    )
+
+    assert decision.reset_client_token is True
+
+
+def test_sustained_recovered_gaps_never_replay(tmp_path: Path) -> None:
+    """A run of recovered gaps must cost no replay at all."""
+    trust, _cache, _runtime = _trust(tmp_path)
+    trust.state = SyncTrustState.CERTIFIED
+
+    decisions = [
+        trust.certify_response(
+            next_batch=f"s_recovered_{index}",
+            cache_result=SyncCacheWriteResult(
+                complete=False,
+                limited_room_ids=("!room:localhost",),
+                recovered_room_ids=("!room:localhost",),
+            ),
+            first_sync=False,
+        )
+        for index in range(4)
+    ]
+
+    assert [decision.reset_client_token for decision in decisions] == [False] * 4

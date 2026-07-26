@@ -1373,6 +1373,16 @@ class ThreadSyncWritePolicy:
         return tuple(limited_room_ids), ()
 
     @staticmethod
+    def _recovered_sync_timeline_room_ids(response: nio.SyncResponse) -> tuple[str, ...]:
+        """Return limited rooms the Matrix client reports it backfilled."""
+        # Matrix clients without limited-timeline recovery report nothing, and a
+        # gap that cannot be proven closed must be read as still open.
+        reported = getattr(response, "recovered_room_ids", ())
+        if not isinstance(reported, (frozenset, set, tuple, list)):
+            return ()
+        return tuple(room_id for room_id in reported if isinstance(room_id, str))
+
+    @staticmethod
     def _cache_task_errors(results: list[object | BaseException]) -> tuple[BaseException, ...]:
         """Return task outcomes that prevent cache certification."""
         errors: list[BaseException] = []
@@ -1402,10 +1412,12 @@ class ThreadSyncWritePolicy:
                 runtime_available=self._cache_ops.cache_runtime_available(),
                 runtime_diagnostics=self._cache_ops.cache_runtime_diagnostics(),
             )
+        recovered_room_ids = self._recovered_sync_timeline_room_ids(response)
         if not self._cache_ops.cache_runtime_available():
             return SyncCacheWriteResult(
                 complete=False,
                 limited_room_ids=limited_room_ids,
+                recovered_room_ids=recovered_room_ids,
                 runtime_available=False,
                 task_count=0,
                 runtime_diagnostics=self._cache_ops.cache_runtime_diagnostics(),
@@ -1422,6 +1434,7 @@ class ThreadSyncWritePolicy:
             return SyncCacheWriteResult(
                 complete=False,
                 limited_room_ids=limited_room_ids,
+                recovered_room_ids=recovered_room_ids,
                 errors=(exc,),
                 runtime_available=self._cache_ops.cache_runtime_available(),
                 runtime_diagnostics=self._cache_ops.cache_runtime_diagnostics(),
@@ -1437,6 +1450,7 @@ class ThreadSyncWritePolicy:
         return SyncCacheWriteResult(
             complete=complete,
             limited_room_ids=limited_room_ids,
+            recovered_room_ids=recovered_room_ids,
             errors=errors,
             runtime_available=runtime_available,
             task_count=len(tasks),
