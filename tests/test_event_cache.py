@@ -776,14 +776,6 @@ def test_only_persistent_thread_repair_failure_arms_backoff(tmp_path: Path) -> N
             "cache_repair_usable": False,
         },
     )
-    skipped_snapshot = thread_history_result(
-        [],
-        is_full_history=True,
-        diagnostics={
-            "cache_store_outcome": "skipped_missing_thread_root",
-            "cache_repair_usable": False,
-        },
-    )
     stale_fallback = thread_history_result(
         [],
         is_full_history=True,
@@ -794,7 +786,6 @@ def test_only_persistent_thread_repair_failure_arms_backoff(tmp_path: Path) -> N
     )
 
     assert conversation_cache._thread_repair_result_arms_backoff(writes_unavailable) is False
-    assert conversation_cache._thread_repair_result_arms_backoff(skipped_snapshot) is False
     assert conversation_cache._thread_repair_result_arms_backoff(stale_fallback) is False
     assert conversation_cache._thread_repair_result_arms_backoff(hard_failure) is True
 

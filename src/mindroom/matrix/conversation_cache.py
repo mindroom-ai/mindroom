@@ -717,15 +717,13 @@ class MatrixConversationCache(ConversationCacheProtocol):
         self,
         room_id: str,
         thread_id: str,
-        *,
-        failure_message: str,
     ) -> set[str] | None:
         """Read raw event IDs for repair bookkeeping without failing the user-facing read."""
         try:
             event_sources = await self.runtime.event_cache.get_thread_events(room_id, thread_id)
         except Exception as exc:
             self.logger.warning(
-                failure_message,
+                "Failed to inspect raw thread cache during repair",
                 room_id=room_id,
                 thread_id=thread_id,
                 error_type=type(exc).__name__,
@@ -748,7 +746,6 @@ class MatrixConversationCache(ConversationCacheProtocol):
         cached_event_ids = await self._cached_thread_event_ids_for_repair(
             room_id,
             thread_id,
-            failure_message="Failed to inspect retained thread deltas before repair",
         )
         if cached_event_ids is None or retained_event_ids - cached_event_ids:
             await self._write_cache_ops.invalidate_known_thread(
@@ -783,7 +780,6 @@ class MatrixConversationCache(ConversationCacheProtocol):
             repaired_event_ids = await self._cached_thread_event_ids_for_repair(
                 room_id,
                 thread_id,
-                failure_message="Failed to inspect repaired thread cache for retained deltas",
             )
             if repaired_event_ids is not None:
                 acknowledged_event_ids.update(remaining_event_ids & repaired_event_ids)
@@ -1056,8 +1052,6 @@ class MatrixConversationCache(ConversationCacheProtocol):
                 room_id,
                 limit=_STARTUP_PREWARM_THREAD_LIMIT,
             )
-        except asyncio.CancelledError:
-            raise
         except Exception as exc:
             self.logger.warning(
                 "startup_thread_prewarm_room_threads_failed",
@@ -1100,8 +1094,6 @@ class MatrixConversationCache(ConversationCacheProtocol):
                 room_id,
                 thread_ids,
             )
-        except asyncio.CancelledError:
-            raise
         except Exception as exc:
             self.logger.warning(
                 "startup_thread_prewarm_cache_probe_failed",
@@ -1129,8 +1121,6 @@ class MatrixConversationCache(ConversationCacheProtocol):
                 room_id,
                 untrusted_thread_ids,
             )
-        except asyncio.CancelledError:
-            raise
         except Exception as exc:
             self.logger.warning(
                 "startup_thread_prewarm_bulk_failed",

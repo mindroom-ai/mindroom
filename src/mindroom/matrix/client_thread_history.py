@@ -1134,15 +1134,14 @@ async def _resolve_merged_thread_fetch_result(
 class _ThreadCacheRefillAttempt:
     """One completed reconstruct-and-store attempt and any already-usable winner."""
 
-    cache_store_outcome: str
+    replace_outcome: ThreadCacheReplaceOutcome
     cache_repair_usable: bool
-    replace_outcome: ThreadCacheReplaceOutcome | None
     existing_history: ThreadHistoryResult | None = None
 
     @property
     def retryable(self) -> bool:
         """Return whether another bounded reconstruction may still install a snapshot."""
-        return self.replace_outcome is not None and self.replace_outcome.retryable
+        return self.replace_outcome.retryable
 
 
 async def _fetch_thread_repair_snapshot(
@@ -1203,34 +1202,19 @@ async def _stale_history_after_refresh_error(
     )
 
 
-async def _cache_store_rejection_outcome(
+async def _reject_opaque_thread_snapshot(
     event_cache: ConversationEventCache,
     *,
     room_id: str,
     thread_id: str,
     fetch_result: _ThreadHistoryFetchResult,
-) -> str | None:
-    """Reject incomplete snapshots before a guarded cache store."""
-    rejection_reason = _thread_history_cache_rejection_reason(fetch_result.event_sources, thread_id=thread_id)
-    if rejection_reason == _OPAQUE_ENCRYPTED_EVENT_REJECTION:
-        await _mark_thread_stale_for_opaque_history(event_cache, room_id=room_id, thread_id=thread_id)
-        msg = f"thread history for {thread_id} contains still-undecryptable encrypted events"
-        raise OpaqueEncryptedThreadHistoryError(msg)
-    if rejection_reason is None:
-        return None
-    logger.info(
-        "Thread history cache store skipped",
-        room_id=room_id,
-        thread_id=thread_id,
-        cache_store_skipped_reason=rejection_reason,
-        has_thread_root=False,
-        event_count=len(fetch_result.event_sources),
-        history_event_count=len(fetch_result.history),
-        homeserver_scan_pages=fetch_result.room_scan_pages,
-        homeserver_scanned_event_count=fetch_result.scanned_event_count,
-        homeserver_thread_event_count=len(fetch_result.event_sources),
-    )
-    return f"skipped_{rejection_reason}"
+) -> None:
+    """Reject an opaque-poisoned reconstruction before its guarded store."""
+    if not any(is_opaque_encrypted_event_source(source) for source in fetch_result.event_sources):
+        return
+    await _mark_thread_stale_for_opaque_history(event_cache, room_id=room_id, thread_id=thread_id)
+    msg = f"thread history for {thread_id} contains still-undecryptable encrypted events"
+    raise OpaqueEncryptedThreadHistoryError(msg)
 
 
 async def _store_repaired_thread_snapshot(
@@ -1247,18 +1231,12 @@ async def _store_repaired_thread_snapshot(
     repair_attempt: int,
 ) -> _ThreadCacheRefillAttempt:
     """Guard one snapshot replacement and resolve any existing usable winner."""
-    skipped_reason = await _cache_store_rejection_outcome(
+    await _reject_opaque_thread_snapshot(
         event_cache,
         room_id=room_id,
         thread_id=thread_id,
         fetch_result=fetch_result,
     )
-    if skipped_reason is not None:
-        return _ThreadCacheRefillAttempt(
-            cache_store_outcome=skipped_reason,
-            cache_repair_usable=False,
-            replace_outcome=None,
-        )
     outcome = await _store_thread_history_cache(
         event_cache,
         room_id=room_id,
@@ -1281,9 +1259,8 @@ async def _store_repaired_thread_snapshot(
     )
     if outcome is not ThreadCacheReplaceOutcome.EXISTING_USABLE:
         return _ThreadCacheRefillAttempt(
-            cache_store_outcome=outcome.value,
-            cache_repair_usable=outcome.usable,
             replace_outcome=outcome,
+            cache_repair_usable=outcome.usable,
         )
     try:
         existing_history, _existing_reject = await _load_cached_thread_history_if_usable(
@@ -1305,9 +1282,8 @@ async def _store_repaired_thread_snapshot(
             error=str(exc),
         )
         return _ThreadCacheRefillAttempt(
-            cache_store_outcome=outcome.value,
-            cache_repair_usable=False,
             replace_outcome=outcome,
+            cache_repair_usable=False,
         )
     if existing_history is None:
         logger.warning(
@@ -1318,14 +1294,12 @@ async def _store_repaired_thread_snapshot(
             cache_repair_attempt=repair_attempt,
         )
         return _ThreadCacheRefillAttempt(
-            cache_store_outcome=outcome.value,
-            cache_repair_usable=False,
             replace_outcome=outcome,
+            cache_repair_usable=False,
         )
     return _ThreadCacheRefillAttempt(
-        cache_store_outcome=outcome.value,
-        cache_repair_usable=True,
         replace_outcome=outcome,
+        cache_repair_usable=True,
         existing_history=existing_history,
     )
 
@@ -1431,7 +1405,7 @@ async def refresh_thread_history_from_source(
                 is_full_history=hydrate_sidecars,
                 diagnostics={
                     **attempt.existing_history.diagnostics,
-                    "cache_store_outcome": attempt.cache_store_outcome,
+                    "cache_store_outcome": attempt.replace_outcome.value,
                     "cache_repair_attempts": repair_attempts,
                     "cache_repair_usable": True,
                 },
@@ -1442,26 +1416,26 @@ async def refresh_thread_history_from_source(
             "Retrying thread cache repair after guarded replacement conflict",
             room_id=room_id,
             thread_id=thread_id,
-            cache_store_outcome=attempt.cache_store_outcome,
+            cache_store_outcome=attempt.replace_outcome.value,
             cache_repair_attempt=repair_attempts,
         )
 
     assert fetch_result is not None
     assert attempt is not None
-    if attempt.replace_outcome is not None and not attempt.cache_repair_usable:
+    if not attempt.cache_repair_usable:
         # Covers durable-write faults too, not just conflicts: a cache that cannot accept writes is
         # the condition operators most need to see, and it is otherwise only logged at INFO.
         logger.warning(
             "Thread cache repair did not install a usable snapshot",
             room_id=room_id,
             thread_id=thread_id,
-            cache_store_outcome=attempt.cache_store_outcome,
+            cache_store_outcome=attempt.replace_outcome.value,
             cache_repair_attempts=repair_attempts,
         )
     return _homeserver_thread_history_result(
         fetch_result,
         hydrate_sidecars=hydrate_sidecars,
-        cache_store_outcome=attempt.cache_store_outcome,
+        cache_store_outcome=attempt.replace_outcome.value,
         repair_attempts=repair_attempts,
         cache_repair_usable=attempt.cache_repair_usable,
         cache_reject_diagnostics=cache_reject_diagnostics,
