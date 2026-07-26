@@ -1,8 +1,10 @@
 """Test extra_kwargs functionality in model configuration."""
 
+import asyncio
 import importlib
 import os
 import tempfile
+import threading
 from pathlib import Path
 
 import pytest
@@ -1457,6 +1459,83 @@ async def test_prompt_cache_hook_drops_orphaned_search_use_from_streaming_replay
     )
     assert any(getattr(block, "type", None) == "tool_use" for block in assistant_wire["content"])
     assert wire_messages[-1]["content"][0]["type"] == "tool_result"
+
+
+@pytest.mark.parametrize("use_beta", [False, True])
+@pytest.mark.asyncio
+async def test_prompt_cache_hook_constructs_async_stream_off_event_loop(*, use_beta: bool) -> None:
+    """Slow synchronous SDK stream setup must not block unrelated async work."""
+    model = Claude(id="claude-opus-4-8", api_key="test-key", cache_system_prompt=False)
+    stream_started = threading.Event()
+    heartbeat_seen = threading.Event()
+    allow_stream_return = threading.Event()
+    heartbeat_before_release: list[bool] = []
+    stream_thread_ids: list[int] = []
+    event_loop_thread_id = threading.get_ident()
+
+    class _EmptyAsyncStream:
+        async def __aenter__(self) -> object:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        def __aiter__(self) -> object:
+            return self
+
+        async def __anext__(self) -> object:
+            raise StopAsyncIteration
+
+    class _BlockingAsyncMessagesAPI:
+        def stream(self, **_kwargs: object) -> object:
+            stream_thread_ids.append(threading.get_ident())
+            stream_started.set()
+            assert allow_stream_return.wait(2.0)
+            return _EmptyAsyncStream()
+
+    class _FakeBetaAPI:
+        def __init__(self) -> None:
+            self.messages = _BlockingAsyncMessagesAPI()
+
+    class _FakeAsyncClient:
+        def __init__(self) -> None:
+            self.messages = _BlockingAsyncMessagesAPI()
+            self.beta = _FakeBetaAPI()
+
+    def release_after_heartbeat() -> None:
+        assert stream_started.wait(2.0)
+        heartbeat_before_release.append(heartbeat_seen.wait(0.5))
+        allow_stream_return.set()
+
+    vars(model)["get_async_client"] = lambda: _FakeAsyncClient()
+    vars(model)["_prepare_request_kwargs"] = lambda *_args, **_kwargs: {}
+    vars(model)["_has_beta_features"] = lambda **_kwargs: use_beta
+    install_claude_prompt_cache_hook(model)
+    release_thread = threading.Thread(target=release_after_heartbeat)
+    release_thread.start()
+
+    async def consume_stream() -> list[ModelResponse]:
+        return [
+            response
+            async for response in model.ainvoke_stream(
+                messages=[Message(role="user", content="Current turn")],
+                assistant_message=Message(role="assistant"),
+            )
+        ]
+
+    stream_task = asyncio.create_task(consume_stream())
+    try:
+        assert await asyncio.to_thread(stream_started.wait, 2.0)
+        await asyncio.sleep(0)
+        heartbeat_seen.set()
+        assert await asyncio.wait_for(stream_task, timeout=2.0) == []
+    finally:
+        allow_stream_return.set()
+        await asyncio.to_thread(release_thread.join, 2.0)
+
+    assert heartbeat_before_release == [True]
+    assert stream_thread_ids
+    assert stream_thread_ids[0] != event_loop_thread_id
 
 
 def _dirty_replay_messages() -> list[Message]:
