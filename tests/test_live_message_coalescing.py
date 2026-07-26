@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from typing import TYPE_CHECKING, Literal, cast
+from typing import TYPE_CHECKING, Literal, cast, get_args
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -4236,7 +4236,7 @@ def _coalesced_ownership_record(ownership: _SourceOwnership) -> TurnRecord:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("degraded", [False, True])
-@pytest.mark.parametrize("ownership", ["single", "mixed", "absent", "partial", "redacted"])
+@pytest.mark.parametrize("ownership", get_args(_SourceOwnership))
 async def test_backlog_replay_respects_coalesced_source_ownership(
     tmp_path: Path,
     *,
