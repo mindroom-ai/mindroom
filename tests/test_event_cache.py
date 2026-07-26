@@ -800,6 +800,43 @@ def test_only_persistent_thread_repair_failure_arms_backoff(tmp_path: Path) -> N
 
 
 @pytest.mark.asyncio
+async def test_departure_clears_retained_thread_repair_deltas(tmp_path: Path) -> None:
+    """A leave/rejoin boundary must not replay plaintext retained before departure."""
+    event_cache = SqliteEventCache(tmp_path / "event_cache.db", principal_id="@agent:localhost")
+    await event_cache.initialize()
+    conversation_cache = _conversation_cache_for_thread_reads(tmp_path, event_cache, client=MagicMock())
+    coordinator = EventCacheWriteCoordinator(logger=MagicMock())
+    conversation_cache.runtime.event_cache_write_coordinator = coordinator
+    room_id = "!room:localhost"
+    thread_id = "$thread:localhost"
+    coordinator.retain_thread_repair_delta(
+        room_id,
+        thread_id,
+        _clear_payload("$old:localhost", body="pre-departure", thread_root_id=thread_id),
+        coordination_scope=event_cache.principal_id,
+    )
+
+    try:
+        assert coordinator.pending_thread_repair_deltas(
+            room_id,
+            thread_id,
+            coordination_scope=event_cache.principal_id,
+        )
+        await conversation_cache.purge_rooms([room_id])
+        await conversation_cache.mark_room_joined(room_id)
+        retained_after_rejoin = coordinator.pending_thread_repair_deltas(
+            room_id,
+            thread_id,
+            coordination_scope=event_cache.principal_id,
+        )
+    finally:
+        await coordinator.close()
+        await event_cache.close()
+
+    assert retained_after_rejoin == ()
+
+
+@pytest.mark.asyncio
 async def test_dispatch_thread_read_degrades_when_fetcher_stalls(
     tmp_path: Path,
 ) -> None:

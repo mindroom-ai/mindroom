@@ -1372,8 +1372,14 @@ class MatrixConversationCache(ConversationCacheProtocol):
     async def purge_rooms(self, room_ids: Collection[str]) -> None:
         """Fence an entire authoritative leave batch before awaiting any purge."""
         departed_room_ids = tuple(dict.fromkeys(room_ids))
+        coordinator = self.runtime.event_cache_write_coordinator
         for room_id in departed_room_ids:
             self._write_cache_ops.mark_room_departed(room_id)
+            if coordinator is not None:
+                coordinator.clear_thread_repair_room(
+                    room_id,
+                    coordination_scope=self.runtime.event_cache.principal_id,
+                )
         tasks = tuple(
             self._write_cache_ops.queue_room_cache_update(
                 room_id,

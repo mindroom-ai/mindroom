@@ -107,6 +107,7 @@ Cancelling a waiting caller does not cancel the shared repair, and a caller that
 Live and outbound thread events are retained as certified deltas before their ordered append begins, replayed into the reconstructed snapshot in canonical order, and forgotten once an append or an installed snapshot is proven to contain them.
 A replayed delta never replaces authoritative same-ID fetched state, so a redacted event stays redacted.
 Retained deltas expire after 60 seconds because any later scan already observes them.
+Authoritative departure clears retained repair deltas for that principal and room before any post-rejoin repair can begin.
 
 The guarded replacement classifies its result as `stored`, `existing_usable`, `retryable_conflict`, `invalidated`, `writes_unavailable`, or `hard_failure`.
 A refill performs at most two reconstruction attempts and only retries `retryable_conflict` and `invalidated`; `existing_usable` serves the winning snapshot instead.
