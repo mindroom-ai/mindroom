@@ -287,17 +287,12 @@ class TestThreadMutationHelpers:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        ("context", "use_append_failure_reason"),
-        [
-            ("outbound", False),
-            ("live", True),
-            ("sync", True),
-        ],
+        "context",
+        ["outbound", "live", "sync"],
     )
     async def test_thread_message_mutation_room_level_skips_invalidation(
         self,
         context: str,
-        use_append_failure_reason: bool,
     ) -> None:
         """Room-level message mutations should only log and leave thread state untouched."""
         cache_ops, logger, event_cache = _thread_mutation_cache_ops()
@@ -311,7 +306,6 @@ class TestThreadMutationHelpers:
             event_id="$event:localhost",
             context=context,
             room_level_skip_message=f"skip-{context}",
-            use_append_failure_reason=use_append_failure_reason,
         )
 
         assert result is False
@@ -327,17 +321,12 @@ class TestThreadMutationHelpers:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        ("context", "use_append_failure_reason"),
-        [
-            ("outbound", False),
-            ("live", True),
-            ("sync", True),
-        ],
+        "context",
+        ["outbound", "live", "sync"],
     )
     async def test_thread_message_mutation_unknown_invalidates_room_once(
         self,
         context: str,
-        use_append_failure_reason: bool,
     ) -> None:
         """Unknown message mutations should fail closed with one room-thread invalidation."""
         cache_ops, _logger, event_cache = _thread_mutation_cache_ops()
@@ -351,7 +340,6 @@ class TestThreadMutationHelpers:
             event_id="$event:localhost",
             context=context,
             room_level_skip_message=f"skip-{context}",
-            use_append_failure_reason=use_append_failure_reason,
         )
 
         assert result is True
@@ -364,17 +352,12 @@ class TestThreadMutationHelpers:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        ("context", "use_append_failure_reason"),
-        [
-            ("outbound", False),
-            ("live", True),
-            ("sync", True),
-        ],
+        "context",
+        ["outbound", "live", "sync"],
     )
     async def test_thread_message_mutation_threaded_success_uses_context_reasons(
         self,
         context: str,
-        use_append_failure_reason: bool,
     ) -> None:
         """Threaded message mutations should append atomically and avoid room invalidation."""
         cache_ops, _logger, event_cache = _thread_mutation_cache_ops()
@@ -389,7 +372,6 @@ class TestThreadMutationHelpers:
             event_id="$event:localhost",
             context=context,
             room_level_skip_message=f"skip-{context}",
-            use_append_failure_reason=use_append_failure_reason,
         )
 
         assert result is False
@@ -398,26 +380,23 @@ class TestThreadMutationHelpers:
             "!room:localhost",
             "$thread:localhost",
             event_source,
-            append_failed_reason=(
-                f"{context}_append_failed" if use_append_failure_reason else f"{context}_thread_mutation"
-            ),
+            append_failed_reason=f"{context}_append_failed",
         )
         event_cache.mark_room_threads_stale.assert_not_awaited()
         event_cache.mark_thread_stale.assert_not_awaited()
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        ("context", "use_append_failure_reason", "expected_reason"),
+        ("context", "expected_reason"),
         [
-            ("outbound", False, "outbound_thread_mutation"),
-            ("live", True, "live_append_failed"),
-            ("sync", True, "sync_append_failed"),
+            ("outbound", "outbound_append_failed"),
+            ("live", "live_append_failed"),
+            ("sync", "sync_append_failed"),
         ],
     )
     async def test_thread_message_mutation_threaded_append_failure_uses_path_policy(
         self,
         context: str,
-        use_append_failure_reason: bool,
         expected_reason: str,
     ) -> None:
         """An append that cannot land must carry each path's own durable marker reason."""
@@ -433,7 +412,6 @@ class TestThreadMutationHelpers:
             event_id="$event:localhost",
             context=context,
             room_level_skip_message=f"skip-{context}",
-            use_append_failure_reason=use_append_failure_reason,
         )
 
         assert result is False
@@ -654,7 +632,7 @@ class TestMatrixConversationCacheThreadReads:
         ) -> ThreadAppendOutcome:
             assert room_id == "!room:localhost"
             assert thread_id == "$claimed-thread:localhost"
-            assert append_failed_reason == "outbound_thread_mutation"
+            assert append_failed_reason == "outbound_append_failed"
             thread_invalidation_started.set()
             return ThreadAppendOutcome.APPENDED
 
@@ -1099,7 +1077,7 @@ class TestMatrixConversationCacheThreadReads:
         event_cache.apply_thread_mutation_append.assert_awaited_once()
         awaited = event_cache.apply_thread_mutation_append.await_args
         assert awaited.args[:2] == ("!room:localhost", "$thread-root:localhost")
-        assert awaited.kwargs["append_failed_reason"] == "outbound_thread_mutation"
+        assert awaited.kwargs["append_failed_reason"] == "outbound_append_failed"
 
     @pytest.mark.asyncio
     async def test_notify_outbound_message_reference_to_threaded_target_updates_thread_cache(self) -> None:
@@ -1134,7 +1112,7 @@ class TestMatrixConversationCacheThreadReads:
         event_cache.apply_thread_mutation_append.assert_awaited_once()
         awaited = event_cache.apply_thread_mutation_append.await_args
         assert awaited.args[:2] == ("!room:localhost", "$thread-root:localhost")
-        assert awaited.kwargs["append_failed_reason"] == "outbound_thread_mutation"
+        assert awaited.kwargs["append_failed_reason"] == "outbound_append_failed"
 
     @pytest.mark.asyncio
     async def test_notify_outbound_redaction_transitive_target_updates_thread_cache(self) -> None:

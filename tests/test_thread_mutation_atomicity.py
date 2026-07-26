@@ -15,7 +15,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 import pytest_asyncio
 
-from mindroom.background_tasks import _tasks_for_owner, wait_for_background_tasks
+from mindroom.background_tasks import _tasks_for_owner, create_background_task, wait_for_background_tasks
 from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -237,7 +237,6 @@ async def test_write_policy_mutation_never_exposes_an_invalid_snapshot(tmp_path:
                 event_id=str(event_source["event_id"]),
                 context="sync",
                 room_level_skip_message="skip",
-                use_append_failure_reason=True,
             )
 
     try:
@@ -295,7 +294,6 @@ async def test_a_failed_cache_write_never_leaves_a_trusted_snapshot(tmp_path: Pa
                 event_id="$live",
                 context="sync",
                 room_level_skip_message="skip",
-                use_append_failure_reason=True,
             )
         state = await cache.get_thread_cache_state(ROOM_ID, THREAD_ID)
     finally:
@@ -334,7 +332,6 @@ async def test_a_cancelled_cache_write_never_leaves_a_trusted_snapshot(tmp_path:
                 event_id="$live",
                 context="sync",
                 room_level_skip_message="skip",
-                use_append_failure_reason=True,
             )
         state = await cache.get_thread_cache_state(ROOM_ID, THREAD_ID)
     finally:
@@ -393,7 +390,6 @@ async def test_a_cancelled_appends_marker_is_owned_by_the_shutdown_drain(tmp_pat
                     event_id="$live",
                     context="sync",
                     room_level_skip_message="skip",
-                    use_append_failure_reason=True,
                 ),
             )
             await asyncio.wait_for(append_started.wait(), timeout=5.0)
@@ -402,15 +398,108 @@ async def test_a_cancelled_appends_marker_is_owned_by_the_shutdown_drain(tmp_pat
 
             # The marker is in flight and the mutation is already cancelled: the drain must be able
             # to see this write, or the next shutdown round drops it.
-            owned = _tasks_for_owner(coordinator.background_task_owner)
+            owned = _tasks_for_owner(coordinator.failure_marker_task_owner)
             assert owned, "the marker write is untracked, so the shutdown drain cannot wait for it"
 
             release_marker.set()
             with pytest.raises(asyncio.CancelledError):
                 await mutation
-            await wait_for_background_tasks(timeout=5.0, owner=coordinator.background_task_owner)
+            await wait_for_background_tasks(timeout=5.0, owner=coordinator.failure_marker_task_owner)
         state = await cache.get_thread_cache_state(ROOM_ID, THREAD_ID)
     finally:
         await root_cache.close()
 
     assert thread_cache_rejection_reason(state) == "thread_invalidated_after_validation"
+
+
+@pytest.mark.asyncio
+async def test_a_later_outbound_append_cannot_erase_an_earlier_failed_one(cache: ConversationEventCache) -> None:
+    """A failed append must not leave a marker the next successful append can clear.
+
+    The reason a failed append writes has to sit outside the incremental allowlist, or the next
+    outbound mutation revalidates the thread while it is still missing the earlier event -- and the
+    retained delta that would otherwise catch it expires after a minute.
+    """
+    await _seed_valid_thread(cache)
+    missed = _event("$missed", 2000, thread_id=THREAD_ID)
+    await cache.store_events_batch([("$missed", ROOM_ID, missed)])
+    await cache.redact_event(ROOM_ID, "$missed")
+
+    refused = await cache.apply_thread_mutation_append(
+        ROOM_ID,
+        THREAD_ID,
+        missed,
+        append_failed_reason="outbound_append_failed",
+    )
+    later = await cache.apply_thread_mutation_append(
+        ROOM_ID,
+        THREAD_ID,
+        _event("$later", 3000, thread_id=THREAD_ID),
+        append_failed_reason="outbound_append_failed",
+    )
+    state = await cache.get_thread_cache_state(ROOM_ID, THREAD_ID)
+    cached_ids = {event["event_id"] for event in (await cache.get_thread_events(ROOM_ID, THREAD_ID) or [])}
+
+    assert refused is ThreadAppendOutcome.APPEND_REFUSED
+    assert later is ThreadAppendOutcome.APPENDED_STALE
+    assert "$missed" not in cached_ids
+    assert thread_cache_rejection_reason(state) is not None, (
+        "the thread went back to trusted while still missing the refused event"
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_drain_that_cancels_an_append_still_lands_its_marker(tmp_path: Path) -> None:
+    """The drain cancelling an append is the common way to owe a marker, so it must not race it.
+
+    Sharing one owner means the append spends the whole budget and the marker, created inside its
+    cancellation, is cancelled by the very next round.
+    """
+    root_cache = SqliteEventCache(tmp_path / "event_cache.db")
+    cache = root_cache.for_principal(PRINCIPAL_ID)
+    await cache.initialize()
+    cache_ops = _cache_ops(tmp_path, cache)
+    coordinator = cache_ops.runtime.event_cache_write_coordinator
+    assert coordinator is not None
+    event_source = _event("$live", 2000, thread_id=THREAD_ID)
+    real_mark_thread_stale = cache.mark_thread_stale
+
+    async def hanging_append(*_args: object, **_kwargs: object) -> ThreadAppendOutcome:
+        await asyncio.Event().wait()
+        raise AssertionError
+
+    async def slow_mark_thread_stale(room_id: str, thread_id: str, *, reason: str) -> None:
+        # Longer than one cancel round, which is what makes a shared owner lose the write.
+        await asyncio.sleep(0.3)
+        await real_mark_thread_stale(room_id, thread_id, reason=reason)
+
+    try:
+        await _seed_valid_thread(cache)
+        with (
+            patch.object(cache, "apply_thread_mutation_append", hanging_append),
+            patch.object(cache, "mark_thread_stale", slow_mark_thread_stale),
+        ):
+            create_background_task(
+                _apply_thread_message_mutation(
+                    cache_ops=cache_ops,
+                    room_id=ROOM_ID,
+                    event_info=EventInfo.from_event(event_source),
+                    impact=MutationThreadImpact(state=MutationThreadImpactState.THREADED, thread_id=THREAD_ID),
+                    event_source=event_source,
+                    event_id="$live",
+                    context="sync",
+                    room_level_skip_message="skip",
+                ),
+                name="append_cancelled_by_the_drain",
+                owner=coordinator.background_task_owner,
+                log_exceptions=False,
+            )
+            await asyncio.sleep(0.05)
+            await coordinator.close()
+        state = await cache.get_thread_cache_state(ROOM_ID, THREAD_ID)
+    finally:
+        await root_cache.close()
+
+    assert thread_cache_rejection_reason(state) == "thread_invalidated_after_validation"
+    assert state is not None
+    assert state.invalidation_reason == "sync_append_failed"

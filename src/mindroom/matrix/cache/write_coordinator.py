@@ -96,6 +96,9 @@ class EventCacheWriteCoordinator:
 
     logger: structlog.stdlib.BoundLogger
     background_task_owner: object = field(default_factory=object)
+    # Fail-closed markers owed by a cancelled append are owned separately, so the generic
+    # cancellation rounds cannot reach them: those rounds are what create them.
+    failure_marker_task_owner: object = field(default_factory=object)
     _room_states: dict[_CoordinationRoomKey, _RoomSchedulerState] = field(default_factory=dict, init=False)
     _room_update_tasks: dict[_CoordinationRoomKey, _UpdateTask] = field(default_factory=dict, init=False)
     _thread_update_tasks: dict[tuple[_CoordinationRoomKey, str], _UpdateTask] = field(
@@ -676,21 +679,17 @@ class EventCacheWriteCoordinator:
             speculative=speculative,
         )
 
-    def speculative_thread_repair_suppression_reason(
-        self,
-        room_id: str,
-        thread_id: str,
-        *,
-        coordination_scope: str,
-    ) -> str | None:
-        """Return why one speculative repair would be declined, without reserving a slot.
+    def reserve_speculative_thread_repair(self, room_id: str, thread_id: str, *, coordination_scope: str) -> bool:
+        """Claim the right to schedule one speculative repair for this thread.
 
-        Callers use this to avoid spawning a background task per replayed event; the authoritative
-        decision is still made inside ``run_thread_repair``.
+        Testing and claiming together is what bounds a synchronous burst: admission inside
+        ``run_thread_repair`` cannot, because nothing in the burst has reached it yet.
         """
-        return self._thread_repairs.speculative_suppression_reason(
-            (coordination_scope, room_id, thread_id),
-        )
+        return self._thread_repairs.reserve_speculative_repair((coordination_scope, room_id, thread_id))
+
+    def release_speculative_thread_repair(self, room_id: str, thread_id: str, *, coordination_scope: str) -> None:
+        """Release a scheduling reservation once its repair reached the registry or was abandoned."""
+        self._thread_repairs.release_speculative_repair((coordination_scope, room_id, thread_id))
 
     def suppress_speculative_thread_repairs(self) -> AbstractContextManager[None]:
         """Drop speculative repairs for the duration of one sync replay batch."""
@@ -809,8 +808,14 @@ class EventCacheWriteCoordinator:
             )
 
     async def close(self) -> None:
-        """Drain any queued cache writes for this coordinator."""
+        """Drain any queued cache writes for this coordinator.
+
+        Markers are drained after, and on their own budget. Cancelling a queued append is what makes
+        it owe one, so an owed marker does not exist until the first drain has already given up, and
+        sharing that drain would leave it to be cancelled by the very next round.
+        """
         await wait_for_background_tasks(timeout=5.0, owner=self.background_task_owner)
+        await wait_for_background_tasks(timeout=5.0, owner=self.failure_marker_task_owner)
         self._room_states.clear()
         self._room_update_tasks.clear()
         self._thread_update_tasks.clear()

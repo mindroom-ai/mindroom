@@ -16,7 +16,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
-from mindroom.background_tasks import wait_for_background_tasks
+from mindroom.background_tasks import _tasks_for_owner, wait_for_background_tasks
 from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -436,16 +436,21 @@ async def test_sync_certification_declines_speculative_repair_for_a_replay_batch
     conversation_cache = _conversation_cache(tmp_path, event_cache)
     coordinator = EventCacheWriteCoordinator(logger=MagicMock())
     conversation_cache.runtime.event_cache_write_coordinator = coordinator
-    suppression_reasons: list[str | None] = []
+    could_schedule: list[bool] = []
 
     async def observe_suppression(_response: object) -> str:
-        suppression_reasons.append(
-            coordinator.speculative_thread_repair_suppression_reason(
+        reserved = coordinator.reserve_speculative_thread_repair(
+            ROOM_ID,
+            "$thread:localhost",
+            coordination_scope=event_cache.principal_id,
+        )
+        could_schedule.append(reserved)
+        if reserved:
+            coordinator.release_speculative_thread_repair(
                 ROOM_ID,
                 "$thread:localhost",
                 coordination_scope=event_cache.principal_id,
-            ),
-        )
+            )
         return "certified"
 
     try:
@@ -464,7 +469,7 @@ async def test_sync_certification_declines_speculative_repair_for_a_replay_batch
         await coordinator.close()
         await event_cache.close()
 
-    assert suppression_reasons == ["sync_replay", None]
+    assert could_schedule == [False, True]
 
 
 @pytest.mark.asyncio
@@ -570,3 +575,31 @@ async def test_clearing_the_registry_does_not_inflate_the_repair_ceiling() -> No
     registry._release_repair_slot(speculative=False)
 
     assert registry._repair_slots._value == 2
+
+
+@pytest.mark.asyncio
+async def test_a_replay_burst_does_not_create_a_task_per_event(tmp_path: Path) -> None:
+    """Scheduling must be bounded before admission, not only at the scan.
+
+    A replay reaches the scheduler once per event with no await in between, so nothing has entered
+    the registry yet: a check that does not also claim lets every caller believe it has capacity.
+    """
+    event_cache = SqliteEventCache(tmp_path / "event_cache.db")
+    await event_cache.initialize()
+    conversation_cache = _conversation_cache(tmp_path, event_cache)
+    coordinator = EventCacheWriteCoordinator(logger=MagicMock())
+    conversation_cache.runtime.event_cache_write_coordinator = coordinator
+    budget = ThreadRepairRegistry().max_concurrent_speculative_repairs
+
+    try:
+        for index in range(250):
+            conversation_cache._schedule_missing_thread_repair(ROOM_ID, f"$thread-{index}:localhost")
+        distinct_threads = len(_tasks_for_owner(coordinator.background_task_owner))
+        for _ in range(250):
+            conversation_cache._schedule_missing_thread_repair(ROOM_ID, "$hot:localhost")
+        one_thread = len(_tasks_for_owner(coordinator.background_task_owner))
+    finally:
+        await event_cache.close()
+
+    assert distinct_threads <= budget, f"250 stale threads created {distinct_threads} tasks before admission"
+    assert one_thread == distinct_threads, "repeated events for one thread each added a task"

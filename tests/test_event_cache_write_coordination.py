@@ -352,7 +352,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             append_failed_reason: str,
         ) -> ThreadAppendOutcome:
             nonlocal max_active_thread_count
-            assert append_failed_reason == "outbound_thread_mutation"
+            assert append_failed_reason == "outbound_append_failed"
             active_threads.add(thread_id)
             max_active_thread_count = max(max_active_thread_count, len(active_threads))
             entered_by_thread[thread_id].set()

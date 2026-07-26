@@ -373,12 +373,10 @@ class ThreadMutationCacheOps:
         ``close`` returns without it and a marker abandoned mid-shutdown is the fail-open this
         handler exists to prevent. Owning the task puts it in the set ``close`` waits on.
 
-        One ordering is still not covered. When the append is itself cancelled *by* that drain, the
-        five-second budget has already been spent on the append, and the marker created in its
-        handler inherits only the remainder of one 0.1s cancel round before the next round cancels
-        it too. A healthy marker write is about a millisecond, so this needs a congested write path
-        on top of a drain that already failed -- and a slow homeserver scan in the same owned set
-        reaches that state with a perfectly healthy cache.
+        It is owned separately from ordinary cache writes because the common way to owe a marker is
+        for the drain to cancel the append: by then the shared budget is spent, and a marker put in
+        the same set would simply be cancelled by the next round. ``close`` drains this owner after
+        that one, on its own budget.
         """
         # Every caller reaches an append only through `cache_runtime_available`, and the queue
         # helpers dereference the coordinator unguarded, so a missing one is a bug, not a mode.
@@ -388,7 +386,7 @@ class ThreadMutationCacheOps:
             create_background_task(
                 self.invalidate_known_thread(room_id, thread_id, reason=reason),
                 name="matrix_cache_append_failure_marker",
-                owner=coordinator.background_task_owner,
+                owner=coordinator.failure_marker_task_owner,
             ),
         )
 

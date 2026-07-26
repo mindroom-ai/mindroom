@@ -987,16 +987,15 @@ class MatrixConversationCache(ConversationCacheProtocol):
         if coordinator is None or not self.runtime.event_cache.durable_writes_available:
             return
         principal_id = self.runtime.event_cache.principal_id
-        suppression_reason = coordinator.speculative_thread_repair_suppression_reason(
-            room_id,
-            thread_id,
-            coordination_scope=principal_id,
-        )
-        if suppression_reason is not None:
-            self._log_suppressed_thread_repair(room_id, thread_id, reason=suppression_reason)
+        # Claimed before the task exists. A replay burst reaches this method once per event without
+        # ever yielding, so a check that does not also claim lets every one of them add a task.
+        if not coordinator.reserve_speculative_thread_repair(room_id, thread_id, coordination_scope=principal_id):
+            self._log_suppressed_thread_repair(room_id, thread_id, reason="already_scheduled")
             return
 
         async def repair() -> None:
+            # The reservation covers scheduling only; the registry owns every decision from here.
+            coordinator.release_speculative_thread_repair(room_id, thread_id, coordination_scope=principal_id)
             try:
                 await self._fetch_thread_from_client(
                     fetch_dispatch_thread_snapshot,

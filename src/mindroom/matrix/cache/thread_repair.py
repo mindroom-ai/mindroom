@@ -6,9 +6,10 @@ dispatch fan-out. A *speculative* repair is launched by a live append that found
 nobody is waiting on its result, so it is dropped rather than queued whenever it would add load:
 
 1. while a sync replay batch is being applied;
-2. while any flight for the same thread is already scanning, whatever caller contract owns it;
-3. while that thread is inside its post-repair cooldown;
-4. while the speculative concurrency budget is spent or an interactive repair is waiting for a slot.
+2. while one is already scheduled for that thread, or the pending-schedule budget is spent;
+3. while any flight for the same thread is already scanning, whatever caller contract owns it;
+4. while that thread is inside its post-repair cooldown;
+5. while the speculative concurrency budget is spent or an interactive repair is waiting for a slot.
 
 They are listed in the order ``speculative_suppression_reason`` tests them, because the reason it
 returns is what gets logged.
@@ -97,6 +98,7 @@ class ThreadRepairRegistry:
     _deltas: dict[_ThreadRepairDeltaKey, dict[str, _RetainedDelta]] = field(default_factory=dict, init=False)
     _speculative_cooldowns: dict[_ThreadRepairDeltaKey, float] = field(default_factory=dict, init=False)
     _interactive_joins: dict[_ThreadRepairFlightKey, int] = field(default_factory=dict, init=False)
+    _reserved_speculative: set[_ThreadRepairDeltaKey] = field(default_factory=set, init=False)
     _repair_slots: asyncio.Semaphore = field(init=False, repr=False)
     _running_speculative_repairs: int = field(default=0, init=False)
     _speculative_suppression_depth: int = field(default=0, init=False)
@@ -198,19 +200,42 @@ class ThreadRepairRegistry:
         second scan of a thread another contract is already scanning. A flight re-checking itself
         just before it scans passes ``ignore_active_flight`` so it does not see its own ownership.
         """
-        if self._speculative_suppression_depth > 0:
-            return "sync_replay"
-        if not ignore_active_flight and self._has_active_task(key):
-            return "repair_in_flight"
-        if self._speculative_cooldown_active(key):
-            return "recently_repaired"
-        if self._running_speculative_repairs >= self.max_concurrent_speculative_repairs:
-            return "speculative_concurrency_limit"
-        # ``locked`` is true while anyone is queued as well as at capacity, so a speculative caller
-        # never steps in front of an interactive one waiting for a slot.
-        if self._repair_slots.locked():
-            return "repair_concurrency_limit"
-        return None
+        # Kept lazy and in order: the reason returned is the one that gets logged, and
+        # ``_has_active_task`` drops finished flights as it looks.
+        declines: tuple[tuple[Callable[[], bool], str], ...] = (
+            (lambda: self._speculative_suppression_depth > 0, "sync_replay"),
+            (lambda: key in self._reserved_speculative, "repair_pending"),
+            (
+                lambda: len(self._reserved_speculative) >= self.max_concurrent_speculative_repairs,
+                "speculative_pending_limit",
+            ),
+            (lambda: not ignore_active_flight and self._has_active_task(key), "repair_in_flight"),
+            (lambda: self._speculative_cooldown_active(key), "recently_repaired"),
+            (
+                lambda: self._running_speculative_repairs >= self.max_concurrent_speculative_repairs,
+                "speculative_concurrency_limit",
+            ),
+            # ``locked`` is true while anyone is queued as well as at capacity, so a speculative
+            # caller never steps in front of an interactive one waiting for a slot.
+            (self._repair_slots.locked, "repair_concurrency_limit"),
+        )
+        return next((reason for declined, reason in declines if declined()), None)
+
+    def reserve_speculative_repair(self, key: _ThreadRepairDeltaKey) -> bool:
+        """Claim the right to schedule one speculative repair, or report that nobody may.
+
+        Admission inside :meth:`run` cannot bound a burst, because a burst is synchronous: nothing
+        has reached ``run`` yet, so every caller sees free capacity and adds another task. This is
+        the check that has to be atomic with the decision to create one, so it both tests and marks.
+        """
+        if self.speculative_suppression_reason(key) is not None:
+            return False
+        self._reserved_speculative.add(key)
+        return True
+
+    def release_speculative_repair(self, key: _ThreadRepairDeltaKey) -> None:
+        """Release a reservation once its repair has reached the registry, or been abandoned."""
+        self._reserved_speculative.discard(key)
 
     @contextmanager
     def _joined_interactively(self, key: _ThreadRepairFlightKey) -> Iterator[None]:
@@ -424,6 +449,9 @@ class ThreadRepairRegistry:
             for key, retry_after in self._speculative_cooldowns.items()
             if key[:2] != (coordination_scope, room_id)
         }
+        self._reserved_speculative = {
+            key for key in self._reserved_speculative if key[:2] != (coordination_scope, room_id)
+        }
 
     def clear(self) -> None:
         """Drop runtime-only ownership after all coordinator tasks drained."""
@@ -432,4 +460,5 @@ class ThreadRepairRegistry:
         self._deltas.clear()
         self._speculative_cooldowns.clear()
         self._interactive_joins.clear()
+        self._reserved_speculative.clear()
         self._running_speculative_repairs = 0
