@@ -679,17 +679,30 @@ class EventCacheWriteCoordinator:
             speculative=speculative,
         )
 
-    def reserve_speculative_thread_repair(self, room_id: str, thread_id: str, *, coordination_scope: str) -> bool:
-        """Claim the right to schedule one speculative repair for this thread.
+    def reserve_speculative_thread_repair(
+        self,
+        room_id: str,
+        thread_id: str,
+        *,
+        coordination_scope: str,
+    ) -> object | None:
+        """Claim the right to schedule one speculative repair, returning a token, or ``None``.
 
         Testing and claiming together is what bounds a synchronous burst: admission inside
         ``run_thread_repair`` cannot, because nothing in the burst has reached it yet.
         """
         return self._thread_repairs.reserve_speculative_repair((coordination_scope, room_id, thread_id))
 
-    def release_speculative_thread_repair(self, room_id: str, thread_id: str, *, coordination_scope: str) -> None:
-        """Release a scheduling reservation once its repair reached the registry or was abandoned."""
-        self._thread_repairs.release_speculative_repair((coordination_scope, room_id, thread_id))
+    def release_speculative_thread_repair(
+        self,
+        room_id: str,
+        thread_id: str,
+        *,
+        coordination_scope: str,
+        token: object,
+    ) -> None:
+        """Drop a scheduling claim, but only while this token still holds it."""
+        self._thread_repairs.release_speculative_repair((coordination_scope, room_id, thread_id), token)
 
     def suppress_speculative_thread_repairs(self) -> AbstractContextManager[None]:
         """Drop speculative repairs for the duration of one sync replay batch."""

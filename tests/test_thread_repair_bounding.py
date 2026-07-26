@@ -444,12 +444,13 @@ async def test_sync_certification_declines_speculative_repair_for_a_replay_batch
             "$thread:localhost",
             coordination_scope=event_cache.principal_id,
         )
-        could_schedule.append(reserved)
-        if reserved:
+        could_schedule.append(reserved is not None)
+        if reserved is not None:
             coordinator.release_speculative_thread_repair(
                 ROOM_ID,
                 "$thread:localhost",
                 coordination_scope=event_cache.principal_id,
+                token=reserved,
             )
         return "certified"
 
@@ -603,3 +604,143 @@ async def test_a_replay_burst_does_not_create_a_task_per_event(tmp_path: Path) -
 
     assert distinct_threads <= budget, f"250 stale threads created {distinct_threads} tasks before admission"
     assert one_thread == distinct_threads, "repeated events for one thread each added a task"
+
+
+async def _drain_done_callbacks() -> None:
+    """Let task done callbacks run.
+
+    They are queued with ``call_soon``, so awaiting a cancelled task does not by itself guarantee
+    its cleanup has executed.
+    """
+    for _ in range(3):
+        await asyncio.sleep(0)
+
+
+def _pre_start_cancelled_repair(conversation_cache: MatrixConversationCache, thread_id: str) -> asyncio.Task[None]:
+    """Schedule a speculative repair and cancel it before its coroutine ever runs.
+
+    Identified by set difference: background tasks are held in a set, so indexing the owner's tasks
+    picks an arbitrary one and can leave the repair just scheduled running.
+    """
+    coordinator = conversation_cache.runtime.event_cache_write_coordinator
+    assert coordinator is not None
+    before = set(_tasks_for_owner(coordinator.background_task_owner))
+    conversation_cache._schedule_missing_thread_repair(ROOM_ID, thread_id)
+    created = set(_tasks_for_owner(coordinator.background_task_owner)) - before
+    assert len(created) == 1, f"expected exactly one scheduled repair, got {len(created)}"
+    scheduled = created.pop()
+    scheduled.cancel()
+    return scheduled
+
+
+@pytest.mark.asyncio
+async def test_a_repair_cancelled_before_it_starts_releases_its_claim(tmp_path: Path) -> None:
+    """A body-level release never runs for a task cancelled before its first instruction."""
+    event_cache = SqliteEventCache(tmp_path / "event_cache.db")
+    await event_cache.initialize()
+    conversation_cache = _conversation_cache(tmp_path, event_cache)
+    coordinator = EventCacheWriteCoordinator(logger=MagicMock())
+    conversation_cache.runtime.event_cache_write_coordinator = coordinator
+
+    try:
+        cancelled = _pre_start_cancelled_repair(conversation_cache, "$thread:localhost")
+        await asyncio.gather(cancelled, return_exceptions=True)
+        await _drain_done_callbacks()
+        # The claim must be gone, so the very same thread can be scheduled again.
+        conversation_cache._schedule_missing_thread_repair(ROOM_ID, "$thread:localhost")
+        replacements = [task for task in _tasks_for_owner(coordinator.background_task_owner) if not task.done()]
+        for task in _tasks_for_owner(coordinator.background_task_owner):
+            task.cancel()
+        await asyncio.gather(*_tasks_for_owner(coordinator.background_task_owner), return_exceptions=True)
+    finally:
+        await event_cache.close()
+
+    assert replacements, "the leaked claim blocked a replacement repair for the same thread"
+
+
+@pytest.mark.asyncio
+async def test_pre_start_cancelled_repairs_do_not_suppress_unrelated_threads(tmp_path: Path) -> None:
+    """Leaked claims fill the pending budget and starve threads that never failed."""
+    event_cache = SqliteEventCache(tmp_path / "event_cache.db")
+    await event_cache.initialize()
+    conversation_cache = _conversation_cache(tmp_path, event_cache)
+    coordinator = EventCacheWriteCoordinator(logger=MagicMock())
+    conversation_cache.runtime.event_cache_write_coordinator = coordinator
+    budget = ThreadRepairRegistry().max_concurrent_speculative_repairs
+
+    try:
+        cancelled = [
+            _pre_start_cancelled_repair(conversation_cache, f"$dead-{index}:localhost") for index in range(budget)
+        ]
+        await asyncio.gather(*cancelled, return_exceptions=True)
+        await _drain_done_callbacks()
+        leaked = dict(coordinator._thread_repairs._reserved_speculative)
+        unrelated = coordinator.reserve_speculative_thread_repair(
+            ROOM_ID,
+            "$unrelated:localhost",
+            coordination_scope=event_cache.principal_id,
+        )
+        for task in _tasks_for_owner(coordinator.background_task_owner):
+            task.cancel()
+        await asyncio.gather(*_tasks_for_owner(coordinator.background_task_owner), return_exceptions=True)
+    finally:
+        await event_cache.close()
+
+    assert leaked == {}, f"cancelled repairs leaked claims: {sorted(key[2] for key in leaked)}"
+    assert unrelated is not None, f"{budget} cancelled repairs exhausted the pending budget"
+
+
+@pytest.mark.asyncio
+async def test_waves_during_preparation_create_one_pre_admission_task(tmp_path: Path) -> None:
+    """The claim has to outlive the awaited preparation, not just the synchronous burst."""
+    event_cache = SqliteEventCache(tmp_path / "event_cache.db")
+    await event_cache.initialize()
+    conversation_cache = _conversation_cache(tmp_path, event_cache)
+    coordinator = EventCacheWriteCoordinator(logger=MagicMock())
+    conversation_cache.runtime.event_cache_write_coordinator = coordinator
+    prepare_calls = 0
+    block_preparation = asyncio.Event()
+
+    async def blocked_prepare(*_args: object, **_kwargs: object) -> None:
+        nonlocal prepare_calls
+        prepare_calls += 1
+        await block_preparation.wait()
+
+    try:
+        with patch.object(conversation_cache, "_prepare_pending_thread_repair_deltas", blocked_prepare):
+            for _wave in range(50):
+                for _ in range(250):
+                    conversation_cache._schedule_missing_thread_repair(ROOM_ID, "$hot:localhost")
+                await asyncio.sleep(0)  # let the scheduled task reach preparation and block there
+            pending = [task for task in _tasks_for_owner(coordinator.background_task_owner) if not task.done()]
+            blocked = prepare_calls
+        block_preparation.set()
+        for task in _tasks_for_owner(coordinator.background_task_owner):
+            task.cancel()
+        await asyncio.gather(*_tasks_for_owner(coordinator.background_task_owner), return_exceptions=True)
+    finally:
+        await event_cache.close()
+
+    assert blocked == 1, f"preparation ran {blocked} times for one thread"
+    assert len(pending) == 1, f"{len(pending)} pre-admission tasks for one thread across 50 waves"
+
+
+@pytest.mark.asyncio
+async def test_a_stale_release_cannot_drop_a_later_claim_on_the_same_thread() -> None:
+    """Releases are identified by token, so a late one cannot free somebody else's claim."""
+    registry = ThreadRepairRegistry()
+    key = ("@agent:localhost", ROOM_ID, "$thread")
+
+    first = registry.reserve_speculative_repair(key)
+    assert first is not None
+    registry.release_speculative_repair(key, first)
+    second = registry.reserve_speculative_repair(key)
+    assert second is not None
+
+    registry.release_speculative_repair(key, first)  # the abandoned holder, arriving late
+
+    assert registry.speculative_suppression_reason(key) == "repair_pending"
+    registry.release_speculative_repair(key, second)
+    assert registry.speculative_suppression_reason(key) is None
+    registry.clear()
+    assert registry._reserved_speculative == {}

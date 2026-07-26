@@ -988,14 +988,19 @@ class MatrixConversationCache(ConversationCacheProtocol):
             return
         principal_id = self.runtime.event_cache.principal_id
         # Claimed before the task exists. A replay burst reaches this method once per event without
-        # ever yielding, so a check that does not also claim lets every one of them add a task.
-        if not coordinator.reserve_speculative_thread_repair(room_id, thread_id, coordination_scope=principal_id):
+        # ever yielding, so a check that does not also claim lets every one of them add a task. The
+        # claim is held until the registry takes ownership of the thread, which covers the awaited
+        # preparation in between.
+        reservation = coordinator.reserve_speculative_thread_repair(
+            room_id,
+            thread_id,
+            coordination_scope=principal_id,
+        )
+        if reservation is None:
             self._log_suppressed_thread_repair(room_id, thread_id, reason="already_scheduled")
             return
 
         async def repair() -> None:
-            # The reservation covers scheduling only; the registry owns every decision from here.
-            coordinator.release_speculative_thread_repair(room_id, thread_id, coordination_scope=principal_id)
             try:
                 await self._fetch_thread_from_client(
                     fetch_dispatch_thread_snapshot,
@@ -1027,11 +1032,24 @@ class MatrixConversationCache(ConversationCacheProtocol):
                     error=str(exc),
                 )
 
-        create_background_task(
+        task = create_background_task(
             repair(),
             name="matrix_cache_schedule_missing_thread_repair",
             owner=coordinator.background_task_owner,
             log_exceptions=False,
+        )
+        # On the task, not in the coroutine: a task cancelled before its first instruction never
+        # runs its body at all, and a claim leaked that way would suppress this thread until the
+        # process ends, and unrelated threads once enough of them accumulate. Releasing is a no-op
+        # once the registry has taken the claim over, and the token makes it a no-op if a later
+        # wave has since claimed the same thread.
+        task.add_done_callback(
+            lambda _task: coordinator.release_speculative_thread_repair(
+                room_id,
+                thread_id,
+                coordination_scope=principal_id,
+                token=reservation,
+            ),
         )
 
     def _log_suppressed_thread_repair(self, room_id: str, thread_id: str, *, reason: str) -> None:

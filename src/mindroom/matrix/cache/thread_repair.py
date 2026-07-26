@@ -98,7 +98,7 @@ class ThreadRepairRegistry:
     _deltas: dict[_ThreadRepairDeltaKey, dict[str, _RetainedDelta]] = field(default_factory=dict, init=False)
     _speculative_cooldowns: dict[_ThreadRepairDeltaKey, float] = field(default_factory=dict, init=False)
     _interactive_joins: dict[_ThreadRepairFlightKey, int] = field(default_factory=dict, init=False)
-    _reserved_speculative: set[_ThreadRepairDeltaKey] = field(default_factory=set, init=False)
+    _reserved_speculative: dict[_ThreadRepairDeltaKey, object] = field(default_factory=dict, init=False)
     _repair_slots: asyncio.Semaphore = field(init=False, repr=False)
     _running_speculative_repairs: int = field(default=0, init=False)
     _speculative_suppression_depth: int = field(default=0, init=False)
@@ -193,20 +193,26 @@ class ThreadRepairRegistry:
         key: _ThreadRepairDeltaKey,
         *,
         ignore_active_flight: bool = False,
+        ignore_reservation: bool = False,
     ) -> str | None:
         """Return why one speculative repair must be dropped, or ``None`` when it may run.
 
         The key is the thread, not the caller contract, so a speculative trigger never opens a
         second scan of a thread another contract is already scanning. A flight re-checking itself
-        just before it scans passes ``ignore_active_flight`` so it does not see its own ownership.
+        just before it scans passes ``ignore_active_flight`` so it does not see its own ownership,
+        and a caller carrying this thread's scheduling reservation passes ``ignore_reservation`` so
+        it does not see its own claim.
         """
         # Kept lazy and in order: the reason returned is the one that gets logged, and
         # ``_has_active_task`` drops finished flights as it looks.
         declines: tuple[tuple[Callable[[], bool], str], ...] = (
             (lambda: self._speculative_suppression_depth > 0, "sync_replay"),
-            (lambda: key in self._reserved_speculative, "repair_pending"),
+            (lambda: not ignore_reservation and key in self._reserved_speculative, "repair_pending"),
             (
-                lambda: len(self._reserved_speculative) >= self.max_concurrent_speculative_repairs,
+                lambda: (
+                    not ignore_reservation
+                    and len(self._reserved_speculative) >= self.max_concurrent_speculative_repairs
+                ),
                 "speculative_pending_limit",
             ),
             (lambda: not ignore_active_flight and self._has_active_task(key), "repair_in_flight"),
@@ -221,21 +227,27 @@ class ThreadRepairRegistry:
         )
         return next((reason for declined, reason in declines if declined()), None)
 
-    def reserve_speculative_repair(self, key: _ThreadRepairDeltaKey) -> bool:
-        """Claim the right to schedule one speculative repair, or report that nobody may.
+    def reserve_speculative_repair(self, key: _ThreadRepairDeltaKey) -> object | None:
+        """Claim the right to schedule one speculative repair, returning a token, or ``None``.
 
         Admission inside :meth:`run` cannot bound a burst, because a burst is synchronous: nothing
         has reached ``run`` yet, so every caller sees free capacity and adds another task. This is
         the check that has to be atomic with the decision to create one, so it both tests and marks.
+
+        The claim is held until :meth:`run` takes over ownership of the thread, which covers the
+        awaited preparation in between. The token identifies the holder so a late release can never
+        drop a claim that has since been handed to somebody else.
         """
         if self.speculative_suppression_reason(key) is not None:
-            return False
-        self._reserved_speculative.add(key)
-        return True
+            return None
+        token = object()
+        self._reserved_speculative[key] = token
+        return token
 
-    def release_speculative_repair(self, key: _ThreadRepairDeltaKey) -> None:
-        """Release a reservation once its repair has reached the registry, or been abandoned."""
-        self._reserved_speculative.discard(key)
+    def release_speculative_repair(self, key: _ThreadRepairDeltaKey, token: object) -> None:
+        """Drop a scheduling claim, but only while this token still holds it."""
+        if self._reserved_speculative.get(key) is token:
+            del self._reserved_speculative[key]
 
     @contextmanager
     def _joined_interactively(self, key: _ThreadRepairFlightKey) -> Iterator[None]:
@@ -290,7 +302,10 @@ class ThreadRepairRegistry:
     ) -> Exception | None:
         """Return why this caller may not start a new scan right now."""
         if speculative:
-            suppression_reason = self.speculative_suppression_reason(self._thread_key(key))
+            suppression_reason = self.speculative_suppression_reason(
+                self._thread_key(key),
+                ignore_reservation=True,
+            )
             if suppression_reason is not None:
                 return ThreadRepairSuppressedError(suppression_reason)
         retry_after_seconds = self.retry_after_seconds(key)
@@ -393,6 +408,10 @@ class ThreadRepairRegistry:
 
         task = schedule(lambda: self._run_in_repair_slot(key, run_repair, speculative=speculative))
         self._tasks[key] = task
+        if speculative:
+            # Ownership transferred: `_tasks` now suppresses this thread, so the scheduling claim
+            # that stood in for it until admission is spent.
+            self._reserved_speculative.pop(self._thread_key(key), None)
         task.add_done_callback(lambda done_task: self._clear_task(key, done_task))
         return await asyncio.shield(task)
 
@@ -450,7 +469,7 @@ class ThreadRepairRegistry:
             if key[:2] != (coordination_scope, room_id)
         }
         self._reserved_speculative = {
-            key for key in self._reserved_speculative if key[:2] != (coordination_scope, room_id)
+            key: token for key, token in self._reserved_speculative.items() if key[:2] != (coordination_scope, room_id)
         }
 
     def clear(self) -> None:
