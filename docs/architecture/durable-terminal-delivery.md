@@ -31,6 +31,7 @@ Checkpoint commit atomically marks the canonical turn completed, records its vis
 The ledger writes the transaction to disk before publishing it to shared process memory.
 A failed write therefore does not publish a new in-memory checkpoint.
 Disk mutations are allowed to finish before caller cancellation propagates.
+An edit regeneration keeps retrying its frozen initial checkpoint after transient persistence failures, so a newer edit cannot be reported handled before it becomes durable.
 
 The coordinator scans the unique canonical `TurnRecord` values that still contain checkpoints.
 It attempts up to eight checkpoints concurrently and serializes work that shares a canonical turn or visible target.
@@ -40,12 +41,14 @@ There is no retry-count or age limit that silently abandons a committed terminal
 
 ## Identity and supersession
 
-Replay lookup succeeds only when every candidate source ID resolves to the same canonical record with an actual terminal checkpoint.
-A completed turn without a checkpoint does not short-circuit response execution.
-When lookup succeeds, response execution reuses the checkpoint's original visible target and placeholder fact without rerunning model or delivery work.
+Replay lookup succeeds only when every candidate source ID resolves to the same canonical record with either an actual terminal checkpoint or a matching settled-delivery receipt.
+A completed turn without either form of matching terminal ownership does not short-circuit response execution.
+When a checkpoint lookup succeeds, response execution reuses the checkpoint's original visible target and placeholder fact without rerunning model or delivery work.
+A settled-delivery receipt prevents the same response episode from being redispatched after checkpoint clearing.
 
 Committing the same transaction again is idempotent.
-A different checkpoint for the same turn is rejected while the current checkpoint remains authoritative.
+A strictly newer edit regeneration for the same visible target may atomically replace an older deferred checkpoint.
+Unrelated, stale, or non-monotonic replacements are rejected while the current checkpoint remains authoritative.
 When a different turn claims the same visible target, one atomic ledger transaction clears all previous target owners and installs the new checkpoint.
 Attempts, lifecycle updates, and checkpoint clearing compare the expected transaction ID, so stale work cannot mutate a replacement.
 
@@ -54,7 +57,7 @@ Attempts, lifecycle updates, and checkpoint clearing compare the expected transa
 Source redactions and response-target redactions use the same canonical `TurnStore` transaction path as checkpoint updates.
 The coordinator holds the affected turn and event locks while the durable mutation runs.
 
-Redacting a source tombstones that source on its canonical record and clears the record's checkpoint in the same transaction.
+Redacting a source tombstones that source on its canonical record and retains any checkpoint as target-cleanup debt until the visible response is redacted.
 Redacting a visible response target clears that target and checkpoint from every canonical owner and creates a tombstone for the redacted event in the same transaction.
 This ordering prevents replay from recreating a redacted answer and prevents an outstanding checkpoint from editing a redacted target.
 Cached Matrix history is sanitized after the durable redaction attempt.
@@ -77,7 +80,8 @@ They are not frozen into the terminal checkpoint and are not replayed by the ter
 
 Startup warms the existing handled-turn ledger, then the coordinator scans its outstanding checkpoints.
 No terminal-specific store is loaded or reconciled.
-Stale-stream cleanup excludes visible targets still named by checkpoints, so it cannot overwrite a committed answer with an interruption notice.
+Stale-stream cleanup serializes its final ownership check and edit with terminal delivery for the same visible target.
+It excludes targets owned by either an outstanding checkpoint or a settled-delivery receipt, so it cannot overwrite a committed answer with an interruption notice.
 
-The checkpoint remains on its canonical turn until delivery and required checkpointed lifecycle progress converge, another turn supersedes its visible target, or source or target redaction invalidates it.
+The checkpoint remains on its canonical turn until delivery and required checkpointed lifecycle progress converge, another turn supersedes its visible target, or redaction cleanup resolves it.
 Clearing the checkpoint leaves the ordinary handled `TurnRecord` as the durable response outcome.
