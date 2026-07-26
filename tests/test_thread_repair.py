@@ -36,6 +36,28 @@ def _event(event_id: str, timestamp: int, *, thread_id: str | None = None) -> di
     }
 
 
+def test_acknowledge_deltas_preserves_a_same_id_overwrite() -> None:
+    """Acknowledgement must compare the exact retained representation atomically."""
+    registry = ThreadRepairRegistry()
+    key = ("@agent:localhost", "!room:localhost", "$thread")
+    first = _event("$event", 1000, thread_id="$thread")
+    overwritten = {
+        **first,
+        "content": {
+            "body": "overwritten",
+            "msgtype": "m.text",
+            "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread"},
+        },
+    }
+    registry.retain_delta(key, first)
+    presented = registry.pending_deltas(key)
+    registry.retain_delta(key, overwritten)
+
+    registry.acknowledge_deltas(key, presented)
+
+    assert registry.pending_deltas(key) == (overwritten,)
+
+
 @pytest.mark.asyncio
 async def test_twenty_missing_thread_callers_share_one_repair_and_converge(  # noqa: PLR0915
     tmp_path: Path,
@@ -99,7 +121,11 @@ async def test_twenty_missing_thread_callers_share_one_repair_and_converge(  # n
             coordinator.acknowledge_thread_repair_deltas(
                 room_id,
                 thread_id,
-                expected_ids,
+                coordinator.pending_thread_repair_deltas(
+                    room_id,
+                    thread_id,
+                    coordination_scope=principal_id,
+                ),
                 coordination_scope=principal_id,
             )
         final_state = await cache.get_thread_cache_state(room_id, thread_id)

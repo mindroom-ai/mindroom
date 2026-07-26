@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Collection
+    from collections.abc import Awaitable, Callable, Collection, Mapping
 
 type _ThreadRepairFlightKey = tuple[str, str, str, bool, bool]
 type _ThreadRepairDeltaKey = tuple[str, str, str]
@@ -172,13 +172,22 @@ class ThreadRepairRegistry:
         deltas = self._deltas.get(key, {})
         return tuple(dict(delta.event_source) for delta in deltas.values())
 
-    def acknowledge_deltas(self, key: _ThreadRepairDeltaKey, event_ids: Collection[str]) -> None:
-        """Forget retained deltas proven present in a usable snapshot."""
+    def acknowledge_deltas(
+        self,
+        key: _ThreadRepairDeltaKey,
+        event_sources: Collection[Mapping[str, Any]],
+    ) -> None:
+        """Atomically forget retained representations proven present in a usable snapshot."""
         deltas = self._deltas.get(key)
         if deltas is None:
             return
-        for event_id in event_ids:
-            deltas.pop(event_id, None)
+        for event_source in event_sources:
+            event_id = event_source.get("event_id")
+            if not isinstance(event_id, str):
+                continue
+            retained = deltas.get(event_id)
+            if retained is not None and retained.event_source == event_source:
+                del deltas[event_id]
         if not deltas:
             self._deltas.pop(key, None)
 

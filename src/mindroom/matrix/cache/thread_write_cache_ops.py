@@ -346,7 +346,7 @@ class ThreadMutationCacheOps:
                 coordinator.acknowledge_thread_repair_deltas(
                     room_id,
                     thread_id,
-                    (event_id,),
+                    (event_source,),
                     coordination_scope=self.runtime.event_cache.principal_id,
                 )
             elif not revalidated:

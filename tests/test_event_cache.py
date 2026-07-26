@@ -1379,7 +1379,7 @@ async def test_stored_repair_releases_replayed_delta_filtered_by_redaction(tmp_p
     coordinator.acknowledge_thread_repair_deltas.assert_called_once_with(
         "!room:localhost",
         "$thread:localhost",
-        {"$redacted"},
+        ({"event_id": "$redacted"},),
         coordination_scope="@agent:localhost",
     )
     event_cache.get_thread_events.assert_awaited_once()
@@ -1467,6 +1467,42 @@ async def test_existing_winner_does_not_acknowledge_quarantined_retained_conflic
 
 
 @pytest.mark.asyncio
+async def test_wrong_sender_redacted_cache_does_not_acknowledge_retained_delta(tmp_path: Path) -> None:
+    """A redaction for a different immutable identity cannot authorize retained deletion."""
+    retained = {
+        "event_id": "$reply",
+        "room_id": "!room:localhost",
+        "sender": "@user:localhost",
+        "origin_server_ts": 2000,
+        "type": "m.room.message",
+        "content": {"body": "Reply", "msgtype": "m.text"},
+    }
+    wrong_sender_redaction = {
+        **retained,
+        "sender": "@mallory:localhost",
+        "content": {},
+        "unsigned": {"redacted_because": {"event_id": "$redaction"}},
+    }
+    event_cache = MagicMock()
+    event_cache.get_thread_events = AsyncMock(return_value=[wrong_sender_redaction])
+    conversation_cache = _conversation_cache_for_thread_reads(tmp_path, event_cache, client=MagicMock())
+    coordinator = MagicMock()
+    coordinator.pending_thread_repair_deltas.return_value = (retained,)
+
+    await conversation_cache._acknowledge_repaired_thread_deltas(
+        coordinator,
+        "!room:localhost",
+        "$thread:localhost",
+        principal_id="@agent:localhost",
+        presented_event_sources={},
+        replayed_event_sources={},
+        snapshot_stored=False,
+    )
+
+    coordinator.acknowledge_thread_repair_deltas.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_late_same_id_retained_overwrite_is_not_acknowledged(tmp_path: Path) -> None:
     """A same-ID overwrite after reconstruction must remain pending for another repair."""
     replayed = {
@@ -1497,6 +1533,65 @@ async def test_late_same_id_retained_overwrite_is_not_acknowledged(tmp_path: Pat
     )
 
     coordinator.acknowledge_thread_repair_deltas.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_repair_acknowledgement_preserves_overwrite_during_cache_read(tmp_path: Path) -> None:
+    """An awaited cache read cannot let old evidence delete a same-ID retained overwrite."""
+    room_id = "!room:localhost"
+    thread_id = "$thread:localhost"
+    principal_id = "@agent:localhost"
+    first = {
+        "event_id": "$reply",
+        "room_id": room_id,
+        "sender": "@user:localhost",
+        "origin_server_ts": 2000,
+        "type": "m.room.message",
+        "content": {"body": "First", "msgtype": "m.text"},
+    }
+    overwritten = {
+        **first,
+        "content": {"body": "Overwritten", "msgtype": "m.text"},
+    }
+    coordinator = EventCacheWriteCoordinator(logger=MagicMock())
+    coordinator.retain_thread_repair_delta(
+        room_id,
+        thread_id,
+        first,
+        coordination_scope=principal_id,
+    )
+    event_cache = MagicMock()
+
+    async def read_cache_after_overwrite(
+        _room_id: str,
+        _thread_id: str,
+    ) -> list[dict[str, object]]:
+        coordinator.retain_thread_repair_delta(
+            room_id,
+            thread_id,
+            overwritten,
+            coordination_scope=principal_id,
+        )
+        return [first]
+
+    event_cache.get_thread_events = AsyncMock(side_effect=read_cache_after_overwrite)
+    conversation_cache = _conversation_cache_for_thread_reads(tmp_path, event_cache, client=MagicMock())
+
+    await conversation_cache._acknowledge_repaired_thread_deltas(
+        coordinator,
+        room_id,
+        thread_id,
+        principal_id=principal_id,
+        presented_event_sources={},
+        replayed_event_sources={},
+        snapshot_stored=False,
+    )
+
+    assert coordinator.pending_thread_repair_deltas(
+        room_id,
+        thread_id,
+        coordination_scope=principal_id,
+    ) == (overwritten,)
 
 
 @pytest.mark.asyncio

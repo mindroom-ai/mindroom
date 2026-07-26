@@ -35,7 +35,7 @@ from mindroom.timing import elapsed_ms_between, emit_timing_event, timing_enable
 from .thread_repair import ThreadRepairRegistry
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Collection
+    from collections.abc import Awaitable, Callable, Collection, Mapping
 
     import structlog
 
@@ -702,14 +702,14 @@ class EventCacheWriteCoordinator:
         self,
         room_id: str,
         thread_id: str,
-        event_ids: Collection[str],
+        event_sources: Collection[Mapping[str, Any]],
         *,
         coordination_scope: str,
     ) -> None:
-        """Forget retained deltas after a successful append."""
+        """Forget exact retained representations after a successful append or repair."""
         self._thread_repairs.acknowledge_deltas(
             (coordination_scope, room_id, thread_id),
-            event_ids,
+            event_sources,
         )
 
     def clear_thread_repair_room(self, room_id: str, *, coordination_scope: str) -> None:

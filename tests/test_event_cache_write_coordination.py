@@ -41,7 +41,7 @@ from tests.threading_helpers import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Collection, Coroutine
+    from collections.abc import Callable, Collection, Coroutine, Mapping
     from typing import Any
 
     from mindroom.bot import AgentBot
@@ -100,6 +100,46 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         assert appended is True
         assert [event["event_id"] for event in retained] == ["$reply:localhost"]
         schedule_repair.assert_called_once_with(room_id, thread_id)
+
+    @pytest.mark.asyncio
+    async def test_incremental_append_acknowledges_only_its_exact_retained_source(self) -> None:
+        """Revalidation cannot let one append delete a same-ID retained overwrite."""
+        cache_ops, _logger, event_cache = _thread_mutation_cache_ops()
+        coordinator = cache_ops.runtime.event_cache_write_coordinator
+        assert coordinator is not None
+        room_id = "!room:localhost"
+        thread_id = "$thread:localhost"
+        first = {
+            "event_id": "$reply:localhost",
+            "room_id": room_id,
+            "sender": "@user:localhost",
+            "origin_server_ts": 2000,
+            "type": "m.room.message",
+            "content": {"body": "First", "msgtype": "m.text"},
+        }
+        overwritten = {
+            **first,
+            "content": {"body": "Overwritten", "msgtype": "m.text"},
+        }
+        cache_ops.retain_thread_repair_delta(room_id, thread_id, first)
+
+        async def overwrite_during_revalidation(*_args: object) -> bool:
+            coordinator.retain_thread_repair_delta(
+                room_id,
+                thread_id,
+                overwritten,
+                coordination_scope=event_cache.principal_id,
+            )
+            return True
+
+        event_cache.revalidate_thread_after_incremental_update.side_effect = overwrite_during_revalidation
+
+        assert await cache_ops.append_event_to_cache(room_id, thread_id, first, context="live")
+        assert coordinator.pending_thread_repair_deltas(
+            room_id,
+            thread_id,
+            coordination_scope=event_cache.principal_id,
+        ) == (overwritten,)
 
     @pytest.mark.asyncio
     async def test_get_event_queues_persistent_cache_fill_through_room_write_barrier(self) -> None:
@@ -1221,11 +1261,11 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 self,
                 room_id: str,
                 thread_id: str,
-                event_ids: Collection[str],
+                event_sources: Collection[Mapping[str, Any]],
                 *,
                 coordination_scope: str,
             ) -> None:
-                del room_id, thread_id, event_ids, coordination_scope
+                del room_id, thread_id, event_sources, coordination_scope
 
         cache_ops.runtime.event_cache_write_coordinator = _InlineCoordinator()
         resolver = MagicMock()

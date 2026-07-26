@@ -839,12 +839,12 @@ class MatrixConversationCache(ConversationCacheProtocol):
         )
         if not pending_event_sources:
             return
-        acknowledged_event_ids = {
-            event_id
+        acknowledged_event_sources = {
+            event_id: pending_source
             for event_id, pending_source in pending_event_sources.items()
             if snapshot_stored and replayed_event_sources.get(event_id) == pending_source
         }
-        remaining_event_ids = pending_event_sources.keys() - acknowledged_event_ids
+        remaining_event_ids = pending_event_sources.keys() - acknowledged_event_sources.keys()
         if remaining_event_ids:
             repaired_event_sources = await self._cached_thread_event_sources_for_repair(
                 room_id,
@@ -860,13 +860,13 @@ class MatrixConversationCache(ConversationCacheProtocol):
                         continue
                     cached_source = repaired_event_sources.get(event_id)
                     if cached_source is not None and event_representation_covers(cached_source, pending_source):
-                        acknowledged_event_ids.add(event_id)
-        if not acknowledged_event_ids:
+                        acknowledged_event_sources[event_id] = pending_source
+        if not acknowledged_event_sources:
             return
         coordinator.acknowledge_thread_repair_deltas(
             room_id,
             thread_id,
-            acknowledged_event_ids,
+            tuple(acknowledged_event_sources.values()),
             coordination_scope=principal_id,
         )
 
